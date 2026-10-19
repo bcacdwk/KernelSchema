@@ -52,7 +52,7 @@
 
 | 步骤 | 内容 | 对应位置 |
 | --- | --- | --- |
-| 1 硬件 | 硬件 spec、基本 primitive、功能支持、PTX/SASS 指令；计算、访存、指令发射硬件在典型 tile size 下的吞吐与延时 microbench。可以先覆盖常用 primitive，再按迭代需要补测；每种卡的 spec 固定不变 | `contract.hardware_specific`；数值细节在 wiki / microbench |
+| 1 硬件 | 硬件 spec、执行单元与层级、基本 primitive、功能支持、指令集资料（如 PTX/SASS）；计算、访存、指令发射硬件在典型 tile size 下的吞吐与延时 microbench。可以先覆盖常用 primitive，再按迭代需要补测；每种卡的 spec 固定不变 | `contract.hardware_specification`；数值细节在 wiki / microbench |
 | 2 算法 | 数学公式（如 SDPA）、PyTorch 算法（如 online softmax）、输入输出 shape 与精度规格；在不改变输入输出的前提下改写计算顺序与计算方法。这一步偏纯数学、算法层面的形式化验证与迭代，可能可以完全交给 AI；评估看各级存储（RMEM/SMEM/GMEM）的访存总量与 Tensor Core / CUDA Core 的计算总量 | `contract.algorithm_requirement`、`design.math_reshape` |
 | 3 瓶颈 | 数据依赖图、roofline 估算、瓶颈判断，给定算法与硬件即可推导 | 估算器；`math_reshape` 中定量记录改写带来的计算量与访存量变化 |
 | 4 流水线设计与搜索 | SM/Grid/CTA 任务划分、tile size、warp specialization 分工、RMEM/TMEM/SMEM 分配、barrier 与计算顺序、数据流转。这是最关键的设计：描述要完备、唯一，能近似评估性能上限，最好能快速生成可上机验证的 prototype。pipeline 设计天然有树状分叉，适合用 evolve 式的遗传策略维护谱系，甚至直接广搜、深搜 | `design.work_schedule`、`design.tile_pipeline`，Designer 负责 |
@@ -100,7 +100,7 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 | 区 | 子区 | 记录什么 | 修改权限 |
 | --- | --- | --- | --- |
 | Contract | `contract.algorithm_requirement` | 算法要求：从外部看，算子必须满足的输入、输出与数学关系 | Designer 与 Coder 都不能改 |
-| Contract | `contract.hardware_specific` | 硬件规格：目标设备的核心能力与边界，以及完整规格与 microbench 的引用 | 同上 |
+| Contract | `contract.hardware_specification` | 硬件规格：目标设备的执行单元、核心能力与边界，本任务已选的实现栈，以及完整规格与 microbench 的引用 | 同上 |
 | Design | `design.math_reshape` | 数学改写：为了在该硬件上实现，对计算本身做的改写 | 只有 Designer 能改，Coder 必须遵守 |
 | Design | `design.work_schedule` | 工作调度：计算如何分解、由谁执行、怎样分配 | 同上 |
 | Design | `design.tile_pipeline` | tile 流水线：一份工作内部 warp / warp group 的分工、顺序与依赖 | 同上 |
@@ -122,17 +122,17 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 
 **contract.algorithm_requirement（算法要求）**
 
-- 从调用者的视角把算子当作黑盒：接收什么、返回什么、输入与输出之间必须满足什么数学关系。内容包括数学定义与记号、特殊语义、输入输出与内部变量的命名和含义、golden reference（引用固定版本的代码位置）、代表性 shape 与 workload，以及优化目标与精度要求（accuracy 的字段格式与验收阈值尚未确定）。
+- 从调用者的视角把算子当作黑盒：接收什么、返回什么、输入与输出之间必须满足什么数学关系。内容包括数学定义与记号、特殊语义、输入输出与内部变量的命名和含义、golden reference（固定版本的参考实现入口及各输出的误差判据）、代表性 shape 与 workload，以及优化目标（后两项的字段格式尚未确定）。
 - 完备性标准：不看 Design，能否仅凭这一段写出一个朴素 reference，而不需要猜掩码、量化、路由和状态语义。
 - 只写“要求算什么”，不写“怎样改写”：因果可见性、MoE 的量化函数、GDN 的状态递推属于这里；online softmax、按专家分组、块内三角求解属于 math_reshape。量化组长决定数值含义，不能当作普通的 tile size 调整。
 - 计算定义里出现的中间量只用来定义数学关系，不要求实现物化。契约的边界来自选定的计算任务，不照搬现有 kernel 的拆分方式。
 
-**contract.hardware_specific（硬件规格）**
+**contract.hardware_specification（硬件规格）**
 
-- 记录目标设备的身份、会改变可行的计算、存储或协作方式的核心能力及其边界，以及完整规格与 microbench 的固定版本引用。
-- 要精简，不能变成 datasheet：SM 数量、资源容量、吞吐、延时等数值放在 wiki / microbench，这里只引用（不抄表，但对应的约束仍要检查）；TMEM、CTA-pair MMA 这类显著影响后续决策的能力才写在这里。
-- 独立于 kernel：同一设备、同一资料版本只对应一份描述，从公共硬件资料中提炼，而不是从某个 kernel 用了哪些指令反推。最初的设想是记录“在这张卡上实现这个算子必须考虑的硬件特性”，后来改为与 kernel 无关的设备摘要。
-- 只陈述条件，不替 Design 做选择：“支持 CTA-pair MMA”属于这里，“采用双 CTA”不属于。软件后端暂时无法表达某项能力，不等于硬件不支持。
+- 记录目标设备的身份、执行单元与层级、会改变设计空间的核心机制及其边界，本任务已选的实现栈，以及完整规格与 microbench 的固定版本引用。执行单元是下游 worker 与 lane 的词汇来源：CTA、warp 只是 NVIDIA 上的实例，其他设备另有自己的单元。
+- 要精简，不能变成 datasheet：SM 数量、资源容量、吞吐、延时等数值放在 wiki / microbench，这里只引用（不抄表，但对应的约束仍要检查）。机制的入选判据是删除测试——缺了这一条，读者会不会做出不可实现的设计，或错误地排除一个可行的设计。“本代新增”既不是入选理由，也不是排除理由；关键缺项可以显式写明不支持，用来阻止跨设备的默认继承。
+- 设备事实独立于 kernel：同一设备、同一资料版本只对应一份身份、执行模型与机制摘要，从公共硬件资料中提炼，而不是从某个 kernel 用了哪些指令反推。最初的设想是记录“在这张卡上实现这个算子必须考虑的硬件特性”，后来改为与 kernel 无关的设备摘要。实现栈与资料绑定则按任务固定，换栈不改变设备事实。
+- 只陈述条件，不替 Design 做选择：“支持 CTA-pair MMA”属于这里，“采用双 CTA”不属于。软件后端暂时无法表达某项能力，不等于硬件不支持。具体的编译目标参数属于实现选择，需要固定时写进 `realization` 的 `require`。
 
 **design.math_reshape（数学改写）**
 
@@ -171,8 +171,9 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 
 | 这条信息是什么 | 写在哪里 |
 | --- | --- |
-| 算子从外部看必须满足的输入、输出与数学关系，包括掩码、量化、路由、状态与边界情况 | `contract.algorithm_requirement` |
-| 目标设备有什么能力、边界在哪里 | `contract.hardware_specific`，数值规格在 wiki / microbench |
+| 任务名称、设计出处与这份 plan 的修订号 | `meta_data`，位于 Plan 最前面，字段规则见 `schema_docs/1`，不属于 Contract |
+| 算子从外部看必须满足的输入、输出与数学关系，包括掩码、量化、路由、状态与边界情况，以及验收的误差判据 | `contract.algorithm_requirement` |
+| 目标设备有哪些执行单元、什么能力、边界在哪里，本任务用哪个实现栈 | `contract.hardware_specification`，数值规格在 wiki / microbench |
 | 算出哪些值、如何定义、以什么精度存在、存在多久 | `design.math_reshape` |
 | 计算怎样分解成 worktile、由什么 worker 执行、怎样分配与接续、怎样跨 worktile 合并 | `design.work_schedule` |
 | worktile 内 warp / warp group 的分工、动作顺序、依赖与 buffer 复用 | `design.tile_pipeline` |
@@ -186,7 +187,7 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 3. **一个决定只写一次，写在唯一合适的位置**（见 3.3）。下游直接引用，不重新解释，也不改变含义。
 4. **不为格式对称填空壳。** 没有内容的字段和区域直接省略，不设 `notes` 式的兜底区域。
 5. **定量、可核对。** 收益、代价和理由写成能核对的事实，不写“提升性能”“优化访存”这类口号；好坏的判断留给评审与实验。
-6. **名称跨区一致。** 维度、张量、状态的名称属于当前算法实例，不是模板字段；同一个对象在各区用同一个名字。algorithm_requirement 与 math_reshape 共用一套数学记号与精度约定。
+6. **名称跨区一致。** 维度、张量、状态的名称属于当前算法实例，不是模板字段；同一个对象在各区用同一个名字。数学记号、精度、shape 与空值等共用写法定义在 algorithm_requirement，下游区直接引用，只补充本区特有的部分。
 7. **对照真实源码的单一分支填写。** 来源固定到 `仓库@commit:路径`；不同分支不拼成一份，源码中每一处偏离精确计算的地方都要能在 schema 中找到。
 8. **只陈述条件，不替下游做决定。** 每一层只固定本层必须固定的量，其余注明由哪一层决定。
 9. **有约束力的是具体决策，不是名称。** `persistent`、`CLC`、`online softmax` 这类名字只帮助理解，不能代替具体规则。
@@ -206,7 +207,7 @@ schema 和 template 要同时服务 Agent 和人类专家，所以要格式规�
 
 ### 5.2 schema：YAML
 
-YAML 的层级结构天然适合“表格 + 嵌套小节”；块标量 `|` 能容纳短文本和伪代码；支持注释，这是人类审阅批注所必需的；在 Agent 的训练语料中占比大，编辑鲁棒；`yq` 与 Python 的批处理生态成熟；git diff 按行，人类可审。
+YAML 的层级结构天然适合“表格 + 嵌套小节”；块标量 `|` 能容纳短文本和伪代码；支持注释，人类审阅时可以直接批注（定稿的 schema 实例不保留注释，以免内容无节制地膨胀）；在 Agent 的训练语料中占比大，编辑鲁棒；`yq` 与 Python 的批处理生态成熟；git diff 按行，人类可审。
 
 淘汰的候选：JSON 不支持注释，多行文本要转义；TOML 表达深嵌套和重复结构（多个 role、多个 barrier）很笨拙；Markdown 无法约束，批处理只能靠猜；textproto 有强类型、枚举和注释，但需要 proto 编译链，太重；SQLite 等数据库不能 git diff，人类无法直接审阅，Agent 也无法直接编辑。需要的“数据库感”在校验关系上，不在存储上。
 
@@ -258,7 +259,7 @@ Agent 编辑一个 schema 时，上下文中同时有三层：
 ### 6.2 (template, schema) 共同演化
 
 - Agent 写 schema 前先看 template 有没有不足以描述的地方；有就先最小化地修改 template，再写 schema。
-- Harness 以单个 task 为粒度：一个 task 针对一个 kernel 迭代若干轮（例如 5 轮），产出它的 schema 和新版 template；下一个 kernel 以已有的 schema 为例、以新 template 为种子继续。template 只迭代版本，schema 不断积累；修改 template 后要回改旧的 schema（通常只有删改才需要，新增一般不需要）。从 v0 开始，10 个 kernel 可能到 v10，但不一定每轮都要改 template，可能到 v5 就差不多了。
+- Harness 以单个 task 为粒度：一个 task 针对一个 kernel 迭代若干轮（例如 5 轮），产出它的 schema 和新版 template；下一个 kernel 以已有的 schema 为例、以新 template 为种子继续。template 只迭代版本，schema 不断积累；修改 template 后要回改旧的 schema（通常只有删改才需要，新增一般不需要）。从 v0 开始，10 个 kernel 可能到 v10，但不一定每轮都要改 template，可能到 v5 就差不多了。template 的版本线与 plan 自身的 `meta_data.version` 是两回事：前者记录语言有哪些字段，后者只记录这份设计修订到第几版。
 - 第一轮先放开语言的自由度、增加原语，逐渐覆盖全部 kernel；第二轮再精简 template、优化 schema。template 应当小而精，而不是大而全：只保留 schema 的核心，把细节踢给 Coder（移到下层），让 template 越来越规范、原语越来越少，schema 同步瘦身。
 - 待定：kernel 的引入顺序。从简单到困难逐步撑大语言空间，适合人类理解，但可能每次都要改 schema，一开始也抓不住核心；从最困难的开始，一开始语言空间就很大、之后逐渐稳定，但可能不容易收敛、形态各异。
 
@@ -272,7 +273,7 @@ Agent 编辑一个 schema 时，上下文中同时有三层：
 
 ## 7 现状
 
-- **已有**：六个区的字段规则文档 `schema_docs/1–6`，是旧版草稿的优化版本，每份都按“核心思想 / 字段定义 / 语法规则 / 关键原则 / 具体案例”组织。案例共用三个固定版本的 kernel：FA4（SM100，Dao-AILab/flash-attention `ce088ab9`）、MoE（vLLM TritonExperts，FP8 block 量化，vllm-project/vllm `28282ffe`）、GDN（FLA Triton 分块前向，fla-org/flash-linear-attention `954438d1`）；硬件案例为 B200（SM100）、RTX PRO 5000 Blackwell（SM120）、RTX 4090（SM89）。旧版草稿与 tile_pipeline 的渲染脚本原型 `render.py` 归档在 `schema_docs/archived/old_schema_drafts.md`；该脚本的键名与旧版 YAML 样例并未对齐，复用前要按现行字段更新。
+- **已有**：六个区的字段规则文档 `schema_docs/1–6`，是旧版草稿的优化版本，每份都按“核心思想 / 字段定义 / 语法规则 / 关键原则 / 具体案例”组织。案例共用三个固定版本的 kernel：FA4（SM100，Dao-AILab/flash-attention `ce088ab9`）、MoE（vLLM TritonExperts，FP8 block 量化，vllm-project/vllm `28282ffe`）、GDN（FLA Triton 分块前向，fla-org/flash-linear-attention `954438d1`）；硬件案例为 B200（SM100）、MI355X（gfx950）、昇腾 950PR（NPU arch 3510），分别绑定 CUDA C++/CUTLASS、HIP/Composable Kernel、Ascend C 三个实现栈。旧版草稿与 tile_pipeline 的渲染脚本原型 `render.py` 归档在 `schema_docs/archived/old_schema_drafts.md`；该脚本的键名与旧版 YAML 样例并未对齐，复用前要按现行字段更新。
 - **正在做**：逐区优化 `schema_docs/1–6`。即使是优化后的版本，字段规则和样例仍有许多细节需要调优。
 - **尚未开始**：template（CUE），包括整体设计思想与原则以及六个区各自的 template；把六个区串起来的完整案例（full case）；`schema_wiki/` 中的 wiki 样例；更多 kernel 的转写与整体精简；检查器与评估器。
 
@@ -284,7 +285,7 @@ Agent 编辑一个 schema 时，上下文中同时有三层：
 - 26/09/08 起：从按角色分组的前驱表演进到按 lane 记录动作与依赖的 tile_pipeline 写法，并写出渲染脚本原型。
 - 26/09/09：第二轮分区讨论，确定 Contract / Design / Realization 三区六个子区。
 - 26/09/14：写出 work_schedule 的草稿；第三轮分区讨论聚焦 math_reshape。
-- 此后：写出 math_reshape、algorithm_requirement、hardware_specific、realization 的草稿，再把六个区的草稿优化为 `schema_docs/1–6`。
+- 此后：写出 math_reshape、algorithm_requirement、hardware_specification、realization 的草稿，再把六个区的草稿优化为 `schema_docs/1–6`。
 
 ## 8 仓库结构与阅读顺序
 
@@ -293,7 +294,7 @@ Agent 编辑一个 schema 时，上下文中同时有三层：
 ├── README.md                      本文件：背景、动机、分区、原则与现状
 ├── schema_docs/                   六个区的字段规则与样例（当前的工作对象）
 │   ├── 1.contract.algorithm_requirement.md
-│   ├── 2.contract.hardware_specific.md
+│   ├── 2.contract.hardware_specification.md
 │   ├── 3.design.math_reshape.md
 │   ├── 4.design.work_schedule.md
 │   ├── 5.design.tile_pipeline.md
