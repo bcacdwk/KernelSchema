@@ -145,7 +145,8 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 
 **design.work_schedule（工作调度）**
 
-- 数学对象与硬件资源之间的映射、分配与调度，分三部分：decomposition 写计算怎样分解成可独立分配的工作单元 worktile，以及跨 worktile 的合并；mapping 写 worktile 由什么样的 worker 执行（CTA、CTA pair、cluster 等）、需要多少；schedule 写 worktile 怎样排列，以及 worker 怎样获得、接续工作、何时退出（静态分配、persistent、动态领取、负载均衡、任务窃取、分桶等）。
+- 数学对象与硬件资源之间的映射、分配与调度。一类工作登记成一个 phase，内部分三部分：decomposition 写计算怎样分解成可独立分配的工作单元 worktile，以及跨 worktile 的合并；mapping 写 worktile 由什么样的 worker 执行（CTA、CTA pair、cluster 等）、需要多少；schedule 写 worktile 怎样排列，以及 worker 怎样获得、接续工作、何时退出（静态分配、persistent、动态领取、负载均衡、任务窃取、分桶等）。
+- 多数算子只有一个 phase。需要多个时由 flow 记录它们落在哪几次 kernel 提交、同一次提交内怎样接续、彼此怎样交接数据；phase 同时是 tile_pipeline 的嵌套单位。
 - 思考方式贴近 Triton / TileLang：按 tile 管理计算对象，按 CTA 分发（不细到 warp），同时考虑 wave、SM 数量、尾波负载均衡与 SM 资源平衡。这是最重要的 co-design 之一。
 - 核心区分：worktile 的排列不等于 worker 的工作归属；预先获配的工作不等于运行时新领取的工作。
 - `persistent`、`CLC` 等策略名可以帮助人类理解，但有约束力的是具体的决策。这一区不描述线程级实现，也不重复 tile_pipeline 的动作、依赖与缓冲协议。
@@ -273,7 +274,7 @@ Agent 编辑一个 schema 时，上下文中同时有三层：
 
 ## 7 现状
 
-- **已有**：六个区的字段规则文档 `schema_docs/1–6`，是旧版草稿的优化版本，每份都按“核心思想 / 字段定义 / 语法规则 / 关键原则 / 具体案例”组织。案例共用三个固定版本的 kernel：FA4（SM100，Dao-AILab/flash-attention `ce088ab9`）、MoE（vLLM TritonExperts，FP8 block 量化，vllm-project/vllm `28282ffe`）、GDN（FLA Triton 分块前向，fla-org/flash-linear-attention `954438d1`）；硬件案例为 B200（SM100）、MI355X（gfx950）、昇腾 950PR（NPU arch 3510），分别绑定 CUDA C++/CUTLASS、HIP/Composable Kernel、Ascend C 三个实现栈。旧版草稿与 tile_pipeline 的渲染脚本原型 `render.py` 归档在 `schema_docs/archived/old_schema_drafts.md`；该脚本的键名与旧版 YAML 样例并未对齐，复用前要按现行字段更新。
+- **已有**：六个区的字段规则文档 `schema_docs/1–6`，是旧版草稿的优化版本，每份都按“核心思想 / 字段定义 / 语法规则 / 关键原则 / 具体案例”组织。案例取自三个固定版本的 kernel：FA4（SM100，Dao-AILab/flash-attention `ce088ab9`）、MoE（vLLM TritonExperts，FP8 block 量化，vllm-project/vllm `28282ffe`）、GDN（FLA Triton 分块前向，fla-org/flash-linear-attention `954438d1`）；硬件案例为 B200（SM100）、MI355X（gfx950）、昇腾 950PR（NPU arch 3510），分别绑定 CUDA C++/CUTLASS、HIP/Composable Kernel、Ascend C 三个实现栈。旧版草稿与 tile_pipeline 的渲染脚本原型 `render.py` 归档在 `schema_docs/archived/old_schema_drafts.md`；该脚本的键名与旧版 YAML 样例并未对齐，复用前要按现行字段更新。
 - **正在做**：逐区优化 `schema_docs/1–6`。即使是优化后的版本，字段规则和样例仍有许多细节需要调优。
 - **尚未开始**：template（CUE），包括整体设计思想与原则以及六个区各自的 template；把六个区串起来的完整案例（full case）；`schema_wiki/` 中的 wiki 样例；更多 kernel 的转写与整体精简；检查器与评估器。
 
