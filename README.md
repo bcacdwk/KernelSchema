@@ -162,11 +162,11 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 
 - Designer 与 Coder 之间的交接区，只记录 Contract 和 Design 尚未表达、但双方需要共享的实现决定。它不是第四个 Design 区，也不是源码剩余细节的收纳区。
 - 按约束强度分三类：
-  - `require`：既定设计成立所必需的硬条件，类似 lowering hint，尽量简短，Coder 不得替换。例如 Blackwell 上必须用 `tcgen05.mma`，不能用 `mma.sync` 或 `wgmma`；Hopper 及以后要用 TMA 搬运。这里记录的东西应当影响上面的设计，而不是被设计所影响。
+  - `require`：设计依赖、但 Design 刻意留在抽象层的实现条件，类似 lowering hint，尽量简短，Coder 不得替换。tile_pipeline 的动作契约与 math_reshape 的数值路径只写所依赖的保证，提供保证的原语在这里绑定：例如 Blackwell 上 S 与 P 共用 TMEM 槽，依赖 `tcgen05.mma` 的顺序保证，不能改用 `mma.sync` 或 `wgmma`。
   - `prefer`：与既定设计的代价直接相关的优先选择，能实现就优先实现。Coder 可以用实验证据支持替代方案，这是 Coder 唯一的反馈位点。
   - `forbid`：Designer 考虑过并明确排除的路径，即实现起来简单、但会走弯路白费力气的方案。尽量留空。
 - 替换测试：如果 Coder 换掉这一选择，Design 的核心设计是否仍然成立？成立就留给 Coder，不成立才写进 realization。
-- 这一区越长，说明设计越差：好的设计应当容易确定，而不是遗留大量细节，评估时篇幅越长扣分越多。反馈也不是修改上游设计的入口：替代方案需要移动舍入点、增加搬运、改变角色或 buffer 生命周期时，回到对应的 Design 区讨论；`require` 无法实现时报告阻碍，不能自行降为 `prefer`。
+- 这一区越长，说明设计越差：好的设计应当容易确定，而不是遗留大量细节，评估时篇幅越长扣分越多。该收束的是 Design 本身，不能靠省略必要的硬条件显短。反馈也不是修改上游设计的入口：替代方案需要移动舍入点、增加搬运、改变角色或 buffer 生命周期时，回到对应的 Design 区讨论；`require` 无法实现时报告阻碍，不能自行降为 `prefer`。
 
 ### 3.3 一个决定写在哪里
 
@@ -178,7 +178,7 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 | 算出哪些值、如何定义、以什么精度存在、存在多久 | `design.math_reshape` |
 | 计算怎样分解成 worktile、由什么 worker 执行、怎样分配与接续、怎样跨 worktile 合并 | `design.work_schedule` |
 | worktile 内 warp / warp group 的分工、动作顺序、依赖与 buffer 复用，以及片上存储的层级、槽数与各角色的寄存器预算 | `design.tile_pipeline` |
-| 设计成立所依赖、但上面没有表达的实现条件（如必须使用的原语），以及优先尝试的实现选择 | `realization` |
+| 设计所依赖、但 Design 只写到保证与数值路径的实现条件（如提供这些保证的原语），以及优先尝试的实现选择 | `realization` |
 | 只替换实现、数值差异在 fp32 ulp 以内的选择；代码组织、地址计算、barrier 的类型、编号与 phase、精确的 layout | 留给 Coder，不写进 schema（除非替换测试表明换掉后设计不再成立） |
 
 ## 4 编写原则
@@ -252,7 +252,7 @@ Agent 编辑一个 schema 时，上下文中同时有三层：
 
 1. 收集 NVIDIA 卡（以 H 卡、B 卡为主）上的开源 SOTA kernel，覆盖 FA3/4、MoE、GEMM、MLA、DSA/GDN/KDA 等，做必要的清洗。
 2. 用一份初版 template（表格模板 + 原语词汇）统一风格，让多个 Agent 并行地把 kernel 提取成 schema。Agent 有权修改 template、增加原语，但要尽可能保守，且必须优先抓大放小；在单个 kernel 上多轮迭代、不断精简，不同 kernel 分 batch 并行。关键是让 Agent 完备地覆盖一个 kernel 的设计，把 macro tile 与 micro pipeline 都讲清楚；另设一个专门的 Agent 确认 Designer 必需的内容没有遗漏、没有错误，Coder 的细节已经去掉。
-3. 先描述清楚几个典型算子（最初设想是 FA4、fusedMoE、GEMM，目前各区文档用的是 FA4、MoE、GDN），再逐步加入其他算子：一方面检查原语和词汇是否够用，另一方面检查有没有重复、冗余、可以精简的词汇。
+3. 先描述清楚几个典型算子（最初设想是 FA4、fusedMoE、GEMM；目前 Design 各区与 realization 的案例收敛到 FA4 与 GDN，algorithm_requirement 另有 MoE），再逐步加入其他算子：一方面检查原语和词汇是否够用，另一方面检查有没有重复、冗余、可以精简的词汇。
 4. 检查得到的几十份 schema 没有事实错误，然后精简：舍弃特例的原语和表格项，抓重点、抓 insight，确定最小的交集原语，最终抽象成一门固定风格的语言并附上大量示例。交付物是一个 template 加上所有 SOTA kernel 对应的 schema。
 5. 与 CAKE-IR 的前端语言比较，看是否收敛到一致。
 6. 最后再研究检查器和评估器：先有一门好的语言。
@@ -274,7 +274,7 @@ Agent 编辑一个 schema 时，上下文中同时有三层：
 
 ## 7 现状
 
-- **已有**：六个区的字段规则文档 `schema_docs/1–6`，是旧版草稿的优化版本，每份都按“核心思想 / 字段定义 / 语法规则 / 关键原则 / 具体案例”组织。案例取自三个固定版本的 kernel：FA4（SM100，Dao-AILab/flash-attention `ce088ab9`）、MoE（vLLM TritonExperts，FP8 block 量化，vllm-project/vllm `28282ffe`）、GDN（FLA Triton 分块前向，fla-org/flash-linear-attention `954438d1`）；硬件案例为 B200（SM100）、MI355X（gfx950）、昇腾 950PR（NPU arch 3510），分别绑定 CUDA C++/CUTLASS、HIP/Composable Kernel、Ascend C 三个实现栈。旧版草稿与 tile_pipeline 的渲染脚本原型 `render.py` 归档在 `schema_docs/archived/old_schema_drafts.md`；该脚本的键名与旧版 YAML 样例并未对齐，复用前要按现行字段更新。
+- **已有**：六个区的字段规则文档 `schema_docs/1–6`，是旧版草稿的优化版本，每份都按“核心思想 / 字段定义 / 语法规则 / 关键原则 / 具体案例”组织。案例取自三个固定版本的 kernel：FA4（SM100，Dao-AILab/flash-attention `ce088ab9`）、MoE（vLLM TritonExperts，FP8 block 量化，vllm-project/vllm `28282ffe`）、GDN（FLA Triton 分块前向，fla-org/flash-linear-attention `954438d1`），其中 MoE 只出现在 algorithm_requirement，Design 各区与 realization 只保留 FA4、GDN 两例；硬件案例为 B200（SM100）、MI355X（gfx950）、昇腾 950PR（NPU arch 3510），分别绑定 CUDA C++/CUTLASS、HIP/Composable Kernel、Ascend C 三个实现栈。旧版草稿与 tile_pipeline 的渲染脚本原型 `render.py` 归档在 `schema_docs/archived/old_schema_drafts.md`；该脚本的键名与旧版 YAML 样例并未对齐，复用前要按现行字段更新。
 - **正在做**：逐区优化 `schema_docs/1–6`。即使是优化后的版本，字段规则和样例仍有许多细节需要调优。
 - **尚未开始**：template（CUE），包括整体设计思想与原则以及六个区各自的 template；把六个区串起来的完整案例（full case）；`schema_wiki/` 中的 wiki 样例；更多 kernel 的转写与整体精简；检查器与评估器。
 
