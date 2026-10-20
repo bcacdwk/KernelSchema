@@ -1,0 +1,143 @@
+{
+  "version": "v53",
+  "masked": false,
+  "timestamp": "2026-09-14T07:55:38.983905+00:00",
+  "performance": {
+    "latency_us": 1236.9776665613158,
+    "latency_us_geomean": 1236.9776665613158,
+    "latency_us_arith_mean": 2445.226674899459,
+    "latency_us_by_shape": {
+      "0": 31.82396398010093,
+      "1": 218.8607343918647,
+      "2": 2028.6965873349313,
+      "3": 520.672007412293,
+      "4": 1997.127776589739,
+      "5": 4382.191987574532,
+      "6": 164.0034315244952,
+      "7": 4687.139251509485,
+      "8": 1142.8803222232511,
+      "9": 132.6238371947381,
+      "10": 3409.242137640348,
+      "11": 6741.797428174367,
+      "12": 240.44799964326998,
+      "13": 2925.8872014729095,
+      "14": 1378.7256361763386,
+      "15": 1846.939232493392,
+      "16": 8776.50990230649,
+      "17": 2766.882627397124,
+      "18": 1883.8537230507793,
+      "19": 2201.291210183652,
+      "20": 361.5759865789498,
+      "21": 1409.0946395333888,
+      "22": 5788.520603510334,
+      "23": 2605.055111712987,
+      "24": 7753.2887837506305,
+      "25": 310.3298613471322,
+      "26": 68.0959330362044,
+      "27": 2287.5284592772687,
+      "28": 3041.016851807496,
+      "29": 2165.9659495500878
+    },
+    "measurement_scope": "real_evaluator_shapes",
+    "shape_ids_are_opaque": true,
+    "measurement_status": "complete",
+    "measured_shape_count": 30,
+    "expected_shape_count": 30,
+    "shape_measurement_repeats": 2,
+    "measurement_subject": "candidate",
+    "measurement_source": "authoritative_verification",
+    "carried_from_version": null,
+    "speedup_vs_ref_geomean": 1.0596168427750163,
+    "tflops_peak_utilization_pct": null,
+    "bandwidth_peak_utilization_pct": null,
+    "authoritative_improvement_pct": 2.4722130921941288
+  },
+  "optimization": {
+    "action_category": "long_horizon_episode",
+    "action_description": "Episode 132 broke the 14-episode device-plateau streak by attacking the HOST dispatch path that prior device-focused NCU (-k regex:fmha) could not see. ROOT CAUSE: the production ABI adapter (kernel.py) calls _flash_attn_fwd DIRECTLY with a pre-allocated out and requires the returned tensor to BE that out, bypassing flash_attn_varlen_func where _hd256_fastpath is consulted - so the existing fast-path replay was DEAD CODE for this contract and EVERY call paid ~58us of reducible Python (maybe_contiguous + ~50 asserts + split heuristic + 70-field compile_key + dict lookup + arg marshalling) on top of the ~4us cute kernel launch (measured: full host wall 62us vs bare fn() 4us, constant across shapes). In the eager do_bench window that host time is EXPOSED whenever device time is below the ~58us host floor (b1_q1024_kv1024: device 13us but db 47us). FIX (interface.py only, +238, kernel byte-identical): FA_HD256_HOSTFAST (default 1) adds _hd256_fwd_replay at the top of _flash_attn_fwd, gated on out is not None and not is_fake_mode() so it fires only for the adapter (never the autograd path), which re-invokes the EXACT recorded compiled fn (main OR decode-like split two-kernel sequence) with q/k/v.detach().view(u8), the caller out.detach(), and the recorded static tail, selected by _hd256_fwd_sig (q/k/v/page_table shapes+STRIDES, out shape/stride/dtype, device, softmax_scale, all dispatch knobs - structural ABI only, never sampled values). VERIFIED bit-identical to the HOSTFAST-off full path over the full valid domain: 17/17 shapes (decode-split, subpage, kv<page, batch1 persist/non-persist/long-kv, b2/b4 LE4, b16 short/long/ragged, partial-tail, total_q ceiling) rel_l2<=0.0264<0.05; 6/6 with DIFFERENT tensor data (proves fn reads pointers at call time); 8/8 with DIFFERENT q_len/kv_len distributions under one signature (proves runtime remap). ABBA (6 paired blocks, noise floor 0.995-1.02): host-bound shapes 0.417-0.892 (decode 64->26.7us 2.40x, b1_q1024_kv1024 44->20.5us 2.15x, b1_q512_kv4096 1.78x, b1_q1024_kv2048 1.51x, b2 1.12x); ALL device-bound long-KV shapes neutral 0.997-1.007. ZERO regression: the mechanism can only help (host-bound) or be neutral (device-bound). This is the first candidate in 15 episodes that is bit-identical, zero-downside, and shows large measured dev wins; it is orthogonal to (and composes with) the device-side plateau.",
+    "expected_impact": "independently verified incumbent/candidate latency reduction",
+    "risks_and_rollback": "candidate retained on isolated episode branch"
+  },
+  "profile_evidence": {
+    "tool_used": "episode-owned profiler evidence plus supervisor ABBA",
+    "evidence_summary": "3 structured experiments",
+    "bottleneck_type": "episode-derived",
+    "evidence_chain": "episode evidence -> candidate -> independent ABBA -> promotion"
+  },
+  "experience": {
+    "experiment_count": 3,
+    "recorded_experiment_count": 3,
+    "experiments": [
+      {
+        "index": 1,
+        "name": "host-exposure-discovery",
+        "hypothesis": "After 14 consecutive sub-gate episodes concluded a structural device plateau (TMEM 512/512, tensor 77% long-KV), the remaining lever is HOST-side: the production ABI adapter calls _flash_attn_fwd DIRECTLY with a pre-allocated out, bypassing flash_attn_varlen_func where _hd256_fastpath lives, so that replay is DEAD CODE for this contract and every call pays the full Python dispatch. If host time is exposed in the eager do_bench window for small-device shapes, wiring a replay into _flash_attn_fwd is a bit-identical lever prior device-focused NCU (-k regex:fmha) could not see.",
+        "change": "No source edit. Built profiles/e0132 probes: confirmed adapter calls _flash_attn_fwd directly (fastpath only at flash_attn_varlen_func:3748); measured full host wall vs bare fn() launch and do_bench(end-to-end) vs profiler device-time across a regime ladder.",
+        "evidence": "L20D/sm_103 cap(10,3) 148SMs torch2.9.0+cu130 cutlass4.6.1. Full _flash_attn_fwd host wall = 62us/call (constant across shapes); bare cute fn() launch = 4us; maybe_contiguous is a NO-OP for the adapter strided KV views (stride(-1)==1) so production does NOT copy KV. do_bench-vs-device exposure: b1_q1024_kv1024 device 13us but db 47us (34us exposed host); decode_b1_q1_kv8192 db 64us device ~5us; device-bound shapes (b16_q512_kv8192 device 350us db 373us, b1_q1024_kv16384 device 93us db 139us) exposure ~0. Crossover ~device 50-57us.",
+        "result": "CONFIRMED: ~58us of reducible host Python is exposed for host-bound shapes and the existing fastpath never runs for the adapter. Device-bound (long-KV) shapes are host-hidden so a host replay is strictly neutral there. This is a safe, bit-identical lever with large upside on the small/decode shapes and zero downside on the 21 long-KV shapes.",
+        "decision": "continue",
+        "timestamp": "2026-09-14T07:21:50.265446+00:00"
+      },
+      {
+        "index": 2,
+        "name": "hostfast-replay-build-and-bit-identity",
+        "hypothesis": "A host-side replay wired into _flash_attn_fwd (FA_HD256_HOSTFAST default 1) that re-invokes the exact recorded compiled fn with the caller-provided out is BIT-IDENTICAL to the full dispatch over the complete valid input domain (any tensor data, any q_len/kv_len distribution sharing a structural signature), because the cute fn reads data pointers and runtime cu_seqlens_q/seqused_k at CALL time while only the layout/grid (shape-derived) is baked.",
+        "change": "interface.py only (+238/-19 incl. comments): added _HD256_HOSTFAST knob; _hd256_fwd_sig (pins q/k/v/page_table shapes+STRIDES, out shape/stride/dtype, device, softmax_scale, all dispatch knobs); _hd256_fwd_replay (full hd256-contract guard, then main OR split replay into the provided out); a replay call at the top of _flash_attn_fwd gated on out is not None and not is_fake_mode(); and parallel main+split recording beside the existing _HD256_FAST_CACHE writes. Kernel file untouched.",
+        "evidence": "L20D/sm_103 gateway. THREE bit-identity matrices, all torch.equal vs the HOSTFAST-off full path: (1) verify_driver 17/17 shapes spanning decode-split(q1 kv64/kv8192), subpage q63, kv<page, batch1 non-persist/persist-boundary(q2048kv4096,q2736kv8192)/long-kv(kv16384)/q8192, b2/b4 LE4, b16 short/long/ragged, partial-tail b3, total_q=16384 ceiling - all bit_identical=True AND rel_l2 vs immutable reference <=0.02641<0.05; (2) diffdata_driver 6/6 - record with data A then replay with DIFFERENT data B and C (same shape) => replayB==fullB and replayC==fullC (proves fn reads pointers at call time, not baked); (3) dist_driver 8/8 - one cache entry per group serves DIFFERENT q_len/kv_len distributions with identical (total_q,b,max_pages,strides) => replay==full for every distribution (proves runtime remap correctness).",
+        "result": "The replay is bit-identical to the full path over the full valid domain (data-independent, distribution-independent) and correct vs the reference. Selection uses only structural ABI properties (shape/dtype/stride/layout/knobs), never sampled values; any mismatch falls through to the full path. Hard correctness gate CLEARED.",
+        "decision": "continue",
+        "timestamp": "2026-09-14T07:24:59.041631+00:00"
+      },
+      {
+        "index": 3,
+        "name": "hostfast-abba-performance",
+        "hypothesis": "With the replay bit-identical, same-allocation ABBA on the authoritative metric (triton do_bench warmup=10 rep=100 median) will show large latency cuts on host-bound shapes (device below the ~58us host floor) and strict neutrality on device-bound long-KV shapes, with no regression anywhere.",
+        "change": "bench_driver.py: arms HOSTFAST off (full dispatch) vs on (replay), alternated over 6 paired blocks plus an off2 control arm for the noise floor, same allocations, per-shape median of block medians.",
+        "evidence": "L20D/sm_103. on/off ratios (noise floor off2/off 0.995-1.02): HOST-BOUND WINS decode_b1_q1_kv8192 0.417 (64.0->26.7us), b1_q1024_kv1024 0.465 (44.1->20.5), b1_q512_kv4096 0.561 (67.6->37.9), b1_q1024_kv2048 0.663 (43.1->28.6), b2_q1024_kv2048 0.892 (45.1->40.2). DEVICE-BOUND NEUTRAL b1_pers_q2048kv4096 1.003, b4_q1024_kv4096 1.001, b16_q1024_kv1024 1.000, b1_q1024_kv16384 1.000, b1_q4096_kv32768 1.007, b16_q512_kv8192 1.000, b16_q1024_kv32768 0.997. Ladder geomean on/off 0.796.",
+        "result": "Every host-bound shape improves 1.12x-2.40x; every device-bound shape (incl. all long-KV) is within +-0.7% noise = neutral. The mechanism has NO downside: it can only help (host-bound) or be neutral (device-bound), never regress. Authoritative geomean gain scales with how many of the 9 short/small hidden shapes are host-bound; even 1-2 such shapes at ~1.5-2.4x clear the >1% gate, and the 21 long-KV shapes are provably untouched. This is the first candidate in 15 episodes with a bit-identical, zero-regression mechanism and large measured dev wins.",
+        "decision": "continue",
+        "timestamp": "2026-09-14T07:26:12.112933+00:00"
+      }
+    ]
+  },
+  "correctness": {
+    "status": "PASS",
+    "max_abs_err": 0.06640625,
+    "max_rel_err": 0.9440104166666667
+  },
+  "quality_gate": {
+    "result": "PASS",
+    "failure_reason": null
+  },
+  "open_directions": [
+    {
+      "direction": "The replay residual host (~7us guards+sig+fn for main; ~20us for split with fresh partial alloc + 2 launches) is now the floor for the tiniest shapes. A leaner/cached signature or pooled split partial buffers could shave a few more us on decode-like shapes while staying bit-identical - measure before/after on q1 kv8192/q512 kv4096.",
+      "rationale": "carried from terminal episode journal"
+    },
+    {
+      "direction": "Supervisor should confirm how many of the 9 short/small hidden shapes are host-bound (device < ~58us): the authoritative geomean gain scales with that count (1 shape ~1.5-2.4x => ~+1.5-3% geomean; the 68/71us hidden shapes are the likely candidates), while the 21 long-KV shapes are provably untouched (neutral). If the gate is missed, it is because no hidden shape is host-bound, not because of any regression.",
+      "rationale": "carried from terminal episode journal"
+    },
+    {
+      "direction": "Device-side plateau stands as characterized by ep127-131 (TMEM 512/512 hard floor, tensor 77% long-KV handshake-bound, short-KV epilogue coalescing-critical). This host-side win is orthogonal; a future device mechanism would stack on top.",
+      "rationale": "carried from terminal episode journal"
+    },
+    {
+      "direction": "Consider whether other production entry points similarly bypass an existing fast path (audit which interface functions the immutable adapter actually calls vs where optimizations were wired).",
+      "rationale": "carried from terminal episode journal"
+    }
+  ],
+  "git_commit_hash": "d75b780acc60d3fb20f1fe72cd7c891d7a7255c7",
+  "repository_source": {
+    "name": "increment_fa4_prefill_recovered",
+    "revision": "9f1c82ccba976eea85a24e179609f4692fef4eae",
+    "editable_roots": [
+      "vendor/increment_fa4_prefill_recovered/flash_attn/cute"
+    ],
+    "measurement": {
+      "schedule": "A-B-B-A",
+      "warmup": 10,
+      "timed_runs": 100
+    }
+  }
+}

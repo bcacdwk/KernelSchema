@@ -1,0 +1,277 @@
+{
+  "id": "qwen38_max_gdn_prefill_sm103_core",
+  "category": "OTHER",
+  "num_shapes": 30,
+  "phase": "prefill",
+  "status": "run_eval_validated",
+  "target_gpu_arch": "sm_103",
+  "benchmark_contract": {
+    "correctness_min_cases": 6,
+    "correctness_tolerances": {
+      "output[0]": {
+        "atol": 0.01,
+        "rtol": 0.01
+      },
+      "output[1]": {
+        "atol": 0.005,
+        "rtol": 0.001
+      },
+      "mutated_inputs.output": {
+        "atol": 0.01,
+        "rtol": 0.01
+      },
+      "mutated_inputs.output_state": {
+        "atol": 0.005,
+        "rtol": 0.001
+      }
+    },
+    "mutates_inputs": [
+      "output",
+      "output_state"
+    ],
+    "scratch_inputs": [],
+    "acceptance": "Every element must satisfy abs(candidate-reference) <= atol + rtol*abs(reference); no relative-L2 or mismatch-rate replacement.",
+    "timed_boundary": "Model.forward: GDN core plus required official wrapper work (including int64 cu_seqlens to int32 conversion). Input generation, BF16 K normalize, continuation prefix, output allocation/NaN fill and source checks excluded.",
+    "minimum_seed_policy": "At least six independently seeded inputs per geometric case; deterministic_input_seed records each seed.",
+    "reference": {
+      "repository": "https://github.com/flashinfer-ai/flashinfer",
+      "commit": "2ab910c58fdd2392914ea05e2a8714946ac0eef6",
+      "file": "tests/gdn/reference_delta_rule.py",
+      "function": "blockwise_delta_rule",
+      "block_size": 32,
+      "qkv_compute_dtype": "float32",
+      "adapters": [
+        "packed interface",
+        "BF16 output cast",
+        "state layout transpose [B,H,V,K] <-> [B,H,K,V]"
+      ]
+    },
+    "baseline": {
+      "file": "solution.py",
+      "callable": "flashinfer.gdn_prefill.chunk_gated_delta_rule",
+      "use_cp": false,
+      "source_pin": "flashinfer_pin.json",
+      "scope": "fixed comparison baseline; candidate algorithm and chunk size are unrestricted"
+    },
+    "inputs": {
+      "q": "BF16 [T,4,128], unnormalized",
+      "k": "BF16 [T,4,128], torch.nn.functional.normalize on BF16 generator output",
+      "v": "BF16 [T,32,128]",
+      "alpha": "FP32 [T,32], U(0,1), linear decay",
+      "beta": "FP32 [T,32], U(0,1)",
+      "initial_state": "FP32 [B,32,128,128] in [B,H,V,K] order; zero or continuation",
+      "cu_seqlens": "int64 [B+1], starts 0, strictly increasing, ends T",
+      "scale": 0.08838834764831845,
+      "output": "Preallocated BF16 [T,32,128], filled with NaN before calls",
+      "output_state": "Preallocated FP32 [B,32,128,128] [B,H,V,K], filled with NaN before calls"
+    },
+    "input_distribution": "Exact pinned gen_qkv: independent row centres Normal(0,0.05), elements Uniform(centre-0.25,centre+0.25), then BF16.",
+    "initial_state_scenarios": {
+      "zero": "Explicit all-zero FP32 state",
+      "continuation": "Final state of one independently generated 32-token prefix per sequence using pinned reference and the same official numerical contract; excluded from timing"
+    },
+    "excluded_operations": [
+      "Q/K normalization inside the kernel",
+      "raw gate projections or softplus/sigmoid gate computation",
+      "state pool gather/scatter",
+      "context parallel communication"
+    ]
+  },
+  "output_dtypes": {
+    "output[0]": "bfloat16",
+    "output[1]": "float32"
+  },
+  "validation": {
+    "static_cpu": "passed_17_tests",
+    "gpu_correctness": "passed_30_shapes_180_cases",
+    "gpu_performance": "measured_30_shapes_eager_unlocked",
+    "independent_gpu_baseline_crosscheck": "passed",
+    "evidence": "../../provenance/validation.json",
+    "job_id": "dv_f92ee8777ae6",
+    "summary": "provenance/gpu_validation/summary.json"
+  },
+  "shapes": {
+    "0": {
+      "description": "GDN core B=3 T=12672 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "1": {
+      "description": "GDN core B=2 T=14483 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "2": {
+      "description": "GDN core B=2 T=14640 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "3": {
+      "description": "GDN core B=1 T=14784 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "4": {
+      "description": "GDN core B=2 T=14784 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "5": {
+      "description": "GDN core B=2 T=14784 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "6": {
+      "description": "GDN core B=2 T=14921 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "7": {
+      "description": "GDN core B=3 T=15162 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "8": {
+      "description": "GDN core B=2 T=15184 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "9": {
+      "description": "GDN core B=2 T=15972 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "10": {
+      "description": "GDN core B=2 T=16312 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "11": {
+      "description": "GDN core B=2 T=16367 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "12": {
+      "description": "GDN core B=4 T=16384 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "13": {
+      "description": "GDN core B=2 T=16384 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "14": {
+      "description": "GDN core B=3 T=16384 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "15": {
+      "description": "GDN core B=2 T=2286 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "16": {
+      "description": "GDN core B=3 T=2289 (qwen37_original_production)",
+      "source_types": [
+        "qwen37_original_production"
+      ]
+    },
+    "17": {
+      "description": "GDN core B=1 T=2258 (qwen38_pressure_test_runtime_probe)",
+      "source_types": [
+        "qwen38_pressure_test_runtime_probe"
+      ]
+    },
+    "18": {
+      "description": "GDN core B=3 T=8639 (qwen38_pressure_test_runtime_probe)",
+      "source_types": [
+        "qwen38_pressure_test_runtime_probe"
+      ]
+    },
+    "19": {
+      "description": "GDN core B=1 T=6 (flashinfer_contest_geometry_transplant)",
+      "source_types": [
+        "flashinfer_contest_geometry_transplant"
+      ]
+    },
+    "20": {
+      "description": "GDN core B=1 T=61 (flashinfer_contest_geometry_transplant)",
+      "source_types": [
+        "flashinfer_contest_geometry_transplant"
+      ]
+    },
+    "21": {
+      "description": "GDN core B=1 T=134 (flashinfer_contest_geometry_transplant)",
+      "source_types": [
+        "flashinfer_contest_geometry_transplant"
+      ]
+    },
+    "22": {
+      "description": "GDN core B=1 T=525 (flashinfer_contest_geometry_transplant)",
+      "source_types": [
+        "flashinfer_contest_geometry_transplant"
+      ]
+    },
+    "23": {
+      "description": "GDN core B=1 T=1377 (flashinfer_contest_geometry_transplant)",
+      "source_types": [
+        "flashinfer_contest_geometry_transplant"
+      ]
+    },
+    "24": {
+      "description": "GDN core B=2 T=28 (flashinfer_contest_geometry_transplant)",
+      "source_types": [
+        "flashinfer_contest_geometry_transplant"
+      ]
+    },
+    "25": {
+      "description": "GDN core B=2 T=2040 (flashinfer_contest_geometry_transplant)",
+      "source_types": [
+        "flashinfer_contest_geometry_transplant"
+      ]
+    },
+    "26": {
+      "description": "GDN core B=3 T=82 (flashinfer_contest_geometry_transplant)",
+      "source_types": [
+        "flashinfer_contest_geometry_transplant"
+      ]
+    },
+    "27": {
+      "description": "GDN core B=4 T=959 (flashinfer_contest_geometry_transplant)",
+      "source_types": [
+        "flashinfer_contest_geometry_transplant"
+      ]
+    },
+    "28": {
+      "description": "GDN core B=5 T=3028 (flashinfer_contest_geometry_transplant)",
+      "source_types": [
+        "flashinfer_contest_geometry_transplant"
+      ]
+    },
+    "29": {
+      "description": "GDN core B=15 T=4124 (flashinfer_contest_geometry_transplant)",
+      "source_types": [
+        "flashinfer_contest_geometry_transplant"
+      ]
+    }
+  },
+  "verify_gpu": "NVIDIA L20D",
+  "perf_gpu": "NVIDIA L20D"
+}

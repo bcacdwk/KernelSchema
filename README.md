@@ -103,7 +103,7 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 | Contract | `contract.hardware_specification` | 硬件规格：目标设备的执行单元、核心能力与边界，本任务已选的实现栈，以及完整规格与 microbench 的引用 | 同上 |
 | Design | `design.math_reshape` | 数学改写：为了在该硬件上实现，对计算本身做的改写 | 只有 Designer 能改，Coder 必须遵守 |
 | Design | `design.work_schedule` | 工作调度：计算如何分解、由谁执行、怎样分配 | 同上 |
-| Design | `design.tile_pipeline` | tile 流水线：一份工作内部 warp / warp group 的分工、顺序与依赖 | 同上 |
+| Design | `design.tile_pipeline` | tile 流水线：一份工作内部 warp / warp group 的分工、顺序与依赖，以及片上资源的分配 | 同上 |
 | Realization | `realization` | 实现交接：设计所依赖、但上面没有表达的实现条件，以及优先尝试的实现选择 | Designer 填写；Coder 只能附带实验反馈 |
 
 六个子区依次对应 `schema_docs/1–6`。Design 三区的关系：
@@ -153,10 +153,10 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 
 **design.tile_pipeline（tile 流水线）**
 
-- 一个 worktile、一个 worker 之内的微流水：warp / warp group 的角色划分（warp specialization），以及各角色在 prologue（填入）、steady（重复推进的最小单元，即 pace）、epilogue（排出）中的动作与依赖。只细到 warp 级，不深入 thread 访问的元素和 layout。
+- 一个 worktile、一个 worker 之内的微流水：warp / warp group 的角色划分（warp specialization），各角色在 prologue（填入）、steady（重复推进的最小单元，即 pace）、epilogue（排出）中的动作与依赖，以及支撑它们的片上资源账（各级存储的槽数与别名、各角色的寄存器预算）。只细到 warp 级，不深入 thread 访问的元素和 layout。
 - 目标是在不死锁、不产生读写竞争的前提下，通过 warp 分工、异步逻辑与排布顺序，最大化计算与访存的重叠。一个 pace 的延时就是流水线的平均延时，设计围绕 microbench 给出的最慢环节 max(t1, t2, …) 展开，类似一张 Gantt 图；例如 FA4 在 SM100 上围绕 SFU 偏慢来设计。
 - 三个关键语义：发射顺序不等于完成顺序，异步动作要区分 issue 与 done；除了“数据就绪”，还要记录“buffer 可以再次写入”的复用约束；循环体只写一次，跨迭代的依赖用迭代索引表达，展开后才是 DAG。
-- 写法上曾参考 OSDI 2026 的 *Optimal Software Pipelining and Warp Specialization for Tensor Core GPUs*（Twill）：它便于分析，但人和 AI 都很难迅速抓住核心，最终改为按 lane（一个 warp 或 warp group）记录角色、动作序列与依赖。这种 YAML 可以用 Python 展开并检查（动作归属、重复 ID、缺失引用、有向环），再用 Graphviz 渲染成按 lane 分组的依赖图；依赖图不是时间线，节点间距不代表耗时。
+- 写法上曾参考 OSDI 2026 的 *Optimal Software Pipelining and Warp Specialization for Tensor Core GPUs*（Twill）：它便于分析，但人和 AI 都很难迅速抓住核心，最终改为按 lane（一个或几个 warp）记录角色、动作序列与依赖。这种 YAML 可以用 Python 展开并检查（动作归属、重复 ID、缺失引用、有向环），再用 Graphviz 渲染成按 lane 分组的依赖图；依赖图不是时间线，节点间距不代表耗时。
 
 **realization（实现交接）**
 
@@ -177,7 +177,7 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 | 目标设备有哪些执行单元、什么能力、边界在哪里，本任务用哪个实现栈 | `contract.hardware_specification`，数值规格在 wiki / microbench |
 | 算出哪些值、如何定义、以什么精度存在、存在多久 | `design.math_reshape` |
 | 计算怎样分解成 worktile、由什么 worker 执行、怎样分配与接续、怎样跨 worktile 合并 | `design.work_schedule` |
-| worktile 内 warp / warp group 的分工、动作顺序、依赖与 buffer 复用 | `design.tile_pipeline` |
+| worktile 内 warp / warp group 的分工、动作顺序、依赖与 buffer 复用，以及片上存储的层级、槽数与各角色的寄存器预算 | `design.tile_pipeline` |
 | 设计成立所依赖、但上面没有表达的实现条件（如必须使用的原语），以及优先尝试的实现选择 | `realization` |
 | 只替换实现、数值差异在 fp32 ulp 以内的选择；代码组织、地址计算、barrier 的类型、编号与 phase、精确的 layout | 留给 Coder，不写进 schema（除非替换测试表明换掉后设计不再成立） |
 
