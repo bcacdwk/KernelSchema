@@ -194,7 +194,9 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 9. **有约束力的是具体决策，不是名称。** `persistent`、`CLC`、`online softmax` 这类名字只帮助理解，不能代替具体规则。
 10. **抓大放小。** Designer 必需的内容不能遗漏、不能出错；属于 Coder 的细节移出 schema；确实模糊、可以由 Coder 决定的内容放进 realization 的 `prefer`，并尽量减少。
 
-**篇幅锚点。** 一份 plan 应在 200–300 行以内，人类能读懂。参照 CAKE 论文的 Table 4：FA4 forward 的 CUDA device 代码约 2369 行，Cake IR 表达为 430 行，可执行的 schedule 表示压缩了约 5 倍。schema 去掉操作流之后应当再小几倍，一个 SOTA attention kernel 的设计骨架大约在 50–150 行；写到 400 行，说明操作流细节漏了进来，应下放给 Coder。
+**篇幅锚点。** 一份 plan 应在允许的范围内尽可能的短，我们不对具体的行数有确切的要求，不能以形害意、导致因为限制篇幅反而漏掉内容；但是更不能因为没有篇幅而随意发挥。核心在于，删除schema的任何内容都会导致实际的设计信息被影响，这就说明schema达到了承载的都是有用信息。参照 CAKE 论文的 Table 4：FA4 forward 的 CUDA device 代码约 2369 行，Cake IR 表达为 430 行，可执行的 schedule 表示压缩了约 5 倍。schema 去掉操作流之后应当再小几倍，一个 SOTA attention kernel 的设计骨架大约在 50–150 行；写到 400 行，说明操作流细节漏了进来，应下放给 Coder。
+
+** dispatch ** 待定，目前的策略是针对不同的workload等情况，直接写一个新的schema的dispatch版本（比如host出现了dispatch，那么schema也应该划分）
 
 ## 5 文件格式：schema 用 YAML，template 用 CUE
 

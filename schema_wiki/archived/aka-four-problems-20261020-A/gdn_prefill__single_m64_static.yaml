@@ -1,0 +1,442 @@
+meta_data:
+  name: gated_delta_rule_prefill
+  describe: Compute packed variable-length gated delta recurrence with grouped query and key heads, returning token outputs and the final value-by-key state.
+  source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/gdn_prefill/aka_solution/solution.py::Model.forward
+  dispatch: single_m64_static
+  version: 1
+contract:
+  algorithm_requirement:
+    constant:
+      HQ: {value: 4, meaning: Query and key head count.}
+      HV: {value: 32, meaning: Value and recurrent-state head count.}
+      DK: {value: 128, meaning: Key dimension.}
+      DV: {value: 128, meaning: Value dimension.}
+      epsilon: {value: 1.0e-10, meaning: Additive forget-gate stabilizer.}
+    input:
+      q: {meaning: Packed unnormalized queries., shape: [token: T, head: HQ, dk: DK], dtype: bf16}
+      k:
+        meaning: Packed keys supplied to the recurrence.
+        shape: [token: T, head: HQ, dk: DK]
+        dtype: bf16
+        range: Each row is the BF16 result of torch.nn.functional.normalize(p=2.0, dim=-1) applied to BF16 generator output before the timed call.
+      v: {meaning: Packed values., shape: [token: T, head: HV, dv: DV], dtype: bf16}
+      alpha: {meaning: Linear forget gates., shape: [token: T, head: HV], dtype: fp32, range: "[0,1)"}
+      beta: {meaning: Delta update strengths., shape: [token: T, head: HV], dtype: fp32, range: "[0,1)"}
+      initial_state:
+        meaning: Explicit incoming value-by-key recurrent state.
+        shape: [batch: B, head: HV, dv: DV, dk: DK]
+        dtype: fp32
+        range: Either all zeros or the FP32 final value-by-key state of an independent 32-token reference prefix per sequence, starting from zero under the same numerical input contract.
+      cu_seqlens: {meaning: Packed sequence boundaries., shape: [boundary: "B+1"], dtype: int64, range: "cu_seqlens[0]=0; strictly increasing; cu_seqlens[B]=T"}
+      scale: {meaning: Mandatory Python float multiplying each output contraction., shape: [], dtype: fp64, range: "Python binary64 result of 1.0/math.sqrt(DK), equal to 0.08838834764831843."}
+      output_buffer: {meaning: Mandatory preallocated argument output overwritten by the call., shape: [token: T, head: HV, dv: DV], dtype: bf16, range: Arbitrary contents including the benchmark's NaN poison.}
+      state_buffer: {meaning: Mandatory preallocated argument output_state overwritten by the call., shape: [batch: B, head: HV, dv: DV, dk: DK], dtype: fp32, range: Arbitrary contents including the benchmark's NaN poison.}
+    output:
+      output: {meaning: First returned tensor aliasing and fully overwriting output_buffer., shape: [token: T, head: HV, dv: DV], dtype: bf16}
+      output_state: {meaning: Second returned tensor aliasing and fully overwriting state_buffer in value-by-key order., shape: [batch: B, head: HV, dv: DV, dk: DK], dtype: fp32}
+    compute:
+      - name: Gated state recurrence and inclusive readout
+        math: |
+          1 <= B <= 16; T=sum_b L_b <= 16384; L_b=cu_seqlens[b+1]-cu_seqlens[b] > 0.
+          All tensor arguments are contiguous CUDA tensors on the target device.
+          Before key normalization, q/k/v rows are independently drawn with a Normal(0,0.05) center,
+          elementwise Uniform(center-0.25,center+0.25) values, and a BF16 cast.
+          For 0 <= b < B and 0 <= h < HV, let a=floor(h/(HV/HQ)), and initialize R(-1)=initial_state[b,h].
+          For 0 <= i < L_b, x=cu_seqlens[b]+i and Rd=(alpha[x,h]+epsilon)*R(i-1).
+          For 0 <= j < DV:
+            delta[j]=beta[x,h]*(v[x,h,j]-sum_{d=0}^{DK-1} Rd[j,d]*k[x,a,d]).
+            R(i)[j,d]=Rd[j,d]+delta[j]*k[x,a,d] for 0 <= d < DK.
+            output[x,h,j]=bf16(scale*sum_{d=0}^{DK-1} R(i)[j,d]*q[x,a,d]).
+          output_state[b,h]=R(L_b-1).
+          Only output_buffer and state_buffer are mutated. The timed region is the complete Model.forward,
+          including its int64-to-int32 boundary conversion. Input construction, key normalization,
+          continuation-prefix evaluation, and pre-call allocation/NaN fill of output_buffer and state_buffer are outside timing.
+        symbol:
+          L_b: {meaning: Sequence lengths indexed by b., shape: [batch: B], dtype: int64}
+          R: {meaning: Reference value-by-key state after local token i for each sequence and value head., shape: [batch: B, head: HV, dv: DV, dk: DK], dtype: fp32}
+    golden_reference:
+      source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/gdn_prefill/reference.py::Model.forward
+      gap: The oracle evaluates the token recurrence using FP32 block_size=32 triangular inversion and log-space decay; its blocked evaluation supplies the floating-point comparison values.
+      tolerance:
+        output: "Every element of both the returned result and mutated output satisfies abs(candidate-reference)<=0.01+0.01*abs(reference)."
+        output_state: "Every element of both the returned result and mutated output_state satisfies abs(candidate-reference)<=0.005+0.001*abs(reference)."
+  hardware_specification:
+    device: NVIDIA L20D
+    arch: SM103
+    execution: {CTA: "<hardware-execution@pending:L20D/CTA>", cluster: "<hardware-execution@pending:L20D/cluster>", warp: "<hardware-execution@pending:L20D/warp>"}
+    feature: {memory: "<hardware-feature@pending:L20D/SMEM-TMEM-register>"}
+    stack:
+      language: CuTe DSL, nvidia-cutlass-dsl[cu13]>=4.5.0
+      toolchain: "torch>=2.9; cuda-python>=13.0; CUDA major>=13; <stack@pending:resolved_versions>"
+    wiki:
+      hardware: "<wiki-hardware@pending:Blackwell/L20D.md>"
+      programming: {language: "<wiki-language@pending:CuTe-DSL/resolved-version/>", virtual_isa: "<wiki-virtual-isa@pending:PTX/version/>", machine_isa: "<wiki-machine-isa@pending:SASS/SM103/>"}
+      microbench: "<wiki-microbench@pending:L20D/>"
+      sota: {kernel: "<wiki-sota-kernel@pending:L20D/>", schema: "<wiki-sota-schema@pending:L20D/>"}
+      profile: "<wiki-profile@pending:NVIDIA/>"
+design:
+  math_reshape:
+    thesis: Replace token recurrence with chunk-wise triangular solves and matrix products, carrying FP32 state while narrowing selected operands to BF16.
+    rewrite:
+      - step: chunk
+        name: Form paired chunks and stabilized base-two decay prefixes
+        math: |
+          offset32=int32(cu_seqlens) is the required timed wrapper conversion.
+          The selected B=1 kernel uses the known start 0 and length T without reading offset32.
+          For each b,h, a=floor(h/(HV/HQ)); Nc=2*ceil(L_b/(2*C)); 0 <= c < Nc; 0 <= u,j < C.
+          When c*C+u<L_b, x=c*C+u:
+            Q(c)[u,:]=q[x,a,:]; K(c)[u,:]=k[x,a,:]; V(c)[u,:]=v[x,h,:]; gate[u]=alpha[x,h]; Bgate(c)[u]=beta[x,h].
+          Otherwise Q(c)[u,:]=K(c)[u,:]=V(c)[u,:]=0, gate[u]=1 and Bgate(c)[u]=0.
+          G(c)[u]=sum32_{r=0}^{u} log2_fast(gate[r]+epsilon); gamma(c)[u]=exp2_fast(G(c)[u]).
+          Gamma(c)[u,j]=exp2_fast(G(c)[u]-G(c)[j]) for j<=u, and 0 otherwise.
+          Scan each 32-token half separately, then add the first-half total to the second.
+        symbol:
+          C: {meaning: Tokens per recurrent chunk., value: 64}
+          Nc: {meaning: Even chunk count including final padding.}
+          offset32: {meaning: Converted boundaries passed by the wrapper but unused by this dispatch., shape: [boundary: "B+1"], dtype: int32, life: "stored invocation"}
+          Q: {meaning: Padded query chunk for one query head., shape: [token: C, dk: DK], dtype: bf16}
+          K: {meaning: Padded key chunk for one key head., shape: [token: C, dk: DK], dtype: bf16}
+          V: {meaning: Padded value chunk for one value head., shape: [token: C, dv: DV], dtype: bf16}
+          Bgate: {meaning: Padded beta chunk., shape: [token: C], dtype: fp32}
+          G: {meaning: Inclusive log2 decay prefix within a chunk., shape: [token: C], dtype: fp32, life: "stored (b,h,c)"}
+          gamma: {meaning: Decay from the incoming state to each chunk row., shape: [token: C], dtype: fp32, life: "stored (b,h,c)"}
+          Gamma: {meaning: Causal decay ratios reused by the inverse and output weights., shape: [token: C, source: C], dtype: fp32, life: "stored (b,h,c)"}
+        arithmetic: {approx: "log2_fast and exp2_fast use fast approximate FP32 functions on the stabilized gate and its prefix differences; unknown: <numerics@pending:certified_log2_exp2_error_bound>."}
+      - step: inverse
+        name: Solve the local delta feedback with a BF16 hierarchical inverse
+        math: |
+          KK(c)=mm32(K(c),transpose(K(c))); QK(c)=mm32(Q(c),transpose(K(c))).
+          A(c)=bf16(KK(c) ⊙ Gamma(c) ⊙ Bgate(c)[:,None]); J=I+strict_lower(A(c)).
+          Invert J's diagonal 8x8 blocks by FP32 Gauss-Jordan elimination, then cast each completed block to BF16.
+          Recursively merge 8->16->32->64 blocks: for Jblock=[[X,0],[Z,Y]],
+          Jblock_inverse=[[Xinv,0],[bf16(mm32(bf16(-mm32(Yinv,Z)),Xinv)),Yinv]].
+          Ainv(c)=bf16(J_inverse ⊙ Bgate(c)[None,:]); W(c)=bf16((QK(c) ⊙ Gamma(c))*fp32(scale)).
+        symbol:
+          KK: {meaning: Key Gram accumulator., shape: [token: C, source: C], dtype: fp32}
+          QK: {meaning: Unscaled query-key accumulator., shape: [token: C, source: C], dtype: fp32}
+          A: {meaning: Rounded lower feedback coefficients before diagonal replacement., shape: [token: C, source: C], dtype: bf16}
+          Ainv: {meaning: Rounded inverse with beta applied on columns., shape: [token: C, source: C], dtype: bf16, life: "stored (b,h,c)"}
+          W: {meaning: Causal query-key decay weights with output scale., shape: [token: C, source: C], dtype: bf16, life: "stored (b,h,c)"}
+      - step: recurrence
+        name: Keep the state live and fuse value correction with output and state update
+        math: |
+          S(-1)=initial_state[b,h]. For c=0..Nc-1, Sbar(c)=bf16(S(c-1)); Sd=gamma(c)[C-1]*S(c-1).
+          KS(c)=mm32(K(c),transpose(Sbar(c))); QS(c)=mm32(Q(c),transpose(Sbar(c))).
+          VKS(c)=bf16(V(c)-bf16(gamma(c)[:,None] ⊙ KS(c))); NV(c)=mm32(Ainv(c),VKS(c)).
+          NVbar(c)=bf16(NV(c)); DecayV(c)=bf16(exp2_fast(G(c)[C-1]-G(c))[:,None] ⊙ NV(c)).
+          QSscaled(c)=(gamma(c)[:,None] ⊙ QS(c))*fp32(scale); Oacc(c)=mma32(W(c),NVbar(c),QSscaled(c)); O(c)=bf16(Oacc(c)).
+          S(c)=mma32(transpose(DecayV(c)),K(c),Sd).
+          Store O(c)[u] to output[c*C+u,h] only for c*C+u<L_b; output_state[b,h]=S(Nc-1).
+        symbol:
+          S: {meaning: FP32 value-by-key state after chunk c., shape: [dv: DV, dk: DK], dtype: fp32, life: "carried (b,h); c=-1..Nc-1"}
+          Sbar: {meaning: Rounded incoming-state snapshot before applying this chunk's decay., shape: [dv: DV, dk: DK], dtype: bf16}
+          KS: {meaning: Key contraction with the rounded incoming state., shape: [token: C, dv: DV], dtype: fp32}
+          QS: {meaning: Query contraction subsequently rescaled and accumulated into output., shape: [token: C, dv: DV], dtype: fp32}
+          QSscaled: {meaning: Decayed and scaled inter-chunk output contribution., shape: [token: C, dv: DV], dtype: fp32}
+          Oacc: {meaning: Unrounded final output chunk., shape: [token: C, dv: DV], dtype: fp32}
+          VKS: {meaning: Residual values after the separately rounded decayed-state projection., shape: [token: C, dv: DV], dtype: bf16}
+          NV: {meaning: Unrounded local delta values., shape: [token: C, dv: DV], dtype: fp32}
+          NVbar: {meaning: Rounded local deltas used by the output product., shape: [token: C, dv: DV], dtype: bf16}
+          DecayV: {meaning: End-decayed deltas rounded directly from FP32 NV., shape: [token: C, dv: DV], dtype: bf16}
+          O: {meaning: Rounded output chunk., shape: [token: C, dv: DV], dtype: bf16}
+        arithmetic:
+          approx: exp2_fast uses the approximation defined in rewrite step chunk.
+    ledger:
+      baseline: Contract's token recurrence with one live FP32 state per sequence and value head.
+      depth: [{item: State-dependent update chain, change: "L_b token updates -> Nc block updates per sequence and value head", by: [chunk, inverse, recurrence]}]
+      matmul: [{item: Dense block products, change: "+7 main matrix products and one hierarchical inverse per chunk before value-row partition", by: [inverse, recurrence]}]
+      error: [{item: Approximation and operand rounding, change: "+fast log2/exp2 and BF16 inverse coefficients and matrix operands, relative to the FP32 recurrence", by: [chunk, inverse, recurrence]}]
+  work_schedule:
+    thesis: Map the single sequence directly to value-head row halves, keeping the full recurrence local and using fixed descriptors at the cost of duplicated Q/K and scalar-tile loads.
+    flow:
+      launch:
+        - {phase: [cast_offset]}
+        - {phase: [gdn], start_after: cast_offset.kernel_done}
+    phase:
+      cast_offset:
+        describe: "Timed torch.Tensor.to(int32) boundary conversion; this opaque flow slot requires <library@pending:actual_CUDA_launch_expansion>."
+        decomposition:
+          strategy: The boundary axis gives placeholder logical numbering only; actual tile extent and library CUDA work decomposition remain unbound.
+          partition: {boundary: {size: "B+1", tile: "<library@pending:cast_tile_width>"}}
+          worktile: {invariant: {cu_seqlens: {shape: [boundary: "<library@pending:cast_tile_width>"], dtype: int64}}}
+          target: {single_tile: {offset32: {shape: [boundary: "<library@pending:cast_tile_width>"], dtype: int32}}}
+        mapping:
+          worker: {unit: "<library@pending:cast_execution_unit>", count: "<library@pending:cast_worker_width>"}
+          count: "<library@pending:cast_worker_count>"
+        schedule:
+          worktile_order: [{by: boundary, direction: ascending}]
+          worker_assignment:
+            refill: {opaque_library: "<library@pending:cast_work_assignment>"}
+            exit: "<library@pending:cast_completion_condition>"
+      gdn:
+        describe: Run the B=1 paired-chunk recurrence with fixed descriptors, runtime scale, scalar TMA, and compact CG1 events.
+        decomposition:
+          strategy: This dispatch covers B=1; the GDN kernel uses sequence bounds [0,T), while the preceding wrapper conversion remains timed.
+          partition: {batch: {size: B, tile: 1}, head: {size: HV, tile: 1}, dv: {size: DV, tile: 64}}
+          worktile:
+            invariant: {initial_state: {shape: [dv: 64, dk: DK], dtype: fp32}, scale: {shape: [], dtype: fp64}}
+            iteration:
+              Q: {shape: [token: C, dk: DK], dtype: bf16, direction: ascending}
+              K: {shape: [token: C, dk: DK], dtype: bf16, direction: ascending}
+              V: {shape: [token: C, dv: 64], dtype: bf16, direction: ascending}
+              alpha: {shape: [token: C], dtype: fp32, direction: ascending}
+              Bgate: {shape: [token: C], dtype: fp32, direction: ascending}
+          target: {single_tile: {output: {shape: [token: L_b, dv: 64], dtype: bf16}, output_state: {shape: [dv: 64, dk: DK], dtype: fp32}}}
+        mapping:
+          strategy: >-
+            Directly decode linear work id as virtual_head, with head=floor(virtual_head/2) and row_half=virtual_head%2.
+            SMCount is the runtime SM count; its recorded L20D value 148 yields 64 workers and one worktile per worker.
+          worker: {unit: CTA, count: 1}
+          count: "min(worktile_count,SMCount)"
+        schedule:
+          worktile_order: [{by: batch, direction: ascending}, {by: head, direction: ascending}, {by: dv, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, step: worker_count}, refill: none, exit: assigned_done}
+  tile_pipeline:
+    thesis: >-
+      Keep the paired inverse path ahead of the state recurrence; raw scalar TMA overlaps the gate scan,
+      and output-paced lookahead removes scalar empty-stage handshakes while CG1 reuses one ordered ready-event stream.
+    phase:
+      cast_offset:
+        lane:
+          Library:
+            info: {member: "<library@pending:cast_lane>", verb: {produce: "<library@pending:PyTorch_cast_micro_pipeline_and_completion>"}}
+            pipe: {steady: ["produce:offset32"]}
+      gdn:
+        domain:
+          t: worktile
+          c: [0, Nc]
+          p: [0, "Nc/2"]
+          n: {flatten: [t, c]}
+        resource:
+          QRing: {space: SMEM, shape: [token: C, dk: DK], dtype: bf16, slot: 3, view: {"Q(n)": {slot: "n%3"}}}
+          KRing: {space: SMEM, shape: [token: C, dk: DK], dtype: bf16, slot: 4, view: {"K(n)": {slot: "n%4"}}}
+          VRing: {space: SMEM, shape: [token: C, dv: 64], dtype: bf16, slot: 2, view: {"V(n)": {slot: "n%2"}}}
+          InverseRing: {space: SMEM, shape: [token: C, source: C], dtype: bf16, slot: 3, view: {"A(n)": {slot: "n%3"}, "Ainv(n)": {slot: "n%3"}}}
+          WeightRing: {space: SMEM, shape: [token: C, source: C], dtype: bf16, slot: 2, view: {"W(n)": {slot: "n%2"}}}
+          OutputSlot: {space: SMEM, shape: [token: C, dv: 64], dtype: bf16, view: {"O(n)": {part: {token: [0, C]}}}}
+          GateRing: {space: SMEM, shape: [field: 2, token: C], dtype: fp32, slot: 5, view: {"G(n)": {slot: "c%5", part: {field: [0, 1]}}, "gamma(n)": {slot: "c%5", part: {field: [1, 2]}}}}
+          BetaRing: {space: SMEM, shape: [token: C], dtype: fp32, slot: 5, view: {"Bgate(n)": {slot: "c%5"}}}
+          RawScalarRing:
+            space: SMEM
+            shape: [field: 2, token: C, head_group: 4]
+            dtype: fp32
+            slot: 2
+            view: {"RawScalar(n)": {slot: "c%2"}}
+          GammaPair: {space: register, shape: [pair_chunk: 2, token: C, source: C], dtype: fp32, view: {"Gamma(n)": {part: {pair_chunk: ["n%2", "n%2+1"]}}}}
+          TensorMemory:
+            space: TMEM
+            shape: [row: 128, column: "<capacity@pending:CuTe_get_max_tmem_alloc_cols_sm100>"]
+            dtype: fp32
+            view:
+              S: {part: {column: [0, 128]}}
+              "QS(n)": {part: {column: [128, 192]}}
+              "QSscaled(n)": {part: {column: [128, 192]}}
+              "Oacc(n)": {part: {column: [128, 192]}}
+              "Sbar(n)": {part: {column: [192, 256]}, dtype: bf16}
+              "KK(n)": {part: {column: ["256+64*(n%2)", "320+64*(n%2)"]}}
+              "QK(n)": {part: {column: ["256+64*(n%2)", "320+64*(n%2)"]}}
+              "KS(n)": {part: {column: [384, 448]}}
+              "NV(n)": {part: {column: [384, 448]}}
+              "VKS(n)": {part: {column: [448, 480]}, dtype: bf16}
+              "NVbar(n)": {part: {column: [448, 480]}, dtype: bf16}
+              "DecayV(n)": {part: {column: [480, 512]}, dtype: bf16}
+        lane:
+          Load:
+            info:
+              member: "warp[9:10]"
+              mode: async
+              register: 24
+              verb:
+                load: Use embedded Q/K/V descriptors bounded by T; descriptor bounds zero-fill partial and synthetic chunks.
+            pipe:
+              repeat: t
+              steady:
+                - repeat: "n[t]"
+                  steady: ["load:K(n)", "load:Q(n)", "load:V(n)"]
+            edge:
+              reuse:
+                "load:Q(n+3)": ["MMA0/mma:Q(n[t,2*floor(c/2)+1])@K(n[t,2*floor(c/2)+1])", "MMA1/mma:Q(n)@Sbar(n)"]
+                "load:K(n+4)": ["MMA0/mma:Q(n[t,2*floor(c/2)+1])@K(n[t,2*floor(c/2)+1])", "MMA1/mma:DecayV(n)@K(n)"]
+                "load:V(n+2)": ["CG1/release:V(n)"]
+          MMA0:
+            info:
+              member: "warp[8:9]"
+              mode: ordered
+              register: 24
+              verb:
+                mma: >-
+                  K@K produces KK and Q@K produces QK using math_reshape's transposes and zero initial accumulators.
+                  Completion covers prior products and operand reads of this issuer only.
+            pipe:
+              repeat: t
+              steady:
+                - repeat: p
+                  steady:
+                    - "mma:K(n[t,2*p])@K(n[t,2*p])"
+                    - "mma:K(n[t,2*p+1])@K(n[t,2*p+1])"
+                    - "mma:Q(n[t,2*p])@K(n[t,2*p])"
+                    - "mma:Q(n[t,2*p+1])@K(n[t,2*p+1])"
+            edge:
+              reuse:
+                "mma:Q(n)@K(n)": ["CG0/read:KK(n)"]
+                "mma:K(n+2)@K(n+2)": ["CG0/read:QK(n)"]
+          CG0:
+            info:
+              member: "warp[0:4]"
+              register: 224
+              verb:
+                compute: >-
+                  GammaPair captures both G chunks and retains both decay-ratio matrices through KK and QK; A weights the captured KK.
+                  InversePair uses FP32 row elimination for 8x8 leaves and synchronous warp-local BF16-input/FP32-accumulator matrix products for larger merges,
+                  with CG0 rendezvous at entry and between levels. Two warps per chunk handle the 8x8 level,
+                  all four handle each chunk's 16x16 level, then two per chunk handle its 32x32 and 64x64 levels.
+                read: >-
+                  BetaPair captures both beta row fragments; their stages remain live until the later column reads in Ainv publication.
+                  KK/QK capture their accumulator in registers and return its TMEM slot before arithmetic.
+                publish: Ainv finishes the column beta scaling; W weights the captured QK using the retained Gamma.
+            pipe:
+              repeat: t
+              steady:
+                - repeat: p
+                  steady:
+                    - "compute:GammaPair(t,p)"
+                    - "read:BetaPair(t,p)"
+                    - "read:KK(n[t,2*p])"
+                    - "compute:A(n[t,2*p])"
+                    - "read:KK(n[t,2*p+1])"
+                    - "compute:A(n[t,2*p+1])"
+                    - "compute:InversePair(t,p)"
+                    - "publish:Ainv(n[t,2*p])"
+                    - "publish:Ainv(n[t,2*p+1])"
+                    - "read:QK(n[t,2*p])"
+                    - "publish:W(n[t,2*p])"
+                    - "read:QK(n[t,2*p+1])"
+                    - "publish:W(n[t,2*p+1])"
+            edge:
+              data:
+                "compute:GammaPair(t,p)": ["ScalarStore/publish:Scalar(n[t,2*p])", "ScalarStore/publish:Scalar(n[t,2*p+1])"]
+                "read:KK(n)": ["MMA0/mma:K(n)@K(n)"]
+                "read:QK(n)": ["MMA0/mma:Q(n)@K(n)"]
+              reuse:
+                "read:KK(n+3)": ["MMA1/mma:Ainv(n)@VKS(n)"]
+                "read:QK(n+2)": ["MMA1/mma:W(n)@NVbar(n)"]
+          MMA1:
+            info:
+              member: "warp[10:11]"
+              mode: ordered
+              register: 24
+              verb:
+                mma: >-
+                  K@Sbar, Q@Sbar and Ainv@VKS produce KS, QS and NV; W@NVbar produces Oacc; DecayV@K updates S,
+                  using math_reshape's transposes and initial accumulators.
+                  Completion covers prior products and operand reads of this issuer only.
+            pipe:
+              repeat: t
+              steady:
+                - repeat: "n[t]"
+                  steady:
+                    - "mma:K(n)@Sbar(n)"
+                    - "mma:Q(n)@Sbar(n)"
+                    - "mma:Ainv(n)@VKS(n)"
+                    - "mma:W(n)@NVbar(n)"
+                    - "mma:DecayV(n)@K(n)"
+            edge:
+              data:
+                "mma:W(n)@NVbar(n)": ["CG1/rescale:QS(n)", "CG1/publish:DeltaPair(n)"]
+                "mma:DecayV(n)@K(n)": ["CG1/publish:DeltaPair(n)"]
+          CG1:
+            info:
+              member: "warp[4:8]"
+              register: 256
+              verb:
+                publish: >-
+                  Sbar reads each incoming S subtile once and publishes its BF16 snapshot after decaying S in place;
+                  VKS uses loaded V and captured KS; DeltaPair writes NVbar and DecayV from captured FP32 NV and publishes them together.
+                  Sbar, VKS and DeltaPair reuse one ready-event stream; the KS, NV and state-update dependencies prevent a later event from overtaking its consumer.
+                  O copies and rounds Oacc into the output slot.
+                compute: >-
+                  DecayFactors captures this chunk's gamma and end-decay factors in registers without a gate-stage return,
+                  overlapping the already published Sbar's matrix products.
+                read: Capture NV in registers and return the shared KS/NV accumulator after its final reads.
+                rescale: Replace QS in place with QSscaled.
+                load: Load initial_state into S.
+                store: Write final S to output_state.
+            pipe:
+              repeat: t
+              steady:
+                - "load:initial_state(t)"
+                - repeat: "n[t]"
+                  steady:
+                    - "publish:Sbar(n)"
+                    - "compute:DecayFactors(n)"
+                    - "publish:VKS(n)"
+                    - "rescale:QS(n)"
+                    - "release:V(n)"
+                    - "read:NV(n)"
+                    - "publish:DeltaPair(n)"
+                    - "publish:O(n)"
+                - "store:output_state(t)"
+            edge:
+              data:
+                "publish:Sbar(n)": ["ScalarStore/publish:Scalar(n)"]
+                "publish:Sbar(n[t,c+1])": ["MMA1/mma:DecayV(n[t,c])@K(n[t,c])"]
+                "publish:VKS(n)": ["Load/load:V(n)", "MMA1/mma:K(n)@Sbar(n)"]
+                "rescale:QS(n)": ["MMA1/mma:Q(n)@Sbar(n)"]
+                "release:V(n)": ["MMA1/mma:Ainv(n)@VKS(n)"]
+                "publish:O(n)": ["MMA1/mma:W(n)@NVbar(n)"]
+                "store:output_state(t)": ["MMA1/mma:DecayV(n[t,last(c)])@K(n[t,last(c)])"]
+              reuse: {"publish:O(n+1)": ["ScalarStore/store:O(n)"]}
+          ScalarStore:
+            info:
+              member: "warp[11:12]"
+              register: 24
+              verb:
+                load:
+                  mode: async
+                  meaning: Stage RawScalar's alpha and beta tiles for value heads [4*floor(h/4),4*floor(h/4)+4) through fixed descriptors.
+                read: >-
+                  RawScalar waits for both transfers, captures the selected h%4 column into registers,
+                  and finishes all raw-stage reads before reuse; padded positions become gate=1 and beta=0.
+                  The predicate is unnecessary when T is divisible by 2*C.
+                prefetch:
+                  mode: async
+                  meaning: >-
+                    RawAhead(n[t,c]) issues RawScalar(n[t,c+2]) into the just-read raw stage when c+2<Nc;
+                    otherwise it has no transfer. Issue precedes the current gate scan.
+                compute: GateRegs forms G and gamma from the captured gate values while the next raw transfer is in flight.
+                publish: >-
+                  Scalar writes G, gamma and Bgate to their shared stage and issues one ready notification after all writes.
+                  There is no empty-stage acquisition or consumer return; preparing chunk c+5 follows store:O(c),
+                  which transitively finishes that stage's Gamma, beta-column and decay-factor consumers.
+                store: Use the embedded O descriptor bounded by T; return the output slot after the bulk store completes.
+            pipe:
+              repeat: t
+              steady:
+                - "load:RawScalar(n[t,0])"
+                - "load:RawScalar(n[t,1])"
+                - repeat: "n[t,0:min(4,Nc)]"
+                  steady: ["read:RawScalar(n)", "prefetch:RawAhead(n)", "compute:GateRegs(n)", "publish:Scalar(n)"]
+                - repeat: "n[t,0:max(0,Nc-4)]"
+                  steady:
+                    - "read:RawScalar(n+4)"
+                    - "prefetch:RawAhead(n+4)"
+                    - "compute:GateRegs(n+4)"
+                    - "publish:Scalar(n+4)"
+                    - "store:O(n)"
+                - repeat: "n[t,max(0,Nc-4):Nc]"
+                  steady: ["store:O(n)"]
+            edge:
+              data:
+                "read:RawScalar(n[t,c+2])": ["prefetch:RawAhead(n[t,c])"]
+realization:
+  require:
+    - item: [design.tile_pipeline::gdn.MMA0, design.tile_pipeline::gdn.MMA1]
+      choice: Single-CTA tcgen05.mma with TMEM operands/accumulators and issuer-local cumulative completion commits.
+      reason: The accumulator aliases and delayed Q/K slot returns require completion to cover all prior products and operand reads of that issuer.
+    - item: [design.tile_pipeline::gdn.Load, design.tile_pipeline::gdn.ScalarStore]
+      choice: Embedded TMA descriptors for Q/K/V/O and both scalar streams; raw scalar TMA completion uses transaction-count mbarriers, with warp synchronization and an async-shared proxy fence before raw-stage reissue.
+      reason: Fixed single-sequence bounds and the raw-stage read-before-reissue guarantee support scalar prefetch during the gate scan.
+    - item: [design.tile_pipeline::gdn.CG1, design.tile_pipeline::gdn.MMA1, design.tile_pipeline::gdn.ScalarStore]
+      choice: One phase-alternating MbarrierArray stage for CG1, with DeltaPair's notification covering both following products; ready-only MbarrierArray notifications for the combined scalar stages.
+      reason: These notifications replace separate full/empty handshakes only because the output-paced and state-dependent execution orders prevent publication from lapping consumption.
+

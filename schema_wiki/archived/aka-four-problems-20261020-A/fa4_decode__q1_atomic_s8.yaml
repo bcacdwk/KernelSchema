@@ -1,0 +1,604 @@
+meta_data:
+  name: paged_grouped_query_attention_decode
+  describe: Compute right-aligned causal FP8 paged-cache attention and overwrite the supplied BF16 output.
+  source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_decode/aka_solution/solution.py::Model.forward
+  dispatch: q1_atomic_s8
+  version: 2
+contract:
+  algorithm_requirement:
+    constant:
+      H: {value: 16, meaning: Query heads sharing one KV head.}
+      D: {value: 256, meaning: 'Query, key and value head dimension.'}
+      PageSize: {value: 64, meaning: Tokens per physical KV page.}
+      TableWidth: {value: 16434, meaning: Supplied page-table row capacity.}
+      WorkspaceBytes: {value: 413138944, meaning: Supplied workspace byte count in every scored shape.}
+    input:
+      query: {meaning: Request-major query tails., shape: [{query_row: QueryRows}, {head: H}, {d: D}], dtype: fp8_e4m3fn}
+      kv_cache: {meaning: HND cache with key then value in the selector axis., shape: [{page: PageCount}, {selector: 2}, {kv_head: 1},
+          {token: PageSize}, {d: D}], dtype: fp8_e4m3fn}
+      workspace_buffer: {meaning: 'Scratch, zeroed before first isolated use.', shape: [{byte: WorkspaceBytes}], dtype: uint8}
+      block_tables: {meaning: Logical-page to physical-page indices; unused entries are -1., shape: [{request: BatchCount}, {logical_page: TableWidth}],
+        dtype: int32, range: -1 <= block_tables < PageCount}
+      seq_lens: {meaning: Valid cached token count per request., shape: [{request: BatchCount}], dtype: int32, range: q_len_per_req
+          <= seq_lens <= PageSize*TableWidth}
+      max_seq_len: {meaning: Maximum valid cache length., shape: [], dtype: python_int}
+      bmm1_scale: {meaning: Composite query-key score scale including captured quantization scales., shape: [], dtype: python_float,
+        range: [0.0625, 0.0625]}
+      bmm2_scale: {meaning: Composite value-output scale., shape: [], dtype: python_float, range: [1.0, 1.0]}
+      window_left: {meaning: Full-context attention selector., shape: [], dtype: python_int, range: [-1, -1]}
+      sinks: {meaning: Required argument fixed to Python None; attention sinks are disabled., shape: [], dtype: '<schema-abi@pending:Python-None-sentinel>',
+        range: None}
+      o_sf_scale: {meaning: Required argument fixed to Python None; output scale-factor tensor is disabled., shape: [], dtype: '<schema-abi@pending:Python-None-sentinel>',
+        range: None}
+      out: {meaning: Writable output storage; its incoming contents are ignored., shape: [{query_row: QueryRows}, {head: H}, {d: D}],
+        dtype: bf16, range: 'Ignored contents, including NaN and infinities'}
+      q_len_per_req: {meaning: Query-tail length shared by all requests., shape: [], dtype: python_int, range: [1, 1]}
+    output:
+      output: {meaning: Returned tensor aliasing the supplied out storage., shape: [{query_row: QueryRows}, {head: H}, {d: D}], dtype: bf16}
+      out_after: {meaning: In-place replacement of input out., shape: [{query_row: QueryRows}, {head: H}, {d: D}], dtype: bf16}
+    compute:
+    - name: Resolve pages and causal scores
+      math: |
+        python_int denotes an arbitrary-precision Python integer; python_float denotes the supplied Python binary64 float.
+        All tensors are contiguous in the stated axis order and reside on one CUDA device.
+        QueryRows = BatchCount*q_len_per_req; max_seq_len = max_b seq_lens[b].
+        PageCount = sum_b ceil(seq_lens[b]/PageSize).
+        Every used block_tables[b,p], 0 <= p < ceil(seq_lens[b]/PageSize), is a valid physical page.
+        For 0 <= b < BatchCount, 0 <= t < q_len_per_req, 0 <= h < H:
+          visible(b,t) = {k in integers | 0 <= k < seq_lens[b] and k <= seq_lens[b]-q_len_per_req+t}.
+          For 0 <= k < seq_lens[b], 0 <= d < D, K[b,k,d] = kv_cache[block_tables[b,floor(k/PageSize)],0,0,k%PageSize,d].
+          For 0 <= k < seq_lens[b], 0 <= d < D, V[b,k,d] = kv_cache[block_tables[b,floor(k/PageSize)],1,0,k%PageSize,d].
+          score[b,t,h,k] = bmm1_scale*sum_{d=0}^{D-1} query[b*q_len_per_req+t,h,d]*K[b,k,d] for k in visible(b,t).
+      symbol:
+        visible: {meaning: Visible logical-key set for one query., shape: not_applicable, dtype: not_applicable}
+        K: {meaning: Logical unscaled key view of the paged cache., shape: [{request: BatchCount}, {kv: max_seq_len}, {d: D}], dtype: fp8_e4m3fn}
+        V: {meaning: Logical unscaled value view of the paged cache., shape: 'ref:K.shape', dtype: fp8_e4m3fn}
+        score: {meaning: Composite-scaled scores on the visible-key domain., shape: [{request: BatchCount}, {query_tail: q_len_per_req},
+            {head: H}, {kv: max_seq_len}], dtype: fp32}
+    - name: Normalize and overwrite output
+      math: |
+        For each (b,t,h), let a = max_{k in visible(b,t)} score[b,t,h,k] and l = sum_{k in visible(b,t)} exp(score[b,t,h,k]-a).
+        output[b*q_len_per_req+t,h,d] = bf16(bmm2_scale*sum_{k in visible(b,t)} exp(score[b,t,h,k]-a)*V[b,k,d]/l), 0 <= d < D.
+        out_after = output; return the same tensor object as out. Only out is a semantic input mutation.
+        The timed callable includes page handling and partial-result combination; input construction precedes timing.
+    golden_reference:
+      source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_decode/reference.py::Model.forward
+      tolerance:
+        output: atol=0.06, rtol=0.04
+        out_after: atol=0.06, rtol=0.04
+  hardware_specification:
+    device: NVIDIA L20D
+    arch: SM103
+    execution:
+      CTA: <hardware-execution@pending:L20D/CTA>
+      cluster: <hardware-execution@pending:L20D/cluster>
+      warp: <hardware-execution@pending:L20D/warp>
+    feature:
+      memory: <hardware-feature@pending:L20D/SMEM-TMEM-register>
+    stack:
+      language: CuTe DSL, nvidia-cutlass-dsl==4.6.1
+      toolchain: nvidia-cutlass-dsl 4.6.1 bundled compilation; torch>=2.9 and cuda-python; <stack@pending:CUDA-and-unpinned-package-versions>
+    wiki:
+      hardware: "<wiki-hardware@pending:Blackwell/L20D.md>"
+      programming:
+        language: "<wiki-language@pending:CuTe-DSL/4.6.1/>"
+        virtual_isa: "<wiki-virtual-isa@pending:PTX/version/>"
+        machine_isa: "<wiki-machine-isa@pending:SASS/SM103/>"
+      microbench: "<wiki-microbench@pending:L20D/>"
+      sota:
+        kernel: "<wiki-sota-kernel@pending:L20D/>"
+        schema: "<wiki-sota-schema@pending:L20D/>"
+      profile: "<wiki-profile@pending:NVIDIA/>"
+design:
+  math_reshape:
+    thesis: Pack shared-KV query rows and stream interleaved splits through two parity states; represent each probability by two FP8
+      terms, doubling value products while retaining an FP32 denominator. Combine split statistics before rounding local contributions,
+      avoiding the global FP32 partial-output round trip.
+    rewrite:
+    - step: stream
+      name: Gather interleaved pages and pack query heads
+      math: |
+        Each request b and query tile qbase are independent; these indices are omitted below.
+        Qpack[r,:] = query[b*q_len_per_req+qbase+floor(r/H),r%H,:], 0 <= r < Rows.
+        For 0 <= z < SplitCount, N(z) = max(0,ceil((ceil(seq_lens[b]/Bk)-z)/WorkSplits)) if z<WorkSplits; otherwise 0.
+        In one stream write N=N(z), k(i,u)=(z+i*WorkSplits)*Bk+u, 0<=i<N, 0<=u<Bk.
+        If p=floor(k(i,u)/PageSize)<ceil(seq_lens[b]/PageSize), Kblk(i)[u,:] and Vblk(i)[u,:] read kv_cache[block_tables[b,p],selector,0,k(i,u)%PageSize,:] with selector=0 and 1; otherwise both are zero.
+        K_fragment(i,f) and V_fragment(i,f), 0<=f<4, select the 128-by-128 quadrant with kv half floor(f/2) and d half f%2.
+        Sraw(i)=mm32(Kblk(i),Qpackᵀ).
+        S(i)[u,r]=Sraw(i)[u,r] when k(i,u) belongs to visible(b,qbase+floor(r/H)); otherwise -inf.
+      symbol:
+        Bk: {meaning: Logical KV tokens per local step., binding: 'bind:design.work_schedule::Bk'}
+        SplitCount: {meaning: Launched interleaved KV streams per query tile., binding: 'bind:design.work_schedule::SplitCount'}
+        WorkSplits: {meaning: Stride and number of working KV streams., binding: 'bind:design.work_schedule::WorkSplits'}
+        Qtile: {meaning: Query-tail positions packed with all heads., binding: 'bind:design.work_schedule::Qtile'}
+        Rows: {meaning: Packed query rows in a query tile., binding: 'bind:design.work_schedule::Rows'}
+        Qpack: {meaning: Query tile with r=h+H*(t-qbase)., shape: [{packed_query: Rows}, {d: D}], dtype: fp8_e4m3fn, life: 'stored (b,qbase)'}
+        Kblk: {meaning: Current gathered key tile., shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn}
+        Vblk: {meaning: Current gathered value tile., shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn}
+        K_fragment: {meaning: Key quadrant view., shape: [{kv: 128}, {d: 128}], dtype: fp8_e4m3fn}
+        V_fragment: {meaning: Value quadrant view., shape: [{kv: 128}, {d: 128}], dtype: fp8_e4m3fn}
+        Sraw: {meaning: Unmasked key-by-packed-query scores., shape: [{kv: Bk}, {packed_query: Rows}], dtype: fp32}
+    - step: parity
+      name: Maintain a shared maximum and two numerator parity chains
+      math: |
+        c=fp32(bmm1_scale)*log2(e); min_f32=fp32(-3.4028234663852886e38); m(-1)[r]=-inf; Y(-2)=Y(-1)=0.
+        For 0<=i<N and 0<=r<Rows:
+          m(i)[r]=max(m(i-1)[r],c*max(min_f32,max_u S(i)[u,r])).
+          E(i)[u,r]=exp2_fast(c*S(i)[u,r]-m(i)[r]).
+          P_pair(i)[0,:,:]=fp8_e4m3fn(448*E(i)); P_pair(i)[1,:,:]=fp8_e4m3fn(448*E(i)-P_pair(i)[0,:,:]).
+          alpha(i)[r]=0 if i<2; otherwise exp2_fast(m(i-2)[r]-m(i)[r]).
+          Y_base(i)=Y(i-2) ⊙ alpha(i)[None,:].
+          Y(i)=mma32(Vblk(i)ᵀ,P_pair(i)[1,:,:],mma32(Vblk(i)ᵀ,P_pair(i)[0,:,:],Y_base(i))).
+          For 0<=p<128:
+            Ltile(i)[p,r]=E(i)[p,r]+E(i)[p+128,r].
+            L_base(i)[p,r]=0 if i<2; otherwise alpha(i)[r]*L_base(i-2)[p,r]+alpha(i)[r]*Ltile(i-2)[p,r].
+        If N>0:
+          M_local[z,:]=m(N-1).
+          previous_m=m(N-2) if N>1; otherwise m(N-1).
+          previous_Y=Y(N-2) if N>1; otherwise 0.
+          previous_L=L_base(N-2)+Ltile(N-2) if N>1; otherwise 0.
+          beta_tail=exp2_fast(previous_m-m(N-1)).
+          U_local[z,:,:]=Y(N-1)+previous_Y ⊙ beta_tail[None,:].
+          Lt=L_base(N-1)+Ltile(N-1)+previous_L ⊙ beta_tail[None,:].
+          L_final_fragment[g,:]=sum32_{p=32*g}^{32*g+31} Lt[p,:], 0<=g<4.
+          L_local[z,:]=sum32_{g=0}^{3} L_final_fragment[g,:].
+        If N=0, M_local[z,:]=-inf and L_local[z,:]=0; no U_local value is produced or consumed.
+      symbol:
+        m: {meaning: Shared cumulative base-two score maximum., shape: [{packed_query: Rows}], dtype: fp32, life: 'carried (b,qbase,z);
+            i=-1..N-1'}
+        P_pair: {meaning: Leading and residual FP8 numerator operands., shape: [{term: 2}, {kv: Bk}, {packed_query: Rows}], dtype: fp8_e4m3fn}
+        Y: {meaning: Parity numerator at the current shared maximum., shape: [{d: D}, {packed_query: Rows}], dtype: fp32, life: 'carried
+            (b,qbase,z); i=-2..N-1'}
+        Y_base: {meaning: Corrected parity numerator before the next VP update., shape: 'ref:Y.shape', dtype: fp32}
+        L_base: {meaning: Corrected denominator partitions before the current tile., shape: [{partition: 128}, {packed_query: Rows}],
+          dtype: fp32, life: 'carried (b,qbase,z); i=0..N-1'}
+        Ltile: {meaning: Current two-term exponential sums., shape: [{partition: 128}, {packed_query: Rows}], dtype: fp32}
+        L_final_fragment: {meaning: Four grouped contributions to one split denominator., shape: [{group: 4}, {packed_query: Rows}],
+          dtype: fp32}
+        M_local: {meaning: Final maximum of each split., shape: [{split: SplitCount}, {packed_query: Rows}], dtype: fp32, life: 'stored
+            (b,qbase)'}
+        L_local: {meaning: Final denominator of each split., shape: [{split: SplitCount}, {packed_query: Rows}], dtype: fp32, life: 'stored
+            (b,qbase)'}
+        U_local: {meaning: 'Unnormalized, 448-scaled numerator; defined only for N(z)>0.', shape: [{split: SplitCount}, {d: D}, {packed_query: Rows}],
+          dtype: fp32, life: 'stored (b,qbase)'}
+      arithmetic:
+        approx: 'exp2_fast is cute.math.exp2 with fastmath=True; unknown: <numerics@pending:CuTe-4.6.1-fast-exp2-error-bound>.'
+        accumulate: The two FP8 probability terms share one FP32 accumulator; within each V fragment and native MMA K step the leading
+          product precedes the residual product. L_base scales Ltile before adding it to the scaled old L_base; scalar multiply-add
+          contraction is <numerics@pending:CuTe-4.6.1-FP32-contraction>.
+    - step: combine
+      name: Combine split statistics and accumulate rounded output contributions
+      math: |
+        For each packed query r, let R=ReductionRounds and peer(z,j)=z xor 2^j.
+        Mtree(0)[z]=M_local[z,r]. For 0<=j<R, Mtree(j+1)[z]=max(Mtree(j)[z],Mtree(j)[peer(z,j)]).
+        Dtree(0)[z]=exp2_fast(M_local[z,r]-Mtree(R)[z])*L_local[z,r].
+        For 0<=j<R, Dtree(j+1)[z]=Dtree(j)[z]+Dtree(j)[peer(z,j)].
+        Normalization[z,r]=exp2_fast(M_local[z,r]-Mtree(R)[z])*rcp_fast(Dtree(R)[z])*fp32(bmm2_scale/448).
+        For z with N(z)>0, Contribution(z)[d,r]=bf16(U_local[z,d,r]*Normalization[z,r]).
+        For each output element, start at BF16 zero and apply the native BF16 TMA reduce-add to every active Contribution(z), in arrival order.
+        Store that result in output[b*q_len_per_req+qbase+floor(r/H),r%H,d]; out_after=output.
+      arithmetic:
+        approx: 'exp2_fast follows parity; rcp_fast is cute.arch.rcp_approx; unknown: <numerics@pending:SM103-reciprocal-error-bound>.'
+        accumulate: 'FP32 maxima and sums follow the XOR tree. Each contribution is rounded to BF16 before native BF16 TMA reduce-add;
+          arrival order is unspecified. The repository does not define the primitive''s internal arithmetic or subnormal handling: <numerics@pending:SM103-BF16-TMA-reduce-add-semantics>.'
+      symbol:
+        ReductionRounds: {meaning: Number of XOR peer-exchange rounds., binding: 'bind:design.work_schedule::ReductionRounds'}
+        Normalization: {meaning: Per-split correction to the cluster-wide denominator., shape: [{split: SplitCount}, {packed_query: Rows}],
+          dtype: fp32, life: 'stored (b,qbase)'}
+        Contribution: {meaning: Rounded contribution submitted to final-output reduce-add., shape: [{d: D}, {packed_query: Rows}], dtype: bf16,
+          life: 'stored (b,qbase,z)'}
+    ledger:
+      baseline: Direct FP32 attention through globally materialized scores and probabilities, with one value product.
+      matmul:
+      - {item: Value products, change: 'q_len_per_req*H*D*seq_lens[b] -> 2*q_len_per_req*H*D*Bk*ceil(seq_lens[b]/Bk) MAC per request,
+          including padded evaluated entries', by: [parity]}
+      traffic:
+      - {item: Score and probability materialization, change: '16*q_len_per_req*H*seq_lens[b] -> 0 bytes of global score/probability
+          transport per request; final BF16 contributions are reduced directly into output', by: [stream, parity, combine]}
+      depth:
+      - {item: KV state chain, change: 'ceil(seq_lens[b]/Bk) local updates -> max_z N(z) local updates plus split combination per query
+          tile', by: [stream, parity, combine]}
+      error:
+      - {item: Numerator representation, change: +two FP8 roundings per probability and approximate exp2/reciprocal; the denominator
+          retains unquantized FP32 E, by: [parity, combine]}
+      - {item: Split readout rounding, change: '+one BF16 rounding per active split contribution before arrival-ordered BF16 reduction,
+          instead of one final BF16 conversion', by: [combine]}
+  work_schedule:
+    thesis: Keep all 8 stream CTAs in one cluster, exchanging statistics across 3 peer rounds and reducing contributions directly into
+      output; this removes a combine launch and FP32 partial workspace at the cost of cluster placement and BF16 accumulation.
+    flow:
+      launch:
+      - {phase: [decode]}
+    phase:
+      decode:
+        describe: Compute one cluster-combined query tile.
+        decomposition:
+          strategy: 'Scored shape IDs 10,11,13,15,16 only: BatchCount=15 with 31417<=max_seq_len<=31422, or BatchCount=2 with max_seq_len=2117;
+            both routes select an eight-member cluster. Bk=256, Qtile=1, Rows=H*Qtile, SplitCount=8, WorkSplits=8; qbase is the query_tail
+            tile origin. N is 0..16 on this domain. ReductionRounds=3. A worker is one cluster; CTA member z owns stream z, and all
+            members participate in statistics reduction even when N(z)=0. Split 0 initializes the output tile during pipeline startup.'
+          partition:
+            request: {size: BatchCount, tile: 1}
+            query_tail: {size: q_len_per_req, tile: Qtile}
+          worktile:
+            invariant:
+              Qpack: {shape: [{packed_query: Rows}, {d: D}], dtype: fp8_e4m3fn}
+            iteration:
+              Kblk: {shape: [{split: SplitCount}, {kv: Bk}, {d: D}], dtype: fp8_e4m3fn, direction: ascending}
+              Vblk: {shape: [{split: SplitCount}, {kv: Bk}, {d: D}], dtype: fp8_e4m3fn, direction: ascending}
+          target:
+            single_tile:
+              output: {shape: [{query_tail: Qtile}, {head: H}, {d: D}], dtype: bf16}
+        mapping:
+          worker: {unit: CTA, count: SplitCount}
+          placement: {unit: cluster, count: 1}
+          strategy: Member z has an independent paged-KV traversal and its own Qpack copy; cluster placement enables peer-SMEM statistics
+            exchange. The physical grid is (SplitCount,q_len_per_req/Qtile,BatchCount).
+          member:
+          - split:
+            - [0, 1]
+          - split:
+            - [1, 2]
+          - split:
+            - [2, 3]
+          - split:
+            - [3, 4]
+          - split:
+            - [4, 5]
+          - split:
+            - [5, 6]
+          - split:
+            - [6, 7]
+          - split:
+            - [7, 8]
+          count: worktile_count
+        schedule:
+          worktile_order:
+          - {by: request, direction: ascending}
+          - {by: query_tail, direction: ascending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: Q1 alternates two softmax groups over a shared maximum and two parity accumulators. Separate K/QK and V/VP roles stream
+      independently ready fragments; F=min(2,SStages-1) controls score lookahead, with SStages=Score.slot and KVStages=KV.shape.fragment.
+      The two issuer completion streams remain separate.
+    phase:
+      decode:
+        domain:
+          i: [0, N]
+          first: [0, 'min(1,N)']
+          f: [0, 4]
+          a: [0, F]
+          warmup: [0, 'min(N,F+1)']
+          headmax: [0, 'min(2,N)']
+          nextmax: [2, N]
+          tail: ['max(0,N-2)', N]
+          tail_even: ['max(0,ceil(N/2)-1)', ceil(N/2)]
+          tail_odd: ['max(0,floor(N/2)-1)', floor(N/2)]
+          final: ['max(0,N-1)', N]
+          empty: [0, '1-min(1,N)']
+          even: [0, ceil(N/2)]
+          odd: [0, floor(N/2)]
+          j: [0, ReductionRounds]
+        resource:
+          Qpack: {space: SMEM, shape: [{packed_query: Rows}, {d: D}], dtype: fp8_e4m3fn}
+          KV:
+            space: SMEM
+            shape: [{fragment: '<cutlass-dsl@pending:4.6.1/sm_100/kv_stages>'}, {element: 16384}]
+            dtype: fp8_e4m3fn
+            view:
+              K_fragment(i,f): {part: {fragment: ['(4*(i+max(0,i-F))+f)%KVStages', '(4*(i+max(0,i-F))+f)%KVStages+1']}}
+              V_fragment(i,f): {part: {fragment: ['(4*min(2*i+F+1,N+i)+f)%KVStages', '(4*min(2*i+F+1,N+i)+f)%KVStages+1']}}
+              Contribution: {part: {fragment: [0, 1], element: [0, 8192]}, dtype: bf16}
+          PT:
+            space: SMEM
+            shape: [{page: 4}]
+            dtype: int32
+            slot: 4
+            view:
+              PT(i): {slot: i%4}
+          Score:
+            space: TMEM
+            shape: [{kv: Bk}, {packed_query: Rows}]
+            dtype: fp32
+            slot: <cutlass-dsl@pending:4.6.1/sm_100/s_stages>
+            view:
+              Sraw(i): {slot: i%SStages}
+          P_pair:
+            space: SMEM
+            shape: [{term: 2}, {kv: Bk}, {packed_query: Rows}]
+            dtype: fp8_e4m3fn
+            slot: 4
+            view:
+              P_pair(i): {slot: i%4}
+          Y:
+            space: TMEM
+            shape: [{d: D}, {packed_query: Rows}]
+            dtype: fp32
+            slot: 2
+            view:
+              Y(i): {slot: i%2}
+              Y_base(i): {slot: i%2}
+          L_fragment:
+            space: TMEM
+            shape: [{partition: 128}, {packed_query: Rows}]
+            dtype: fp32
+            slot: 2
+            view:
+              Ltile(i): {slot: i%2}
+          Maximum:
+            space: SMEM
+            shape: [{packed_query: Rows}]
+            dtype: fp32
+            view:
+              m: {part: {packed_query: [0, Rows]}}
+              Normalization: {part: {packed_query: [0, Rows]}}
+          L_final_fragment: {space: SMEM, shape: [{group: 4}, {packed_query: Rows}], dtype: fp32}
+          L_chain_fragment:
+            space: register
+            shape: [{partition: 128}, {packed_query: Rows}]
+            dtype: fp32
+            slot: 2
+            view:
+              L_base(i): {slot: i%2}
+          ReductionScratch: {space: SMEM, shape: [{round: 4}, {statistic: 2}, {packed_query: Rows}], dtype: fp32}
+        lane:
+          LoadK:
+            info:
+              member: warp[2:3]
+              mode: async
+              verb:
+                prime: {mode: sync, meaning: 'Speculatively fetch PT(0) using the fixed table stride during CTA setup, including for
+                    N=0; pages beyond the logical cache have -1 entries. Every subsequent LoadK action and its incoming edges are guarded
+                    by N>0.'}
+                advance: {mode: sync, meaning: 'Prefetch PT(i+1) when i+1<N, then capture PT(i).'}
+                acquire: {mode: sync, meaning: Reserve the KV fragment slot after its previous MMA reader completes. At f=3 hand the
+                    K turn to LoadV before issuing that fragment's TMA.}
+                relay: {mode: sync, meaning: Supply the remaining F K-turn arrivals after the real K tiles; these control-only arrivals
+                    also complete prefetch handshakes when N<=F.}
+            pipe:
+              prologue: ['prime:PT', 'load:Qpack']
+              steady:
+              - repeat: i
+                steady:
+                - advance:PT(i)
+                - repeat: f
+                  steady: ['acquire:K_slot(i,f)', 'load:K_fragment(i,f)']
+              epilogue:
+              - repeat: a
+                steady: ['relay:K_tail(a)']
+            edge:
+              sync:
+                acquire:K_slot(warmup,0): ['LoadV/open:K_turn(warmup)']
+                acquire:K_slot(i+F+1,0): ['LoadV/acquire:V_slot(i,3)']
+                relay:K_tail(a): ['LoadV/open:K_turn(N+a)', 'LoadV/acquire:V_slot(N+a-F-1,3)']
+          LoadV:
+            info:
+              member: warp[3:4]
+              mode: async
+              verb:
+                open: {mode: sync, meaning: The entire LoadV pipe and its incoming edges execute only for N>0. Grant a K turn; startup
+                    and tail arrivals balance even when fewer than F+1 real tiles exist.}
+                wait: {mode: sync, meaning: Receive a K turn from a real tile or its tail relay.}
+                read: {mode: sync, meaning: 'Capture PT(i) in registers after the matching K-turn wait; for F=2 and i+4<N, overwrite
+                    protection remains <source-order@pending:FA4-decode/PT-four-slot-reuse/F2>.'}
+                acquire: {mode: sync, meaning: Reserve the V fragment slot after its previous MMA reader completes. At f=3 hand the
+                    next K turn back before issuing this fragment's TMA.}
+                store: For N>0, bulk-store Contribution from the aliased KV region; for N=0 no numerator store is issued. This is a
+                  BF16 reduce-add into output, after acquiring split 0's device-visible zero completion and an async-proxy fence.
+            pipe:
+              prologue:
+              - open:K_turn(0)
+              - repeat: a
+                steady: ['wait:K_prefetch(a)', 'open:K_turn(a+1)']
+              steady:
+              - repeat: i
+                steady:
+                - read:PT(i)
+                - repeat: f
+                  steady: ['acquire:V_slot(i,f)', 'load:V_fragment(i,f)']
+              epilogue: ['store:Contribution']
+            edge:
+              sync:
+                wait:K_prefetch(a): ['LoadK/acquire:K_slot(a,3)', 'LoadK/relay:K_tail(a-N)']
+                read:PT(i): ['LoadK/acquire:K_slot(i+F,3)', 'LoadK/relay:K_tail(i+F-N)']
+              data:
+                store:Contribution: ['Correction[0]/zero:Output']
+          MMA_QK:
+            info:
+              member: warp[0:1]
+              mode: ordered
+              verb:
+                initialize: {mode: sync, meaning: 'Complete cooperative CTA setup and initialize shared maximum to -inf and denominator
+                    fragments to zero. For N=0, bypass every streaming action: MMA_VP releases the unused TMEM allocation and Correction
+                    publishes neutral final M/L availability; MMA_QK still executes its reduction epilogue. No Q/K/V, probability or
+                    numerator output is issued on that path. For N>0, initialize both Y slots and the unused L slot through Correction
+                    before consumption. Every cluster member, including an empty one, initializes peer-exchange barriers and participates
+                    in the initial cluster rendezvous.'}
+                acquire: {mode: sync, meaning: Reserve the Score slot for Sraw(i).}
+                wait: {mode: sync, meaning: 'Qpack waits, score iterations and QK tail relays, with their incoming edges, execute only
+                    for N>0; initialization and the reduction epilogue execute for every N. Wait for Qpack or one K fragment; the last
+                    fragment wait hands the QK turn to MMA_VP before its product is issued.'}
+                mma: Use the matching Qpack d-half; initialize each score row-half on its first d-half and accumulate the second. Return
+                  each KV slot after its fragment read completes.
+                publish: Sraw commits cumulative QK completion. Normalization overwrites shared Maximum only after all max/sum peer
+                  exchanges finish, then releases Correction.
+                relay: {mode: sync, meaning: 'Supply F QK-turn arrivals after the real score tiles, including control-only startup completion
+                    for N<=F.'}
+                exchange: {mode: sync, meaning: 'Exchange the current max or weighted denominator with peer member z xor 2^j through
+                    that round''s SMEM slot, wait for the peer write, then apply the upstream max or sum. Empty members exchange neutral
+                    statistics.'}
+                compute: {mode: sync, meaning: Reduce the four local denominator fragments and apply the correction to the cluster maximum.}
+            pipe:
+              prologue: ['initialize:Split', 'wait:Qpack']
+              steady:
+              - repeat: i
+                steady:
+                - acquire:S_slot(i)
+                - repeat: f
+                  steady: ['wait:K_fragment(i,f)', 'mma:K_fragment(i,f)@Qpack']
+                - publish:Sraw(i)
+              epilogue:
+              - repeat: a
+                steady: ['relay:QK_tail(a)']
+              - repeat: j
+                steady: ['exchange:ClusterMax(j)']
+              - compute:WeightedL
+              - repeat: j
+                steady: ['exchange:ClusterDenominator(j)']
+              - publish:Normalization
+            edge:
+              reuse:
+                acquire:S_slot(2*even+SStages): ['Softmax_even/read:Sraw(2*even)']
+                acquire:S_slot(2*odd+1+SStages): ['Softmax_odd/read:Sraw(2*odd+1)']
+              sync:
+                acquire:S_slot(warmup): ['MMA_VP/open:QK_turn(warmup)']
+                acquire:S_slot(i+F+1): ['MMA_VP/wait:V_fragment(i,3)']
+                relay:QK_tail(a): ['MMA_VP/open:QK_turn(N+a)', 'MMA_VP/wait:V_fragment(N+a-F-1,3)']
+                exchange:ClusterMax(0): ['Correction/publish:Empty_statistics(empty)']
+                compute:WeightedL: ['Correction/publish:Empty_statistics(empty)']
+              data:
+                exchange:ClusterMax(0): ['Correction/read:m(final)']
+                compute:WeightedL: ['Correction/publish:L_final_fragment(final)']
+          MMA_VP:
+            info:
+              member: warp[1:2]
+              mode: ordered
+              verb:
+                open: {mode: sync, meaning: 'For N>0 execute this lane normally and grant a QK turn; startup and tail exchanges also
+                    cover short streams. For N=0 bypass its entire pipe and edges except immediate release:TMEM.'}
+                wait: {mode: sync, meaning: Wait for the P pair or one V fragment; the last fragment wait returns the next QK turn before
+                    issuing its product.}
+                acquire: {mode: sync, meaning: 'Reserve the current parity Y slot, initialized or corrected to Y_base(i).'}
+                mma: Use both FP8 P terms for this kv half, in leading-then-residual order, and update the matching d-half of Y; return
+                  the KV fragment after both terms have read it.
+                publish: Y(i) commits the complete value update and returns P_pair(i) after its last read. Empty_Y is a completion-only
+                  publication for the untouched zero parity slot when N=1; otherwise it is a no-op.
+                release: {mode: sync, meaning: 'For N>0 wait for Correction to drain both final Y slots, then safely relinquish and
+                    deallocate TMEM; for N=0 deallocate immediately without the drain dependency.'}
+            pipe:
+              prologue:
+              - open:QK_turn(0)
+              - repeat: a
+                steady: ['wait:QK_prefetch(a)', 'open:QK_turn(a+1)']
+              steady:
+              - repeat: i
+                steady:
+                - wait:P_pair(i)
+                - acquire:Y_slot(i)
+                - repeat: f
+                  steady: ['wait:V_fragment(i,f)', 'mma:P_pair(i)@V_fragment(i,f)']
+                - publish:Y(i)
+              epilogue: ['publish:Empty_Y', 'release:TMEM']
+            edge:
+              data:
+                acquire:Y_slot(headmax): ['Correction/zero:Y_L']
+                acquire:Y_slot(i+2): ['Correction/rescale:Y_base(i+2)']
+                release:TMEM: ['Correction/drain:Y_tail(final)']
+              sync:
+                wait:QK_prefetch(a): ['MMA_QK/wait:K_fragment(a,3)', 'MMA_QK/relay:QK_tail(a-N)']
+                wait:P_pair(i): ['MMA_QK/wait:K_fragment(i+F,3)', 'MMA_QK/relay:QK_tail(i+F-N)']
+          Softmax_even:
+            info:
+              member: warp[4:8]
+              verb:
+                read: This softmax lane and its incoming edges execute only for N>0. Capture Sraw into registers and return its Score
+                  slot; capture shared m before handing maximum-update ownership onward.
+                update: Write the next shared m after its previous readers release it, before blocking for the P_pair slot; the
+                  updated state becomes readable at publish:m.
+                publish: Complete the m producer rendezvous after acquiring the current P_pair slot, then publish the two FP8 probability
+                  terms and the unquantized Ltile from the same retained E. The common maximum advances in increasing i.
+                signal: For N=1 only, signal availability of the unused L parity slot, whose value is zeroed by Correction; no extra
+                  exponential tile is computed.
+            pipe:
+              repeat: even
+              steady: ['read:Sraw(2*even)', 'update:Maximum(2*even)', 'publish:m(2*even)', 'read:m(2*even)', 'publish:P_pair(2*even)', 'publish:Ltile(2*even)']
+            edge:
+              sync:
+                update:Maximum(first): ['Correction/zero:Y_L']
+              reuse:
+                update:Maximum(2*even+2): ['Correction/read:m(2*even+1)', 'Softmax_odd/read:m(2*even+1)']
+                publish:m(2*even+4): ['MMA_VP/publish:Y(2*even)']
+                publish:Ltile(2*even+2): ['Correction/read:Ltile(2*even)']
+          Softmax_odd:
+            info:
+              member: warp[8:12]
+              verb:
+                read: This softmax lane and its incoming edges execute only for N>0. Capture Sraw into registers and return its Score
+                  slot; capture shared m before handing maximum-update ownership onward.
+                update: Write the next shared m after its previous readers release it, before blocking for the P_pair slot; the
+                  updated state becomes readable at publish:m.
+                publish: Complete the m producer rendezvous after acquiring the current P_pair slot, then publish the two FP8 probability
+                  terms and the unquantized Ltile from the same retained E. The common maximum advances in increasing i.
+                signal: For N=1 only, signal availability of the unused L parity slot, whose value is zeroed by Correction; no extra
+                  exponential tile is computed.
+            pipe:
+              repeat: odd
+              prologue: ['signal:Empty_L']
+              steady: ['read:Sraw(2*odd+1)', 'update:Maximum(2*odd+1)', 'publish:m(2*odd+1)', 'read:m(2*odd+1)', 'publish:P_pair(2*odd+1)', 'publish:Ltile(2*odd+1)']
+            edge:
+              reuse:
+                update:Maximum(2*odd+1): ['Correction/read:m(2*odd)', 'Softmax_even/read:m(2*odd)']
+                publish:m(2*odd+5): ['MMA_VP/publish:Y(2*odd+1)']
+                publish:Ltile(2*odd+3): ['Correction/read:Ltile(2*odd+1)']
+          Correction:
+            info:
+              member: warp[12:16]
+              verb:
+                zero: For N>0 execute this lane normally, initializing both Y slots, both register denominator chains and unused TMEM
+                  L slot 1 to zero. For N=0 execute only publish:Empty_statistics(0); bypass the normal pipe and its incoming edges,
+                  without waiting for statistics, draining Y or producing an output. Output is zeroed only by the first correction warp
+                  of split 0, then a GPU-scope fence and peer signals publish that zeroing to every member; other members do not clear
+                  output.
+                read: Capture m or Ltile and return its shared slot. Capturing the final m also releases the final-maximum consumer
+                  before the remaining Y drain.
+                rescale: Form Y_base(i) in TMEM and return that parity slot to MMA_VP.
+                wait: {mode: sync, meaning: 'Complete the final-L rendezvous after MMA_QK has consumed the final maximum, allowing Y
+                    to drain while the remaining denominator reduction can progress.'}
+                drain: For N>0 capture both final Y slots in registers and return each TMEM slot; for N=1 this includes the untouched
+                  zero slot. The final release permits TMEM deallocation before normalization and SMEM output publication.
+                publish: Empty_statistics publishes setup's -inf maximum and zero denominator through both final-statistics rendezvous,
+                  without reading TMEM. L_final_fragment drains the two final L parity slots, merges them at the final maximum and writes
+                  four grouped sums. Contribution forms the upstream readout from drained register
+                  fragments and publishes it in the KV-aliased SMEM region; no numerator is read or written when N=0. Apply Normalization
+                  and round to BF16 before publishing Contribution.
+            pipe:
+              prologue:
+              - repeat: empty
+                steady: ['publish:Empty_statistics(empty)']
+              - zero:Y_L
+              - zero:Output
+              - repeat: headmax
+                steady: ['read:m(headmax)']
+              steady:
+              - repeat: nextmax
+                steady: ['read:Ltile(nextmax-2)', 'read:m(nextmax)', 'rescale:Y_base(nextmax)', 'compute:L_base(nextmax)']
+              epilogue:
+              - repeat: final
+                steady: ['publish:L_final_fragment(final)']
+              - wait:Statistics
+              - repeat: final
+                steady: ['drain:Y_tail(final)']
+              - publish:Contribution
+            edge:
+              data:
+                rescale:Y_base(i+2): ['MMA_VP/publish:Y(i)']
+                publish:L_final_fragment(final): ['Softmax_even/publish:Ltile(2*tail_even)', 'Softmax_odd/publish:Ltile(2*tail_odd+1)',
+                  'Softmax_odd/signal:Empty_L']
+                drain:Y_tail(final): ['MMA_VP/publish:Y(tail)', 'MMA_VP/publish:Empty_Y']
+                wait:Statistics: ['MMA_QK/exchange:ClusterMax(ReductionRounds-1)']
+                publish:Contribution: ['MMA_QK/publish:Normalization']
+realization:
+  require:
+  - item: ['design.tile_pipeline::decode.MMA_QK', 'design.tile_pipeline::decode.MMA_VP']
+    choice: tcgen05.mma with one-CTA FP8 operands and FP32 TMEM accumulators; completion is cumulative separately within each MMA issuer.
+    reason: S and Y commits and per-fragment KV returns must not imply completion of the other issuer's products.
+  - item: design.tile_pipeline::decode.KV
+    choice: TMA and the shared PipelineTmaUmma fragment ring with completion-based producer acquisition.
+    reason: Each 128-by-128 fragment becomes readable independently and is reusable only after its particular MMA reader finishes.
+  - item: ['design.tile_pipeline::decode.MMA_QK', 'design.tile_pipeline::decode.Correction', 'design.tile_pipeline::decode.LoadV']
+    choice: DSMEM peer stores with completion barriers for cluster statistics and zeroing notification; CopyReduceBulkTensorTileS2GOp
+      on BF16 output after GPU-scope release and async-proxy acquire.
+    reason: Peer exchange requires resident cluster members, and no output reduce-add may race the split-0 initialization.

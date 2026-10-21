@@ -1,0 +1,338 @@
+meta_data:
+  name: paged_causal_attention_prefill
+  describe: Compute right-aligned causal grouped-query attention from FP8 queries and an HND paged KV cache, returning the supplied BF16 output buffer.
+  source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_prefill/aka_solution/solution.py::Model.forward
+  dispatch: persistent_shared_load
+  version: 2
+contract:
+  algorithm_requirement:
+    constant:
+      Hq: {value: 16, meaning: Query head count}
+      Hkv: {value: 1, meaning: KV head count}
+      D: {value: 256, meaning: Query and value head dimension}
+      Page: {value: 64, meaning: Tokens per physical KV page}
+    input:
+      query: {meaning: Concatenated request queries, shape: [{query: TotalQ}, {head: Hq}, {d: D}], dtype: fp8_e4m3fn}
+      kv_cache: {meaning: HND cache with key then value in its second axis, shape: [{page: PageCount}, {kind: 2}, {kv_head: Hkv}, {page_token: Page}, {
+            d: D}], dtype: fp8_e4m3fn}
+      workspace_buffer: {meaning: Caller scratch initialized to zero before first isolated use, shape: [{byte: WorkspaceBytes}], dtype: uint8}
+      block_tables: {meaning: Request-local page number to physical page ID, shape: [{request: BatchCount}, {page_slot: TableColumns}], dtype: int32, range: 'Valid
+          page entries are in [0,PageCount); unused entries are -1'}
+      seq_lens: {meaning: Used KV lengths, shape: [{request: BatchCount}], dtype: int32, range: seq_lens > 0}
+      max_q_len: {meaning: Maximum request query length, shape: [], dtype: python_int}
+      max_kv_len: {meaning: Maximum used KV length, shape: [], dtype: python_int}
+      bmm1_scale: {meaning: Composite score scale including quantization scales, shape: [], dtype: python_float, range: '0.0625'}
+      bmm2_scale: {meaning: Composite output scale, shape: [], dtype: python_float, range: '1.0'}
+      batch_size: {meaning: ABI request count, shape: [], dtype: python_int}
+      cum_seq_lens_q: {meaning: Prefix boundaries in the concatenated query tensor, shape: [{boundary: BatchCount+1}], dtype: int32}
+      cum_seq_lens_kv: {meaning: Prefix counts of allocated pages rather than KV tokens, shape: [{boundary: BatchCount+1}], dtype: int32}
+      window_left: {meaning: Disabled sliding-window selector, shape: [], dtype: python_int, range: '-1'}
+      sinks: {meaning: Disabled sink argument whose only admitted value is Python None, shape: [], dtype: '<schema-abi@pending:Python-None-sentinel>', range: None}
+      o_sf_scale: {meaning: Disabled output quantization argument whose only admitted value is Python None, shape: [], dtype: '<schema-abi@pending:Python-None-sentinel>',
+        range: None}
+      out: {meaning: Caller-owned destination whose initial contents are not read, shape: [{query: TotalQ}, {head: Hq}, {d: D}], dtype: bf16, range: 'finite,
+          inf, or NaN'}
+    output:
+      out_after: {meaning: Attention result written in place to input out, shape: [{query: TotalQ}, {head: Hq}, {d: D}], dtype: bf16}
+      output: {meaning: Returned alias of the updated out storage, shape: [{query: TotalQ}, {head: Hq}, {d: D}], dtype: bf16}
+    compute:
+    - name: Interpret the paged callable boundary
+      math: |
+        python_int denotes a Python integer; python_float denotes an IEEE binary64 Python float.
+        All tensors are contiguous in the stated axis order and reside on one CUDA device.
+        batch_size=BatchCount; cum_seq_lens_q[0]=cum_seq_lens_kv[0]=0; cum_seq_lens_q[BatchCount]=TotalQ.
+        For each independent request b: Qlen(b)=cum_seq_lens_q[b+1]-cum_seq_lens_q[b], L(b)=seq_lens[b], 0<Qlen(b)<=L(b).
+        cum_seq_lens_kv[b+1]-cum_seq_lens_kv[b]=ceil(L(b)/Page)<=TableColumns.
+        max_q_len=max_b Qlen(b); max_kv_len=max_b L(b); PageCount=sum_b ceil(L(b)/Page).
+        For 0<=j<L(b), page(b,j)=block_tables[b,floor(j/Page)].
+        K_logical[b,j,d]=kv_cache[page(b,j),0,0,j%Page,d]; V_logical[b,j,d]=kv_cache[page(b,j),1,0,j%Page,d]; padded j>=L(b) is outside the logical domain.
+        The timed replacement boundary is the complete standalone callable on the existing HND cache, including required internal work.
+        Only out is an observable input mutation; workspace_buffer contents are scratch, not an output.
+      symbol:
+        Qlen: {meaning: Function returning the query length of request b, shape: not_applicable, dtype: not_applicable}
+        L: {meaning: Function returning the used KV length of request b, shape: not_applicable, dtype: not_applicable}
+        K_logical: {meaning: Logical keys on each request's valid domain, shape: [{request: BatchCount}, {kv: max_kv_len}, {d: D}], dtype: fp8_e4m3fn}
+        V_logical: {meaning: Logical values on each request's valid domain, shape: 'ref:K_logical.shape', dtype: fp8_e4m3fn}
+    - name: Define causal attention and both observable outputs
+      math: |
+        For 0<=b<BatchCount, 0<=q<Qlen(b), 0<=h<Hq, let a=cum_seq_lens_q[b]+q.
+        J(b,q)={j in integers | 0<=j<L(b) and j<=q+L(b)-Qlen(b)}.
+        score[j]=bmm1_scale*sum_{d=0}^{D-1} query[a,h,d]*K_logical[b,j,d] for j in J(b,q).
+        m=max_{j in J(b,q)} score[j]; p[j]=exp(score[j]-m)/sum_{k in J(b,q)} exp(score[k]-m).
+        out_after[a,h,d]=bf16(bmm2_scale*sum_{j in J(b,q)} p[j]*V_logical[b,j,d]) for 0<=d<D.
+        Return the same tensor object as out; output and out_after denote its updated contents.
+      symbol:
+        J: {meaning: Function returning the right-aligned causal key set of a request/query pair, shape: not_applicable, dtype: not_applicable}
+    golden_reference:
+      source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_prefill/reference.py::Model.forward
+      tolerance:
+        out_after: atol=0.06, rtol=0.04
+        output: atol=0.06, rtol=0.04
+  hardware_specification:
+    device: NVIDIA L20D
+    arch: SM103
+    execution:
+      CTA: <hardware-execution@pending:L20D/CTA>
+      cluster: <hardware-execution@pending:L20D/cluster>
+      warp: <hardware-execution@pending:L20D/warp>
+    feature:
+      memory: <hardware-feature@pending:L20D/SMEM-TMEM-register>
+    stack:
+      language: CuTe DSL, nvidia-cutlass-dsl==4.6.1
+      toolchain: nvidia-cutlass-dsl 4.6.1 bundled compiler; torch>=2.9 and unpinned cuda-python; <toolchain@pending:CUDA-and-driver-version>
+    wiki:
+      hardware: "<wiki-hardware@pending:Blackwell/L20D.md>"
+      programming:
+        language: "<wiki-language@pending:CuTe-DSL/4.6.1/>"
+        virtual_isa: "<wiki-virtual-isa@pending:PTX/version/>"
+        machine_isa: "<wiki-machine-isa@pending:SASS/SM103/>"
+      microbench: "<wiki-microbench@pending:L20D/>"
+      sota:
+        kernel: "<wiki-sota-kernel@pending:L20D/>"
+        schema: "<wiki-sota-schema@pending:L20D/>"
+      profile: "<wiki-profile@pending:NVIDIA/>"
+design:
+  math_reshape:
+    thesis: Fold the GQA heads into rows and stream paged KV with an online numerator and denominator; keep a lagged maximum and scale probabilities upward
+      before FP8 conversion, avoiding dense intermediates at the cost of FP8 numerator operands and serial block merges.
+    rewrite:
+    - step: stream
+      name: Reinterpret GQA rows and score only the causal block range
+      math: |
+        Work parameters Bm, Bk, R, N and sigma are bound by work_schedule; b is one request.
+        For r in R, local_row(r)=r-min(R), q=floor(r/Hq), h=r%Hq, Q[local_row(r),:]=query[cum_seq_lens_q[b]+q,h,:].
+        For 0<=i<N, 0<=u<Bk, let j=sigma(i)*Bk+u and p=floor(j/Page).
+        p_read=p if p*Page<L(b); otherwise p_read=2*sigma(i), redirecting the missing second page to the first.
+        K(i)[u,:]=kv_cache[block_tables[b,p_read],0,0,j%Page,:]; V(i)[u,:]=kv_cache[block_tables[b,p_read],1,0,j%Page,:].
+        S(i)[local_row(r),u]=dot32(Q[local_row(r),:],K(i)[u,:]).
+      symbol:
+        Bm: {meaning: Packed query rows per worktile, binding: 'bind:design.work_schedule::Bm'}
+        Bk: {meaning: KV tokens per local iteration, binding: 'bind:design.work_schedule::Bk'}
+        R: {meaning: Valid packed query rows of one worktile, binding: 'bind:design.work_schedule::R'}
+        N: {meaning: Number of streamed KV blocks for this worktile, binding: 'bind:design.work_schedule::N'}
+        sigma: {meaning: Local iteration to KV block map, binding: 'bind:design.work_schedule::sigma'}
+        Q: {meaning: Packed query view, shape: [{packed_row: Bm}, {d: D}], dtype: fp8_e4m3fn}
+        K: {meaning: Current logical key block, shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn}
+        V: {meaning: Current logical value block, shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn}
+        S: {meaning: Raw QK dot products before masking, shape: [{packed_row: Bm}, {kv: Bk}], dtype: fp32}
+    - step: online
+      name: Use an offset exponential with a lagged maximum
+      math: |
+        c=fp32(bmm1_scale*log2(e)), evaluating the expression inside fp32 in Python binary64.
+        For each r in R independently, m(-1)=-inf, Z(-1)=0, Y(-1)=0.
+        For 0<=i<N, set T(i)[u]=S(i)[local_row(r),u] on visible entries sigma(i)*Bk+u in J(b,floor(r/Hq)); otherwise T(i)[u]=-inf.
+        m_star=max(m(i-1),max_u T(i)[u]); base_star=m_star if m_star!=-inf else 0.
+        m(i)=m(i-1) if c*(m(i-1)-base_star)>=-tau; otherwise m_star.
+        base=m(i) if m(i)!=-inf else 0; alpha(i)=exp2_native(c*(m(i-1)-base)).
+        E(i)[u]=exp2_native(fma32(c,T(i)[u],offset-c*base)) for every 0<=u<Bk.
+        P(i)[u]=fp8_e4m3fn(E(i)[u]).
+        Z(i)=alpha(i)*Z(i-1)+sum32_u E(i)[u]; Y(i)=mma32(P(i),V(i),alpha(i)*Y(i-1)).
+        invZ=fp32(1.0/Z(N-1)); out_after[cum_seq_lens_q[b]+floor(r/Hq),r%Hq,:]=bf16(Y(N-1)*invZ).
+      symbol:
+        tau: {meaning: Maximum lag in base-two score units, value: 4.0}
+        offset: {meaning: Base-two shift applied before the E4M3FN probability cast, value: 4.0}
+        m: {meaning: Retained raw-score maximum, shape: [], dtype: fp32, life: 'carried (b,r); i=-1..N-1'}
+        Z: {meaning: Denominator using unrounded exponentials, shape: [], dtype: fp32, life: 'carried (b,r); i=-1..N-1'}
+        Y: {meaning: Numerator using FP8 probabilities, shape: [{d: D}], dtype: fp32, life: 'carried (b,r); i=-1..N-1'}
+        P: {meaning: FP8 value-product operand, shape: [{kv: Bk}], dtype: fp8_e4m3fn}
+      arithmetic:
+        approx: 'exp2_native is fast hardware exp2 on SM103, with no polynomial substitution; unknown: <error-bound@pending:SM103/fast-exp2-and-output-division>'
+        accumulate: Z uses four FP32 pair-valued partial sums, with both components of the first pair seeded by Z_previous*(alpha*0.5) and the other pairs
+          zero. Each pair accumulates its exponential fragment; merge (g0+g1)+(g2+g3), then add the two components.
+    ledger:
+      baseline: Evaluate the contract by materializing FP32 dense scores and probabilities for all Qlen(b)*L(b) pairs per head.
+      footprint:
+      - {item: Attention intermediate, change: Two Qlen(b)*L(b) FP32 matrices per head -> D+2 FP32 carried scalars per packed row plus a Bk-entry transient,
+        by: [stream, online]}
+      traffic:
+      - {item: Dense intermediates, change: -16*Hq*Qlen(b)*L(b) logical global bytes per request for one write and read of each matrix, by: [stream, online]}
+      depth:
+      - {item: KV reduction, change: One full-row reduction -> N ordered block merges per packed row, by: [online]}
+      error:
+      - {item: Numerator precision, change: +1 E4M3FN rounding per probability operand; denominator retains unrounded FP32 E, by: [online]}
+  work_schedule:
+    thesis: Keep a bounded CTA-pair grid resident over packed query tiles and let one loader warp serialize K/V operand packets in the MMA consumption order.
+    flow:
+      launch:
+      - phase: [attention]
+    phase:
+      attention:
+        describe: Non-split hd256 attention with one-request flattened mapping, mode-1 static persistence, and a shared K/V loader and stage stream.
+        decomposition:
+          strategy: |
+            Bm=256, Bk=128; C_b=ceil(Hq*Qlen(b)/Bm), C_actual=sum_b C_b, C_cap=ceil((TotalQ+(BatchCount-1)*15)/16).
+            The selected scored configuration has BatchCount=1 and page-rounded max_kv_len<98304; request ordering is the identity.
+            Build a request-order/prefix table once per CTA; each role resolves its logical ID by linear lookup to obtain the segment and position x; with z=ceil(C_b/2), map x to mblock=2*x if x<z, else 2*(C_b-1-x)+1.
+            R=[Bm*mblock,min(Bm*(mblock+1),Hq*Qlen(b))); N=min(ceil(L(b)/Bk),ceil((16*(mblock+1)+L(b)-Qlen(b))/Bk)); sigma(i)=i.
+            IDs in [C_actual,C_cap) are scheduler no-ops; tile_pipeline t numbers only active work locally and n stays continuous across it. Active instances have N>=1, with complete unmasked blocks preceding the causal/tail-mask suffix.
+          partition:
+            tile_id: {size: C_cap, tile: 1}
+          worktile:
+            invariant:
+              Q: {shape: [{packed_row: Bm}, {d: D}], dtype: fp8_e4m3fn}
+            iteration:
+              K:
+                shape: [{kv: Bk}, {d: D}]
+                dtype: fp8_e4m3fn
+                direction: ascending
+              V:
+                shape: [{kv: Bk}, {d: D}]
+                dtype: fp8_e4m3fn
+                direction: ascending
+          target:
+            single_tile:
+              out_after: {shape: [{query: 16}, {head: Hq}, {d: D}], dtype: bf16}
+        mapping:
+          worker: {unit: CTA, count: 2}
+          placement: {unit: cluster, count: 1}
+          count: min(74,C_cap)
+          member:
+          - packed_row:
+            - [0, 128]
+          - packed_row:
+            - [128, 256]
+          strategy: The 148-SM target admits 74 two-CTA workers; the capped grid strides over the query work without global work stealing.
+        schedule:
+          worktile_order:
+          - {by: tile_id, direction: ascending}
+          worker_assignment:
+            preassigned: {start: worker_id, step: worker_count}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: Run QK one KV block ahead of PV; a shared K/V loader and one four-stage operand stream follow that same order, while two aliased score/probability
+      slots and correction-owned numerator state allow softmax and rescaling to overlap.
+    phase:
+      attention:
+        domain:
+          t: worktile
+          i: [0, N]
+          n:
+            flatten: [t, i]
+          p: [0, 2*N]
+          s: [0, 2]
+          e:
+            flatten: [t, p, s]
+        resource:
+          Qbuf: {space: SMEM, shape: [{packed_row: 128}, {d: 128}], dtype: fp8_e4m3fn, slot: 2, view: {'Q(t,s)': {slot: s}}}
+          Kbuf: {space: SMEM, shape: [{kv: 64}, {d: 128}], dtype: fp8_e4m3fn, slot: 4, view: {'KVStage(e[t,max(0,2*i-1),s])': {slot: e%4}}}
+          Vbuf: {space: SMEM, shape: [{kv: 128}, {d: 64}], dtype: fp8_e4m3fn, slot: 4, view: {'KVStage(e[t,min(2*i+2,2*N-1),s])': {slot: e%4}}}
+          Score:
+            space: TMEM
+            shape: [{row: 128}, {column: 128}]
+            dtype: fp32
+            slot: 2
+            view:
+              S(n): {slot: n%2}
+              P(n): {slot: n%2, part: {column: [0, 32]}, dtype: fp8_e4m3fn}
+              MaxPair(n): {slot: n%2, part: {column: [32, 34]}}
+          Y: {space: TMEM, shape: [{packed_row: 128}, {d: D}], dtype: fp32}
+          Zfinal: {space: SMEM, shape: [{packed_row: 128}], dtype: fp32}
+          Ostage: {space: SMEM, shape: [{packed_row: 128}, {d: 128}], dtype: bf16}
+          RequestMap: {space: SMEM, shape: [{element: 36}], dtype: int32}
+        lane:
+          Load:
+            info:
+              member: warp[9:10]
+              mode: async
+              register: 32
+              verb:
+                load: 'Q stages contain D/2 slices of this member''s rows. KVStage starts with K0, follows with K(i),V(i-1) for i=1..N-1, and ends with
+                  V(N-1), with two s slices per packet: K(i,s) is packet p=max(0,2*i-1), V(i,s) is p=min(2*i+2,2*N-1). For K, member c supplies tokens [64*c,64*c+64)
+                  and features [128*s,128*s+128); for V, it supplies all 128 tokens and columns [128*s+64*c,128*s+64*c+64). Both members contribute to pair-wide
+                  readiness. Kbuf and Vbuf are distinct arrays but share one four-stage acquire/release stream.'
+            pipe:
+              repeat: t
+              steady:
+              - repeat: s
+                steady: ['load:Q(t,s)']
+              - repeat: e[t]
+                steady: ['load:KVStage(e)']
+            edge:
+              data:
+                load:Q(0,0): ['Softmax/publish:RequestMap']
+              reuse:
+                load:Q(t+1,s): ['MMA/mma:KVStage(e[t,max(0,2*(N-1)-1),s])']
+                load:KVStage(e+4): ['MMA/mma:KVStage(e)']
+          MMA:
+            info:
+              member: CTA[0].warp[8:9]
+              mode: ordered
+              register: 32
+              verb:
+                mma: 'Consume KVStage in the loader''s packet order. A K packet computes Q(t,s)@K(i,s): s=0 clears S(n[t,i]), s=1 completes its D contraction.
+                  A V packet computes P(n[t,i])@V(i,s) into Y''s corresponding D/2 slice, initializing it at i=0. Each product spans both CTAs. Same-issuer
+                  ordering completes an earlier PV read before a later QK write to its aliased score slot. The launch has 12 warps per CTA; warps 10 and
+                  11 and the second CTA''s warp 8 do not issue work.'
+            pipe:
+              repeat: t
+              steady:
+              - repeat: e[t]
+                steady: ['mma:KVStage(e)']
+            edge:
+              data:
+                mma:KVStage(e[t,max(0,2*i-1),s]): ['Load/load:Q(t,s)']
+                mma:KVStage(e[t,min(2*i+2,2*N-1),s]): ['Softmax/publish:P(n[t,i])']
+                mma:KVStage(e[t,min(2*(i+1)+2,2*N-1),0]): ['Correction/rescale:Y(n[t,i+1])']
+              reuse:
+                mma:KVStage(e[t,max(0,2*i-1),0]): ['Softmax/read:S(n[t,i]-2)']
+                mma:KVStage(e[t,min(2,2*N-1),0]): ['Correction/release:Y(t-1)']
+          Softmax:
+            info:
+              member: warp[0:4]
+              register: 256
+              verb:
+                read: Copy S to registers and end score-slot reads; use the SM103 load-and-row-max path on unmasked blocks and recompute the row maximum
+                  after masking otherwise.
+                publish: Build immutable RequestMap once per worker before any role resolves work. MaxPair records the previous maximum and current safe
+                  base; P overwrites its compact region after scores are captured. Zfinal publishes the completed denominator.
+            pipe:
+              repeat: t
+              prologue: ['publish:RequestMap']
+              steady:
+              - repeat: n[t]
+                steady: ['read:S(n)', 'publish:MaxPair(n)', 'publish:P(n)', 'compute:Z(n)']
+                epilogue: ['publish:Zfinal(t)']
+            edge:
+              data:
+                read:S(n[t,i]): ['MMA/mma:KVStage(e[t,max(0,2*i-1),1])']
+              reuse:
+                publish:MaxPair(n+2): ['Correction/read:MaxPair(n)']
+                publish:Zfinal(t+1): ['Correction/read:Zfinal(t)']
+                publish:P(n[t,i]+2): ['MMA/mma:KVStage(e[t,min(2*i+2,2*N-1),1])']
+          Correction:
+            info:
+              member: warp[4:8]
+              register: 160
+              verb:
+                read: The first MaxPair only acknowledges its publication and returns the statistics slot without reading values; later MaxPair and Zfinal
+                  are captured into registers before release.
+                rescale: Derive alpha from MaxPair and apply it to both Y slices; skip the TMEM read/modify/write when no row in the warp has alpha<1, while
+                  still returning ownership.
+                stage: Normalize the indicated Y half, narrow to BF16 and stage it in Ostage.
+                release: Return Y ownership; the final half's global stores may still be outstanding.
+                store: Write the staged half into out using coalesced stores and end reads of Ostage.
+            pipe:
+              repeat: t
+              steady:
+              - repeat: n[t,1:]
+                prologue: ['read:MaxPair(n[t,0])']
+                steady: ['read:MaxPair(n)', 'rescale:Y(n)']
+              - read:Zfinal(t)
+              - stage:out_after(t,0)
+              - store:out_after(t,0)
+              - stage:out_after(t,1)
+              - release:Y(t)
+              - store:out_after(t,1)
+            edge:
+              data:
+                rescale:Y(n[t,i+1]): ['MMA/mma:KVStage(e[t,min(2*i+2,2*N-1),1])']
+                stage:out_after(t,0): ['MMA/mma:KVStage(e[t,2*N-1,1])']
+realization:
+  require:
+  - item: design.tile_pipeline::attention.MMA
+    choice: Use tcgen05.mma with CTA-group TWO, FP8 operands and FP32 TMEM accumulators, retaining same-issuer operand ordering and pair-wide completion.
+    reason: The two-member products and aliased score/probability storage depend on these guarantees.
+  - item: design.tile_pipeline::attention.Load
+    choice: Use CopyBulkTensorTileG2SOp with CTA-group TWO and transaction completion for operand handoffs.
+    reason: Both members' transfers contribute to readiness of each shared K/V stage; reusing that stage waits for its current operand's MMA read.

@@ -1,0 +1,597 @@
+meta_data:
+  name: paged_grouped_query_decode_attention
+  describe: Compute causal attention for a query tail against a paged FP8 KV cache and overwrite the supplied output.
+  source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_decode/aka_solution/solution.py::Model.forward
+  version: 2
+  dispatch:
+    id: fa4_decode.q1_cluster_nominal16
+    when: |
+      B=BatchCount.
+      Q=q_len_per_req.
+      L=max_seq_len.
+      P=PageCount.
+      C=ceil(L/256).
+      E=64*P.
+      A=floor(E/B).
+      skew=(2*E<B*L).
+      U=(B>=5 and L>=32768 and A>=(65536 if B=8 else 32768) and not skew).
+      G=(B<=4 and L>=24576) or (U and B>=8) or (skew and 5<=B<=8 and L>=65536) or (not skew and L>=24576 and 16<=B<=17).
+      X16=(B<=4) or (skew and L>=32768) or (not skew and 5<=B<=7 and (12288<=L<=20480 or (L>=24576 and A>=24576))).
+      Select exactly when Q=1 and (C>1 and not G and X16).
+contract:
+  algorithm_requirement:
+    constant:
+      HeadCount: {value: 16, meaning: Query head count.}
+      KVHeadCount: {value: 1, meaning: KV head count.}
+      D: {value: 256, meaning: 'Query, key and value dimension.'}
+      PageSize: {value: 64, meaning: Tokens per cache page.}
+      TableWidth: {value: 16434, meaning: Block-table entries per request.}
+    input:
+      query: {meaning: Query tail, shape: [{query: TotalQuery}, {head: HeadCount}, {d: D}], dtype: fp8_e4m3fn}
+      kv_cache: {meaning: HND cache with key at selector 0 and value at selector 1, shape: [{page: PageCount}, {selector: 2},
+          {kv_head: KVHeadCount}, {page_token: PageSize}, {d: D}], dtype: fp8_e4m3fn}
+      workspace_buffer: {meaning: 'Caller-owned scratch, zeroed before first isolated use; its final contents are
+          not an output', shape: [{byte: WorkspaceBytes}], dtype: uint8}
+      block_tables: {meaning: Logical-to-physical page map per request, shape: [{batch: BatchCount}, {page_index: TableWidth}],
+        dtype: int32, range: -1 <= block_tables < PageCount; valid pages are nonnegative}
+      seq_lens: {meaning: KV length including the current query tail, shape: [{batch: BatchCount}], dtype: int32,
+        range: q_len_per_req <= seq_lens <= PageSize*TableWidth}
+      max_seq_len: {meaning: Maximum entry of seq_lens, shape: [], dtype: python_int}
+      bmm1_scale: {meaning: Composite score scale already incorporating the boundary's quantization scales, shape: [],
+        dtype: fp64, range: [0.0625, 0.0625]}
+      bmm2_scale: {meaning: Composite value-output scale, shape: [], dtype: fp64, range: [1.0, 1.0]}
+      window_left: {meaning: Full-attention sentinel, shape: [], dtype: python_int, range: [-1, -1]}
+      out:
+        meaning: Caller-owned destination whose previous contents are ignored
+        shape: [{query: TotalQuery}, {head: HeadCount}, {d: D}]
+        dtype: bf16
+        range: Any BF16 bit pattern; never read before overwrite.
+      q_len_per_req: {meaning: Number of query-tail tokens per request, shape: [], dtype: python_int, range: [1, 1]}
+    output: {output: {meaning: Final contents written in place to out; the returned tensor aliases that same input,
+        shape: [{query: TotalQuery}, {head: HeadCount}, {d: D}], dtype: bf16}}
+    compute:
+    - name: Interpret the captured callable boundary
+      math: |
+        The dtype python_int denotes an arbitrary-precision signed Python integer; fp64 scalar inputs are Python float values.
+        The fixed absent ABI arguments are sinks=None and o_sf_scale=None.
+        TotalQuery = BatchCount*q_len_per_req; max_seq_len = max_b seq_lens[b].
+        All tensor arguments are contiguous CUDA tensors on the same device.
+        For 0 <= b < BatchCount, let L_b = seq_lens[b].
+        The first ceil(L_b/PageSize) entries of block_tables[b,:] name valid physical pages.
+        For 0 <= k < L_b and 0 <= d < D:
+          page = block_tables[b,floor(k/PageSize)].
+          K[b,k,d] = kv_cache[page,0,0,k%PageSize,d].
+          V[b,k,d] = kv_cache[page,1,0,k%PageSize,d].
+        The timed replacement is the complete standalone decode callable, including any
+        required partial-result combination; cache construction is outside this boundary.
+      symbol:
+        K: {meaning: Logical keys after page lookup, shape: [{batch: BatchCount}, {kv: max_seq_len}, {d: D}], dtype: fp8_e4m3fn}
+        V: {meaning: Logical values after page lookup, shape: [{batch: BatchCount}, {kv: max_seq_len}, {d: D}], dtype: fp8_e4m3fn}
+    - name: Attend to the right-aligned query tail
+      math: |
+        Each request and query head is independent and shares the sole KV head.
+        For 0 <= b < BatchCount, 0 <= t < q_len_per_req and 0 <= h < HeadCount:
+          visible_key(b,t) = {k in integers | 0 <= k <= L_b-q_len_per_req+t}.
+          score[b,t,h,k] = bmm1_scale*sum_{d=0}^{D-1} query[b*q_len_per_req+t,h,d]*K[b,k,d].
+          m = max_{k in visible_key(b,t)} score[b,t,h,k].
+          Z = sum_{k in visible_key(b,t)} exp(score[b,t,h,k]-m).
+          probability[b,t,h,k] = exp(score[b,t,h,k]-m)/Z for k in visible_key(b,t); otherwise 0.
+          output[b*q_len_per_req+t,h,d] = bf16(bmm2_scale*
+            sum_{k in visible_key(b,t)} probability[b,t,h,k]*V[b,k,d]), for 0 <= d < D.
+        The input constraints make every visible set nonempty. There is no returned LSE.
+      symbol:
+        visible_key: {meaning: Valid causal keys for one tail token, shape: not_applicable, dtype: not_applicable}
+        score: {meaning: Scaled query-key score on valid logical keys, shape: [{batch: BatchCount}, {query_tail: q_len_per_req},
+            {head: HeadCount}, {kv: max_seq_len}], dtype: fp32}
+        probability: {meaning: Softmax probability on valid logical keys, shape: 'ref:score.shape', dtype: fp32}
+    golden_reference:
+      source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_decode/reference.py::Model.forward
+      tolerance: {output: 'atol=0.06, rtol=0.04; check both the returned tensor and mutated_inputs.out against the
+          reference.'}
+  hardware_specification:
+    device: NVIDIA L20D
+    arch: SM103
+    execution: {warp: '<hardware-execution@pending:L20D/warp>', CTA: '<hardware-execution@pending:L20D/CTA>', cluster: '<hardware-execution@pending:L20D/cluster>'}
+    feature:
+      SMEM: <hardware-feature@pending:L20D/SMEM>
+      TMEM: <hardware-feature@pending:L20D/TMEM>
+      register: <hardware-feature@pending:L20D/register>
+      TMA: <hardware-feature@pending:L20D/TMA>
+      tcgen05.mma: <hardware-feature@pending:L20D/tcgen05.mma>
+      mbarrier: <hardware-feature@pending:L20D/mbarrier>
+      setmaxnreg: <hardware-feature@pending:L20D/setmaxnreg>
+      cp.async: <hardware-feature@pending:L20D/cp.async>
+      PDL: <hardware-feature@pending:L20D/PDL>
+    stack: {language: 'CuTe DSL, nvidia-cutlass-dsl 4.6.1', toolchain: 'nvidia-cutlass-dsl 4.6.1 compiler; torch>=2.9
+        and cuda-python as declared; <toolchain@pending:CUDA-and-cuda-python-versions>'}
+    wiki:
+      hardware: <wiki-hardware@pending:L20D/SM103.md>
+      programming: {language: '<wiki-language@pending:CuTe-DSL/4.6.1/>', virtual_isa: '<wiki-virtual-isa@pending:PTX/pending/>',
+        machine_isa: '<wiki-machine-isa@pending:SASS/SM103/>'}
+      microbench: <wiki-microbench@pending:L20D/>
+      sota: {kernel: '<wiki-sota-kernel@pending:L20D/>', schema: '<wiki-sota-schema@pending:L20D/>'}
+      profile: <wiki-profile@pending:NVIDIA/>
+design:
+  math_reshape:
+    thesis: Stripe the online reduction, share only its maximum and denominator, and add separately normalized BF16
+      split contributions. This removes FP32 global partial tensors and the combine kernel, at the cost of destination-precision
+      reduction.
+    rewrite:
+    - step: stripe
+      name: Pack query heads and stripe the logical key blocks
+      math: |
+        For request b and query-block coordinate q, let L_b=seq_lens[b],
+        x=h+HeadCount*t, 0<=t<QueryTile, 0<=h<HeadCount, and t_abs=q*QueryTile+t.
+        Qpack[x,:]=query[b*q_len_per_req+t_abs,h,:].
+        For 0<=r<SplitCount, let T_b=ceil(L_b/Bk) and
+          N_r=max(0,ceil((T_b-r)/WorkSplit(b))) if r<WorkSplit(b); otherwise 0.
+        For 0<=i<N_r and 0<=u<Bk:
+          k(r,i,u)=(r+i*WorkSplit(b))*Bk+u.
+          Kblk(r,i)[u,:]=K[b,k(r,i,u),:] if k(r,i,u)<L_b; otherwise 0.
+          Vblk(r,i)[u,:]=V[b,k(r,i,u),:] if k(r,i,u)<L_b; otherwise 0.
+          ScoreBlock(r,i)=mm32(Kblk(r,i),Qpackᵀ).
+        Mask ScoreBlock(r,i)[u,x] to -inf unless k(r,i,u) is in visible_key(b,t_abs).
+      symbol:
+        SplitCount: {meaning: Number of nominal KV splits., binding: 'bind:design.work_schedule::SplitCount'}
+        WorkSplit: {meaning: Request-to-active-split-count map., binding: 'bind:design.work_schedule::WorkSplit'}
+        Bk: {meaning: Logical key block length., binding: 'bind:design.work_schedule::Bk'}
+        QueryTile: {meaning: Tail queries sharing one KV traversal., binding: 'bind:design.work_schedule::QueryTile'}
+        PackedColumns: {meaning: 'Head-query column count, HeadCount*QueryTile.', binding: 'bind:design.work_schedule::PackedColumns'}
+        Qpack: {meaning: Packed query-head and query-tail rows., shape: [{packed_query: PackedColumns}, {d: D}], dtype: fp8_e4m3fn}
+        Kblk: {meaning: Logical paged key block., shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn}
+        Vblk: {meaning: Logical paged value block., shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn}
+        ScoreBlock: {meaning: Masked key-by-packed-query product., shape: [{kv: Bk}, {packed_query: PackedColumns}],
+          dtype: fp32}
+    - step: exponent
+      name: Use two FP8 components for each scaled exponential
+      math: |
+        For each (b,q,r), omit these indices below and initialize m(-1)[x]=-inf.
+        c=fp32(bmm1_scale*log2(e)).
+        For 0<=i<N_r:
+          m(i)[x]=max(m(i-1)[x],c*max(MinFinite,max_u ScoreBlock(i)[u,x])).
+          Eblock(i)[u,x]=exp2_fast(c*ScoreBlock(i)[u,x]-m(i)[x]) for visible keys; otherwise 0.
+          P_hi(i)=fp8_e4m3fn(rho*Eblock(i)).
+          P_lo(i)=fp8_e4m3fn(rho*Eblock(i)-P_hi(i)).
+          Lblock(i)[x]=sum32_u Eblock(i)[u,x].
+      symbol:
+        rho: {meaning: Probability-operand scale., shape: [], dtype: fp32, value: 448}
+        MinFinite: {meaning: Finite initializer of the masked score maximum., shape: [], dtype: fp32, value: -3.4028234663852886e+38}
+        m: {meaning: Ordered running maximum in base-two score units., shape: [{packed_query: PackedColumns}], dtype: fp32,
+          life: 'carried (b,q,r); i=-1..N_r-1'}
+        P_hi: {meaning: Leading FP8 component of the scaled exponential., shape: [{kv: Bk}, {packed_query: PackedColumns}],
+          dtype: fp8_e4m3fn}
+        P_lo: {meaning: Independently rounded FP8 residual., shape: [{kv: Bk}, {packed_query: PackedColumns}], dtype: fp8_e4m3fn}
+        Lblock: {meaning: Unrounded exponential sum of one logical block., shape: [{packed_query: PackedColumns}],
+          dtype: fp32}
+      arithmetic: {approx: 'exp2_fast is the source''s fast-math base-two exponential; unknown: <error-bound@pending:fa4_decode/fast-exp2>.'}
+    - step: parity
+      name: Carry two interleaved numerators and denominators
+      math: |
+        Initialize Y(-2)=Y(-1)=0 and Lsum(-2)=Lsum(-1)=0.
+        For 0<=i<N_r:
+          a(i)[x]=0 if i<2; otherwise exp2_fast(m(i-2)[x]-m(i)[x]).
+          Y(i)=mma32(Vblk(i)ᵀ,P_lo(i),
+                 mma32(Vblk(i)ᵀ,P_hi(i),Y(i-2) ⊙ a(i)[None,:])).
+          Lsum(i)=a(i) ⊙ Lsum(i-2)+Lblock(i).
+        If N_r=0: Mlocal[x]=-inf, Llocal[x]=0, Ylocal[d,x]=0.
+        If N_r=1: Mlocal=m(0), Llocal=Lsum(0), Ylocal=Y(0).
+        If N_r>=2, let f=N_r-1, p=N_r-2 and z[x]=exp2_fast(m(p)[x]-m(f)[x]):
+          Mlocal=m(f); Llocal=Lsum(f)+z ⊙ Lsum(p).
+          Ylocal=Y(f)+Y(p) ⊙ z[None,:].
+      symbol:
+        Y: {meaning: 'FP32 numerator of one parity, still scaled by rho.', shape: [{d: D}, {packed_query: PackedColumns}],
+          dtype: fp32, life: 'carried (b,q,r,parity); i=-2..N_r-1 on that parity'}
+        Lsum: {meaning: FP32 denominator of one parity., shape: [{packed_query: PackedColumns}], dtype: fp32, life: 'carried
+            (b,q,r,parity); i=-2..N_r-1 on that parity'}
+        Mlocal: {meaning: Split-local base-two maximum., shape: [{packed_query: PackedColumns}], dtype: fp32, life: 'stored
+            (b,q,r)'}
+        Llocal: {meaning: Split-local denominator at Mlocal., shape: [{packed_query: PackedColumns}], dtype: fp32,
+          life: 'stored (b,q,r)'}
+        Ylocal: {meaning: Split-local numerator at Mlocal., shape: [{d: D}, {packed_query: PackedColumns}], dtype: fp32,
+          life: 'stored (b,q,r)'}
+      arithmetic: {approx: exp2_fast follows step exponent., accumulate: Both value products accumulate into the same
+          FP32 parity state; denominator sums keep unrounded Eblock and are reduced from per-warp partial sums.}
+    - step: normalize
+      name: Share normalization and add narrowed split contributions
+      math: |
+        For each (b,q,x), with split indices restored:
+          M=max_{r=0}^{SplitCount-1} Mlocal(r)[x].
+          w[r]=exp2_fast(Mlocal(r)[x]-M) if Mlocal(r)[x]>-inf; otherwise 0.
+          Z=sum32_{r=0}^{SplitCount-1} w[r]*Llocal(r)[x].
+          Normalization(r)[x]=w[r]*rcp_fast(Z)*fp32(bmm2_scale/rho).
+          Contribution(r)[d,x]=bf16(Ylocal(r)[d,x]*Normalization(r)[x]).
+        For x=h+HeadCount*t and t_abs=q*QueryTile+t:
+          output[b*q_len_per_req+t_abs,h,d]=reduce_add_bf16_r Contribution(r)[d,x].
+        reduce_add_bf16 starts from BF16 zero and adds the BF16 contributions in
+        runtime completion order into the BF16 destination; empty splits add nothing.
+      arithmetic:
+        approx: 'exp2_fast follows step exponent; rcp_fast is the source approximate reciprocal; unknown: <error-bound@pending:fa4_decode/reciprocal>.'
+        accumulate: Cluster max and sum use XOR-partner rounds; output accumulation takes separately BF16-rounded
+          split contributions and has no fixed split order.
+      symbol:
+        Normalization: {meaning: Scale applied to the local numerator before its BF16 output cast., shape: [{packed_query: PackedColumns}],
+          dtype: fp32, life: 'stored (b,q,r)'}
+        Contribution: {meaning: Normalized BF16 split contribution., shape: [{d: D}, {packed_query: PackedColumns}],
+          dtype: bf16}
+    ledger:
+      baseline: Contract evaluation with dense FP32 scores and probabilities materialized in global memory.
+      matmul:
+      - {item: Score and value contractions, change: 2*D*L_b -> 3*D*Bk*T_b MAC per query head; the added contraction
+          applies P_lo., by: [stripe, exponent, parity]}
+      traffic:
+      - {item: Dense intermediates, change: -16*q_len_per_req*HeadCount*L_b bytes per request for score/probability
+          writes and reads., by: [stripe, exponent]}
+      error:
+      - {item: Numerator representation, change: '+two FP8 roundings per exponential, the second on its residual;
+          the denominator keeps Eblock.', by: [exponent]}
+      - {item: Elementary functions and reduction grouping, change: +fast exp2 and approximate reciprocal; parity
+          and split grouping replace the reference reduction order., by: [exponent, parity, normalize]}
+      - {item: BF16 split accumulation, change: '+one BF16 cast per active split contribution, followed by destination-precision
+          adds instead of one final BF16 cast.', by: [normalize]}
+      depth:
+      - {item: KV online chain, change: 'T_b -> max_r N_r sequential block updates per query, followed by a SplitCount-way
+          normalization reduction.', by: [stripe, normalize]}
+  work_schedule:
+    thesis: Use the nominal sixteen-member cluster policy where extra KV chains offset its larger collective; cap
+      by available tiles.
+    flow:
+      launch:
+      - {phase: [attention]}
+    phase:
+      attention:
+        describe: Compute and normalize one query block within its assigned worker.
+        decomposition:
+          strategy: |
+            Bk=256; QueryTile=1; PackedColumns=HeadCount*QueryTile; C=ceil(max_seq_len/Bk).
+            pow2_floor(n)=the largest power of two not exceeding max(1,n).
+            SplitCount=pow2_floor(min(16,C)); WorkSplit(b)=SplitCount.
+            Split r independently traverses logical blocks r+i*WorkSplit(b), 0<=i<N_r.
+            Load the HND cache through the four page-table entries of each logical block;
+            no cache repacking occurs. Tail and causal visibility follow math_reshape.
+            One worker is the entire SplitCount-CTA cluster for a query block.
+            Member r owns split r and its local iteration independently. An empty member
+            still participates in cluster max/sum exchange. Member 0 zeroes the output
+            before any BF16 reduce-add; zeroing overlaps the other members' KV work.
+            For this multi-member worker, iteration shapes collect its independently advancing member-local blocks; they do not impose lockstep i.
+          partition: {batch: {size: BatchCount, tile: 1}, query_tail: {size: q_len_per_req, tile: QueryTile}, head: {
+              size: HeadCount, tile: HeadCount}}
+          worktile:
+            invariant: {Qpack: {shape: [{packed_query: PackedColumns}, {d: D}], dtype: fp8_e4m3fn}, seq_lens: {shape: [
+                  {batch: 1}], dtype: int32}}
+            iteration:
+              block_tables: {shape: [{split: SplitCount}, {page_index: 4}], dtype: int32, direction: ascending}
+              Kblk: {shape: [{split: SplitCount}, {kv: Bk}, {d: D}], dtype: fp8_e4m3fn, direction: ascending}
+              Vblk: {shape: [{split: SplitCount}, {kv: Bk}, {d: D}], dtype: fp8_e4m3fn, direction: ascending}
+          target: {single_tile: {output: {shape: [{query_tail: QueryTile}, {head: HeadCount}, {d: D}], dtype: bf16}}}
+        mapping:
+          worker: {unit: CTA, count: SplitCount}
+          count: worktile_count
+          placement: {unit: cluster, count: 1}
+          strategy: Cluster member r, 0<=r<SplitCount, owns exactly the striped split r; query operands are separately
+            loaded by each member.
+        schedule:
+          worktile_order:
+          - {by: batch, direction: ascending}
+          - {by: query_tail, direction: ascending}
+          - {by: head, direction: ascending}
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+  tile_pipeline:
+    thesis: Separate paged loads, score products, value products and correction so their work can overlap. A bounded
+      score lead and two numerator parities hide softmax/correction latency using a shared KV ring and independent
+      score, probability and sum slots. Two softmax warpgroups alternate blocks while sharing one ordered maximum;
+      this narrow-column path does not reconfigure role register budgets.
+    phase:
+      attention:
+        domain:
+          i: [0, N_r]
+          active: [0, 'min(1,N_r)']
+          single: [0, 'min(1,N_r)*max(0,2-N_r)']
+          head: [0, 'min(2,N_r)']
+          corr: [0, 'max(0,N_r-2)']
+          corr_prefix: [0, 'max(0,N_r-3)']
+          corr_final: ['max(0,N_r-3)', 'max(0,N_r-2)']
+          tail: ['max(0,N_r-2)', N_r]
+          u: [0, 4]
+          body_turn: [0, 'max(0,N_r-Lead)']
+          tail_turn: ['max(0,N_r-Lead)', N_r]
+          drain: [0, 'Lead*min(1,N_r)']
+          j: [0, ceil(N_r/2)]
+          k: [0, floor(N_r/2)]
+        resource:
+          Qpack: {space: SMEM, shape: [{packed_query: PackedColumns}, {d: D}], dtype: fp8_e4m3fn}
+          PageIndex: {space: SMEM, shape: [{page_index: 4}], dtype: int32, slot: 4, view: {PageIndex(i): {slot: i%4}}}
+          KV:
+            space: SMEM
+            shape: [{element: 16384*KVStageCount}]
+            dtype: fp8_e4m3fn
+            view:
+              Kslice(i,u): {part: {element: ['16384*Kslot(i,u)', '16384*(Kslot(i,u)+1)']}}
+              Vslice(i,u): {part: {element: ['16384*Vslot(i,u)', '16384*(Vslot(i,u)+1)']}}
+              Ostage: {part: {element: [0, 2*D*PackedColumns]}, dtype: bf16}
+          ScoreBlock: {space: TMEM, shape: [{kv: Bk}, {packed_query: PackedColumns}], dtype: fp32, slot: ScoreStageCount,
+            view: {ScoreBlock(i): {slot: i%ScoreStageCount}}}
+          P_hi: {space: SMEM, shape: [{kv: Bk}, {packed_query: PackedColumns}], dtype: fp8_e4m3fn, slot: 4, view: {
+              P_hi(i): {slot: i%4}}}
+          P_lo: {space: SMEM, shape: [{kv: Bk}, {packed_query: PackedColumns}], dtype: fp8_e4m3fn, slot: 4, view: {
+              P_lo(i): {slot: i%4}}}
+          Y: {space: TMEM, shape: [{d: D}, {packed_query: PackedColumns}], dtype: fp32, slot: 2, view: {Y(i): {slot: i%2}}}
+          ExponentialSum: {space: TMEM, shape: [{partial: 128}, {packed_query: PackedColumns}], dtype: fp32, slot: 2,
+            view: {ExponentialSum(i): {slot: i%2}}}
+          Maximum:
+            space: SMEM
+            shape: [{packed_query: PackedColumns}]
+            dtype: fp32
+            view:
+              m: {}
+              Normalization: {}
+          FinalSum: {space: SMEM, shape: [{packed_query: PackedColumns}, {warp: 4}], dtype: fp32}
+          Lsum: {space: register, shape: [{partial: 128}, {packed_query: PackedColumns}, {parity: 2}], dtype: fp32}
+          ClusterStatistic: {space: SMEM, shape: [{packed_query: PackedColumns}, {round: 4}, {statistic: 2}], dtype: fp32}
+        lane:
+          LoadK:
+            info:
+              member: warp[2:3]
+              mode: async
+              verb:
+                configure: |
+                  ScoreStageCount=min(4,floor((T-6*PackedColumns)/(2*PackedColumns))),
+                  Lead=min(2,ScoreStageCount-1), and TMEM allocation is the least power of two
+                  covering (6+2*ScoreStageCount)*PackedColumns columns, where
+                  T=<cutlass-capacity@pending:4.6.1/get_max_tmem_alloc_cols(sm_100)>.
+                  Let A=268+2356*PackedColumns+16*ScoreStageCount, pad=128-A%128, R0=floor((Csm-A-pad)/16384),
+                  KVStageCount=R0-int(16*R0>pad), where
+                  Csm=<cutlass-capacity@pending:4.6.1/get_smem_capacity_in_bytes(sm_100)>.
+                  Kslot(i,u)=(4*i+4*max(i-Lead,0)+u)%KVStageCount;
+                  Vslot(i,u)=(4*(i+min(i+Lead+1,N_r))+u)%KVStageCount.
+                  Each KV slice is 128-by-128 FP8; u orders token-half then d-half.
+                prepare: {mode: sync, meaning: 'Speculatively prefetch the first four page indices during setup for
+                    every nominal member, before the empty-split decision. Empty splits issue no query or KV transfer.'}
+                advance:
+                  mode: sync
+                  meaning: |
+                    Complete the current PageIndex lookup and issue the next prefetch, if
+                    any, before the current K block; cycle through four page-table slots.
+                    The ordering of V's PageIndex(i) capture before the async PageIndex(i+4)
+                    overwrite is <sync-proof@pending:fa4_decode/PageIndex-reuse>.
+                load: |
+                  Load Qpack once. A Kblk load comprises four slices, each assembled from
+                  page-sized transfers. Each KV slice is acquired only after its previous
+                  KQ or VP operand read finishes; per-slice producer-consumer completion
+                  protects this shared ring independently of the whole-block event.
+                turn:
+                  mode: sync
+                  meaning: |
+                    Kturn(i) releases LoadV after the last slice of Kblk(i) is acquired,
+                    before requiring its transfer completion. Ktail(drain) is an empty
+                    issue turn at the end, releasing V block N_r-Lead+drain when it exists.
+            pipe:
+              prologue: ['configure:storage', 'prepare:PageIndex']
+              steady:
+              - repeat: active
+                steady:
+                - load:Qpack
+                - {repeat: i, steady: ['advance:PageIndex(i)', 'load:Kblk(i)', 'turn:Kturn(i)']}
+                - {repeat: drain, steady: ['turn:Ktail(drain)']}
+            edge: {sync: {'load:Kblk(i+Lead+1)': ['LoadV/turn:Vturn(i)'], 'turn:Ktail(drain)': ['LoadV/turn:Vturn(N_r-Lead-1+drain)']}}
+          LoadV:
+            info:
+              member: warp[3:4]
+              mode: async
+              verb:
+                load: |
+                  Read the same page indices as K and load the four V slices through the
+                  shared ring's per-slice acquire protocol. The issue order is Lead K
+                  blocks followed by alternating the next K and oldest V, then the V tail;
+                  Lead=2 gives K0,K1,K2,V0,K3,V1,... . This is an issue order, not a transfer-completion order.
+                turn: {mode: sync, meaning: 'Vturn(i) releases the next K issue turn after its final V slice is acquired,
+                    while transfers can remain in flight.'}
+                store: For N_r>0, wait for this member's zero_done notification, acquire the GPU-scope zero stores
+                  and re-enter the asynchronous memory proxy, then TMA reduce-add its BF16 Ostage into out.
+            pipe: {repeat: i, steady: ['load:Vblk(i)', 'turn:Vturn(i)'], epilogue: ['store:output_tile']}
+            edge:
+              data: {'load:Vblk(i)': ['LoadK/advance:PageIndex(i)'], 'store:output_tile': ['Correction/publish:Ostage']}
+              sync: {'load:Vblk(body_turn)': ['LoadK/turn:Kturn(body_turn+Lead)'], 'load:Vblk(tail_turn)': ['LoadK/turn:Ktail(tail_turn+Lead-N_r)']}
+          Score:
+            info:
+              member: warp[0:1]
+              mode: async
+              verb:
+                mma: |
+                  Form ScoreBlock as two 128-key by PackedColumns products, each reduced
+                  over both 128-d slices. Acquire its score slot before writing and publish
+                  only the complete score block. Return each K slice after its matrix read.
+                turn:
+                  mode: sync
+                  meaning: ScoreTurn(i) releases Value after the final K operand slice is acquired, before the score
+                    product necessarily completes; ScoreTail(drain) is an empty turn releasing value block N_r-Lead+drain
+                    when it exists.
+                release: {mode: sync, meaning: 'Record completion of all K operand reads for the later Ostage alias.
+                    This is an abstract operand-completion guarantee, not an additional collective barrier.'}
+                wait:
+                  mode: sync
+                  meaning: Join Correction's existing FinalSum rendezvous; completion admits this lane's sum read and
+                    Correction's final Y capture.
+                reduce:
+                  mode: sync
+                  meaning: |
+                    After the local maximum is final, exchange it through DSMEM with member
+                    r XOR 2^j for j=0..log2(SplitCount)-1, taking the maximum each round.
+                    Every member, including empty members, participates. Each round waits
+                    for its peer's store notification before consuming that round's buffer.
+                publish:
+                  mode: sync
+                  meaning: |
+                    Reduce the four local FinalSum entries, rescale to ClusterMax, then use
+                    the same XOR-partner rounds to sum denominators. Publish the upstream
+                    per-member Normalization by reusing the shared Maximum storage.
+            pipe:
+              repeat: i
+              steady: ['mma:Kblk(i)@Qpack', 'turn:ScoreTurn(i)']
+              epilogue:
+              - repeat: active
+                steady:
+                - {repeat: drain, steady: ['turn:ScoreTail(drain)']}
+              - release:K_reads
+              - reduce:ClusterMax
+              - wait:FinalSum
+              - publish:Normalization
+            edge:
+              data: {'reduce:ClusterMax': ['Correction/publish:FinalMaximum'], 'wait:FinalSum': ['Correction/publish:FinalSum']}
+              reuse: {'mma:Kblk(2*j+ScoreStageCount)@Qpack': ['SoftmaxEven/read:ScoreBlock(2*j)'], 'mma:Kblk(2*k+1+ScoreStageCount)@Qpack': [
+                  'SoftmaxOdd/read:ScoreBlock(2*k+1)']}
+              sync: {'mma:Kblk(i+Lead+1)@Qpack': ['Value/turn:ValueTurn(i)'], 'turn:ScoreTail(drain)': ['Value/turn:ValueTurn(N_r-Lead-1+drain)']}
+          Value:
+            info:
+              member: warp[1:2]
+              mode: async
+              verb:
+                mma: |
+                  P_pair denotes the P_hi and P_lo components of the same block. For each
+                  V slice issue both products into that block's parity of Y. Acquire Y
+                  only after its initialization or previous correction; return P and V
+                  only after both component reads finish.
+                  For N_r=1, also complete the initialized empty Y parity for the common tail drain.
+                turn: {mode: sync, meaning: ValueTurn(i) releases the next Score turn after the final V operand slice
+                    is acquired; the products can remain in flight.}
+                release: {mode: sync, meaning: 'Record completion of all V and P operand reads without adding a
+                    collective barrier. This does not require Correction to have returned the final Y slots.'}
+                retire:
+                  mode: sync
+                  meaning: |
+                    After Correction returns both final Y slots, relinquish the TMEM allocation
+                    permit and free the allocation holding ScoreBlock, Y and ExponentialSum.
+                    For N_r=0 free it immediately. This return can overlap Correction's later
+                    normalization and Ostage publication; it does not wait for either.
+            pipe: {repeat: i, steady: ['mma:Vblk(i)@P_pair(i)', 'turn:ValueTurn(i)'], epilogue: ['release:V_reads', 'retire:TMEM']}
+            edge:
+              data:
+                mma:Vblk(i)@P_pair(i): ['Correction/zero:Y']
+                mma:Vblk(i+2)@P_pair(i+2): ['Correction/rescale:Y(i)']
+                mma:Vblk(2*j)@P_pair(2*j): ['SoftmaxEven/publish:P_pair(2*j)']
+                mma:Vblk(2*k+1)@P_pair(2*k+1): ['SoftmaxOdd/publish:P_pair(2*k+1)']
+              sync: {'mma:Vblk(body_turn)@P_pair(body_turn)': ['Score/turn:ScoreTurn(body_turn+Lead)'], 'mma:Vblk(tail_turn)@P_pair(tail_turn)': [
+                  'Score/turn:ScoreTail(tail_turn+Lead-N_r)']}
+              reuse: {'retire:TMEM': ['Correction/capture:Y(tail)']}
+          SoftmaxEven:
+            info:
+              member: warp[4:8]
+              verb:
+                initialize: During CTA setup set the shared maximum to -inf and FinalSum to zero, including the empty-split
+                  path.
+                read: Copy ScoreBlock to registers and immediately release its TMEM score slot.
+                publish_max: |
+                  Apply the upstream visibility mask and update the ordered shared maximum.
+                  Capture the new maximum in registers for this block; the next update
+                  waits until Correction has captured it. Two Q1 softmax warpgroups also
+                  serialize their alternating access to the shared maximum.
+                publish: |
+                  P_pair publishes both FP8 components together into their four-stage slots.
+                  ExponentialSum publishes 128 FP32 partial sums per packed column, adding
+                  corresponding positions in the two 128-key halves. Its two parity slots
+                  are independent of the P slots; return one only after Correction copies it.
+            pipe: {prologue: ['initialize:Statistic'], repeat: j, steady: ['read:ScoreBlock(2*j)', 'publish_max:m(2*j)',
+                'publish:P_pair(2*j)', 'publish:ExponentialSum(2*j)']}
+            edge:
+              data: {'read:ScoreBlock(2*j)': ['Score/mma:Kblk(2*j)@Qpack']}
+              reuse: {'publish:P_pair(2*j+4)': ['Value/mma:Vblk(2*j)@P_pair(2*j)'], 'publish:ExponentialSum(2*j+2)': [
+                  'Correction/read:ExponentialSum(2*j)']}
+              sync: {'publish_max:m(active)': ['Correction/zero:Y'], 'publish_max:m(2*j+2)': ['Correction/read:m(2*j+1)']}
+          SoftmaxOdd:
+            info:
+              member: warp[8:12]
+              verb:
+                prepare: For N_r=1, signal the initialized empty exponential-sum parity before the block loop; otherwise
+                  no signal is emitted. This role owns that signal even though its odd-block loop is empty.
+                read: Copy ScoreBlock to registers and immediately release its TMEM score slot.
+                publish_max: |
+                  Apply the upstream visibility mask and update the ordered shared maximum.
+                  Capture the new maximum in registers for this block; the next update
+                  waits until Correction has captured it. Two Q1 softmax warpgroups also
+                  serialize their alternating access to the shared maximum.
+                publish: |
+                  P_pair publishes both FP8 components together into their four-stage slots.
+                  ExponentialSum publishes 128 FP32 partial sums per packed column, adding
+                  corresponding positions in the two 128-key halves. Its two parity slots
+                  are independent of the P slots; return one only after Correction copies it.
+            pipe: {prologue: ['prepare:EmptySum'], repeat: k, steady: ['read:ScoreBlock(2*k+1)', 'publish_max:m(2*k+1)', 'publish:P_pair(2*k+1)',
+                'publish:ExponentialSum(2*k+1)']}
+            edge:
+              data: {'read:ScoreBlock(2*k+1)': ['Score/mma:Kblk(2*k+1)@Qpack']}
+              reuse: {'publish:P_pair(2*k+1+4)': ['Value/mma:Vblk(2*k+1)@P_pair(2*k+1)'], 'publish:ExponentialSum(2*k+1+2)': [
+                  'Correction/read:ExponentialSum(2*k+1)']}
+              sync: {'publish_max:m(2*k+1)': ['Correction/read:m(2*k)']}
+          Correction:
+            info:
+              member: warp[12:16]
+              verb:
+                zero: |
+                  For a nonempty split zero both TMEM Y slots and ExponentialSum parity 1.
+                  Fence this initialization before admitting the first maximum update and
+                  initial sum-slot writes. An empty split skips this arithmetic and uses
+                  the setup's neutral statistics.
+                  For output, only member 0's first correction warp overwrites the complete
+                  output tile with BF16 zero, executes a GPU-scope fence and sends zero_done
+                  DSMEM notifications to all members. This occurs during the mainloop ramp;
+                  the other members do not wait until their eventual reduce-add stores.
+                read: |
+                  Before the first maximum capture, initialize both register Lsum parities to zero.
+                  Copy the named maximum or exponential partial sums to registers and release
+                  that source; retain the last two maxima. For N_r=1, ExponentialSum(0)
+                  first drains the initialized empty parity 1, then the real parity 0.
+                rescale: Using captured m(i+2), wait for Y(i), apply the upstream parity correction to that numerator
+                  and denominator, then return the Y slot for block i+2.
+                capture: |
+                  Copy a final parity of Y to registers after its value products finish and
+                  release that TMEM slot. For N_r=1, Y(0) first drains the initialized empty
+                  parity 1, then the real parity 0; both are returned before TMEM deallocation.
+                publish: |-
+                  FinalMaximum signals the final maximum once available, before the last
+                  outstanding parity correction; an empty split retains -inf. FinalSum
+                  merges corrected parity denominators into four warp sums per packed column
+                  (zero for N_r=0), publishes them and arrives at the reduction-warp rendezvous.
+                  Its done covers publication and arrival; final Y capture waits for the peer.
+                  Ostage merges the captured valid Y parities, applies upstream Normalization, and stages its BF16 output over the now-unused beginning of the KV ring; N_r=0 emits no O payload.
+            pipe:
+              steady:
+              - repeat: active
+                steady:
+                - zero:Y
+                - zero:output
+                - {repeat: head, steady: ['read:m(head)']}
+                - {repeat: corr_prefix, steady: ['read:ExponentialSum(corr_prefix)', 'read:m(corr_prefix+2)', 'rescale:Y(corr_prefix)']}
+                - {repeat: corr_final, steady: ['read:ExponentialSum(corr_final)', 'read:m(corr_final+2)']}
+              - publish:FinalMaximum
+              - {repeat: corr_final, steady: ['rescale:Y(corr_final)']}
+              - {repeat: tail, steady: ['read:ExponentialSum(tail)']}
+              - publish:FinalSum
+              - {repeat: tail, steady: ['capture:Y(tail)']}
+              - publish:Ostage
+            edge:
+              data:
+                publish:FinalMaximum: ['SoftmaxEven/initialize:Statistic']
+                rescale:Y(corr): ['Value/mma:Vblk(corr)@P_pair(corr)']
+                capture:Y(tail): ['Value/mma:Vblk(tail)@P_pair(tail)']
+                read:m(2*j): ['SoftmaxEven/publish_max:m(2*j)']
+                read:ExponentialSum(2*j): ['SoftmaxEven/publish:ExponentialSum(2*j)']
+                read:m(2*k+1): ['SoftmaxOdd/publish_max:m(2*k+1)']
+                read:ExponentialSum(2*k+1): ['SoftmaxOdd/publish:ExponentialSum(2*k+1)']
+                read:ExponentialSum(single): ['SoftmaxOdd/prepare:EmptySum']
+                publish:Ostage: ['Score/publish:Normalization']
+              reuse: {'publish:Ostage': ['Score/release:K_reads', 'Value/release:V_reads']}
+              sync: {'capture:Y(tail)': ['Score/wait:FinalSum']}
+realization:
+  require:
+  - item: ['design.tile_pipeline::attention.Score', 'design.tile_pipeline::attention.Value']
+    choice: tcgen05.mma with FP8 E4M3FN operands and FP32 TMEM accumulators; track operand reads and result completion
+      independently of issue.
+    reason: Softmax and Correction exchange these accumulators directly through TMEM, while the KV ring is reused
+      at slice boundaries.
+  - item: ['design.tile_pipeline::attention.LoadK', 'design.tile_pipeline::attention.LoadV']
+    choice: TMA for page-sized query/KV transfers and the output transfer; cp.async for page-table prefetch, with
+      producer-consumer barriers for the KV ring.
+    reason: The HND page view is consumed directly, and K/V share one asynchronous slice ring.
+  - item: ['design.tile_pipeline::attention.Score', 'design.tile_pipeline::attention.Correction', 'design.tile_pipeline::attention.LoadV']
+    choice: Cluster DSMEM exchanges with completion notifications for maximum/sum and zero_done; GPU-scope fence plus
+      asynchronous-proxy acquire before BF16 TMA reduce-add.
+    reason: The cluster must share a common normalization and observe zero initialization before adding separately
+      narrowed contributions to out.

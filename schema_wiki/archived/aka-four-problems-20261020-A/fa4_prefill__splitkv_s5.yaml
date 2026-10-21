@@ -1,0 +1,454 @@
+meta_data:
+  name: paged_causal_attention_prefill
+  describe: Compute right-aligned causal grouped-query attention from FP8 queries and an HND paged KV cache, returning the supplied BF16 output buffer.
+  source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_prefill/aka_solution/solution.py::Model.forward
+  dispatch: splitkv_s5
+  version: 2
+contract:
+  algorithm_requirement:
+    constant:
+      Hq: {value: 16, meaning: Query head count}
+      Hkv: {value: 1, meaning: KV head count}
+      D: {value: 256, meaning: Query and value head dimension}
+      Page: {value: 64, meaning: Tokens per physical KV page}
+    input:
+      query: {meaning: Concatenated request queries, shape: [{query: TotalQ}, {head: Hq}, {d: D}], dtype: fp8_e4m3fn}
+      kv_cache: {meaning: HND cache with key then value in its second axis, shape: [{page: PageCount}, {kind: 2}, {kv_head: Hkv}, {page_token: Page}, {
+            d: D}], dtype: fp8_e4m3fn}
+      workspace_buffer: {meaning: Caller scratch initialized to zero before first isolated use, shape: [{byte: WorkspaceBytes}], dtype: uint8}
+      block_tables: {meaning: Request-local page number to physical page ID, shape: [{request: BatchCount}, {page_slot: TableColumns}], dtype: int32, range: 'Valid
+          page entries are in [0,PageCount); unused entries are -1'}
+      seq_lens: {meaning: Used KV lengths, shape: [{request: BatchCount}], dtype: int32, range: seq_lens > 0}
+      max_q_len: {meaning: Maximum request query length, shape: [], dtype: python_int}
+      max_kv_len: {meaning: Maximum used KV length, shape: [], dtype: python_int}
+      bmm1_scale: {meaning: Composite score scale including quantization scales, shape: [], dtype: python_float, range: '0.0625'}
+      bmm2_scale: {meaning: Composite output scale, shape: [], dtype: python_float, range: '1.0'}
+      batch_size: {meaning: ABI request count, shape: [], dtype: python_int}
+      cum_seq_lens_q: {meaning: Prefix boundaries in the concatenated query tensor, shape: [{boundary: BatchCount+1}], dtype: int32}
+      cum_seq_lens_kv: {meaning: Prefix counts of allocated pages rather than KV tokens, shape: [{boundary: BatchCount+1}], dtype: int32}
+      window_left: {meaning: Disabled sliding-window selector, shape: [], dtype: python_int, range: '-1'}
+      sinks: {meaning: Disabled sink argument whose only admitted value is Python None, shape: [], dtype: '<schema-abi@pending:Python-None-sentinel>', range: None}
+      o_sf_scale: {meaning: Disabled output quantization argument whose only admitted value is Python None, shape: [], dtype: '<schema-abi@pending:Python-None-sentinel>',
+        range: None}
+      out: {meaning: Caller-owned destination whose initial contents are not read, shape: [{query: TotalQ}, {head: Hq}, {d: D}], dtype: bf16, range: 'finite,
+          inf, or NaN'}
+    output:
+      out_after: {meaning: Attention result written in place to input out, shape: [{query: TotalQ}, {head: Hq}, {d: D}], dtype: bf16}
+      output: {meaning: Returned alias of the updated out storage, shape: [{query: TotalQ}, {head: Hq}, {d: D}], dtype: bf16}
+    compute:
+    - name: Interpret the paged callable boundary
+      math: |
+        python_int denotes a Python integer; python_float denotes an IEEE binary64 Python float.
+        All tensors are contiguous in the stated axis order and reside on one CUDA device.
+        batch_size=BatchCount; cum_seq_lens_q[0]=cum_seq_lens_kv[0]=0; cum_seq_lens_q[BatchCount]=TotalQ.
+        For each independent request b: Qlen(b)=cum_seq_lens_q[b+1]-cum_seq_lens_q[b], L(b)=seq_lens[b], 0<Qlen(b)<=L(b).
+        cum_seq_lens_kv[b+1]-cum_seq_lens_kv[b]=ceil(L(b)/Page)<=TableColumns.
+        max_q_len=max_b Qlen(b); max_kv_len=max_b L(b); PageCount=sum_b ceil(L(b)/Page).
+        For 0<=j<L(b), page(b,j)=block_tables[b,floor(j/Page)].
+        K_logical[b,j,d]=kv_cache[page(b,j),0,0,j%Page,d]; V_logical[b,j,d]=kv_cache[page(b,j),1,0,j%Page,d]; padded j>=L(b) is outside the logical domain.
+        The timed replacement boundary is the complete standalone callable on the existing HND cache, including required internal work.
+        Only out is an observable input mutation; workspace_buffer contents are scratch, not an output.
+      symbol:
+        Qlen: {meaning: Function returning the query length of request b, shape: not_applicable, dtype: not_applicable}
+        L: {meaning: Function returning the used KV length of request b, shape: not_applicable, dtype: not_applicable}
+        K_logical: {meaning: Logical keys on each request's valid domain, shape: [{request: BatchCount}, {kv: max_kv_len}, {d: D}], dtype: fp8_e4m3fn}
+        V_logical: {meaning: Logical values on each request's valid domain, shape: 'ref:K_logical.shape', dtype: fp8_e4m3fn}
+    - name: Define causal attention and both observable outputs
+      math: |
+        For 0<=b<BatchCount, 0<=q<Qlen(b), 0<=h<Hq, let a=cum_seq_lens_q[b]+q.
+        J(b,q)={j in integers | 0<=j<L(b) and j<=q+L(b)-Qlen(b)}.
+        score[j]=bmm1_scale*sum_{d=0}^{D-1} query[a,h,d]*K_logical[b,j,d] for j in J(b,q).
+        m=max_{j in J(b,q)} score[j]; p[j]=exp(score[j]-m)/sum_{k in J(b,q)} exp(score[k]-m).
+        out_after[a,h,d]=bf16(bmm2_scale*sum_{j in J(b,q)} p[j]*V_logical[b,j,d]) for 0<=d<D.
+        Return the same tensor object as out; output and out_after denote its updated contents.
+      symbol:
+        J: {meaning: Function returning the right-aligned causal key set of a request/query pair, shape: not_applicable, dtype: not_applicable}
+    golden_reference:
+      source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_prefill/reference.py::Model.forward
+      tolerance:
+        out_after: atol=0.06, rtol=0.04
+        output: atol=0.06, rtol=0.04
+  hardware_specification:
+    device: NVIDIA L20D
+    arch: SM103
+    execution:
+      CTA: <hardware-execution@pending:L20D/CTA>
+      cluster: <hardware-execution@pending:L20D/cluster>
+      warp: <hardware-execution@pending:L20D/warp>
+    feature:
+      memory: <hardware-feature@pending:L20D/SMEM-TMEM-register>
+    stack:
+      language: CuTe DSL, nvidia-cutlass-dsl==4.6.1
+      toolchain: nvidia-cutlass-dsl 4.6.1 bundled compiler; torch>=2.9 and unpinned cuda-python; <toolchain@pending:CUDA-and-driver-version>
+    wiki:
+      hardware: "<wiki-hardware@pending:Blackwell/L20D.md>"
+      programming:
+        language: "<wiki-language@pending:CuTe-DSL/4.6.1/>"
+        virtual_isa: "<wiki-virtual-isa@pending:PTX/version/>"
+        machine_isa: "<wiki-machine-isa@pending:SASS/SM103/>"
+      microbench: "<wiki-microbench@pending:L20D/>"
+      sota:
+        kernel: "<wiki-sota-kernel@pending:L20D/>"
+        schema: "<wiki-sota-schema@pending:L20D/>"
+      profile: "<wiki-profile@pending:NVIDIA/>"
+design:
+  math_reshape:
+    thesis: Split the causal KV range into five contiguous block partitions, stream each with lagged-max FP8 online attention, then combine normalized FP32
+      partial outputs using their natural-log normalizers; the extra scratch and launch buy independent KV work for a short query.
+    rewrite:
+    - step: stream
+      name: Reinterpret GQA rows and score only the causal block range
+      math: |
+        Work parameters Bm, Bk, R, N and sigma are bound by work_schedule; b is one request and z is its independent KV split.
+        For r in R, local_row(r)=r-min(R), q=floor(r/Hq), h=r%Hq, Q[local_row(r),:]=query[cum_seq_lens_q[b]+q,h,:].
+        For 0<=i<N, 0<=u<Bk, let j=sigma(i)*Bk+u and p=floor(j/Page).
+        p_read=p if p*Page<L(b); otherwise p_read=2*sigma(i), redirecting the missing second page to the first.
+        K(i)[u,:]=kv_cache[block_tables[b,p_read],0,0,j%Page,:]; V(i)[u,:]=kv_cache[block_tables[b,p_read],1,0,j%Page,:].
+        S(i)[local_row(r),u]=dot32(Q[local_row(r),:],K(i)[u,:]).
+      symbol:
+        Bm: {meaning: Packed query rows per worktile, binding: 'bind:design.work_schedule::Bm'}
+        Bk: {meaning: KV tokens per local iteration, binding: 'bind:design.work_schedule::Bk'}
+        R: {meaning: Valid packed query rows of one worktile, binding: 'bind:design.work_schedule::R'}
+        N: {meaning: Number of streamed KV blocks for this worktile, binding: 'bind:design.work_schedule::N'}
+        sigma: {meaning: Local iteration to KV block map, binding: 'bind:design.work_schedule::sigma'}
+        Q: {meaning: Packed query view, shape: [{packed_row: Bm}, {d: D}], dtype: fp8_e4m3fn}
+        K: {meaning: Current logical key block, shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn}
+        V: {meaning: Current logical value block, shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn}
+        S: {meaning: Raw QK dot products before masking, shape: [{packed_row: Bm}, {kv: Bk}], dtype: fp32}
+    - step: online
+      name: Produce normalized split outputs and natural-log normalizers
+      math: |
+        c=fp32(bmm1_scale*log2(e)), evaluating the expression inside fp32 in Python binary64.
+        For each r in R independently, m(-1)=-inf, Z(-1)=0, Y(-1)=0.
+        For 0<=i<N, set T(i)[u]=S(i)[local_row(r),u] on visible entries sigma(i)*Bk+u in J(b,floor(r/Hq)); otherwise T(i)[u]=-inf.
+        m_star=max(m(i-1),max_u T(i)[u]); base_star=m_star if m_star!=-inf else 0.
+        m(i)=m(i-1) if c*(m(i-1)-base_star)>=-tau; otherwise m_star.
+        base=m(i) if m(i)!=-inf else 0; alpha(i)=exp2_native(c*(m(i-1)-base)).
+        E(i)[u]=exp2_native(fma32(c,T(i)[u],offset-c*base)) for every 0<=u<Bk.
+        P(i)[u]=fp8_e4m3fn(E(i)[u]).
+        Z(i)=alpha(i)*Z(i-1)+sum32_u E(i)[u]; Y(i)=mma32(P(i),V(i),alpha(i)*Y(i-1)).
+        a=cum_seq_lens_q[b]+floor(r/Hq), h=r%Hq; invZ=fp32(1.0/Z(N-1)).
+        Opartial[z,a,h,:]=Y(N-1)*invZ.
+        LSEpartial[z,h,a]=fp32(bmm1_scale)*m(N-1)+log_native(Z(N-1))-fp32(offset)*ln(2).
+        The selected scored shape has nonempty, finite-normalizer partials for every valid row in all five splits.
+      symbol:
+        tau: {meaning: Maximum lag in base-two score units, value: 4.0}
+        offset: {meaning: Base-two shift applied before the E4M3FN probability cast, value: 4.0}
+        m: {meaning: Retained raw-score maximum, shape: [], dtype: fp32, life: 'carried (b,z,r); i=-1..N-1'}
+        Z: {meaning: Denominator using unrounded exponentials, shape: [], dtype: fp32, life: 'carried (b,z,r); i=-1..N-1'}
+        Y: {meaning: Numerator using FP8 probabilities, shape: [{d: D}], dtype: fp32, life: 'carried (b,z,r); i=-1..N-1'}
+        P: {meaning: FP8 value-product operand, shape: [{kv: Bk}], dtype: fp8_e4m3fn}
+        Opartial: {meaning: 'Normalized per-split numerator, using FP8 probabilities internally', shape: [{split: 5}, {query: TotalQ}, {head: Hq}, {d: D}],
+          dtype: fp32, life: 'stored invocation'}
+        LSEpartial: {meaning: Per-split natural-log normalizer of the unrounded exponential weights, shape: [{split: 5}, {head: Hq}, {query: TotalQ}], dtype: fp32,
+          life: 'stored invocation'}
+      arithmetic:
+        approx: 'exp2_native and log_native use fast hardware math on SM103; unknown: <error-bound@pending:SM103/fast-exp2-log-and-division>'
+        accumulate: Z uses four FP32 pair-valued partial sums, with both components of the first pair seeded by Z_previous*(alpha*0.5) and the other pairs
+          zero. Each pair accumulates its exponential fragment; merge (g0+g1)+(g2+g3), then add the two components.
+    - step: combine
+      name: Weight normalized partials by their log normalizers
+      math: |-
+        For every valid concatenated query a, head h and feature d, let ell_z=LSEpartial[z,h,a].
+        M=max_{0<=z<5} ell_z; E_z=exp2_native(ell_z*log2(e)-M*log2(e)).
+        w_z=E_z*fp32(1.0/sum32_z E_z).
+        C(-1)=0; C(z)=C(z-1)+w_z*Opartial[z,a,h,d] for z=0,1,2,3,4.
+        out_after[a,h,d]=bf16(C(4)).
+        LSE padding z=5..31 is -inf and therefore contributes zero weight; the final LSE is not an observable output.
+      symbol:
+        C: {meaning: Split-reduction accumulator for one output element, shape: [], dtype: fp32, life: 'carried (a,h,d); z=-1..4'}
+      arithmetic:
+        accumulate: Weights use a 32-lane max and sum reduction after padding five splits to 32; each output element accumulates the five normalized partials
+          in ascending split order.
+        approx: 'exp2_native uses fast hardware exp2; unknown: <error-bound@pending:SM103/combine-fastmath-and-division>'
+    ledger:
+      baseline: Evaluate the contract by materializing FP32 dense scores and probabilities for all Qlen(b)*L(b) pairs per head.
+      footprint:
+      - {item: Attention intermediate, change: 'Two Qlen(b)*L(b) FP32 matrices per head -> D+2 FP32 carried scalars per split/packed row, a Bk-entry transient,
+          and 5*TotalQ*Hq*(D+1) FP32 global partial elements', by: [stream, online, combine]}
+      traffic:
+      - {item: Dense intermediates, change: -16*Hq*Qlen(b)*L(b) logical global bytes per request for one write and read of each matrix, by: [stream, online]}
+      - {item: Split partials, change: '+20*TotalQ*Hq*(2*D+3) logical global bytes: write/read each FP32 output partial and write/read/read each normalizer
+          across the two feature CTAs', by: [online, combine]}
+      depth:
+      - {item: KV and split reductions, change: 'Five independent local block streams, followed by one five-way output reduction; each stream retains N
+          ordered online merges', by: [online, combine]}
+      error:
+      - {item: Numerator precision, change: +1 E4M3FN rounding per probability operand; denominator retains unrounded FP32 E, by: [online]}
+      - {item: Split merge, change: +FP32 natural-log/exp2 normalization and ascending five-way output accumulation before one BF16 store, by: [online,
+          combine]}
+  work_schedule:
+    thesis: Expose five independent contiguous KV partitions for each short-query CTA pair, then launch independent eight-row/128-feature CTAs to combine
+      the normalized partials.
+    flow:
+      launch:
+      - phase: [attention]
+      - phase: [combine]
+        start_after: attention.kernel_done
+      handoff:
+        Opartial: {producer: attention, consumer: [combine], storage: global}
+        LSEpartial: {producer: attention, consumer: [combine], storage: global}
+    phase:
+      attention:
+        describe: Rectangular nonpersistent hd256 split attention, S=5, with one shared K/V loader.
+        decomposition:
+          strategy: |-
+            Bm=256, Bk=128, S=5; the selected scored configuration has BatchCount=1, Qlen(0)=200, L(0)=8648.
+            C_rect=ceil(Hq*TotalQ/Bm)=13. For logical row tile x, zmid=ceil(C_rect/2), mblock=2*x if x<zmid, else 2*(C_rect-1-x)+1.
+            R=[Bm*mblock,min(Bm*(mblock+1),Hq*Qlen(b))).
+            Let Ck=ceil(L(b)/Bk)=68, W=ceil(Ck/S)=14, lo=z*W, hi=min(lo+W,Ck).
+            CausalEnd=min(Ck,ceil((16*(mblock+1)+L(b)-Qlen(b))/Bk)); N=max(0,min(hi,CausalEnd)-lo); sigma(i)=lo+i.
+            The five pre-causal block intervals are [0,14), [14,28), [28,42), [42,56), [56,68); intersect each with the tile's causal range. Every active tile/split has N>=1 in this selected workload.
+          partition:
+            batch: {size: BatchCount, tile: 1}
+            split: {size: S, tile: 1}
+            row_tile: {size: C_rect, tile: 1}
+          worktile:
+            invariant:
+              Q: {shape: [{packed_row: Bm}, {d: D}], dtype: fp8_e4m3fn}
+            iteration:
+              K:
+                shape: [{kv: Bk}, {d: D}]
+                dtype: fp8_e4m3fn
+                direction: ascending
+              V:
+                shape: [{kv: Bk}, {d: D}]
+                dtype: fp8_e4m3fn
+                direction: ascending
+          target:
+            single_tile:
+              Opartial: {shape: [{split: 1}, {query: 16}, {head: Hq}, {d: D}], dtype: fp32}
+              LSEpartial: {shape: [{split: 1}, {head: Hq}, {query: 16}], dtype: fp32}
+        mapping:
+          worker: {unit: CTA, count: 2}
+          placement: {unit: cluster, count: 1}
+          count: BatchCount*S*C_rect
+          member:
+          - packed_row:
+            - [0, 128]
+          - packed_row:
+            - [128, 256]
+          strategy: A fresh CTA pair owns exactly one rectangular row tile and KV split; the selected launch has 65 pairs and no persistent remapping table.
+        schedule:
+          worktile_order:
+          - {by: split, direction: ascending}
+          - {by: batch, direction: ascending}
+          - {by: row_tile, direction: ascending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+      combine:
+        describe: Combine five FP32 partials into BF16 out with one 256-thread CTA per eight head-major query rows and 128 output columns.
+        decomposition:
+          strategy: |-
+            Flatten output rows in head-major order: for row idx, h=floor(idx/Qlen(b)), q=idx%Qlen(b), a=cum_seq_lens_q[b]+q. This is a view of Opartial[z,a,h,d] and LSEpartial[z,h,a], not the attention phase's query-major GQA packing.
+            BmC=8, BdC=128; each worktile reduces all five splits, padding the LSE reduction to 32 split slots. The selected B=1 grid is (400,2,1), or 800 CTAs.
+          partition:
+            batch: {size: BatchCount, tile: 1}
+            d: {size: D, tile: BdC}
+            head_query: {size: Hq*TotalQ, tile: BmC}
+          worktile:
+            invariant:
+              LSEpartial: {shape: [{split: 5}, {head_query: BmC}], dtype: fp32}
+            iteration:
+              Opartial:
+                shape: [{head_query: BmC}, {d: BdC}]
+                dtype: fp32
+                direction: ascending
+          target:
+            single_tile:
+              out_after: {shape: [{head_query: BmC}, {d: BdC}], dtype: bf16}
+            tile_reduction:
+              dimension: split
+              input: [Opartial, LSEpartial]
+              output: [out_after]
+              method: ref:design.math_reshape::combine
+        mapping:
+          worker: {unit: CTA, count: 1}
+          count: BatchCount*ceil(Hq*TotalQ/BmC)*ceil(D/BdC)
+        schedule:
+          worktile_order:
+          - {by: batch, direction: ascending}
+          - {by: d, direction: ascending}
+          - {by: head_query, direction: ascending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: Use a shared four-stage K/V stream and QK-ahead-of-PV softmax/correction pipeline for each split, then let all eight combine warps reduce LSEs
+      and overlap four-stage partial-output copies with FP32 accumulation.
+    phase:
+      attention:
+        domain:
+          n: [0, N]
+          p: [0, 2*N]
+          s: [0, 2]
+          e:
+            flatten: [p, s]
+        resource:
+          Qbuf: {space: SMEM, shape: [{packed_row: 128}, {d: 128}], dtype: fp8_e4m3fn, slot: 2, view: {Q(s): {slot: s}}}
+          Kbuf: {space: SMEM, shape: [{kv: 64}, {d: 128}], dtype: fp8_e4m3fn, slot: 4, view: {'KVStage(e[max(0,2*n-1),s])': {slot: e%4}}}
+          Vbuf: {space: SMEM, shape: [{kv: 128}, {d: 64}], dtype: fp8_e4m3fn, slot: 4, view: {'KVStage(e[min(2*n+2,2*N-1),s])': {slot: e%4}}}
+          Score:
+            space: TMEM
+            shape: [{row: 128}, {column: 128}]
+            dtype: fp32
+            slot: 2
+            view:
+              S(n): {slot: n%2}
+              P(n): {slot: n%2, part: {column: [0, 32]}, dtype: fp8_e4m3fn}
+              MaxPair(n): {slot: n%2, part: {column: [32, 34]}}
+          Y: {space: TMEM, shape: [{packed_row: 128}, {d: D}], dtype: fp32}
+          Zfinal: {space: SMEM, shape: [{packed_row: 128}], dtype: fp32}
+          Ostage: {space: SMEM, shape: [{packed_row: 128}, {d: 128}], dtype: fp32}
+        lane:
+          Load:
+            info:
+              member: warp[9:10]
+              mode: async
+              register: 32
+              verb:
+                load: 'Q stages contain D/2 slices of this member''s rows. KVStage starts with K0, follows with K(n),V(n-1) for n=1..N-1, and ends with
+                  V(N-1), with two s slices per packet: K(n,s) is packet p=max(0,2*n-1), V(n,s) is p=min(2*n+2,2*N-1). For K, member c supplies tokens [64*c,64*c+64)
+                  and features [128*s,128*s+128); for V, it supplies all 128 tokens and columns [128*s+64*c,128*s+64*c+64). Both members contribute to pair-wide
+                  readiness. Kbuf and Vbuf are distinct arrays but share one four-stage acquire/release stream.'
+            pipe:
+              steady:
+              - repeat: s
+                steady: ['load:Q(s)']
+              - repeat: e
+                steady: ['load:KVStage(e)']
+            edge:
+              reuse:
+                load:KVStage(e+4): ['MMA/mma:KVStage(e)']
+          MMA:
+            info:
+              member: CTA[0].warp[8:9]
+              mode: ordered
+              register: 32
+              verb:
+                mma: 'Consume KVStage in the loader''s packet order. A K packet computes Q(s)@K(n,s): s=0 clears S(n), s=1 completes its D contraction.
+                  A V packet computes P(n)@V(n,s) into Y''s corresponding D/2 slice, initializing it at n=0. Each product spans both CTAs. Same-issuer ordering
+                  completes an earlier PV read before a later QK write to its aliased score slot. The launch has 12 warps per CTA; warps 10 and 11 and the
+                  second CTA''s warp 8 do not issue work.'
+            pipe:
+              steady:
+              - repeat: e
+                steady: ['mma:KVStage(e)']
+            edge:
+              data:
+                mma:KVStage(e[max(0,2*n-1),s]): ['Load/load:Q(s)']
+                mma:KVStage(e[min(2*n+2,2*N-1),s]): ['Softmax/publish:P(n)']
+                mma:KVStage(e[min(2*(n+1)+2,2*N-1),0]): ['Correction/rescale:Y(n+1)']
+              reuse:
+                mma:KVStage(e[max(0,2*n-1),0]): ['Softmax/read:S(n-2)']
+          Softmax:
+            info:
+              member: warp[0:4]
+              register: 256
+              verb:
+                read: Copy S to registers and end score-slot reads; use the SM103 load-and-row-max path on unmasked blocks and recompute the row maximum
+                  after masking otherwise.
+                publish: MaxPair records the previous maximum and current safe base; P overwrites its compact region after scores are captured. Zfinal publishes
+                  the completed denominator.
+                produce: Write the natural-log normalizer for each valid packed row at this worktile's split index, after publishing Zfinal; correction
+                  may already be staging partial outputs.
+            pipe:
+              steady:
+              - repeat: n
+                steady: ['read:S(n)', 'publish:MaxPair(n)', 'publish:P(n)', 'compute:Z(n)']
+                epilogue: ['publish:Zfinal', 'produce:LSEpartial']
+            edge:
+              data:
+                read:S(n): ['MMA/mma:KVStage(e[max(0,2*n-1),1])']
+              reuse:
+                publish:MaxPair(n+2): ['Correction/read:MaxPair(n)']
+                publish:P(n+2): ['MMA/mma:KVStage(e[min(2*n+2,2*N-1),1])']
+          Correction:
+            info:
+              member: warp[4:8]
+              register: 160
+              verb:
+                read: The first MaxPair only acknowledges its publication and returns the statistics slot without reading values; later MaxPair and Zfinal
+                  are captured into registers before release.
+                rescale: Derive alpha from MaxPair and apply it to both Y slices; skip the TMEM read/modify/write when no row in the warp has alpha<1, while
+                  still returning ownership.
+                stage: Normalize the indicated Y half and stage its FP32 partial output in Ostage.
+                store: Write the staged half to this split's Opartial slice using coalesced stores and end reads of Ostage.
+            pipe:
+              steady:
+              - repeat: n[1:]
+                prologue: ['read:MaxPair(0)']
+                steady: ['read:MaxPair(n)', 'rescale:Y(n)']
+              - read:Zfinal
+              - stage:Opartial(0)
+              - store:Opartial(0)
+              - stage:Opartial(1)
+              - store:Opartial(1)
+            edge:
+              data:
+                rescale:Y(n+1): ['MMA/mma:KVStage(e[min(2*n+2,2*N-1),1])']
+                stage:Opartial(0): ['MMA/mma:KVStage(e[2*N-1,1])']
+      combine:
+        domain:
+          z: [0, 5]
+        resource:
+          LSEbuf:
+            space: SMEM
+            shape: [{split: 32}, {head_query: 8}]
+            dtype: fp32
+            view:
+              LSEBlock: {slot: 0}
+              Weights: {slot: 0}
+          PartialBuf: {space: SMEM, shape: [{head_query: 8}, {d: 128}], dtype: fp32, slot: 4, view: {Partial(z): {slot: z%4}}}
+          Accum: {space: register, shape: [{head_query: 8}, {d: 128}], dtype: fp32}
+        lane:
+          Cooperative:
+            info:
+              member: warp[0:8]
+              mode: async
+              verb:
+                load: All 256 threads issue cp.async copies. LSEBlock loads five splits and fills padded split slots with -inf; its completion includes
+                  the CTA rendezvous before LSE use. Partial(z) gives each warp one output row, with four contiguous FP32 elements per thread; its reads
+                  are private to the issuing thread.
+                compute: {meaning: 'WeightRegs transposes the LSE tile into one 32-lane warp reduction per row. Accum(z) reads Partial(z) and the corresponding
+                    shared weight, initializes the register output at z=0, and accumulates in split order; no CTA barrier is needed for private partial-buffer
+                    reads.', mode: sync}
+                publish: {meaning: Publish the normalized Weights back into the same LSEbuf and rendezvous the CTA before the output accumulation layout
+                    reads them., mode: sync}
+                store: Narrow the completed register Accum to BF16 and write its eight-row/128-column output tile.
+            pipe:
+              prologue:
+              - load:LSEBlock
+              - repeat:
+                  a: [0, 3]
+                steady: ['load:Partial(a)']
+              - compute:WeightRegs
+              - publish:Weights
+              steady:
+              - repeat:
+                  z: [0, 2]
+                steady: ['load:Partial(z+3)', 'compute:Accum(z)']
+              - repeat:
+                  z: [2, 5]
+                steady: ['compute:Accum(z)']
+              epilogue: ['store:out_after']
+            edge:
+              data:
+                compute:WeightRegs: ['load:LSEBlock']
+                compute:Accum(z): ['load:Partial(z)']
+realization:
+  require:
+  - item: design.tile_pipeline::attention.MMA
+    choice: Use tcgen05.mma with CTA-group TWO, FP8 operands and FP32 TMEM accumulators, retaining same-issuer operand ordering and pair-wide completion.
+    reason: The two-member products and aliased score/probability storage depend on these guarantees.
+  - item: design.tile_pipeline::attention.Load
+    choice: Use CopyBulkTensorTileG2SOp with CTA-group TWO and transaction completion for operand handoffs.
+    reason: Both members' transfers contribute to readiness of each shared K/V stage; reusing that stage waits for its current operand's MMA read.
+  - item: design.tile_pipeline::combine.Cooperative
+    choice: Use cp.async group commit/wait with a four-slot FP32 partial-output ring; preserve the CTA rendezvous around LSE redistribution and normalized-weight
+      publication.
+    reason: The same eight warps issue copies and compute; prefetched partials remain in flight while weights are reduced, and each thread consumes only
+      its own partial-copy fragments.
