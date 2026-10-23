@@ -1,19 +1,35 @@
 # FA4 prefill schema
 
-本目录包含 11 份独立完整的 plan。文件名为 `fa4_prefill__<path>.yaml`，dispatch ID 为 `fa4_prefill.<path>`；精确选择条件见各文件的 `meta_data.dispatch.when`，修订号见 `meta_data.version`。
+本任务以矩形 static 调度、K/V 独立加载的设计作为 root。它保留通用的请求与 query 网格，其他节点针对工作量、请求组织或加载方式派生。完整 Contract 只在 `root.yaml` 中定义。
 
-| Schema 路径 | Dispatch 概览 |
+```mermaid
+flowchart TD
+    root --> rect_joint_load
+    root --> packed_persistent
+    packed_persistent --> single_persistent_dual_load
+    single_persistent_dual_load --> single_persistent_joint_load
+    packed_persistent --> small_persistent_lpt
+    small_persistent_lpt --> small_persistent_shared_rescale
+    root --> small_static_lpt
+    small_static_lpt --> small_static_shared_rescale
+    root --> splitkv_dual_load
+    splitkv_dual_load --> splitkv_joint_load
+```
+
+| 节点 | Workload 与相对父节点的设计变化 |
 | --- | --- |
-| [splitkv_joint_load](fa4_prefill__splitkv_joint_load.yaml) | KV 分段，K/V 联合加载 |
-| [splitkv_dual_load](fa4_prefill__splitkv_dual_load.yaml) | KV 分段，K/V 独立加载 |
-| [single_persistent_joint_load](fa4_prefill__single_persistent_joint_load.yaml) | 单请求 persistent，K/V 联合加载 |
-| [single_persistent_dual_load](fa4_prefill__single_persistent_dual_load.yaml) | 单请求 persistent，K/V 独立加载 |
-| [small_persistent_lpt](fa4_prefill__small_persistent_lpt.yaml) | 2–4 请求，LPT 排列，persistent，普通 rescale |
-| [small_static_lpt](fa4_prefill__small_static_lpt.yaml) | 2–4 请求，LPT 排列，static，普通 rescale |
-| [small_persistent_shared_rescale](fa4_prefill__small_persistent_shared_rescale.yaml) | 4 请求且 TotalQ=16384，LPT 排列，persistent，共享 rescale |
-| [small_static_shared_rescale](fa4_prefill__small_static_shared_rescale.yaml) | 4 请求且 TotalQ=16384，LPT 排列，static，共享 rescale |
-| [packed_persistent](fa4_prefill__packed_persistent.yaml) | 5–16 请求，保留请求次序，persistent |
-| [rect_joint_load](fa4_prefill__rect_joint_load.yaml) | 矩形 static 分派，K/V 联合加载 |
-| [rect_dual_load](fa4_prefill__rect_dual_load.yaml) | 矩形 static 分派，K/V 独立加载 |
+| [root](root.yaml) | 通用矩形 static 双加载设计，承接大 batch 及部分单请求 workload |
+| [rect_joint_load](rect_joint_load.yaml) | 单请求；矩形调度下由同一加载角色处理 K/V |
+| [packed_persistent](packed_persistent.yaml) | 中等 batch；折叠 query 工作并用 persistent worker 接续多份工作，保留请求次序 |
+| [single_persistent_dual_load](single_persistent_dual_load.yaml) | 单请求；使用单请求的 persistent 工作映射 |
+| [single_persistent_joint_load](single_persistent_joint_load.yaml) | 单请求；persistent 调度下由同一加载角色处理 K/V |
+| [small_persistent_lpt](small_persistent_lpt.yaml) | 小 batch；persistent 遍历按 KV 长度降序排列请求 |
+| [small_persistent_shared_rescale](small_persistent_shared_rescale.yaml) | 特定小 batch；softmax 向 correction 传递已计算的 alpha |
+| [small_static_lpt](small_static_lpt.yaml) | 小 batch；按 KV 长度降序排列并折叠 query 工作，每个 worker 只承担一份工作 |
+| [small_static_shared_rescale](small_static_shared_rescale.yaml) | 特定小 batch；static 调度下改为共享已计算的 alpha |
+| [splitkv_dual_load](splitkv_dual_load.yaml) | query 工作不足时；增加 KV 分段、FP32 部分结果和独立合并 kernel |
+| [splitkv_joint_load](splitkv_joint_load.yaml) | 单请求；保留 KV 分段与合并，由同一加载角色处理 K/V |
 
-LPT 按 KV 长度降序排列请求；persistent 按固定步长接续多份工作，static 每个 worker 只承担一份工作；共享 rescale 传递已计算的 alpha，普通 rescale 传递最大值信息。
+树与各节点的 `meta_data.dispatch.parent` 对应，表示设计派生关系。root 和其他节点均按各自的 `when` 在共同契约域内参与选择；精确条件与修订号分别见 YAML 的 `meta_data.dispatch.when`、`meta_data.version`。
+
+LPT 指按 KV 长度降序排列请求；persistent 按固定步长接续多份工作，static 每个 worker 只承担一份工作。split 数、长度阈值等参数变化留在所属节点内。

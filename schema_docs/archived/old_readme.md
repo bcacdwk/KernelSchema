@@ -1,4 +1,6 @@
-# KernelSchema
+# KernelSchema（旧版 README，已归档）
+
+> 本文件是旧版 README，已被仓库根目录的新版 `README.md` 取代，只读保留；其中的进展日志、分区讨论历程等不再维护，内容以新版 README 与 `schema_docs/1–6` 为准。
 
 本仓库设计一套描述 GPU kernel **流水线设计**的 schema：用结构化的 YAML 记录一个 kernel 要算什么、数学上怎么改写、工作怎么分配到硬件、tile 内部怎么流水，以及实现时必须遵守的条件。schema 位于所有 GPU 编程语言之上，由 Designer 填写、Coder 实现、人类专家审阅。
 
@@ -172,7 +174,7 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 
 | 这条信息是什么 | 写在哪里 |
 | --- | --- |
-| 任务名称、设计出处与这份 plan 的修订号 | `meta_data`，位于 Plan 最前面，字段规则见 `schema_docs/1`，不属于 Contract |
+| 任务名称、设计出处、dispatch 路径及其选择条件，以及这份 plan 的修订号 | `meta_data`，位于 Plan 最前面，字段规则见 `schema_docs/1`，不属于 Contract |
 | 算子从外部看必须满足的输入、输出与数学关系，包括掩码、量化、路由、状态与边界情况，以及验收的误差判据 | `contract.algorithm_requirement` |
 | 目标设备有哪些执行单元、什么能力、边界在哪里，本任务用哪个实现栈 | `contract.hardware_specification`，数值规格在 wiki / microbench |
 | 算出哪些值、如何定义、以什么精度存在、存在多久 | `design.math_reshape` |
@@ -196,7 +198,7 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 
 **篇幅锚点。** 一份 plan 应在允许的范围内尽可能的短，我们不对具体的行数有确切的要求，不能以形害意、导致因为限制篇幅反而漏掉内容；但是更不能因为没有篇幅而随意发挥。核心在于，删除schema的任何内容都会导致实际的设计信息被影响，这就说明schema达到了承载的都是有用信息。参照 CAKE 论文的 Table 4：FA4 forward 的 CUDA device 代码约 2369 行，Cake IR 表达为 430 行，可执行的 schedule 表示压缩了约 5 倍。schema 去掉操作流之后应当再小几倍，一个 SOTA attention kernel 的设计骨架大约在 50–150 行；写到 400 行，说明操作流细节漏了进来，应下放给 Coder。
 
-** dispatch ** 待定，目前的策略是针对不同的workload等情况，直接写一个新的schema的dispatch版本（比如host出现了dispatch，那么schema也应该划分）
+**dispatch。** 一份 plan 只描述一条流水线。不同 workload 明显需要不同的流水线时（例如 host 按 workload 分派到不同的设计），每条路径单独写一份完整的 plan，由 `meta_data.dispatch` 标识并给出选择条件；只是参数不同的 workload 留在同一份 plan 内。字段、命名与目录组织见 `schema_docs/1`。
 
 ## 5 文件格式：schema 用 YAML，template 用 CUE
 

@@ -2,16 +2,7 @@ meta_data:
   name: paged_sparse_grouped_query_attention
   describe: Compute selected paged attention, round the attention result, and apply an elementwise sigmoid gate.
   source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/qsa_prefill/aka_solution/solution.py::Model.forward
-  version: 2
-  dispatch:
-    id: qsa_prefill.union_persistent
-    when: >
-      NVIDIA L20D / SM103 serialized eager calls in the single-request fitted-step15 domain: BF16 q and output_gate [4096,24,256],
-      BF16 K/V [2626,128,2,256] with element strides [2157376,512,256,1] and V base delta 65536 elements,
-      int32 logical_indices [4096,2052], block_table [1,2054], and zero token_to_req [4096].
-      Each row supplies 512 distinct completed four-token groups plus a 0..3-token causal tail and an appended valid_count;
-      every selected token maps to initialized finite K/V. Both CP ranks and all fitted index draws use this path,
-      including either use_prefill_config value and out=None or a compatible supplied out.
+  version: 4
 contract:
   algorithm_requirement:
     constant:
@@ -47,6 +38,7 @@ contract:
     compute:
       - name: Resolve the supplied selection and apply gated attention
         math: |
+          K/V share storage with element strides [2157376,512,256,1]; v_cache starts 65536 elements after k_cache.
           For each independent row r and head h, v=floor(h/GroupSize), J(r)={0,...,logical_indices[r,SelectedWidth]-1}.
           For j in J(r), k=logical_indices[r,j], page=block_table[0,floor(k/PageSize)], offset=k%PageSize.
           K_j=k_cache[page,offset,v,:], V_j=v_cache[page,offset,v,:]; score[j]=scale*sum_{d=0}^{D-1} q[r,h,d]*K_j[d].

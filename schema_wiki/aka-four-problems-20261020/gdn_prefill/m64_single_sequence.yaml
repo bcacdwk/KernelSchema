@@ -2,74 +2,11 @@ meta_data:
   name: gated_delta_rule_prefill
   describe: Apply grouped-head gated delta updates to packed sequences and overwrite the supplied output and final-state buffers.
   source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/gdn_prefill/aka_solution/solution.py::Model.forward
-  version: 1
+  version: 3
   dispatch:
-    id: gdn_prefill.m64_single_sequence
-    when: >-
-      On SM103, select this path when B=cu_seqlens.numel()-1 equals 1, with 1<=T<=16384;
-      q/k are BF16 [T,4,128], v/output are BF16 [T,32,128], alpha/beta are FP32 [T,32],
-      and initial_state/output_state are present FP32 [B,32,128,128]. The Model.forward entry
-      forces 64 value rows, with no checkpoints or state-pool indices. Scale is the Python
-      binary64 result of 1.0/math.sqrt(128). All positive lengths, including T%128==0, share this plan.
-contract:
-  algorithm_requirement:
-    constant:
-      HQ: {value: 4, meaning: Query and key head count.}
-      HV: {value: 32, meaning: Value and state head count.}
-      DK: {value: 128, meaning: Key dimension.}
-      DV: {value: 128, meaning: Value dimension.}
-      epsilon: {value: 1.0e-10, meaning: Additive stabilizer for linear decay.}
-    input:
-      q: {meaning: Unnormalized queries., shape: [token: T, head: HQ, dk: DK], dtype: bf16}
-      k: {meaning: Pre-normalized keys., shape: [token: T, head: HQ, dk: DK], dtype: bf16, range: "BF16 result of torch.nn.functional.normalize(p=2.0, dim=-1) on the BF16 generator output."}
-      v: {meaning: Values., shape: [token: T, head: HV, dv: DV], dtype: bf16}
-      alpha: {meaning: Linear decay factors., shape: [token: T, head: HV], dtype: fp32, range: "0 <= alpha < 1"}
-      beta: {meaning: Delta-update strengths., shape: [token: T, head: HV], dtype: fp32, range: "0 <= beta < 1"}
-      initial_state: {meaning: Explicit incoming value-by-key state., shape: [batch: B, head: HV, dv: DV, dk: DK], dtype: fp32, range: "All zeros or the final state of an independent 32-token reference prefix per sequence under the same input contract."}
-      cu_seqlens: {meaning: Packed sequence boundaries., shape: [boundary: B+1], dtype: int64, range: "Starts at 0, strictly increases, ends at T; 1<=B<=16 and T<=16384."}
-      scale: {meaning: Mandatory Python output multiplier., shape: [], dtype: fp64, range: "Python binary64 1.0/math.sqrt(DK), equal to 0.08838834764831843."}
-      output: {meaning: Preallocated output buffer., shape: [token: T, head: HV, dv: DV], dtype: bf16, range: "Arbitrary contents including NaN; previous contents ignored."}
-      output_state: {meaning: Preallocated final-state buffer., shape: [batch: B, head: HV, dv: DV, dk: DK], dtype: fp32, range: "Arbitrary contents including NaN; previous contents ignored."}
-    output:
-      O: {meaning: First returned tensor aliasing and fully overwriting output., shape: [token: T, head: HV, dv: DV], dtype: bf16}
-      S_final: {meaning: Second returned tensor aliasing and fully overwriting output_state., shape: [batch: B, head: HV, dv: DV, dk: DK], dtype: fp32}
-    compute:
-      - name: Decay and update the state before inclusive readout
-        math: |
-          All tensors are contiguous CUDA tensors. Before key normalization, q/k/v rows have independent
-          Normal(0,0.05) centers and Uniform(center-0.25,center+0.25) elements rounded to BF16.
-          Independently for each 0<=b<B and 0<=h<HV, let hq=floor(h/(HV/HQ)),
-          L_b=cu_seqlens[b+1]-cu_seqlens[b]>0 and State(-1)=initial_state[b,h].
-          For 0<=t<L_b, x=cu_seqlens[b]+t, 0<=j<DV and 0<=d<DK:
-            D=(alpha[x,h]+epsilon)*State(t-1).
-            delta[j]=beta[x,h]*(v[x,h,j]-sum_d D[j,d]*k[x,hq,d]).
-            State(t)[j,d]=D[j,d]+delta[j]*k[x,hq,d].
-            O[x,h,j]=bf16(scale*sum_d State(t)[j,d]*q[x,hq,d]).
-          S_final[b,h]=State(L_b-1); only output and output_state are mutated.
-          Timing includes Model.forward and its int64-to-int32 boundary conversion; input generation,
-          normalization, continuation-prefix evaluation, allocation and NaN fill are outside timing.
-        symbol:
-          State: {meaning: Updated reference state after local token t., shape: [batch: B, head: HV, dv: DV, dk: DK], dtype: fp32}
-    golden_reference:
-      source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/gdn_prefill/reference.py::Model.forward
-      tolerance:
-        O: "atol=0.01, rtol=0.01; every element of both the returned tensor and mutated_inputs.output."
-        S_final: "atol=0.005, rtol=0.001; every element of both the returned tensor and mutated_inputs.output_state."
-      gap: The oracle evaluates the recurrence with FP32 block_size=32 inversion and log-space decay; that blocked evaluation defines the floating-point comparison values.
-  hardware_specification:
-    device: NVIDIA L20D
-    arch: SM103
-    execution: {CTA: "<hardware-execution@pending:L20D/CTA>", warp: "<hardware-execution@pending:L20D/warp>"}
-    feature: {SMEM: "<hardware-feature@pending:L20D/SMEM>", TMEM: "<hardware-feature@pending:L20D/TMEM>", register: "<hardware-feature@pending:L20D/register>", asynchronous_execution: "<hardware-feature@pending:L20D/asynchronous_execution>"}
-    stack:
-      language: CuTe DSL, nvidia-cutlass-dsl[cu13]>=4.5.0
-      toolchain: "CuTe DSL bundled compiler; torch>=2.9; cuda-python>=13.0; CUDA major>=13; <stack@pending:resolved_versions>"
-    wiki:
-      hardware: "<wiki-hardware@pending:L20D/SM103.md>"
-      programming: {language: "<wiki-language@pending:CuTe-DSL/resolved-version/>", virtual_isa: "<wiki-virtual-isa@pending:PTX/version/>", machine_isa: "<wiki-machine-isa@pending:SASS/SM103/>"}
-      microbench: "<wiki-microbench@pending:L20D/>"
-      sota: {kernel: "<wiki-sota-kernel@pending:L20D/>", schema: "<wiki-sota-schema@pending:L20D/>"}
-      profile: "<wiki-profile@pending:NVIDIA/>"
+    id: m64_single_sequence
+    parent: root
+    when: Select exactly when B=1.
 design:
   math_reshape:
     thesis: Replace the token dependency chain with chunk matrix products and a hierarchical inverse, paying local quadratic work and BF16 rounding while carrying state in FP32.

@@ -2,9 +2,9 @@ meta_data:
   name: paged_grouped_query_decode_attention
   describe: Compute right-aligned causal attention against a paged FP8 KV cache; overwrite BF16 out.
   source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_decode/aka_solution/solution.py::Model.forward
-  version: 2
+  version: 4
   dispatch:
-    id: fa4_decode.q4_global
+    id: root
     when: |
       Let B=BatchCount, L=max_seq_len, P=PageCount, C=ceil(L/256), skew=(128*P<B*L),
       compact=(L>=24576 and ((not skew and B in {10,11}) or
@@ -36,7 +36,7 @@ contract:
       o_sf_scale: {meaning: Required None sentinel; output scaling tensor disabled., shape: [], dtype: '<schema-abi@pending:Python-None-sentinel>', range: None}
       out: {meaning: Destination; incoming contents are ignored., shape: [{query: TotalQuery}, {head: HeadCount}, {d: D}], dtype: bf16, range: Any BF16 bit pattern; never read before
           overwrite.}
-      q_len_per_req: {meaning: Number of query-tail tokens per request, shape: [], dtype: python_int, range: [4, 4]}
+      q_len_per_req: {meaning: Number of query-tail tokens per request, shape: [], dtype: python_int, range: "q_len_per_req in {1, 4}"}
     output:
       output: {meaning: 'Returned tensor, aliasing out.', shape: [{query: TotalQuery}, {head: HeadCount}, {d: D}], dtype: bf16}
       out_after: {meaning: In-place replacement of input out; identical to output., shape: [{query: TotalQuery}, {head: HeadCount}, {d: D}], dtype: bf16}

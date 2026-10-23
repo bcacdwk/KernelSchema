@@ -2,15 +2,10 @@ meta_data:
   name: gated_delta_rule_prefill
   describe: Apply grouped-head gated delta updates to packed sequences and overwrite the supplied output and final-state buffers.
   source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/gdn_prefill/aka_solution/solution.py::Model.forward
-  version: 1
+  version: 3
   dispatch:
-    id: gdn_prefill.m64_packed_sequences
-    when: >-
-      On SM103, select this path when B=cu_seqlens.numel()-1 satisfies 2<=B<=16, every sequence length is positive, and T<=16384;
-      q/k are BF16 [T,4,128], v/output are BF16 [T,32,128], alpha/beta are FP32 [T,32],
-      and initial_state/output_state are present FP32 [B,32,128,128]. The Model.forward entry
-      forces 64 value rows, with no checkpoints or state-pool indices. Scale is the Python
-      binary64 result of 1.0/math.sqrt(128). All valid packed length distributions and both initial-state modes share this plan.
+    id: root
+    when: Select exactly when B>1.
 contract:
   algorithm_requirement:
     constant:
