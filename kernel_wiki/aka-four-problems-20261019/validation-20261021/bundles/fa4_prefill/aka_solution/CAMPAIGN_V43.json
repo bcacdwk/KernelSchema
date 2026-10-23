@@ -1,0 +1,154 @@
+{
+  "version": "v43",
+  "masked": false,
+  "timestamp": "2026-09-13T01:10:39.657520+00:00",
+  "performance": {
+    "latency_us": 1250.0801957223607,
+    "latency_us_geomean": 1250.0801957223607,
+    "latency_us_arith_mean": 2403.547727316618,
+    "latency_us_by_shape": {
+      "0": 71.66269598178584,
+      "1": 204.92544483289134,
+      "2": 2137.925436719561,
+      "3": 508.055685745161,
+      "4": 1909.2403196845817,
+      "5": 4375.063054872273,
+      "6": 166.92790796027438,
+      "7": 4641.741239936726,
+      "8": 1110.902382487409,
+      "9": 134.1119891970495,
+      "10": 3438.38230752936,
+      "11": 6604.380799739371,
+      "12": 244.3743178854776,
+      "13": 2937.5291799817915,
+      "14": 1447.0403746685183,
+      "15": 1777.4458037718096,
+      "16": 8637.831173823757,
+      "17": 2674.534297719415,
+      "18": 1909.3039545819206,
+      "19": 2060.921331916205,
+      "20": 350.4708708012567,
+      "21": 1421.8081823153068,
+      "22": 5712.759896531087,
+      "23": 2284.788617768366,
+      "24": 7588.282036699293,
+      "25": 309.65024165802015,
+      "26": 68.17532353811175,
+      "27": 2125.668597370592,
+      "28": 2994.178640479082,
+      "29": 2081.873582093797
+    },
+    "measurement_scope": "real_evaluator_shapes",
+    "shape_ids_are_opaque": true,
+    "measurement_status": "complete",
+    "measured_shape_count": 30,
+    "expected_shape_count": 30,
+    "shape_measurement_repeats": 2,
+    "measurement_subject": "incumbent",
+    "measurement_source": "canonical_incumbent_carry_forward",
+    "carried_from_version": "v37",
+    "speedup_vs_ref_geomean": 1.0485106268462285
+  },
+  "optimization": {
+    "action_category": "long_horizon_episode",
+    "action_description": "Episode 122 closes two false leads with measurement, then ships a bit-identical gated pipeline-depth candidate. CLOSED: (1) HOST OVERHEAD is NOT exposed in the authoritative metric -- end_to_end_time_ms is triton do_bench(warmup=10,rep=100,return_mode=all) median, which brackets one Model.forward behind a 256MB L2 flush; with n_repeat=O(1000s) for small shapes the ~60us host dispatch runs ahead in steady state, so db==kernel GPU time with host HIDDEN for every shape (t1_b1_q64_kv64 db 43us < host 61us). The source _hd256_fastpath replay is also DEAD CODE (cache stored under a 17-tuple _hd256_fast_sig at interface.py:1752 but looked up under a 7-tuple short sig at :1897, never matches; and kernel.py calls _flash_attn_fwd which only populates the cache, never consults it) so fixing it would not move db. (2) exp2 already optimal on sm_103 (hardware ex2, +5-9% shipped). (3) kv_stage swept globally deeper(5,6) and shallower(3,2): kv4 is the robust GLOBAL optimum; depth is a load-bound-vs-fill tradeoff, not a broad lever. CANDIDATE: gate a deeper KV pipeline (kv7) to the load-latency-bound batch1 NON-SPLIT path only (use_dedicated_hd256_kernel AND NOT hd256_split_kv_loads == batch1 & max_seqlen_k<96K, the single-interleaved-load-warp path NCU shows is long_scoreboard-bound 42% / 76% tensor). interface.py only (+36/-2): new _HD256_KVSTAGE_NS knob (default 7), hd256_kv_stage_eff wired into compile_key + kv_stage_override; the compute-bound split path (batch>1/kv>=96K, ~85% tensor) keeps eff=0 -> kernel default 4 -> byte-identical compile (it REGRESSES under depth, b8 +8-10% at kv6/7). EVIDENCE (L20D/sm_103 gateway, runtime cap (10,3) 148 SMs authoritative over the desensitized name; torch 2.9.0+cu130, triton 3.7.1): BIT-IDENTICAL over the complete public domain (54 comparisons=18 shapes x 3 draws: batch1 non-split kv64..90000 + q16384 full-causal, batch1 split kv99000/131072, batch>1 split b2/b4/b8/b16, ragged b3/b4/b16; n_bad=0, worst_maxabs 0.0, all torch.equal; rel_l2 vs immutable reference worst 0.0261<0.05). ABBA (db column, 5 paired blocks, arm order alternated): non-split family +8.07% geomean (best -22.4% b1_q1024_kv8192, -19.2% b1_q1024_kv65536, -7.9% b1_q2048_kv16384; worst changed shape 1.0034=noise), split family -0.21% NEUTRAL (byte-identical, all within the ~+-0.8% noise floor), overall +4.34%, ZERO regressions; ship-defaults smoke (no monkeypatch) confirms the as-committed default IS the candidate. RISK: the win surface is genuinely batch1-non-split-only (the dominant split family is compute-bound and regresses under depth, so it cannot be broadened by this lever); auth geomean ~= +8% x (hidden batch1 non-split fraction), clearing the 1% gate iff that fraction >~12% (4 of 30). It is STRICTLY SAFER than v42 split-for-batch1 (which changed warp structure and measured -0.9% auth): depth adds no warps and never raises time-to-first-MMA (fill=min(depth,blocks)), so no non-split shape can regress and the split family is byte-identical -- the auth floor is neutral, not negative. If the hidden batch1 non-split fraction is too low (the v41/v42 dilution lesson) it dilutes below 1% like them; that is the dominant residual risk.",
+    "expected_impact": "episode exploration did not produce a promotable improvement",
+    "risks_and_rollback": "incumbent kernel was preserved"
+  },
+  "profile_evidence": {
+    "tool_used": "episode journal",
+    "evidence_summary": "4 structured experiments",
+    "bottleneck_type": "episode-derived",
+    "evidence_chain": "episode evidence -> terminal handoff -> no promotion"
+  },
+  "experience": {
+    "experiment_count": 4,
+    "recorded_experiment_count": 4,
+    "experiments": [
+      {
+        "index": 1,
+        "name": "reconstruct_incumbent_and_decompose_host_vs_device_overhead",
+        "hypothesis": "Tree source at HEAD c921ca4 is byte-identical to the episode-116 promoted incumbent (episodes 117-121 committed only memory/vN.json, no source). The authoritative metric is end_to_end_time_ms = triton do_bench(warmup=10,rep=100,return_mode=all) median, which brackets one Model.forward with CUDA events behind a 256MB L2 flush. Hypothesis to test: host-side Python dispatch in _flash_attn_fwd (~60us per the interface.py:88-95 comment) may be EXPOSED in db for small shapes (a broad bit-identical lever), since the source already documents a fast-path replay for exactly this.",
+        "change": "Built profiles/e122/probe.py (public-contract, vendor pinned first + flash_attn evicted). Decomposed per-shape time into db (do_bench median, authoritative proxy), dev (cuda-event throughput over 50 back-to-back no-sync calls), and host (perf_counter enqueue cost, no sync) across 13 shapes tiny->extreme. Also read the fast-path internals.",
+        "evidence": "HW ground truth: capability (10,3)=sm_103, 148 SMs, smem_optin 232448B, torch 2.9.0+cu130, triton 3.7.1 (desensitized name NVIDIA L20D). host cost is ~60-64us for EVERY shape (full _flash_attn_fwd dispatch). But db < host even for the tiniest shape (t1_b1_q64_kv64: db=43.07us, dev=61.50us, host=60.96us): do_bench 256MB L2 flush (~32us GPU) + huge iteration count (n_repeat=int(100/0.043)=2325 for t1) let the host run ahead in steady state, so db == kernel GPU time with host HIDDEN. CODE: _flash_attn_fwd (interface.py:628, the entry kernel.py calls directly) only POPULATES _HD256_FAST_CACHE (1754/1777); the REPLAY _hd256_fastpath is consulted only at line 3748 inside flash_attn_varlen_func, which kernel.py bypasses. WORSE: the cache is STORED under _hd256_fast_sig (17-tuple incl knobs, line 1752) but LOOKED UP under a 7-tuple short sig (line 1897) -> dict.get never matches -> the fast path is DEAD CODE that never fires even for its intended caller. Confirmed empirically: host stays ~60us for all shapes (no replay).",
+        "result": "Host-dispatch reduction is NOT a viable lever for the authoritative metric: db is kernel-GPU-bound (host hidden behind the do_bench flush+iteration count) for every shape including the tiniest. Fixing the dead fast path would cut host 60->~10us but leave db unchanged. This falsifies the interface.py:88-95 premise for the current do_bench protocol and closes the host-overhead direction. db is also COLD-CACHE (L2 flushed): measured cold penalty db-dev is +18% for batch1 non-split (load-bound) but only +5% for batch>1 split (compute-bound, robust). Next: device-side levers only.",
+        "decision": "pivot",
+        "timestamp": "2026-09-13T00:07:17.637507+00:00"
+      },
+      {
+        "index": 2,
+        "name": "kv_stage_global_sweep_deeper_and_shallower_falsified_as_a_global_lever",
+        "hypothesis": "db is cold-cache (L2 flushed) so per-tile pipeline fill latency is exposed; kv_stage (KV smem pipeline depth, default 4, knob FA_HD256_KVSTAGE in compile_key line 1340 + kv_stage_override line 1530) is bit-identical. Hypothesis: a deeper pipeline broadly hides the cold fill + dependent page-gather latency; a shallower one might cut fill cost for the many-tile batch>1 family.",
+        "change": "Zero source change: same-invocation ABBA via monkeypatching interface._HD256_KVSTAGE (compile_key reads it per call). profiles/e122/kv_sweep.py, authoritative db column (do_bench warmup=10 rep=100 median), 5 paired blocks, balanced 9-shape set weighted to the dominant batch>1 split family. Swept kv_stage 5,6 (deeper) then 3,2 (shallower) vs base 4.",
+        "evidence": "DEEPER: only robust monotone win is batch1 NON-SPLIT long-kv (b1_q2048_kv16384: kv5 -5.6%, kv6 -9.6%); batch>1 split deltas inconsistent across kv5/kv6 (m1 +1.4%/+0.05%, l2 +1.6%/-1.0%, b4 +0.8%/+1.7%) = ~+-1.5% noise. Balanced geomean kv5 +0.50%, kv6 +1.18% (driven entirely by the one b1 shape). SHALLOWER: kv3 geomean -2.73%, kv2 -8.63% (b1_q2048_kv16384 +17.4%/+58.6%, b1_q1024_kv131072 +7.8%/+19.5%) - shallower HURTS badly, confirming the non-split path is load-latency-bound. batch>1 shallow was heterogeneous (b4 -4.4% at kv3 but l2 +6.4%), no clean broad win.",
+        "result": "kv_stage=4 is a robust GLOBAL optimum; depth is a load-bound-vs-fill tradeoff, not a broad lever. Deeper helps only the batch1 non-split family (single interleaved load warp); shallower hurts it. A per-shape oracle depth would give +2.1% but is an overfitting trap (heterogeneous, misclassification costs up to +6.4%). The actionable finding: gate deeper pipeline to the non-split path only. decision=continue toward that conditional candidate.",
+        "decision": "continue",
+        "timestamp": "2026-09-13T00:32:44.267663+00:00"
+      },
+      {
+        "index": 3,
+        "name": "depth_sweep_finds_optimal_non_split_depth_and_confirms_split_must_keep_kv4",
+        "hypothesis": "If the batch1 non-split path is load-latency-bound, the optimal KV depth for it is >4 and the win grows with depth until smem saturates; the compute-bound batch>1 split path must KEEP kv4 (deeper regresses it), so the depth must be gated to the non-split path.",
+        "change": "profiles/e122/depth_b1.py: same-invocation ABBA (interface._HD256_KVSTAGE monkeypatch), db column, 5 paired blocks, 7 batch1 non-split shapes (kv64..kv65536, q64..q4096) + 2 batch>1 split controls, swept kv4/5/6/7/8.",
+        "evidence": "All depths 5-8 fit smem (compiled+ran 9/9; smem is shape-independent: kv_stage x fixed K/V stage bytes + Q(q_stage=2) + sO_epi(128x128) + barriers, within the 232448B optin). batch1 NON-SPLIT geomean vs kv4: kv5 +3.71%, kv6 +7.30%, kv7 +8.08%, kv8 +8.15% (plateaus at kv7). Per-shape at kv7: b1_q1024_kv8192 -22.1%, b1_q1024_kv65536 -19.6%, b1_q2048_kv16384 -8.9%, b1_q512_kv4096 -1.4%, b1_q4096_kv32768 -0.7%, tiny b1_q64_kv64/b1_q256_kv2048 neutral (fill=min(depth,blocks)). CONTROLS: split b8_q512_kv4096 REGRESSES with depth (kv5 +3.8%, kv6 +8.2%, kv7 +9.7%) and split b4_q1024_kv8192 is neutral - so deeper must NOT touch the split path.",
+        "result": "Optimal non-split depth = kv7 (+8.08% family geomean, essentially tied with kv8 at lower smem). The split path must keep kv4 (deeper regresses the compute-bound dominant family). This dictates a CONDITIONAL depth gated on (use_dedicated_hd256_kernel AND NOT hd256_split_kv_loads) = batch1 & max_seqlen_k<96K. Chose kv7. decision=continue to implement the gated candidate.",
+        "decision": "continue",
+        "timestamp": "2026-09-13T00:44:01.987570+00:00"
+      },
+      {
+        "index": 4,
+        "name": "implement_gated_deeper_non_split_pipeline_validate_bit_identity_and_abba",
+        "hypothesis": "A deeper KV pipeline (kv7) gated to the load-latency-bound batch1 non-split path is bit-identical, strictly no-regression (the split path keeps kv4 byte-identically), and wins ~8% on that family -- a safer bet than v42 split (which changed warp structure and regressed -0.9% auth).",
+        "change": "interface.py ONLY (+36/-2): added _HD256_KVSTAGE_NS knob (default 7, env FA_HD256_KVSTAGE_NS, NOT in adapter _STABLE_KNOBS so the source default governs); computed hd256_kv_stage_eff = _HD256_KVSTAGE if >0 else (_HD256_KVSTAGE_NS if use_dedicated_hd256_kernel and not hd256_split_kv_loads and _HD256_KVSTAGE_NS>0 else 0); wired it into the compile_key (was _HD256_KVSTAGE) and the kv_stage_override kwarg. Split path => eff 0 => kernel default 4 => compile_key entry identical to incumbent (byte-identical compile). No kernel-body change.",
+        "evidence": "BIT-IDENTITY (profiles/e122/validate.py, fresh vendor import): 54 comparisons = 18 shapes x 3 random draws, candidate(kv7 non-split) vs incumbent arm(_HD256_KVSTAGE_NS=0 => kv4) on the SAME input tensors: n_bad=0, worst_maxabs=0.0, all torch.equal=True. Domain covered: batch1 non-split kv64/2048/4096/8192/16384/32768/65536/90000 + q16384_kv16384 (max total_q full causal); batch1 split kv99000/kv131072; batch>1 split b2/b4/b8/b16; ragged b3/b4/b16 (flatten/LPT). rel_l2 vs immutable reference worst 0.026129 < 0.05 (inc==cand). ABBA (profiles/e122/abba.py, db column, 5 paired blocks, arm order alternated): NON-SPLIT family geomean +8.07% (n=7, worst 1.0034=noise, best 0.7757=-22.4%: b1_q1024_kv8192 -22.4%, b1_q1024_kv65536 -19.2%, b1_q2048_kv16384 -7.9%); SPLIT family geomean -0.21% NEUTRAL (n=6, all within +-0.8%, byte-identical compile); overall +4.34%, overall worst 1.0081 on a BYTE-IDENTICAL split shape (= the ~+-0.8% noise floor, not a regression). SHIP-DEFAULTS smoke (no monkeypatch): _HD256_KVSTAGE_NS=7/_HD256_KVSTAGE=0 confirmed; non-split default(kv7) vs incumbent(kv4) torch.equal=True maxabs 0.0 and 56.26us vs 70.85us (ratio 0.794); split shape is the SAME compile (eff 0 both arms).",
+        "result": "PASS on every dev gate: bit-identical over the complete public domain, split path byte-identical and neutral, non-split family +8% with ZERO regressions (worst changed shape within noise). Strictly safer than v42 (no warp-structure change => no regression mode; auth floor is neutral not negative). Auth geomean ~= +8% x (hidden batch1 non-split fraction); clears the 1% gate iff that fraction >~12% (4 of 30). The win surface is genuinely batch1-non-split-only (the dominant batch>1 split family is compute-bound at ~85% tensor and regresses under depth, so it cannot be broadened by this lever). Ship as candidate_ready; the supervisor ABBA on the hidden set is the acceptance authority.",
+        "decision": "continue",
+        "timestamp": "2026-09-13T00:45:16.472201+00:00"
+      }
+    ]
+  },
+  "correctness": {
+    "status": "PASS",
+    "max_abs_err": null,
+    "max_rel_err": null
+  },
+  "quality_gate": {
+    "result": "FAIL",
+    "failure_reason": "candidate improvement 0.5946143153829775 did not exceed 1.000%"
+  },
+  "open_directions": [
+    {
+      "direction": "The batch1 non-split path is load-latency-bound on the dependent per-KV-block mPageTable[batch,idx] gather feeding each per-page TMA (cutlass.range unroll=1 blocks compiler pipelining). A shallow in-register ROLLING page-table prefetch (depth 2-4, issued before the acquire_and_advance barrier wait so the latency overlaps it) could win MORE on this family than depth alone and without the smem cost -- mechanistically distinct from v42 falsified smem BATCH prefetch (which concentrated latency). Same narrow family.",
+      "rationale": "carried from terminal episode journal"
+    },
+    {
+      "direction": "The dominant batch>1 split family is compute-bound at ~85% tensor and robust to pipeline depth and cold cache; confirm via NCU whether the residual ~14% is the indivisible QK->softmax->PV chain (no lever) or an attackable stall BEFORE spending another episode on the steady-state mainloop.",
+      "rationale": "carried from terminal episode journal"
+    },
+    {
+      "direction": "If the supervisor hidden set has a low batch1 non-split fraction (v42 regressed -0.9% on the same family), the campaign is at a true tuning plateau; the next structural lever is a dedicated low-latency small-shape path -- the tiny shapes are ~40us of fixed GPU launch/fill/epilogue overhead under the cold-cache (L2-flushed) authoritative timer -- not mainloop tuning.",
+      "rationale": "carried from terminal episode journal"
+    },
+    {
+      "direction": "The dead fast-path (sig store/lookup mismatch interface.py:1752 vs :1897; _flash_attn_fwd populates but never consults) is irrelevant to db today (host hidden), but if the authoritative timer ever shrinks the L2 flush or iteration count host dispatch becomes exposed; fixing it plus routing _flash_attn_fwd through a replay honoring the caller-supplied out tensor would then be a broad lever.",
+      "rationale": "carried from terminal episode journal"
+    }
+  ],
+  "git_commit_hash": null,
+  "long_horizon": {
+    "status": "candidate_ready",
+    "candidate_commit": "ea356fc77ef987419d8f77113fdbca280f182fda"
+  },
+  "repository_source": {
+    "name": "increment_fa4_prefill_recovered",
+    "revision": "9f1c82ccba976eea85a24e179609f4692fef4eae",
+    "editable_roots": [
+      "vendor/increment_fa4_prefill_recovered/flash_attn/cute"
+    ],
+    "measurement": {
+      "schedule": "A-B-B-A",
+      "warmup": 10,
+      "timed_runs": 100
+    }
+  }
+}
