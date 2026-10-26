@@ -71,7 +71,7 @@ import (
 	for id in Pipe if !list.Contains(Work, id) {work_schedule: phase: error("missing work_schedule phase \(id)")}
 }
 
-// schema_docs/1: task identity is separate from dispatch identity and revision.
+// schema_docs/0.common: task identity is separate from dispatch identity and revision.
 #MetaData: {
 	name!:     #Text
 	describe!: #Text
@@ -90,7 +90,7 @@ import (
 // --------------------------
 
 // Shared notation. Text is deliberately not an executable mathematical language.
-// See schema_docs/1 §语法规则. English prose and meaningful content are reviewed.
+// See schema_docs/0.common §通用写法. English prose and meaningful content are reviewed.
 #Text:           string & =~"\\S" & !~"^\\s*-\\s*$"
 #Identifier:     string & =~"^[A-Za-z_][A-Za-z0-9_]*$"
 #NodeID:         string & =~"^[a-z_][a-z0-9_]*$"

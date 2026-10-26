@@ -1,6 +1,6 @@
 # YAML 编写与校验
 
-Agent 参考 [schema.cue](schema.cue) 和 [schema_docs/1–6](../schema_docs/)，直接编辑 YAML。CUE 定义结构规范，Python 补充复杂关联检查；字段语义与角色权限由六份 MD 说明，案例不覆盖规范。
+Agent 参考 [schema.cue](schema.cue)、[公共约定](../schema_docs/0.common.md)与各区文档，直接编辑 YAML。文档入口及角色权限见 [README](../README.md#阅读入口)；CUE 定义结构规范，Python 补充复杂关联检查，案例不覆盖规范。
 
 ## 填写与检查
 
@@ -15,9 +15,9 @@ python3 schema_template/tools/schema.py validate schema_wiki/my_batch/my_task
 
 `init` 将唯一的 [starter.yaml](starter.yaml) 复制为可编辑的 `root.yaml`，不覆盖已有 plan。按任务重命名骨架中的对象，把 `null` 待填项替换为真实内容；这些待填项不能通过校验，不是合法的缺省值。
 
-一个任务一个目录，每个节点一个 YAML 映射文档。`validate` 读取目录直属的全部 `.yaml` / `.yml`，以文件名去掉扩展名作为节点 ID，同一 ID 不能同时使用两种扩展名。root 保存唯一的 Contract；派生节点写完整的元数据与 Design，不复制 Contract、不继承父节点的 Design。文件组织、身份和修订规则详见 [文档 1](../schema_docs/1.contract.algorithm_requirement.md)。
+`validate` 读取任务目录直属的全部 `.yaml` / `.yml`。文件组织、节点身份、共享 Contract 与派生关系见[公共约定](../schema_docs/0.common.md#派生节点与-dispatch)。
 
-短记录推荐行内映射，shape、范围和短引用列表推荐行内列表，数学正文保留多行；紧凑与展开写法同样合法。数据内容变化时递增该节点的 `meta_data.version`，纯排版变化无需递增。
+YAML 排版见[通用写法](../schema_docs/0.common.md#通用写法)，内容修订遵循[元数据版本规则](../schema_docs/0.common.md#单份-plan-与元数据)。
 
 `validate` 不改写内容、权限或修改时间，不补字段、不重排 YAML。错误标出文件和字段路径，CUE 提供源位置时一并保留。多个目录可一次传入，任何任务失败都返回非零状态；任务也可以位于仓库之外。
 
@@ -39,7 +39,7 @@ python3 schema_template/tools/schema.py validate path/to/task_a path/to/task_b
 | `tests/` | 正反例与最小合成 YAML fixture |
 | `examples/gdn/root.yaml` | 完整的紧凑 YAML 示例 |
 
-`#Task` 的映射键来自文件名，容器只用于校验，不写进 YAML。适配层不另定义字段规则。安装器支持 macOS/Linux 的 amd64、arm64，二进制保存在忽略提交的 `.tools/`；CUE 模块、版本、Makefile 与 CI 配置位于仓库根目录。
+加载器去掉文件名的扩展名，以节点 ID 作为 `#Task` 的映射键；该容器只用于校验，不写进 YAML。适配层不另定义字段规则。安装器支持 macOS/Linux 的 amd64、arm64，二进制保存在忽略提交的 `.tools/`；CUE 模块、版本、Makefile 与 CI 配置位于仓库根目录。
 
 ## 校验边界
 
