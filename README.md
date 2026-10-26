@@ -8,8 +8,8 @@
 
 - **Designer**（也称 planner）：做设计的 Agent 或人，唯一能修改 Design 区。
 - **Coder**：把设计实现成代码的 Agent（如 AKA），实现语言不限。
-- **schema**：既指这套描述语言（分区与字段规则），也指针对某个 kernel 填好的设计实例；后者也叫 **plan**。plan 在 CUE 中编写，派生为供审阅和实现的只读 YAML。一份 plan 只描述一条流水线，即一个 **dispatch**。
-- **template**：用 CUE 编写的母版，定义字段、必填条件、开放词汇与可校验关系；入口为 `schema_template/plan.cue` 的 `#Task`。
+- **schema**：既指这套描述语言（分区与字段规则），也指针对某个 kernel 填好的设计实例；后者也叫 **plan**。Agent 直接编写和修改 YAML，供审阅与实现。一份 plan 只描述一条流水线，即一个 **dispatch**。
+- **template**：用 CUE 编写的母版，定义字段、必填条件、开放词汇与可校验关系；入口为 `schema_template/schema.cue` 的 `#Task`。
 - **wiki / microbench**：完整的硬件资料、指令手册，以及吞吐与延时的实测结果；schema 只引用，不抄录。
 
 ## 1 背景与动机
@@ -41,9 +41,9 @@ Kernel Agent 有两个普遍问题：**难以优化**——无法判断结果是
 
 Design 三区从上到下排列，越靠上越难优化、收益越大、在源码里越难看出来：`math_reshape` 是前置（定下有哪些量、计算顺序、哪些量跨迭代携带、哪些中间量物化），之后 `work_schedule`（macro）与 `tile_pipeline`（micro）交替协同。
 
-**文件格式。** Agent 必须填写 CUE，经过模板和关联校验后自动生成 YAML。CUE 是唯一可编辑来源，YAML 是不可手工修改的派生产物；人类专家与 Coder 仍按 YAML 阅读设计。修改设计或补充实验反馈都回到 CUE，再生成 YAML。
+**文件格式。** YAML 是 plan 的编辑源；设计、修订号和实验反馈都直接在 YAML 中修改。CUE 提供明确的结构模板，统一校验入口读取整个任务目录，检查结构及必要的关联，不改写原文件。
 
-生成器设置本地 YAML 为只读，并记录源文件、模板、工具版本与产物摘要。`check` 重新生成并逐字节比对，发现手改、过期或缺失即失败。只读权限是本地防误编辑措施，Git 不保存这类权限；提交检查依靠重新生成比对，不宣称操作系统层面不可绕过。
+短记录推荐使用行内映射，shape、范围和短引用列表推荐使用行内列表，数学正文保留多行，参考 `schema_template/examples/gdn/root.yaml`。紧凑与展开写法同样合法，排版不是结构约束。
 
 ## 3 预期使用
 
@@ -53,14 +53,14 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 - **撰写 / 优化**（在线，planner）：依据 `schema_wiki` 的案例、CUE template 与 `schema_docs` 规则，从零撰写或逐步优化一条流水线设计。
 - **实现**（coder，schema → kernel）：按某个 dispatch 的设计从零实现，或逐步修改优化对应的 kernel。
 
-三条流都遵守上述编写方向。当前 CUE 编写与生成入口见 [模板使用说明](schema_template/README.md)，三份完整的操作指导仍待补充。
+三条流都遵守上述编写方向。YAML 编写与校验入口见 [模板使用说明](schema_template/README.md)，三份完整的操作指导仍待补充。
 
 ```sh
 make setup
 python3 schema_template/tools/schema.py init schema_wiki/<batch>/<task>
-# 填写新目录中的 task.cue；类型占位没有填完时不能导出。
-python3 schema_template/tools/schema.py build schema_wiki/<batch>/<task>
-python3 schema_template/tools/schema.py check schema_wiki/<batch>/<task>
+# 直接填写 root.yaml；初始化骨架的 null 待填项必须替换，不能通过校验。
+python3 schema_template/tools/schema.py validate schema_wiki/<batch>/<task>
+make check
 ```
 
 ## 4 编写原则
@@ -77,11 +77,12 @@ python3 schema_template/tools/schema.py check schema_wiki/<batch>/<task>
 ```text
 .
 ├── README.md            本文件：背景、分区总览、原则与现状
-├── schema_template/     模板统一入口：说明、公共类型、六区规则与 plan.cue
-│   ├── starter.cue      Agent 待填写骨架，由 init 复制为任务源文件
-│   ├── tools/           CUE 安装、生成与关联校验工具
-│   ├── tests/           结构、关联和产物一致性的正反例
-│   └── examples/        经生成流程验证的 CUE 编写示例
+├── schema_template/     模板统一入口：schema.cue、填写骨架、校验工具与测试
+│   ├── schema.cue       全部核心约束，按职责分章
+│   ├── starter.yaml     Agent 待填写骨架，由 init 复制为 root.yaml
+│   ├── tools/           CUE 安装、YAML 任务加载与关联校验工具
+│   ├── tests/           结构、关联和 YAML 加载的正反例
+│   └── examples/        纳入检查的 YAML 编写示例
 ├── cue.mod/             仓库级 CUE 模块配置
 ├── schema_docs/         转换规则：六个区的字段规则与案例（当前主要工作对象）
 │   ├── 1.contract.algorithm_requirement.md
@@ -94,11 +95,12 @@ python3 schema_template/tools/schema.py check schema_wiki/<batch>/<task>
 ├── kernel_wiki/         转换前：SOTA kernel 源库（参考实现、方案、evidence、验证报告）
 │   └── <batch>/<task>/  按批次、按任务组织
 └── schema_wiki/         转换后：schema 实例库（plan）
-    └── <batch>/<task>/  CUE 源文件 + root.yaml / <id>.yaml + dispatch.md
+    └── <batch>/<task>/  root.yaml / <id>.yaml + dispatch.md
 ```
 
 - `kernel_wiki`（转换前）与 `schema_wiki`（转换后）一一呼应：前者是作为数据来源的 SOTA kernel，后者是从中提取、或据此撰写的 schema 设计。
-- 新任务用同目录的 CUE package 定义 `plans`；生成器按节点 ID 输出 YAML。旧的手写 YAML 尚未迁移，生成器不会把它们作为输入或自动覆盖。
+- 一个任务的 root 保存唯一的 Contract，派生节点各自完整填写 Design；文件名与节点 ID 对应。校验时统一使用 root 的 Contract，身份、父子关系与引用都在任务范围内检查。
+- `make check` 校验 CUE 模板、回归测试及 `schema_template/examples` 下维护中的 YAML 任务。历史 `schema_wiki` 不在默认验收范围内；可以按目录显式校验，发现差异仍按现行规范报错，不自动迁移。
 - 模板配套内容均在 `schema_template` 内；`cue.mod`、工具版本、Makefile、Agent 导航和 CI 等项目配置保留在根目录。
 - 基础 Harness 设施尚未纳入仓库，见 §6。
 
@@ -110,11 +112,11 @@ python3 schema_template/tools/schema.py check schema_wiki/<batch>/<task>
 
 ## 6 现状与 TODO
 
-**已有：** `schema_docs/1–6`、六区 CUE 模板、CUE 编写与 YAML 生成工具、正反例测试及 CI 检查；`kernel_wiki` 与尚未全量迁移的 `schema_wiki`。规则与校验范围的对应关系见 [覆盖说明](schema_template/coverage.md)。文档案例覆盖 FA4、GDN、MoE 与三类硬件；它们不是自动校验或性能成立的证明。
+**已有：** `schema_docs/1–6`、统一 CUE 规范、YAML 初始化与任务校验工具、正反例测试及 CI 检查；`kernel_wiki` 与尚未逐一按现行规范验收的 `schema_wiki`。使用方法与校验边界见 [模板说明](schema_template/README.md#校验边界)。文档案例覆盖 FA4、GDN、MoE 与三类硬件；它们不是自动校验或性能成立的证明。
 
 **TODO：**
 
-- **案例迁移与验收**：用 CUE 重写已有实例，补齐资料与设计缺口；端到端编写示例见 `schema_template/examples/gdn`，数值及性能验收另行进行。
+- **案例核对与验收**：按实际任务逐一核对已有 YAML，补齐资料与设计缺口；完整编写示例见 `schema_template/examples/gdn/root.yaml`，数值及性能验收另行进行。
 - **更多转写与精简**：转写更多 SOTA kernel，收敛到最小交集原语。
 - **检查器与评估器**：在现有结构和具名关系校验之外，继续实现资源记账、展开事件图的合法性与活性分析，以及尽量保序的性能估算。
 - **基础 Harness 设施**：支撑离线提取与在线撰写迭代的轻量平台，尚未放入仓库。

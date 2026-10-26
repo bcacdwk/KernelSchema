@@ -1,11 +1,10 @@
-"""Executable acceptance tests for the authoring contract and generation path."""
+"""Acceptance tests for CUE constraints and direct YAML task validation."""
 from __future__ import annotations
 
 from copy import deepcopy
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from decimal import Decimal
 import io
-import json
 from pathlib import Path
 import stat
 import sys
@@ -13,10 +12,8 @@ import tempfile
 import unittest
 
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1]
-ROOT = TEMPLATE_ROOT.parent
 sys.path.insert(0, str(TEMPLATE_ROOT / "tools"))
 import schema
-import compact_yaml
 import json_value
 
 ALGO = ("root", "contract", "algorithm_requirement")
@@ -65,21 +62,82 @@ def add_child(data, name="small", parent=None):
 class SchemaTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.base = schema.compile_task(TEMPLATE_ROOT / "tests/fixtures/minimal")
+        cls.base = schema.validate_directory(TEMPLATE_ROOT / "tests/fixtures/minimal")
+        cls.source = (TEMPLATE_ROOT / "tests/fixtures/minimal/root.yaml").read_text()
+
+    def setUp(self):
+        # Tasks need not be in the repository's CUE module.
+        self.temp = tempfile.TemporaryDirectory(prefix="schema-yaml-test-")
+        self.directory = Path(self.temp.name).resolve()
+        self.addCleanup(self.temp.cleanup)
+        (self.directory / "root.yaml").write_text(self.source)
+
+    def write_task(self, data):
+        # JSON flow syntax is also YAML; mutations exercise the directory entry.
+        # The checked-in fixture and presentation tests use block/compact YAML.
+        for file in self.directory.iterdir():
+            if file.suffix in {".yaml", ".yml"}:
+                file.unlink()
+        for node, plan in data.items():
+            (self.directory / (node + ".yaml")).write_text(json_value.dumps(plan))
+
+    def snapshot(self):
+        return {p.name: (p.read_bytes(), stat.S_IMODE(p.stat().st_mode), p.stat().st_mtime_ns)
+                for p in self.directory.iterdir()}
+
+    def assert_task_invalid(self, data, *messages):
+        self.write_task(data)
+        before = self.snapshot()
+        with self.assertRaises(schema.SchemaError) as caught:
+            schema.validate_directory(self.directory)
+        for message in messages:
+            self.assertIn(message, str(caught.exception))
+        self.assertEqual(before, self.snapshot())
 
     def assert_valid(self, transform=lambda d: None):
         data = deepcopy(self.base)
         transform(data)
-        schema.validate_data(data)
+        self.write_task(data)
+        self.assertEqual(data, schema.validate_directory(self.directory))
         return data
 
     def assert_invalid(self, transform, message=None):
         data = deepcopy(self.base)
         transform(data)
-        with self.assertRaises(schema.SchemaError) as caught:
-            schema.validate_data(data)
-        if message:
-            self.assertIn(message, str(caught.exception))
+        self.assert_task_invalid(data, *([message] if message else []))
+
+    def test_local_constraints_are_enforced_by_cue(self):
+        assignment = {"preassigned": {"start": 0, "count": 1}, "refill": "none", "exit": "assigned_done"}
+        handoff = {"producer": "copy", "consumer": ["next"], "storage": "global"}
+        lane = deepcopy(at(self.base, LANE))
+        cases = [
+            ("#Schedule", {"worker_assignment": assignment},
+             {"worker_assignment": {"refill": "none", "exit": "assigned_done"}}),
+            ("#Handoff", handoff, dict(handoff, consumer=["copy", "next"])),
+            ("#MemberRegion", [0, 4], [-1, 4]),
+            ("#MemberRegion", [[0, 4], [4, 8]], [[0, 4], [-1, 8]]),
+            ("#View", {"part": {"x": [0, 4]}}, {"part": {"x": [-1, 4]}}),
+        ]
+        for name in ("kernel_done", "launch_ready", "kernel_done(i)", "launch_ready(i)"):
+            cases.append(("#PipelinePhase", {"lane": {"Main": lane}, "milestone": {"copied": ["Main/produce:Y"]}},
+                          {"lane": {"Main": lane}, "milestone": {name: ["Main/produce:Y"]}}))
+        for definition, valid, invalid in cases:
+            with self.subTest(definition=definition, invalid=invalid):
+                args = ("vet", "-c", "./schema_template:kernel", "-d", definition, "yaml:", "-")
+                schema.cue(*args, data=json_value.dumps(valid))
+                with self.assertRaises(schema.SchemaError):
+                    schema.cue(*args, data=json_value.dumps(invalid))
+
+    def test_signed_domains_and_textual_integer_bounds(self):
+        self.assert_valid(lambda d: put(d, LANE + ("pipe",), {
+            "repeat": {"i": [-1, 2]}, "steady": ["produce:Y(i)"]}))
+        for path, value in [
+            (PHASE + ("mapping", "member"), [{"x": ["-1", 4]}]),
+            (PIPE + ("resource",), {"R": {"space": "SMEM", "shape": [{"x": 4}], "dtype": "fp32",
+                                          "view": {"Y": {"part": {"x": ["-1", 4]}}}}}),
+        ]:
+            with self.subTest(path=path):
+                self.assert_invalid(lambda d: put(d, path, value), "literal")
 
     def test_closed_structures_required_fields_and_types(self):
         cases = [
@@ -350,185 +408,239 @@ class SchemaTests(unittest.TestCase):
         self.assert_valid(lambda d: put(d, ("root", "meta_data", "dispatch"),
                                        {"when": "Select for every input in the contract domain."}))
 
-
-class GenerationTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.base = schema.compile_task(TEMPLATE_ROOT / "tests/fixtures/minimal")
-
-    def setUp(self):
-        TEMPLATE_ROOT.joinpath(".tools").mkdir(exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(dir=TEMPLATE_ROOT / ".tools", prefix="schema-test-")
-        self.directory = Path(self.temp.name)
-        self.addCleanup(self.temp.cleanup)
-        self.write_source(deepcopy(self.base))
-
-    def write_source(self, data):
-        # JSON syntax is valid CUE. The generator must enforce #Task even when
-        # the author forgot the import; these remain .cue source packages.
-        (self.directory / "task.cue").write_text("package plan\nplans: " + json_value.dumps(data) + "\n")
-
-    def test_build_check_readonly_and_reproducibility(self):
-        schema.build(self.directory)
-        before = {p.name: p.read_bytes() for p in self.directory.glob("*.yaml")}
-        self.assertEqual(["root.yaml"], sorted(before))
-        self.assertFalse((self.directory / "root.yaml").stat().st_mode & stat.S_IWUSR)
-        schema.check_generated(self.directory)
-        schema.build(self.directory)
-        self.assertEqual(before, {p.name: p.read_bytes() for p in self.directory.glob("*.yaml")})
-
-    def test_compact_yaml_round_trip_and_full_cue_validation(self):
+    def test_validation_never_changes_sources_or_permissions(self):
+        (self.directory / "dispatch.md").write_text("Synthetic task navigation.\n")
+        root = self.directory / "root.yaml"
+        for mode in (0o644, 0o444):
+            root.chmod(mode)
+            before = self.snapshot()
+            self.assertEqual(self.base, schema.validate_directory(self.directory))
+            self.assertEqual(before, self.snapshot())
+        root.chmod(0o644)
         data = deepcopy(self.base)
-        tensor = {"meaning": "Fixture tensor.", "shape": [{"row": "Rows"}, {"d": 128}], "dtype": "fp32"}
-        at(data, ALGO)["input"]["X"] = tensor
-        at(data, ALGO)["output"]["Y"] = deepcopy(tensor)
-        at(data, ALGO)["compute"][0]["math"] = "For each row and d:\n  Y[row,d] = X[row,d].\n"
-        text = compact_yaml.dumps(data["root"])
-        self.assertIn('X: {meaning: "Fixture tensor.", shape: [row: Rows, d: 128], dtype: fp32}', text)
-        self.assertIn("math: |\n", text)
-        schema.cue("vet", "-c", "./schema_template:kernel", "-d", "#RootPlan", "yaml:", "-", data=text)
-        decoded = json_value.loads(schema.cue("export", "yaml:", "-", "--out", "json", data=text))
-        self.assertEqual(data["root"], decoded)
-        schema.validate_data({"root": decoded})
+        put(data, LANE + ("edge",), {"data": {"produce:Y": ["Missing/produce:Y"]}})
+        self.assert_task_invalid(data, "root.yaml", "design.tile_pipeline.phase.copy.lane.Main.edge.data", "unknown lane")
 
-    def test_yaml_presentation_does_not_relax_constraints(self):
+    def test_compact_expanded_and_multiline_yaml(self):
         forms = [
-            "meaning: Query\nshape:\n  - token: T\n  - d: 128\ndtype: bf16\n",
-            "{meaning: Query, shape: [token: T, d: 128], dtype: bf16}\n",
-            "{meaning: Query, shape: [{token: T}, {d: 128}], dtype: bf16}\n",
+            'X: {meaning: Input scalar., shape: [token: T, d: 128], dtype: fp32}',
+            'X: {meaning: Input scalar., shape: [{token: T}, {d: 128}], dtype: fp32}',
+            'X:\n        meaning: Input scalar.\n        shape:\n          - token: T\n          - d: 128\n        dtype: fp32',
         ]
-        decoded = []
-        for text in forms:
-            schema.cue("vet", "-c", "./schema_template:kernel", "-d", "#Output", "yaml:", "-", data=text)
-            decoded.append(json_value.loads(schema.cue("export", "yaml:", "-", "--out", "json", data=text)))
-            with self.assertRaises(schema.SchemaError):
-                schema.cue("vet", "-c", "./schema_template:kernel", "-d", "#Output", "yaml:", "-",
-                           data=text.replace("d: 128", "d: -1"))
-            with self.assertRaises(schema.SchemaError):
-                schema.cue("vet", "-c", "./schema_template:kernel", "-d", "#Output", "yaml:", "-",
-                           data=text.replace("dtype:", "datatype:"))
-        self.assertTrue(all(value == decoded[0] for value in decoded))
+        root = self.directory / "root.yaml"
+        results = []
+        for form in forms:
+            with self.subTest(form=form):
+                text = self.source.replace('X: {meaning: Input scalar., shape: [], dtype: fp32}', form)
+                root.write_text(text)
+                results.append(schema.validate_directory(self.directory))
+                self.assertEqual("Y = X.\n", at(results[-1], ALGO)["compute"][0]["math"])
+                for invalid in (text.replace("d: 128", "d: -1"), text.replace("dtype:", "datatype:", 1)):
+                    root.write_text(invalid)
+                    with self.assertRaisesRegex(schema.SchemaError, "root.yaml"):
+                        schema.validate_directory(self.directory)
+        self.assertTrue(all(result == results[0] for result in results))
 
-    def test_compact_yaml_preserves_scalars_and_multiline_whitespace(self):
-        strings = ["", "true", "yes", "null", "1", "2026-10-26", "x: y", "[x,y]",
-                   "a\nb", "a\nb\n", "a\n\n", "\n", "\n\n", "\n  indented\nout\n",
-                   "  leading\nnormal", "a\tb\n", "a\r\nb", "a\u0085b", "a\u2028b", "a\u2029b",
-                   "\x00", "Aᵀ ⊙ B", 'quote " and slash \\']
-        value = {
-            "strings": strings,
-            "by_name": {f"case_{i}": v for i, v in enumerate(strings)},
-            "numbers": [False, True, None, 0, -3, Decimal("1.000000000000000000000001"), Decimal("1E-10")],
-            "shapes": [{"token": "T"}, {"d": 128}],
-            "nested": [[0, 2], [2, 4]],
-            "empty": {},
-            "a: key": "value",
-        }
-        text = compact_yaml.dumps(value)
-        decoded = json_value.loads(schema.cue("export", "yaml:", "-", "--out", "json", data=text))
-        self.assertEqual(json_value.dumps(value, sort_keys=True), json_value.dumps(decoded, sort_keys=True))
+    def test_yaml_anchors_are_local_value_reuse(self):
+        root = self.directory / "root.yaml"
+        source = self.source.replace("shape: [], dtype: fp32", "shape: &scalar [], dtype: fp32", 1)
+        source = source.replace("Y: {meaning: Output scalar., shape: []", "Y: {meaning: Output scalar., shape: *scalar")
+        root.write_text(source)
+        self.assertEqual(self.base, schema.validate_directory(self.directory))
+        (self.directory / "small.yaml").write_text("design: *scalar\n")
+        with self.assertRaisesRegex(schema.SchemaError, "small.yaml"):
+            schema.validate_directory(self.directory)
 
-    def test_edit_detection_and_explicit_repair(self):
-        schema.build(self.directory)
-        output = self.directory / "root.yaml"
-        output.chmod(0o644)
-        output.write_text(output.read_text() + "\n# Hand edit\n")
-        with self.assertRaises(schema.SchemaError):
-            schema.check_generated(self.directory)
-        with self.assertRaises(schema.SchemaError):
-            schema.build(self.directory)
-        schema.build(self.directory, repair=True)
-        schema.check_generated(self.directory)
-
-    def test_failed_generation_preserves_outputs_and_no_import_bypass(self):
-        schema.build(self.directory)
-        before = (self.directory / "root.yaml").read_bytes()
-        data = deepcopy(self.base)
-        data["root"]["not_a_field"] = 1
-        self.write_source(data)
-        with self.assertRaises(schema.SchemaError):
-            schema.build(self.directory)
-        self.assertEqual(before, (self.directory / "root.yaml").read_bytes())
-
-    def test_derived_export_omits_contract_and_removes_owned_stale_file(self):
+    def test_yml_extension_and_duplicate_file_identity(self):
+        root = self.directory / "root.yaml"
+        root.rename(self.directory / "root.yml")
+        self.assertEqual(self.base, schema.validate_directory(self.directory))
+        root.write_text(self.source)
+        with self.assertRaisesRegex(schema.SchemaError, "duplicate node ID root"):
+            schema.validate_directory(self.directory)
+        root.unlink()
         data = deepcopy(self.base)
         add_child(data)
-        self.write_source(data)
-        schema.build(self.directory)
-        self.assertNotIn("\ncontract:", (self.directory / "small.yaml").read_text())
-        next_data = deepcopy(self.base)
-        next_data["root"]["meta_data"]["version"] = 2
-        self.write_source(next_data)
-        schema.build(self.directory)
-        self.assertFalse((self.directory / "small.yaml").exists())
-        schema.check_generated(self.directory)
+        (self.directory / "small.yaml").write_text(json_value.dumps(data["small"]))
+        (self.directory / "small.yml").write_text(json_value.dumps(data["small"]))
+        with self.assertRaisesRegex(schema.SchemaError, "duplicate node ID small"):
+            schema.validate_directory(self.directory)
 
-    def test_handwritten_yaml_is_never_adopted_or_overwritten(self):
-        legacy = self.directory / "root.yaml"
-        legacy.write_text("handwritten: true\n")
-        with self.assertRaises(schema.SchemaError):
-            schema.build(self.directory)
-        self.assertEqual("handwritten: true\n", legacy.read_text())
-
-    def test_extra_public_field_and_unfilled_starter_fail(self):
-        with (self.directory / "task.cue").open("a") as output:
-            output.write("surprise: 1\n")
-        with self.assertRaises(schema.SchemaError):
-            schema.compile_task(self.directory)
-        (self.directory / "task.cue").unlink()
-        with redirect_stdout(io.StringIO()):
-            self.assertEqual(0, schema.main(["init", str(self.directory)]))
-        self.assertTrue((self.directory / "task.cue").read_text().startswith("package plan\n"))
-        with self.assertRaises(schema.SchemaError):
-            schema.compile_task(self.directory)
-        self.assertFalse(list(self.directory.glob("*.yaml")))
-
-    def test_plan_revision_must_advance_but_comments_do_not_change_plan(self):
-        schema.build(self.directory)
-        with (self.directory / "task.cue").open("a") as output:
-            output.write("// Source-only annotation.\n")
-        schema.build(self.directory)
+    def test_one_mapping_document_per_file(self):
+        for text in ("", "null\n", "42\n", "[]\n", self.source + "---\n" + self.source,
+                     "---\n" + self.source + "---\n"):
+            with self.subTest(text=text[:30]):
+                (self.directory / "root.yaml").write_text(text)
+                with self.assertRaisesRegex(schema.SchemaError, "root.yaml.*exactly one YAML mapping"):
+                    schema.validate_directory(self.directory)
+        (self.directory / "root.yaml").write_text("---\n" + self.source + "...\n")
+        self.assertEqual(self.base, schema.validate_directory(self.directory))
         data = deepcopy(self.base)
-        at(data, MATH)["thesis"] = "Changed design rationale."
-        self.write_source(data)
-        with self.assertRaisesRegex(schema.SchemaError, "increment meta_data.version"):
-            schema.build(self.directory)
-        data["root"]["meta_data"]["version"] = 2
-        self.write_source(data)
-        schema.build(self.directory)
-        schema.check_generated(self.directory)
+        add_child(data)
+        self.write_task(data)
+        child = self.directory / "small.yaml"
+        child.write_text(child.read_text() + "\n---\n" + child.read_text())
+        with self.assertRaisesRegex(schema.SchemaError, "small.yaml.*exactly one YAML mapping"):
+            schema.validate_directory(self.directory)
 
-    def test_decimal_values_do_not_round_through_python_float(self):
+    def test_syntax_and_structure_errors_locate_yaml(self):
+        root = self.directory / "root.yaml"
+        root.write_text("meta_data: [\n")
+        with self.assertRaisesRegex(schema.SchemaError, r"root.yaml:"):
+            schema.validate_directory(self.directory)
+        data = deepcopy(self.base)
+        put(data, ("root", "extra"), 1)
+        self.assert_task_invalid(data, "root.yaml", "extra", "field not allowed")
+        data = deepcopy(self.base)
+        drop(data, ("root", "meta_data", "name"))
+        self.assert_task_invalid(data, "root.yaml", "meta_data.name", "required")
+
+    def test_root_is_required_and_all_yaml_files_are_checked(self):
+        root = self.directory / "root.yaml"
+        for path in (root, self.directory / "absent"):
+            with self.assertRaisesRegex(schema.SchemaError, "task directory"):
+                schema.validate_directory(path)
+        root.unlink()
+        with self.assertRaisesRegex(schema.SchemaError, "missing root.yaml"):
+            schema.validate_directory(self.directory)
+        (self.directory / "small.yaml").write_text(self.source)
+        with self.assertRaisesRegex(schema.SchemaError, "missing root.yaml"):
+            schema.validate_directory(self.directory)
+        root.write_text(self.source)
+        with self.assertRaisesRegex(schema.SchemaError, "small.yaml"):
+            schema.validate_directory(self.directory)
+
+    def test_derived_identity_fields_are_checked_not_filled(self):
+        for field in (("name",), ("describe",), ("dispatch", "id"), ("dispatch", "when")):
+            data = deepcopy(self.base)
+            add_child(data)
+            drop(data, ("small", "meta_data") + field)
+            with self.subTest(missing=field):
+                self.assert_task_invalid(data, "small.yaml", "required")
+        for path, value in [
+            (("small", "meta_data", "name"), "other"),
+            (("small", "meta_data", "describe"), "Different task."),
+            (("small", "meta_data", "dispatch", "id"), "wrong"),
+            (("root", "meta_data", "dispatch", "id"), "small"),
+            (("small", "contract"), self.base["root"]["contract"]),
+            (("small", "design"), {}),
+        ]:
+            data = deepcopy(self.base)
+            add_child(data)
+            put(data, path, value)
+            with self.subTest(path=path):
+                self.assert_task_invalid(data, path[0] + ".yaml")
+        data = deepcopy(self.base)
+        add_child(data)
+        drop(data, ("root", "meta_data", "dispatch"))
+        self.assert_task_invalid(data, "root.yaml", "dispatch", "required")
+
+    def test_derived_tree_and_shared_contract(self):
+        data = deepcopy(self.base)
+        add_child(data)
+        add_child(data, "tiny", "small")
+        self.write_task(data)
+        before = self.snapshot()
+        self.assertEqual(data, schema.validate_directory(self.directory))
+        self.assertEqual(before, self.snapshot())
+        for node in ("small", "tiny"):
+            self.assertNotIn("contract", data[node])
+        for path, value, message in [
+            (("small", "meta_data", "dispatch", "parent"), "absent", "unknown parent"),
+            (("small", "meta_data", "dispatch", "parent"), "tiny", "cycle"),
+            (("small", "design", "work_schedule", "phase", "copy", "mapping", "worker", "unit"), "Missing", "worker unit"),
+            (("small", "design", "tile_pipeline", "phase", "copy", "lane", "Main", "info", "member"), "Missing[0:1]", "unregistered"),
+            (("small", "design", "math_reshape", "rewrite", 0, "symbol"), {"X": {"meaning": "Repeated Contract input."}}, "duplicates"),
+        ]:
+            changed = deepcopy(data)
+            put(changed, path, value)
+            with self.subTest(path=path):
+                self.assert_task_invalid(changed, "small.yaml", message)
+
+    def test_explicit_contract_property_references_use_root(self):
+        data = deepcopy(self.base)
+        put(data, ALGO + ("constant",), {"Scale": {"meaning": "Test constant.", "value": 1}})
+        put(data, ALGO + ("compute", 0, "symbol"), {
+            "Original": {"meaning": "Contract intermediate.", "shape": "ref:X.shape", "dtype": "ref:X.dtype"}})
+        add_child(data)
+        shape_ref = "ref:contract.algorithm_requirement::Original.shape"
+        dtype_ref = "ref:contract.algorithm_requirement::X.dtype"
+        symbol_path = ("small", "design", "math_reshape", "rewrite", 0, "symbol", "A")
+        target_path = ("small",) + PHASE[1:] + ("decomposition", "target", "single_tile", "Y", "dtype")
+        resource_path = ("small",) + PIPE[1:] + ("resource", "Storage")
+        put(data, ("small",) + MATH[1:] + ("rewrite", 0, "symbol"), {
+            "A": {"meaning": "Test intermediate.", "shape": shape_ref, "dtype": dtype_ref}})
+        put(data, target_path, dtype_ref)
+        put(data, ("small",) + PIPE[1:] + ("resource",), {
+            "Storage": {"space": "register", "shape": [], "dtype": dtype_ref, "view": {"Y": {"dtype": dtype_ref}}}})
+        self.write_task(data)
+        self.assertEqual(data, schema.validate_directory(self.directory))
+        paths = [symbol_path + ("shape",), symbol_path + ("dtype",), target_path,
+                 resource_path + ("dtype",), resource_path + ("view", "Y", "dtype")]
+        for path in paths:
+            changed = deepcopy(data)
+            put(changed, path, "ref:contract.algorithm_requirement::Missing." + path[-1])
+            with self.subTest(path=path):
+                self.assert_task_invalid(changed, "small.yaml", "unknown shared Contract reference Missing")
+        changed = deepcopy(data)
+        put(changed, target_path, "ref:contract.algorithm_requirement::Scale.dtype")
+        self.assert_task_invalid(changed, "small.yaml", "Scale has no dtype")
+        # Removing the shared declaration invalidates the child's reference;
+        # neither its own math symbols nor its parent's Design supply Contract.
+        changed = deepcopy(data)
+        drop(changed, ALGO + ("compute", 0, "symbol"))
+        self.assert_task_invalid(changed, "small.yaml", "unknown shared Contract reference Original")
+
+    def test_filename_defines_node_identity(self):
+        data = deepcopy(self.base)
+        add_child(data)
+        self.write_task(data)
+        (self.directory / "small.yaml").rename(self.directory / "other.yaml")
+        with self.assertRaisesRegex(schema.SchemaError, "other.yaml"):
+            schema.validate_directory(self.directory)
+        (self.directory / "other.yaml").unlink()
+        for name in ("Bad", "bad-name", "1bad"):
+            (self.directory / (name + ".yaml")).write_text(json_value.dumps(data["small"]))
+            with self.subTest(name=name), self.assertRaises(schema.SchemaError):
+                schema.validate_directory(self.directory)
+            (self.directory / (name + ".yaml")).unlink()
+
+    def test_exact_decimal_numbers_and_range_comparison(self):
         data = deepcopy(self.base)
         exact = Decimal("1.000000000000000000000001")
-        at(data, MATH)["rewrite"][0]["symbol"] = {
-            "coef": {"meaning": "Exact fixture coefficient.", "value": exact}
-        }
-        self.write_source(data)
-        compiled = schema.compile_task(self.directory)
-        self.assertEqual(exact, at(compiled, MATH)["rewrite"][0]["symbol"]["coef"]["value"])
-        schema.build(self.directory)
-        self.assertIn(str(exact), (self.directory / "root.yaml").read_text())
-        schema.check_generated(self.directory)
+        lower = Decimal("1.000000000000000000000000")
+        put(data, ALGO + ("input", "X", "range"), [lower, exact])
+        put(data, MATH + ("rewrite", 0, "symbol"), {"coef": {"meaning": "Exact fixture coefficient.", "value": exact}})
+        self.write_task(data)
+        result = schema.validate_directory(self.directory)
+        self.assertEqual(exact, at(result, MATH)["rewrite"][0]["symbol"]["coef"]["value"])
+        put(data, ALGO + ("input", "X", "range"), [exact, lower])
+        self.assert_task_invalid(data, "root.yaml", "input.X.range", "reversed")
 
-    def test_extra_yaml_and_removed_sources_fail_check(self):
-        schema.build(self.directory)
-        (self.directory / "extra.yaml").write_text("extra: true\n")
+    def test_init_editable_yaml_and_unfilled_holes_fail(self):
+        directory = self.directory / "new"
+        target = schema.init(directory)
+        self.assertEqual([target], list(directory.iterdir()))
+        self.assertEqual("root.yaml", target.name)
+        self.assertTrue(target.stat().st_mode & stat.S_IWUSR)
         with self.assertRaises(schema.SchemaError):
-            schema.check_generated(self.directory)
-        (self.directory / "extra.yaml").unlink()
-        (self.directory / "task.cue").unlink()
+            schema.validate_directory(directory)
+        before = target.read_bytes()
         with self.assertRaises(schema.SchemaError):
-            schema.check_generated(self.directory)
+            schema.init(directory)
+        self.assertEqual(before, target.read_bytes())
+        target.write_text(self.source)
+        self.assertEqual(self.base, schema.validate_directory(directory))
 
-    def test_multiple_cue_files_compose_one_validated_task(self):
-        data = deepcopy(self.base)
-        add_child(data)
-        (self.directory / "task.cue").write_text('package plan\nimport kernel "kernelschema.local/schema_template:kernel"\nplans: kernel.#Task\n')
-        for name, plan in data.items():
-            (self.directory / (name + ".cue")).write_text("package plan\nplans: " + json_value.dumps({name: plan}) + "\n")
-        schema.build(self.directory)
-        schema.check_generated(self.directory)
-        self.assertEqual({"root.yaml", "small.yaml"}, {p.name for p in self.directory.glob("*.yaml")})
+    def test_cli_validates_every_requested_task(self):
+        (self.directory / "notes.md").write_text("Task notes are not plan input.\n")
+        output, errors = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            status = schema.main(["validate", str(self.directory / "missing"), str(self.directory)])
+        self.assertEqual(1, status)
+        self.assertIn("missing", errors.getvalue())
+        self.assertIn("Valid:", output.getvalue())
+        self.assertEqual(self.base, schema.validate_directory(self.directory))
 
 
 if __name__ == "__main__":

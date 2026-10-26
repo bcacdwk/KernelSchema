@@ -1,4 +1,4 @@
-"""Relations on concrete CUE data. No formula evaluation or event unfolding.
+"""Relations on YAML data validated by CUE. No formula evaluation or event unfolding.
 
 CUE owns field structure and types. These checks traverse named graphs and
 parse the documented small notations, without inferring facts from prose.
@@ -36,12 +36,14 @@ class Checker:
             self.errors.append(Diagnostic(path, message))
         return condition
 
-    def acyclic(self, graph: dict[Any, list[Any]], path: str) -> None:
+    def acyclic(self, graph: dict[Any, list[Any]], path: str,
+                node_paths: dict[Any, str] | None = None) -> None:
         active, finished = set(), set()
 
         def visit(node: Any, chain: list[Any]) -> None:
             if node in active:
-                self.require(False, path, "cycle: " + " -> ".join(map(str, chain + [node])))
+                self.require(False, node_paths[node] if node_paths else path,
+                             "cycle: " + " -> ".join(map(str, chain + [node])))
                 return
             if node in finished:
                 return
@@ -56,7 +58,7 @@ class Checker:
 
     def integer(self, value: Any, path: str, minimum: int | None = None, pipeline: bool = False) -> None:
         if type(value) is int:
-            self.require(minimum is None or value >= minimum, path, f"integer must be >= {minimum}")
+            # Literal types and bounds belong to CUE; parse only text here.
             return
         try:
             tree = ast.parse(value.strip(), mode="eval")
@@ -97,7 +99,7 @@ class Checker:
             if type(lo) is int and type(hi) is int:
                 self.require(lo <= hi, path, "range endpoints are reversed")
 
-    def shapes(self, plan: dict[str, Any], path: str) -> None:
+    def properties(self, plan: dict[str, Any], contract_objects: dict[str, Any], path: str) -> None:
         # Visit descriptor positions, not every mapping key spelled "shape":
         # that spelling is also a valid domain, milestone or object name.
         descriptors = []
@@ -121,6 +123,9 @@ class Checker:
         for pid, phase in plan["design"]["tile_pipeline"]["phase"].items():
             descriptors.extend((obj, f"{path}.design.tile_pipeline.phase.{pid}.resource.{name}")
                                for name, obj in phase.get("resource", {}).items())
+            for name, resource in phase.get("resource", {}).items():
+                descriptors.extend((view, f"{path}.design.tile_pipeline.phase.{pid}.resource.{name}.view.{value}")
+                                   for value, view in resource.get("view", {}).items())
         for descriptor, p in descriptors:
             shape = descriptor.get("shape")
             if isinstance(shape, list):
@@ -128,9 +133,20 @@ class Checker:
                 self.require(len(axes) == len(set(axes)), p + ".shape", "axis names must be unambiguous within one shape")
                 for i, axis in enumerate(shape):
                     self.integer(next(iter(axis.values())), f"{p}.shape[{i}]", 0, "tile_pipeline" in p)
+            # Only explicit Contract property references have a fully declared
+            # target table. Do not infer definitions from mathematical prose.
+            for attribute in ("shape", "dtype"):
+                value = descriptor.get(attribute)
+                prefix = "ref:contract.algorithm_requirement::"
+                if isinstance(value, str) and value.startswith(prefix):
+                    target = value[len(prefix):].rsplit(".", 1)[0]
+                    location = p + "." + attribute
+                    if self.require(target in contract_objects, location, f"unknown shared Contract reference {target}"):
+                        self.require(attribute in contract_objects[target], location,
+                                     f"Contract object {target} has no {attribute} property")
 
-    def contract(self, contract: dict[str, Any], path: str) -> None:
-        objects, order = {}, {}
+    def contract(self, contract: dict[str, Any], path: str) -> dict[str, Any]:
+        objects, order, locations = {}, {}, {}
         names = set(contract.get("constant", {}))
         groups = [(contract[f], -1, f) for f in ("input", "output")]
         groups += [(s.get("symbol", {}), i, f"compute[{i}].symbol") for i, s in enumerate(contract["compute"])]
@@ -139,17 +155,19 @@ class Checker:
                 self.require(name not in names, f"{path}.{label}.{name}", "duplicate Contract object name")
                 names.add(name)
                 objects[name], order[name] = obj, index
+                locations[name] = f"{path}.{label}.{name}"
         for attr in ("shape", "dtype"):
             graph = {}
             for name, obj in objects.items():
                 value = obj[attr]
                 if isinstance(value, str) and value.startswith("ref:"):
                     target = value[4:].rsplit(".", 1)[0]
-                    p = f"{path}.{name}.{attr}"
+                    p = f"{locations[name]}.{attr}"
                     if self.require(target in objects, p, f"unknown Contract reference {target}"):
                         self.require(order[target] <= order[name], p, "reference precedes the defining compute step")
                         graph[name] = [target]
-            self.acyclic(graph, path + "." + attr)
+            self.acyclic(graph, path + "." + attr,
+                         {name: f"{location}.{attr}" for name, location in locations.items()})
         for name, obj in contract["input"].items():
             for axis in obj["shape"]:
                 size = next(iter(axis.values()))
@@ -158,22 +176,24 @@ class Checker:
             bounds = obj.get("range")
             if isinstance(bounds, list) and all(type(x) in (int, float, Decimal) for x in bounds):
                 self.require(bounds[0] <= bounds[1], path + ".input." + name + ".range", "range endpoints are reversed")
+        return {**contract.get("constant", {}), **objects}
 
     def math(self, plan: dict[str, Any], contract: dict[str, Any], path: str) -> None:
-        names = {}
+        names, locations = {}, {}
         reserved = set(contract.get("constant", {})) | set(contract["input"]) | set(contract["output"])
         for i, step in enumerate(plan["design"]["math_reshape"]["rewrite"]):
             for name, obj in step.get("symbol", {}).items():
                 p = f"{path}.design.math_reshape.rewrite[{i}].symbol.{name}"
                 self.require(name not in names and name not in reserved, p, "symbol duplicates an existing definition")
                 names[name] = obj
+                locations[name] = p
         for phase in plan["design"]["work_schedule"]["phase"].values():
             dec = phase["decomposition"]
             for block in [dec["target"]["single_tile"], *dec.get("worktile", {}).values()]:
                 for name in block:
                     if name in names:
                         self.require("shape" in names[name] and "dtype" in names[name],
-                                     path + ".design.math_reshape.symbol." + name,
+                                     locations[name],
                                      "a value consumed as a data block must publish shape and dtype")
 
     def schedule(self, plan: dict[str, Any], path: str) -> None:
@@ -211,8 +231,6 @@ class Checker:
                 resources = set()
                 for pid in launch["phase"]:
                     current = work["phase"][pid]
-                    self.require(first["mapping"]["worker"]["unit"] == current["mapping"]["worker"]["unit"],
-                                 p, "sequential phases share a worker unit")
                     for field in ("worker", "count", "placement"):
                         self.require(not concrete_conflict(first["mapping"].get(field), current["mapping"].get(field)),
                                      p, "sequential phases have incompatible worker mappings")
@@ -231,7 +249,6 @@ class Checker:
         for name, handoff in work["flow"].get("handoff", {}).items():
             p = path + ".design.work_schedule.flow.handoff." + name
             producer, consumers = handoff["producer"], handoff["consumer"]
-            self.require(producer not in consumers, p, "handoff connects distinct phases")
             for ref in as_list(handoff.get("ready", [])):
                 event(ref, p + ".ready", {producer})
             for ref in as_list(handoff.get("wait_at", [])):
@@ -267,9 +284,6 @@ class Checker:
                 if "group" in entry:
                     self.integer(entry["group"], p + ".schedule.worktile_order.group", 1)
             assignment = schedule["worker_assignment"]
-            if assignment["refill"] == "none":
-                self.require("preassigned" in assignment, p + ".schedule.worker_assignment",
-                             "without refill, declare the preassigned work sequence")
             for field, value in assignment.get("preassigned", {}).items():
                 self.integer(value, p + ".schedule.worker_assignment.preassigned." + field, 1 if field == "step" else 0)
 
@@ -337,8 +351,6 @@ class Checker:
                         for ref in right:
                             resolve(ref, ep, lane)
             for milestone, events in phase.get("milestone", {}).items():
-                self.require(milestone.split("(", 1)[0] not in {"kernel_done", "launch_ready"},
-                             p + ".milestone", "built-in launch events cannot be redefined")
                 for ref in events:
                     resolve(ref, p + ".milestone." + milestone, None)
             for name, resource in phase.get("resource", {}).items():
@@ -560,16 +572,17 @@ def validate_task(task: dict[str, Any]) -> list[Diagnostic]:
             parent = plan["meta_data"]["dispatch"].get("parent", "root")
             check.require(parent in task, name + ".meta_data.dispatch.parent", f"unknown parent {parent}")
             parents[name] = [parent]
-    check.acyclic(parents, "meta_data.dispatch.parent")
+    check.acyclic(parents, "meta_data.dispatch.parent",
+                 {name: name + ".meta_data.dispatch.parent" for name in parents})
     if len(task) == 1 and "dispatch" in task["root"]["meta_data"]:
         when = task["root"]["meta_data"]["dispatch"]["when"]
         check.require(" ".join(when.split()) == "Select for every input in the contract domain.",
                       "root.meta_data.dispatch.when", "a sole root covers the complete Contract domain")
     contract = task["root"]["contract"]["algorithm_requirement"]
     hardware = task["root"]["contract"]["hardware_specification"]
-    check.contract(contract, "root.contract.algorithm_requirement")
+    contract_objects = check.contract(contract, "root.contract.algorithm_requirement")
     for name, plan in task.items():
-        check.shapes(plan, name)
+        check.properties(plan, contract_objects, name)
         check.math(plan, contract, name)
         check.schedule(plan, name)
         check.pipeline(plan, hardware, name)
