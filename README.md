@@ -9,8 +9,8 @@
 ## 术语
 
 - **Designer**（也称 planner）：做设计的 Agent 或人，唯一能修改 Design 区。
-- **Coder**：把设计实现成代码的 Agent（如 AKA），实现语言不限。
-- **schema**：既指这套描述语言（分区与字段规则），也指针对某个 kernel 填好的设计实例；后者也叫 **plan**。Agent 直接编写和修改 YAML，供审阅与实现。一份 plan 只描述一条流水线，即一个 **dispatch**。
+- **Coder**：按 Contract 已选的实现栈把设计实现成代码的 Agent（如 AKA）。
+- **schema**：既指这套描述语言（分区与字段规则），也指针对某个计算任务填好的设计实例；后者也叫 **plan**。Agent 直接编写和修改 YAML，供审阅与实现。一份 plan 对应一个 **dispatch**，描述该路径的流水线设计，可以包含多次计算 kernel 提交。
 - **template**：用 CUE 编写的母版，定义字段、必填条件、开放词汇与可校验关系；入口为 `schema_template/schema.cue` 的 `#Task`。
 - **wiki / microbench**：完整的硬件资料、指令手册，以及吞吐与延时的实测结果；schema 只引用，不抄录。
 
@@ -38,7 +38,7 @@ Kernel Agent 有两个普遍问题：**难以优化**——无法判断结果是
 | Contract | [contract.hardware_specification](schema_docs/2.contract.hardware_specification.md) | 硬件规格：目标设备的执行单元、核心能力与边界，已选的实现栈，以及完整规格与 microbench 的引用 | 同上 |
 | Design | [design.math_reshape](schema_docs/3.design.math_reshape.md) | 数学改写：为了在该硬件上实现，对计算本身做的改写 | 只有 Designer 能改，Coder 遵守 |
 | Design | [design.work_schedule](schema_docs/4.design.work_schedule.md) | 工作调度：计算如何分解、由谁执行、怎样分配与接续 | 同上 |
-| Design | [design.tile_pipeline](schema_docs/5.design.tile_pipeline.md) | tile 流水线：一份工作内 warp / warp group 的分工、顺序、依赖，以及片上资源分配 | 同上 |
+| Design | [design.tile_pipeline](schema_docs/5.design.tile_pipeline.md) | tile 流水线：worker 内执行角色的动作、依赖、片上资源及跨工作接续 | 同上 |
 | Realization | [realization](schema_docs/6.realization.md) | 实现交接：设计所依赖、但上面没有表达的实现条件，以及优先尝试的实现选择 | Designer 填写；Coder 只能附带实验反馈 |
 
 Design 三区从上到下排列，越靠上越难优化、收益越大、在源码里越难看出来：`math_reshape` 是前置（定下有哪些量、计算顺序、哪些量跨迭代携带、哪些中间量物化），之后 `work_schedule`（macro）与 `tile_pipeline`（micro）交替协同。
@@ -62,9 +62,8 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 1. **奥卡姆剃刀，less is more。** 删掉不影响设计理解的一切；判断标准是 “删掉它，读者会不会读错或漏掉设计”。没有内容的字段直接省略，不填空壳。
 2. **一个决定只写一次，写在唯一合适的位置。** 下游直接引用，不重述、不改义；同一个对象在各区用同一个名字。
 3. **定量、可核对。** 收益与代价写成能核对的事实（计算量、访存量、误差界等），不写 “更快”“优化访存” 这类口号。
-4. **抓大放小。** Designer 必需的内容不能漏、不能错；属于 Coder 的细节移出 schema；确实模糊、可由 Coder 决定的放进 `realization.prefer`，并尽量减少。
+4. **抓大放小。** Designer 必需的内容不能漏、不能错；普通实现细节留给 Coder。`realization.prefer` 只记录不改变 Contract 和 Design、且有具体成本理由的优先选择；尚未明确的设计返回对应 Design 区补齐。
 5. **有约束力的是具体决策，不是名称。** `persistent`、`CLC`、`online softmax` 这类名字只帮助理解，不能代替具体规则。
-6. **篇幅锚点。** 一份 plan 应尽量短，但不以形害意：当删掉任何内容都会损失实际的设计信息时，才说明承载的都是有用信息。一个 SOTA attention kernel 的设计骨架大约 50–150 行；写到数百行，通常是操作流细节漏了进来，应下放给 Coder。
 
 ## 5 仓库结构与阅读顺序
 
@@ -75,7 +74,7 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 │   ├── schema.cue       全部核心约束，按职责分章
 │   ├── starter.yaml     Agent 待填写骨架，由 init 复制为 root.yaml
 │   ├── tools/           CUE 安装、YAML 任务加载与关联校验工具
-│   ├── tests/           结构、关联和 YAML 加载的正反例
+│   ├── tests/           CUE 与校验工具的回归测试，仅维护时使用
 │   └── examples/        纳入检查的 YAML 编写示例
 ├── cue.mod/             仓库级 CUE 模块配置
 ├── schema_docs/         公共约定与六个区的字段规则、设计指导及局部示例
@@ -96,7 +95,7 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 - `kernel_wiki`（转换前）与 `schema_wiki`（转换后）一一呼应：前者是作为数据来源的 SOTA kernel，后者是从中提取、或据此撰写的 schema 设计。
 - 任务目录中的文件身份、共享 Contract 与派生关系见[公共约定](schema_docs/0.common.md#派生节点与-dispatch)。
 - 工具的使用、检查范围与规范维护要求见[模板说明](schema_template/README.md)。
-- 模板配套内容均在 `schema_template` 内；`cue.mod`、工具版本、Makefile、Agent 导航和 CI 等项目配置保留在根目录。
+- 模板配套内容均在 `schema_template` 内；`cue.mod`、工具版本、Makefile 和 CI 等项目配置保留在根目录。
 - 基础 Harness 设施尚未纳入仓库，见 §6。
 
 ### 阅读入口

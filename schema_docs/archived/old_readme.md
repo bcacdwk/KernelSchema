@@ -114,7 +114,7 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 - 三区从上到下排列：越靠上越难优化、收获越大，在源码中也越难看出来；越往下与代码绑定越深。
 - math_reshape 是下游的前置条件：只有它定下来，下游才知道有哪些量、计算的先后顺序、哪些量跨迭代携带、哪些中间量物化，才能开始分配工作。
 - work_schedule 与 tile_pipeline 需要交替协同：先定 macro，再定 micro，再改 macro，最后定 micro。流水线层面的发现可能反过来改变任务划分，例如 FA4 为了打满瓶颈环节，凑出 Q_high、Q_low 两个 tile，形成两个 softmax warp group。
-- 三区顶部各有一个 `thesis`，用最简单的语言说明这一段为什么这样设计，尽量简短（可以设字数上限）。
+- 三区顶部各有一个 `thesis`，用最简单的语言说明这一段为什么这样设计，尽量简短。
 
 分区经过三轮讨论才定下来：最初 Design 只有 macro tiling 与 micro pipeline 两层，math reshape 放在 Contract 区，另设一个 Designer 与 Coder 交织的“缓冲区”。后来 math reshape 移入 Design，macro tiling 演变为 work_schedule，micro pipeline 演变为 tile_pipeline，缓冲区演变为 realization。
 
@@ -168,7 +168,7 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
   - `prefer`：与既定设计的代价直接相关的优先选择，能实现就优先实现。Coder 可以用实验证据支持替代方案，这是 Coder 唯一的反馈位点。
   - `forbid`：Designer 考虑过并明确排除的路径，即实现起来简单、但会走弯路白费力气的方案。尽量留空。
 - 替换测试：如果 Coder 换掉这一选择，Design 的核心设计是否仍然成立？成立就留给 Coder，不成立才写进 realization。
-- 这一区越长，说明设计越差：好的设计应当容易确定，而不是遗留大量细节，评估时篇幅越长扣分越多。该收束的是 Design 本身，不能靠省略必要的硬条件显短。反馈也不是修改上游设计的入口：替代方案需要移动舍入点、增加搬运、改变角色或 buffer 生命周期时，回到对应的 Design 区讨论；`require` 无法实现时报告阻碍，不能自行降为 `prefer`。
+- 好的设计应当容易确定，而不是遗留大量细节。该收束的是 Design 本身，不能靠省略必要的硬条件显短。反馈也不是修改上游设计的入口：替代方案需要移动舍入点、增加搬运、改变角色或 buffer 生命周期时，回到对应的 Design 区讨论；`require` 无法实现时报告阻碍，不能自行降为 `prefer`。
 
 ### 3.3 一个决定写在哪里
 
@@ -195,8 +195,6 @@ Coder 和 Designer 是对称的，关键是怎样减轻 Designer 的工具负担
 8. **只陈述条件，不替下游做决定。** 每一层只固定本层必须固定的量，其余注明由哪一层决定。
 9. **有约束力的是具体决策，不是名称。** `persistent`、`CLC`、`online softmax` 这类名字只帮助理解，不能代替具体规则。
 10. **抓大放小。** Designer 必需的内容不能遗漏、不能出错；属于 Coder 的细节移出 schema；确实模糊、可以由 Coder 决定的内容放进 realization 的 `prefer`，并尽量减少。
-
-**篇幅锚点。** 一份 plan 应在允许的范围内尽可能的短，我们不对具体的行数有确切的要求，不能以形害意、导致因为限制篇幅反而漏掉内容；但是更不能因为没有篇幅而随意发挥。核心在于，删除schema的任何内容都会导致实际的设计信息被影响，这就说明schema达到了承载的都是有用信息。参照 CAKE 论文的 Table 4：FA4 forward 的 CUDA device 代码约 2369 行，Cake IR 表达为 430 行，可执行的 schedule 表示压缩了约 5 倍。schema 去掉操作流之后应当再小几倍，一个 SOTA attention kernel 的设计骨架大约在 50–150 行；写到 400 行，说明操作流细节漏了进来，应下放给 Coder。
 
 **dispatch。** 一份 plan 只描述一条流水线。不同 workload 明显需要不同的流水线时（例如 host 按 workload 分派到不同的设计），每条路径单独写一份完整的 plan，由 `meta_data.dispatch` 标识并给出选择条件；只是参数不同的 workload 留在同一份 plan 内。字段、命名与目录组织见 `schema_docs/1`。
 

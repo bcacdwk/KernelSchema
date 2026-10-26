@@ -36,7 +36,7 @@ python3 schema_template/tools/schema.py validate path/to/task_a path/to/task_b
 | `tools/validate_relations.py` | 具名引用、图关系和必要记法解析 |
 | `tools/json_value.py` | 精确十进制 JSON 传递及测试数据编码，避免 binary64 舍入 |
 | `tools/install_cue.py` | 官方固定 release 的 SHA-256 校验与本地安装 |
-| `tests/` | 正反例与最小合成 YAML fixture |
+| `tests/` | CUE 与 Python 校验器的回归测试，仅维护规范或工具时使用；编写 plan 无需阅读 |
 | `examples/gdn/root.yaml` | 完整的紧凑 YAML 示例 |
 
 加载器去掉文件名的扩展名，以节点 ID 作为 `#Task` 的映射键；该容器只用于校验，不写进 YAML。适配层不另定义字段规则。安装器支持 macOS/Linux 的 amd64、arm64，二进制保存在忽略提交的 `.tools/`；CUE 模块、版本、Makefile 与 CI 配置位于仓库根目录。
@@ -47,9 +47,11 @@ python3 schema_template/tools/schema.py validate path/to/task_a path/to/task_b
 - **Python**：Contract 与数学符号引用、父节点和启动依赖图、共享 worker 与交接关系、资源区域、域及动作/事件的记法和部分索引作用域。所有派生节点使用 root 的共享 Contract；数值解析和比较保留精确十进制值，不执行公式。
 - **审阅与运行证据**：dispatch 条件的互斥与全覆盖、文本中的数学和策略引用、外部资料及实验依据、修订号相对历史递增、修改权限。通过校验不证明数学等价、数值正确、资源可行或性能；检查器不展开事件图，因而不证明具体动作实例存在、存储复用安全或活性。wiki 占位和 `unknown:` 仍表示尚未补齐的证据。
 
-[GDN 示例](examples/gdn/root.yaml) 连接完整 Contract、数学改写和五个 phase，固定 HeadCount=8、SequenceLength=4096。数学与组织引用 FLA 固定提交，示例环境选用 B200 + CUDA C++/CUTLASS，不表示原始 Triton 实现已完成移植。wiki 占位尚待补齐；示例通过结构与关联检查，未进行 GPU 数值、活性或性能验收。测试 fixture 中的 `testing.invalid` 引用仅标识合成数据。
+[GDN 示例](examples/gdn/root.yaml) 连接完整 Contract、数学改写和五个 phase，固定 HeadCount=8、SequenceLength=4096。数学与组织引用 FLA 固定提交，示例环境选用 B200 + CUDA C++/CUTLASS，不表示原始 Triton 实现已完成移植。wiki 占位尚待补齐；示例通过结构与关联检查，未进行 GPU 数值、活性或性能验收。
 
 ## 维护
+
+`tests/test_schema.py` 验证 CUE 约束与 Python 工具是否按预期接受合法输入、拒绝错误输入，并检查校验不改写文件等行为。`tests/fixtures/minimal/root.yaml` 是构造这些输入的最小测试底稿，其中的 `testing.invalid` 引用仅标识合成数据。它服务于校验器维护；`examples/` 服务于 YAML 编写参考。
 
 ```sh
 make fmt
