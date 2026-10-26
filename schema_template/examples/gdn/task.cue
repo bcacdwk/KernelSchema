@@ -1,0 +1,732 @@
+package plan
+
+import kernel "kernelschema.local/schema_template:kernel"
+
+// Composed from the normative GDN sections; see README.md for the scope.
+plans: kernel.#Task
+
+plans: root: {
+	meta_data: {
+		name:     "gated_delta_rule"
+		describe: "Compute gated delta readouts and the final state."
+		source:   "fla-org/flash-linear-attention@954438d1:fla/ops/gated_delta_rule/chunk.py"
+		version:  1
+		dispatch: {
+			id:   "root"
+			when: "Select for every input in the contract domain."
+		}
+	}
+	contract: {
+		algorithm_requirement: {
+			constant: {
+				DK: {value: 128, meaning: "Key dimension"}
+				DV: {value: 128, meaning: "Value dimension"}
+				scale: {
+					value:   "1/sqrt(DK)"
+					meaning: "Query readout scale"
+				}
+				HeadCount: {
+					value:   8
+					meaning: "Attention head count for this illustrative workload."
+				}
+				SequenceLength: {
+					value:   4096
+					meaning: "Tokens per sequence for this illustrative workload."
+				}
+			}
+			input: {
+				Q: {
+					meaning: "Query"
+					shape: [{batch: "BatchCount"}, {token: "SequenceLength"}, {head: "HeadCount"}, {dk: "DK"}]
+					dtype: "bf16"
+				}
+				K: {
+					meaning: "Key"
+					shape: [{batch: "BatchCount"}, {token: "SequenceLength"}, {head: "HeadCount"}, {dk: "DK"}]
+					dtype: "bf16"
+				}
+				V: {
+					meaning: "Value"
+					shape: [{batch: "BatchCount"}, {token: "SequenceLength"}, {head: "HeadCount"}, {dv: "DV"}]
+					dtype: "bf16"
+				}
+				g: {
+					meaning: "Per-token natural-log decay"
+					shape: [{batch: "BatchCount"}, {token: "SequenceLength"}, {head: "HeadCount"}]
+					dtype: "fp32"
+				}
+				beta: {
+					meaning: "Activated update coefficient"
+					shape: [{batch: "BatchCount"}, {token: "SequenceLength"}, {head: "HeadCount"}]
+					dtype: "fp32"
+				}
+				S0: {
+					meaning: "Initial state"
+					shape: [{batch: "BatchCount"}, {head: "HeadCount"}, {dk: "DK"}, {dv: "DV"}]
+					dtype:   "fp32"
+					default: 0
+				}
+			}
+			output: {
+				o: {
+					meaning: "Updated-state readout"
+					shape: [{batch: "BatchCount"}, {token: "SequenceLength"}, {head: "HeadCount"}, {dv: "DV"}]
+					dtype: "bf16"
+				}
+				S_final: {
+					meaning: "Final state"
+					shape: [{batch: "BatchCount"}, {head: "HeadCount"}, {dk: "DK"}, {dv: "DV"}]
+					dtype: "fp32"
+				}
+			}
+			compute: [{
+				name: "Apply the recurrence"
+				math: """
+					Q and K are used without normalization.
+					For each batch and head, with their indices omitted:
+					  S(-1) = S0.
+					  For 0 <= t < SequenceLength:
+					    S_decay(t) = exp(g[t]) * S(t-1).
+					    delta(t)[j] = beta[t] * (V[t,j] - sum_{i=0}^{DK-1} K[t,i] * S_decay(t)[i,j]) for 0 <= j < DV.
+					    S(t)[i,j] = S_decay(t)[i,j] + K[t,i] * delta(t)[j] for 0 <= i < DK and 0 <= j < DV.
+					    o[t,j] = bf16(sum_{i=0}^{DK-1} (scale * Q[t,i]) * S(t)[i,j]) for 0 <= j < DV.
+					  S_final = S(SequenceLength - 1).
+
+					"""
+				symbol: {
+					S: {
+						meaning: "State after token t"
+						shape:   "ref:S0.shape"
+						dtype:   "fp32"
+					}
+					S_decay: {
+						meaning: "Decayed state at token t"
+						shape:   "ref:S0.shape"
+						dtype:   "fp32"
+					}
+					delta: {
+						meaning: "Update vector at token t"
+						shape: [{batch: "BatchCount"}, {head: "HeadCount"}, {dv: "DV"}]
+						dtype: "fp32"
+					}
+				}
+			}]
+			golden_reference: {
+				source: "fla-org/flash-linear-attention@954438d1:fla/ops/gated_delta_rule/naive.py::naive_recurrent_gated_delta_rule"
+				tolerance: {
+					o:       "rel_rmse <= 5e-3"
+					S_final: "rel_rmse <= 5e-3"
+				}
+			}
+		}
+		hardware_specification: {
+			device: "NVIDIA B200"
+			arch:   "SM100"
+			execution: {
+				warp:    "32 threads that issue as one instruction stream; the smallest scope of a collective instruction."
+				CTA:     "Warps resident on one SM, sharing its SMEM allocation and barriers."
+				cluster: "CTAs co-scheduled on SMs of one GPU processing cluster; the size is fixed at launch."
+			}
+			feature: {
+				"tcgen05.mma": "Single-thread asynchronous issue; TMEM accumulators; one CTA or a same-cluster CTA pair whose ranks differ only in the lowest bit."
+				TMEM:          "Tensor Core memory separate from SMEM, with explicit allocation and dedicated access instructions."
+				TMA:           "Asynchronous tensor-map transfers between GMEM and SMEM; GMEM-to-SMEM multicast within a cluster."
+				mbarrier:      "Asynchronous copies and MMA report completion by arriving at an SMEM barrier; issue order does not imply completion order."
+				setmaxnreg:    "A warp group can release or claim per-thread registers at runtime, so roles in one CTA can hold asymmetric budgets within its total."
+				cluster:       "Peer SMEM in the same cluster is addressable by load, store and atomic while that SMEM exists."
+				CLC:           "Asynchronously attempts to cancel an unstarted CTA or cluster in the same grid; returns its first CTA's grid index on success."
+				"L1/SMEM":     "L1, texture cache, and SMEM share physical capacity."
+			}
+			stack: {
+				language:  "CUDA C++17"
+				template:  "CUTLASS 4.2.1"
+				toolchain: "CUDA Toolkit 13.0.0"
+			}
+			wiki: {
+				hardware: "<wiki-hardware@pending:Blackwell/B200.md>"
+				programming: {
+					language:    "<wiki-language@pending:CUDA-Cpp/13.0.0/>"
+					template:    "NVIDIA/cutlass@f3fde58372d33e9a5650ba7b80fc48b3b49d40c8:media/docs/cpp/"
+					virtual_isa: "<wiki-virtual-isa@pending:PTX/9.0/>"
+					machine_isa: "<wiki-machine-isa@pending:SASS/SM100/>"
+				}
+				microbench: "<wiki-microbench@pending:B200/>"
+				sota: {
+					kernel: "<wiki-sota-kernel@pending:B200/>"
+					schema: "<wiki-sota-schema@pending:B200/>"
+				}
+				profile: "<wiki-profile@pending:NVIDIA/>"
+			}
+		}
+	}
+	design: {
+		math_reshape: {
+			thesis: "Replace the token recurrence by chunk-local triangular systems, shortening the state chain from one transition per token to one per chunk and turning the rank-one updates into matrix products. Reusable transforms and BF16 snapshots are materialized; the state itself stays FP32."
+			rewrite: [{
+				step: "1"
+				name: "Accumulate decay within each chunk"
+				math: """
+					Each batch and head is independent; b and h are omitted.
+					Nc = ceil(SequenceLength/C), n(c) = min(C,SequenceLength-c*C), 0 <= c < Nc
+					X(c) = X[c*C:c*C+n(c)] for every token-indexed value X
+					G(c)[t] = log2(e)*sum32_{s=0}^{t} g(c)[s] for 0 <= t < n(c)
+
+					"""
+				symbol: {
+					C: {
+						meaning: "Mathematical chunk length."
+						value:   64
+					}
+					G: {
+						meaning: "Base-two decay prefix restarted in each chunk."
+						shape: [{token: "SequenceLength"}]
+						dtype: "fp32"
+						life:  "stored (b,h)"
+					}
+				}
+			}, {
+				step: "2"
+				name: "Write the intra-chunk dependence as a triangular system"
+				math: """
+					A(c)[t,j] = (dot32(K(c)[t,:],K(c)[j,:])*exp2(G(c)[t]-G(c)[j]))*beta(c)[t]
+					            if 0 <= j < t < n(c); otherwise 0
+					sub(u) = [u*Ctri,min((u+1)*Ctri,n(c)))
+					0 <= u,v < ceil(n(c)/Ctri)
+					A_uv = A(c)[sub(u),sub(v)], T32_uv = T32(c)[sub(u),sub(v)]
+					0 <= r,s < count(sub(u))
+					D_u[r,r] = 1, D_u[r,s] = 0 if s > r
+					D_u[r,s] = -A_uu[r,s]-sum_{s<k<r} A_uu[r,k]*D_u[k,s] if s < r
+					T32_uu = D_u, T32_uv = 0 if u < v
+					T32_uv = -mm_tf32(mm_tf32(D_u,A_uv),D_v) if u = v+1
+					T32_uv = -mm_tf32(D_u,sum_{w=v}^{u-1} mm_tf32(A_uw,T32_wv)) if u > v+1
+					T[c*C+t,j] = bf16(T32(c)[t,j]) if j < n(c)
+					             0 if n(c) <= j < C
+					0 <= t < n(c), 0 <= j < C
+
+					"""
+				symbol: {
+					Ctri: {
+						meaning: "Diagonal solve block length."
+						value:   16
+					}
+					T: {
+						meaning: "Inverse of I+A for one chunk; tail columns are zero-padded."
+						shape: [{token: "SequenceLength"}, {source_token: "C"}]
+						dtype: "bf16"
+						life:  "stored (b,h)"
+					}
+				}
+			}, {
+				step: "3"
+				name: "Apply one inverse to both right-hand sides"
+				math: """
+					W(c) = bf16(mm32(T(c)[:,0:n(c)],
+					                 bf16((K(c) ⊙ beta(c)[:,None]) ⊙ exp2(G(c))[:,None])))
+					U(c) = bf16(mm32(T(c)[:,0:n(c)],
+					                 bf16(V(c) ⊙ beta(c)[:,None])))
+
+					"""
+				symbol: {
+					W: {
+						meaning: "Transformed key."
+						shape: [{token: "SequenceLength"}, {dk: "DK"}]
+						dtype: "bf16"
+						life:  "stored (b,h)"
+					}
+					U: {
+						meaning: "Transformed value."
+						shape: [{token: "SequenceLength"}, {dv: "DV"}]
+						dtype: "bf16"
+						life:  "stored (b,h)"
+					}
+				}
+			}, {
+				step: "4"
+				name: "Advance the state once per chunk"
+				math: """
+					S(-1) = S0
+					S_bar[c] = bf16(S(c-1))
+					R(c) = U(c)-mm32(W(c),S_bar[c])
+					R_bar(c) = bf16(R(c))
+					decay(c)[t] = exp2(G(c)[n(c)-1]-G(c)[t])
+					R_weight(c) = bf16(decay(c)[:,None] ⊙ R(c))
+					S(c) = mma32(K(c)ᵀ,R_weight(c),exp2(G(c)[n(c)-1])*S(c-1))
+					S_final = S(Nc-1)
+
+					"""
+				symbol: {
+					S: {
+						meaning: "Key-by-value state after the last token of chunk c."
+						shape: [{dk: "DK"}, {dv: "DV"}]
+						dtype: "fp32"
+						life:  "carried (b,h); c=-1..Nc-1"
+					}
+					S_bar: {
+						meaning: "Incoming-state snapshot per chunk."
+						shape: [{chunk: "Nc"}, {dk: "DK"}, {dv: "DV"}]
+						dtype: "bf16"
+						life:  "stored (b,h)"
+					}
+					R_bar: {
+						meaning: "Readout copy of the residual; the state update takes a separately weighted copy."
+						shape: [{token: "SequenceLength"}, {dv: "DV"}]
+						dtype: "bf16"
+						life:  "stored (b,h)"
+					}
+				}
+			}, {
+				step: "5"
+				name: "Read out from the snapshot and the intra-chunk term"
+				math: """
+					B(c)[t,j] = dot32(Q(c)[t,:],K(c)[j,:])*exp2(G(c)[t]-G(c)[j])
+					            if 0 <= j <= t < n(c); otherwise 0
+					o(c) = bf16(scale*(exp2(G(c))[:,None] ⊙ mm32(Q(c),S_bar[c]))
+					            + scale*mm32(bf16(B(c)),R_bar(c)))
+
+					"""
+			}]
+			ledger: {
+				baseline: "Contract token recurrence with the FP32 state held on chip and no chunk intermediates."
+				depth: [{
+					item:   "State dependency chain"
+					change: "SequenceLength token transitions -> Nc chunk transitions per (b,h)"
+					by: ["4"]
+				}]
+				vector: [{
+					item:   "Token recurrence"
+					change: "-3*SequenceLength*DK*DV MAC and -SequenceLength*DK*DV decay multiplies per (b,h)"
+					by: ["4"]
+				}]
+				matmul: [{
+					item:   "Block contractions"
+					change: "0 -> 3*SequenceLength*DK*DV + SequenceLength*C*(3*DK+2*DV) MAC per (b,h), about 1.8x the recurrence they replace at C=64 and DK=DV=128"
+					by: ["2", "3", "4", "5"]
+				}, {
+					item:   "Inverse construction"
+					change: "0 -> Nc unit lower-triangular inverses of order n(c) per (b,h), counted apart from the contractions above"
+					by: ["2"]
+				}]
+				transcendental: [{
+					item:   "Decay factors"
+					change: "SequenceLength exp -> SequenceLength*(C+3) exp2 per (b,h)"
+					by: ["1", "2", "4", "5"]
+				}]
+				footprint: [{
+					item:   "Materialized intermediates"
+					change: "0 -> G, T, W, U, S_bar and R_bar, about 1.4 KB per token per (b,h) at C=64 and DK=DV=128"
+					by: ["1", "2", "3", "4"]
+				}]
+				traffic: [{
+					item:   "Intermediate writes and reads"
+					change: "0 -> about 3.3 KB per token per (b,h), each materialized tensor written once and read by every consuming step"
+					by: ["1", "2", "3", "4", "5"]
+				}]
+				error: [{
+					item:   "BF16 intermediates"
+					change: "+1 BF16 rounding each on T, W, U, S_bar, R_bar, R_weight and the B operand; S and R stay FP32"
+					by: ["2", "3", "4", "5"]
+				}, {
+					item:   "TF32 inverse merges"
+					change: "+TF32 multiply inputs in the off-diagonal blocks of T32, FP32 in the diagonal solve"
+					by: ["2"]
+				}]
+			}
+		}
+		work_schedule: {
+			thesis: "Keep chunks independent in four of the five passes, and serialize along chunk only where the state recurrence forces it, trading one extra global round trip per intermediate for that parallelism."
+			flow: {
+				launch: [{phase: ["gate"]}, {
+					phase: ["solve"]
+					start_after: "gate.kernel_done"
+				}, {
+					phase: ["prepare"]
+					start_after: "solve.kernel_done"
+				}, {
+					phase: ["advance"]
+					start_after: "prepare.kernel_done"
+				}, {
+					phase: ["output"]
+					start_after: "advance.kernel_done"
+				}]
+				handoff: {
+					G: {
+						producer: "gate"
+						consumer: ["solve", "prepare", "advance", "output"]
+						storage: "global"
+					}
+					T: {
+						producer: "solve"
+						consumer: ["prepare"]
+						storage:    "global"
+						initialize: 0
+					}
+					W: {
+						producer: "prepare"
+						consumer: ["advance"]
+						storage: "global"
+					}
+					U: {
+						producer: "prepare"
+						consumer: ["advance"]
+						storage: "global"
+					}
+					S_bar: {
+						producer: "advance"
+						consumer: ["output"]
+						storage: "global"
+					}
+					R_bar: {
+						producer: "advance"
+						consumer: ["output"]
+						storage: "global"
+					}
+				}
+			}
+			phase: {
+				gate: {
+					describe: "Compute chunk-local cumulative decay G."
+					decomposition: {
+						partition: {
+							batch: {size: "BatchCount", tile: 1}
+							head: {size: "HeadCount", tile: 1}
+							chunk: {size: "Nc", tile: 1}
+						}
+						worktile: invariant: g: {shape: [{token: "C"}], dtype: "fp32"}
+						target: single_tile: G: {shape: [{token: "C"}], dtype: "fp32"}
+					}
+					mapping: {
+						worker: {unit: "CTA", count: 1}
+						count: "worktile_count"
+					}
+					schedule: {
+						worktile_order: [{by: "batch", direction: "ascending"}, {by: "head", direction: "ascending"}, {by: "chunk", direction: "ascending"}]
+						worker_assignment: {
+							preassigned: {start: "worker_id", count: 1}
+							refill: "none"
+							exit:   "assigned_done"
+						}
+					}
+				}
+				solve: {
+					describe: "Form and invert the chunk-local triangular matrix."
+					decomposition: {
+						partition: {
+							batch: {size: "BatchCount", tile: 1}
+							head: {size: "HeadCount", tile: 1}
+							chunk: {size: "Nc", tile: 1}
+						}
+						worktile: {
+							invariant: {
+								G: {shape: [{token: "C"}], dtype: "fp32"}
+								beta: {shape: [{token: "C"}], dtype: "fp32"}
+							}
+							iteration: K: {
+								shape: [{token: "C"}, {dk: 64}]
+								dtype:     "bf16"
+								direction: "ascending"
+							}
+						}
+						target: single_tile: T: {
+							shape: [{token: "C"}, {source_token: "C"}]
+							dtype: "bf16"
+						}
+					}
+					mapping: {
+						worker: {unit: "CTA", count: 1}
+						count: "worktile_count"
+					}
+					schedule: {
+						worktile_order: [{by: "batch", direction: "ascending"}, {by: "head", direction: "ascending"}, {by: "chunk", direction: "ascending"}]
+						worker_assignment: {
+							preassigned: {start: "worker_id", count: 1}
+							refill: "none"
+							exit:   "assigned_done"
+						}
+					}
+				}
+				prepare: {
+					describe: "Compute U, then W, using T."
+					decomposition: {
+						partition: {
+							batch: {size: "BatchCount", tile: 1}
+							head: {size: "HeadCount", tile: 1}
+							chunk: {size: "Nc", tile: 1}
+						}
+						worktile: {
+							invariant: {
+								T: {
+									shape: [{token: "C"}, {source_token: "C"}]
+									dtype: "bf16"
+								}
+								beta: {shape: [{token: "C"}], dtype: "fp32"}
+								G: {shape: [{token: "C"}], dtype: "fp32"}
+							}
+							iteration: {
+								V: {
+									shape: [{token: "C"}, {dv: 64}]
+									dtype:     "bf16"
+									direction: "ascending"
+								}
+								K: {
+									shape: [{token: "C"}, {dk: 64}]
+									dtype:     "bf16"
+									direction: "ascending"
+								}
+							}
+						}
+						target: single_tile: {
+							W: {
+								shape: [{token: "C"}, {dk: "DK"}]
+								dtype: "bf16"
+							}
+							U: {
+								shape: [{token: "C"}, {dv: "DV"}]
+								dtype: "bf16"
+							}
+						}
+					}
+					mapping: {
+						worker: {unit: "CTA", count: 1}
+						count: "worktile_count"
+					}
+					schedule: {
+						worktile_order: [{by: "batch", direction: "ascending"}, {by: "head", direction: "ascending"}, {by: "chunk", direction: "ascending"}]
+						worker_assignment: {
+							preassigned: {start: "worker_id", count: 1}
+							refill: "none"
+							exit:   "assigned_done"
+						}
+					}
+				}
+				advance: {
+					describe: "Advance state and save each chunk's snapshot and correction."
+					decomposition: {
+						strategy: "Carry FP32 S across chunks and preserve the distinct saved and weighted R casts."
+						partition: {
+							batch: {size: "BatchCount", tile: 1}
+							head: {size: "HeadCount", tile: 1}
+							dv: {size: "DV", tile: 32}
+						}
+						worktile: {
+							invariant: S0: {
+								shape: [{dk: "DK"}, {dv: 32}]
+								dtype: "fp32"
+							}
+							iteration: {
+								G: {
+									shape: [{chunk: 1}, {token: "C"}]
+									dtype:     "fp32"
+									direction: "ascending"
+								}
+								K: {
+									shape: [{chunk: 1}, {token: "C"}, {dk: "DK"}]
+									dtype:     "bf16"
+									direction: "ascending"
+								}
+								W: {
+									shape: [{chunk: 1}, {token: "C"}, {dk: "DK"}]
+									dtype:     "bf16"
+									direction: "ascending"
+								}
+								U: {
+									shape: [{chunk: 1}, {token: "C"}, {dv: 32}]
+									dtype:     "bf16"
+									direction: "ascending"
+								}
+							}
+						}
+						target: single_tile: {
+							S_bar: {
+								shape: [{chunk: "Nc"}, {dk: "DK"}, {dv: 32}]
+								dtype: "bf16"
+							}
+							R_bar: {
+								shape: [{chunk: "Nc"}, {token: "C"}, {dv: 32}]
+								dtype: "bf16"
+							}
+							S_final: {
+								shape: [{dk: "DK"}, {dv: 32}]
+								dtype: "fp32"
+							}
+						}
+					}
+					mapping: {
+						worker: {unit: "CTA", count: 1}
+						count: "worktile_count"
+					}
+					schedule: {
+						worktile_order: [{by: "batch", direction: "ascending"}, {by: "head", direction: "ascending"}, {by: "dv", direction: "ascending"}]
+						worker_assignment: {
+							preassigned: {start: "worker_id", count: 1}
+							refill: "none"
+							exit:   "assigned_done"
+						}
+					}
+				}
+				output: {
+					describe: "Form output from state snapshots and chunk-local corrections."
+					decomposition: {
+						partition: {
+							batch: {size: "BatchCount", tile: 1}
+							head: {size: "HeadCount", tile: 1}
+							chunk: {size: "Nc", tile: 1}
+							dv: {size: "DV", tile: 64}
+						}
+						worktile: {
+							invariant: {
+								G: {shape: [{token: "C"}], dtype: "fp32"}
+								R_bar: {
+									shape: [{token: "C"}, {dv: 64}]
+									dtype: "bf16"
+								}
+							}
+							iteration: {
+								Q: {
+									shape: [{token: "C"}, {dk: 64}]
+									dtype:     "bf16"
+									direction: "ascending"
+								}
+								K: {
+									shape: [{token: "C"}, {dk: 64}]
+									dtype:     "bf16"
+									direction: "ascending"
+								}
+								S_bar: {
+									shape: [{dk: 64}, {dv: 64}]
+									dtype:     "bf16"
+									direction: "ascending"
+								}
+							}
+						}
+						target: single_tile: o: {
+							shape: [{token: "C"}, {dv: 64}]
+							dtype: "bf16"
+						}
+					}
+					mapping: {
+						worker: {unit: "CTA", count: 1}
+						count: "worktile_count"
+					}
+					schedule: {
+						worktile_order: [{by: "batch", direction: "ascending"}, {by: "head", direction: "ascending"}, {by: "chunk", direction: "ascending"}, {by: "dv", direction: "ascending"}]
+						worker_assignment: {
+							preassigned: {start: "worker_id", count: 1}
+							refill: "none"
+							exit:   "assigned_done"
+						}
+					}
+				}
+			}
+		}
+		tile_pipeline: {
+			thesis: """
+				With one cooperative lane per phase nothing overlaps inside a worker, so latency is hidden only across co-resident CTAs; advance runs the serial chunk chain and keeps the FP32 state in registers throughout, so the state itself never round-trips through memory.
+
+				"""
+			phase: {
+				gate: lane: Main: {
+					info: member: "warp[0:1]"
+					pipe: steady: ["produce:G"]
+				}
+				solve: {
+					resource: Gram: {
+						space: "register"
+						shape: [{block: 10}, {token: 16}, {source_token: 16}]
+						dtype: "fp32"
+					}
+					lane: Main: {
+						info: {
+							member: "warp[0:4]"
+							verb: {
+								accumulate: "Accumulate the lower Ctri-by-Ctri blocks of K·Kᵀ over one dk slice into Gram."
+								solve:      "Apply the upstream solve to Gram and store the lower blocks of BF16 T."
+							}
+						}
+						pipe: {
+							repeat: k: [0, 2]
+							prologue: ["load:G", "load:beta", "zero:Gram"]
+							steady: ["accumulate:Gram(k)"]
+							epilogue: ["solve:T"]
+						}
+					}
+				}
+				prepare: {
+					resource: {
+						T: {
+							space: "register"
+							shape: [{token: 64}, {source_token: 64}]
+							dtype: "bf16"
+						}
+						beta: {
+							space: "register"
+							shape: [{token: 64}]
+							dtype: "fp32"
+						}
+					}
+					lane: Main: {
+						info: member: "warp[0:4]"
+						pipe: {
+							prologue: ["load:T", "load:beta"]
+							steady: [{
+								repeat: u: [0, 2]
+								steady: ["produce:U(u)"]
+							}, "load:G", {
+								repeat: w: [0, 2]
+								steady: ["produce:W(w)"]
+							}]
+						}
+					}
+				}
+				advance: {
+					resource: {
+						S: {
+							space: "register"
+							shape: [{dk: 128}, {dv: 32}]
+							dtype: "fp32"
+						}
+						R: {
+							space: "register"
+							shape: [{token: 64}, {dv: 32}]
+							dtype: "fp32"
+						}
+					}
+					lane: Main: {
+						info: member: "warp[0:2]"
+						pipe: {
+							repeat: c: [0, "Nc"]
+							prologue: ["load:S0"]
+							steady: ["produce:S_bar(c)", "compute:R(c)", "produce:R_bar(c)", "compute:S(c)"]
+							epilogue: ["store:S_final"]
+						}
+					}
+				}
+				output: {
+					resource: {
+						State_term: {
+							space: "register"
+							shape: [{token: 64}, {dv: 64}]
+							dtype: "fp32"
+						}
+						Local_term: {
+							space: "register"
+							shape: [{token: 64}, {source_token: 64}]
+							dtype: "fp32"
+						}
+					}
+					lane: Main: {
+						info: {
+							member: "warp[0:4]"
+							verb: accumulate: "Accumulate Q·S_bar into State_term and Q·Kᵀ into Local_term over one dk slice."
+						}
+						pipe: {
+							repeat: k: [0, 2]
+							prologue: ["zero:State_term", "zero:Local_term"]
+							steady: ["accumulate:State_Local(k)"]
+							epilogue: ["produce:o"]
+						}
+					}
+				}
+			}
+		}
+	}
+}

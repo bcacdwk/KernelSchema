@@ -2,14 +2,14 @@
 
 本仓库设计一套描述 GPU kernel **流水线设计**的 schema：用结构化的 YAML 记录一个 kernel 要算什么、数学上怎么改写、工作怎么分配到硬件、tile 内部怎么流水，以及实现时必须遵守的条件。schema 位于所有 GPU 编程语言之上，由 Designer 填写、Coder 实现、人类专家审阅。
 
-本 README 是全局性的导引：交代背景、分区总览、编写原则、仓库结构与现状。各区的字段规则、语法和案例以 `schema_docs/1–6` 为准。
+本 README 是全局性的导引：交代背景、分区总览、编写原则、仓库结构与现状。语言规范由 `schema_docs/1–6` 的说明与 `schema_template` 中 `kernel` 包的格式约束共同定义，两者必须一致。文档案例与 `schema_wiki` 都用于举例；发现差异时先判断规则是否合理，不以兼容案例为由放宽模板。
 
 ## 术语
 
 - **Designer**（也称 planner）：做设计的 Agent 或人，唯一能修改 Design 区。
 - **Coder**：把设计实现成代码的 Agent（如 AKA），实现语言不限。
-- **schema**：既指这套描述语言（分区与字段规则），也指针对某个 kernel 填好的 YAML 实例；后者也叫 **plan**。一份 plan 只描述一条流水线，即一个 **dispatch**。
-- **template**：schema 的母版，定义有哪些字段、哪些必填、可选哪些词汇；计划用 CUE 编写，尚未开始。
+- **schema**：既指这套描述语言（分区与字段规则），也指针对某个 kernel 填好的设计实例；后者也叫 **plan**。plan 在 CUE 中编写，派生为供审阅和实现的只读 YAML。一份 plan 只描述一条流水线，即一个 **dispatch**。
+- **template**：用 CUE 编写的母版，定义字段、必填条件、开放词汇与可校验关系；入口为 `schema_template/plan.cue` 的 `#Task`。
 - **wiki / microbench**：完整的硬件资料、指令手册，以及吞吐与延时的实测结果；schema 只引用，不抄录。
 
 ## 1 背景与动机
@@ -41,7 +41,9 @@ Kernel Agent 有两个普遍问题：**难以优化**——无法判断结果是
 
 Design 三区从上到下排列，越靠上越难优化、收益越大、在源码里越难看出来：`math_reshape` 是前置（定下有哪些量、计算顺序、哪些量跨迭代携带、哪些中间量物化），之后 `work_schedule`（macro）与 `tile_pipeline`（micro）交替协同。
 
-**文件格式。** plan 实例用 YAML；母版 template 计划用 CUE，尚未编写。
+**文件格式。** Agent 必须填写 CUE，经过模板和关联校验后自动生成 YAML。CUE 是唯一可编辑来源，YAML 是不可手工修改的派生产物；人类专家与 Coder 仍按 YAML 阅读设计。修改设计或补充实验反馈都回到 CUE，再生成 YAML。
+
+生成器设置本地 YAML 为只读，并记录源文件、模板、工具版本与产物摘要。`check` 重新生成并逐字节比对，发现手改、过期或缺失即失败。只读权限是本地防误编辑措施，Git 不保存这类权限；提交检查依靠重新生成比对，不宣称操作系统层面不可绕过。
 
 ## 3 预期使用
 
@@ -51,7 +53,15 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 - **撰写 / 优化**（在线，planner）：依据 `schema_wiki` 的案例、CUE template 与 `schema_docs` 规则，从零撰写或逐步优化一条流水线设计。
 - **实现**（coder，schema → kernel）：按某个 dispatch 的设计从零实现，或逐步修改优化对应的 kernel。
 
-本 README 只给出定位，三条流的具体步骤由上述 skill 覆盖，不在此展开。
+三条流都遵守上述编写方向。当前 CUE 编写与生成入口见 [模板使用说明](schema_template/README.md)，三份完整的操作指导仍待补充。
+
+```sh
+make setup
+python3 schema_template/tools/schema.py init schema_wiki/<batch>/<task>
+# 填写新目录中的 task.cue；类型占位没有填完时不能导出。
+python3 schema_template/tools/schema.py build schema_wiki/<batch>/<task>
+python3 schema_template/tools/schema.py check schema_wiki/<batch>/<task>
+```
 
 ## 4 编写原则
 
@@ -67,6 +77,12 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 ```text
 .
 ├── README.md            本文件：背景、分区总览、原则与现状
+├── schema_template/     模板统一入口：说明、公共类型、六区规则与 plan.cue
+│   ├── starter.cue      Agent 待填写骨架，由 init 复制为任务源文件
+│   ├── tools/           CUE 安装、生成与关联校验工具
+│   ├── tests/           结构、关联和产物一致性的正反例
+│   └── examples/        经生成流程验证的 CUE 编写示例
+├── cue.mod/             仓库级 CUE 模块配置
 ├── schema_docs/         转换规则：六个区的字段规则与案例（当前主要工作对象）
 │   ├── 1.contract.algorithm_requirement.md
 │   ├── 2.contract.hardware_specification.md
@@ -78,27 +94,28 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 ├── kernel_wiki/         转换前：SOTA kernel 源库（参考实现、方案、evidence、验证报告）
 │   └── <batch>/<task>/  按批次、按任务组织
 └── schema_wiki/         转换后：schema 实例库（plan）
-    └── <batch>/<task>/  每个任务一个目录：dispatch.md + <task>__<path>.yaml
+    └── <batch>/<task>/  CUE 源文件 + root.yaml / <id>.yaml + dispatch.md
 ```
 
 - `kernel_wiki`（转换前）与 `schema_wiki`（转换后）一一呼应：前者是作为数据来源的 SOTA kernel，后者是从中提取、或据此撰写的 schema 设计。
-- template（CUE）与基础 Harness 设施尚未纳入仓库，见 §6。
+- 新任务用同目录的 CUE package 定义 `plans`；生成器按节点 ID 输出 YAML。旧的手写 YAML 尚未迁移，生成器不会把它们作为输入或自动覆盖。
+- 模板配套内容均在 `schema_template` 内；`cue.mod`、工具版本、Makefile、Agent 导航和 CI 等项目配置保留在根目录。
+- 基础 Harness 设施尚未纳入仓库，见 §6。
 
 阅读顺序：
 
 1. 先读本 README，了解目的、分区边界与通用原则；
-2. 再读要处理的 `schema_docs/1–6`；改动涉及跨区的名称、记号或案例时，同时核对相关区；
+2. 再读要处理的 `schema_docs/1–6` 和对应 CUE 定义；规则变更同步修订两者，并补充测试；
 3. 需要案例看 `schema_wiki`，需要源 kernel 看 `kernel_wiki`，查旧写法看 `schema_docs/archived`（只读）。
 
 ## 6 现状与 TODO
 
-**已有：** `schema_docs/1–6`（字段规则与案例，正在逐区优化）；`kernel_wiki`（SOTA kernel 源库）；`schema_wiki`（对应的 schema 实例，含 dispatch）。案例覆盖 FA4、GDN、MoE 等算子与 B200、MI355X、昇腾 950PR 三类硬件，细节见各 doc。
+**已有：** `schema_docs/1–6`、六区 CUE 模板、CUE 编写与 YAML 生成工具、正反例测试及 CI 检查；`kernel_wiki` 与尚未全量迁移的 `schema_wiki`。规则与校验范围的对应关系见 [覆盖说明](schema_template/coverage.md)。文档案例覆盖 FA4、GDN、MoE 与三类硬件；它们不是自动校验或性能成立的证明。
 
 **TODO：**
 
-- **template（CUE）**：整体设计思想与原则，以及六个区各自的模板。
-- **完整 full case**：把六个区串成一份端到端的 plan 示例。
+- **案例迁移与验收**：用 CUE 重写已有实例，补齐资料与设计缺口；端到端编写示例见 `schema_template/examples/gdn`，数值及性能验收另行进行。
 - **更多转写与精简**：转写更多 SOTA kernel，收敛到最小交集原语。
-- **检查器与评估器**：不运行代码的静态校验（资源记账、合法性、活性），以及尽量保序的性能估算。
+- **检查器与评估器**：在现有结构和具名关系校验之外，继续实现资源记账、展开事件图的合法性与活性分析，以及尽量保序的性能估算。
 - **基础 Harness 设施**：支撑离线提取与在线撰写迭代的轻量平台，尚未放入仓库。
 - **三份操作指导（skill / AGENTS.md）**：① 离线从 SOTA kernel 提取 schema；② planner 在线依据 `schema_wiki` + CUE + `schema_docs` 从零撰写或逐步优化 schema；③ coder 依据 schema 设计从零实现或逐步优化 kernel。
