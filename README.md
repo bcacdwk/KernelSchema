@@ -2,7 +2,7 @@
 
 本仓库设计一套描述 GPU kernel **流水线设计**的 schema：用结构化的 YAML 记录一个 kernel 要算什么、数学上怎么改写、工作怎么分配到硬件、tile 内部怎么流水，以及实现时必须遵守的条件。schema 位于所有 GPU 编程语言之上，由 Designer 填写、Coder 实现、人类专家审阅。
 
-本 README 是全局性的导引：交代背景、分区总览、编写原则、仓库结构与现状。语言规范由 [schema_docs/0.common.md](schema_docs/0.common.md)、六个分区文档与 `schema_template` 中 `kernel` 包的格式约束共同定义，两者必须一致。文档案例与 `schema_wiki` 都用于举例；发现差异时先判断规则是否合理，不以兼容案例为由放宽模板。
+本 README 是全局性的导引：交代背景、分区总览、编写原则、仓库结构与现状。语言规范由 [schema_docs/0.common.md](schema_docs/0.common.md)、六个分区文档与 `schema_template` 中 `kernel` 包的格式约束共同定义，两者必须一致。文档片段与 `schema_wiki` 都用于举例；发现差异时先判断规则是否合理，不以兼容示例为由放宽模板。
 
 需要了解分区与权限时看[分区总览](#2-schema-是什么)，查找具体规则时用[阅读入口](#阅读入口)。各章按概念依赖组织，可从当前要处理的区域进入，再沿引用补充所需前提。
 
@@ -78,7 +78,7 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 │   ├── tests/           结构、关联和 YAML 加载的正反例
 │   └── examples/        纳入检查的 YAML 编写示例
 ├── cue.mod/             仓库级 CUE 模块配置
-├── schema_docs/         公共约定与六个区的字段规则、设计指导及案例
+├── schema_docs/         公共约定与六个区的字段规则、设计指导及局部示例
 │   ├── 0.common.md
 │   ├── 1.contract.algorithm_requirement.md
 │   ├── 2.contract.hardware_specification.md
@@ -101,25 +101,25 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 
 ### 阅读入口
 
-按当前问题选择入口，各区的语义与对应 CUE 定义共同构成规范。“核心思想”提供本区的概念前提，字段表和结构轮廓用于查阅，案例用于理解具体取舍；已有上下文时可直接定位具体主题。
+按当前问题选择入口，各区的语义与对应 CUE 定义共同构成规范。“核心思想”提供本区的概念前提，字段表和结构轮廓用于查阅，相关规则旁的短片段示范容易写错的用法与取舍；已有上下文时可直接定位具体主题。
 
 | 当前关心的问题 | 入口 | 进一步需要时 |
 | --- | --- | --- |
 | 元数据、YAML 与共用记法 | [公共约定](schema_docs/0.common.md#单份-plan-与元数据) | 多条并存设计再看 [dispatch](schema_docs/0.common.md#派生节点与-dispatch) |
-| 算法或硬件前提 | [算法要求](schema_docs/1.contract.algorithm_requirement.md)、[硬件规格](schema_docs/2.contract.hardware_specification.md) | 数值语义、资料绑定与设备案例各在所属章节 |
+| 算法或硬件前提 | [算法要求](schema_docs/1.contract.algorithm_requirement.md)、[硬件规格](schema_docs/2.contract.hardware_specification.md) | 数值语义、资料绑定与省略条件各在所属章节 |
 | 数学改写的选择与表达 | [math_reshape](schema_docs/3.design.math_reshape.md#核心思想) | 符号、寿命、精度与账本规则 |
 | 一份工作怎样分配 | [基本对象](schema_docs/4.design.work_schedule.md#基本对象)与[单个 phase](schema_docs/4.design.work_schedule.md#单个-phase) | [提交与接续](schema_docs/4.design.work_schedule.md#phase-的提交与接续)、[数据交接](schema_docs/4.design.work_schedule.md#跨-phase-数据交接) |
 | 一个角色怎样执行 | [lane 的含义](schema_docs/5.design.tile_pipeline.md#核心思想)与[单个 lane](schema_docs/5.design.tile_pipeline.md#单个-lane) | [资源与协作](schema_docs/5.design.tile_pipeline.md#worker-内的资源与协作)、跨工作与跨 phase 关系 |
 | 哪些实现选择需要交接 | [realization](schema_docs/6.realization.md#选择一条实现约束) | 实现自由的边界、有证据的替代反馈 |
 | 初始化、校验与错误定位 | [模板说明](schema_template/README.md#填写与检查)与 [starter.yaml](schema_template/starter.yaml) | [校验边界](schema_template/README.md#校验边界) |
 
-需要看完整文件时，先看纳入默认检查的 [GDN 示例](schema_template/examples/gdn/root.yaml)及其[状态说明](schema_template/README.md#校验边界)。各章只展开局部区域，案例采用的分支以该章说明为准。`schema_wiki` 保存更多历史设计，`kernel_wiki` 保存源实现；旧写法仅在需要追溯时查阅 `schema_docs/archived`。
+从零编写时，以 [starter.yaml](schema_template/starter.yaml) 为起点，按各章规则填写。文档中的片段各自说明一个 schema 用法，不组成某个算子的完整设计。需要核对完整文件组织时，可参考现有的 [GDN 示例](schema_template/examples/gdn/root.yaml)及其[状态说明](schema_template/README.md#校验边界)。`schema_wiki` 保存更多历史设计，`kernel_wiki` 保存源实现；旧写法仅在需要追溯时查阅 `schema_docs/archived`。
 
 修改语言规范时再查[维护要求](schema_template/README.md#维护)，同步核对 Markdown、CUE 与对应测试。
 
 ## 6 现状与 TODO
 
-**已有：** 公共约定与六个分区文档、统一 CUE 规范、YAML 初始化与任务校验工具、正反例测试及 CI 检查；`kernel_wiki` 与尚未逐一按现行规范验收的 `schema_wiki`。使用方法与校验边界见 [模板说明](schema_template/README.md#校验边界)。文档案例覆盖 FA4、GDN、MoE 与三类硬件；它们不是自动校验或性能成立的证明。
+**已有：** 公共约定与六个分区文档、统一 CUE 规范、YAML 初始化与任务校验工具、正反例测试及 CI 检查；`kernel_wiki` 与尚未逐一按现行规范验收的 `schema_wiki`。使用方法与校验边界见 [模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
 
 **TODO：**
 
