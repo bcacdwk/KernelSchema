@@ -1,63 +1,34 @@
-# YAML 编写与校验
+# 编写和检查 schema YAML
 
-Agent 参考 [schema.cue](schema.cue)、[公共约定](../schema_docs/0.common.md)与各区文档，直接编辑 YAML。文档入口及角色权限见 [README](../README.md#阅读入口)；CUE 定义结构规范，Python 补充复杂关联检查，案例不覆盖规范。
+先读[公共约定](../schema_docs/0.common.md)，再按[第 1–6 篇](../README.md#阅读入口)核对 Contract、填写 Design 和必要的实现交接。角色权限见仓库 README；Contract 使用任务给定的内容。
 
 ## 填写与检查
 
-需要 Python 3.10+ 标准库和固定版本 CUE。以下命令从仓库根目录运行：
+从仓库根目录为新任务复制骨架，不覆盖已有文件：
 
 ```sh
-make setup
-python3 schema_template/tools/schema.py init schema_wiki/my_batch/my_task
-# 直接填写 root.yaml，再校验整个任务。
-python3 schema_template/tools/schema.py validate schema_wiki/my_batch/my_task
+mkdir -p path/to/task
+cp -n schema_template/starter.yaml path/to/task/root.yaml
 ```
 
-`init` 将唯一的 [starter.yaml](starter.yaml) 复制为可编辑的 `root.yaml`，不覆盖已有 plan。按任务重命名骨架中的对象，把 `null` 待填项替换为真实内容；这些待填项不能通过校验，不是合法的缺省值。
+按任务重命名骨架中的对象，将 `null` 替换为真实内容。骨架不是完整字段清单：还需按各篇“填写条件”补齐适用字段，没有内容的可选字段直接省略。骨架中的 `Dimension` 表示待确定的独立工作维度；整个任务只有一份工作时，使用 `partition: {}` 并省略 `worktile_order`，见[工作分解](../schema_docs/4.design.work_schedule.md#工作分解)。
 
-`validate` 读取任务目录直属的全部 `.yaml` / `.yml`。文件组织、节点身份、共享 Contract 与派生关系见[公共约定](../schema_docs/0.common.md#派生节点与-dispatch)。
-
-YAML 排版见[通用写法](../schema_docs/0.common.md#通用写法)，内容修订遵循[元数据版本规则](../schema_docs/0.common.md#单份-plan-与元数据)。
-
-`validate` 不改写内容、权限或修改时间，不补字段、不重排 YAML。错误标出文件和字段路径，CUE 提供源位置时一并保留。多个目录可一次传入，任何任务失败都返回非零状态；任务也可以位于仓库之外。
+需要 Python 3.10+ 和 PyYAML。填写后运行唯一的日常检查命令：
 
 ```sh
-python3 schema_template/tools/schema.py validate path/to/task_a path/to/task_b
+python3 schema_template/check_yaml.py path/to/task/root.yaml
 ```
 
-## 文件组织
+也可传入派生节点。检查范围始终是该文件所在目录直属的全部 `.yaml / .yml`；派生节点共用同目录 root 的 Contract，文件组织见[公共约定](../schema_docs/0.common.md#派生节点与-dispatch)。任务可以位于仓库之外；输入路径相对当前目录解析，在其他目录调用时使用检查脚本的绝对路径。
 
-| 文件 | 用途 |
-| --- | --- |
-| `schema.cue` | 全部核心规则，按任务、共用值、Contract、Design、Realization 分章；`package kernel`，任务入口 `#Task` |
-| `starter.yaml` | 待填写骨架 |
-| `tools/schema.py` | init / validate、YAML 加载与错误定位 |
-| `tools/validate_task.cue` | 将按文件名组织的 YAML 接入 `#Task`，保留 CUE 源位置 |
-| `tools/validate_relations.py` | 具名引用、图关系和必要记法解析 |
-| `tools/json_value.py` | 精确十进制 JSON 传递及测试数据编码，避免 binary64 舍入 |
-| `tools/install_cue.py` | 官方固定 release 的 SHA-256 校验与本地安装 |
-| `tests/` | CUE 与 Python 校验器的回归测试，仅维护规范或工具时使用；编写 plan 无需阅读 |
-| `examples/gdn/root.yaml` | 完整的紧凑 YAML 示例 |
+缺少 PyYAML 时，检查器会给出一条安装命令；安装后重跑同一检查命令。检查本身不下载或安装依赖。
 
-加载器去掉文件名的扩展名，以节点 ID 作为 `#Task` 的映射键；该容器只用于校验，不写进 YAML。适配层不另定义字段规则。安装器支持 macOS/Linux 的 amd64、arm64，二进制保存在忽略提交的 `.tools/`；CUE 模块、版本、Makefile 与 CI 配置位于仓库根目录。
+成功时输出任务目录和节点数；失败时按文件、字段路径和修改提示处理，已有字段同时显示 YAML 行列位置。缺字段可能没有行号；修改后重跑同一命令。退出状态为：`0` 通过，`1` 输入未通过检查，`2` 参数或工具环境问题导致检查未完成。
+
+检查不补字段、不重排、不改写 YAML，也不改变文件权限或修改时间。填写与修订仍遵守[通用写法](../schema_docs/0.common.md#通用写法)和[版本规则](../schema_docs/0.common.md#单份-plan-与元数据)。
 
 ## 校验边界
 
-- **CUE**：固定结构、类型、必填和条件字段、封闭词汇、清晰的局部约束，以及节点身份、共享任务描述、phase 对应等直接可表达的关系。可选字段的语义缺省值不自动写入数据。
-- **Python**：Contract 与数学符号引用、父节点和启动依赖图、共享 worker 与交接关系、资源区域、域及动作/事件的记法和部分索引作用域。所有派生节点使用 root 的共享 Contract；数值解析和比较保留精确十进制值，不执行公式。
-- **审阅与运行证据**：dispatch 条件的互斥与全覆盖、文本中的数学和策略引用、外部资料及实验依据、修订号相对历史递增、修改权限。通过校验不证明数学等价、数值正确、资源可行或性能；检查器不展开事件图，因而不证明具体动作实例存在、存储复用安全或活性。wiki 占位和 `unknown:` 仍表示尚未补齐的证据。
+通过检查表示结构及已实现的关联检查通过，不证明数学等价、数值正确、资源可行、存储复用安全、活性或性能。dispatch 条件的互斥与覆盖、外部资料和实验依据仍需核实；wiki 占位和 `unknown:` 仍是待解决的缺口，不能靠猜测补齐。
 
-[GDN 示例](examples/gdn/root.yaml) 连接完整 Contract、数学改写和五个 phase，固定 HeadCount=8、SequenceLength=4096。数学与组织引用 FLA 固定提交，示例环境选用 B200 + CUDA C++/CUTLASS，不表示原始 Triton 实现已完成移植。wiki 占位尚待补齐；示例通过结构与关联检查，未进行 GPU 数值、活性或性能验收。
-
-## 维护
-
-`tests/test_schema.py` 验证 CUE 约束与 Python 工具是否按预期接受合法输入、拒绝错误输入，并检查校验不改写文件等行为。`tests/fixtures/minimal/root.yaml` 是构造这些输入的最小测试底稿，其中的 `testing.invalid` 引用仅标识合成数据。它服务于校验器维护；`examples/` 服务于 YAML 编写参考。
-
-```sh
-make fmt
-make check
-# 只检查指定任务时，也可使用：
-make validate TASKS="path/to/task"
-```
-
-`make check` 检查核心 CUE 与适配层格式、正反例测试及维护中的 YAML 示例。历史 `schema_wiki` 不在默认验收范围内；显式传给 `validate` 时仍使用相同规则，不自动迁移或放宽约束。修改规范时同步更新 `schema.cue`、对应 MD 和正反例；只改组织方式时保持原有规则与公开定义。
+examples 仅作可选参考，不是学习规范的前提。维护检查器时再读 [tools/README.md](tools/README.md)。

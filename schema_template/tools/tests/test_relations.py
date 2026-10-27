@@ -1,0 +1,235 @@
+"""Relations behavior through the same task checker used by authors."""
+from __future__ import annotations
+
+from copy import deepcopy
+from .. import schema
+from .support import (TaskCase, ALGO, LANE, MATH, PHASE, PIPE, WORK, add_child, add_phase, at, drop, put)
+
+
+class RelationsTests(TaskCase):
+    def test_local_conditions_prevent_ambiguous_references(self):
+        self.assert_invalid(lambda d: (add_phase(d), put(d, WORK + ("flow", "handoff"), {
+            "Y": {"producer": "copy", "consumer": ["copy", "next"], "storage": "global"}})), "another declared phase")
+        self.assert_valid(lambda d: put(d, PHASE + ("mapping", "member"), [{"x": [0, 4]}]))
+        self.assert_invalid(lambda d: put(d, PHASE + ("mapping", "member"), [{"x": [-1, 4]}]), "literal")
+        for name in ("kernel_done", "launch_ready", "kernel_done(i)", "launch_ready(i)"):
+            self.assert_invalid(lambda d: put(d, PIPE + ("milestone",), {name: ["Main/produce:Y"]}), "built-in")
+
+    def test_contract_names_refs_and_shape_rules(self):
+        symbol = {"meaning": "A scalar.", "shape": "ref:X.shape", "dtype": "ref:X.dtype"}
+        self.assert_valid(lambda d: put(d, ALGO + ("compute", 0, "symbol"), {"A": symbol}))
+        self.assert_invalid(lambda d: put(d, ALGO + ("compute", 0, "symbol"), {"X": symbol}), "duplicate")
+        self.assert_invalid(lambda d: put(d, ALGO + ("compute", 0, "symbol"),
+                                         {"A": dict(symbol, shape="ref:Missing.shape")}), "unknown Contract")
+        self.assert_invalid(lambda d: put(d, ALGO + ("compute", 0, "symbol"),
+                                         {"A": dict(symbol, shape="ref:B.shape"), "B": dict(symbol, shape="ref:A.shape")}), "cycle")
+        self.assert_invalid(lambda d: put(d, ALGO + ("compute",), [
+            {"name": "First", "math": "A = B.", "symbol": {"A": dict(symbol, dtype="ref:B.dtype")}},
+            {"name": "Second", "math": "B = X.", "symbol": {"B": symbol}}]), "precedes")
+        self.assert_valid(lambda d: put(d, ALGO + ("compute", 0, "symbol"),
+                                       {"f": {"meaning": "A function.", "shape": "not_applicable", "dtype": "not_applicable"}}))
+        self.assert_invalid(lambda d: put(d, ALGO + ("input", "X", "shape"), [{"x": 2}, {"x": 3}]), "axis names")
+        self.assert_invalid(lambda d: put(d, ALGO + ("input", "X", "range"), [5, 2]), "reversed")
+
+    def test_phase_launch_topology_and_handoff(self):
+        for order in ["per_worktile", "per_worker", "all", "concurrent", None]:
+            with self.subTest(order=order):
+                self.assert_valid(lambda d: add_phase(d, order=order))
+        self.assert_invalid(lambda d: put(d, WORK + ("flow", "launch"), [{"phase": ["missing"]}]))
+        self.assert_invalid(lambda d: put(d, WORK + ("flow", "launch"), [{"phase": ["copy"]}, {"phase": ["copy"]}]))
+        self.assert_invalid(lambda d: (add_phase(d, order="all"), drop(d, WORK + ("flow", "launch", 0, "order"))))
+        self.assert_invalid(lambda d: put(d, WORK + ("flow", "launch", 0, "start_after"), "copy.kernel_done"), "own event")
+        self.assert_invalid(lambda d: (add_phase(d), put(d, WORK + ("flow", "launch", 0, "start_after"), "next.kernel_done")), "cycle")
+        self.assert_invalid(lambda d: (add_phase(d), put(d, WORK + ("flow", "launch", 1, "start_after"), "copy.launch_ready")), "protocol")
+        self.assert_valid(lambda d: (add_phase(d), put(d, WORK + ("flow", "launch", 1, "start_after"), "copy.launch_ready"),
+                                     put(d, WORK + ("flow", "launch", 1, "protocol"), "pdl")))
+        handoff = {"producer": "copy", "consumer": ["next"], "storage": "global", "initialize": 0}
+        self.assert_valid(lambda d: (add_phase(d), put(d, WORK + ("flow", "handoff"), {"Y": handoff})))
+        self.assert_invalid(lambda d: (add_phase(d), put(d, WORK + ("flow", "handoff"),
+            {"Y": dict(handoff, storage="tile_pipeline.phase.copy.resource.Missing")})), "resource")
+        self.assert_invalid(lambda d: (add_phase(d), put(d, WORK + ("flow", "handoff"),
+            {"Y": dict(handoff, ready="copy.missing")})), "milestone")
+
+    def test_recursive_pipe_and_index_scope(self):
+        def nested(d):
+            block = {"steady": ["produce:Y(" + ",".join(f"k{i}" for i in range(12)) + ")"]}
+            for i in reversed(range(12)):
+                block = {"repeat": {f"k{i}": [0, 2]}, "steady": [block]}
+            put(d, LANE + ("pipe",), block)
+        self.assert_valid(nested)
+        def corrupt(d):
+            nested(d)
+            block = at(d, LANE)["pipe"]
+            for _ in range(10):
+                block = block["steady"][0]
+            block["typo"] = "must fail even at depth 10"
+        self.assert_invalid(corrupt)
+        self.assert_invalid(lambda d: put(d, LANE + ("pipe",),
+                                         {"repeat": {"i": [0, 8]}, "prologue": ["load:X(i)"], "steady": ["produce:Y(i)"]}), "not bound")
+        self.assert_invalid(lambda d: put(d, LANE + ("pipe",),
+                                         {"repeat": "missing", "steady": ["produce:Y(i)"]}), "undefined repeat")
+        self.assert_invalid(lambda d: put(d, PIPE + ("domain",),
+                                         {"a": {"flatten": ["b"]}, "b": {"flatten": ["a"]}}), "cycle")
+        self.assert_invalid(lambda d: put(d, LANE + ("pipe",), {"repeat": {"i": [0, 8]}}))
+        self.assert_valid(lambda d: (put(d, PIPE + ("domain",), {"t": "worktile", "i": [0, 8], "n": {"flatten": ["t", "i"]}}),
+                                     put(d, LANE + ("pipe",), {"repeat": "t", "steady": [
+                                         {"repeat": "n[t]", "steady": ["produce:Y(n,t,i)"], "epilogue": ["store:Y(n[t,last(i)])"]}]})))
+
+    def test_action_events_and_custom_verbs(self):
+        self.assert_invalid(lambda d: put(d, LANE + ("pipe", "steady"), ["magical:Y"]), "custom verb")
+        self.assert_valid(lambda d: (put(d, LANE + ("pipe", "steady"), ["magical:Y"]),
+                                     put(d, LANE + ("info", "verb"), {"magical": {"meaning": "Produce Y.", "mode": "sync"}})))
+        self.assert_invalid(lambda d: put(d, LANE + ("edge",), {"data": {"produce:Y": ["Missing/produce:Y"]}}), "unknown lane")
+        self.assert_invalid(lambda d: put(d, LANE + ("edge",), {"data": {"produce:Y": ["produce:Missing"]}}), "action family")
+        self.assert_invalid(lambda d: put(d, LANE + ("edge",), {"data": {"produce:Y": ["produce:Y@read"]}}), "notation")
+        self.assert_valid(lambda d: (put(d, LANE + ("pipe", "steady"), ["load:X", "mma:X@X", "produce:Y"]),
+                                     put(d, LANE + ("edge",), {"data": {"produce:Y@issue": ["mma:X@X@done"]}})))
+        self.assert_invalid(lambda d: put(d, LANE + ("info", "member"), "warp[0:0]"), "nonempty")
+        self.assert_invalid(lambda d: put(d, LANE + ("info", "member"), "phantom[0:1]"), "unregistered")
+
+    def test_resource_bounds_and_view_exceptions(self):
+        resource = {"space": "SMEM", "shape": [{"x": 8}], "dtype": "fp32", "slot": 2, "view": {"Y": {"slot": 1}}}
+        self.assert_valid(lambda d: put(d, PIPE + ("resource",), {"R": resource}))
+        for replacement in [
+            dict(resource, slot=0), dict(resource, view={"Y": {}}),
+            dict(resource, view={"Y": {"slot": 2}}),
+            dict(resource, view={"Y": {"slot": 0, "part": {"x": [0, 9]}}}),
+            dict(resource, view={"Y": {"slot": 0, "part": {"other": [0, 2]}}}),
+            dict(resource, member=[0, 0]), dict(resource, member=1),
+        ]:
+            with self.subTest(resource=replacement):
+                self.assert_invalid(lambda d: put(d, PIPE + ("resource",), {"R": replacement}))
+
+    def test_local_handoff_and_shared_worker_resource_identity(self):
+        resource = {"space": "SMEM", "shape": [], "dtype": "fp32"}
+        handoff = {"producer": "copy", "consumer": ["next"], "storage": "tile_pipeline.phase.copy.resource.Y"}
+        def setup(d, order):
+            add_phase(d, order=order)
+            put(d, PIPE + ("resource",), {"Y": resource})
+            put(d, WORK + ("flow", "handoff"), {"Y": handoff})
+        self.assert_valid(lambda d: setup(d, "per_worktile"))
+        self.assert_invalid(lambda d: setup(d, None), "same worker")
+        self.assert_invalid(lambda d: setup(d, "concurrent"), "same worker")
+        self.assert_invalid(lambda d: (setup(d, "per_worker"),
+            put(d, ("root", "design", "tile_pipeline", "phase", "next", "resource"), {"Y": resource})), "more than once")
+
+    def test_dynamic_domains_and_malformed_index_syntax(self):
+        def dynamic(d):
+            put(d, PIPE + ("domain",), {"t": "worktile"})
+            put(d, PHASE + ("schedule", "worker_assignment", "refill"), {"counter": "Take the next work until exhausted."})
+            put(d, LANE + ("pipe",), {"repeat": "t", "steady": ["produce:Y(t)"]})
+        self.assert_valid(dynamic)
+        self.assert_invalid(lambda d: (dynamic(d), put(d, LANE + ("pipe", "epilogue"), ["store:Y(last(t))"])), "count/last")
+        # Contract prose is not parsed as an executed expression.
+        self.assert_valid(lambda d: (dynamic(d), put(d, LANE + ("info", "verb"),
+            {"produce": "Produce the result; do not query count(t) or last(t)."})))
+        self.assert_invalid(lambda d: put(d, LANE + ("pipe", "steady"), ["produce:Y(i"]), "notation")
+        self.assert_invalid(lambda d: (put(d, PIPE + ("domain",), {"i": [0, 8]}),
+            put(d, LANE + ("pipe",), {"repeat": "i[0:8", "steady": ["produce:Y(i)"]})))
+
+    def test_instance_names_can_match_field_names(self):
+        self.assert_valid(lambda d: (
+            put(d, PIPE + ("domain",), {"shape": [0, 8]}),
+            put(d, LANE + ("pipe",), {"repeat": "shape", "steady": ["produce:Y(shape)"]}),
+            put(d, PIPE + ("milestone",), {"shape": ["Main/produce:Y(0)"]})))
+
+    def test_per_worktile_order_must_agree(self):
+        def mismatch(d):
+            put(d, PHASE + ("decomposition", "partition"), {"x": {"size": 8, "tile": 1}})
+            put(d, PHASE + ("schedule", "worktile_order"), [{"by": "x", "direction": "ascending"}])
+            add_phase(d, order="per_worktile")
+            put(d, WORK + ("phase", "next", "schedule", "worktile_order", 0, "direction"), "descending")
+        self.assert_invalid(mismatch, "matching coordinates")
+
+    def test_dispatch_identity_contract_and_tree(self):
+        self.assert_valid(add_child)
+        self.assert_invalid(lambda d: (add_child(d), put(d, ("small", "contract"), d["root"]["contract"])))
+        self.assert_invalid(lambda d: (add_child(d), put(d, ("small", "meta_data", "name"), "different")))
+        self.assert_invalid(lambda d: (add_child(d), put(d, ("small", "meta_data", "dispatch", "id"), "wrong")))
+        self.assert_invalid(lambda d: (add_child(d), put(d, ("small", "meta_data", "dispatch", "parent"), "absent")), "parent")
+        self.assert_invalid(lambda d: add_child(d, parent="small"), "cycle")
+        self.assert_invalid(lambda d: (add_child(d, parent="other"), add_child(d, "other", "small")), "cycle")
+        self.assert_invalid(lambda d: put(d, ("root", "meta_data", "dispatch"), {"parent": "small", "when": "All"}))
+        self.assert_valid(lambda d: put(d, ("root", "meta_data", "dispatch"),
+                                       {"when": "Select for every input in the contract domain."}))
+
+    def test_derived_identity_fields_are_checked_not_filled(self):
+        for field in (("name",), ("describe",), ("dispatch", "id"), ("dispatch", "when")):
+            data = deepcopy(self.base)
+            add_child(data)
+            drop(data, ("small", "meta_data") + field)
+            with self.subTest(missing=field):
+                self.assert_task_invalid(data, "small.yaml", "required")
+        for path, value in [
+            (("small", "meta_data", "name"), "other"),
+            (("small", "meta_data", "describe"), "Different task."),
+            (("small", "meta_data", "dispatch", "id"), "wrong"),
+            (("root", "meta_data", "dispatch", "id"), "small"),
+            (("small", "contract"), self.base["root"]["contract"]),
+            (("small", "design"), {}),
+        ]:
+            data = deepcopy(self.base)
+            add_child(data)
+            put(data, path, value)
+            with self.subTest(path=path):
+                self.assert_task_invalid(data, path[0] + ".yaml")
+        data = deepcopy(self.base)
+        add_child(data)
+        drop(data, ("root", "meta_data", "dispatch"))
+        self.assert_task_invalid(data, "root.yaml", "dispatch", "required")
+
+    def test_derived_tree_and_shared_contract(self):
+        data = deepcopy(self.base)
+        add_child(data)
+        add_child(data, "tiny", "small")
+        self.write_task(data)
+        before = self.snapshot()
+        self.assertEqual(data, schema.validate_directory(self.directory))
+        self.assertEqual(before, self.snapshot())
+        for node in ("small", "tiny"):
+            self.assertNotIn("contract", data[node])
+        for path, value, message in [
+            (("small", "meta_data", "dispatch", "parent"), "absent", "unknown parent"),
+            (("small", "meta_data", "dispatch", "parent"), "tiny", "cycle"),
+            (("small", "design", "work_schedule", "phase", "copy", "mapping", "worker", "unit"), "Missing", "worker unit"),
+            (("small", "design", "tile_pipeline", "phase", "copy", "lane", "Main", "info", "member"), "Missing[0:1]", "unregistered"),
+            (("small", "design", "math_reshape", "rewrite", 0, "symbol"), {"X": {"meaning": "Repeated Contract input."}}, "duplicates"),
+        ]:
+            changed = deepcopy(data)
+            put(changed, path, value)
+            with self.subTest(path=path):
+                self.assert_task_invalid(changed, "small.yaml", message)
+
+    def test_explicit_contract_property_references_use_root(self):
+        data = deepcopy(self.base)
+        put(data, ALGO + ("constant",), {"Scale": {"meaning": "Test constant.", "value": 1}})
+        put(data, ALGO + ("compute", 0, "symbol"), {
+            "Original": {"meaning": "Contract intermediate.", "shape": "ref:X.shape", "dtype": "ref:X.dtype"}})
+        add_child(data)
+        shape_ref = "ref:contract.algorithm_requirement::Original.shape"
+        dtype_ref = "ref:contract.algorithm_requirement::X.dtype"
+        symbol_path = ("small", "design", "math_reshape", "rewrite", 0, "symbol", "A")
+        target_path = ("small",) + PHASE[1:] + ("decomposition", "target", "single_tile", "Y", "dtype")
+        resource_path = ("small",) + PIPE[1:] + ("resource", "Storage")
+        put(data, ("small",) + MATH[1:] + ("rewrite", 0, "symbol"), {
+            "A": {"meaning": "Test intermediate.", "shape": shape_ref, "dtype": dtype_ref}})
+        put(data, target_path, dtype_ref)
+        put(data, ("small",) + PIPE[1:] + ("resource",), {
+            "Storage": {"space": "register", "shape": [], "dtype": dtype_ref, "view": {"Y": {"dtype": dtype_ref}}}})
+        self.write_task(data)
+        self.assertEqual(data, schema.validate_directory(self.directory))
+        paths = [symbol_path + ("shape",), symbol_path + ("dtype",), target_path,
+                 resource_path + ("dtype",), resource_path + ("view", "Y", "dtype")]
+        for path in paths:
+            changed = deepcopy(data)
+            put(changed, path, "ref:contract.algorithm_requirement::Missing." + path[-1])
+            with self.subTest(path=path):
+                self.assert_task_invalid(changed, "small.yaml", "unknown shared Contract reference Missing")
+        changed = deepcopy(data)
+        put(changed, target_path, "ref:contract.algorithm_requirement::Scale.dtype")
+        self.assert_task_invalid(changed, "small.yaml", "Scale has no dtype")
+        # Removing the shared declaration invalidates the child's reference;
+        # neither its own math symbols nor its parent's Design supply Contract.
+        changed = deepcopy(data)
+        drop(changed, ALGO + ("compute", 0, "symbol"))
+        self.assert_task_invalid(changed, "small.yaml", "unknown shared Contract reference Original")

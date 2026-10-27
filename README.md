@@ -2,7 +2,7 @@
 
 本仓库设计一套描述 GPU kernel **流水线设计**的 schema：用结构化的 YAML 记录一个 kernel 要算什么、数学上怎么改写、工作怎么分配到硬件、tile 内部怎么流水，以及实现时必须遵守的条件。schema 位于所有 GPU 编程语言之上，由 Designer 填写、Coder 实现、人类专家审阅。
 
-本 README 是全局性的导引：交代背景、分区总览、编写原则、仓库结构与现状。语言规范由 [schema_docs/0.common.md](schema_docs/0.common.md)、六个分区文档与 `schema_template` 中 `kernel` 包的格式约束共同定义，两者必须一致。文档片段与 `schema_wiki` 都用于举例；发现差异时先判断规则是否合理，不以兼容示例为由放宽模板。
+本 README 是全局性的导引：交代背景、分区总览、编写原则、仓库结构与现状。编写规范见 [schema_docs/0.common.md](schema_docs/0.common.md)及六个分区文档；检查器落实文档中可直接判断的结构与关联要求，不反向增加设计义务。文档片段与 `schema_wiki` 都用于举例；发现差异时先判断规则是否合理，不以兼容示例为由放宽模板。
 
 需要了解分区与权限时看[分区总览](#2-schema-是什么)，查找具体规则时用[阅读入口](#阅读入口)。各章按概念依赖组织，可从当前要处理的区域进入，再沿引用补充所需前提。
 
@@ -11,7 +11,7 @@
 - **Designer**（也称 planner）：做设计的 Agent 或人，唯一能修改 Design 区。
 - **Coder**：按 Contract 已选的实现栈把设计实现成代码的 Agent（如 AKA）。
 - **schema**：既指这套描述语言（分区与字段规则），也指针对某个计算任务填好的设计实例；后者也叫 **plan**。Agent 直接编写和修改 YAML，供审阅与实现。一份 plan 对应一个 **dispatch**，描述该路径的流水线设计，可以包含多次计算 kernel 提交。
-- **template**：用 CUE 编写的母版，定义字段、必填条件、开放词汇与可校验关系；入口为 `schema_template/schema.cue` 的 `#Task`。
+- **template**：`schema_template` 提供待填写骨架与统一检查入口；内部机器规则检查字段、必填条件和可校验关系。
 - **wiki / microbench**：完整的硬件资料、指令手册，以及吞吐与延时的实测结果；schema 只引用，不抄录。
 
 ## 1 背景与动机
@@ -43,7 +43,7 @@ Kernel Agent 有两个普遍问题：**难以优化**——无法判断结果是
 
 Design 三区从上到下排列，越靠上越难优化、收益越大、在源码里越难看出来：`math_reshape` 是前置（定下有哪些量、计算顺序、哪些量跨迭代携带、哪些中间量物化），之后 `work_schedule`（macro）与 `tile_pipeline`（micro）交替协同。
 
-**文件格式。** YAML 是 plan 的编辑源；设计、修订号和实验反馈都直接在 YAML 中修改。CUE 提供明确的结构模板，统一校验入口读取整个任务目录，检查结构及必要的关联，不改写原文件。
+**文件格式。** YAML 是 plan 的编辑源；设计、修订号和实验反馈都直接在 YAML 中修改。统一检查入口接收一个 YAML 路径，读取所在任务目录的全部节点，检查结构及必要的关联，不改写原文件。
 
 通用 YAML 写法、元数据与任务组织见[公共约定](schema_docs/0.common.md)。
 
@@ -52,7 +52,7 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 围绕 schema 有三条工作流，各对应未来一份专门的流程或规则（见 §6）：
 
 - **提取**（离线，SOTA kernel → schema）：从 `kernel_wiki` 的 SOTA kernel 提取出对应的 schema。
-- **撰写 / 优化**（在线，planner）：依据 `schema_wiki` 的案例、CUE template 与 `schema_docs` 规则，从零撰写或逐步优化一条流水线设计。
+- **撰写 / 优化**（在线，planner）：依据 `schema_docs` 规则与填写骨架，从零撰写或逐步优化一条流水线设计；案例按需参考。
 - **实现**（coder，schema → kernel）：按某个 dispatch 的设计从零实现，或逐步修改优化对应的 kernel。
 
 三条流都遵守上述编写方向。YAML 编写与校验入口见 [模板使用说明](schema_template/README.md)，三份完整的操作指导仍待补充。
@@ -70,13 +70,12 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 ```text
 .
 ├── README.md            本文件：背景、分区总览、原则与现状
-├── schema_template/     模板统一入口：schema.cue、填写骨架、校验工具与测试
-│   ├── schema.cue       全部核心约束，按职责分章
-│   ├── starter.yaml     Agent 待填写骨架，由 init 复制为 root.yaml
-│   ├── tools/           CUE 安装、YAML 任务加载与关联校验工具
-│   ├── tests/           CUE 与校验工具的回归测试，仅维护时使用
-│   └── examples/        纳入检查的 YAML 编写示例
-├── cue.mod/             仓库级 CUE 模块配置
+├── schema_template/     YAML 编写与检查入口
+│   ├── README.md        复制、填写与检查说明
+│   ├── starter.yaml     待填写骨架，复制为新任务的 root.yaml
+│   ├── check_yaml.py    唯一日常检查入口，接收一个 YAML 路径
+│   ├── tools/           内部 Python 检查与维护测试
+│   └── examples/        少量可选参考
 ├── schema_docs/         公共约定与六个区的字段规则、设计指导及局部示例
 │   ├── 0.common.md
 │   ├── 1.contract.algorithm_requirement.md
@@ -94,13 +93,12 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 
 - `kernel_wiki`（转换前）与 `schema_wiki`（转换后）一一呼应：前者是作为数据来源的 SOTA kernel，后者是从中提取、或据此撰写的 schema 设计。
 - 任务目录中的文件身份、共享 Contract 与派生关系见[公共约定](schema_docs/0.common.md#派生节点与-dispatch)。
-- 工具的使用、检查范围与规范维护要求见[模板说明](schema_template/README.md)。
-- 模板配套内容均在 `schema_template` 内；`cue.mod`、工具版本、Makefile 和 CI 等项目配置保留在根目录。
+- 填写与检查见[模板说明](schema_template/README.md)，检查器维护见[维护说明](schema_template/tools/README.md)。
 - 基础 Harness 设施尚未纳入仓库，见 §6。
 
 ### 阅读入口
 
-按当前问题选择入口，各区的语义与对应 CUE 定义共同构成规范。“核心思想”提供本区的概念前提，字段表和结构轮廓用于查阅，相关规则旁的短片段示范容易写错的用法与取舍；已有上下文时可直接定位具体主题。
+按当前问题选择文档入口，字段规则和设计指导均在各篇说明。“核心思想”提供本区的概念前提，字段表和结构轮廓用于查阅，相关规则旁的短片段示范容易写错的用法与取舍；已有上下文时可直接定位具体主题。
 
 | 当前关心的问题 | 入口 | 进一步需要时 |
 | --- | --- | --- |
@@ -110,15 +108,15 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 | 一份工作怎样分配 | [基本对象](schema_docs/4.design.work_schedule.md#基本对象)与[单个 phase](schema_docs/4.design.work_schedule.md#单个-phase) | [提交与接续](schema_docs/4.design.work_schedule.md#phase-的提交与接续)、[数据交接](schema_docs/4.design.work_schedule.md#跨-phase-数据交接) |
 | 一个角色怎样执行 | [lane 的含义](schema_docs/5.design.tile_pipeline.md#核心思想)与[单个 lane](schema_docs/5.design.tile_pipeline.md#单个-lane) | [资源与协作](schema_docs/5.design.tile_pipeline.md#worker-内的资源与协作)、跨工作与跨 phase 关系 |
 | 哪些实现选择需要交接 | [realization](schema_docs/6.realization.md#选择一条实现约束) | 实现自由的边界、有证据的替代反馈 |
-| 初始化、校验与错误定位 | [模板说明](schema_template/README.md#填写与检查)与 [starter.yaml](schema_template/starter.yaml) | [校验边界](schema_template/README.md#校验边界) |
+| 复制骨架、检查与错误定位 | [模板说明](schema_template/README.md#填写与检查)与 [starter.yaml](schema_template/starter.yaml) | [校验边界](schema_template/README.md#校验边界) |
 
-从零编写时，以 [starter.yaml](schema_template/starter.yaml) 为起点，按各章规则填写。文档中的片段各自说明一个 schema 用法，不组成某个算子的完整设计。需要核对完整文件组织时，可参考现有的 [GDN 示例](schema_template/examples/gdn/root.yaml)及其[状态说明](schema_template/README.md#校验边界)。`schema_wiki` 保存更多历史设计，`kernel_wiki` 保存源实现；旧写法仅在需要追溯时查阅 `schema_docs/archived`。
+从零编写时，以 [starter.yaml](schema_template/starter.yaml) 为起点，按各章规则填写。文档中的片段各自说明一个 schema 用法，不组成某个算子的完整设计。需要核对完整文件组织时，可参考现有的 [GDN 示例](schema_template/examples/gdn/root.yaml)及其[状态说明](schema_template/tools/README.md#示例状态)。`schema_wiki` 保存更多历史设计，`kernel_wiki` 保存源实现；旧写法仅在需要追溯时查阅 `schema_docs/archived`。
 
-修改语言规范时再查[维护要求](schema_template/README.md#维护)，同步核对 Markdown、CUE 与对应测试。
+修改语言规范时再查[维护要求](schema_template/tools/README.md#回归与修改)，以 Markdown 的表达目的为依据，同步核对检查器与对应测试。
 
 ## 6 现状与 TODO
 
-**已有：** 公共约定与六个分区文档、统一 CUE 规范、YAML 初始化与任务校验工具、正反例测试及 CI 检查；`kernel_wiki` 与尚未逐一按现行规范验收的 `schema_wiki`。使用方法与校验边界见 [模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
+**已有：** 公共约定与六个分区文档、YAML 填写骨架与统一 Python 检查入口，以及模板内部的正反例测试；`kernel_wiki` 与尚未逐一按现行规范验收的 `schema_wiki`。使用方法与校验边界见 [模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
 
 **TODO：**
 
@@ -126,4 +124,4 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 - **更多转写与精简**：转写更多 SOTA kernel，收敛到最小交集原语。
 - **检查器与评估器**：在现有结构和具名关系校验之外，继续实现资源记账、展开事件图的合法性与活性分析，以及尽量保序的性能估算。
 - **基础 Harness 设施**：支撑离线提取与在线撰写迭代的轻量平台，尚未放入仓库。
-- **三份操作指导（流程或规则）**：① 离线从 SOTA kernel 提取 schema；② planner 在线依据 `schema_wiki` + CUE + `schema_docs` 从零撰写或逐步优化 schema；③ coder 依据 schema 设计从零实现或逐步优化 kernel。
+- **三份操作指导（流程或规则）**：① 离线从 SOTA kernel 提取 schema；② planner 在线依据 `schema_docs` 与骨架从零撰写或逐步优化 schema；③ coder 依据 schema 设计从零实现或逐步优化 kernel。
