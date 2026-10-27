@@ -88,7 +88,9 @@ def concrete_conflict(a: Any, b: Any, field: str | None = None) -> bool:
         return False
     if a is None or b is None:
         return True
-    if field in {"unit", "by", "direction"}:
+    if field == "by":
+        return as_list(a) != as_list(b)
+    if field in {"unit", "direction"}:
         return a != b
     if isinstance(a, dict) and isinstance(b, dict):
         return set(a) != set(b) or any(concrete_conflict(a[k], b[k], k) for k in a)

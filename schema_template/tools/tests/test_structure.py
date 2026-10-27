@@ -89,6 +89,16 @@ class StructureTests(TaskCase):
         self.assert_valid(lambda d: (put(d, HARD + ("stack", "template"), "Library 1"),
                                      put(d, HARD + ("wiki", "programming", "template"), "repo@v1:docs/")))
 
+    def test_required_non_numeric_sentinel_is_not_missing_information(self):
+        sentinel = {"meaning": "Required Python None sentinel; optional scaling is disabled.",
+                    "shape": [], "dtype": "python_none", "range": "Python None only."}
+        path = ALGO + ("input", "scaling")
+        self.assert_valid(lambda d: put(d, path, sentinel))
+        # A known singleton type does not authorize absent data or an unknown type.
+        for update in ({"dtype": None}, {"dtype": "<schema-abi@pending:None>"}, {"default": None}):
+            with self.subTest(update=update):
+                self.assert_invalid(lambda d: put(d, path, dict(sentinel, **update)))
+
     def test_math_symbols_and_ledger(self):
         row = {"item": "Traffic", "change": "-4 bytes per invocation", "by": ["copy"]}
         self.assert_valid(lambda d: put(d, MATH + ("ledger",), {"baseline": "Direct copy.", "traffic": [row]}))

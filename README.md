@@ -28,7 +28,7 @@ Kernel Agent 有两个普遍问题：**难以优化**——无法判断结果是
 
 ## 2 schema 是什么
 
-**角色。** Designer 在两份 Contract 的基础上做设计，只有它能改 Design 区；Coder 在固定的硬件、算法与设计下逐代实现，只能在 `realization` 中附带有实验证据的反馈；人类专家随时介入、把握方向，只审阅 YAML 形式的 plan，不介入代码。协作方式介于 vibe coding 与全自动 loop 之间。
+**角色。** 两份 Contract 定义算法任务、硬件能力与任务已选环境，不随 Design 的选择增删。Designer 在此基础上做设计，只有它能改 Design 区；Coder 在固定的硬件、算法与设计下逐代实现，只能在 `realization` 中附带有实验证据的反馈；人类专家随时介入、把握方向，只审阅 YAML 形式的 plan，不介入代码。协作方式介于 vibe coding 与全自动 loop 之间。
 
 **分区。** 一份 plan 分为 Contract、Design、Realization 三部分、共六个子区，依次对应 `schema_docs/1–6`；此外开头有一段 `meta_data`（任务名、设计出处、dispatch 路径与修订号），不属于 Contract。
 
@@ -109,7 +109,7 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 
 **TODO：**
 
-- **案例核对与验收**：按实际任务逐一核对已有 YAML，补齐资料与设计缺口；完整编写示例见 `schema_template/examples/gdn/root.yaml`，数值及性能验收另行进行。
+- **案例核对与验收**：按实际任务逐一核对已有 YAML，补齐资料与设计缺口；已规范化的案例及其状态见[示例索引](schema_template/examples/README.md)，数值及性能验收另行进行。
 - **更多转写与精简**：转写更多 SOTA kernel，收敛到最小交集原语。
 - **检查器与评估器**：在现有结构和具名关系校验之外，继续实现资源记账、展开事件图的合法性与活性分析，以及尽量保序的性能估算。
 - **基础 Harness 设施**：支撑离线提取与在线撰写迭代的轻量平台，尚未放入仓库。

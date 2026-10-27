@@ -133,6 +133,25 @@ class RelationsTests(TaskCase):
             put(d, LANE + ("pipe",), {"repeat": "shape", "steady": ["produce:Y(shape)"]}),
             put(d, PIPE + ("milestone",), {"shape": ["Main/produce:Y(0)"]})))
 
+    def test_per_worktile_order_accepts_scalar_and_singleton_keys(self):
+        for first, second in [("x", ["x"]), (["x"], "x")]:
+            with self.subTest(first=first, second=second):
+                def equivalent(d):
+                    put(d, PHASE + ("decomposition", "partition"), {"x": {"size": 8, "tile": 1}})
+                    put(d, PHASE + ("schedule", "worktile_order"), [{"by": first, "direction": "ascending"}])
+                    add_phase(d, order="per_worktile")
+                    put(d, WORK + ("phase", "next", "schedule", "worktile_order", 0, "by"), second)
+                self.assert_valid(equivalent)
+
+    def test_per_worktile_order_preserves_dimension_order(self):
+        def mismatch(d):
+            put(d, PHASE + ("decomposition", "partition"),
+                {"x": {"size": 8, "tile": 1}, "y": {"size": 4, "tile": 1}})
+            put(d, PHASE + ("schedule", "worktile_order"), [{"by": ["x", "y"], "direction": "ascending"}])
+            add_phase(d, order="per_worktile")
+            put(d, WORK + ("phase", "next", "schedule", "worktile_order", 0, "by"), ["y", "x"])
+        self.assert_invalid(mismatch, "matching coordinates")
+
     def test_per_worktile_order_must_agree(self):
         def mismatch(d):
             put(d, PHASE + ("decomposition", "partition"), {"x": {"size": 8, "tile": 1}})

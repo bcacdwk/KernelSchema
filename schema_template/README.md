@@ -75,6 +75,8 @@ python3 schema_template/check_yaml.py path/to/task/root.yaml
 
 ## 校验边界
 
+当前关联检查包括节点与 phase 身份、显式 Contract 属性引用、launch/handoff 的 phase、事件及局部资源引用，以及动作族匹配。`realization.item`、数学区的其他语义绑定，以及公式、strategy 和动作契约中的引用仍需人工解析；改名后应沿这些位置核对。
+
 通过检查表示结构及已实现的关联检查通过，不证明数学等价、表达式正确、数值正确、资源可行、存储复用安全、活性或性能。当前检查器不展开完整动作实例，动作引用通过也不证明每个索引处的动作存在。dispatch 条件的互斥与覆盖、外部资料、修改权限、修订历史和实验依据仍需审阅；实际实现是否满足数值、执行约束及性能目标，需要相应运行证据。
 
-wiki 占位和 `unknown:` 仍是待解决的缺口，不能靠猜测补齐，也不能把结构通过称为资料或设计已验收。examples 仅作可选参考，不是学习规范的前提。维护检查器时再读 [tools/README.md](tools/README.md)。
+wiki 占位和 `unknown:` 仍是待解决的缺口，不能靠猜测补齐，也不能把结构通过称为资料或设计已验收。[examples](examples/README.md) 仅作可选参考，不是学习规范的前提。维护检查器时再读 [tools/README.md](tools/README.md)。
