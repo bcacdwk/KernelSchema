@@ -2,9 +2,19 @@
 
 本仓库设计一套描述 GPU kernel **流水线设计**的 schema：用结构化的 YAML 帮助 Agent 思考、表达和交流一个 kernel 要算什么、数学上怎么改写、工作怎么分配到硬件、tile 内部怎么流水，以及实现时必须遵守的条件。schema 位于所有 GPU 编程语言之上，由 Designer 填写、Coder 据此实现、人类专家审阅；YAML 最终供 Agent 和人阅读，不会被编译。
 
-本 README 是全局性的导引：交代背景、分区总览、编写原则、仓库结构与现状。格式约定在保留设计自由的前提下，使表达相对统一、信息完整、引用一致。检查器落实文档中可直接判断的结构与关联要求，不反向增加设计义务；示例也不代替规范。
+本 README 是全局导引。任务入口指导工作，`schema_docs` 定义字段语义与设计表达，`schema_template` 提供共用的 YAML 操作与检查。检查器落实文档中可直接判断的结构与关联要求，不反向增加设计义务；示例也不代替规范。
 
-分区与权限见[分区总览](#2-schema-是什么)，首次阅读路径见[阅读入口](#阅读入口)。
+## 任务入口
+
+执行具体任务时，先选择对应入口，再按当前问题进入规范、源码或资料：
+
+| 当前任务 | 入口 | 交付什么 |
+| --- | --- | --- |
+| 离线从已有 SOTA kernel 及相关材料提取 schema，或修正已有提取结果 | [提取 schema](EXTRACT_SCHEMA.md) | 忠实于选定实现、可追溯的 schema 与必要缺口说明 |
+| Planner 从零撰写 schema，或逐步优化已有设计 | [规划 schema](PLAN_SCHEMA.md) | Contract 内可供实现的设计，以及未决判断 |
+| Coder 根据 schema 从零实现，或按设计修改、优化 kernel | [实现 kernel](IMPLEMENT_KERNEL.md) | 对应设计版本的代码、验证结果及实现反馈 |
+
+一次任务只执行其中一种工作，通过产物与必要说明交给下一角色。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
 
 ## 术语
 
@@ -45,17 +55,7 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 
 通用 YAML 写法、元数据与任务组织见[公共约定](schema_docs/0.common.md)。
 
-## 3 预期使用
-
-围绕 schema 有三类工作：
-
-- **提取**（离线，SOTA kernel → schema）：从 `kernel_wiki` 的 SOTA kernel 提取出对应的 schema。
-- **撰写 / 优化**（在线，planner）：依据 `schema_docs` 规则与填写骨架，从零撰写或逐步优化一条流水线设计；案例按需参考。
-- **实现**（coder，schema → kernel）：按某个 dispatch 的设计从零实现，或逐步修改优化对应的 kernel。
-
-创建、提取和修改 schema 共用 [模板使用说明](schema_template/README.md)中的操作流程；从 schema 到 kernel 的完整实现流程仍待补充。
-
-## 4 编写原则
+## 3 编写原则
 
 1. **奥卡姆剃刀，less is more。** 删掉不影响设计理解的一切；判断标准是 “删掉它，读者会不会读错或漏掉设计”。
 2. **一个决定只写一次，写在唯一合适的位置。** 下游直接引用，不重述、不改义；同一个对象在各区用同一个名字。
@@ -63,17 +63,20 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 4. **抓大放小。** Designer 必需的内容不能漏、不能错；设计决定在 Design 中表达，普通实现细节留给 Coder。
 5. **有约束力的是具体决策，不是名称。** `persistent`、`CLC`、`online softmax` 这类名字只帮助理解，不能代替具体规则。
 
-## 5 仓库结构与阅读顺序
+## 4 仓库结构与阅读顺序
 
 ```text
 .
-├── README.md            本文件：背景、分区总览、原则与现状
-├── schema_template/     YAML 编写与检查入口
-│   ├── README.md        创建、提取、修改、检查与交付的统一入口
+├── README.md            全局导引与任务分流
+├── EXTRACT_SCHEMA.md    从固定源码与材料提取设计
+├── PLAN_SCHEMA.md       从零设计与已有设计修订
+├── IMPLEMENT_KERNEL.md  按 schema 实现、验证与反馈
+├── schema_template/     共用的 YAML 操作与检查
+│   ├── README.md        创建、修订、检查与交付
 │   ├── starter.yaml     待填写骨架，复制为新任务的 root.yaml
 │   ├── check_yaml.py    唯一日常检查入口，接收一个 YAML 路径
 │   ├── tools/           检查器维护说明、内部实现与测试
-│   └── examples/        少量可选参考
+│   └── examples/        按现行规范维护的案例；README 说明状态与缺口
 ├── schema_docs/         公共约定与六个区的字段规则、设计指导及局部示例
 │   ├── 0.common.md
 │   ├── 1.contract.algorithm_requirement.md
@@ -83,29 +86,33 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 │   ├── 5.design.tile_pipeline.md
 │   ├── 6.realization.md
 │   └── archived/        旧版草稿与旧 README（只读，不再维护）
-├── kernel_wiki/         转换前：SOTA kernel 源库（参考实现、方案、evidence、验证报告）
+├── kernel_wiki/         任务材料与源实现（参考、候选、evidence、验证记录）
 │   └── <batch>/<task>/  按批次、按任务组织
-└── schema_wiki/         转换后：schema 实例库（plan）
+└── schema_wiki/         schema 实例库（含尚未按现行规范验收的设计）
     └── <batch>/<task>/  root.yaml / <id>.yaml + dispatch.md
 ```
 
-- `kernel_wiki`（转换前）与 `schema_wiki`（转换后）一一呼应：前者是作为数据来源的 SOTA kernel，后者是从中提取、或据此撰写的 schema 设计。
+- `kernel_wiki` 保存任务与实现，`schema_wiki` 保存提取或撰写的设计；对应关系以 `meta_data.source` 等实际引用为准，不靠目录同名或批次号推定。
 - 任务目录中的文件身份、共享 Contract 与派生关系见[公共约定](schema_docs/0.common.md#派生节点与-dispatch)。
-- 基础 Harness 设施尚未纳入仓库，见 §6。
+- 基础 Harness 设施尚未纳入仓库，实际实现使用任务提供的构建、测试与测量入口。
 
 ### 阅读入口
 
-第一次接触仓库，读完本 README 后按以下顺序继续：
+**执行任务：** 从上方[任务入口](#任务入口)开始，不需要先读完全部规范。创建、修订或检查 YAML 时进入[模板说明](schema_template/README.md)的对应小节；字段与设计问题由流程引向相应 DOC。
+
+**系统学习：** 希望先理解整套表达时，按以下顺序阅读：
 
 1. [公共约定](schema_docs/0.common.md)：共用写法、身份、引用与共享 Contract。
 2. 按上方分区表依次读第 1–6 篇：先 Contract，再 Design，最后 Realization。各篇的“核心思想”与设计指导解释如何思考，字段表和结构轮廓用于查阅，局部片段解释具体用法，不组成完整算子。
-3. [模板使用说明](schema_template/README.md)：把已学规范用于创建、提取或修改文件，完成检查和交付。实际动手时直接进入这里，按需查具体字段。
+3. 选择一个任务入口，把规范用于具体工作；用[模板说明](schema_template/README.md)完成文件操作与检查。
 
-完整实例是可选参考，不是理解规范或开始填写的前提。`schema_wiki` 保存设计实例，`kernel_wiki` 保存源实现；旧写法仅在需要追溯时查阅 `schema_docs/archived`。维护规范或检查器时，再读 [tools/README.md](schema_template/tools/README.md)。
+**查阅案例与来源：** 学习现行写法时先看[示例索引及状态](schema_template/examples/README.md)；追溯或修改某份设计时读 `schema_wiki` 的任务目录，核对源码时进入对应 `kernel_wiki` 批次与任务说明。当前源材料的文件身份见[批次入口](kernel_wiki/aka-four-problems-20261019/README.md)。案例与实验的适用范围需要核实，完整实例不是开始工作的前提。
 
-## 6 现状与 TODO
+旧规范仅在追溯时查阅 `schema_docs/archived`；维护规范或检查器时，再读 [tools/README.md](schema_template/tools/README.md)。
 
-**已有：** 公共约定与六个分区文档、YAML 填写骨架与统一 Python 检查入口，以及模板内部的正反例测试；`kernel_wiki` 与尚未逐一按现行规范验收的 `schema_wiki`。使用方法与校验边界见 [模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
+## 5 现状与 TODO
+
+**已有：** 提取、规划和实现三个任务入口，公共约定与六个分区文档，YAML 填写骨架、统一 Python 检查入口及内部正反例测试；`kernel_wiki` 与尚未逐一按现行规范验收的 `schema_wiki`。使用方法与校验边界见[模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
 
 **TODO：**
 
@@ -113,4 +120,3 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 - **更多转写与精简**：转写更多 SOTA kernel，收敛到最小交集原语。
 - **检查器与评估器**：在现有结构和具名关系校验之外，继续实现资源记账、展开事件图的合法性与活性分析，以及尽量保序的性能估算。
 - **基础 Harness 设施**：支撑离线提取与在线撰写迭代的轻量平台，尚未放入仓库。
-- **Coder 实现指导**：依据 schema 设计从零实现或逐步优化 kernel 的完整操作流程。

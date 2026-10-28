@@ -1,6 +1,6 @@
 # 编写和检查 schema YAML
 
-这里是创建、从源码提取和修改 schema 的统一操作入口，承接已经学过的公共约定与分区规范。三种工作都按下面的流程进行：确认资料与范围，进入文件，填写与修订，检查，交付。字段含义和设计指导仍以各篇 DOC 为准，遇到具体问题时查相应链接。
+本篇提供创建、修订、检查与交付 schema YAML 的共用操作。任务方法分别见[提取](../EXTRACT_SCHEMA.md)、[规划](../PLAN_SCHEMA.md)和[实现](../IMPLEMENT_KERNEL.md)；按当前需要进入下面的小节，字段语义与设计指导仍以 schema_docs 为准。
 
 ## 填写与检查
 
@@ -8,13 +8,7 @@
 
 开始前需要任务要求和目标硬件条件：输入输出与数学定义、参考入口和误差判据、目标设备、已选实现栈及相应资料。还需从任务说明取得实际 workload 和优化目标；当前规范尚未确定它们的字段格式，不自行增加字段。
 
-Contract 使用任务给定或经任务方确认的内容；转录已确认的要求不等于获得修改要求的权限。需要改变任务边界、验收判据、设备或实现栈时，先向任务方指出问题，遵守[修改权限](../README.md#2-schema-是什么)。在此基础上，按工作来源准备：
-
-| 工作 | 还需要什么 |
-| --- | --- |
-| 从零设计 | 确认本次要解决的 workload、目标与已有约束；设计选择由 Designer 作出，骨架不提供默认方案。 |
-| 从 CUDA 提取 | 固定版本的源码、入口及相关调用路径，包括 host dispatch、模板或编译参数和辅助 kernel；明确本次提取哪条路径。设计出处不能代替任务要求或参考入口。 |
-| 修改已有 schema | 整个任务目录的 root、派生节点与已有 `dispatch.md`，以及本次修改依据；追加实验反馈时还需与原 plan、环境和 workload 对应的真实记录。 |
+Contract 使用任务给定或经任务方确认的内容；转录已确认的要求不等于获得修改要求的权限。需要改变任务边界、验收判据、设备或实现栈时，先向任务方指出问题，遵守[修改权限](../README.md#2-schema-是什么)。参考入口尚未形成时，按 [golden_reference 规则](../schema_docs/1.contract.algorithm_requirement.md#golden_reference)处理；不能用设计源码冒充参考入口。
 
 必要信息不足时，在任务沟通中说明缺什么、影响哪个字段或设计判断、需要哪些资料或确认；可以继续不受影响的部分，但不能把草稿当成完整设计交付。不要编造参考入口、误差阈值、硬件能力或实验结果，也不要用 `null` 掩盖未完成的设计。只有[硬件资料入口](../schema_docs/2.contract.hardware_specification.md#省略与占位)和[数学区允许的位置](../schema_docs/3.design.math_reshape.md#引用与缺项)可按规定标记缺口；这些标记不表示相应判断已经成立。
 
@@ -37,13 +31,7 @@ cp -n schema_template/starter.yaml path/to/task/root.yaml
 
 ### 3 填写与修订
 
-新文件先落实 `meta_data`；root 转录已确认的两份 Contract，派生节点使用共享 Contract。随后按信息依赖推进，不把文件顺序当作一次填完、不再回头的要求：
-
-- 先在 [math_reshape](../schema_docs/3.design.math_reshape.md#核心思想) 确定实际计算、数值路径和逻辑寿命；没有改写的计算引用 Contract。需要下游选值的参数按已有绑定规则交接。
-- 在 [work_schedule](../schema_docs/4.design.work_schedule.md#核心思想) 与 [tile_pipeline](../schema_docs/5.design.tile_pipeline.md#核心思想) 之间反复核对：一份工作的边界、worker 组成、资源容量、局部推进和跨 phase 交接应相容。若调度暴露了数学设计的问题，返回数学区修改其唯一定义。
-- 最后用 [realization 的判断方法](../schema_docs/6.realization.md#选择一条实现约束) 补充尚未表达的必要实现条件和有理由的优先选择；没有新增交接信息时省略，不用它安放未完成的 Design。
-
-从 CUDA 提取时，先用任务要求核对入口及调用路径的外部计算，再识别实际的数学改写、工作组织和局部依赖，不把函数或 kernel 数量直接当成 schema 分区。用源码确认它实际做了什么，用任务要求和硬件资料判断哪些是前提；从实现推导出的设计理由说明依据，不能把推测动机当成源码事实。缺少依据、且影响设计的判断按前述方式报告。若同时提出优化，在修改说明中明确偏离原实现的决定，不把新选择混成原实现的提取结果。具体区分见[算法与实现边界](../schema_docs/1.contract.algorithm_requirement.md#先定义调用者要什么再选择怎样实现)及[实现选择的删除测试](../schema_docs/6.realization.md#先做删除测试再判断强度)。
+新文件先落实 `meta_data`；root 转录已确认的两份 Contract，派生节点使用共享 Contract。Design 的形成与往返核对按[提取入口](../EXTRACT_SCHEMA.md#3-从实现事实形成设计表达)或[规划入口](../PLAN_SCHEMA.md#3-在数学与执行之间迭代)推进，不把 YAML 的排列顺序当成只填写一遍的步骤。
 
 修改时先改决定的唯一定义，再沿引用检查受影响的下游：数学值、shape、dtype 或寿命的变化可能影响分块、资源和实现约束；phase、lane、动作或资源改名时核对 flow、handoff、milestone、edge 与 realization 的引用。共享 Contract 经任务方确认发生变化后，要审阅所有节点是否仍符合它，不能只修当前节点。Coder 追加替代反馈时按[反馈规则](../schema_docs/6.realization.md#有证据的替代反馈)保留原选择与理由；涉及 Design 的变化交给 Designer。
 
