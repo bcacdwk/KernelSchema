@@ -11,10 +11,13 @@
 | 当前任务 | 入口 | 交付什么 |
 | --- | --- | --- |
 | 离线从已有 SOTA kernel 及相关材料提取 schema，或修正已有提取结果 | [提取 schema](EXTRACT_SCHEMA.md) | 忠实于选定实现、可追溯的 schema 与必要缺口说明 |
-| Planner 从零撰写 schema，或逐步优化已有设计 | [规划 schema](PLAN_SCHEMA.md) | Contract 内可供实现的设计，以及未决判断 |
-| Coder 根据 schema 从零实现，或按设计修改、优化 kernel | [实现 kernel](IMPLEMENT_KERNEL.md) | 对应设计版本的代码、验证结果及实现反馈 |
+| Planner 根据已完成的 Contract 设计新算子的 schema | [新建设计](DESIGN_SCHEMA.md) | 从数学到调度、流水逐层形成的首版设计，以及未决判断 |
+| Planner 根据已有 schema 与 Coder 反馈迭代优化 | [优化设计](OPTIMIZE_SCHEMA.md) | 有依据的设计修订、影响范围及下一轮验证要求 |
+| Coder 根据 schema 从零实现，或按设计修改、优化 kernel | [实现 schema](IMPLEMENT_SCHEMA.md) | 对应设计版本的代码、验证结果及实现反馈 |
 
-一次任务只执行其中一种工作，通过产物与必要说明交给下一角色。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
+一次任务选择当前工作对应的入口，通过产物与必要说明交接。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
+
+新建与优化均由 Planner 承担，按数学改写、工作调度、tile 流水线的顺序逐层推导和写入。先把上层方向收束，再向下投入优化精力；下层发现前提问题时，回到对应上层修正并复查受影响部分。
 
 ## 术语
 
@@ -69,8 +72,9 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 .
 ├── README.md            全局导引与任务分流
 ├── EXTRACT_SCHEMA.md    从固定源码与材料提取设计
-├── PLAN_SCHEMA.md       从零设计与已有设计修订
-├── IMPLEMENT_KERNEL.md  按 schema 实现、验证与反馈
+├── DESIGN_SCHEMA.md     从已完成的 Contract 逐层设计新算子
+├── OPTIMIZE_SCHEMA.md   判断实现反馈，逐层迭代已有设计
+├── IMPLEMENT_SCHEMA.md  将 schema 落实为 kernel，验证并反馈
 ├── schema_template/     共用的 YAML 操作与检查
 │   ├── README.md        创建、修订、检查与交付
 │   ├── starter.yaml     待填写骨架，复制为新任务的 root.yaml
@@ -112,7 +116,7 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 
 ## 5 现状与 TODO
 
-**已有：** 提取、规划和实现三个任务入口，公共约定与六个分区文档，YAML 填写骨架、统一 Python 检查入口及内部正反例测试；`kernel_wiki` 与尚未逐一按现行规范验收的 `schema_wiki`。使用方法与校验边界见[模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
+**已有：** 提取、新建设计、优化设计和实现四个任务入口，公共约定与六个分区文档，YAML 填写骨架、统一 Python 检查入口及内部正反例测试；`kernel_wiki` 与尚未逐一按现行规范验收的 `schema_wiki`。使用方法与校验边界见[模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
 
 **TODO：**
 

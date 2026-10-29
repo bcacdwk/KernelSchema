@@ -1,6 +1,6 @@
 # 编写和检查 schema YAML
 
-本篇提供创建、修订、检查与交付 schema YAML 的共用操作。任务方法分别见[提取](../EXTRACT_SCHEMA.md)、[规划](../PLAN_SCHEMA.md)和[实现](../IMPLEMENT_KERNEL.md)；按当前需要进入下面的小节，字段语义与设计指导仍以 schema_docs 为准。
+本篇提供创建、修订、检查与交付 schema YAML 的共用操作。任务方法分别见[提取](../EXTRACT_SCHEMA.md)、[新建设计](../DESIGN_SCHEMA.md)、[优化设计](../OPTIMIZE_SCHEMA.md)和[实现 schema](../IMPLEMENT_SCHEMA.md)；按当前需要进入下面的小节，字段语义与设计指导仍以 schema_docs 为准。
 
 ## 填写与检查
 
@@ -8,13 +8,15 @@
 
 开始前需要任务要求和目标硬件条件：输入输出与数学定义、参考入口和误差判据、目标设备、已选实现栈及相应资料。还需从任务说明取得实际 workload 和优化目标；当前规范尚未确定它们的字段格式，不自行增加字段。
 
+新建设计接收已经完成的 Contract，在其上填写 Design；提取任务按已确认的要求建立共享 Contract；优化任务使用原有 Contract。三者都不因当前设计选择而改写前提。
+
 Contract 使用任务给定或经任务方确认的内容；转录已确认的要求不等于获得修改要求的权限。需要改变任务边界、验收判据、设备或实现栈时，先向任务方指出问题，遵守[修改权限](../README.md#2-schema-是什么)。参考入口尚未形成时，按 [golden_reference 规则](../schema_docs/1.contract.algorithm_requirement.md#golden_reference)处理；不能用设计源码冒充参考入口。
 
 必要信息不足时，在任务沟通中说明缺什么、影响哪个字段或设计判断、需要哪些资料或确认；可以继续不受影响的部分，但不能把草稿当成完整设计交付。不要编造参考入口、误差阈值、硬件能力或实验结果，也不要用 `null` 掩盖未完成的设计。只有[硬件资料入口](../schema_docs/2.contract.hardware_specification.md#省略与占位)和[数学区允许的位置](../schema_docs/3.design.math_reshape.md#引用与缺项)可按规定标记缺口；这些标记不表示相应判断已经成立。
 
 ### 2 创建文件或进入已有任务
 
-新任务使用独立目录，按[任务身份规则](../schema_docs/0.common.md#单份-plan-与元数据)命名。下面的 `path/to/task` 替换为实际目录，例如 `schema_wiki/<batch>/<task>`；任务也可以位于仓库之外。从仓库根目录复制骨架，不覆盖已有文件：
+新任务使用独立目录，按[任务身份规则](../schema_docs/0.common.md#单份-plan-与元数据)命名。已有含 Contract 的 `root.yaml` 时保留它，补入后续设计；需要新建文件时可复制骨架，再接入给定或按任务确认的 Contract。下面的 `path/to/task` 替换为实际目录，例如 `schema_wiki/<batch>/<task>`；任务也可以位于仓库之外。从仓库根目录复制骨架，不覆盖已有文件：
 
 ```sh
 mkdir -p path/to/task
@@ -31,7 +33,7 @@ cp -n schema_template/starter.yaml path/to/task/root.yaml
 
 ### 3 填写与修订
 
-新文件先落实 `meta_data`；root 转录已确认的两份 Contract，派生节点使用共享 Contract。Design 的形成与往返核对按[提取入口](../EXTRACT_SCHEMA.md#3-从实现事实形成设计表达)或[规划入口](../PLAN_SCHEMA.md#3-在数学与执行之间迭代)推进，不把 YAML 的排列顺序当成只填写一遍的步骤。
+新文件先落实 `meta_data`；root 保留给定或按任务确认的两份 Contract，派生节点使用共享 Contract。按[提取](../EXTRACT_SCHEMA.md#3-从实现事实形成设计表达)、[新建](../DESIGN_SCHEMA.md#2-先完成数学改写)或[优化](../OPTIMIZE_SCHEMA.md#2-找到本轮值得改变的决定)流程逐段形成 Design：先核对数学决定，再落实调度和流水；需要回改上层时，依次复查受影响的下游。未进入的分区可以暂留未完成，完整交付前再落实全部适用内容。
 
 修改时先改决定的唯一定义，再沿引用检查受影响的下游：数学值、shape、dtype 或寿命的变化可能影响分块、资源和实现约束；phase、lane、动作或资源改名时核对 flow、handoff、milestone、edge 与 realization 的引用。共享 Contract 经任务方确认发生变化后，要审阅所有节点是否仍符合它，不能只修当前节点。Coder 追加替代反馈时按[反馈规则](../schema_docs/6.realization.md#有证据的替代反馈)保留原选择与理由；涉及 Design 的变化交给 Designer。
 
