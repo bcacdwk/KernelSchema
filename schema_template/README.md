@@ -33,9 +33,9 @@ cp -n schema_template/starter.yaml path/to/task/root.yaml
 
 ### 3 填写与修订
 
-新文件先落实 `meta_data`；root 保留给定或按任务确认的两份 Contract，派生节点使用共享 Contract。按[提取](../EXTRACT_SCHEMA.md#3-从实现事实形成设计表达)、[新建](../DESIGN_SCHEMA.md#2-先完成数学改写)或[优化](../OPTIMIZE_SCHEMA.md#2-找到本轮值得改变的决定)流程逐段形成 Design：先核对数学决定，再落实调度和流水；需要回改上层时，依次复查受影响的下游。未进入的分区可以暂留未完成，完整交付前再落实全部适用内容。
+新文件先落实 `meta_data`；root 保留给定或按任务确认的两份 Contract，派生节点使用共享 Contract。按[提取](../EXTRACT_SCHEMA.md#3-从实现事实形成设计表达)、[新建](../DESIGN_SCHEMA.md#2-先完成数学改写)或[优化](../OPTIMIZE_SCHEMA.md#2-找到本轮值得改变的决定)流程逐段形成 Design：先核对数学改写，再落实工作调度和微流水线；需要回改上层时，依次复查受影响的下游。未进入的分区可以暂留未完成，完整交付前再落实全部适用内容。
 
-修改时先改决定的唯一定义，再沿引用检查受影响的下游：数学值、shape、dtype 或寿命的变化可能影响分块、资源和实现约束；phase、lane、动作或资源改名时核对 flow、handoff、milestone、edge 与 realization 的引用。共享 Contract 经任务方确认发生变化后，要审阅所有节点是否仍符合它，不能只修当前节点。Coder 追加替代反馈时按[反馈规则](../schema_docs/6.realization.md#有证据的替代反馈)保留原选择与理由；涉及 Design 的变化交给 Designer。
+修改时先改决定的唯一定义，再沿引用检查受影响的下游：数学值、shape、dtype 或寿命的变化可能影响分块、资源和实现约束；phase、lane、动作或资源改名时核对 flow、handoff、milestone、edge 与 realization 的引用。共享 Contract 经任务方确认发生变化后，要审阅所有节点是否仍符合它，不能只修当前节点。Coder 追加替代反馈时按[反馈规则](../schema_docs/6.realization.md#有证据的替代反馈)保留原选择与理由；涉及 Design 的变化交给 Planner。
 
 按[版本规则](../schema_docs/0.common.md#单份-plan-与元数据)更新实际改动文件的修订号，结合 diff 核对历史递增；检查器只检查它是否为正整数。改动内容由 diff 给出，设计意图仍写在所属 `thesis` 或实现选择的 `reason` 中。实验记录用 `repository@ref:path` 固定它验证的 plan，同一 ref 同时固定该节点与 root；改过设计后不能把旧实验自动视为新版本的证据。
 

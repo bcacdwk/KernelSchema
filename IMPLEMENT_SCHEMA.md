@@ -27,7 +27,7 @@
 | --- | --- |
 | 计算与数值路径 | 保持有效分支、初末状态、物化与携带状态、精度转换、归约及近似选择；将逻辑访问落实为契约允许的布局和地址。输入域与默认精度查 [DOC 1](schema_docs/1.contract.algorithm_requirement.md#常量输入输出与数学步骤)及其[数学约定](schema_docs/1.contract.algorithm_requirement.md#数学表达与参考精度)，改写的精度语义查 [DOC 3](schema_docs/3.design.math_reshape.md#精度与辅助运算)。 |
 | 工作组织与提交 | 按 work_schedule 实现分块、worker 组成、工作排列、分配、接续与退出，让预处理、主计算和合并都有执行者。多个 phase 按[提交与接续](schema_docs/4.design.work_schedule.md#phase-的提交与接续)落实启动依赖，按[数据交接](schema_docs/4.design.work_schedule.md#跨-phase-数据交接)安排生产消费区域及存储寿命；不能由源码排列推定设备完成顺序。 |
-| 局部动作与资源 | 保持 lane 职责和动作承诺的完成、可见性保证。把显式 edge、[lane 顺序](schema_docs/5.design.tile_pipeline.md#lane-内的顺序)和[默认依赖](schema_docs/5.design.tile_pipeline.md#默认的依赖)一起落实为发射、等待、发布与释放点；按[资源视图](schema_docs/5.design.tile_pipeline.md#视图)核对物理范围、槽位及覆盖时机。存在循环或持久 worker 时，检查首轮、稳态、末轮、跨工作接续和退出，索引边界查 [DOC 5](schema_docs/5.design.tile_pipeline.md#跨工作接续与索引边界)。 |
+| 微流水线 | 保持 lane 职责和动作承诺的完成、可见性保证。把显式 edge、[lane 顺序](schema_docs/5.design.tile_pipeline.md#lane-内的顺序)和[默认依赖](schema_docs/5.design.tile_pipeline.md#默认的依赖)一起落实为发射、等待、发布与释放点；按[资源视图](schema_docs/5.design.tile_pipeline.md#视图)核对物理范围、槽位及覆盖时机。存在循环或持久 worker 时，检查首轮、稳态、末轮、跨工作接续和退出，索引边界查 [DOC 5](schema_docs/5.design.tile_pipeline.md#跨工作接续与索引边界)。 |
 
 异步或复用关系难以落实时，可以选一个缓冲展开几轮。例如，设计已确定 `X(n)` 放在双槽缓冲的 `n%2` 槽，就分别找到代码中“`X(n)` 完成并可读”和“它的全部读者已结束访问”的保证：前者允许消费，后者才允许 `X(n+2)` 覆盖。再检查第一轮如何开始、最后一轮如何收尾。这个局部追踪只用于解决当前疑点，不要求每个任务另写事件图或映射表。
 

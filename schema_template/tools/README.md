@@ -31,7 +31,7 @@ tools/
     └── fixtures/minimal/  最小合成测试底稿
 ```
 
-依赖方向是 `check_yaml.py → schema.py → yaml_source / rules → diagnostics`。解析器和诊断不导入规则；规则只检查已解析的数据，不读写 plan、不打印、不决定进程退出。字段结构通过后，先检查声明是否完整，再按符号、调度、流水线顺序检查关联。
+依赖方向是 `check_yaml.py → schema.py → yaml_source / rules → diagnostics`。解析器和诊断不导入规则；规则只检查已解析的数据，不读写 plan、不打印、不决定进程退出。字段结构通过后，先检查声明是否完整，再按符号、工作调度、微流水线的顺序检查关联。
 
 输入文件名决定节点 ID，所在目录决定任务范围；文件符号链接不使检查切换到目标文件的任务目录。无论传入 root 还是派生节点，都会检查同目录直属的全部 `.yaml / .yml`。共享 Contract 只用于解析引用，不写进派生节点，也不继承父节点 Design。
 

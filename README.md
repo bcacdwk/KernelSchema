@@ -1,6 +1,6 @@
 # KernelSchema
 
-本仓库设计一套描述 GPU kernel **流水线设计**的 schema：用结构化的 YAML 帮助 Agent 思考、表达和交流一个 kernel 要算什么、数学上怎么改写、工作怎么分配到硬件、tile 内部怎么流水，以及实现时必须遵守的条件。schema 位于所有 GPU 编程语言之上，由 Designer 填写、Coder 据此实现、人类专家审阅；YAML 最终供 Agent 和人阅读，不会被编译。
+本仓库设计一套描述 GPU kernel **流水线设计**的 schema：用结构化的 YAML 帮助 Agent 思考、表达和交流一个 kernel 要算什么、数学上怎么改写、工作怎么分配到硬件、微流水线怎样推进计算与复用资源，以及实现时必须遵守的条件。schema 位于所有 GPU 编程语言之上，由 Planner 填写、Coder 据此实现、人类专家审阅；YAML 最终供 Agent 和人阅读，不会被编译。
 
 本 README 是全局导引。任务入口指导工作，`schema_docs` 定义字段语义与设计表达，`schema_template` 提供共用的 YAML 操作与检查。检查器落实文档中可直接判断的结构与关联要求，不反向增加设计义务；示例也不代替规范。
 
@@ -11,17 +11,17 @@
 | 当前任务 | 入口 | 交付什么 |
 | --- | --- | --- |
 | 离线从已有 SOTA kernel 及相关材料提取 schema，或修正已有提取结果 | [提取 schema](EXTRACT_SCHEMA.md) | 忠实于选定实现、可追溯的 schema 与必要缺口说明 |
-| Planner 根据已完成的 Contract 设计新算子的 schema | [新建设计](DESIGN_SCHEMA.md) | 从数学到调度、流水逐层形成的首版设计，以及未决判断 |
+| Planner 根据已完成的 Contract 设计新算子的 schema | [新建设计](DESIGN_SCHEMA.md) | 逐层完成数学改写、工作调度与微流水线的首版设计，以及未决判断 |
 | Planner 根据已有 schema 与 Coder 反馈迭代优化 | [优化设计](OPTIMIZE_SCHEMA.md) | 有依据的设计修订、影响范围及下一轮验证要求 |
 | Coder 根据 schema 从零实现，或按设计修改、优化 kernel | [实现 schema](IMPLEMENT_SCHEMA.md) | 对应设计版本的代码、验证结果及实现反馈 |
 
 一次任务选择当前工作对应的入口，通过产物与必要说明交接。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
 
-新建与优化均由 Planner 承担，按数学改写、工作调度、tile 流水线的顺序逐层推导和写入。先把上层方向收束，再向下投入优化精力；下层发现前提问题时，回到对应上层修正并复查受影响部分。
+新建与优化均由 Planner 承担，按数学改写、工作调度、微流水线的顺序逐层推导和写入。先把上层方向收束，再向下投入优化精力；下层发现前提问题时，回到对应上层修正并复查受影响部分。
 
 ## 术语
 
-- **Designer**（也称 planner）：做设计的 Agent 或人，唯一能修改 Design 区。
+- **Planner**：做设计的 Agent 或人，唯一能修改 Design 区。
 - **Coder**：按 Contract 已选的实现栈把设计实现成代码的 Agent（如 AKA）。
 - **schema**：既指这套描述语言（分区与字段规则），也指针对某个计算任务填好的设计实例；后者也叫 **plan**。Agent 直接编写和修改 YAML，供审阅与实现。一份 plan 对应一个 **dispatch**，描述该路径的流水线设计，可以包含多次计算 kernel 提交。
 - **template**：`schema_template` 提供待填写骨架与统一检查入口；内部机器规则检查字段、必填条件和可校验关系。
@@ -41,18 +41,18 @@ Kernel Agent 有两个普遍问题：**难以优化**——无法判断结果是
 
 ## 2 schema 是什么
 
-**角色。** 两份 Contract 定义算法任务、硬件能力与任务已选环境，不随 Design 的选择增删。Designer 在此基础上做设计，只有它能改 Design 区；Coder 在固定的硬件、算法与设计下逐代实现，只能在 `realization` 中附带有实验证据的反馈；人类专家随时介入、把握方向，只审阅 YAML 形式的 plan，不介入代码。协作方式介于 vibe coding 与全自动 loop 之间。
+**角色。** 两份 Contract 定义算法任务、硬件能力与任务已选环境，不随 Design 的选择增删。Planner 在此基础上做设计，只有它能改 Design 区；Coder 在固定的硬件、算法与设计下逐代实现，只能在 `realization.prefer[].feedback` 中附带有实验证据的替代反馈；人类专家随时介入、把握方向，只审阅 YAML 形式的 plan，不介入代码。协作方式介于 vibe coding 与全自动 loop 之间。
 
 **分区。** 一份 plan 分为 Contract、Design、Realization 三部分、共六个子区，依次对应 `schema_docs/1–6`；此外开头有一段 `meta_data`（任务名、设计出处、dispatch 路径与修订号），不属于 Contract。
 
 | 区 | 子区 | 记录什么 | 修改权限 |
 | --- | --- | --- | --- |
-| Contract | [contract.algorithm_requirement](schema_docs/1.contract.algorithm_requirement.md) | 算法要求：从外部看，算子必须满足的输入、输出与数学关系 | Designer 与 Coder 都不能改 |
+| Contract | [contract.algorithm_requirement](schema_docs/1.contract.algorithm_requirement.md) | 算法要求：从外部看，算子必须满足的输入、输出与数学关系 | Planner 与 Coder 都不能改 |
 | Contract | [contract.hardware_specification](schema_docs/2.contract.hardware_specification.md) | 硬件规格：目标设备的执行单元、核心能力与边界，已选的实现栈，以及完整规格与 microbench 的引用 | 同上 |
-| Design | [design.math_reshape](schema_docs/3.design.math_reshape.md) | 数学改写：为了在该硬件上实现，对计算本身做的改写 | 只有 Designer 能改，Coder 遵守 |
+| Design | [design.math_reshape](schema_docs/3.design.math_reshape.md) | 数学改写：为了在该硬件上实现，对计算本身做的改写 | 只有 Planner 能改，Coder 遵守 |
 | Design | [design.work_schedule](schema_docs/4.design.work_schedule.md) | 工作调度：计算如何分解、由谁执行、怎样分配与接续 | 同上 |
-| Design | [design.tile_pipeline](schema_docs/5.design.tile_pipeline.md) | tile 流水线：worker 内执行角色的动作、依赖、片上资源及跨工作接续 | 同上 |
-| Realization | [realization](schema_docs/6.realization.md) | 实现交接：设计所依赖、但上面没有表达的实现条件，以及优先尝试的实现选择 | Designer 填写；Coder 只能附带实验反馈 |
+| Design | [design.tile_pipeline](schema_docs/5.design.tile_pipeline.md) | 微流水线：worker 内执行角色的动作、依赖、片上资源及跨工作接续 | 同上 |
+| Realization | [realization](schema_docs/6.realization.md) | 实现交接：设计所依赖、但上面没有表达的实现条件，以及优先尝试的实现选择 | Planner 填写；Coder 仅可更新 `prefer[].feedback` |
 
 Design 三区从上到下排列，越靠上越难优化、收益越大、在源码里越难看出来：`math_reshape` 是前置（定下有哪些量、计算顺序、哪些量跨迭代携带、哪些中间量物化），`work_schedule` 与 `tile_pipeline` 分别表达宏观工作组织和局部执行约束。
 
@@ -63,7 +63,7 @@ Design 三区从上到下排列，越靠上越难优化、收益越大、在源�
 1. **奥卡姆剃刀，less is more。** 删掉不影响设计理解的一切；判断标准是 “删掉它，读者会不会读错或漏掉设计”。
 2. **一个决定只写一次，写在唯一合适的位置。** 下游直接引用，不重述、不改义；同一个对象在各区用同一个名字。
 3. **定量、可核对。** 收益与代价写成能核对的事实（计算量、访存量、误差界等），不写 “更快”“优化访存” 这类口号。
-4. **抓大放小。** Designer 必需的内容不能漏、不能错；设计决定在 Design 中表达，普通实现细节留给 Coder。
+4. **抓大放小。** Planner 必需的内容不能漏、不能错；设计决定在 Design 中表达，普通实现细节留给 Coder。
 5. **有约束力的是具体决策，不是名称。** `persistent`、`CLC`、`online softmax` 这类名字只帮助理解，不能代替具体规则。
 
 ## 4 仓库结构与阅读顺序
