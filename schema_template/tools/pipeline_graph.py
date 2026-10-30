@@ -20,7 +20,8 @@ if __package__ in (None, ""):
 from tools import schema
 from tools.pipeline import GraphError, build_phase
 from tools.pipeline.model import ExpansionError
-from tools.pipeline.render import RenderError, dot_text, gallery, graphviz, viewer
+from tools.pipeline.output import GraphOutput, REPORT_SCHEMA
+from tools.pipeline.render import RenderError, gallery_entry
 
 
 def read_sample(path: Path) -> dict:
@@ -64,29 +65,20 @@ def configuration(sample: dict, node: str, overrides: dict, worktiles: int | Non
     return {"parameters": parameters, "worktiles": count}
 
 
-def generate(source: Path, plan: dict, sample: dict, config: dict, output: Path, format: str) -> dict:
+def generate(source: Path, plan: dict, sample: dict, config: dict, output: GraphOutput, format: str) -> dict:
     graphs, samples = [], {}
     for pid, phase in plan["design"]["tile_pipeline"]["phase"].items():
         samples[pid] = config
         worker = plan["design"]["work_schedule"]["phase"][pid]["mapping"]["worker"]
         graphs.append(build_phase(pid, phase, worker, **config))
-    report = {"schema": "pipeline-graph-trial-1", "source": str(source),
+    report = {"schema": REPORT_SCHEMA, "source": str(source),
               "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
               "scope": "representative phase-local event dependencies",
               "acyclic": all(not g.cycle for g in graphs), "samples": samples,
               "notes": sample.get("notes", []),
               "phases": [g.report() for g in graphs]}
-    output.mkdir(parents=True, exist_ok=True)
-    base = output / source.stem
     title = source.parent.name + " / " + source.stem
-    base.with_suffix(".json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    base.with_suffix(".dot").write_text(dot_text(title, graphs, samples), encoding="utf-8")
-    # A DOT-only refresh must not leave an SVG/HTML from an older input.
-    base.with_suffix(".svg").unlink(missing_ok=True)
-    base.with_suffix(".html").unlink(missing_ok=True)
-    if format == "svg":
-        graphviz(base.with_suffix(".dot"), base.with_suffix(".svg"))
-        base.with_suffix(".html").write_text(viewer(title, base.with_suffix(".svg").name, report), encoding="utf-8")
+    output.write(source.stem, title, graphs, samples, report, format)
     return report
 
 
@@ -100,9 +92,12 @@ def main(argv=None) -> int:
     parser.add_argument("--all", action="store_true", help="generate one figure for each sibling YAML")
     parser.add_argument("--format", choices=("svg", "dot"), default="svg")
     args = parser.parse_args(argv)
+    source = args.yaml.expanduser()
+    output = GraphOutput((args.out or source.parent / "pipeline_graphs").expanduser().resolve())
     notices = []
     try:
-        directory, task = schema.validate_file(args.yaml, notices=notices)
+        output.begin(source, all_nodes=args.all)
+        directory, task = schema.validate_file(source, notices=notices)
         files = schema.task_files(directory)
         if args.sample and not args.sample.is_file():
             raise GraphError(f"sample file not found: {args.sample}")
@@ -118,16 +113,15 @@ def main(argv=None) -> int:
             if not name.strip():
                 raise ExpansionError("--set needs a nonempty parameter name, for example N=4")
             overrides[name] = int(value)
-        output = (args.out or directory / "pipeline_graphs").expanduser().resolve()
         result = 0
         entries = []
-        for node in (task if args.all else [args.yaml.stem]):
+        for node in (task if args.all else [source.stem]):
             try:
                 config = configuration(sample, node, overrides, args.worktiles)
                 report = generate(files[node], task[node], sample, config, output, args.format)
                 count = sum(len(p["operations"]) for p in report["phases"])
                 status = "Acyclic sample" if report["acyclic"] else "DEPENDENCY CYCLE"
-                print(f"{status}: {node} ({len(report['phases'])} phases, {count} actions) -> {output / (node + '.' + args.format)}")
+                print(f"{status}: {node} ({len(report['phases'])} phases, {count} actions) -> {output.directory / (node + '.' + args.format)}")
                 for phase in report["phases"]:
                     if phase["cycle"]:
                         print("  " + " -> ".join(phase["cycle"]), file=sys.stderr)
@@ -138,24 +132,16 @@ def main(argv=None) -> int:
                         for reason in reasons[:6]:
                             print("    " + reason, file=sys.stderr)
                 result = max(result, 0 if report["acyclic"] else 1)
-                entries.append({"name": node, "href": node + (".html" if args.format == "svg" else ".dot"),
-                                "summary": f"{len(report['phases'])} phases · {count} actions · {status}"})
+                entries.append(gallery_entry(node, report, args.format))
             except RenderError as error:
-                for suffix in (".svg", ".html"):
-                    (output / (node + suffix)).unlink(missing_ok=True)
-                print(f"Render not completed: {error}; DOT and audit JSON are retained in {output}", file=sys.stderr)
+                print(f"Render not completed: {error}; DOT and audit JSON are retained in {output.directory}", file=sys.stderr)
                 result = 2
             except GraphError as error:
-                # Do not leave a successful picture from an earlier run for an
-                # input that no longer expands. These are generated files only.
-                for suffix in (".svg", ".html", ".dot", ".json"):
-                    (output / (node + suffix)).unlink(missing_ok=True)
                 label = "Graph not completed: " if isinstance(error, ExpansionError) else ""
                 print(f"{label}{files[node]}: {error}", file=sys.stderr)
                 result = max(result, 2 if isinstance(error, ExpansionError) else 1)
         if args.all:
-            output.mkdir(parents=True, exist_ok=True)
-            (output / "index.html").write_text(gallery(directory.name + " · Pipeline review", entries), encoding="utf-8")
+            output.write_gallery(directory.name + " · Pipeline review", entries)
         return result
     except schema.SchemaError as error:
         print(error, file=sys.stderr)

@@ -19,7 +19,8 @@ def operands(action: str) -> tuple[str, list[tuple[str, list[str]]]]:
 
 def instantiate(action: str, domains: Domains, env: dict) -> str:
     verb, objects = operands(action)
-    return verb + ":" + "@".join(name + ("(" + ",".join(str(domains.integer(a, env)) for a in args) + ")"
+    indices = iter(domains.integers([arg for _, args in objects for arg in args], env))
+    return verb + ":" + "@".join(name + ("(" + ",".join(str(next(indices)) for _ in args) + ")"
                                         if args else "") for name, args in objects)
 
 

@@ -22,6 +22,7 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
             _check_domain(check, domain, domains, p + ".domain." + name)
         check.acyclic(graph, p + ".domain")
         unit_count = work[pid]["mapping"]["worker"]["unit_count"]
+        dynamic = work[pid]["schedule"]["worker_assignment"]["refill"] != "none"
         families, role_members = {}, {}
         for role, body in phase["role"].items():
             lp = p + ".role." + role
@@ -39,19 +40,16 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
                 if i == 0 and unit == work[pid]["mapping"]["worker"]["unit"] and type(unit_count) is int:
                     check.require(int(hi) <= unit_count if hi else int(lo) < unit_count,
                                  lp + ".info.member", "member index exceeds worker.unit_count")
-            actions = _check_pipe(check, body["pipe"], domains, set(), lp + ".pipe")
-            families[role] = set()
-            for action, ap in actions:
+            actions = _check_pipe(check, body["pipe"], domains, set(), lp + ".pipe", dynamic=dynamic)
+            families[role] = {}
+            for action, ap, scope in actions:
                 parsed = parse_action(action)
                 if check.require(parsed is not None, ap, "invalid action notation"):
-                    verb, objects = parsed
+                    verb = parsed[0]
                     check.require(verb in GENERIC_VERBS or verb in body["info"].get("verb", {}),
                                  ap, f"custom verb {verb} needs an info.verb contract")
-                    families[role].add((verb, objects))
-            if work[pid]["schedule"]["worker_assignment"]["refill"] != "none":
-                for field in ("pipe", "waits_for"):
-                    _check_dynamic_domain_queries(check, body.get(field, {}), domains, lp + "." + field)
-        if work[pid]["schedule"]["worker_assignment"]["refill"] != "none":
+                    families[role].setdefault(parsed, []).append(scope)
+        if dynamic:
             for field in ("domain", "resource"):
                 _check_dynamic_domain_queries(check, phase.get(field, {}), domains, p + "." + field)
 
@@ -64,13 +62,16 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
                 return
             if target is None:
                 matches = [role for role, items in families.items() if parsed in items]
-                check.require(len(matches) == 1, rp, "phase milestone needs an unambiguous role-qualified event")
-                return
+                if not check.require(len(matches) == 1, rp, "phase milestone needs an unambiguous role-qualified event"):
+                    return
+                target = matches[0]
             if not check.require(target in families, rp, f"unknown role {target}"):
                 return
             if waiting:
                 check.require(target == current, rp, "the waiting event must belong to the current role")
             check.require(parsed in families[target], rp, "event does not name an action family in the referenced role")
+            if dynamic and parsed in families[target]:
+                _check_dynamic_domain_queries(check, action, _common_domains(families[target][parsed]), rp)
             if member not in (None, "*") and type(unit_count) is int:
                 if not check.require(int(member) < unit_count, rp, "event member exceeds worker.unit_count"):
                     return
@@ -127,7 +128,8 @@ def _check_domain(check: CheckContext, domain: Any, known: dict[str, Any], path:
             check.require(item in known, f"{path}.flatten[{i}]", f"flatten names an undefined domain {item}")
 
 
-def _check_pipe(check: CheckContext, pipe: dict[str, Any], known: dict[str, Any], bound: set[str], path: str) -> list[tuple[str, str]]:
+def _check_pipe(check: CheckContext, pipe: dict[str, Any], known: dict[str, Any], bound: set[str],
+                path: str, *, dynamic: bool) -> list[tuple[str, str, dict[str, Any]]]:
     scope = dict(known)
     repeat, index = pipe.get("repeat"), None
     if isinstance(repeat, dict):
@@ -137,6 +139,8 @@ def _check_pipe(check: CheckContext, pipe: dict[str, Any], known: dict[str, Any]
     elif isinstance(repeat, str):
         index = repeat.split("[", 1)[0]
         check.require(index in scope, path + ".repeat", f"undefined repeat domain {index}")
+    if dynamic:
+        _check_dynamic_domain_queries(check, repeat, scope, path + ".repeat")
     body_bound = set(bound)
 
     def bind(name: str, visited: set[str]) -> None:
@@ -157,20 +161,32 @@ def _check_pipe(check: CheckContext, pipe: dict[str, Any], known: dict[str, Any]
         for i, action in enumerate(pipe.get(region, [])):
             ap = f"{path}.{region}[{i}]"
             if isinstance(action, dict):
-                actions.extend(_check_pipe(check, action, scope, current, ap))
+                actions.extend(_check_pipe(check, action, scope, current, ap, dynamic=dynamic))
             else:
-                actions.append((action, ap))
+                actions.append((action, ap, scope))
+                if dynamic:
+                    _check_dynamic_domain_queries(check, action, scope, ap)
                 for free in free_action_indices(action):
                     if free in scope:
                         check.require(free in current, ap, f"index {free} is not bound in this pipe region")
     return actions
 
 
+def _common_domains(scopes: list[dict[str, Any]]) -> dict[str, Any]:
+    """An event family exposes only domain definitions shared by its actions.
+
+    Conflicting local definitions need expansion; do not choose a phase-level
+    definition over a shadowing declaration to manufacture a static rejection.
+    """
+    return {name: value for name, value in scopes[0].items()
+            if all(name in scope and scope[name] == value for scope in scopes[1:])}
+
+
 def _check_dynamic_domain_queries(check: CheckContext, value: Any, domains: dict[str, Any], path: str) -> None:
     if isinstance(value, str):
         for name, domain in domains.items():
             if domain == "worktile":
-                check.require(re.search(r"\b(?:count|last)\(\s*" + re.escape(name) + r"\s*\)", value) is None,
+                check.require(re.search(r"\b(?:count|last)\s*\(\s*" + re.escape(name) + r"\s*\)", value) is None,
                              path, "count/last on a dynamically refilled worktile domain is undefined")
     elif isinstance(value, dict):
         for k, v in value.items():

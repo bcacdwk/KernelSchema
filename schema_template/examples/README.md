@@ -4,16 +4,16 @@
 
 ## 第一批四个任务
 
-以下任务从 [aka-four-problems-20261020](../../schema_wiki/aka-four-problems-20261020/) 复制并规范化。原目录保留作历史对照；节点集合、dispatch 条件、算法、精度路径、分块和核心流水线保持原设计。
+以下任务从 `aka-four-problems-20261020` 提取结果复制并规范化。[来源快照](https://github.com/bcacdwk/KernelSchema/tree/e8605fd9107dec1339cc4593c01049cea4570b0d/schema_wiki/aka-four-problems-20261020) 固定在现行字段迁移前；[未归档 wiki](../../schema_wiki/aka-four-problems-20261020/) 继续维护，不作为历史快照。节点集合、dispatch 条件、算法、精度路径、分块和缓冲容量沿用来源，微流水线按现行规范明确动作身份、完成保证、依赖与空分支。
 
-| 任务入口 | YAML 节点数 | 本次主要整理 |
+| 任务入口 | YAML 节点数 | 当前表达与核对范围 |
 | --- | --- | --- |
-| [FA4 prefill](fa4_prefill/dispatch.md) | 11 | 补实硬件摘要及有同源记录的实现环境；Design 与所有派生文件未改。 |
-| [FA4 decode](fa4_decode/dispatch.md) | 7 | 明确两个必传 `None` 输入；补实库容量；删除重复的内建里程碑声明，将三处等待点定位到原等待动作完成。 |
-| [QSA prefill](qsa_prefill/dispatch.md) | 1 | 补实环境与 TMEM 容量；将未验证结论的伪引用占位改为明确说明。 |
-| [GDN prefill](gdn_prefill/dispatch.md) | 2 | 还原已存在的前置类型转换提交；补实环境与 TMEM 容量；统一具名乘积动作及相关引用。 |
+| [FA4 prefill](fa4_prefill/dispatch.md) | 11 | 补实硬件摘要和实现环境；显式登记 Stats、FinalSum 的生产者及成员依赖，明确累积完成保证，规范 combine 尾部预取的空区间。 |
+| [FA4 decode](fa4_decode/dispatch.md) | 7 | 明确必传 `None` 输入和库容量；交接引用实际等待完成；分别表达轮次放行、操作数到达和结果完成，保留空分支动作及 no-op 保证。 |
+| [QSA prefill](qsa_prefill/dispatch.md) | 1 | 补实环境与 TMEM 容量；明确 ticket 交接、延迟 gather 发布及空 worker 的 drain 行为，保留未验证事项。 |
+| [GDN prefill](gdn_prefill/dispatch.md) | 2 | 还原前置类型转换提交；补实环境与 TMEM 容量；统一具名乘积及角色引用，显式登记 U 的生产者。 |
 
-共 21 个 YAML 节点，四份 `dispatch.md` 与历史版本一致。数据发生变化的节点递增修订号，未变化的节点保留原版本。
+共 21 个 YAML 节点，四份 `dispatch.md` 与来源快照一致。各节点独立维护修订号。所有节点使用现行字段和枚举；`pipeline_samples.json` 提供有限展开的代表性取值及检查边界，不替代实际 workload 或运行证据。
 
 本批 L20D 的融合 GDN 与之前 B200 上的多阶段示例具有不同的任务要求和数值路径；这里保留的是本批原有的两条设计，不从另一示例移植算法。
 
@@ -29,14 +29,15 @@ FA4 decode 原代码查询 `sm_100` helper 得到的值为 `T=512` 列、`Csm=23
 
 GDN 的 `cu_seqlens.to(torch.int32)` 仍是计时范围内的独立提交。其[原 NCU 数据](../../kernel_wiki/aka-four-problems-20261019/validation-20261021/results/gdn_prefill/ncu.csv)记录一个 CTA、128 个线程。[PyTorch 2.9.0 的 copy 路径](https://github.com/pytorch/pytorch/blob/v2.9.0/aten/src/ATen/native/cuda/Copy.cu#L171)、[展开提交](https://github.com/pytorch/pytorch/blob/v2.9.0/aten/src/ATen/native/cuda/CUDALoops.cuh#L481)和[线程配置](https://github.com/pytorch/pytorch/blob/v2.9.0/aten/src/ATen/native/cuda/thread_constants.h#L16)表明，每 CTA 容量为 512 个元素，因此整个契约内的 `B+1` 个边界（2–17 个）总是一份完整逻辑工作；四个 warp 只处理有效元素。没有改成新的转换 kernel，也没有增加 host 同步。单序列主 kernel 不读取转换结果的事实保留。
 
-### 表达修正与规则反馈
+### 表达依据
 
 - FA4 decode 的 `sinks`、`o_sf_scale` 在[原入口](../../kernel_wiki/aka-four-problems-20261019/fa4_decode/aka_solution/qoder_greenfield_decode_attention/operator.py)中均为必传 `None`。使用已定义的非数值单值类型 `python_none`，不删输入、不增加 `default`，也不把 YAML `null` 当作未知值。[算法要求](../../schema_docs/1.contract.algorithm_requirement.md#rangedefault-与空值)补充了这一场景。
 - root、q1_global、q4_compact 原有 `launch_ready` 局部别名重复了内建事件；删除别名，保留实际发布动作及 PDL。`read_partial` 从等待动作的 `issue` 改为 `done`，对应[原 combine](../../kernel_wiki/aka-four-problems-20261019/fa4_decode/aka_solution/qoder_greenfield_decode_attention/gqa_decode.py)先执行 `griddepcontrol_wait`、再读取 partial 的顺序。等待可提前开始，完成后才消费；[交接规则](../../schema_docs/4.design.work_schedule.md#交接字段)补充了这个区别，没有把所有 `wait_at@issue` 都列为非法。
-- GDN 原来的 `mma:KK(n)` 等动作按已定义的乘积结果命名；通用 `mma:A@B` 则按操作数解释。将前者统一命名为自定义 `matmul:KK(n)`，沿用原动作契约，并同步全部事件引用；未改变动作、依赖或完成保证，也未引入新的隐式数据依赖。
+- FA4 prefill 的 Stats、FinalSum 捕获显式等待 Softmax 的发布；[原实现](../../kernel_wiki/aka-four-problems-20261019/fa4_prefill/aka_solution/flash_attn/cute/sm100_hd256_2cta_fmha_forward.py) 中的统计量等待、读取与释放是这些边的依据。combine 尾部预取用 `min(s+3,Ssplit)` 表达空区间，不增加预取动作。
+- FA4 decode 的 [paged 实现](../../kernel_wiki/aka-four-problems-20261019/fa4_decode/aka_solution/qoder_greenfield_decode_attention/gqa_decode_paged.py) 在取得最后一个 slice 或操作数后放行对方，随后仍有 copy、GEMM 或 commit。`yield_turn` 因此与整块数据或结果的完成分开表达；空 split 仍保留原实现实际执行的初始化和收尾。
+- QSA 的 [原实现](../../kernel_wiki/aka-four-problems-20261019/qsa_prefill/aka_solution/qwen38_core_qsa_cutedsl/qsa_kernel.py) 在发布 ticket 后等待接收确认，利用 `wait_group(1)` 延迟发布前一块 gather，并在已有请求时排空末块。对应动作和依赖保留这些顺序；无请求时的 drain 不产生数据访问。
+- GDN 原来的 `mma:KK(n)` 等动作按已定义的乘积结果命名；通用 `mma:A@B` 则按操作数解释。自定义 `matmul:KK(n)` 沿用原契约与事件引用。Recurrence 的 `read:U(n)` 显式等待 `MMA1/matmul:U(n)`，同一 serial role 中此前的 `release:V(n)` 已通过相同前驱保证这个顺序。
 - GDN 单序列保留了未被主 kernel 消费的物化结果。[数学区](../../schema_docs/3.design.math_reshape.md#符号属性)允许如实说明这种已存在的工作，不要求为了满足“keep_value 有用途”而虚构消费者或删除开销。
-
-这四个任务在迁移开始时的检查器上也全部通过，不需要放宽检查规则或增加字段；示例继续使用现有作者入口和示例回归。增加的类型回归区分明确的非数值哨兵与真正缺失的 dtype/default。
 
 ## 尚未解决的事实与验证边界
 
@@ -48,6 +49,6 @@ GDN 的 `cu_seqlens.to(torch.int32)` 仍是计时范围内的独立提交。其[
 | QSA | 未初始化 Q padding 对投票的影响、HalfMax 覆盖安全、近似误差界。 |
 | GDN prefill | 快速 log2/exp2 误差界，以及多序列描述符更新与旧在途读取的顺序依据。 |
 
-这些缺口在相应设计说明中保留；本次没有新增同步、替换数值路径或编造证明。库容量曾藏在说明字符串中，即使结构检查通过，也仍需追踪到实际定义。
+这些缺口在相应设计说明中保留。显式动作和依赖表达已有实现的顺序，不为消除未决事项增加同步或替换数值路径；库容量仍需追踪到实际定义。
 
-已有 GPU 记录在本次用于核对来源、环境和固定实现行为；没有重新运行 GPU 验收。通过 Python 检查表示结构及已实现的关联检查通过，不表示这些 schema 的数值、复用安全、活性或性能已经全部得到验证。
+已有 GPU 记录用于核对来源、环境和固定实现行为；示例规范化及工具回归没有重新运行 GPU 验收。通过 Python 检查表示结构及已实现的关联检查通过，不表示这些 schema 的数值、复用安全、活性或性能已经全部得到验证。

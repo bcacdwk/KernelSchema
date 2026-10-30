@@ -12,7 +12,7 @@ from ..rules.pipeline import parse_action, parse_event
 from ..rules.common import EXECUTION_MODES
 from .actions import action_variables, instantiate, operands
 from .expressions import Boundary, Domains, LIMIT, referenced_domains, tree
-from .model import ExpansionError, GraphError, Operation, PhaseGraph
+from .model import BoundEvent, ExpansionError, GraphError, Operation, PhaseGraph
 from .windows import IndexWindows
 
 
@@ -158,19 +158,42 @@ class Builder:
         match = re.search(r"@(issue|done)$", reference)
         return role, selector, action, match[1] if match else ("issue" if waiting else "done")
 
-    def resolve(self, parsed, current: str, member: int, env: dict, domains: Domains) -> list[str]:
+    def bind_reference(self, parsed, current: str, member: int, env: dict, domains: Domains) -> BoundEvent:
         role, selector, template, event = parsed
-        concrete = instantiate(template, domains, env)
         selected = self.selected_members(current, member, role, selector)
+        concrete = instantiate(template, domains, env)
+        return BoundEvent(role, selected, template, concrete, event, not action_variables(template, domains))
+
+    def resolve(self, reference: BoundEvent, env: dict, domains: Domains) -> list[str]:
         result = []
-        for target in selected:
-            op = self.lookup.get((role, target, concrete))
+        for target in reference.members:
+            op = self.lookup.get((reference.role, target, reference.action))
             if op is None:
-                if self.windows.outside(role, template, concrete, domains, env):
-                    raise Boundary(f"{role}[{target}]/{concrete} outside its declared action index window")
-                raise GraphError(f"dangling event: {role}[{target}]/{concrete}@{event}")
-            result.append(op.event(event))
+                identity = f"{reference.role}[{target}]/{reference.action}"
+                if self.windows.outside(reference.role, reference.template, reference.action, domains, env):
+                    raise Boundary(f"{identity} outside its declared action index window")
+                raise GraphError(f"dangling event: {identity}@{reference.event}")
+            result.append(op.event(reference.event))
         return result
+
+    def resolve_edge(self, left, right, role: str, member: int, env: dict, domains: Domains):
+        """Validate both references before looking up the variable edge instance.
+
+        Member selections, coordinates and fixed events must remain valid even
+        when a variable shift makes this particular edge inactive.
+        """
+        endpoints, boundaries = [], []
+        for parsed in (left, right):
+            try:
+                reference = self.bind_reference(parsed, role, member, env, domains)
+                events = self.resolve(reference, env, domains) if reference.fixed else None
+                endpoints.append((reference, events))
+            except Boundary as error:
+                boundaries.append(error)
+        if boundaries:
+            raise boundaries[0]
+        return [events if events is not None else self.resolve(reference, env, domains)
+                for reference, events in endpoints]
 
     def rule_domains(self, references) -> Domains:
         definitions = dict(self.domains.definitions)
@@ -218,8 +241,6 @@ class Builder:
                         prepared.append((role, kind, target, source, left, right, domains))
         for role, kind, target, source, left, right, domains in prepared:
             names = action_variables(left[2], domains) | action_variables(right[2], domains)
-            fixed_left = not action_variables(left[2], domains)
-            fixed_right = not action_variables(right[2], domains)
             reason = f"{role}.waits_for.{kind}[{target}] <- {source}"
             for index, env in enumerate(domains.contexts(names)):
                 if index >= LIMIT:
@@ -233,13 +254,7 @@ class Builder:
                         raise ExpansionError("combined expansion step limit exceeded (100000); use a smaller sample")
                     try:
                         local_left = (left[0], None, left[2], left[3])
-                        # A shifted endpoint must not hide a broken fixed one.
-                        targets = self.resolve(local_left, role, member, env, domains) if fixed_left else None
-                        predecessors = self.resolve(right, role, member, env, domains) if fixed_right else None
-                        if targets is None:
-                            targets = self.resolve(local_left, role, member, env, domains)
-                        if predecessors is None:
-                            predecessors = self.resolve(right, role, member, env, domains)
+                        targets, predecessors = self.resolve_edge(local_left, right, role, member, env, domains)
                     except Boundary as error:
                         self.graph.boundaries.append({"rule": reason, "context": env, "member": member,
                                                       "reason": str(error)})
@@ -282,7 +297,8 @@ class Builder:
                     identity = instantiate("wait:" + name, domains, env).split(":", 1)[1]
                     result = self.graph.milestones.setdefault(identity, [])
                     for member in self.members[parsed[0]]:
-                        result.extend(self.resolve(parsed, parsed[0], member, env, domains))
+                        reference = self.bind_reference(parsed, parsed[0], member, env, domains)
+                        result.extend(self.resolve(reference, env, domains))
         self.graph.milestones = {name: sorted(set(events)) for name, events in self.graph.milestones.items()}
 
     def build(self) -> PhaseGraph:

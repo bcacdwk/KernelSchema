@@ -163,6 +163,56 @@ class RelationsTests(TaskCase):
             put(d, ROLE + ("pipe",), {"repeat": "shape", "steady": ["produce:Y(shape)"]}),
             put(d, PIPE + ("milestone",), {"shape": ["Main/produce:Y(0)"]})))
 
+    def test_domain_queries_follow_nested_scope_and_restore_the_outer_domain(self):
+        for query in ("last(t)", "count(t)", "count ( t )"):
+            with self.subTest(query=query):
+                def nested(d):
+                    put(d, PIPE + ("domain",), {"t": "worktile"})
+                    put(d, PHASE + ("schedule", "worker_assignment", "refill"), {"counter": "Take work until exhausted."})
+                    put(d, ROLE + ("pipe",), {
+                        "repeat": "t",
+                        "prologue": [{"repeat": {"t": [0, 2]}, "steady": ["zero:Init(t)"],
+                                      "epilogue": [f"release:Init({query})"]}],
+                        "steady": ["produce:Y(t)"],
+                    })
+                self.assert_valid(nested)
+                self.assert_invalid(lambda d: (nested(d), put(d, ROLE + ("pipe", "epilogue"),
+                                                               [f"store:Y({query})"])), "count/last")
+                self.assert_invalid(lambda d: (nested(d), put(d, ROLE + ("pipe", "steady"),
+                    [{"repeat": {"i": [0, query]}, "steady": ["produce:Y(t,i)"]}])), "count/last")
+
+    def test_local_worktile_queries_obey_the_assignment_policy(self):
+        for domain, refill, valid in (("worktile", "none", True), ([0, 2], {"counter": "Take work."}, True),
+                                       ("worktile", {"counter": "Take work."}, False)):
+            for query in ("last(t)", "count(t)"):
+                with self.subTest(domain=domain, refill=refill, query=query):
+                    def task(d):
+                        put(d, PHASE + ("schedule", "worker_assignment", "refill"), refill)
+                        put(d, ROLE + ("pipe",), {"repeat": {"t": domain}, "steady": ["produce:Y(t)"],
+                                                  "epilogue": [f"store:Y({query})"]})
+                    if valid:
+                        self.assert_valid(task)
+                    else:
+                        self.assert_invalid(task, "count/last")
+
+    def test_event_queries_use_the_referenced_action_scope(self):
+        for domain, valid in (([0, 2], True), ("worktile", False)):
+            for event_field in ("waits_for", "milestone"):
+                with self.subTest(domain=domain, event_field=event_field):
+                    def task(d):
+                        put(d, PHASE + ("schedule", "worker_assignment", "refill"), {"counter": "Take work."})
+                        put(d, PIPE + ("domain",), {"t": "worktile"})
+                        put(d, ROLE + ("pipe",), {"repeat": {"t": domain}, "steady": ["produce:Y(t)"],
+                                                  "epilogue": ["store:Result"]})
+                        if event_field == "waits_for":
+                            put(d, ROLE + ("waits_for",), {"data": {"store:Result": ["produce:Y(last(t))"]}})
+                        else:
+                            put(d, PIPE + ("milestone",), {"ready": ["produce:Y(last(t))"]})
+                    if valid:
+                        self.assert_valid(task)
+                    else:
+                        self.assert_invalid(task, "count/last")
+
     def test_per_worktile_order_accepts_scalar_and_singleton_keys(self):
         for first, second in [("x", ["x"]), (["x"], "x")]:
             with self.subTest(first=first, second=second):

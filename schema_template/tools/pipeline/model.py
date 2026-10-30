@@ -13,6 +13,16 @@ class ExpansionError(GraphError):
     """Missing sample values or a tool limit; not a rejection of schema syntax."""
 
 
+@dataclass(frozen=True)
+class BoundEvent:
+    role: str
+    members: tuple[int, ...]
+    template: str
+    action: str
+    event: str
+    fixed: bool
+
+
 @dataclass
 class Operation:
     id: str

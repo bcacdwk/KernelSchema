@@ -119,6 +119,29 @@ class Domains:
             raise GraphError(f"noninteger index/bound: {expression} = {value}")
         return int(value)
 
+    def integers(self, expressions: list[str], env: dict[str, int]) -> list[int]:
+        values, boundary = [], None
+        for expression in expressions:
+            try:
+                values.append(self.integer(expression, env))
+            except Boundary as error:
+                boundary = boundary or error
+        if boundary is not None:
+            raise boundary
+        return values
+
+    def evaluate_all(self, nodes: list[ast.AST], env: dict[str, int]) -> list[Fraction]:
+        """A boundary in one operand does not hide an invalid independent operand."""
+        values, boundary = [], None
+        for node in nodes:
+            try:
+                values.append(self.evaluate(node, env))
+            except Boundary as error:
+                boundary = boundary or error
+        if boundary is not None:
+            raise boundary
+        return values
+
     def evaluate(self, node: ast.AST, env: dict[str, int]) -> Fraction:
         value = self._evaluate(node, env)
         if abs(value) > 10**12:
@@ -137,7 +160,7 @@ class Domains:
             value = self.evaluate(node.operand, env)
             return -value if isinstance(node.op, ast.USub) else value
         if isinstance(node, ast.BinOp):
-            a, b = self.evaluate(node.left, env), self.evaluate(node.right, env)
+            a, b = self.evaluate_all([node.left, node.right], env)
             if isinstance(node.op, ast.Add): return a + b
             if isinstance(node.op, ast.Sub): return a - b
             if isinstance(node.op, ast.Mult): return a * b
@@ -154,7 +177,7 @@ class Domains:
                 if name == "count": return len(values)
                 if not values: raise GraphError(f"last({domain}) on an empty domain")
                 return values[-1][domain]
-            values = [self.evaluate(a, env) for a in node.args]
+            values = self.evaluate_all(node.args, env)
             if name == "min" and values: return min(values)
             if name == "max" and values: return max(values)
             if name == "floor" and len(values) == 1: return floor(values[0])
@@ -170,14 +193,31 @@ class Domains:
             children = definition["flatten"]
             if len(parts) != len(children) or any(isinstance(p, ast.Slice) for p in parts):
                 raise GraphError(f"an action needs full flatten coordinates: {canonical}")
-            coordinates = {}
+            coordinates, unavailable, boundary = {}, set(), None
             for child, part in zip(children, parts):
-                coordinate = self.integer(ast.unparse(part), env)
-                valid = [item[child] for item in self.entries(child, dict(env, **coordinates))]
-                if coordinate not in valid:
-                    error = Boundary if variables(part) & self.definitions.keys() else GraphError
-                    raise error(f"{canonical}: {child}={coordinate} outside its declared domain")
-                coordinates[child] = coordinate
+                try:
+                    coordinate = self.integer(ast.unparse(part), env)
+                except Boundary as error:
+                    boundary = boundary or error
+                    unavailable.update(self.coordinates(child))
+                    continue
+                # A dependent inner domain has no range at an absent outer
+                # coordinate. Independent coordinates still require validation.
+                if unavailable and self.dependencies(child) & unavailable:
+                    unavailable.update(self.coordinates(child))
+                    continue
+                selected = next((item for item in self.entries(child, dict(env, **coordinates))
+                                 if item[child] == coordinate), None)
+                if selected is None:
+                    message = f"{canonical}: {child}={coordinate} outside its declared domain"
+                    if not variables(part) & self.definitions.keys():
+                        raise GraphError(message)
+                    boundary = boundary or Boundary(message)
+                    unavailable.update(self.coordinates(child))
+                else:
+                    coordinates.update(selected)
+            if boundary is not None:
+                raise boundary
             for entry in self.entries(name, {}):
                 if all(entry[c] == v for c, v in coordinates.items()):
                     return entry[name]

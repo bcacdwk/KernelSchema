@@ -200,6 +200,13 @@ function zoom(f){{width*=f;diagram.style.width=width+'px'}}
 function fit(){{width=document.getElementById('canvas').clientWidth;diagram.style.width=width+'px'}}fit();</script></html>'''
 
 
+def gallery_entry(node: str, report: dict, format: str) -> dict:
+    count = sum(len(phase["operations"]) for phase in report["phases"])
+    status = "Acyclic sample" if report["acyclic"] else "DEPENDENCY CYCLE"
+    return {"name": node, "href": node + (".html" if format == "svg" else ".dot"),
+            "summary": f"{len(report['phases'])} phases · {count} actions · {status}"}
+
+
 def gallery(title: str, entries: list[dict]) -> str:
     cards = []
     for item in entries:
