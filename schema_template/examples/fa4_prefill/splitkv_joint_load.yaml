@@ -2,7 +2,7 @@ meta_data:
   name: paged_causal_attention_prefill
   describe: Compute right-aligned causal GQA from FP8 queries and an HND paged KV cache into the supplied BF16 output.
   source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_prefill/aka_solution/solution.py::Model.forward
-  version: 2
+  version: 4
   dispatch:
     id: splitkv_joint_load
     parent: splitkv_dual_load
@@ -30,7 +30,7 @@ design:
         Ssplit: {meaning: KV split count., binding: 'bind:design.work_schedule::Ssplit'}
         N: {meaning: Local KV iteration count., binding: 'bind:design.work_schedule::N'}
         sigma: {meaning: Local iteration to KV block map., binding: 'bind:design.work_schedule::sigma'}
-        Qc: {meaning: Packed query block., shape: [{row: M}, {channel: D}], dtype: fp8_e4m3fn, life: 'stored (b,m,s)'}
+        Qc: {meaning: Packed query block., shape: [{row: M}, {channel: D}], dtype: fp8_e4m3fn, retention: 'keep_value (b,m,s)'}
         Kc: {meaning: Page-backed key block., shape: [{key: Bk}, {channel: D}], dtype: fp8_e4m3fn}
         Vc: {meaning: Page-backed value block., shape: [{key: Bk}, {channel: D}], dtype: fp8_e4m3fn}
         S: {meaning: Raw score after a channel-half contraction., shape: [{row: M}, {key: Bk}], dtype: fp32}
@@ -51,15 +51,15 @@ design:
       symbol:
         tau: {meaning: Maximum lag in base-two score units., value: 4}
         offset: {meaning: Base-two shift before probability narrowing., value: 4}
-        mhat: {meaning: Retained raw-score maximum., shape: [{row: M}], dtype: fp32, life: 'carried (b,m,s); i=-1..N-1'}
-        ell: {meaning: Denominator from unrounded exponentials., shape: [{row: M}], dtype: fp32, life: 'carried (b,m,s); i=-1..N-1'}
-        Y: {meaning: Numerator from FP8 probabilities., shape: [{row: M}, {channel: D}], dtype: fp32, life: 'carried (b,m,s); i=-1..N-1'}
+        mhat: {meaning: Retained raw-score maximum., shape: [{row: M}], dtype: fp32, retention: 'carry_forward (b,m,s); i=-1..N-1'}
+        ell: {meaning: Denominator from unrounded exponentials., shape: [{row: M}], dtype: fp32, retention: 'carry_forward (b,m,s); i=-1..N-1'}
+        Y: {meaning: Numerator from FP8 probabilities., shape: [{row: M}, {channel: D}], dtype: fp32, retention: 'carry_forward (b,m,s); i=-1..N-1'}
         P: {meaning: Value-product operand., shape: [{row: M}, {key: Bk}], dtype: fp8_e4m3fn}
         Stats: {meaning: Previous maximum and guarded current base., shape: [{row: M}, {stat: 2}], dtype: fp32}
         Opart: {meaning: Locally normalized split output., shape: [{row: M}, {channel: D}], dtype: fp32}
         LSEpart: {meaning: Natural-log split normalizer., shape: [{row: M}], dtype: fp32}
-        PartialO: {meaning: Materialized split output., shape: [{split: Ssplit}, {token: TotalQ}, {head: Hq}, {channel: D}], dtype: fp32, life: stored invocation}
-        PartialLSE: {meaning: Materialized split normalizer., shape: [{split: Ssplit}, {head: Hq}, {token: TotalQ}], dtype: fp32, life: stored invocation}
+        PartialO: {meaning: Materialized split output., shape: [{split: Ssplit}, {token: TotalQ}, {head: Hq}, {channel: D}], dtype: fp32, retention: keep_value invocation}
+        PartialLSE: {meaning: Materialized split normalizer., shape: [{split: Ssplit}, {head: Hq}, {token: TotalQ}], dtype: fp32, retention: keep_value invocation}
       arithmetic:
         approx: 'exp2_fast and log_fast are native fast math on SM103 without polynomial substitution; unknown: standalone exp2, log and division error bounds are not supplied.'
         accumulate: Seed both components of one FP32 pair with ell_previous*(alpha*0.5), seed three other pairs with zero, add four E fragments, merge (g0+g1)+(g2+g3), then add components.
@@ -75,7 +75,7 @@ design:
         Mc: {meaning: Rows per combine worktile., binding: 'bind:design.work_schedule::Mc'}
         Dc: {meaning: Channels per combine worktile., binding: 'bind:design.work_schedule::Dc'}
         Weights: {meaning: Normalized split weights for combine rows., shape: [{split: Ssplit}, {row: Mc}], dtype: fp32}
-        Facc: {meaning: Weighted split-output sum., shape: [{row: Mc}, {channel: Dc}], dtype: fp32, life: 'carried (b,row_block,channel_half); s=-1..Ssplit-1'}
+        Facc: {meaning: Weighted split-output sum., shape: [{row: Mc}, {channel: Dc}], dtype: fp32, retention: 'carry_forward (b,row_block,channel_half); s=-1..Ssplit-1'}
         Fblock: {meaning: Final combine output slice., shape: [{row: Mc}, {channel: Dc}], dtype: bf16}
       arithmetic:
         approx: Native fast exp2 and division have the unknown bounds stated in online.
@@ -116,9 +116,9 @@ design:
             single_tile: {PartialO: {shape: [{row: M}, {channel: D}], dtype: fp32}, PartialLSE: {shape: [{row: M}], dtype: fp32}}
         mapping:
           strategy: Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.
-          worker: {unit: CTA, count: 2}
-          placement: {unit: cluster, count: 1}
-          count: BatchCount*Crect*Ssplit
+          worker: {unit: CTA, unit_count: 2}
+          placement: {unit: cluster, unit_count: 1}
+          worker_count: BatchCount*Crect*Ssplit
           member: [{row: [0, 128]}, {row: [128, 256]}]
         schedule:
           strategy: For ordinal x in [0,Crect), map to m=2*x if x<ceil(Crect/2), otherwise m=2*(Crect-1-x)+1; use grid coordinates directly, with query clusters fastest.
@@ -139,7 +139,7 @@ design:
           target:
             single_tile: {Fblock: {shape: [{row: Mc}, {channel: Dc}], dtype: bf16}}
             tile_reduction: {dimension: split, input: [PartialO, PartialLSE], output: [Fblock], method: 'ref:design.math_reshape::combine'}
-        mapping: {worker: {unit: CTA, count: 1}, count: 'BatchCount*ceil(TotalQ*Hq/Mc)*ceil(D/Dc)'}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: 'BatchCount*ceil(TotalQ*Hq/Mc)*ceil(D/Dc)'}
         schedule:
           worktile_order: [{by: request, direction: ascending}, {by: channel, direction: ascending}, {by: head_query, direction: ascending}]
           worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
@@ -156,27 +156,27 @@ design:
           p: [0, 2*N]
           e: {flatten: [p, d]}
         resource:
-          Query: {space: SMEM, shape: [{row: 128}, {channel: 128}], dtype: fp8_e4m3fn, slot: 2, view: {'Qc(d)': {slot: d}}}
-          KeyRing: {space: SMEM, shape: [{key: 64}, {channel: 128}], dtype: fp8_e4m3fn, slot: 4, view: {'Kc(i,d)': {slot: 'e[max(0,2*i-1),d]%4'}}}
-          ValueRing: {space: SMEM, shape: [{key: 128}, {channel: 64}], dtype: fp8_e4m3fn, slot: 4, view: {'Vc(i,d)': {slot: 'e[min(2*i+2,2*N-1),d]%4'}}}
+          Query: {space: SMEM, member_slot_shape: [{row: 128}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 2, view: {'Qc(d)': {slot_index: d}}}
+          KeyRing: {space: SMEM, member_slot_shape: [{key: 64}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Kc(i,d)': {slot_index: 'e[max(0,2*i-1),d]%4'}}}
+          ValueRing: {space: SMEM, member_slot_shape: [{key: 128}, {channel: 64}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Vc(i,d)': {slot_index: 'e[min(2*i+2,2*N-1),d]%4'}}}
           ScoreProbability:
             space: TMEM
-            shape: [{row: 128}, {column: 128}]
+            member_slot_shape: [{row: 128}, {column: 128}]
             dtype: fp32
-            slot: 2
+            slot_count: 2
             view:
-              S(i,d): {slot: i%2}
-              P(i): {slot: i%2, part: {column: [0, 32]}, dtype: fp8_e4m3fn}
-              Stats(i): {slot: i%2, part: {column: [32, 34]}}
-          Y: {space: TMEM, shape: [{row: 128}, {channel: D}], dtype: fp32}
-          Denominator: {space: SMEM, shape: [{row: 128}], dtype: fp32, view: {'FinalSum': {part: {row: [0, 128]}}}}
-          OutputStage: {space: SMEM, shape: [{row: 128}, {channel: 128}], dtype: fp32, view: {'Opart(active,d)': {part: {channel: [0, 128]}}}}
-          OnlineState: {space: register, shape: [{row: 128}, {state: 2}], dtype: fp32, view: {'mhat(i)': {part: {state: [0, 1]}}, 'ell(i)': {part: {state: [1, 2]}}}}
-        lane:
+              S(i,d): {slot_index: i%2}
+              P(i): {slot_index: i%2, part: {column: [0, 32]}, dtype: fp8_e4m3fn}
+              Stats(i): {slot_index: i%2, part: {column: [32, 34]}}
+          Y: {slot_count: 1, space: TMEM, member_slot_shape: [{row: 128}, {channel: D}], dtype: fp32}
+          Denominator: {slot_count: 1, space: SMEM, member_slot_shape: [{row: 128}], dtype: fp32, view: {'FinalSum(active)': {part: {row: [0, 128]}}}}
+          OutputStage: {slot_count: 1, space: SMEM, member_slot_shape: [{row: 128}, {channel: 128}], dtype: fp32, view: {'Opart(active,d)': {part: {channel: [0, 128]}}}}
+          OnlineState: {slot_count: 1, space: register, member_slot_shape: [{row: 128}, {state: 2}], dtype: fp32, view: {'mhat(i)': {part: {state: [0, 1]}}, 'ell(i)': {part: {state: [1, 2]}}}}
+        role:
           Load:
             info:
               member: warp[9:10]
-              mode: async
+              execution_mode: async
               register: 32
               verb:
                 load: |
@@ -188,28 +188,29 @@ design:
               steady:
               - {repeat: d, steady: ['load:Qc(d)']}
               - {repeat: 'e', steady: ['load:KVStage(e)']}
-            edge:
+            waits_for:
               reuse:
-                load:KVStage(e+4): ['MMA/contract:KVStage(e)']
+                load:KVStage(e+4)@issue: ['MMA/contract:KVStage(e)@done']
           MMA:
             info:
               member: CTA[0].warp[8:9]
-              mode: ordered
+              execution_mode: async_ordered_completion
               register: 32
               verb:
                 contract: |
                   K tokens perform QK, initializing S at d=0 and completing at d=1; V tokens perform PV, initializing Y at i=0 and using corrected Y thereafter.
                   Completion covers both CTAs and returns the operand token. Ordered products read earlier P before a later QK overwrites its aliased slot.
             pipe: {repeat: active, steady: [{repeat: 'e', steady: ['contract:KVStage(e)']}]}
-            edge:
+            waits_for:
               data:
-                contract:KVStage(e[max(0,2*i-1),d]): ['Load/load:Qc(d)', 'Load/load:KVStage(e[max(0,2*i-1),d])']
-                contract:KVStage(e[min(2*i+2,2*N-1),d]): ['Softmax/publish:P(i)', 'Load/load:KVStage(e[min(2*i+2,2*N-1),d])']
-                contract:KVStage(e[min(2*later+2,2*N-1),0]): ['Correction/rescale:Y(later)']
+                contract:KVStage(e[max(0,2*i-1),d])@issue: ['Load/load:Qc(d)@done', 'Load/load:KVStage(e[max(0,2*i-1),d])@done']
+                contract:KVStage(e[min(2*i+2,2*N-1),d])@issue: ['Softmax/publish:P(i)@done', 'Load/load:KVStage(e[min(2*i+2,2*N-1),d])@done']
+                contract:KVStage(e[min(2*later+2,2*N-1),0])@issue: ['Correction/rescale:Y(later)@done']
               reuse:
-                contract:KVStage(e[max(0,2*i-1),0]): ['Softmax/capture:S(i-2,1)']
+                contract:KVStage(e[max(0,2*i-1),0])@issue: ['Softmax/capture:S(i-2,1)@done']
           Softmax:
             info:
+              execution_mode: serial
               member: warp[0:4]
               register: 256
               verb:
@@ -220,54 +221,66 @@ design:
               repeat: active
               steady:
               - {repeat: 'i', steady: ['capture:S(i,1)', 'publish:Stats(i)', 'publish:P(i)', 'compute:ell(i)']}
-              - publish:FinalSum
+              - publish:FinalSum(active)
               - produce:LSEpart
-            edge:
-              data: {'capture:S(i,1)': ['MMA/contract:KVStage(e[max(0,2*i-1),1])']}
+            waits_for:
+              data: {'capture:S(i,1)@issue': ['MMA/contract:KVStage(e[max(0,2*i-1),1])@done']}
               reuse:
-                publish:Stats(i+2): ['Correction/capture:Stats(i)']
+                publish:Stats(i+2)@issue: ['Correction/capture:Stats(i)@done']
           Correction:
             info:
+              execution_mode: serial
               member: warp[4:8]
               register: 160
               verb:
                 capture: Acknowledge first-block Stats without reading its payload; capture later Stats and final ell into registers before returning their slots.
-                rescale: Evaluate alpha from Stats and correct both Y halves after previous PV; a warp vote skips rewriting when no row has alpha<1, retaining the ownership handshake.
+                rescale: Evaluate alpha from Stats and correct both Y halves after previous PV; a warp vote skips rewriting when no row has alpha<1, retaining the
+                  ownership handshake.
                 stage: Normalize one Y half into FP32 OutputStage; completion covers the correction group.
-                store: Coalesced stores write the split PartialO slice; completion ends OutputStage reads and includes the group barrier. EmptyLSE writes only PartialLSE=-inf without waiting on unused pipelines.
+                store: Coalesced stores write the split PartialO slice; completion ends OutputStage reads and includes the group barrier. EmptyLSE writes only PartialLSE=-inf
+                  without waiting on unused pipelines.
             pipe:
               steady:
               - repeat: active
                 steady:
                 - capture:Stats(0)
                 - {repeat: 'i[1:]', steady: ['capture:Stats(i)', 'rescale:Y(i)']}
-                - capture:FinalSum
+                - capture:FinalSum(active)
                 - stage:Opart(active,0)
                 - store:Opart(active,0)
                 - stage:Opart(active,1)
                 - store:Opart(active,1)
               - {repeat: empty, steady: ['store:EmptyLSE']}
-            edge:
+            waits_for:
               data:
-                rescale:Y(later): ['MMA/contract:KVStage(e[min(2*(later-1)+2,2*N-1),1])']
-                stage:Opart(active,0): ['MMA/contract:KVStage(e[2*N-1,1])']
+                rescale:Y(later)@issue: ['MMA/contract:KVStage(e[min(2*(later-1)+2,2*N-1),1])@done']
+                stage:Opart(active,0)@issue: ['MMA/contract:KVStage(e[2*N-1,1])@done']
+                capture:Stats(i)@issue: ['Softmax/publish:Stats(i)@done']
+                capture:FinalSum(active)@issue: ['Softmax/publish:FinalSum(active)@done']
       combine:
         domain: {s: [0, Ssplit]}
         resource:
-          LSEWeight: {space: SMEM, shape: [{split: Smax}, {row: Mc}], dtype: fp32, view: {PartialLSE: {part: {split: [0, Ssplit]}}, Weights: {part: {split: [0, Ssplit]}}}}
-          LastValidSplit: {space: SMEM, shape: [{row: Mc}], dtype: int32}
-          PartialRing: {space: SMEM, shape: [{row: Mc}, {channel: Dc}], dtype: fp32, slot: 4, view: {'PartialO(s)': {slot: s%4}}}
-          Facc: {space: register, shape: [{row: Mc}, {channel: Dc}], dtype: fp32}
-        lane:
+          LSEWeight: {slot_count: 1, space: SMEM, member_slot_shape: [{split: Smax}, {row: Mc}], dtype: fp32, view: {PartialLSE: {part: {split: [0, Ssplit]}}, Weights: {part: {split: [0, Ssplit]}}}}
+          LastValidSplit: {slot_count: 1, space: SMEM, member_slot_shape: [{row: Mc}], dtype: int32}
+          PartialRing: {space: SMEM, member_slot_shape: [{row: Mc}, {channel: Dc}], dtype: fp32, slot_count: 4, view: {'PartialO(s)': {slot_index: s%4}}}
+          Facc: {slot_count: 1, space: register, member_slot_shape: [{row: Mc}, {channel: Dc}], dtype: fp32}
+        role:
           Main:
             info:
               member: warp[0:8]
-              mode: async
+              execution_mode: async
               verb:
-                load: Issue cp.async copies; PartialLSE includes -inf padding. The first three partial prefetches may read unspecified empty-split payloads; later copies skip splits beyond each thread-owned row group's last nonempty split.
-                publish: {mode: sync, meaning: 'Wait for LSE copies and rendezvous the CTA; compute combine weights and per-row LastValidSplit, overwrite LSEWeight, then rendezvous before consuming the transposed weights.'}
-                accumulate: {mode: sync, meaning: 'Wait for the current partial stage; initialize Facc before s=0 and apply combine. Each warp owns one row; skip nonpositive weights and iterations beyond its last valid split. Reads are thread-private, so no per-stage CTA barrier is needed.'}
-                store: {mode: sync, meaning: Narrow Facc to BF16 and coalescently store its valid output slice.}
+                load: Issue cp.async copies; PartialLSE includes -inf padding. The first three partial prefetches may read unspecified empty-split payloads; later
+                  copies skip splits beyond each thread-owned row group's last nonempty split.
+                publish:
+                  execution_mode: serial
+                  meaning: Wait for LSE copies and rendezvous the CTA; compute combine weights and per-row LastValidSplit, overwrite LSEWeight, then rendezvous before
+                    consuming the transposed weights.
+                accumulate:
+                  execution_mode: serial
+                  meaning: Wait for the current partial stage; initialize Facc before s=0 and apply combine. Each warp owns one row; skip nonpositive weights and
+                    iterations beyond its last valid split. Reads are thread-private, so no per-stage CTA barrier is needed.
+                store: {execution_mode: serial, meaning: Narrow Facc to BF16 and coalescently store its valid output slice.}
             pipe:
               repeat: s
               prologue:
@@ -275,14 +288,12 @@ design:
               - {repeat: {p: [0, 'min(3,Ssplit)']}, steady: ['load:PartialO(p)']}
               - publish:Weights
               steady:
-              - {repeat: {p: [s+3, 'min(s+4,Ssplit)']}, steady: ['load:PartialO(p)']}
+              - {repeat: {p: ['min(s+3,Ssplit)', 'min(s+4,Ssplit)']}, steady: ['load:PartialO(p)']}
               - accumulate:Facc(s)
               epilogue: ['store:Fblock']
-            edge:
-              data:
-                publish:Weights: ['load:PartialLSE']
-                accumulate:Facc(s): ['load:PartialO(s)', 'publish:Weights']
-              reuse: {'load:PartialO(s+4)': ['accumulate:Facc(s)']}
+            waits_for:
+              data: {'publish:Weights@issue': ['load:PartialLSE@done'], 'accumulate:Facc(s)@issue': ['load:PartialO(s)@done', 'publish:Weights@done']}
+              reuse: {'load:PartialO(s+4)@issue': ['accumulate:Facc(s)@done']}
 realization:
   require:
   - {item: 'design.tile_pipeline::attention.MMA', choice: Use two-CTA tcgen05 MMA with cumulative completion and earlier-PV-read-before-later-QK-write ordering., reason: Pair-wide operand returns and aliased score/probability storage depend on these guarantees.}

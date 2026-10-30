@@ -34,7 +34,7 @@ GDN 的 `cu_seqlens.to(torch.int32)` 仍是计时范围内的独立提交。其[
 - FA4 decode 的 `sinks`、`o_sf_scale` 在[原入口](../../kernel_wiki/aka-four-problems-20261019/fa4_decode/aka_solution/qoder_greenfield_decode_attention/operator.py)中均为必传 `None`。使用已定义的非数值单值类型 `python_none`，不删输入、不增加 `default`，也不把 YAML `null` 当作未知值。[算法要求](../../schema_docs/1.contract.algorithm_requirement.md#rangedefault-与空值)补充了这一场景。
 - root、q1_global、q4_compact 原有 `launch_ready` 局部别名重复了内建事件；删除别名，保留实际发布动作及 PDL。`read_partial` 从等待动作的 `issue` 改为 `done`，对应[原 combine](../../kernel_wiki/aka-four-problems-20261019/fa4_decode/aka_solution/qoder_greenfield_decode_attention/gqa_decode.py)先执行 `griddepcontrol_wait`、再读取 partial 的顺序。等待可提前开始，完成后才消费；[交接规则](../../schema_docs/4.design.work_schedule.md#交接字段)补充了这个区别，没有把所有 `wait_at@issue` 都列为非法。
 - GDN 原来的 `mma:KK(n)` 等动作按已定义的乘积结果命名；通用 `mma:A@B` 则按操作数解释。将前者统一命名为自定义 `matmul:KK(n)`，沿用原动作契约，并同步全部事件引用；未改变动作、依赖或完成保证，也未引入新的隐式数据依赖。
-- GDN 单序列保留了未被主 kernel 消费的物化结果。[数学区](../../schema_docs/3.design.math_reshape.md#符号属性)允许如实说明这种已存在的工作，不要求为了满足“stored 有用途”而虚构消费者或删除开销。
+- GDN 单序列保留了未被主 kernel 消费的物化结果。[数学区](../../schema_docs/3.design.math_reshape.md#符号属性)允许如实说明这种已存在的工作，不要求为了满足“keep_value 有用途”而虚构消费者或删除开销。
 
 这四个任务在迁移开始时的检查器上也全部通过，不需要放宽检查规则或增加字段；示例继续使用现有作者入口和示例回归。增加的类型回归区分明确的非数值哨兵与真正缺失的 dtype/default。
 

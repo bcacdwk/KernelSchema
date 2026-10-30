@@ -5,22 +5,22 @@ from copy import deepcopy
 from decimal import Decimal
 from .. import schema, yaml_source
 from ..diagnostics import encode_value
-from .support import (TaskCase, ALGO, LANE, MATH, add_child, at, drop, put)
+from .support import (TaskCase, ALGO, ROLE, MATH, add_child, at, drop, put)
 
 
 class YamlTests(TaskCase):
     def test_validation_never_changes_sources_or_permissions(self):
         (self.directory / "dispatch.md").write_text("Synthetic task navigation.\n")
         root = self.directory / "root.yaml"
-        for mode in (0o644, 0o444):
-            root.chmod(mode)
+        for permissions in (0o644, 0o444):
+            root.chmod(permissions)
             before = self.snapshot()
             self.assertEqual(self.base, schema.validate_directory(self.directory))
             self.assertEqual(before, self.snapshot())
         root.chmod(0o644)
         data = deepcopy(self.base)
-        put(data, LANE + ("edge",), {"data": {"produce:Y": ["Missing/produce:Y"]}})
-        self.assert_task_invalid(data, "root.yaml", "design.tile_pipeline.phase.copy.lane.Main.edge.data", "unknown lane")
+        put(data, ROLE + ("waits_for",), {"data": {"produce:Y": ["Missing/produce:Y"]}})
+        self.assert_task_invalid(data, "root.yaml", "design.tile_pipeline.phase.copy.role.Main.waits_for.data", "unknown role")
 
     def test_compact_expanded_and_multiline_yaml(self):
         forms = [
@@ -178,10 +178,10 @@ class YamlTests(TaskCase):
         self.write_task(data)
         self.assertEqual(Decimal("1e-30"), schema.validate_directory(self.directory)["root"]["contract"]["algorithm_requirement"]["constant"]["Tiny"]["value"])
         data = deepcopy(self.base)
-        put(data, LANE + ("edge",), {"data": {"produce:Y": ["Missing/produce:Y"]}})
+        put(data, ROLE + ("waits_for",), {"data": {"produce:Y": ["Missing/produce:Y"]}})
         self.write_task(data)
         with self.assertRaises(schema.SchemaError) as caught:
             schema.validate_file(root)
         source = root.read_text()
         self.assertIn("root.yaml:1:" + str(source.index('"Missing/produce:Y"') + 1), str(caught.exception))
-        self.assertIn('edge.data["produce:Y"][0]', str(caught.exception))
+        self.assertIn('waits_for.data["produce:Y"][0]', str(caught.exception))

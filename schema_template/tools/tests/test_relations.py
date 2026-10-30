@@ -3,10 +3,40 @@ from __future__ import annotations
 
 from copy import deepcopy
 from .. import schema
-from .support import (TaskCase, ALGO, LANE, MATH, PHASE, PIPE, WORK, add_child, add_phase, at, drop, put)
+from .support import (TaskCase, ALGO, ROLE, MATH, PHASE, PIPE, WORK, add_child, add_phase, at, drop, put)
 
 
 class RelationsTests(TaskCase):
+    def test_worker_counts_and_resource_capacity_are_checked(self):
+        def shared(data):
+            add_phase(data, order="all")
+        self.assert_valid(shared)
+        self.assert_invalid(lambda d: (shared(d), put(d, WORK + ("phase", "next", "mapping", "worker_count"), 2)),
+                            "incompatible worker mappings")
+        resource = {"slot_count": 1, "space": "SMEM", "member_slot_shape": [{"x": 8}], "dtype": "fp32"}
+        self.assert_invalid(lambda d: put(d, PIPE + ("resource",), {"R": dict(resource,
+            view={"Y": {"part": {"x": [0, 9]}}})}), "exceeds parent storage")
+        self.assert_invalid(lambda d: put(d, PIPE + ("resource",), {"R": dict(resource,
+            member_slot_shape=[{"x": 8}, {"x": 2}])}), "member_slot_shape")
+
+    def test_explicit_event_member_must_exist_in_its_lane(self):
+        def setup(data, count, member):
+            put(data, PHASE + ("mapping", "worker", "unit_count"), count)
+            put(data, ROLE + ("info", "member"), "CTA[0].warp[0:1]")
+            put(data, ROLE + ("waits_for",), {"data": {"produce:Y@done": [f"Main[{member}]/produce:Y@issue"]}})
+        for count in (2, "MemberCount"):
+            self.assert_invalid(lambda d: setup(d, count, 1), "role Main has no member 1")
+        self.assert_valid(lambda d: setup(d, 2, 0))
+
+    def test_obvious_self_waits_and_valid_same_action_references(self):
+        for target, source in (("produce:Y", "produce:Y"), ("produce:Y@issue", "Main/produce:Y@issue"),
+                               ("produce:Y@done", "produce:Y@done")):
+            self.assert_invalid(lambda d: put(d, ROLE + ("waits_for",), {"data": {target: [source]}}), "cannot depend on itself")
+        self.assert_valid(lambda d: put(d, ROLE + ("waits_for",), {"data": {"produce:Y@done": ["produce:Y@issue"]}}))
+        self.assert_valid(lambda d: (
+            put(d, PHASE + ("mapping", "worker", "unit_count"), 2),
+            put(d, ROLE + ("waits_for",), {"sync": {"Main[1]/produce:Y": ["Main[0]/produce:Y"]}})))
+
     def test_local_conditions_prevent_ambiguous_references(self):
         self.assert_invalid(lambda d: (add_phase(d), put(d, WORK + ("flow", "handoff"), {
             "Y": {"producer": "copy", "consumer": ["copy", "next"], "storage": "global"}})), "another declared phase")
@@ -55,53 +85,53 @@ class RelationsTests(TaskCase):
             block = {"steady": ["produce:Y(" + ",".join(f"k{i}" for i in range(12)) + ")"]}
             for i in reversed(range(12)):
                 block = {"repeat": {f"k{i}": [0, 2]}, "steady": [block]}
-            put(d, LANE + ("pipe",), block)
+            put(d, ROLE + ("pipe",), block)
         self.assert_valid(nested)
         def corrupt(d):
             nested(d)
-            block = at(d, LANE)["pipe"]
+            block = at(d, ROLE)["pipe"]
             for _ in range(10):
                 block = block["steady"][0]
             block["typo"] = "must fail even at depth 10"
         self.assert_invalid(corrupt)
-        self.assert_invalid(lambda d: put(d, LANE + ("pipe",),
+        self.assert_invalid(lambda d: put(d, ROLE + ("pipe",),
                                          {"repeat": {"i": [0, 8]}, "prologue": ["load:X(i)"], "steady": ["produce:Y(i)"]}), "not bound")
-        self.assert_invalid(lambda d: put(d, LANE + ("pipe",),
+        self.assert_invalid(lambda d: put(d, ROLE + ("pipe",),
                                          {"repeat": "missing", "steady": ["produce:Y(i)"]}), "undefined repeat")
         self.assert_invalid(lambda d: put(d, PIPE + ("domain",),
                                          {"a": {"flatten": ["b"]}, "b": {"flatten": ["a"]}}), "cycle")
-        self.assert_invalid(lambda d: put(d, LANE + ("pipe",), {"repeat": {"i": [0, 8]}}))
+        self.assert_invalid(lambda d: put(d, ROLE + ("pipe",), {"repeat": {"i": [0, 8]}}))
         self.assert_valid(lambda d: (put(d, PIPE + ("domain",), {"t": "worktile", "i": [0, 8], "n": {"flatten": ["t", "i"]}}),
-                                     put(d, LANE + ("pipe",), {"repeat": "t", "steady": [
+                                     put(d, ROLE + ("pipe",), {"repeat": "t", "steady": [
                                          {"repeat": "n[t]", "steady": ["produce:Y(n,t,i)"], "epilogue": ["store:Y(n[t,last(i)])"]}]})))
 
     def test_action_events_and_custom_verbs(self):
-        self.assert_invalid(lambda d: put(d, LANE + ("pipe", "steady"), ["magical:Y"]), "custom verb")
-        self.assert_valid(lambda d: (put(d, LANE + ("pipe", "steady"), ["magical:Y"]),
-                                     put(d, LANE + ("info", "verb"), {"magical": {"meaning": "Produce Y.", "mode": "sync"}})))
-        self.assert_invalid(lambda d: put(d, LANE + ("edge",), {"data": {"produce:Y": ["Missing/produce:Y"]}}), "unknown lane")
-        self.assert_invalid(lambda d: put(d, LANE + ("edge",), {"data": {"produce:Y": ["produce:Missing"]}}), "action family")
-        self.assert_invalid(lambda d: put(d, LANE + ("edge",), {"data": {"produce:Y": ["produce:Y@read"]}}), "notation")
-        self.assert_valid(lambda d: (put(d, LANE + ("pipe", "steady"), ["load:X", "mma:X@X", "produce:Y"]),
-                                     put(d, LANE + ("edge",), {"data": {"produce:Y@issue": ["mma:X@X@done"]}})))
-        self.assert_invalid(lambda d: put(d, LANE + ("info", "member"), "warp[0:0]"), "nonempty")
-        self.assert_invalid(lambda d: put(d, LANE + ("info", "member"), "phantom[0:1]"), "unregistered")
+        self.assert_invalid(lambda d: put(d, ROLE + ("pipe", "steady"), ["magical:Y"]), "custom verb")
+        self.assert_valid(lambda d: (put(d, ROLE + ("pipe", "steady"), ["magical:Y"]),
+                                     put(d, ROLE + ("info", "verb"), {"magical": {"meaning": "Produce Y.", "execution_mode": "serial"}})))
+        self.assert_invalid(lambda d: put(d, ROLE + ("waits_for",), {"data": {"produce:Y": ["Missing/produce:Y"]}}), "unknown role")
+        self.assert_invalid(lambda d: put(d, ROLE + ("waits_for",), {"data": {"produce:Y": ["produce:Missing"]}}), "action family")
+        self.assert_invalid(lambda d: put(d, ROLE + ("waits_for",), {"data": {"produce:Y": ["produce:Y@read"]}}), "notation")
+        self.assert_valid(lambda d: (put(d, ROLE + ("pipe", "steady"), ["load:X", "mma:X@X", "produce:Y"]),
+                                     put(d, ROLE + ("waits_for",), {"data": {"produce:Y@issue": ["mma:X@X@done"]}})))
+        self.assert_invalid(lambda d: put(d, ROLE + ("info", "member"), "warp[0:0]"), "nonempty")
+        self.assert_invalid(lambda d: put(d, ROLE + ("info", "member"), "phantom[0:1]"), "unregistered")
 
     def test_resource_bounds_and_view_exceptions(self):
-        resource = {"space": "SMEM", "shape": [{"x": 8}], "dtype": "fp32", "slot": 2, "view": {"Y": {"slot": 1}}}
+        resource = {"space": "SMEM", "member_slot_shape": [{"x": 8}], "dtype": "fp32", "slot_count": 2, "view": {"Y": {"slot_index": 1}}}
         self.assert_valid(lambda d: put(d, PIPE + ("resource",), {"R": resource}))
         for replacement in [
-            dict(resource, slot=0), dict(resource, view={"Y": {}}),
-            dict(resource, view={"Y": {"slot": 2}}),
-            dict(resource, view={"Y": {"slot": 0, "part": {"x": [0, 9]}}}),
-            dict(resource, view={"Y": {"slot": 0, "part": {"other": [0, 2]}}}),
+            dict(resource, slot_count=0), dict(resource, view={"Y": {}}),
+            dict(resource, view={"Y": {"slot_index": 2}}),
+            dict(resource, view={"Y": {"slot_index": 0, "part": {"x": [0, 9]}}}),
+            dict(resource, view={"Y": {"slot_index": 0, "part": {"other": [0, 2]}}}),
             dict(resource, member=[0, 0]), dict(resource, member=1),
         ]:
             with self.subTest(resource=replacement):
                 self.assert_invalid(lambda d: put(d, PIPE + ("resource",), {"R": replacement}))
 
     def test_local_handoff_and_shared_worker_resource_identity(self):
-        resource = {"space": "SMEM", "shape": [], "dtype": "fp32"}
+        resource = {"slot_count": 1, "space": "SMEM", "member_slot_shape": [], "dtype": "fp32"}
         handoff = {"producer": "copy", "consumer": ["next"], "storage": "tile_pipeline.phase.copy.resource.Y"}
         def setup(d, order):
             add_phase(d, order=order)
@@ -117,20 +147,20 @@ class RelationsTests(TaskCase):
         def dynamic(d):
             put(d, PIPE + ("domain",), {"t": "worktile"})
             put(d, PHASE + ("schedule", "worker_assignment", "refill"), {"counter": "Take the next work until exhausted."})
-            put(d, LANE + ("pipe",), {"repeat": "t", "steady": ["produce:Y(t)"]})
+            put(d, ROLE + ("pipe",), {"repeat": "t", "steady": ["produce:Y(t)"]})
         self.assert_valid(dynamic)
-        self.assert_invalid(lambda d: (dynamic(d), put(d, LANE + ("pipe", "epilogue"), ["store:Y(last(t))"])), "count/last")
+        self.assert_invalid(lambda d: (dynamic(d), put(d, ROLE + ("pipe", "epilogue"), ["store:Y(last(t))"])), "count/last")
         # Contract prose is not parsed as an executed expression.
-        self.assert_valid(lambda d: (dynamic(d), put(d, LANE + ("info", "verb"),
+        self.assert_valid(lambda d: (dynamic(d), put(d, ROLE + ("info", "verb"),
             {"produce": "Produce the result; do not query count(t) or last(t)."})))
-        self.assert_invalid(lambda d: put(d, LANE + ("pipe", "steady"), ["produce:Y(i"]), "notation")
+        self.assert_invalid(lambda d: put(d, ROLE + ("pipe", "steady"), ["produce:Y(i"]), "notation")
         self.assert_invalid(lambda d: (put(d, PIPE + ("domain",), {"i": [0, 8]}),
-            put(d, LANE + ("pipe",), {"repeat": "i[0:8", "steady": ["produce:Y(i)"]})))
+            put(d, ROLE + ("pipe",), {"repeat": "i[0:8", "steady": ["produce:Y(i)"]})))
 
     def test_instance_names_can_match_field_names(self):
         self.assert_valid(lambda d: (
             put(d, PIPE + ("domain",), {"shape": [0, 8]}),
-            put(d, LANE + ("pipe",), {"repeat": "shape", "steady": ["produce:Y(shape)"]}),
+            put(d, ROLE + ("pipe",), {"repeat": "shape", "steady": ["produce:Y(shape)"]}),
             put(d, PIPE + ("milestone",), {"shape": ["Main/produce:Y(0)"]})))
 
     def test_per_worktile_order_accepts_scalar_and_singleton_keys(self):
@@ -211,7 +241,7 @@ class RelationsTests(TaskCase):
             (("small", "meta_data", "dispatch", "parent"), "absent", "unknown parent"),
             (("small", "meta_data", "dispatch", "parent"), "tiny", "cycle"),
             (("small", "design", "work_schedule", "phase", "copy", "mapping", "worker", "unit"), "Missing", "worker unit"),
-            (("small", "design", "tile_pipeline", "phase", "copy", "lane", "Main", "info", "member"), "Missing[0:1]", "unregistered"),
+            (("small", "design", "tile_pipeline", "phase", "copy", "role", "Main", "info", "member"), "Missing[0:1]", "unregistered"),
             (("small", "design", "math_reshape", "rewrite", 0, "symbol"), {"X": {"meaning": "Repeated Contract input."}}, "duplicates"),
         ]:
             changed = deepcopy(data)
@@ -234,7 +264,7 @@ class RelationsTests(TaskCase):
             "A": {"meaning": "Test intermediate.", "shape": shape_ref, "dtype": dtype_ref}})
         put(data, target_path, dtype_ref)
         put(data, ("small",) + PIPE[1:] + ("resource",), {
-            "Storage": {"space": "register", "shape": [], "dtype": dtype_ref, "view": {"Y": {"dtype": dtype_ref}}}})
+            "Storage": {"slot_count": 1, "space": "register", "member_slot_shape": [], "dtype": dtype_ref, "view": {"Y": {"dtype": dtype_ref}}}})
         self.write_task(data)
         self.assertEqual(data, schema.validate_directory(self.directory))
         paths = [symbol_path + ("shape",), symbol_path + ("dtype",), target_path,

@@ -12,7 +12,7 @@ GENERIC_VERBS = {"load", "publish", "store", "compute", "produce", "zero", "mma"
 DOMAIN_FUNCTIONS = {"count", "last"}
 
 
-def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any], path: str) -> None:
+def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any] | None, path: str) -> None:
     work = plan["design"]["work_schedule"]["phase"]
     for pid, phase in plan["design"]["tile_pipeline"]["phase"].items():
         p = path + ".design.tile_pipeline.phase." + pid
@@ -21,29 +21,35 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
         for name, domain in domains.items():
             _check_domain(check, domain, domains, p + ".domain." + name)
         check.acyclic(graph, p + ".domain")
-        worker_count = work[pid]["mapping"]["worker"]["count"]
-        families = {}
-        for lane, body in phase["lane"].items():
-            lp = p + ".lane." + lane
+        unit_count = work[pid]["mapping"]["worker"]["unit_count"]
+        families, role_members = {}, {}
+        for role, body in phase["role"].items():
+            lp = p + ".role." + role
             pieces = re.findall(r"([^\[\]]+)\[(\d+)(?::(\d+))?\]", body["info"]["member"])
+            unit, lo, hi = pieces[0]
+            if unit == work[pid]["mapping"]["worker"]["unit"]:
+                role_members[role] = range(int(lo), int(hi) if hi else int(lo) + 1)
+            else:
+                role_members[role] = range(unit_count) if type(unit_count) is int else None
             for i, (unit, lo, hi) in enumerate(pieces):
                 unit = unit.removeprefix(".")
-                check.require(unit in hardware["execution"], lp + ".info.member", f"unregistered execution unit {unit}")
+                if hardware is not None:
+                    check.require(unit in hardware["execution"], lp + ".info.member", f"unregistered execution unit {unit}")
                 check.require(not hi or int(hi) > int(lo), lp + ".info.member", "member interval must be nonempty")
-                if i == 0 and unit == work[pid]["mapping"]["worker"]["unit"] and type(worker_count) is int:
-                    check.require(int(hi) <= worker_count if hi else int(lo) < worker_count,
-                                 lp + ".info.member", "member index exceeds worker count")
+                if i == 0 and unit == work[pid]["mapping"]["worker"]["unit"] and type(unit_count) is int:
+                    check.require(int(hi) <= unit_count if hi else int(lo) < unit_count,
+                                 lp + ".info.member", "member index exceeds worker.unit_count")
             actions = _check_pipe(check, body["pipe"], domains, set(), lp + ".pipe")
-            families[lane] = set()
+            families[role] = set()
             for action, ap in actions:
                 parsed = parse_action(action)
                 if check.require(parsed is not None, ap, "invalid action notation"):
                     verb, objects = parsed
                     check.require(verb in GENERIC_VERBS or verb in body["info"].get("verb", {}),
                                  ap, f"custom verb {verb} needs an info.verb contract")
-                    families[lane].add((verb, objects))
+                    families[role].add((verb, objects))
             if work[pid]["schedule"]["worker_assignment"]["refill"] != "none":
-                for field in ("pipe", "edge"):
+                for field in ("pipe", "waits_for"):
                     _check_dynamic_domain_queries(check, body.get(field, {}), domains, lp + "." + field)
         if work[pid]["schedule"]["worker_assignment"]["refill"] != "none":
             for field in ("domain", "resource"):
@@ -57,33 +63,52 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
             if not check.require(parsed is not None, rp, "invalid event/action notation; events are issue or done"):
                 return
             if target is None:
-                matches = [lane for lane, items in families.items() if parsed in items]
-                check.require(len(matches) == 1, rp, "phase milestone needs an unambiguous lane-qualified event")
+                matches = [role for role, items in families.items() if parsed in items]
+                check.require(len(matches) == 1, rp, "phase milestone needs an unambiguous role-qualified event")
                 return
-            if not check.require(target in families, rp, f"unknown lane {target}"):
+            if not check.require(target in families, rp, f"unknown role {target}"):
                 return
             if waiting:
-                check.require(target == current, rp, "the waiting event must belong to the current lane")
-            check.require(parsed in families[target], rp, "event does not name an action family in the referenced lane")
-            if member not in (None, "*") and type(worker_count) is int:
-                check.require(int(member) < worker_count, rp, "event member exceeds worker count")
+                check.require(target == current, rp, "the waiting event must belong to the current role")
+            check.require(parsed in families[target], rp, "event does not name an action family in the referenced role")
+            if member not in (None, "*") and type(unit_count) is int:
+                if not check.require(int(member) < unit_count, rp, "event member exceeds worker.unit_count"):
+                    return
+            selected = role_members[target]
+            if member not in (None, "*") and selected is not None:
+                check.require(int(member) in selected, rp,
+                              f"role {target} has no member {member}; check its info.member selection")
 
-        for lane, body in phase["lane"].items():
-            for kind, edges in body.get("edge", {}).items():
+        for role, body in phase["role"].items():
+            for kind, edges in body.get("waits_for", {}).items():
                 for left, right in edges.items():
-                    ep = field_path(f"{p}.lane.{lane}.edge.{kind}", left)
-                    resolve(left, ep, lane, True)
+                    ep = field_path(f"{p}.role.{role}.waits_for.{kind}", left)
+                    resolve(left, ep, role, True)
                     for i, ref in enumerate(right):
-                        resolve(ref, f"{ep}[{i}]", lane)
+                        resolve(ref, f"{ep}[{i}]", role)
+                        # Only reject literal same-instance dependencies. Index
+                        # algebra and cross-member relationships remain for expansion.
+                        ll, lm, la = parse_event(left)
+                        rl, rm, ra = parse_event(ref)
+                        le = "done" if left.endswith("@done") else "issue"
+                        revent = "issue" if ref.endswith("@issue") else "done"
+                        same = ((ll or role) == (rl or role) == role and lm == rm and la == ra
+                                and parse_action(la) in families[role])
+                        if lm not in (None, "*") and role_members[role] is not None:
+                            same &= int(lm) in role_members[role]
+                        if same and (le == "issue" or revent == "done"):
+                            check.require(False, f"{ep}[{i}]",
+                                          "an event cannot depend on itself or its own later completion; check the event suffix or index shift")
         for milestone, events in phase.get("milestone", {}).items():
             for i, ref in enumerate(events):
                 resolve(ref, field_path(p + ".milestone", milestone) + f"[{i}]", None)
         for name, resource in phase.get("resource", {}).items():
             rp = p + ".resource." + name
             for member, mp in indexed_values(resource.get("member", []), rp + ".member"):
-                if type(worker_count) is int:
-                    check.require(member < worker_count, mp, "resource member exceeds worker count")
-            axes = {k: v for axis in resource["shape"] for k, v in axis.items()}
+                if type(unit_count) is int:
+                    check.require(member < unit_count, mp, "resource member exceeds worker.unit_count")
+            capacity = resource["member_slot_shape"]
+            axes = {k: v for axis in capacity for k, v in axis.items()}
             for view, value in resource.get("view", {}).items():
                 vp = field_path(rp + ".view", view)
                 check.require(parse_action("load:" + view) is not None, vp, "invalid view index notation")

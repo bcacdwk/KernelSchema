@@ -23,7 +23,7 @@ mkdir -p path/to/task
 cp -n schema_template/starter.yaml path/to/task/root.yaml
 ```
 
-[starter.yaml](starter.yaml) 是编辑起点，不是完整字段清单或默认设计。按任务重命名 `Input / Output / Dimension / main / Main` 等名称并维护引用，将 `null` 换成真实内容；步骤、phase、launch、lane 和对象条目均按设计增删。骨架中的 `version: 1` 是新文件的起始修订号，不是已有文件的重置值。
+[starter.yaml](starter.yaml) 是编辑起点，不是完整字段清单或默认设计。按任务重命名 `Input / Output / Dimension / main / Main` 等名称并维护引用，将 `null` 换成真实内容；步骤、phase、launch、role 和对象条目均按设计增删。骨架中的 `version: 1` 是新文件的起始修订号，不是已有文件的重置值。
 
 不能只替换占位值就认为完成：按各篇“填写条件”补齐适用字段，没有内容的可选字段直接省略。例如提取设计需要登记真实的 `meta_data.source`；选择 `refill: none` 时还需补上骨架未列出的 `preassigned`。`Dimension` 表示待确定的独立工作维度；整个任务只有一份工作时，使用 `partition: {}` 并省略 `worktile_order`，见[工作分解](../schema_docs/4.design.work_schedule.md#工作分解)与[工作分配](../schema_docs/4.design.work_schedule.md#工作排列与分配)。
 
@@ -35,7 +35,8 @@ cp -n schema_template/starter.yaml path/to/task/root.yaml
 
 新文件先落实 `meta_data`；root 保留给定或按任务确认的两份 Contract，派生节点使用共享 Contract。按[提取](../EXTRACT_SCHEMA.md#3-从实现事实形成设计表达)、[新建](../DESIGN_SCHEMA.md#2-先完成数学改写)或[优化](../OPTIMIZE_SCHEMA.md#2-找到本轮值得改变的决定)流程逐段形成 Design：先核对数学改写，再落实工作调度和微流水线；需要回改上层时，依次复查受影响的下游。未进入的分区可以暂留未完成，完整交付前再落实全部适用内容。
 
-修改时先改决定的唯一定义，再沿引用检查受影响的下游：数学值、shape、dtype 或寿命的变化可能影响分块、资源和实现约束；phase、lane、动作或资源改名时核对 flow、handoff、milestone、edge 与 realization 的引用。共享 Contract 经任务方确认发生变化后，要审阅所有节点是否仍符合它，不能只修当前节点。Coder 追加替代反馈时按[反馈规则](../schema_docs/6.realization.md#有证据的替代反馈)保留原选择与理由；涉及 Design 的变化交给 Planner。
+修改时先改决定的唯一定义，再沿引用检查受影响的下游：数学值、shape、dtype 或寿命的变化可能影响分块、资源和实现约束；phase、role、动作或资源改名时核对 flow、handoff、milestone、waits_for 与 realization 的引用。共享 Contract 经任务方确认发生变化后，要审阅所有节点是否仍符合它，不能只修当前节点。Coder 追加替代反馈时按[反馈规则](../schema_docs/6.realization.md#有证据的替代反馈)保留原选择与理由；涉及 Design 的变化交给 Planner。
+
 
 按[版本规则](../schema_docs/0.common.md#单份-plan-与元数据)更新实际改动文件的修订号，结合 diff 核对历史递增；检查器只检查它是否为正整数。改动内容由 diff 给出，设计意图仍写在所属 `thesis` 或实现选择的 `reason` 中。实验记录用 `repository@ref:path` 固定它验证的 plan，同一 ref 同时固定该节点与 root；改过设计后不能把旧实验自动视为新版本的证据。
 
@@ -55,6 +56,8 @@ python3 schema_template/check_yaml.py path/to/task/root.yaml
 
 检查不补字段、不重排、不改写 YAML，也不改变文件权限或修改时间。若诊断与文档允许的表达冲突，核对具体规则并报告冲突，不为通过检查删除必要设计信息。人工审阅或实现反馈指出问题时，回到上一步确定修改范围，再检查整个任务。
 
+未归档 `schema_wiki` 的硬件资料允许待补：仓库的 [check_policy.json](../schema_wiki/check_policy.json) 明确开启硬件占位豁免，检查时会提示。它允许硬件区为空或缺失，并暂缓依赖这些资料的检查；算法、调度和动作仍按当前规则检查。具体范围见[硬件占位豁免](tools/README.md#硬件占位豁免)。
+
 ### 5 交付
 
 交付任务目录：`root.yaml`、存在的派生节点，以及多节点任务的 `dispatch.md`；只有 root 时索引可选。派生文件依赖共享 Contract，不作为脱离 root 的完整 plan 交付。源码、硬件资料和实验记录保留在各自实际位置，通过规定的引用定位，不复制进 YAML。
@@ -62,6 +65,22 @@ python3 schema_template/check_yaml.py path/to/task/root.yaml
 任务冻结时，将准备阶段用 tag 或 branch 定位的硬件与编程等 wiki 资料解析到 commit，按 Contract 修改权限确认后填回原 `ref`；引用更新也按版本规则修订 root，并重跑同一检查命令。核对设计出处、参考入口及实验记录均指向实际对象和所声明的版本，而不只是字符串格式合法。
 
 交付时简要说明改动范围、检查结果及仍未解决的资料、设计或运行验证问题，可以写在任务消息中，无需新增固定报告文件或 YAML 状态字段。若必需信息或设计尚未确定，明确交付的是草稿及其缺口；检查通过不能改变这一状态。
+
+## 微流水线图
+
+需要检查具体动作实例或查看依赖图时，使用独立入口：
+
+```sh
+python3 schema_template/tools/pipeline_graph.py path/to/task/root.yaml
+```
+
+先通过同目录的 YAML 检查，再为指定文件生成一张图，按 phase 分区、role 分列。结果位于任务目录的 `pipeline_graphs/`，包括 SVG、可缩放的 HTML、DOT 和事件 JSON；加 `--all` 处理同目录全部节点。生成 SVG 还需要 Graphviz 的 `dot`；`--format dot` 可只生成 DOT 和 JSON。
+
+采用代表性规模展开起始、若干重复和收尾，不表示实测时间线。示例的取值保存在同目录 `pipeline_samples.json`，可用 `--set N=4`、`--worktiles 2` 覆盖；这些是绘图输入，不改写 plan。缺少取值、表达式尚不支持或展开超过工具上限时，会说明无法完成的原因，退出状态为 `2`，不据此判定 YAML 非法。
+
+工具检查展开后的重复动作、悬空事件引用、成员匹配与依赖环；发现环时列出涉及的事件和边的来源，退出状态为 `1`。它不解析文字契约，只对可明确识别的 `mma / store / wait / release` 消费位置推导默认数据边；其余关系由显式边表达。无环只说明这次展开的已建模依赖无环，不能代替完整的死锁、复用安全或性能审计。
+
+手写动作列表与 `repeat` 使用同一套声明范围；范围内漏写的动作仍会报错。工具无法确定某个索引范围时返回 `2` 并指出原因，不把“没有生成这个动作”自动解释成越界。
 
 ## 校验边界
 

@@ -2,7 +2,7 @@ meta_data:
   name: gated_delta_rule_prefill
   describe: Apply grouped-head gated delta updates to packed sequences and overwrite the supplied output and final-state buffers.
   source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/gdn_prefill/aka_solution/solution.py::Model.forward
-  version: 3
+  version: 4
   dispatch:
     id: root
     when: Select exactly when B>1.
@@ -81,15 +81,15 @@ design:
         symbol:
           C: {meaning: Tokens per recurrent chunk., value: 64}
           Np: {meaning: Even padded chunk count for the current sequence.}
-          Cu32: {meaning: Converted packed boundaries consumed by the core., shape: [boundary: B+1], dtype: int32, life: stored invocation}
+          Cu32: {meaning: Converted packed boundaries consumed by the core., shape: [boundary: B+1], dtype: int32, retention: keep_value invocation}
           Q: {meaning: Padded query chunk., shape: [token: C, dk: DK], dtype: bf16}
           K: {meaning: Padded key chunk., shape: [token: C, dk: DK], dtype: bf16}
           V: {meaning: Padded value chunk., shape: [token: C, dv: DV], dtype: bf16}
           Alpha: {meaning: Neutral-padded linear decays., shape: [token: C], dtype: fp32}
-          Beta: {meaning: Zero-padded update strengths., shape: [token: C], dtype: fp32, life: "stored (b,h,c)"}
-          G: {meaning: Inclusive log2 decay prefix., shape: [token: C], dtype: fp32, life: "stored (b,h,c)"}
-          Gamma: {meaning: Decay from incoming state to each row., shape: [token: C], dtype: fp32, life: "stored (b,h,c)"}
-          W: {meaning: Causal decay ratios reused for feedback and readout., shape: [token: C, source_token: C], dtype: fp32, life: "stored (b,h,c)"}
+          Beta: {meaning: Zero-padded update strengths., shape: [token: C], dtype: fp32, retention: "keep_value (b,h,c)"}
+          G: {meaning: Inclusive log2 decay prefix., shape: [token: C], dtype: fp32, retention: "keep_value (b,h,c)"}
+          Gamma: {meaning: Decay from incoming state to each row., shape: [token: C], dtype: fp32, retention: "keep_value (b,h,c)"}
+          W: {meaning: Causal decay ratios reused for feedback and readout., shape: [token: C, source_token: C], dtype: fp32, retention: "keep_value (b,h,c)"}
         arithmetic:
           approx: "log2_fast/exp2_fast are approximate FP32 functions on stabilized gates and prefix differences; unknown: <error-bound@pending:gdn_prefill/log2-exp2>."
           accumulate: Scan each 32-token half in FP32, then add the first-half total to the second half.
@@ -105,9 +105,9 @@ design:
         symbol:
           KK: {meaning: Key Gram accumulator., shape: [token: C, source_token: C], dtype: fp32}
           A: {meaning: Rounded feedback and in-place inverse workspace., shape: [token: C, source_token: C], dtype: bf16}
-          Tinv: {meaning: Rounded inverse with column beta scaling., shape: [token: C, source_token: C], dtype: bf16, life: "stored (b,h,c)"}
+          Tinv: {meaning: Rounded inverse with column beta scaling., shape: [token: C, source_token: C], dtype: bf16, retention: "keep_value (b,h,c)"}
           QK: {meaning: Query-key accumulator., shape: [token: C, source_token: C], dtype: fp32}
-          Bmat: {meaning: Causal decay-weighted and scaled readout coefficients., shape: [token: C, source_token: C], dtype: bf16, life: "stored (b,h,c)"}
+          Bmat: {meaning: Causal decay-weighted and scaled readout coefficients., shape: [token: C, source_token: C], dtype: bf16, retention: "keep_value (b,h,c)"}
       - step: recurrence
         name: Correct values and update the local state
         math: |
@@ -118,7 +118,7 @@ design:
           QSscaled=(QS ⊙ Gamma[None,:])*fp32(scale); Y=mma32(Ubar,Bmatᵀ,QSscaled).
           S(c)=mma32(Udec,K,Sdec); for c*C+i<L_b, O[Cu32[b]+c*C+i,h,:]=bf16(Y[:,i]); S_final[b,h]=S(Np-1).
         symbol:
-          S: {meaning: FP32 chunk-boundary value-by-key state., shape: [dv: DV, dk: DK], dtype: fp32, life: "carried (b,h); c=-1..Np-1"}
+          S: {meaning: FP32 chunk-boundary value-by-key state., shape: [dv: DV, dk: DK], dtype: fp32, retention: "carry_forward (b,h); c=-1..Np-1"}
           Sbar: {meaning: Rounded state snapshot before decay., shape: [dv: DV, dk: DK], dtype: bf16}
           Sdec: {meaning: State scaled to the chunk end., shape: [dv: DV, dk: DK], dtype: fp32}
           KS: {meaning: Incoming-state key projection., shape: [dv: DV, token: C], dtype: fp32}
@@ -147,10 +147,10 @@ design:
       index_cast:
         describe: "Timed PyTorch int32 conversion; this opaque flow slot has <library@pending:actual_CUDA_launch_expansion>."
         decomposition: {partition: {boundary: {size: B+1, tile: '<library@pending:cast_tile_width>'}}, target: {single_tile: {Cu32: {shape: [{boundary: '<library@pending:cast_tile_width>'}], dtype: int32}}}}
-        mapping: {worker: {unit: "<library@pending:cast_execution_unit>", count: "<library@pending:cast_worker_width>"}, count: "<library@pending:cast_worker_count>"}
+        mapping: {worker: {unit: "<library@pending:cast_execution_unit>", unit_count: "<library@pending:cast_worker_width>"}, worker_count: "<library@pending:cast_worker_count>"}
         schedule: {worktile_order: [{by: boundary, direction: ascending}], worker_assignment: {refill: {opaque_library: "<library@pending:cast_work_assignment>"}, exit: "<library@pending:cast_completion_condition>"}}
       gdn:
-        describe: Fused M64 recurrence with per-worktile sequence-end descriptors and separate scalar and CG1 input streams.
+        describe: Fused M64 recurrence with per-worktile sequence-end descriptors and separate scalar and Recurrence input streams.
         decomposition:
           strategy: Traverse Np chunks per worktile using Cu32[b:b+2]; the two value-row halves never merge.
           partition: {batch: {size: B, tile: 1}, head: {size: HV, tile: 1}, dv: {size: DV, tile: 64}}
@@ -165,8 +165,8 @@ design:
           target: {single_tile: {O: {shape: [token: L_b, dv: 64], dtype: bf16}, S_final: {shape: [dv: 64, dk: DK], dtype: fp32}}}
         mapping:
           strategy: "P=min(B*HV*(DV/64),num_sm), with num_sm queried at runtime; linear id=b*(2*HV)+2*h+row_half. The source L20D run records num_sm=148."
-          worker: {unit: CTA, count: 1}
-          count: P
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: P
         schedule:
           strategy: All roles follow the same preassigned sequence; ring cursors continue across worktiles while S reloads each worktile's initial_state. No per-worktile global drain.
           worktile_order: [{by: batch, direction: ascending}, {by: head, direction: ascending}, {by: dv, direction: ascending}]
@@ -175,25 +175,26 @@ design:
     thesis: Separate pairwise inverse preparation from the recurrent chain with two compute groups and two MMA issuers; unequal rings and early accumulator returns support overlap while scalar and output work share one warp.
     phase:
       index_cast:
-        lane:
+        role:
           Convert:
-            info: {member: "<library@pending:cast_lane>", verb: {produce: "Exact conversion; <library@pending:PyTorch_cast_micro_pipeline_and_completion>."}}
+            info: {execution_mode: serial, member: "<library@pending:cast_lane>", verb: {produce: "Exact conversion; <library@pending:PyTorch_cast_micro_pipeline_and_completion>."}}
             pipe: {steady: ["produce:Cu32"]}
       gdn:
         domain: {t: worktile, c: [0, Np], p: [0, Np/2], n: {flatten: [t, c]}}
         resource:
-          Qring: {space: SMEM, shape: [token: C, dk: DK], dtype: bf16, slot: 3, view: {"Q(n)": {slot: n%3}}}
-          Kring: {space: SMEM, shape: [token: C, dk: DK], dtype: bf16, slot: 4, view: {"K(n)": {slot: n%4}}}
-          Vring: {space: SMEM, shape: [dv: 64, token: C], dtype: bf16, slot: 2, view: {"V(n)": {slot: n%2}}}
-          Tring: {space: SMEM, shape: [token: C, source_token: C], dtype: bf16, slot: 3, view: {"A(n)": {slot: n%3}, "Tinv(n)": {slot: n%3}}}
-          Bring: {space: SMEM, shape: [token: C, source_token: C], dtype: bf16, slot: 2, view: {"Bmat(n)": {slot: n%2}}}
-          O: {space: SMEM, shape: [dv: 64, token: C], dtype: bf16}
-          GateRing: {space: SMEM, shape: [field: 2, token: C], dtype: fp32, slot: 5, view: {"G(n)": {slot: n%5, part: {field: [0, 1]}}, "Gamma(n)": {slot: n%5, part: {field: [1, 2]}}}}
-          BetaRing: {space: SMEM, shape: [token: C], dtype: fp32, slot: 5, view: {"Beta(n)": {slot: n%5}}}
-          Wpair: {space: register, shape: [token: C, source_token: C], dtype: fp32, slot: 2, view: {"W(n)": {slot: n%2}}}
+          Qring: {space: SMEM, member_slot_shape: [token: C, dk: DK], dtype: bf16, slot_count: 3, view: {"Q(n)": {slot_index: n%3}}}
+          Kring: {space: SMEM, member_slot_shape: [token: C, dk: DK], dtype: bf16, slot_count: 4, view: {"K(n)": {slot_index: n%4}}}
+          Vring: {space: SMEM, member_slot_shape: [dv: 64, token: C], dtype: bf16, slot_count: 2, view: {"V(n)": {slot_index: n%2}}}
+          Tring: {space: SMEM, member_slot_shape: [token: C, source_token: C], dtype: bf16, slot_count: 3, view: {"A(n)": {slot_index: n%3}, "Tinv(n)": {slot_index: n%3}}}
+          Bring: {space: SMEM, member_slot_shape: [token: C, source_token: C], dtype: bf16, slot_count: 2, view: {"Bmat(n)": {slot_index: n%2}}}
+          O: {slot_count: 1, space: SMEM, member_slot_shape: [dv: 64, token: C], dtype: bf16}
+          GateRing: {space: SMEM, member_slot_shape: [field: 2, token: C], dtype: fp32, slot_count: 5, view: {"G(n)": {slot_index: n%5, part: {field: [0, 1]}}, "Gamma(n)": {slot_index: n%5, part: {field: [1, 2]}}}}
+          BetaRing: {space: SMEM, member_slot_shape: [token: C], dtype: fp32, slot_count: 5, view: {"Beta(n)": {slot_index: n%5}}}
+          Wpair: {space: register, member_slot_shape: [token: C, source_token: C], dtype: fp32, slot_count: 2, view: {"W(n)": {slot_index: n%2}}}
           Arena:
+            slot_count: 1
             space: TMEM
-            shape: [row: 128, column: "<capacity@pending:CuTe_get_max_tmem_alloc_cols_sm100>"]
+            member_slot_shape: [row: 128, column: "<capacity@pending:CuTe_get_max_tmem_alloc_cols_sm100>"]
             dtype: fp32
             view: {
               S: {part: {column: [0, 128]}}, Sdec(n): {part: {column: [0, 128]}},
@@ -203,23 +204,24 @@ design:
               KS(n): {part: {column: [384, 448]}}, U(n): {part: {column: [384, 448]}},
               R(n): {part: {column: [448, 480]}, dtype: bf16}, Ubar(n): {part: {column: [448, 480]}, dtype: bf16},
               Udec(n): {part: {column: [480, 512]}, dtype: bf16}}
-        lane:
+        role:
           Load:
-            info: {member: 'warp[9:10]', mode: async, register: 24, verb: {bound: {mode: sync, meaning: 'Update this worker''s Q/K/V descriptors to Cu32[b+1] and fence before use; earlier requests may remain in flight. Loads start at Cu32[b]+c*C and zero-fill beyond the current sequence end.'}}}
+            info: {member: 'warp[9:10]', execution_mode: async, register: 24, verb: {bound: {execution_mode: serial, meaning: 'Update this worker''s Q/K/V descriptors to Cu32[b+1] and fence before use; earlier requests may remain in flight. Loads start at Cu32[b]+c*C and zero-fill beyond the current sequence end.'}}}
             pipe: {repeat: t, steady: ["bound:QKV(t)", {repeat: "n[t]", steady: ["load:K(n)", "load:Q(n)", "load:V(n)"]}]}
-            edge:
+            waits_for:
               reuse:
-                "load:K(n+4)": ["MMA0/mma:QK(n+1-n%2)", "MMA1/mma:S(n)"]
-                "load:Q(n+3)": ["MMA0/mma:QK(n+1-n%2)", "MMA1/mma:QS(n)"]
-                "load:V(n+2)": ["CG1/release:V(n)"]
+                "load:K(n+4)@issue": ["MMA0/mma:QK(n+1-n%2)@done", "MMA1/mma:S(n)@done"]
+                "load:Q(n+3)@issue": ["MMA0/mma:QK(n+1-n%2)@done", "MMA1/mma:QS(n)@done"]
+                "load:V(n+2)@issue": ["Recurrence/release:V(n)@done"]
           MMA0:
-            info: {member: "warp[8:9]", mode: ordered, register: 24, verb: {mma: "Issue the named upstream product with zero FP32 accumulator; completion covers this issuer's prior products and operand reads."}}
+            info: {member: "warp[8:9]", execution_mode: async_ordered_completion, register: 24, verb: {mma: "Issue the named upstream product with zero FP32 accumulator; completion covers this issuer's prior products and operand reads."}}
             pipe: {repeat: t, steady: [{repeat: p, steady: ["mma:KK(n[t,2*p])", "mma:KK(n[t,2*p+1])", "mma:QK(n[t,2*p])", "mma:QK(n[t,2*p+1])"]}]}
-            edge:
-              data: {"mma:KK(n)": ["Load/load:K(n)"], "mma:QK(n)": ["Load/load:Q(n)", "Load/load:K(n)"]}
-              reuse: {"mma:KK(n+2)": ["CG0/read:QK(n)"], "mma:QK(n)": ["CG0/read:KK(n)"]}
-          CG0:
+            waits_for:
+              data: {"mma:KK(n)@issue": ["Load/load:K(n)@done"], "mma:QK(n)@issue": ["Load/load:Q(n)@done", "Load/load:K(n)@done"]}
+              reuse: {"mma:KK(n+2)@issue": ["Inverse/read:QK(n)@done"], "mma:QK(n)@issue": ["Inverse/read:KK(n)@done"]}
+          Inverse:
             info:
+              execution_mode: serial
               member: "warp[0:4]"
               register: 224
               verb:
@@ -229,25 +231,26 @@ design:
                 invert: Invert both chunks in place with group rendezvous between levels; two warps per chunk at widths 8/32/64, all four across each chunk's 16x16 diagonal blocks.
                 publish: Tinv applies column Beta and returns its beta stage; Bmat weights the captured QK using retained W.
             pipe: {repeat: t, steady: [{repeat: p, steady: ['prepare:Pair(t,p)', 'capture:BetaPair(t,p)', {repeat: {j: [0, 2]}, steady: ['read:KK(n[t,2*p+j])', 'compute:A(n[t,2*p+j])']}, 'invert:Pair(t,p)', {repeat: {j: [0, 2]}, steady: ['publish:Tinv(n[t,2*p+j])']}, {repeat: {j: [0, 2]}, steady: ['read:QK(n[t,2*p+j])', 'publish:Bmat(n[t,2*p+j])']}]}]}
-            edge:
+            waits_for:
               data:
-                "prepare:Pair(t,p)": ["ScalarOutput/publish:Gate(n[t,2*p])", "ScalarOutput/publish:Gate(n[t,2*p+1])"]
-                "capture:BetaPair(t,p)": ["ScalarOutput/load:Beta(n[t,2*p])", "ScalarOutput/load:Beta(n[t,2*p+1])"]
-                "read:KK(n)": ["MMA0/mma:KK(n)"]
-                "read:QK(n)": ["MMA0/mma:QK(n)"]
-              reuse: {"read:KK(n+3)": ["MMA1/mma:U(n)"], "read:QK(n+2)": ["MMA1/mma:Y(n)"]}
+                "prepare:Pair(t,p)@issue": ["ScalarOutput/publish:Gate(n[t,2*p])@done", "ScalarOutput/publish:Gate(n[t,2*p+1])@done"]
+                "capture:BetaPair(t,p)@issue": ["ScalarOutput/load:Beta(n[t,2*p])@done", "ScalarOutput/load:Beta(n[t,2*p+1])@done"]
+                "read:KK(n)@issue": ["MMA0/mma:KK(n)@done"]
+                "read:QK(n)@issue": ["MMA0/mma:QK(n)@done"]
+              reuse: {"read:KK(n+3)@issue": ["MMA1/mma:U(n)@done"], "read:QK(n+2)@issue": ["MMA1/mma:Y(n)@done"]}
           MMA1:
-            info: {member: 'warp[10:11]', mode: ordered, register: 24, verb: {mma: 'Issue the named upstream product; KS/QS/U start from zero, Y accumulates into QSscaled, S into Sdec. Completion covers this issuer''s prior products and operand reads.'}}
+            info: {member: 'warp[10:11]', execution_mode: async_ordered_completion, register: 24, verb: {mma: 'Issue the named upstream product; KS/QS/U start from zero, Y accumulates into QSscaled, S into Sdec. Completion covers this issuer''s prior products and operand reads.'}}
             pipe: {repeat: t, steady: [{repeat: "n[t]", steady: ["mma:KS(n)", "mma:QS(n)", "mma:U(n)", "mma:Y(n)", "mma:S(n)"]}]}
-            edge:
+            waits_for:
               data:
-                "mma:KS(n)": ["CG1/publish:StateOperand(n)", "Load/load:K(n)", "Load/load:Q(n)"]
-                "mma:U(n)": ["CG1/publish:R(n)", "CG0/publish:Tinv(n)"]
-                "mma:Y(n)": ["CG1/publish:Ubar(n)", "CG1/rescale:QS(n)", "CG0/publish:Bmat(n)"]
-                "mma:S(n)": ["CG1/publish:Udec(n)"]
-              reuse: {"mma:QS(n)": ["CG1/publish:O(n-1)"]}
-          CG1:
+                "mma:KS(n)@issue": ["Recurrence/publish:StateOperand(n)@done", "Load/load:K(n)@done", "Load/load:Q(n)@done"]
+                "mma:U(n)@issue": ["Recurrence/publish:R(n)@done", "Inverse/publish:Tinv(n)@done"]
+                "mma:Y(n)@issue": ["Recurrence/publish:Ubar(n)@done", "Recurrence/rescale:QS(n)@done", "Inverse/publish:Bmat(n)@done"]
+                "mma:S(n)@issue": ["Recurrence/publish:Udec(n)@done"]
+              reuse: {"mma:QS(n)@issue": ["Recurrence/publish:O(n-1)@done"]}
+          Recurrence:
             info:
+              execution_mode: serial
               member: "warp[4:8]"
               register: 256
               verb:
@@ -257,47 +260,48 @@ design:
                   R captures/releases KS; Ubar and Udec are written from the captured FP32 U before their separate publications;
                   O rounds Y into SMEM and releases its TMEM slot. StateOperand, R, Ubar and Udec have independent notification streams.
                   Producers omit empty-stage acquisition: subsequent KS/U/state completion transitively protects their fixed operand slots.
-                compute: Capture Gamma and end-decay factors after StateOperand publication, return this lane's gate stage, and overlap with KS/QS.
+                compute: Capture Gamma and end-decay factors after StateOperand publication, return this role's gate stage, and overlap with KS/QS.
                 read: Capture U in registers and return the shared KS/U accumulator.
                 rescale: Replace QS by QSscaled in place.
             pipe: {repeat: t, steady: ['load:initial_state(t)', {repeat: 'n[t]', steady: ['publish:StateOperand(n)', 'compute:Decay(n)', 'publish:R(n)', 'rescale:QS(n)', 'release:V(n)', 'read:U(n)', 'publish:Ubar(n)', 'publish:Udec(n)', 'publish:O(n)']}, 'store:S_final(t)']}
-            edge:
+            waits_for:
               data:
-                "publish:StateOperand(n)": ["ScalarOutput/publish:Gate(n)"]
-                "publish:StateOperand(n[t,c+1])": ["MMA1/mma:S(n[t,c])"]
-                "publish:R(n)": ["MMA1/mma:KS(n)", "Load/load:V(n)"]
-                "rescale:QS(n)": ["MMA1/mma:QS(n)"]
-                "release:V(n)": ["MMA1/mma:U(n)"]
-                "publish:O(n)": ["MMA1/mma:Y(n)"]
-                "store:S_final(t)": ["MMA1/mma:S(n[t,Np-1])"]
-              reuse: {"publish:O(n+1)": ["ScalarOutput/store:O(n)"]}
+                "publish:StateOperand(n)@issue": ["ScalarOutput/publish:Gate(n)@done"]
+                "publish:StateOperand(n[t,c+1])@issue": ["MMA1/mma:S(n[t,c])@done"]
+                "publish:R(n)@issue": ["MMA1/mma:KS(n)@done", "Load/load:V(n)@done"]
+                "rescale:QS(n)@issue": ["MMA1/mma:QS(n)@done"]
+                "release:V(n)@issue": ["MMA1/mma:U(n)@done"]
+                "publish:O(n)@issue": ["MMA1/mma:Y(n)@done"]
+                "store:S_final(t)@issue": ["MMA1/mma:S(n[t,Np-1])@done"]
+              reuse: {"publish:O(n+1)@issue": ["ScalarOutput/store:O(n)@done"]}
           ScalarOutput:
             info:
+              execution_mode: serial
               member: "warp[11:12]"
               register: 24
               verb:
                 bound: Update this worker's O descriptor to Cu32[b+1] and fence before stores, suppressing padded rows.
                 compute: Load predicated Alpha into registers and form G/Gamma before acquiring a gate stage.
                 publish: Gate writes G/Gamma and publishes them together after acquiring their shared stage.
-                load: {mode: async, meaning: "Acquire a separate beta stage and copy Beta with explicit zero-fill for padded rows."}
+                load: {execution_mode: async, meaning: "Acquire a separate beta stage and copy Beta with explicit zero-fill for padded rows."}
                 store: Store O and return its sole slot after bulk-store completion.
             pipe: {repeat: t, steady: ['bound:Output(t)', {repeat: {j: [0, 'min(4,Np)']}, steady: ['compute:GateRegs(n[t,j])', 'publish:Gate(n[t,j])', 'load:Beta(n[t,j])']}, {repeat: {j: [0, 'max(0,Np-4)']}, steady: ['compute:GateRegs(n[t,j+4])', 'publish:Gate(n[t,j+4])', 'load:Beta(n[t,j+4])', 'store:O(n[t,j])']}, {repeat: {j: ['max(0,Np-4)', Np]}, steady: ['store:O(n[t,j])']}]}
-            edge:
+            waits_for:
               reuse:
-                "publish:Gate(n+5)": ["CG0/prepare:Pair(t,floor(c/2))", "CG1/compute:Decay(n)"]
-                "load:Beta(n+5)": ["CG0/publish:Tinv(n)"]
+                "publish:Gate(n+5)@issue": ["Inverse/prepare:Pair(t,floor(c/2))@done", "Recurrence/compute:Decay(n)@done"]
+                "load:Beta(n+5)@issue": ["Inverse/publish:Tinv(n)@done"]
 
 realization:
   require:
     - item: [design.tile_pipeline::gdn.MMA0, design.tile_pipeline::gdn.MMA1]
       choice: Single-CTA tcgen05.mma with TMEM access and issuer-local cumulative completion signaling.
       reason: Supplies the ordering and operand-read completion used by accumulator aliases and input-slot returns.
-    - item: design.tile_pipeline::gdn.CG0
+    - item: design.tile_pipeline::gdn.Inverse
       choice: BF16 warp-level mma.sync for inverse merges, with FP32 accumulators.
       reason: Keeps inverse preparation independent of the two asynchronous TMEM issuers.
     - item: [design.tile_pipeline::gdn.Load, design.tile_pipeline::gdn.ScalarOutput]
       choice: Per-worker mutable TMA Q/K/V/O descriptors via TensorMapManager GMEM updates and fences; PipelineCpAsync for Beta and PipelineAsync for gate and output handoffs.
       reason: "Supplies sequence-tail isolation and independent scalar returns; old in-flight descriptor-read ordering is <library@pending:TensorMapManager_inflight_descriptor_update_semantics>."
-    - item: [design.tile_pipeline::gdn.CG1, design.tile_pipeline::gdn.MMA1]
+    - item: [design.tile_pipeline::gdn.Recurrence, design.tile_pipeline::gdn.MMA1]
       choice: Separate PipelineAsyncUmma notification streams for StateOperand, R, Ubar and Udec, retaining the source's omitted producer acquire operations.
       reason: Operand reuse follows the recurrent dependencies; a full handshake on each input would change the overlap.

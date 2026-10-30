@@ -42,8 +42,9 @@ def validate(check: CheckContext, plan: dict[str, Any], path: str) -> None:
             resources = set()
             for pid in launch["phase"]:
                 current = work["phase"][pid]
-                for field in ("worker", "count", "placement"):
-                    check.require(not concrete_conflict(first["mapping"].get(field), current["mapping"].get(field)),
+                for field in ("worker", "worker_count", "placement"):
+                    a, b = first["mapping"].get(field), current["mapping"].get(field)
+                    check.require(not concrete_conflict(a, b),
                                  p, "sequential phases have incompatible worker mappings")
                 for name in pipe[pid].get("resource", {}):
                     check.require(name not in resources, p, f"shared-worker resource {name} is defined more than once")

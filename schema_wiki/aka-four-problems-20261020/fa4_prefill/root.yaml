@@ -2,7 +2,7 @@ meta_data:
   name: paged_causal_attention_prefill
   describe: Compute right-aligned causal GQA from FP8 queries and an HND paged KV cache into the supplied BF16 output.
   source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_prefill/aka_solution/solution.py::Model.forward
-  version: 2
+  version: 3
   dispatch:
     id: root
     when: |
@@ -97,7 +97,7 @@ design:
         Bk: {meaning: Keys per local iteration., binding: 'bind:design.work_schedule::Bk'}
         N: {meaning: Local KV iteration count., binding: 'bind:design.work_schedule::N'}
         sigma: {meaning: Local iteration to KV block map., binding: 'bind:design.work_schedule::sigma'}
-        Qc: {meaning: Packed query block., shape: [{row: M}, {channel: D}], dtype: fp8_e4m3fn, life: 'stored (b,m)'}
+        Qc: {meaning: Packed query block., shape: [{row: M}, {channel: D}], dtype: fp8_e4m3fn, retention: 'keep_value (b,m)'}
         Kc: {meaning: Page-backed key block., shape: [{key: Bk}, {channel: D}], dtype: fp8_e4m3fn}
         Vc: {meaning: Page-backed value block., shape: [{key: Bk}, {channel: D}], dtype: fp8_e4m3fn}
         S: {meaning: Raw score after a channel-half contraction., shape: [{row: M}, {key: Bk}], dtype: fp32}
@@ -116,9 +116,9 @@ design:
       symbol:
         tau: {meaning: Maximum lag in base-two score units., value: 4}
         offset: {meaning: Base-two shift before probability narrowing., value: 4}
-        mhat: {meaning: Retained raw-score maximum., shape: [{row: M}], dtype: fp32, life: 'carried (b,m); i=-1..N-1'}
-        ell: {meaning: Denominator from unrounded exponentials., shape: [{row: M}], dtype: fp32, life: 'carried (b,m); i=-1..N-1'}
-        Y: {meaning: Numerator from FP8 probabilities., shape: [{row: M}, {channel: D}], dtype: fp32, life: 'carried (b,m); i=-1..N-1'}
+        mhat: {meaning: Retained raw-score maximum., shape: [{row: M}], dtype: fp32, retention: 'carry_forward (b,m); i=-1..N-1'}
+        ell: {meaning: Denominator from unrounded exponentials., shape: [{row: M}], dtype: fp32, retention: 'carry_forward (b,m); i=-1..N-1'}
+        Y: {meaning: Numerator from FP8 probabilities., shape: [{row: M}, {channel: D}], dtype: fp32, retention: 'carry_forward (b,m); i=-1..N-1'}
         P: {meaning: Value-product operand., shape: [{row: M}, {key: Bk}], dtype: fp8_e4m3fn}
         Stats: {meaning: Previous maximum and guarded current base., shape: [{row: M}, {stat: 2}], dtype: fp32}
         Oblock: {meaning: Final output block., shape: [{row: M}, {channel: D}], dtype: bf16}
@@ -153,9 +153,9 @@ design:
             single_tile: {Oblock: {shape: [{row: M}, {channel: D}], dtype: bf16}}
         mapping:
           strategy: Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.
-          worker: {unit: CTA, count: 2}
-          placement: {unit: cluster, count: 1}
-          count: BatchCount*Crect
+          worker: {unit: CTA, unit_count: 2}
+          placement: {unit: cluster, unit_count: 1}
+          worker_count: BatchCount*Crect
           member: [{row: [0, 128]}, {row: [128, 256]}]
         schedule:
           strategy: For ordinal x in [0,Crect), map to m=2*x if x<ceil(Crect/2), otherwise m=2*(Crect-1-x)+1; use grid coordinates directly, with query clusters fastest.
@@ -170,27 +170,27 @@ design:
           later: [1, N]
           d: [0, 2]
         resource:
-          Query: {space: SMEM, shape: [{row: 128}, {channel: 128}], dtype: fp8_e4m3fn, slot: 2, view: {'Qc(d)': {slot: d}}}
-          KeyRing: {space: SMEM, shape: [{key: 64}, {channel: 128}], dtype: fp8_e4m3fn, slot: 4, view: {'Kc(i,d)': {slot: '(2*i+d)%4'}}}
-          ValueRing: {space: SMEM, shape: [{key: 128}, {channel: 64}], dtype: fp8_e4m3fn, slot: 4, view: {'Vc(i,d)': {slot: '(2*i+d)%4'}}}
+          Query: {space: SMEM, member_slot_shape: [{row: 128}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 2, view: {'Qc(d)': {slot_index: d}}}
+          KeyRing: {space: SMEM, member_slot_shape: [{key: 64}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Kc(i,d)': {slot_index: '(2*i+d)%4'}}}
+          ValueRing: {space: SMEM, member_slot_shape: [{key: 128}, {channel: 64}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Vc(i,d)': {slot_index: '(2*i+d)%4'}}}
           ScoreProbability:
             space: TMEM
-            shape: [{row: 128}, {column: 128}]
+            member_slot_shape: [{row: 128}, {column: 128}]
             dtype: fp32
-            slot: 2
+            slot_count: 2
             view:
-              S(i,d): {slot: i%2}
-              P(i): {slot: i%2, part: {column: [0, 32]}, dtype: fp8_e4m3fn}
-              Stats(i): {slot: i%2, part: {column: [32, 34]}}
-          Y: {space: TMEM, shape: [{row: 128}, {channel: D}], dtype: fp32}
-          Denominator: {space: SMEM, shape: [{row: 128}], dtype: fp32, view: {'FinalSum': {part: {row: [0, 128]}}}}
-          OutputStage: {space: SMEM, shape: [{row: 128}, {channel: 128}], dtype: bf16, view: {'Oblock(d)': {part: {channel: [0, 128]}}}}
-          OnlineState: {space: register, shape: [{row: 128}, {state: 2}], dtype: fp32, view: {'mhat(i)': {part: {state: [0, 1]}}, 'ell(i)': {part: {state: [1, 2]}}}}
-        lane:
+              S(i,d): {slot_index: i%2}
+              P(i): {slot_index: i%2, part: {column: [0, 32]}, dtype: fp8_e4m3fn}
+              Stats(i): {slot_index: i%2, part: {column: [32, 34]}}
+          Y: {slot_count: 1, space: TMEM, member_slot_shape: [{row: 128}, {channel: D}], dtype: fp32}
+          Denominator: {slot_count: 1, space: SMEM, member_slot_shape: [{row: 128}], dtype: fp32, view: {'FinalSum': {part: {row: [0, 128]}}}}
+          OutputStage: {slot_count: 1, space: SMEM, member_slot_shape: [{row: 128}, {channel: 128}], dtype: bf16, view: {'Oblock(d)': {part: {channel: [0, 128]}}}}
+          OnlineState: {slot_count: 1, space: register, member_slot_shape: [{row: 128}, {state: 2}], dtype: fp32, view: {'mhat(i)': {part: {state: [0, 1]}}, 'ell(i)': {part: {state: [1, 2]}}}}
+        role:
           LoadQK:
             info:
               member: warp[9:10]
-              mode: async
+              execution_mode: async
               register: 32
               verb:
                 load: Q holds this member's rows for the KV traversal; each K half uses one page per member. Both members contribute to pair-wide readiness.
@@ -198,23 +198,23 @@ design:
               steady:
               - {repeat: d, steady: ['load:Qc(d)']}
               - {repeat: 'i', steady: [{repeat: d, steady: ['load:Kc(i,d)']}]}
-            edge:
+            waits_for:
               reuse:
-                load:Kc(i+2,d): ['MMA/qk:S(i,d)']
+                load:Kc(i+2,d)@issue: ['MMA/qk:S(i,d)@done']
           LoadV:
             info:
               member: warp[10:11]
-              mode: async
+              execution_mode: async
               register: 32
               verb:
                 load: Each V half uses two page transfers per member; done covers both and contributes to pair-wide readiness independently of K.
             pipe: {repeat: i, steady: [{repeat: d, steady: ['load:Vc(i,d)']}]}
-            edge:
-              reuse: {'load:Vc(i+2,d)': ['MMA/pv:Y(i,d)']}
+            waits_for:
+              reuse: {'load:Vc(i+2,d)@issue': ['MMA/pv:Y(i,d)@done']}
           MMA:
             info:
               member: CTA[0].warp[8:9]
-              mode: ordered
+              execution_mode: async_ordered_completion
               register: 32
               verb:
                 qk: Issue one QK channel half; d=0 initializes S and d=1 completes it. Done returns K; last QK returns Q. Ordered pair products read earlier P before later QK overwrites its aliased slot.
@@ -227,15 +227,16 @@ design:
                 - {repeat: d, steady: ['qk:S(i,d)']}
                 - {repeat: d, steady: ['pv:Y(i-1,d)']}
               - {repeat: d, steady: ['pv:Y(last(i),d)']}
-            edge:
+            waits_for:
               data:
-                qk:S(i,d): ['LoadQK/load:Qc(d)', 'LoadQK/load:Kc(i,d)']
-                pv:Y(i,d): ['Softmax/publish:P(i)', 'LoadV/load:Vc(i,d)']
-                pv:Y(later,0): ['Correction/rescale:Y(later)']
+                qk:S(i,d)@issue: ['LoadQK/load:Qc(d)@done', 'LoadQK/load:Kc(i,d)@done']
+                pv:Y(i,d)@issue: ['Softmax/publish:P(i)@done', 'LoadV/load:Vc(i,d)@done']
+                pv:Y(later,0)@issue: ['Correction/rescale:Y(later)@done']
               reuse:
-                qk:S(i,0): ['Softmax/capture:S(i-2,1)']
+                qk:S(i,0)@issue: ['Softmax/capture:S(i-2,1)@done']
           Softmax:
             info:
+              execution_mode: serial
               member: warp[0:4]
               register: 256
               verb:
@@ -245,12 +246,13 @@ design:
               steady:
               - {repeat: 'i', steady: ['capture:S(i,1)', 'publish:Stats(i)', 'publish:P(i)', 'compute:ell(i)']}
               - publish:FinalSum
-            edge:
-              data: {'capture:S(i,1)': ['MMA/qk:S(i,1)']}
+            waits_for:
+              data: {'capture:S(i,1)@issue': ['MMA/qk:S(i,1)@done']}
               reuse:
-                publish:Stats(i+2): ['Correction/capture:Stats(i)']
+                publish:Stats(i+2)@issue: ['Correction/capture:Stats(i)@done']
           Correction:
             info:
+              execution_mode: serial
               member: warp[4:8]
               register: 160
               verb:
@@ -267,10 +269,10 @@ design:
               - store:Oblock(0)
               - stage:Oblock(1)
               - store:Oblock(1)
-            edge:
+            waits_for:
               data:
-                rescale:Y(later): ['MMA/pv:Y(later-1,1)']
-                stage:Oblock(0): ['MMA/pv:Y(last(i),1)']
+                rescale:Y(later)@issue: ['MMA/pv:Y(later-1,1)@done']
+                stage:Oblock(0)@issue: ['MMA/pv:Y(last(i),1)@done']
 realization:
   require:
   - {item: 'design.tile_pipeline::attention.MMA', choice: Use two-CTA tcgen05 MMA with cumulative completion and earlier-PV-read-before-later-QK-write ordering., reason: Pair-wide operand returns and aliased score/probability storage depend on these guarantees.}

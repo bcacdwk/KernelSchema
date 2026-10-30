@@ -2,7 +2,7 @@ meta_data:
   name: paged_sparse_grouped_query_attention
   describe: Compute selected paged attention, round the attention result, and apply an elementwise sigmoid gate.
   source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/qsa_prefill/aka_solution/solution.py::Model.forward
-  version: 4
+  version: 5
 contract:
   algorithm_requirement:
     constant:
@@ -87,8 +87,8 @@ design:
           Etile: {meaning: Union entries per iteration., binding: "bind:design.work_schedule::Etile"}
           Bk: {meaning: Token columns per iteration., binding: "bind:design.work_schedule::Bk"}
           M: {meaning: Packed query capacity., binding: "bind:design.work_schedule::M"}
-          Union: {meaning: Compacted request/group/membership entries., shape: [entry: MaxE, word: 4], dtype: int32, life: "stored (b)"}
-          Count: {meaning: Live union entry count., shape: [], dtype: int32, life: "stored (b)"}
+          Union: {meaning: Compacted request/group/membership entries., shape: [entry: MaxE, word: 4], dtype: int32, retention: "keep_value (b)"}
+          Count: {meaning: Live union entry count., shape: [], dtype: int32, retention: "keep_value (b)"}
           Qblk: {meaning: Packed query/head rows., shape: [packed_query: M, d: D], dtype: bf16}
           Kblk: {meaning: Gathered union keys., shape: [kv: Bk, d: D], dtype: bf16}
           Vblk: {meaning: Gathered union values., shape: [kv: Bk, d: D], dtype: bf16}
@@ -112,9 +112,9 @@ design:
           P: {meaning: Rounded numerator weights., shape: [packed_query: M, kv: Bk], dtype: bf16}
           P_A: {meaning: First column half of P., shape: [packed_query: M, kv: "Bk/2"], dtype: bf16}
           P_B: {meaning: Second column half of P., shape: [packed_query: M, kv: "Bk/2"], dtype: bf16}
-          m: {meaning: Common reference replicated by the two halves., shape: [packed_query: M], dtype: fp32, life: "carried (b,v); i=-1..N(b)-1"}
-          L: {meaning: Separate FP32 half-denominators., shape: [half: 2, packed_query: M], dtype: fp32, life: "carried (b,v); i=-1..N(b)-1"}
-          Y: {meaning: Unnormalized numerator., shape: [packed_query: M, d: D], dtype: fp32, life: "carried (b,v); i=0..N(b)-1"}
+          m: {meaning: Common reference replicated by the two halves., shape: [packed_query: M], dtype: fp32, retention: "carry_forward (b,v); i=-1..N(b)-1"}
+          L: {meaning: Separate FP32 half-denominators., shape: [half: 2, packed_query: M], dtype: fp32, retention: "carry_forward (b,v); i=-1..N(b)-1"}
+          Y: {meaning: Unnormalized numerator., shape: [packed_query: M, d: D], dtype: fp32, retention: "carry_forward (b,v); i=0..N(b)-1"}
         arithmetic:
           approx: "exp2_fast uses approximate FP32 exp2 on the shown arguments; unknown: <numerical-bound@pending:qsa/fast-exp2>."
       - step: gate
@@ -158,7 +158,7 @@ design:
               token_to_req: {shape: [row: Br], dtype: int32}
               block_table: {shape: [request: 1, logical_page: TableWidth], dtype: int32}
           target: {single_tile: {Union: {shape: [entry: MaxE, word: 4], dtype: int32}, Count: {shape: [], dtype: int32}}}
-        mapping: {worker: {unit: CTA, count: 1}, count: worktile_count}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: worktile_count}
         schedule:
           worktile_order: [{by: row, direction: ascending}]
           worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
@@ -177,7 +177,7 @@ design:
               Kblk: {shape: [kv: Bk, d: D], dtype: bf16, direction: ascending}
               Vblk: {shape: [kv: Bk, d: D], dtype: bf16, direction: ascending}
           target: {single_tile: {O: {shape: [row: Br, head: GroupSize, d: D], dtype: bf16}}}
-        mapping: {strategy: SMCount is queried from device properties., worker: {unit: CTA, count: 1}, count: "min(SMCount,worktile_count)"}
+        mapping: {strategy: SMCount is queried from device properties., worker: {unit: CTA, unit_count: 1}, worker_count: "min(SMCount,worktile_count)"}
         schedule:
           strategy: Cached device ticket and host base start at zero; each serialized eager call consumes worktile_count+worker_count tickets and advances the host base by that amount, using signed-int32 wrap-safe subtraction without a counter reset.
           worktile_order: [{by: row, direction: descending}, {by: kv_head, direction: ascending}]
@@ -189,13 +189,14 @@ design:
     phase:
       preprocess:
         resource:
-          Hash: {space: SMEM, shape: [word: 3, hash_slot: 16384], dtype: int32}
-          RowHeader: {space: SMEM, shape: [row: Br, word: 2], dtype: int32}
-          PageTable: {space: SMEM, shape: [logical_page: TableWidth], dtype: int32}
-          CompactCount: {space: SMEM, shape: [], dtype: int32}
-        lane:
+          Hash: {slot_count: 1, space: SMEM, member_slot_shape: [word: 3, hash_slot: 16384], dtype: int32}
+          RowHeader: {slot_count: 1, space: SMEM, member_slot_shape: [row: Br, word: 2], dtype: int32}
+          PageTable: {slot_count: 1, space: SMEM, member_slot_shape: [logical_page: TableWidth], dtype: int32}
+          CompactCount: {slot_count: 1, space: SMEM, member_slot_shape: [], dtype: int32}
+        role:
           Main:
             info:
+              execution_mode: serial
               member: "warp[0:16]"
               verb:
                 build: >
@@ -207,25 +208,27 @@ design:
       attention:
         domain: {t: worktile, i: [0, "N(b)"], n: {flatten: [t, i]}}
         resource:
-          Ticket: {space: SMEM, shape: [], dtype: int32}
-          Qblk: {space: SMEM, shape: [packed_query: M, d: D], dtype: bf16}
-          KeyRing: {space: SMEM, shape: [kv: Bk, d: D], dtype: bf16, slot: 2, view: {"Kblk(n)": {slot: "n%2"}}}
-          ValueRing: {space: SMEM, shape: [kv: Bk, d: D], dtype: bf16, slot: 2, view: {"Vblk(n)": {slot: "n%2"}}}
+          Ticket: {slot_count: 1, space: SMEM, member_slot_shape: [], dtype: int32}
+          Qblk: {slot_count: 1, space: SMEM, member_slot_shape: [packed_query: M, d: D], dtype: bf16}
+          KeyRing: {space: SMEM, member_slot_shape: [kv: Bk, d: D], dtype: bf16, slot_count: 2, view: {"Kblk(n)": {slot_index: "n%2"}}}
+          ValueRing: {space: SMEM, member_slot_shape: [kv: Bk, d: D], dtype: bf16, slot_count: 2, view: {"Vblk(n)": {slot_index: "n%2"}}}
           Accumulator:
+            slot_count: 1
             space: TMEM
-            shape: [row: M, column: "<capacity@pending:CuTe/get_max_tmem_alloc_cols(sm_100)>"]
+            member_slot_shape: [row: M, column: "<capacity@pending:CuTe/get_max_tmem_alloc_cols(sm_100)>"]
             dtype: fp32
             view:
               "S(n)": {part: {column: ["Bk*(n%3)", "Bk*(n%3+1)"]}}
               "P(n)": {part: {column: ["Bk*(n%3)", "Bk*(n%3)+Bk/2"]}, dtype: bf16}
               Y: {part: {column: ["3*Bk", "3*Bk+D"]}}
-          HalfMax: {space: SMEM, shape: [half: 2, packed_query: M], dtype: fp32}
-          HalfSum: {space: SMEM, shape: [half: 2, packed_query: M], dtype: fp32}
-          Reference: {space: register, shape: [half: 2, packed_query: M], dtype: fp32, view: {m_A: {part: {half: [0, 1]}}, m_B: {part: {half: [1, 2]}}}}
-          L: {space: register, shape: [half: 2, packed_query: M], dtype: fp32}
-        lane:
+          HalfMax: {slot_count: 1, space: SMEM, member_slot_shape: [half: 2, packed_query: M], dtype: fp32}
+          HalfSum: {slot_count: 1, space: SMEM, member_slot_shape: [half: 2, packed_query: M], dtype: fp32}
+          Reference: {slot_count: 1, space: register, member_slot_shape: [half: 2, packed_query: M], dtype: fp32, view: {m_A: {part: {half: [0, 1]}}, m_B: {part: {half: [1, 2]}}}}
+          L: {slot_count: 1, space: register, member_slot_shape: [half: 2, packed_query: M], dtype: fp32}
+        role:
           Scheduler:
             info:
+              execution_mode: serial
               member: "warp[11:12]"
               verb:
                 publish: Claim and post a ticket; done means readable. Before claiming the following ticket, await all eleven consumer warps' copies and acknowledgements of the current ticket. Acknowledgement permits one-worktile lookahead while that work is still executing. Ticket0 is the first ticket; Next(t) includes the terminal ticket, whose acknowledgement is required before exit.
@@ -233,35 +236,35 @@ design:
           GatherK:
             info:
               member: "warp[9:10]"
-              mode: async
+              execution_mode: async
               verb:
-                accept: {mode: sync, meaning: "Copy and acknowledge the published ticket; terminal tickets start no work."}
+                accept: {execution_mode: serial, meaning: "Copy and acknowledge the published ticket; terminal tickets start no work."}
                 load: >
                   Prime address lookahead per worktile, then resolve Union two tiles ahead and block_table one ahead,
                   clamped to that worktile's last tile. Resolve one base per union-entry position and share it within
                   the gather warp across that entry's token/channel copies; issue the current paged copy into KeyRing.
                   load:Kblk(n) becomes done only after issuing tile n+1 and publishing n's completed copy.
                   Carry delayed publication across worktiles; drain publishes the final outstanding tile.
-                drain: {mode: sync, meaning: Finish and publish any final gather after the terminal ticket.}
+                drain: {execution_mode: serial, meaning: Finish and publish any final gather after the terminal ticket.}
             pipe: {repeat: t, prologue: ["accept:Ticket0"], steady: [{repeat: "n[t]", steady: ["load:Kblk(n)"]}, "accept:Next(t)"], epilogue: ["drain:KeyRing"]}
-            edge: {reuse: {"load:Kblk(n+2)": ["MMA/mma:Qblk(t)@Kblk(n)"]}}
+            waits_for: {reuse: {"load:Kblk(n+2)@issue": ["MMA/mma:Qblk(t)@Kblk(n)@done"]}}
           GatherV:
             info:
               member: "warp[10:11]"
-              mode: async
+              execution_mode: async
               verb:
-                accept: {mode: sync, meaning: "Copy and acknowledge the published ticket; terminal tickets start no work."}
+                accept: {execution_mode: serial, meaning: "Copy and acknowledge the published ticket; terminal tickets start no work."}
                 load: Follow GatherK's address lookahead and delayed publication for ValueRing, adding the V base delta and using the value-product orientation.
-                drain: {mode: sync, meaning: Finish and publish any final gather after the terminal ticket.}
+                drain: {execution_mode: serial, meaning: Finish and publish any final gather after the terminal ticket.}
             pipe: {repeat: t, prologue: ["accept:Ticket0"], steady: [{repeat: "n[t]", steady: ["load:Vblk(n)"]}, "accept:Next(t)"], epilogue: ["drain:ValueRing"]}
-            edge: {reuse: {"load:Vblk(n+2)": ["MMA/mma:P(n)@Vblk(n)"]}}
+            waits_for: {reuse: {"load:Vblk(n+2)@issue": ["MMA/mma:P(n)@Vblk(n)@done"]}}
           MMA:
             info:
               member: "warp[8:9]"
-              mode: ordered
+              execution_mode: async_ordered_completion
               verb:
-                accept: {mode: sync, meaning: "Copy and acknowledge the published ticket; terminal tickets start no work."}
-                wait: {mode: sync, meaning: Wait for the initial Q publication even when Ticket0 is terminal.}
+                accept: {execution_mode: serial, meaning: "Copy and acknowledge the published ticket; terminal tickets start no work."}
+                wait: {execution_mode: serial, meaning: Wait for the initial Q publication even when Ticket0 is terminal.}
                 mma: QK initializes S and each worktile's first PV initializes Y. Cumulative completion includes operand reads; PV(n) reads P before a later QK overwrites its aliased S/P stage.
             pipe:
               repeat: t
@@ -272,11 +275,12 @@ design:
                   steady: ["mma:Qblk(t)@Kblk(n+2)", "mma:P(n)@Vblk(n)"]
                   epilogue: ["mma:P(n[t,last(i)-1])@Vblk(n[t,last(i)-1])", "mma:P(n[t,last(i)])@Vblk(n[t,last(i)])"]
                 - "accept:Next(t)"
-            edge:
-              data: {"mma:Qblk(t)@Kblk(n[t,i])": ["SoftmaxA/publish:Qnext(t-1)"], "mma:P(n)@Vblk(n)": ["SoftmaxA/publish:P_A(n)", "SoftmaxB/publish:P_B(n)"]}
-              reuse: {"mma:P(n[t+1,0])@Vblk(n[t+1,0])": ["SoftmaxA/drain:Y_A(t)", "SoftmaxB/drain:Y_B(t)"]}
+            waits_for:
+              data: {"mma:Qblk(t)@Kblk(n[t,i])@issue": ["SoftmaxA/publish:Qnext(t-1)@done"], "mma:P(n)@Vblk(n)@issue": ["SoftmaxA/publish:P_A(n)@done", "SoftmaxB/publish:P_B(n)@done"]}
+              reuse: {"mma:P(n[t+1,0])@Vblk(n[t+1,0])@issue": ["SoftmaxA/drain:Y_A(t)@done", "SoftmaxB/drain:Y_B(t)@done"]}
           SoftmaxA:
             info:
+              execution_mode: serial
               member: "warp[0:4]"
               verb:
                 accept: Copy and acknowledge the published ticket; terminal tickets start no work.
@@ -289,7 +293,7 @@ design:
                   Prime membership per worktile; retain the current packed mask through weight formation while prefetching raw words for min(i+1,N(b)-1) in registers. Count masks dead entries when packing the next mask.
                   HalfMax overwrite safety remains <sync-proof@pending:qsa/HalfMax-reuse>; no extra read-complete barrier is assumed.
                   Qnext completes the issued Q refill and publishes readiness after this group's final Y read; terminal Next(t) is a no-op.
-                prefetch: {mode: async, meaning: Issue the next valid ticket's Q gather into Qblk after the current final QK has retired.}
+                prefetch: {execution_mode: async, meaning: Issue the next valid ticket's Q gather into Qblk after the current final QK has retired.}
                 combine: Exchange final L halves through HalfSum with a 256-thread rendezvous and capture the normalization factor.
                 drain: Read Y[:,0:D/2] in 32-column pieces, gate/store the first pieces and retain the last in registers; done releases this half of Y before its final gate/store.
                 store: Gate and directly store the retained final output piece on real rows.
@@ -304,10 +308,11 @@ design:
                 - "drain:Y_A(t)"
                 - "publish:Qnext(t)"
                 - "store:O_A_tail(t)"
-            edge:
-              data: {"publish:HalfMax_A(n)": ["MMA/mma:Qblk(t)@Kblk(n)"], "publish:P_A(n)": ["SoftmaxB/publish:HalfMax_B(n)"], "drain:Y_A(t)": ["MMA/mma:P(n[t,last(i)])@Vblk(n[t,last(i)])"], "publish:Qnext(t)": ["prefetch:Qnext(t)"]}
+            waits_for:
+              data: {"publish:HalfMax_A(n)@issue": ["MMA/mma:Qblk(t)@Kblk(n)@done"], "publish:P_A(n)@issue": ["SoftmaxB/publish:HalfMax_B(n)@done"], "drain:Y_A(t)@issue": ["MMA/mma:P(n[t,last(i)])@Vblk(n[t,last(i)])@done"], "publish:Qnext(t)@issue": ["prefetch:Qnext(t)@done"]}
           SoftmaxB:
             info:
+              execution_mode: serial
               member: "warp[4:8]"
               verb:
                 accept: Copy and acknowledge the published ticket; terminal tickets start no work.
@@ -316,8 +321,8 @@ design:
                 drain: Follow A's drain for Y[:,D/2:D], releasing this half before the final gate/store.
                 store: Gate and directly store the retained final output piece on real rows.
             pipe: {repeat: t, prologue: ["accept:Ticket0"], steady: [{repeat: "n[t]", steady: ["publish:HalfMax_B(n)", "publish:P_B(n)"]}, "accept:Next(t)", "combine:Normalization_B(t)", "drain:Y_B(t)", "store:O_B_tail(t)"]}
-            edge:
-              data: {"publish:HalfMax_B(n)": ["MMA/mma:Qblk(t)@Kblk(n)"], "publish:P_B(n)": ["SoftmaxA/publish:HalfMax_A(n)"], "drain:Y_B(t)": ["MMA/mma:P(n[t,last(i)])@Vblk(n[t,last(i)])"]}
+            waits_for:
+              data: {"publish:HalfMax_B(n)@issue": ["MMA/mma:Qblk(t)@Kblk(n)@done"], "publish:P_B(n)@issue": ["SoftmaxA/publish:HalfMax_A(n)@done"], "drain:Y_B(t)@issue": ["MMA/mma:P(n[t,last(i)])@Vblk(n[t,last(i)])@done"]}
 realization:
   require:
     - {item: design.tile_pipeline::attention.MMA, choice: "Single-CTA tcgen05.mma with TMEM accumulators, TMEM P for PV and cumulative completion commits.", reason: S/P alias reuse and Y correction depend on direct TMEM handoff and operand-read completion.}

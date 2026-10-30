@@ -36,10 +36,11 @@ def properties(check: CheckContext, plan: dict[str, Any], contract_objects: dict
             descriptors.extend((view, field_path(f"{path}.design.tile_pipeline.phase.{pid}.resource.{name}.view", value))
                                for value, view in resource.get("view", {}).items())
     for descriptor, p in descriptors:
-        shape = descriptor.get("shape")
+        shape_field = "member_slot_shape" if "member_slot_shape" in descriptor else "shape"
+        shape = descriptor.get(shape_field)
         if isinstance(shape, list):
             axes = [next(iter(axis)) for axis in shape]
-            check.require(len(axes) == len(set(axes)), p + ".shape", "axis names must be unambiguous within one shape")
+            check.require(len(axes) == len(set(axes)), p + "." + shape_field, "axis names must be unambiguous within one shape")
         # Only explicit Contract property references have a fully declared
         # target table. Do not infer definitions from mathematical prose.
         for attribute in ("shape", "dtype"):

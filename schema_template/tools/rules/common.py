@@ -5,6 +5,8 @@ from typing import Any
 
 from ..diagnostics import Diagnostic
 
+EXECUTION_MODES = ("serial", "async", "async_ordered_completion")
+
 
 class CheckContext:
     def __init__(self) -> None:

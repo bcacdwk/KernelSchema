@@ -5,11 +5,11 @@ from ..diagnostics import field_path
 from .common import CheckContext, as_list
 
 
-def validate(check: CheckContext, task: dict) -> None:
+def validate(check: CheckContext, task: dict, *, allow_missing_hardware=False) -> None:
     """Conditions that keep identities, references and handoffs readable."""
     root = task["root"]
     algorithm = root["contract"]["algorithm_requirement"]
-    hardware = root["contract"]["hardware_specification"]
+    hardware = None if allow_missing_hardware else root["contract"]["hardware_specification"]
     outputs, tolerance = algorithm["output"], algorithm["golden_reference"]["tolerance"]
     for name in outputs.keys() - tolerance.keys():
         check.require(False, "root.contract.algorithm_requirement.golden_reference.tolerance." + name,
@@ -17,11 +17,12 @@ def validate(check: CheckContext, task: dict) -> None:
     for name in tolerance.keys() - outputs.keys():
         check.require(False, "root.contract.algorithm_requirement.golden_reference.tolerance." + name,
                      "tolerance names an undeclared output; correct the key, do not invent an output")
-    stack, programming = hardware["stack"], hardware["wiki"]["programming"]
-    if ("template" in stack) != ("template" in programming):
-        owner = "wiki.programming" if "template" in stack else "stack"
-        check.require(False, "root.contract.hardware_specification." + owner + ".template",
-                     "stack.template and wiki.programming.template are required together", missing=True)
+    if hardware is not None:
+        stack, programming = hardware["stack"], hardware["wiki"]["programming"]
+        if ("template" in stack) != ("template" in programming):
+            owner = "wiki.programming" if "template" in stack else "stack"
+            check.require(False, "root.contract.hardware_specification." + owner + ".template",
+                         "stack.template and wiki.programming.template are required together", missing=True)
     for name, plan in task.items():
         meta = plan["meta_data"]
         dispatch = meta.get("dispatch", {})
@@ -50,10 +51,10 @@ def validate(check: CheckContext, task: dict) -> None:
             for symbol, value in step.get("symbol", {}).items():
                 p = f"{name}.design.math_reshape.rewrite[{i}].symbol.{symbol}"
                 check.require(not ("binding" in value and "value" in value), p, "binding and value cannot both define the same symbol")
-                if "life" in value:
+                if "retention" in value:
                     for attr in ("shape", "dtype"):
                         check.require(attr in value, p + "." + attr,
-                                     "carried/stored values need shape and dtype for downstream use", missing=True)
+                                     "carry_forward/keep_value values need shape and dtype for downstream use", missing=True)
         work = plan["design"]["work_schedule"]
         pipe = plan["design"]["tile_pipeline"]["phase"]
         wp = name + ".design.work_schedule"
@@ -80,11 +81,11 @@ def validate(check: CheckContext, task: dict) -> None:
             p = wp + ".phase." + pid
             dec, mapping, schedule = phase["decomposition"], phase["mapping"], phase["schedule"]
             for field in ("worker", "placement"):
-                if field in mapping:
+                if field in mapping and hardware is not None:
                     check.require(mapping[field]["unit"] in hardware["execution"], p + ".mapping." + field + ".unit",
                                  f"{field} unit is not registered in shared hardware execution")
-            if "member" in mapping and type(mapping["worker"]["count"]) is int:
-                check.require(len(mapping["member"]) == mapping["worker"]["count"], p + ".mapping.member", "member entries must match worker.count")
+            if "member" in mapping and type(mapping["worker"]["unit_count"]) is int:
+                check.require(len(mapping["member"]) == mapping["worker"]["unit_count"], p + ".mapping.member", "member entries must match worker.unit_count")
             for value, block in dec.get("worktile", {}).get("invariant", {}).items():
                 if "offset" in block:
                     check.require(len(block["offset"]) == len(block["shape"]), p + ".decomposition.worktile.invariant." + value + ".offset", "offset length must match shape rank")
@@ -107,12 +108,12 @@ def validate(check: CheckContext, task: dict) -> None:
                              "built-in launch events cannot also name a local milestone")
             for key, resource in phase.get("resource", {}).items():
                 rp = p + ".resource." + key
-                count = resource.get("slot", 1)
+                count = resource["slot_count"]
                 if type(count) is int and count > 1:
                     check.require("view" in resource, rp + ".view", "multi-slot storage requires value-to-slot views", missing=True)
                 for value, view in resource.get("view", {}).items():
                     vp = field_path(rp + ".view", value)
                     if type(count) is int and count > 1:
-                        check.require("slot" in view, vp + ".slot", "multi-slot views require a slot mapping", missing=True)
-                    if type(count) is int and type(view.get("slot")) is int:
-                        check.require(view["slot"] < count, vp + ".slot", "view slot exceeds resource slot count")
+                        check.require("slot_index" in view, vp + ".slot_index", "multi-slot views require a slot_index", missing=True)
+                    if type(count) is int and type(view.get("slot_index")) is int:
+                        check.require(view["slot_index"] < count, vp + ".slot_index", "view slot_index exceeds resource slot_count")

@@ -17,7 +17,7 @@ MATH = ("root", "design", "math_reshape")
 WORK = ("root", "design", "work_schedule")
 PHASE = WORK + ("phase", "copy")
 PIPE = ("root", "design", "tile_pipeline", "phase", "copy")
-LANE = PIPE + ("lane", "Main")
+ROLE = PIPE + ("role", "Main")
 
 
 def at(data, path):

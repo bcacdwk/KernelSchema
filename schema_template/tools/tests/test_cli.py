@@ -12,7 +12,7 @@ import subprocess
 import sys
 import check_yaml
 from .. import schema
-from .support import (TaskCase, LANE, PHASE, TEMPLATE_ROOT, add_child, drop, put)
+from .support import (TaskCase, ROLE, PHASE, TEMPLATE_ROOT, add_child, drop, put)
 
 
 class CliTests(TaskCase):
@@ -96,16 +96,16 @@ class CliTests(TaskCase):
 
     def test_author_diagnostics_keep_positions_and_explain_conditions(self):
         data = deepcopy(self.base)
-        put(data, LANE + ("info", "mode"), "parallel")
+        put(data, ROLE + ("info", "execution_mode"), "parallel")
         self.write_task(data)
         source = (self.directory / "root.yaml").read_text()
         with self.assertRaises(schema.SchemaError) as caught:
             schema.validate_file(self.directory / "root.yaml")
         message = str(caught.exception)
         self.assertIn("root.yaml:1:" + str(source.index('"parallel"') + 1), message)
-        self.assertIn("expected one of 'sync', 'async', 'ordered'", message)
+        self.assertIn("expected one of 'serial', 'async', 'async_ordered_completion'", message)
         self.assertIn('Actual: "parallel"', message)
-        drop(data, LANE + ("info", "mode"))
+        put(data, ROLE + ("info", "execution_mode"), "serial")
         drop(data, PHASE + ("schedule", "worker_assignment", "preassigned"))
         self.write_task(data)
         with self.assertRaises(schema.SchemaError) as caught:
@@ -117,7 +117,7 @@ class CliTests(TaskCase):
 
     def test_relation_diagnostics_keep_indices_and_shared_contract_source(self):
         data = deepcopy(self.base)
-        put(data, PHASE + ("mapping", "worker", "count"), 2)
+        put(data, PHASE + ("mapping", "worker", "unit_count"), 2)
         put(data, PHASE + ("mapping", "member"), [{"x": [0, 2]}, {"x": [4, 2]}])
         self.assert_task_invalid(data, "mapping.member[1].x", "Actual: [4,2]")
         data = deepcopy(self.base)

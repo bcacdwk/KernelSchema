@@ -9,10 +9,10 @@ from .common import CheckContext
 from .structure import validate_task as validate_structure
 
 
-def validate_relations(task: dict[str, Any]) -> list[Diagnostic]:
+def validate_relations(task: dict[str, Any], *, allow_missing_hardware=False) -> list[Diagnostic]:
     """Call after field shapes pass; check declared relationships, not prose meaning."""
     check, parents = CheckContext(), {}
-    declarations.validate(check, task)
+    declarations.validate(check, task, allow_missing_hardware=allow_missing_hardware)
     if check.errors:
         return check.errors
     for name, plan in task.items():
@@ -23,7 +23,7 @@ def validate_relations(task: dict[str, Any]) -> list[Diagnostic]:
     check.acyclic(parents, "meta_data.dispatch.parent",
                  {name: name + ".meta_data.dispatch.parent" for name in parents})
     contract = task["root"]["contract"]["algorithm_requirement"]
-    hardware = task["root"]["contract"]["hardware_specification"]
+    hardware = None if allow_missing_hardware else task["root"]["contract"]["hardware_specification"]
     contract_objects = symbols.contract(check, contract, "root.contract.algorithm_requirement")
     for name, plan in task.items():
         symbols.properties(check, plan, contract_objects, name)

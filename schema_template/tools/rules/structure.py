@@ -4,11 +4,13 @@ from __future__ import annotations
 from functools import partial
 import re
 
+from .common import EXECUTION_MODES
+from .hardware import hardware_rule
 from .values import (
     attribute, binding, constant, enum, identifier, input_range, integer,
     known_text, literal, named, node_id, number, one_or_many, pair, predicate,
     record, reference, reference_list, reject, repository, scalar, sequence,
-    shape, source, text, wiki,
+    shape, source, text,
 )
 
 # Contract: schema_docs/1 and 2.
@@ -32,28 +34,18 @@ algorithm = record(
      "compute": sequence(compute), "golden_reference": golden_reference},
     {"constant": named(record({"value": constant, "meaning": text}))},
 )
-stack = record({"language": known_text, "toolchain": known_text}, {"template": known_text})
-programming = record({"language": wiki}, {"template": wiki, "virtual_isa": wiki, "machine_isa": wiki})
-wiki_entries = record({
-    "hardware": wiki, "microbench": wiki, "profile": wiki,
-    "sota": record({"kernel": wiki, "schema": wiki}),
-    "programming": programming,
-})
-hardware = record({
-    "device": known_text, "arch": known_text,
-    "execution": named(known_text, key=text), "feature": named(known_text, key=text),
-    "stack": stack, "wiki": wiki_entries,
-})
+hardware = hardware_rule()
+incomplete_hardware = hardware_rule(allow_missing=True)
 
 # Mathematical definitions and their ledger: schema_docs/3.
-life = predicate(
-    lambda value: isinstance(value, str) and re.fullmatch(r"(?:carried|stored)\s+\S.*", value),
-    "carried or stored followed by the logical instance",
+retention = predicate(
+    lambda value: isinstance(value, str) and re.fullmatch(r"(?:carry_forward|keep_value)\s+\S.*", value),
+    "carry_forward or keep_value followed by the logical instance",
 )
 math_symbol = record(
     {"meaning": text},
     {"shape": attribute("shape", context="math"), "dtype": attribute("dtype", context="math"),
-     "binding": binding, "value": literal, "life": life},
+     "binding": binding, "value": literal, "retention": retention},
 )
 arithmetic = record({}, {"approx": text, "accumulate": text})
 rewrite = record({"step": text, "name": text, "math": text},
@@ -64,7 +56,7 @@ ledger = record({"baseline": text}, {resource: sequence(ledger_entry) for resour
 math_reshape = record({"thesis": text, "rewrite": sequence(rewrite)}, {"ledger": ledger})
 
 # Work decomposition, assignment and handoff: schema_docs/4.
-unit_count = record({"unit": text, "count": integer(1)})
+unit_count = record({"unit": text, "unit_count": integer(1)})
 data_block = record({"shape": shape, "dtype": attribute("dtype")})
 region = pair(integer(0))
 direction = enum("ascending", "descending")
@@ -79,7 +71,7 @@ tile_reduction = record({
 target = record({"single_tile": named(data_block)}, {"tile_reduction": tile_reduction})
 decomposition = record({"partition": named(partition_dimension, empty=True), "target": target},
                        {"strategy": text, "worktile": worktile})
-mapping = record({"worker": unit_count, "count": integer(1)},
+mapping = record({"worker": unit_count, "worker_count": integer(1)},
                  {"strategy": text, "placement": unit_count, "member": sequence(named(region))})
 preassigned = record({"start": integer(0)}, {"step": integer(1), "count": integer(0)})
 
@@ -152,10 +144,10 @@ def pipe(value, path, errors):
     record({}, {"repeat": repeat, "prologue": sequence(action),
                 "steady": sequence(action), "epilogue": sequence(action)})(value, path, errors)
     if isinstance(value, dict) and value and not any(value.get(r) for r in ("prologue", "steady", "epilogue")):
-        reject(errors, path, "a lane needs actions; repeat alone does not describe any work")
+        reject(errors, path, "a role needs actions; repeat alone does not describe any work")
 
 
-mode = enum("sync", "async", "ordered")
+execution_mode = enum(*EXECUTION_MODES)
 member = predicate(
     lambda value: isinstance(value, str) and re.fullmatch(
         r"[^\[\]\r\n]+\[\d+(?::\d+)?\](?:\.[^\[\]\r\n]+\[\d+(?::\d+)?\])*", value),
@@ -166,24 +158,24 @@ value_pattern = predicate(
         r"[A-Za-z_][A-Za-z0-9_]*(?:\([^\r\n]+\))?", value),
     "a value name, optionally with indices",
 )
-view = record({}, {"slot": integer(0), "part": named(region), "dtype": attribute("dtype")}, empty=True)
+view = record({}, {"slot_index": integer(0), "part": named(region), "dtype": attribute("dtype")}, empty=True)
 resource = record(
-    {"space": text, "shape": shape, "dtype": attribute("dtype")},
-    {"slot": integer(1), "member": one_or_many(integer(0, expression=False), unique=True),
+    {"space": text, "member_slot_shape": shape, "dtype": attribute("dtype"), "slot_count": integer(1)},
+    {"member": one_or_many(integer(0, expression=False), unique=True),
      "view": named(view, key=value_pattern)},
 )
-verb_detail = record({"meaning": text, "mode": mode})
+verb_detail = record({"meaning": text, "execution_mode": execution_mode})
 
 
 def verb_contract(value, path, errors):
     (text if isinstance(value, str) else verb_detail)(value, path, errors)
 
 
-lane_info = record({"member": member},
-                   {"mode": mode, "register": integer(1, expression=False), "verb": named(verb_contract)})
+role_info = record({"member": member, "execution_mode": execution_mode},
+                   {"register": integer(1, expression=False), "verb": named(verb_contract)})
 edges = record({}, {kind: named(sequence(text), key=text) for kind in ("data", "reuse", "sync")})
-lane = record({"info": lane_info, "pipe": pipe}, {"edge": edges})
-pipeline_phase = record({"lane": named(lane)},
+role = record({"info": role_info, "pipe": pipe}, {"waits_for": edges})
+pipeline_phase = record({"role": named(role)},
                         {"domain": named(domain), "resource": named(resource),
                          "milestone": named(sequence(text), key=value_pattern)})
 tile_pipeline = record({"thesis": text, "phase": named(pipeline_phase)})
@@ -196,7 +188,7 @@ realization = record({}, {"require": sequence(choice), "prefer": sequence(prefer
 
 
 # Task and plan identity: schema_docs/0.
-def validate_task(task):
+def validate_task(task, *, allow_missing_hardware=False):
     errors = []
     for name, plan in task.items():
         node_id(name, name, errors)
@@ -208,6 +200,9 @@ def validate_task(task):
         required = {"meta_data": metadata, "design": record({"math_reshape": math_reshape,
                                                              "work_schedule": work_schedule, "tile_pipeline": tile_pipeline})}
         if name == "root":
-            required["contract"] = record({"algorithm_requirement": algorithm, "hardware_specification": hardware})
+            required["contract"] = (
+                record({"algorithm_requirement": algorithm}, {"hardware_specification": incomplete_hardware})
+                if allow_missing_hardware else
+                record({"algorithm_requirement": algorithm, "hardware_specification": hardware}))
         record(required, {"realization": realization})(plan, name, errors)
     return errors

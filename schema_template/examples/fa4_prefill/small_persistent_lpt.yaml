@@ -2,7 +2,7 @@ meta_data:
   name: paged_causal_attention_prefill
   describe: Compute right-aligned causal GQA from FP8 queries and an HND paged KV cache into the supplied BF16 output.
   source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_prefill/aka_solution/solution.py::Model.forward
-  version: 3
+  version: 5
   dispatch:
     id: small_persistent_lpt
     parent: packed_persistent
@@ -32,7 +32,7 @@ design:
         Bk: {meaning: Keys per local iteration., binding: 'bind:design.work_schedule::Bk'}
         N: {meaning: Local KV iteration count., binding: 'bind:design.work_schedule::N'}
         sigma: {meaning: Local iteration to KV block map., binding: 'bind:design.work_schedule::sigma'}
-        Qc: {meaning: Packed query block., shape: [{row: M}, {channel: D}], dtype: fp8_e4m3fn, life: 'stored (b,m)'}
+        Qc: {meaning: Packed query block., shape: [{row: M}, {channel: D}], dtype: fp8_e4m3fn, retention: 'keep_value (b,m)'}
         Kc: {meaning: Page-backed key block., shape: [{key: Bk}, {channel: D}], dtype: fp8_e4m3fn}
         Vc: {meaning: Page-backed value block., shape: [{key: Bk}, {channel: D}], dtype: fp8_e4m3fn}
         S: {meaning: Raw score after a channel-half contraction., shape: [{row: M}, {key: Bk}], dtype: fp32}
@@ -51,9 +51,9 @@ design:
       symbol:
         tau: {meaning: Maximum lag in base-two score units., value: 4}
         offset: {meaning: Base-two shift before probability narrowing., value: 4}
-        mhat: {meaning: Retained raw-score maximum., shape: [{row: M}], dtype: fp32, life: 'carried (b,m); i=-1..N-1'}
-        ell: {meaning: Denominator from unrounded exponentials., shape: [{row: M}], dtype: fp32, life: 'carried (b,m); i=-1..N-1'}
-        Y: {meaning: Numerator from FP8 probabilities., shape: [{row: M}, {channel: D}], dtype: fp32, life: 'carried (b,m); i=-1..N-1'}
+        mhat: {meaning: Retained raw-score maximum., shape: [{row: M}], dtype: fp32, retention: 'carry_forward (b,m); i=-1..N-1'}
+        ell: {meaning: Denominator from unrounded exponentials., shape: [{row: M}], dtype: fp32, retention: 'carry_forward (b,m); i=-1..N-1'}
+        Y: {meaning: Numerator from FP8 probabilities., shape: [{row: M}, {channel: D}], dtype: fp32, retention: 'carry_forward (b,m); i=-1..N-1'}
         P: {meaning: Value-product operand., shape: [{row: M}, {key: Bk}], dtype: fp8_e4m3fn}
         Stats: {meaning: Previous maximum and guarded current base., shape: [{row: M}, {stat: 2}], dtype: fp32}
         Oblock: {meaning: Final output block., shape: [{row: M}, {channel: D}], dtype: bf16}
@@ -88,9 +88,9 @@ design:
             single_tile: {Oblock: {shape: [{row: M}, {channel: D}], dtype: bf16}}
         mapping:
           strategy: SMCount is the runtime multiprocessor count; rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.
-          worker: {unit: CTA, count: 2}
-          placement: {unit: cluster, count: 1}
-          count: ceil(min(SMCount,2*Cpad)/2)
+          worker: {unit: CTA, unit_count: 2}
+          placement: {unit: cluster, unit_count: 1}
+          worker_count: ceil(min(SMCount,2*Cpad)/2)
           member: [{row: [0, 128]}, {row: [128, 256]}]
         schedule:
           strategy: |
@@ -111,28 +111,28 @@ design:
           n: {flatten: [t, i]}
           d: [0, 2]
         resource:
-          Query: {space: SMEM, shape: [{row: 128}, {channel: 128}], dtype: fp8_e4m3fn, slot: 2, view: {'Qc(t,d)': {slot: d}}}
-          KeyRing: {space: SMEM, shape: [{key: 64}, {channel: 128}], dtype: fp8_e4m3fn, slot: 4, view: {'Kc(n,d)': {slot: '(2*n+d)%4'}}}
-          ValueRing: {space: SMEM, shape: [{key: 128}, {channel: 64}], dtype: fp8_e4m3fn, slot: 4, view: {'Vc(n,d)': {slot: '(2*n+d)%4'}}}
+          Query: {space: SMEM, member_slot_shape: [{row: 128}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 2, view: {'Qc(t,d)': {slot_index: d}}}
+          KeyRing: {space: SMEM, member_slot_shape: [{key: 64}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Kc(n,d)': {slot_index: '(2*n+d)%4'}}}
+          ValueRing: {space: SMEM, member_slot_shape: [{key: 128}, {channel: 64}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Vc(n,d)': {slot_index: '(2*n+d)%4'}}}
           ScoreProbability:
             space: TMEM
-            shape: [{row: 128}, {column: 128}]
+            member_slot_shape: [{row: 128}, {column: 128}]
             dtype: fp32
-            slot: 2
+            slot_count: 2
             view:
-              S(n,d): {slot: n%2}
-              P(n): {slot: n%2, part: {column: [0, 32]}, dtype: fp8_e4m3fn}
-              Stats(n): {slot: n%2, part: {column: [32, 34]}}
-          Y: {space: TMEM, shape: [{row: 128}, {channel: D}], dtype: fp32}
-          Denominator: {space: SMEM, shape: [{row: 128}], dtype: fp32, view: {'FinalSum(t)': {part: {row: [0, 128]}}}}
-          OutputStage: {space: SMEM, shape: [{row: 128}, {channel: 128}], dtype: bf16, view: {'Oblock(t,d)': {part: {channel: [0, 128]}}}}
-          OnlineState: {space: register, shape: [{row: 128}, {state: 2}], dtype: fp32, view: {'mhat(n)': {part: {state: [0, 1]}}, 'ell(n)': {part: {state: [1, 2]}}}}
-          RequestMap: {space: SMEM, shape: [{element: 36}], dtype: int32}
-        lane:
+              S(n,d): {slot_index: n%2}
+              P(n): {slot_index: n%2, part: {column: [0, 32]}, dtype: fp8_e4m3fn}
+              Stats(n): {slot_index: n%2, part: {column: [32, 34]}}
+          Y: {slot_count: 1, space: TMEM, member_slot_shape: [{row: 128}, {channel: D}], dtype: fp32}
+          Denominator: {slot_count: 1, space: SMEM, member_slot_shape: [{row: 128}], dtype: fp32, view: {'FinalSum(t)': {part: {row: [0, 128]}}}}
+          OutputStage: {slot_count: 1, space: SMEM, member_slot_shape: [{row: 128}, {channel: 128}], dtype: bf16, view: {'Oblock(t,d)': {part: {channel: [0, 128]}}}}
+          OnlineState: {slot_count: 1, space: register, member_slot_shape: [{row: 128}, {state: 2}], dtype: fp32, view: {'mhat(n)': {part: {state: [0, 1]}}, 'ell(n)': {part: {state: [1, 2]}}}}
+          RequestMap: {slot_count: 1, space: SMEM, member_slot_shape: [{element: 36}], dtype: int32}
+        role:
           LoadQK:
             info:
               member: warp[9:10]
-              mode: async
+              execution_mode: async
               register: 32
               verb:
                 load: Q holds this member's rows for the KV traversal; each K half uses one page per member. Both members contribute to pair-wide readiness.
@@ -141,26 +141,26 @@ design:
               steady:
               - {repeat: d, steady: ['load:Qc(t,d)']}
               - {repeat: 'n[t]', steady: [{repeat: d, steady: ['load:Kc(n,d)']}]}
-            edge:
-              data: {'load:Qc(t,0)': ['Softmax/publish:RequestMap']}
+            waits_for:
+              data: {'load:Qc(t,0)@issue': ['Softmax/publish:RequestMap@done']}
               reuse:
-                load:Qc(t+1,d): ['MMA/qk:S(n[t,last(i)],d)']
-                load:Kc(n+2,d): ['MMA/qk:S(n,d)']
+                load:Qc(t+1,d)@issue: ['MMA/qk:S(n[t,last(i)],d)@done']
+                load:Kc(n+2,d)@issue: ['MMA/qk:S(n,d)@done']
           LoadV:
             info:
               member: warp[10:11]
-              mode: async
+              execution_mode: async
               register: 32
               verb:
                 load: Each V half uses two page transfers per member; done covers both and contributes to pair-wide readiness independently of K.
             pipe: {repeat: n, steady: [{repeat: d, steady: ['load:Vc(n,d)']}]}
-            edge:
-              data: {'load:Vc(n[t,0],0)': ['Softmax/publish:RequestMap']}
-              reuse: {'load:Vc(n+2,d)': ['MMA/pv:Y(n,d)']}
+            waits_for:
+              data: {'load:Vc(n[t,0],0)@issue': ['Softmax/publish:RequestMap@done']}
+              reuse: {'load:Vc(n+2,d)@issue': ['MMA/pv:Y(n,d)@done']}
           MMA:
             info:
               member: CTA[0].warp[8:9]
-              mode: ordered
+              execution_mode: async_ordered_completion
               register: 32
               verb:
                 qk: Issue one QK channel half; d=0 initializes S and d=1 completes it. Done returns K; last QK returns Q. Ordered pair products read earlier P before later QK overwrites its aliased slot.
@@ -174,16 +174,17 @@ design:
                 - {repeat: d, steady: ['qk:S(n,d)']}
                 - {repeat: d, steady: ['pv:Y(n-1,d)']}
               - {repeat: d, steady: ['pv:Y(n[t,last(i)],d)']}
-            edge:
+            waits_for:
               data:
-                qk:S(n,d): ['LoadQK/load:Qc(t,d)', 'LoadQK/load:Kc(n,d)']
-                pv:Y(n,d): ['Softmax/publish:P(n)', 'LoadV/load:Vc(n,d)']
-                pv:Y(n[t,later],0): ['Correction/rescale:Y(n[t,later])']
+                qk:S(n,d)@issue: ['LoadQK/load:Qc(t,d)@done', 'LoadQK/load:Kc(n,d)@done']
+                pv:Y(n,d)@issue: ['Softmax/publish:P(n)@done', 'LoadV/load:Vc(n,d)@done']
+                pv:Y(n[t,later],0)@issue: ['Correction/rescale:Y(n[t,later])@done']
               reuse:
-                qk:S(n,0): ['Softmax/capture:S(n-2,1)']
-                pv:Y(n[t,0],0): ['Correction/release:Y(t-1)']
+                qk:S(n,0)@issue: ['Softmax/capture:S(n-2,1)@done']
+                pv:Y(n[t,0],0)@issue: ['Correction/release:Y(t-1)@done']
           Softmax:
             info:
+              execution_mode: serial
               member: warp[0:4]
               register: 256
               verb:
@@ -195,18 +196,20 @@ design:
               steady:
               - {repeat: 'n[t]', steady: ['capture:S(n,1)', 'publish:Stats(n)', 'publish:P(n)', 'compute:ell(n)']}
               - publish:FinalSum(t)
-            edge:
-              data: {'capture:S(n,1)': ['MMA/qk:S(n,1)']}
+            waits_for:
+              data: {'capture:S(n,1)@issue': ['MMA/qk:S(n,1)@done']}
               reuse:
-                publish:Stats(n+2): ['Correction/capture:Stats(n)']
-                publish:FinalSum(t+1): ['Correction/capture:FinalSum(t)']
+                publish:Stats(n+2)@issue: ['Correction/capture:Stats(n)@done']
+                publish:FinalSum(t+1)@issue: ['Correction/capture:FinalSum(t)@done']
           Correction:
             info:
+              execution_mode: serial
               member: warp[4:8]
               register: 160
               verb:
                 capture: Acknowledge first-block Stats without reading its payload; capture later Stats and final ell into registers before returning their slots.
-                rescale: Evaluate alpha from Stats and correct both Y halves after previous PV; a warp vote skips rewriting when no row has alpha<1, retaining the ownership handshake.
+                rescale: Evaluate alpha from Stats and correct both Y halves after previous PV; a warp vote skips rewriting when no row has alpha<1, retaining the
+                  ownership handshake.
                 stage: Normalize and narrow one Y half into OutputStage; completion covers the correction group.
                 store: Coalesced valid-row stores undo head packing; completion ends OutputStage reads and includes the group barrier before reuse.
                 release: All Y reads are complete; the next tile may initialize Y while the final staged half is being stored.
@@ -221,10 +224,12 @@ design:
               - stage:Oblock(t,1)
               - release:Y(t)
               - store:Oblock(t,1)
-            edge:
+            waits_for:
               data:
-                rescale:Y(n[t,later]): ['MMA/pv:Y(n[t,later-1],1)']
-                stage:Oblock(t,0): ['MMA/pv:Y(n[t,last(i)],1)']
+                rescale:Y(n[t,later])@issue: ['MMA/pv:Y(n[t,later-1],1)@done']
+                stage:Oblock(t,0)@issue: ['MMA/pv:Y(n[t,last(i)],1)@done']
+                capture:Stats(n)@issue: ['Softmax/publish:Stats(n)@done']
+                capture:FinalSum(t)@issue: ['Softmax/publish:FinalSum(t)@done']
 realization:
   require:
   - {item: 'design.tile_pipeline::attention.MMA', choice: Use two-CTA tcgen05 MMA with cumulative completion and earlier-PV-read-before-later-QK-write ordering., reason: Pair-wide operand returns and aliased score/probability storage depend on these guarantees.}
