@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..diagnostics import Diagnostic
+from .values import literal_integer
 
 EXECUTION_MODES = ("serial", "async", "async_ordered_completion")
 
@@ -46,8 +47,8 @@ class CheckContext:
                     stack.append((target, iter(graph.get(target, []))))
 
     def interval(self, value: list[Any], path: str) -> None:
-        lo, hi = value
-        if type(lo) is int and type(hi) is int:
+        lo, hi = map(literal_integer, value)
+        if lo is not None and hi is not None:
             self.require(lo <= hi, path, "range endpoints are reversed")
 
 

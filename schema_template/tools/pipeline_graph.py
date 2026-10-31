@@ -27,7 +27,13 @@ def configuration(parameters: dict, worktiles: int = 1) -> dict:
         raise ExpansionError("sample parameters must map nonempty expression names to integers")
     if type(worktiles) is not int or not 0 <= worktiles <= 64:
         raise ExpansionError("sample worktiles must be an integer in 0..64")
-    return {"parameters": parameters, "worktiles": worktiles}
+    normalized = {}
+    for name, value in parameters.items():
+        canonical = name.strip().replace(" ", "")
+        if canonical in normalized:
+            raise ExpansionError(f"duplicate sample parameter {canonical!r} after removing spaces")
+        normalized[canonical] = value
+    return {"parameters": normalized, "worktiles": worktiles}
 
 
 def analyze(plan: dict, config: dict) -> list:
@@ -55,7 +61,8 @@ def main(argv=None) -> int:
         output = GraphOutput()
         if not args.check_only:
             output.begin(source, all_nodes=args.all)
-        directory, task = schema.validate_file(source, notices=notices)
+        source_hashes = {}
+        directory, task = schema.validate_file(source, notices=notices, source_hashes=source_hashes)
         files = schema.task_files(directory)
         parameters = {}
         for item in args.set:
@@ -85,7 +92,8 @@ def main(argv=None) -> int:
                 destination = ""
                 if not args.check_only:
                     samples = {graph.phase: config for graph in graphs}
-                    destination = " -> " + str(output.write(files[node], graphs, samples, notes))
+                    destination = " -> " + str(output.write(files[node], graphs, samples, notes,
+                                                            source_sha256=source_hashes[node]))
                 print(f"{status}: {node} ({len(graphs)} phases, {count} actions){destination}")
             except RenderError as error:
                 print(f"Render not completed: {files[node]}: {error}", file=sys.stderr)

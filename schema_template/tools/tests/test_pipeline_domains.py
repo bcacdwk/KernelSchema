@@ -61,6 +61,44 @@ class DomainTests(TaskCase):
         self.assertIn("scopes disagree", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_indexed_milestone_cannot_silently_drop_a_required_event(self):
+        task = deepcopy(self.base)
+        put(task, ROLE + ("pipe",), {"repeat": {"i": [0, 2]}, "steady": ["produce:Y(i)"]})
+        put(task, PIPE + ("role", "Peer"), {"info": {"member": "warp[1:2]", "execution_mode": "serial"},
+            "pipe": {"repeat": {"i": [0, 3]}, "steady": ["publish:X(i)"]}})
+        put(task, PIPE + ("milestone",), {"ready(i)": ["Main/produce:Y(i)", "Peer/publish:X(i)"]})
+        with self.assertRaisesRegex(ExpansionError, "ambiguous milestone index i"):
+            self.graph(task)
+        result = self.run_graph(task)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("scopes disagree", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+        # An unindexed aggregate can collect independently scoped event families.
+        put(task, PIPE + ("milestone",), {"ready": ["Main/produce:Y(i)", "Peer/publish:X(i)"]})
+        self.assertEqual(len(self.graph(task).milestones["ready"]), 5)
+        put(task, PIPE + ("milestone",), {"ready(i)": ["Main/produce:Y(i)", "Peer/publish:X(i)"]})
+        for stop in (2, "2", "+2", "02"):
+            with self.subTest(stop=stop):
+                put(task, PIPE + ("role", "Peer", "pipe", "repeat", "i"), [0, stop])
+                graph = self.graph(task)
+                self.assertEqual(set(graph.milestones), {"ready(0)", "ready(1)"})
+                self.assertTrue(all(len(events) == 2 for events in graph.milestones.values()))
+                put(task, ROLE + ("waits_for",), {"data": {"produce:Y(i)": ["Peer/publish:X(i)"]}})
+                self.assertFalse(self.graph(task).cycle)
+
+    def test_milestone_checks_flatten_coordinate_definitions(self):
+        task = deepcopy(self.base)
+        put(task, PIPE + ("domain",), {"t": [0, 1], "i": [0, 2], "n": {"flatten": ["t", "i"]}})
+        for name, value, stop in (("Main", "Y", 2), ("Peer", "X", 3)):
+            put(task, PIPE + ("role", name), {
+                "info": {"member": "warp[0:1]" if name == "Main" else "warp[1:2]", "execution_mode": "serial"},
+                "pipe": {"repeat": {"i": [0, stop]}, "prologue": [
+                    {"repeat": "n", "steady": [f"publish:{value}(n)"]}]}})
+        put(task, PIPE + ("milestone",), {"ready(n)": ["Main/publish:Y(n)", "Peer/publish:X(n)"]})
+        with self.assertRaisesRegex(ExpansionError, "ambiguous milestone index i"):
+            self.graph(task)
+
     def test_affine_reparameterization_preserves_dependencies_and_boundaries(self):
         domains = {"t": [0, 3], "i": [0, "t+1"]}
         variants = [("t", "i", "t+1", "i", lambda a, b: (a, b)),

@@ -1,4 +1,4 @@
-"""Shared action notation and lexical pipe scopes; no validation or expansion I/O."""
+"""Shared integer/action notation and lexical pipe scopes; no expansion I/O."""
 from __future__ import annotations
 
 import ast
@@ -10,6 +10,15 @@ from .diagnostics import IDENTIFIER
 
 DOMAIN_FUNCTIONS = {"count", "last"}
 REGIONS = ("prologue", "steady", "epilogue")
+
+
+def literal_integer(value):
+    """Recognize an integer literal without evaluating mathematical expressions."""
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+        return int(value)
+    return None
 
 
 @dataclass(frozen=True)
@@ -33,10 +42,19 @@ class IndexScope:
         return result
 
 
+def same_domain(first: Any, second: Any) -> bool:
+    if isinstance(first, list) and isinstance(second, list):
+        def endpoint(value):
+            literal = literal_integer(value)
+            return value if literal is None else literal
+        return list(map(endpoint, first)) == list(map(endpoint, second))
+    return first == second
+
+
 def domain_choices(scopes: list[IndexScope], name: str) -> list[Any]:
     values = []
     for scope in scopes:
-        if name in scope.definitions and scope.definitions[name] not in values:
+        if name in scope.definitions and not any(same_domain(scope.definitions[name], value) for value in values):
             values.append(scope.definitions[name])
     return values
 

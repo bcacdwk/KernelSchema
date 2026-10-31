@@ -6,6 +6,7 @@ from typing import Any
 
 from ..diagnostics import IDENTIFIER, field_path
 from .common import CheckContext
+from .values import literal_integer
 
 
 def properties(check: CheckContext, plan: dict[str, Any], contract_objects: dict[str, Any], path: str) -> None:
@@ -83,8 +84,10 @@ def contract(check: CheckContext, contract: dict[str, Any], path: str) -> dict[s
             if isinstance(size, str) and IDENTIFIER.fullmatch(size) and size not in contract.get("constant", {}):
                 check.require(size not in names, f"{path}.input.{name}.shape[{i}].{key}", "a runtime extent cannot also name a Contract object")
         bounds = obj.get("range")
-        if isinstance(bounds, list) and all(type(x) in (int, float, Decimal) for x in bounds):
-            check.require(bounds[0] <= bounds[1], path + ".input." + name + ".range", "range endpoints are reversed")
+        if isinstance(bounds, list):
+            endpoints = [number if (number := literal_integer(value)) is not None else value for value in bounds]
+            if all(type(value) in (int, float, Decimal) for value in endpoints):
+                check.require(endpoints[0] <= endpoints[1], path + ".input." + name + ".range", "range endpoints are reversed")
     return {**contract.get("constant", {}), **objects}
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import hashlib
 from pathlib import Path
 import re
 import shlex
@@ -10,6 +11,8 @@ import sys
 
 from .diagnostics import field_path
 from .errors import CapacityError
+
+MAX_EXPANDED_NODES = 100000
 
 
 class ReadError(Exception):
@@ -25,6 +28,7 @@ class Document:
     value: dict
     positions: dict[str, tuple[int, int]]
     values: dict[str, object]
+    source_sha256: str
 
 
 def load(path: Path, name: str) -> Document:
@@ -73,10 +77,15 @@ def load(path: Path, name: str) -> Document:
         raise problem(f"unsupported scalar or non-finite number ({node.tag}); use ordinary YAML values", node.start_mark)
 
     positions, values, active = {}, {}, set()
+    expanded = 0
 
     def convert(node, field, mark=None):
+        nonlocal expanded
         if id(node) in active:
             raise problem("recursive aliases do not describe a finite plan", node.start_mark)
+        expanded += 1
+        if expanded > MAX_EXPANDED_NODES:
+            raise CapacityError(f"{path}: YAML expansion exceeds the parser's capacity ({MAX_EXPANDED_NODES} nodes)")
         active.add(id(node))
         try:
             if isinstance(node, yaml.ScalarNode):
@@ -116,12 +125,13 @@ def load(path: Path, name: str) -> Document:
 
     loader = None
     try:
-        loader = Loader(path.read_text(encoding="utf-8"))
+        source_bytes = path.read_bytes()
+        loader = Loader(source_bytes.decode("utf-8"))
         node = loader.get_node() if loader.check_node() else None
         if node is None or not isinstance(node, yaml.MappingNode) or loader.check_node():
             raise problem("expected exactly one YAML mapping document per node", node.start_mark if node else None)
         value = convert(node, name)
-        return Document(value, positions, values)
+        return Document(value, positions, values, hashlib.sha256(source_bytes).hexdigest())
     except yaml.YAMLError as error:
         raise problem(getattr(error, "problem", None) or str(error), getattr(error, "problem_mark", None)) from error
     except UnicodeDecodeError as error:

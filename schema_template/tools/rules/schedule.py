@@ -5,6 +5,7 @@ from collections import defaultdict
 from typing import Any
 
 from .common import CheckContext, as_list, indexed_values
+from .values import literal_integer
 
 
 def validate(check: CheckContext, plan: dict[str, Any], path: str) -> None:
@@ -97,6 +98,9 @@ def concrete_conflict(a: Any, b: Any, field: str | None = None) -> bool:
         return set(a) != set(b) or any(concrete_conflict(a[k], b[k], k) for k in a)
     if isinstance(a, list) and isinstance(b, list):
         return len(a) != len(b) or any(concrete_conflict(x, y, field) for x, y in zip(a, b))
+    left, right = literal_integer(a), literal_integer(b)
+    if left is not None and right is not None:
+        return left != right
     if isinstance(a, str) or isinstance(b, str):
         return False
     return a != b

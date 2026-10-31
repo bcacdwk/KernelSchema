@@ -5,6 +5,7 @@ from decimal import Decimal
 import re
 
 from ..diagnostics import Diagnostic, field_path
+from ..pipeline_syntax import literal_integer
 
 
 def reject(errors, path, message, *, missing=False, hint=""):
@@ -90,9 +91,9 @@ def integer(minimum=None, *, expression=True):
             text(value, path, errors)
             if value.startswith(("unknown:", "ref:", "bind:", "<")):
                 reject(errors, path, "supply a defined integer expression, not a missing-value marker")
-            if not re.fullmatch(r"[+-]?\d+", value.strip()):
+            literal = literal_integer(value)
+            if literal is None:
                 return  # Expressions are read, never compiled, evaluated or restricted to Python syntax.
-            literal = int(value)
         if type(literal) is not int:
             reject(errors, path, "expected an integer" + (" or a defined integer expression" if expression else ""))
         elif minimum is not None and literal < minimum:

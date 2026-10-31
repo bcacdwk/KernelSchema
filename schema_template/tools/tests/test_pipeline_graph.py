@@ -440,6 +440,24 @@ class EventGraphTests(unittest.TestCase):
         domains = Domains({"i": [0, "count(S)+1"]}, {"count(S)": 2}, 1)
         self.assertEqual(list(domains.contexts({"i"})), [{"i": 0}, {"i": 1}, {"i": 2}])
 
+    def test_sample_parameter_spaces_do_not_change_expression_identity(self):
+        for name in ("N(b)", "N ( b )", " N(b) "):
+            config = configuration({name: 4})
+            self.assertEqual(Domains({}, **config).integer("N(b)", {}), 4)
+        with self.assertRaisesRegex(ExpansionError, "duplicate sample parameter"):
+            configuration({"N ( b )": 4, "N(b)": 5})
+
+    def test_ceil_div_by_zero_is_invalid_not_an_unsupported_expression(self):
+        domains = Domains({}, {}, 1)
+        with self.assertRaisesRegex(GraphError, "division by zero") as caught:
+            domains.integer("ceil_div(3,0)", {})
+        self.assertNotIsInstance(caught.exception, ExpansionError)
+        self.assertEqual(domains.integer("ceil_div(3,2)", {}), 2)
+
+    def test_expression_size_limit_keeps_its_capacity_diagnostic(self):
+        with self.assertRaisesRegex(ExpansionError, "expression too large"):
+            Domains({}, {"N": 7}, 1).integer("+".join(["N"] * 40), {})
+
     def test_all_trial_examples_and_representative_scales(self):
         total = 0
         for directory in sorted((TEMPLATE_ROOT / "examples").iterdir()):

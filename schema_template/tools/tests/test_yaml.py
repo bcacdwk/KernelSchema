@@ -3,12 +3,23 @@ from __future__ import annotations
 
 from copy import deepcopy
 from decimal import Decimal
+import hashlib
 from .. import schema, yaml_source
 from ..diagnostics import encode_value
 from .support import (TaskCase, ALGO, ROLE, MATH, add_child, at, drop, put)
 
 
 class YamlTests(TaskCase):
+    def test_source_hashes_describe_the_exact_bytes_parsed(self):
+        root = self.directory / "root.yaml"
+        original = self.source.replace("\n", "\r\n").encode("utf-8")
+        root.write_bytes(original)
+        hashes = {"retired_node": "a previous check's hash"}
+        _, task = schema.validate_file(root, source_hashes=hashes)
+        self.assertEqual(task, self.base)
+        self.assertEqual(hashes, {"root": hashlib.sha256(original).hexdigest()})
+        self.assertEqual(root.read_bytes(), original)
+
     def test_validation_never_changes_sources_or_permissions(self):
         (self.directory / "dispatch.md").write_text("Synthetic task navigation.\n")
         root = self.directory / "root.yaml"

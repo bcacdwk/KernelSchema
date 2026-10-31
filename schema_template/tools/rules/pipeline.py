@@ -8,6 +8,7 @@ from ..diagnostics import field_path
 from ..pipeline_syntax import (IndexScope, ScopedPipe, common_domains,
                                free_action_indices, parse_action, parse_event)
 from .common import CheckContext, indexed_values
+from .values import literal_integer
 
 GENERIC_VERBS = {"load", "publish", "store", "compute", "produce", "zero", "mma", "wait", "release"}
 
@@ -21,7 +22,7 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
         for name, domain in domains.items():
             _check_domain(check, domain, domains, p + ".domain." + name)
         check.acyclic(graph, p + ".domain")
-        unit_count = work[pid]["mapping"]["worker"]["unit_count"]
+        unit_count = literal_integer(work[pid]["mapping"]["worker"]["unit_count"])
         dynamic = work[pid]["schedule"]["worker_assignment"]["refill"] != "none"
         families, role_members = {}, {}
         for role, body in phase["role"].items():
@@ -31,13 +32,13 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
             if unit == work[pid]["mapping"]["worker"]["unit"]:
                 role_members[role] = range(int(lo), int(hi) if hi else int(lo) + 1)
             else:
-                role_members[role] = range(unit_count) if type(unit_count) is int else None
+                role_members[role] = range(unit_count) if unit_count is not None else None
             for i, (unit, lo, hi) in enumerate(pieces):
                 unit = unit.removeprefix(".")
                 if hardware is not None:
                     check.require(unit in hardware["execution"], lp + ".info.member", f"unregistered execution unit {unit}")
                 check.require(not hi or int(hi) > int(lo), lp + ".info.member", "member interval must be nonempty")
-                if i == 0 and unit == work[pid]["mapping"]["worker"]["unit"] and type(unit_count) is int:
+                if i == 0 and unit == work[pid]["mapping"]["worker"]["unit"] and unit_count is not None:
                     check.require(int(hi) <= unit_count if hi else int(lo) < unit_count,
                                  lp + ".info.member", "member index exceeds worker.unit_count")
             actions = _check_pipe(check, body["pipe"], domains, set(), lp + ".pipe", dynamic=dynamic)
@@ -72,7 +73,7 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
             check.require(parsed in families[target], rp, "event does not name an action family in the referenced role")
             if dynamic and parsed in families[target]:
                 _check_dynamic_domain_queries(check, action, common_domains(families[target][parsed]), rp)
-            if member not in (None, "*") and type(unit_count) is int:
+            if member not in (None, "*") and unit_count is not None:
                 if not check.require(int(member) < unit_count, rp, "event member exceeds worker.unit_count"):
                     return
             selected = role_members[target]
@@ -106,7 +107,7 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
         for name, resource in phase.get("resource", {}).items():
             rp = p + ".resource." + name
             for member, mp in indexed_values(resource.get("member", []), rp + ".member"):
-                if type(unit_count) is int:
+                if unit_count is not None:
                     check.require(member < unit_count, mp, "resource member exceeds worker.unit_count")
             capacity = resource["member_slot_shape"]
             axes = {k: v for axis in capacity for k, v in axis.items()}
@@ -116,8 +117,9 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
                 for axis, bounds in value.get("part", {}).items():
                     check.require(axis in axes, vp + ".part", "part must name a parent resource axis")
                     check.interval(bounds, vp + ".part." + axis)
-                    if axis in axes and type(axes[axis]) is int and type(bounds[1]) is int:
-                        check.require(bounds[1] <= axes[axis], vp + ".part." + axis, "view exceeds parent storage")
+                    size, end = literal_integer(axes.get(axis)), literal_integer(bounds[1])
+                    if size is not None and end is not None:
+                        check.require(end <= size, vp + ".part." + axis, "view exceeds parent storage")
 
 
 def _check_domain(check: CheckContext, domain: Any, known: dict[str, Any], path: str) -> None:

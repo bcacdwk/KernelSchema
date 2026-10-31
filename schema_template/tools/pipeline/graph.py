@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
-from ..pipeline_syntax import IndexScope, ScopedPipe, domain_choices, parse_action, parse_event
+from ..pipeline_syntax import IndexScope, ScopedPipe, domain_choices, parse_action, parse_event, same_domain
 from ..rules.common import EXECUTION_MODES
 from .actions import action_variables, instantiate, operands
 from .expressions import Boundary, Domains, LIMIT, referenced_domains, tree
@@ -181,12 +181,13 @@ class Builder:
         return [events if events is not None else self.resolve(reference, env, domains)
                 for reference, events in endpoints]
 
-    def rule_domains(self, references) -> Domains:
+    def rule_domains(self, references, *, indices=None) -> Domains:
         definitions = {}
         for reference in references:
             scopes = self.families[reference[0]][parse_action(reference[2])]
-            pending = list(set().union(*(referenced_domains(tree(arg))
-                           for _, args in operands(reference[2])[1] for arg in args)))
+            arguments = (indices if indices is not None else
+                         [arg for _, args in operands(reference[2])[1] for arg in args])
+            pending = list(set().union(*(referenced_domains(tree(arg)) for arg in arguments)))
             visited = set()
             while pending:
                 name = pending.pop()
@@ -196,8 +197,9 @@ class Builder:
                 choices = domain_choices(scopes, name)
                 if not choices:
                     continue
-                if len(choices) > 1 or name in definitions and definitions[name] != choices[0]:
-                    raise ExpansionError(f"ambiguous local edge index {name}; referenced action scopes disagree")
+                if len(choices) > 1 or name in definitions and not same_domain(definitions[name], choices[0]):
+                    subject = "local edge" if indices is None else "milestone"
+                    raise ExpansionError(f"ambiguous {subject} index {name}; referenced action scopes disagree")
                 definition = definitions[name] = choices[0]
                 if isinstance(definition, dict):
                     pending.extend(definition["flatten"])
@@ -267,14 +269,21 @@ class Builder:
 
     def milestones(self) -> None:
         for name, references in self.phase.get("milestone", {}).items():
-            for reference in references:
-                parsed = self.parse_reference(reference, None)
+            parsed_references = [self.parse_reference(reference, None) for reference in references]
+            indices = [arg for _, args in operands("wait:" + name)[1] for arg in args]
+            # Every reference must interpret a milestone's own coordinates the
+            # same way. Otherwise per-reference unions can silently drop an event.
+            self.rule_domains(parsed_references, indices=indices)
+            for parsed in parsed_references:
                 domains = self.rule_domains([parsed])
                 names = action_variables(parsed[2], domains) | action_variables("wait:" + name, domains)
                 for env in domains.contexts(names):
                     identity = instantiate("wait:" + name, domains, env).split(":", 1)[1]
                     result = self.graph.milestones.setdefault(identity, [])
                     for member in self.members[parsed[0]]:
+                        self.steps += 1
+                        if self.steps > 100000:
+                            raise ExpansionError("combined expansion step limit exceeded (100000); use a smaller sample")
                         reference = self.bind_reference(parsed, parsed[0], member, env, domains)
                         result.extend(self.resolve(reference, env, domains))
         self.graph.milestones = {name: sorted(set(events)) for name, events in self.graph.milestones.items()}

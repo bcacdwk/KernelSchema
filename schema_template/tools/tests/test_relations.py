@@ -7,6 +7,40 @@ from .support import (TaskCase, ALGO, ROLE, MATH, PHASE, PIPE, WORK, add_child, 
 
 
 class RelationsTests(TaskCase):
+    def test_integer_literal_spellings_have_identical_resource_and_member_checks(self):
+        for literal in (int, str):
+            with self.subTest(spelling=literal.__name__):
+                resource = {"space": "SMEM", "member_slot_shape": [{"x": literal(8)}],
+                            "dtype": "fp32", "slot_count": literal(2)}
+                self.assert_invalid(lambda d: put(d, PIPE + ("resource",), {"R": resource}), "multi-slot")
+                resource["view"] = {"Y": {"slot_index": literal(1), "part": {"x": [literal(0), literal(8)]}}}
+                self.assert_valid(lambda d: put(d, PIPE + ("resource",), {"R": resource}))
+                resource["view"]["Y"]["slot_index"] = literal(2)
+                self.assert_invalid(lambda d: put(d, PIPE + ("resource",), {"R": resource}), "slot_index exceeds")
+                resource["view"]["Y"]["slot_index"] = literal(1)
+                resource["view"]["Y"]["part"]["x"] = [literal(0), literal(9)]
+                self.assert_invalid(lambda d: put(d, PIPE + ("resource",), {"R": resource}), "exceeds parent storage")
+                resource["view"]["Y"]["part"]["x"] = [literal(4), literal(2)]
+                self.assert_invalid(lambda d: put(d, PIPE + ("resource",), {"R": resource}), "reversed")
+                self.assert_invalid(lambda d: (
+                    put(d, PHASE + ("mapping", "worker", "unit_count"), literal(2)),
+                    put(d, ROLE + ("info", "member"), "CTA[2].warp[0:1]")), "member index exceeds")
+                self.assert_invalid(lambda d: (
+                    put(d, PHASE + ("mapping", "worker", "unit_count"), literal(2)),
+                    put(d, PHASE + ("mapping", "member"), [{"x": [0, 8]}])), "member entries")
+                self.assert_invalid(lambda d: put(d, ALGO + ("input", "X", "range"), [literal(4), 2]), "reversed")
+        # General expressions still belong to design review, not this literal check.
+        self.assert_valid(lambda d: put(d, PIPE + ("resource",), {"R": {
+            "space": "SMEM", "member_slot_shape": [{"x": "size(N)"}], "dtype": "fp32", "slot_count": "stages(N)"}}))
+
+    def test_shared_workers_compare_integer_literals_without_evaluating_expressions(self):
+        def setup(data, value):
+            add_phase(data, order="all")
+            put(data, WORK + ("phase", "next", "mapping", "worker_count"), value)
+        self.assert_valid(lambda d: setup(d, "1"))
+        self.assert_invalid(lambda d: setup(d, "2"), "incompatible worker mappings")
+        self.assert_valid(lambda d: setup(d, "available_workers(N)"))
+
     def test_worker_counts_and_resource_capacity_are_checked(self):
         def shared(data):
             add_phase(data, order="all")

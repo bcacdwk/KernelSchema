@@ -82,10 +82,15 @@ class GraphOutput:
         for path in sorted(sources):
             path.with_suffix(".png").unlink(missing_ok=True)
 
-    def write(self, source: Path, graphs: list, samples: dict, notes: list[str]) -> Path:
+    def write(self, source: Path, graphs: list, samples: dict, notes: list[str], *, source_sha256: str) -> Path:
+        def unchanged():
+            if hashlib.sha256(source.read_bytes()).hexdigest() != source_sha256:
+                raise RenderError(f"{source}: source changed after checking; rerun checking and rendering")
+
+        unchanged()
         title = source.parent.name + " / " + source.stem
         image = graphviz(dot_text(title, graphs, samples, notes))
-        information = {"kind": "pipeline_graph", "source": source.name, "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        information = {"kind": "pipeline_graph", "source": source.name, "source_sha256": source_sha256,
                        "samples": samples, "notes": notes, "acyclic": all(not graph.cycle for graph in graphs)}
         try:
             image = stamp(image, information)
@@ -95,5 +100,6 @@ class GraphOutput:
         with TemporaryDirectory(prefix=".pipeline-", dir=source.parent) as temporary:
             staged = Path(temporary) / destination.name
             staged.write_bytes(image)
+            unchanged()
             staged.replace(destination)
         return destination

@@ -1,13 +1,40 @@
 """Capacity and actual invalidity remain distinct at both public entry points."""
 from copy import deepcopy
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 import subprocess
 import sys
+from unittest.mock import patch
 
+import check_yaml
+from .. import yaml_source
+from ..pipeline_graph import main as graph_main
 from ..diagnostics import encode_value
 from .support import TaskCase, MATH, PIPE, ROLE, TEMPLATE_ROOT, put
 
 
 class ToolLimitTests(TaskCase):
+    def test_alias_expansion_has_a_total_budget_at_both_entries(self):
+        task = deepcopy(self.base)
+        put(task, MATH + ("rewrite", 0, "symbol"), {
+            "Constants": {"meaning": "Repeated literal arrays.", "value": "ALIAS_ARRAY"}})
+        aliases = ["&a0 [0]"] + [f"&a{i} [*a{i-1}, *a{i-1}]" for i in range(1, 10)]
+        source = encode_value(task["root"]).replace('"ALIAS_ARRAY"', "[" + ", ".join(aliases) + "]")
+        path = self.directory / "root.yaml"
+        path.write_text(source)
+        before = self.snapshot()
+        for entry, arguments in ((check_yaml.main, [str(path)]), (graph_main, [str(path), "--check-only"])):
+            output, errors = StringIO(), StringIO()
+            with patch.object(yaml_source, "MAX_EXPANDED_NODES", 2000), redirect_stdout(output), redirect_stderr(errors):
+                result = entry(arguments)
+            self.assertEqual(result, 2, errors.getvalue())
+            self.assertIn("capacity", errors.getvalue())
+            self.assertNotIn("Traceback", errors.getvalue())
+        self.assertEqual(before, self.snapshot())
+        # The same finite aliases remain valid when the tool can expand them.
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            self.assertEqual(check_yaml.main([str(path)]), 0)
+
     def command(self, graph):
         script = "tools/pipeline_graph.py" if graph else "check_yaml.py"
         command = [sys.executable, "-B", str(TEMPLATE_ROOT / script), str(self.directory / "root.yaml")]

@@ -55,6 +55,39 @@ class OutputTests(TaskCase):
         self.assertEqual(info["source"], "root.yaml")
         self.assertNotIn(str(self.directory), str(info))
 
+    def test_source_edited_during_render_is_not_published_with_the_new_hash(self):
+        self.assertEqual(self.run_graph()[0], 0)
+        task = deepcopy(self.base)
+        put(task, ROLE + ("pipe",), {"steady": ["zero:Buffer", "produce:Y"]})
+        def edit_during_render(dot):
+            self.write_task(task)
+            return tiny_png()
+        code, _, error = self.run_graph(renderer=edit_during_render)
+        self.assertEqual(code, 2, error)
+        self.assertIn("source changed after checking", error)
+        self.assertFalse((self.directory / "root.png").exists())
+        before = (self.directory / "root.yaml").read_bytes()
+        code, stdout, error = self.run_graph()
+        self.assertEqual(code, 0, error)
+        self.assertIn("2 actions", stdout)
+        info = output.metadata(self.directory / "root.png")
+        self.assertEqual(info["source_sha256"], hashlib.sha256(before).hexdigest())
+        self.assertEqual(before, (self.directory / "root.yaml").read_bytes())
+
+    def test_cli_expression_parameter_spaces_and_division_diagnostics(self):
+        task = deepcopy(self.base)
+        put(task, ROLE + ("pipe",), {"repeat": {"i": [0, "N(b)"]}, "steady": ["produce:Y(i)"]})
+        self.write_task(task)
+        code, stdout, error = self.run_graph("--check-only", "--set", "N ( b )=3")
+        self.assertEqual(code, 0, error)
+        self.assertIn("3 actions", stdout)
+        put(task, ROLE + ("pipe", "repeat", "i"), [0, "ceil_div(3,0)"])
+        self.write_task(task)
+        code, _, error = self.run_graph("--check-only")
+        self.assertEqual(code, 1, error)
+        self.assertIn("division by zero", error)
+        self.assertNotIn("supply it with --set", error)
+
     def test_failed_refresh_removes_the_stale_png(self):
         for failure, code in (("schema", 1), ("yaml", 1), ("option", 2), ("parameter", 2), ("event", 1)):
             with self.subTest(failure=failure):

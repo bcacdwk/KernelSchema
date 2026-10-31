@@ -5,7 +5,7 @@ import ast
 from fractions import Fraction
 from math import ceil, floor
 
-from ..pipeline_syntax import IndexScope
+from ..pipeline_syntax import IndexScope, literal_integer
 from .model import ExpansionError, GraphError
 
 LIMIT = 20000
@@ -18,12 +18,13 @@ class Boundary(GraphError):
 
 def tree(text: str) -> ast.AST:
     try:
-        result = ast.parse(str(text).strip(), mode="eval").body
-        if len(list(ast.walk(result))) > 100:
-            raise ExpansionError(f"expression too large to expand: {text}")
-        return result
-    except (SyntaxError, RecursionError) as error:
+        literal = literal_integer(text)
+        result = ast.Constant(value=literal) if literal is not None else ast.parse(str(text).strip(), mode="eval").body
+    except (SyntaxError, ValueError, RecursionError) as error:
         raise ExpansionError(f"unsupported integer expression: {text}") from error
+    if len(list(ast.walk(result))) > 100:
+        raise ExpansionError(f"expression too large to expand: {text}")
+    return result
 
 
 def variables(node: ast.AST) -> set[str]:
@@ -181,7 +182,10 @@ class Domains:
             if name == "max" and values: return max(values)
             if name == "floor" and len(values) == 1: return floor(values[0])
             if name == "ceil" and len(values) == 1: return ceil(values[0])
-            if name == "ceil_div" and len(values) == 2 and values[1]: return ceil(values[0] / values[1])
+            if name == "ceil_div" and len(values) == 2:
+                if not values[1]:
+                    raise GraphError(f"division by zero: {canonical}")
+                return ceil(values[0] / values[1])
         if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
             name = node.value.id
             definition = self.definitions.get(name)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from ..diagnostics import field_path
 from .common import CheckContext, as_list
+from .values import literal_integer
 
 
 def validate(check: CheckContext, task: dict, *, allow_missing_hardware=False) -> None:
@@ -84,8 +85,9 @@ def validate(check: CheckContext, task: dict, *, allow_missing_hardware=False) -
                 if field in mapping and hardware is not None:
                     check.require(mapping[field]["unit"] in hardware["execution"], p + ".mapping." + field + ".unit",
                                  f"{field} unit is not registered in shared hardware execution")
-            if "member" in mapping and type(mapping["worker"]["unit_count"]) is int:
-                check.require(len(mapping["member"]) == mapping["worker"]["unit_count"], p + ".mapping.member", "member entries must match worker.unit_count")
+            member_count = literal_integer(mapping["worker"]["unit_count"])
+            if "member" in mapping and member_count is not None:
+                check.require(len(mapping["member"]) == member_count, p + ".mapping.member", "member entries must match worker.unit_count")
             for value, block in dec.get("worktile", {}).get("invariant", {}).items():
                 if "offset" in block:
                     check.require(len(block["offset"]) == len(block["shape"]), p + ".decomposition.worktile.invariant." + value + ".offset", "offset length must match shape rank")
@@ -108,12 +110,13 @@ def validate(check: CheckContext, task: dict, *, allow_missing_hardware=False) -
                              "built-in launch events cannot also name a local milestone")
             for key, resource in phase.get("resource", {}).items():
                 rp = p + ".resource." + key
-                count = resource["slot_count"]
-                if type(count) is int and count > 1:
+                count = literal_integer(resource["slot_count"])
+                if count is not None and count > 1:
                     check.require("view" in resource, rp + ".view", "multi-slot storage requires value-to-slot views", missing=True)
                 for value, view in resource.get("view", {}).items():
                     vp = field_path(rp + ".view", value)
-                    if type(count) is int and count > 1:
+                    if count is not None and count > 1:
                         check.require("slot_index" in view, vp + ".slot_index", "multi-slot views require a slot_index", missing=True)
-                    if type(count) is int and type(view.get("slot_index")) is int:
-                        check.require(view["slot_index"] < count, vp + ".slot_index", "view slot_index exceeds resource slot_count")
+                    slot = literal_integer(view.get("slot_index"))
+                    if count is not None and slot is not None:
+                        check.require(slot < count, vp + ".slot_index", "view slot_index exceeds resource slot_count")

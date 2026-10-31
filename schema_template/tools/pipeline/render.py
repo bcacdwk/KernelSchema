@@ -21,7 +21,7 @@ STYLES = {
 
 
 class RenderError(RuntimeError):
-    """The checked graph is available, but the rendering environment failed."""
+    """The checked graph cannot be published as a current PNG (exit 2)."""
 
 
 def quote(value) -> str:
