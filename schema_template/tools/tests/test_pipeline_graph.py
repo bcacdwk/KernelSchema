@@ -597,13 +597,13 @@ class GraphCliTests(TaskCase):
         output = self.directory / "figures"
         result = self.run_graph("--format", "dot")
         self.assertEqual(result.returncode, 0, result.stderr)
-        for suffix in (".svg", ".html"):
+        for suffix in (".svg", ".view.html"):
             (output / ("root" + suffix)).write_text("old picture")
         result = self.run_graph("--format", "dot")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((output / "root.dot").is_file())
         self.assertFalse((output / "root.svg").exists())
-        self.assertFalse((output / "root.html").exists())
+        self.assertFalse((output / "root.view.html").exists())
 
     def test_failed_refresh_invalidates_results_and_gallery(self):
         output = self.directory / "figures"
@@ -615,7 +615,7 @@ class GraphCliTests(TaskCase):
                 sample.unlink(missing_ok=True)
                 result = self.run_graph("--format", "dot", "--all")
                 self.assertEqual(result.returncode, 0, result.stderr)
-                for suffix in (".svg", ".html"):
+                for suffix in (".svg", ".view.html"):
                     (output / ("root" + suffix)).write_text("previous successful rendering")
                 (output / "notes.txt").write_text("keep unrelated files")
                 options = []
@@ -689,7 +689,7 @@ class GraphCliTests(TaskCase):
         output = self.directory / "figures"
         result = self.run_graph("--format", "dot")
         self.assertEqual(result.returncode, 0, result.stderr)
-        for suffix in (".svg", ".html"):
+        for suffix in (".svg", ".view.html"):
             (output / ("root" + suffix)).write_text("previous successful rendering")
         result = self.run_graph(env={**os.environ, "PATH": ""})
         self.assertEqual(result.returncode, 2, result.stderr)
@@ -697,7 +697,7 @@ class GraphCliTests(TaskCase):
         self.assertTrue((self.directory / "figures/root.dot").is_file())
         self.assertTrue((self.directory / "figures/root.json").is_file())
         self.assertFalse((self.directory / "figures/root.svg").exists())
-        self.assertFalse((self.directory / "figures/root.html").exists())
+        self.assertFalse((self.directory / "figures/root.view.html").exists())
         self.assertEqual({p.name for p in output.iterdir()}, {"root.dot", "root.json"})
 
     def test_output_conflicts_preserve_unrelated_files_even_for_missing_inputs(self):

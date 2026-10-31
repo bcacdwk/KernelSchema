@@ -9,6 +9,7 @@ import shlex
 import sys
 
 from .diagnostics import field_path
+from .errors import CapacityError
 
 
 class ReadError(Exception):
@@ -126,7 +127,7 @@ def load(path: Path, name: str) -> Document:
     except UnicodeDecodeError as error:
         raise problem("YAML must be valid UTF-8") from error
     except RecursionError as error:
-        raise problem("YAML nesting or alias recursion exceeds the parser's capacity") from error
+        raise CapacityError(f"{path}: YAML nesting exceeds the parser's capacity") from error
     finally:
         if loader is not None:
             loader.dispose()

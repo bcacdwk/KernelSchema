@@ -2,13 +2,26 @@
 from __future__ import annotations
 
 import json
+from html.parser import HTMLParser
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from .render import RenderError, dot_text, gallery, gallery_entry, graphviz, viewer
+from .render import RenderError, dot_text, gallery, graphviz, viewer
 
 REPORT_SCHEMA = "pipeline-graph-trial-1"
-SUFFIXES = (".json", ".dot", ".svg", ".html")
+SUFFIXES = (".json", ".dot", ".svg", ".view.html")
+
+
+class GalleryIdentity(HTMLParser):
+    """Read stable ownership metadata independently of gallery presentation."""
+    def __init__(self):
+        super().__init__()
+        self.sources = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "meta" and attributes.get("name") == "kernelschema-gallery-source":
+            self.sources.append(attributes.get("content"))
 
 
 class GraphOutput:
@@ -33,18 +46,13 @@ class GraphOutput:
                 reports[path.stem] = report
         return reports
 
-    def owns_gallery(self, task_directory: Path, reports: dict[str, dict]) -> bool:
-        """Recognize the generated index from the reports and links it displays."""
+    def owns_gallery(self, task_directory: Path) -> bool:
         try:
-            contents = (self.directory / "index.html").read_text(encoding="utf-8")
-            for format, suffix in (("svg", ".html"), ("dot", ".dot")):
-                entries = [gallery_entry(node, report, format) for node, report in reports.items()
-                           if (self.directory / (node + suffix)).is_file()]
-                if contents == gallery(task_directory.name + " · Pipeline review", entries):
-                    return True
-        except (OSError, UnicodeError, KeyError, TypeError):
-            pass
-        return False
+            identity = GalleryIdentity()
+            identity.feed((self.directory / "index.html").read_text(encoding="utf-8"))
+            return identity.sources == [str(task_directory)]
+        except (OSError, UnicodeError, ValueError):
+            return False
 
     def begin(self, source: Path, *, all_nodes: bool) -> None:
         """Invalidate the requested results before checking any input.
@@ -52,7 +60,7 @@ class GraphOutput:
         A whole-task refresh also retires reports for removed nodes. Recognize
         those by their report format and source directory, not by file suffix.
         """
-        task_directory = source.parent.resolve()
+        task_directory = self.task_directory = source.parent.resolve()
         reports = self.reports(task_directory)
         nodes = {source.stem}
         if all_nodes:
@@ -63,7 +71,7 @@ class GraphOutput:
                      for suffix in SUFFIXES
                      if (self.directory / (node + suffix)).exists() or (self.directory / (node + suffix)).is_symlink()]
         index = self.directory / "index.html"
-        if (index.exists() or index.is_symlink()) and not self.owns_gallery(task_directory, reports):
+        if (index.exists() or index.is_symlink()) and not self.owns_gallery(task_directory):
             conflicts.append(index)
         if conflicts:
             raise OSError("output conflicts with files not owned by this task: "
@@ -85,8 +93,8 @@ class GraphOutput:
                 if format == "svg":
                     try:
                         graphviz(base.with_suffix(".dot"), base.with_suffix(".svg"))
-                        base.with_suffix(".html").write_text(viewer(title, node + ".svg", report), encoding="utf-8")
-                        suffixes.extend((".svg", ".html"))
+                        base.with_suffix(".view.html").write_text(viewer(title, node + ".svg", report), encoding="utf-8")
+                        suffixes.extend((".svg", ".view.html"))
                     except RenderError as error:
                         render_error = error
                 for suffix in suffixes:
@@ -99,4 +107,7 @@ class GraphOutput:
 
     def write_gallery(self, title: str, entries: list[dict]) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
-        (self.directory / "index.html").write_text(gallery(title, entries), encoding="utf-8")
+        with TemporaryDirectory(prefix=".pipeline-", dir=self.directory) as temporary:
+            index = Path(temporary) / "index.html"
+            index.write_text(gallery(title, entries, str(self.task_directory)), encoding="utf-8")
+            index.replace(self.directory / "index.html")

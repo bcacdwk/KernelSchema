@@ -5,14 +5,11 @@ from pathlib import Path
 
 from . import check_policy, rules, yaml_source
 from .diagnostics import format_diagnostics
+from .errors import ToolError, bounded
 from .rules.values import node_id
 
 class SchemaError(Exception):
     """Invalid YAML or task relations (exit 1)."""
-
-
-class ToolError(Exception):
-    """The check could not be completed (exit 2)."""
 
 
 def task_files(directory: Path) -> dict[str, Path]:
@@ -36,6 +33,7 @@ def task_files(directory: Path) -> dict[str, Path]:
     return files
 
 
+@bounded
 def validate_directory(directory: str | Path, *, notices: list[str] | None = None) -> dict:
     directory = Path(directory).resolve()
     files = task_files(directory)

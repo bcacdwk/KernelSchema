@@ -18,12 +18,14 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import schema
+from tools.errors import bounded
 from tools.pipeline import GraphError, build_phase
 from tools.pipeline.model import ExpansionError
 from tools.pipeline.output import GraphOutput, REPORT_SCHEMA
 from tools.pipeline.render import RenderError, gallery_entry
 
 
+@bounded
 def read_sample(path: Path) -> dict:
     if not path.exists():
         return {}

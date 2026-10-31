@@ -5,6 +5,7 @@ import ast
 from fractions import Fraction
 from math import ceil, floor
 
+from ..pipeline_syntax import IndexScope
 from .model import ExpansionError, GraphError
 
 LIMIT = 20000
@@ -52,14 +53,12 @@ def referenced_domains(node: ast.AST) -> set[str]:
 
 class Domains:
     def __init__(self, definitions: dict, parameters: dict[str, int], worktiles: int):
-        self.definitions = definitions
+        self.scope = definitions if isinstance(definitions, IndexScope) else IndexScope(definitions)
+        self.definitions = self.scope.definitions
         self.parameters = parameters
         self.worktiles = worktiles
         self._active: set[str] = set()
         self._dependencies: dict[str, set[str]] = {}
-
-    def extended(self, name: str, definition) -> Domains:
-        return Domains(dict(self.definitions, **{name: definition}), self.parameters, self.worktiles)
 
     def coordinates(self, name: str, visited=None) -> set[str]:
         visited = set() if visited is None else visited

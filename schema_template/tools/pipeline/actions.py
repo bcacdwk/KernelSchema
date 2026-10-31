@@ -1,7 +1,7 @@
 """Shared action parsing and integer substitution for finite expansion."""
 from __future__ import annotations
 
-from ..rules.pipeline import action_parts, parse_action, split_top
+from ..pipeline_syntax import action_parts, parse_action, split_top
 from .expressions import Domains, tree, variables
 from .model import GraphError
 

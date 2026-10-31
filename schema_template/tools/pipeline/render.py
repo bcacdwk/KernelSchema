@@ -203,17 +203,18 @@ function fit(){{width=document.getElementById('canvas').clientWidth;diagram.styl
 def gallery_entry(node: str, report: dict, format: str) -> dict:
     count = sum(len(phase["operations"]) for phase in report["phases"])
     status = "Acyclic sample" if report["acyclic"] else "DEPENDENCY CYCLE"
-    return {"name": node, "href": node + (".html" if format == "svg" else ".dot"),
+    return {"name": node, "href": node + (".view.html" if format == "svg" else ".dot"),
             "summary": f"{len(report['phases'])} phases · {count} actions · {status}"}
 
 
-def gallery(title: str, entries: list[dict]) -> str:
+def gallery(title: str, entries: list[dict], source: str) -> str:
     cards = []
     for item in entries:
         href = html.escape(item["href"], quote=True)
         cards.append(f'<a class="card" href="{href}"><b>{html.escape(item["name"])}</b>'
                      f'<span>{html.escape(item["summary"])}</span></a>')
     return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<meta name="kernelschema-gallery-source" content="{html.escape(source, quote=True)}">
 <title>{html.escape(title)}</title><style>
 body{{margin:40px auto;max-width:1100px;padding:0 24px;font:15px system-ui;color:#26384b;background:#f6f8fb}}
 h1{{font-size:28px}}p{{line-height:1.7}}main{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}}

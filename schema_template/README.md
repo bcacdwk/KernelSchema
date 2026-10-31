@@ -74,7 +74,7 @@ python3 schema_template/check_yaml.py path/to/task/root.yaml
 python3 schema_template/tools/pipeline_graph.py path/to/task/root.yaml
 ```
 
-先通过同目录的 YAML 检查，再为指定文件生成一张图，按 phase 分区、role 分列。结果位于任务目录的 `pipeline_graphs/`，包括 SVG、可缩放的 HTML、DOT 和事件 JSON；加 `--all` 处理同目录全部节点。生成 SVG 还需要 Graphviz 的 `dot`；`--format dot` 可只生成 DOT 和 JSON。
+先通过同目录的 YAML 检查，再为指定文件生成一张图，按 phase 分区、role 分列。结果位于任务目录的 `pipeline_graphs/`：每个节点生成 `<id>.svg`、可缩放的 `<id>.view.html`、`<id>.dot` 和事件 `<id>.json`；加 `--all` 处理同目录全部节点并生成目录页 `index.html`。目录页与节点查看器分开命名，`index` 仍是合法节点 ID。生成 SVG 还需要 Graphviz 的 `dot`；`--format dot` 时每个节点只生成 DOT 和 JSON，`--all` 仍生成目录页。
 
 采用代表性规模展开起始、若干重复和收尾，不表示实测时间线。示例的取值保存在同目录 `pipeline_samples.json`，可用 `--set N=4`、`--worktiles 2` 覆盖；这些是绘图输入，不改写 plan。缺少取值、表达式尚不支持或展开超过工具上限时，会说明无法完成的原因，退出状态为 `2`，不据此判定 YAML 非法。
 

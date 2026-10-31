@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
-from ..rules.pipeline import parse_action, parse_event
+from ..pipeline_syntax import IndexScope, ScopedPipe, domain_choices, parse_action, parse_event
 from ..rules.common import EXECUTION_MODES
 from .actions import action_variables, instantiate, operands
 from .expressions import Boundary, Domains, LIMIT, referenced_domains, tree
@@ -37,69 +37,55 @@ class Builder:
     def __init__(self, pid: str, phase: dict, worker: dict, parameters: dict, worktiles: int):
         self.graph = PhaseGraph(pid)
         self.phase = phase
-        self.domains = Domains(phase.get("domain", {}), parameters, worktiles)
+        scope = IndexScope(phase.get("domain", {}))
+        self.domains = Domains(scope, parameters, worktiles)
+        self.pipes = {role: ScopedPipe.read(body["pipe"], scope,
+                      f"design.tile_pipeline.phase.{pid}.role.{role}.pipe")
+                      for role, body in phase["role"].items()}
+        self.domain_cache = {id(scope): self.domains}
         self.members = {role: members(body["info"], worker, self.domains)
                         for role, body in phase["role"].items()}
         self.all_members = tuple(range(self.domains.integer(worker["unit_count"], {})))
         self.lookup = {}
-        self.families = defaultdict(set)
+        self.families = defaultdict(dict)
         self.windows = IndexWindows()
-        self.local_domains = defaultdict(lambda: defaultdict(list))
         self.steps = 0
 
-    def expand_pipe(self, role: str, block: dict, domains: Domains, env: dict, path: str):
-        repeat = block.get("repeat")
-        if isinstance(repeat, dict):
-            name, definition = next(iter(repeat.items()))
-            domains = domains.extended(name, definition)
-            repeat = name
-        for region in ("prologue", "steady", "epilogue"):
+    def domains_for(self, scope: IndexScope) -> Domains:
+        if id(scope) not in self.domain_cache:
+            self.domain_cache[id(scope)] = Domains(scope, self.domains.parameters, self.domains.worktiles)
+        return self.domain_cache[id(scope)]
+
+    def expand_pipe(self, block: ScopedPipe, env: dict):
+        domains = self.domains_for(block.scope)
+        for region, items in block.regions.items():
             contexts = [env]
-            if region == "steady" and repeat:
+            if region == "steady" and block.repeat:
                 try:
-                    contexts = [dict(env, **item) for item in domains.select(repeat, env)]
+                    contexts = [dict(env, **item) for item in domains.select(block.repeat, env)]
                 except GraphError as error:
-                    raise type(error)(f"{path}.repeat: {error}") from error
+                    raise type(error)(f"{block.path}.repeat: {error}") from error
             for context in contexts:
                 self.steps += 1
                 if self.steps > 100000:
                     raise ExpansionError("pipe expansion step limit exceeded (100000); use a smaller sample")
-                for index, item in enumerate(block.get(region, [])):
-                    location = f"{path}.{region}[{index}]"
-                    if isinstance(item, dict):
-                        yield from self.expand_pipe(role, item, domains, context, location)
+                for item in items:
+                    if isinstance(item, ScopedPipe):
+                        yield from self.expand_pipe(item, context)
                     else:
                         try:
-                            yield instantiate(item, domains, context), context, location
+                            yield instantiate(item.text, domains, context), context, item.path
                         except GraphError as error:
-                            raise type(error)(f"{location}: {error}") from error
-
-    def collect_families(self, role: str, block: dict, domains: Domains) -> None:
-        # Include inactive branches: a misspelled family is never a boundary.
-        repeat = block.get("repeat")
-        if isinstance(repeat, dict):
-            for name, definition in repeat.items():
-                domains = domains.extended(name, definition)
-        for region in ("prologue", "steady", "epilogue"):
-            for item in block.get(region, []):
-                if isinstance(item, dict):
-                    self.collect_families(role, item, domains)
-                else:
-                    family = parse_action(item)
-                    self.families[role].add(family)
-                    self.windows.register(role, item, domains)
-                    for name, definition in domains.definitions.items():
-                        if name not in self.domains.definitions or definition != self.domains.definitions[name]:
-                            local = self.local_domains[(role, family)][name]
-                            if definition not in local:
-                                local.append(definition)
+                            raise type(error)(f"{item.path}: {error}") from error
 
     def add_operations(self) -> None:
         for role, body in self.phase["role"].items():
-            self.collect_families(role, body["pipe"], self.domains)
+            pipe = self.pipes[role]
+            for action in pipe.actions():
+                self.families[role].setdefault(parse_action(action.text), []).append(action.scope)
+                self.windows.register(role, action.text, self.domains_for(action.scope))
             info = body["info"]
-            path = f"design.tile_pipeline.phase.{self.graph.phase}.role.{role}.pipe"
-            expanded = list(self.expand_pipe(role, body["pipe"], self.domains, {}, path))
+            expanded = list(self.expand_pipe(pipe, {}))
             for member in self.members[role]:
                 previous = ordered = None
                 for action, context, location in expanded:
@@ -196,35 +182,27 @@ class Builder:
                 for reference, events in endpoints]
 
     def rule_domains(self, references) -> Domains:
-        definitions = dict(self.domains.definitions)
-        names = set().union(*(referenced_domains(tree(arg)) for ref in references
-                              for _, args in operands(ref[2])[1] for arg in args))
-        candidates = defaultdict(list)
-        for ref in references:
-            for name, values in self.local_domains[(ref[0], parse_action(ref[2]))].items():
-                for value in values:
-                    if value not in candidates[name]:
-                        candidates[name].append(value)
-        pending, visited = list(names), set()
-        while pending:
-            name = pending.pop()
-            if name in visited:
-                continue
-            visited.add(name)
-            local = candidates[name]
-            if name in definitions:
-                if any(value != definitions[name] for value in local):
-                    raise ExpansionError(f"ambiguous shadowed edge index {name}; use a shared phase domain for expansion")
-            elif len(local) == 1:
-                definitions[name] = local[0]
-            elif len(local) > 1:
-                raise ExpansionError(f"ambiguous local edge index {name}; use a shared phase domain for expansion")
-            definition = definitions.get(name)
-            if isinstance(definition, dict):
-                pending.extend(definition["flatten"])
-            elif isinstance(definition, list):
-                dependencies = set().union(*(referenced_domains(tree(str(bound))) for bound in definition))
-                pending.extend(dependencies & (definitions.keys() | candidates.keys()))
+        definitions = {}
+        for reference in references:
+            scopes = self.families[reference[0]][parse_action(reference[2])]
+            pending = list(set().union(*(referenced_domains(tree(arg))
+                           for _, args in operands(reference[2])[1] for arg in args)))
+            visited = set()
+            while pending:
+                name = pending.pop()
+                if name in visited:
+                    continue
+                visited.add(name)
+                choices = domain_choices(scopes, name)
+                if not choices:
+                    continue
+                if len(choices) > 1 or name in definitions and definitions[name] != choices[0]:
+                    raise ExpansionError(f"ambiguous local edge index {name}; referenced action scopes disagree")
+                definition = definitions[name] = choices[0]
+                if isinstance(definition, dict):
+                    pending.extend(definition["flatten"])
+                elif isinstance(definition, list):
+                    pending.extend(set().union(*(referenced_domains(tree(str(bound))) for bound in definition)))
         return Domains(definitions, self.domains.parameters, self.domains.worktiles)
 
     def explicit_edges(self) -> None:

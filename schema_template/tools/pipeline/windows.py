@@ -4,10 +4,12 @@ from __future__ import annotations
 import ast
 from collections import defaultdict
 from dataclasses import dataclass
+from enum import Enum
 
-from ..rules.pipeline import parse_action
+from ..pipeline_syntax import parse_action
 from .actions import operands
 from .expressions import Domains, LIMIT, tree, variables
+from .coordinates import recover
 from .model import ExpansionError
 
 
@@ -35,6 +37,10 @@ class Window:
     domains: Domains
     position: tuple[int, int]
     other_arguments: list[tuple[tuple[int, int], ast.AST]]
+
+
+class WindowMatch(Enum):
+    REQUIRED = "an unshifted reference still requires an actual action"
 
 
 class IndexWindows:
@@ -70,92 +76,95 @@ class IndexWindows:
             collection[key].append(Window(expression, domains, position,
                 [(pos, node) for pos, node in arguments.items() if pos != position]))
 
-    def outer_context(self, window, concrete, env, needed):
+    def target_contexts(self, window, concrete, env, needed, require_context_shift):
         domains = window.domains
-        context = dict(env)
-        bound = set()
-        if isinstance(window.expression, ast.Name):
-            context[window.expression.id] = int(concrete[window.position])
-            bound.add(window.expression.id)
+        arguments = [(window.expression, int(concrete[window.position]))]
         for position, expression in window.other_arguments:
-            if isinstance(expression, ast.Name) and expression.id in domains.definitions:
-                context[expression.id] = int(concrete[position])
-                bound.add(expression.id)
-        pending = [(position, expression) for position, expression in window.other_arguments
-                   if variables(expression) & (needed - bound)]
-        targets = set().union(*(variables(expression) & needed for _, expression in pending))
+            normalized = RangeExpression(domains).visit(tree(ast.unparse(expression)))
+            arguments.append((normalized, int(concrete[position])))
+        if not needed:
+            if require_context_shift:
+                yield WindowMatch.REQUIRED
+                return
+            for position, expression in window.other_arguments:
+                if not variables(expression) & domains.definitions.keys():
+                    if domains.integer(ast.unparse(expression), env) != int(concrete[position]):
+                        return
+            yield dict(env)
+            return
+        context = recover(arguments, domains, env, needed, partial=True)
+        if context is None:
+            return
+        represented = set().union(*(domains.coordinates(name) for expression, _ in arguments
+                                    for name in variables(expression) & domains.definitions.keys()))
+        missing = needed - context.keys()
+        if missing & represented:
+            raise ExpansionError("cannot uniquely recover action-index coordinates: "
+                                 + ", ".join(sorted(missing & represented)))
+        if require_context_shift and not any(name in env and name in context and context[name] != env[name]
+                                             for name in needed):
+            yield WindowMatch.REQUIRED
+            return
+        # Coordinates omitted from the action identity quantify declaration
+        # contexts. Enumerate their complete domains, never the emitted actions.
+        if not self.outer_exists(domains, needed & context.keys(), context):
+            yield None
+            return
+        found = False
+        for i, candidate in enumerate(domains.contexts(missing, context)):
+            self.step()
+            if i >= LIMIT:
+                raise ExpansionError("action-index declaration contexts exceed expansion limit")
+            found = True
+            yield candidate
+        if missing and not found:
+            yield None
+
+    def outer_exists(self, domains, needed, context):
+        pending, checked = set(needed), set()
         while pending:
-            progress = False
-            for position, expression in list(pending):
-                unbound = variables(expression) & (domains.definitions.keys() - bound)
-                if not unbound:
-                    if domains.integer(ast.unparse(expression), context) != int(concrete[position]):
-                        return None
-                elif len(unbound) == 1:
-                    name = next(iter(unbound))
-                    dependencies = domains.dependencies(name)
-                    if dependencies & (targets - bound):
-                        continue
-                    if not dependencies <= context.keys():
-                        raise ExpansionError(f"cannot bind outer coordinate {name} for an action-index window")
-                    seed = {key: context[key] for key in dependencies}
-                    matches = []
-                    for entry in domains.entries(name, seed):
-                        self.step()
-                        if any(key in bound and context[key] != value for key, value in entry.items()):
-                            continue
-                        if domains.integer(ast.unparse(expression), dict(context, **entry)) == int(concrete[position]):
-                            matches.append(entry)
-                            if len(matches) > 1:
-                                raise ExpansionError(f"ambiguous outer coordinate in action-index window: {ast.unparse(expression)}")
-                    if not matches:
-                        return None
-                    context.update(matches[0])
-                    bound.update(matches[0])
-                else:
-                    continue
-                pending.remove((position, expression))
-                progress = True
-            if not progress:
-                raise ExpansionError("cannot bind coupled outer coordinates for an action-index window")
-        for position, expression in window.other_arguments:
-            if not variables(expression) & domains.definitions.keys():
-                if domains.integer(ast.unparse(expression), context) != int(concrete[position]):
-                    return None
-        return context
+            ready = [name for name in pending if domains.dependencies(name) & needed <= checked]
+            if not ready:
+                raise ExpansionError("cannot order action-index outer coordinates")
+            name = min(ready)
+            self.step()
+            if not any(entry[name] == context[name] for entry in domains.entries(name, context)):
+                return False
+            checked.add(name)
+            pending.remove(name)
+        return True
 
     def bounds(self, window, concrete, env, *, require_context_shift=False):
         domains = window.domains
         names = variables(window.expression) & domains.definitions.keys()
         dependencies = set().union(*(domains.dependencies(name) for name in names))
-        # An outer coordinate used both in an expression and an inner bound is
-        # fixed for that instance. A flat index, however, spans its full domain.
         varying = names - dependencies
         unbound = set().union(*(domains.coordinates(name) for name in varying))
         needed = dependencies - unbound
-        context = self.outer_context(window, concrete, env, needed)
-        if context is None:
-            return None
-        if require_context_shift and not any(name in env and context.get(name) != env[name] for name in needed):
-            return None
-        if not needed <= context.keys():
-            raise ExpansionError(f"cannot bind action-index window context: {', '.join(sorted(needed - context.keys()))}")
-        seed = {name: context[name] for name in needed}
-        key = (id(window), tuple(sorted(seed.items())))
-        if key not in self.cache:
-            values = []
-            for i, bound in enumerate(domains.contexts(varying, seed)):
-                self.step()
-                if i >= LIMIT:
-                    raise ExpansionError("action index window exceeds expansion limit; use a smaller sample")
-                values.append(domains.integer(ast.unparse(window.expression), bound))
-            self.cache[key] = (min(values), max(values)) if values else (0, -1)
-        return self.cache[key]
+        bounds = []
+        for context in self.target_contexts(window, concrete, env, needed, require_context_shift):
+            if context is WindowMatch.REQUIRED:
+                return WindowMatch.REQUIRED
+            if context is None or not self.outer_exists(domains, needed, context):
+                bounds.append((0, -1))
+                continue
+            seed = {name: context[name] for name in needed}
+            key = (id(window), tuple(sorted(seed.items())))
+            if key not in self.cache:
+                values = []
+                for i, bound in enumerate(domains.contexts(varying, seed)):
+                    self.step()
+                    if i >= LIMIT:
+                        raise ExpansionError("action index window exceeds expansion limit; use a smaller sample")
+                    values.append(domains.integer(ast.unparse(window.expression), bound))
+                self.cache[key] = (min(values), max(values)) if values else (0, -1)
+            bounds.append(self.cache[key])
+        return (min(bound[0] for bound in bounds), max(bound[1] for bound in bounds)) if bounds else None
 
     def outside(self, role, template, concrete, domains, env):
         values = {(oi, ai): value for oi, (_, args) in enumerate(operands(concrete)[1])
                   for ai, value in enumerate(args)}
-        unknown = []
+        unknown, incomplete = [], []
         for oi, (_, args) in enumerate(operands(template)[1]):
             for ai, argument in enumerate(args):
                 node = tree(argument)
@@ -168,13 +177,24 @@ class IndexWindows:
                     if not unshifted:
                         unknown.append(argument)
                     continue
-                bounds = [bound for source in sources
-                          if (bound := self.bounds(source, values, env,
-                                                   require_context_shift=unshifted)) is not None]
-                if bounds:
+                bounds, uncertain, required = [], False, False
+                for source in sources:
+                    try:
+                        bound = self.bounds(source, values, env, require_context_shift=unshifted)
+                    except ExpansionError as error:
+                        incomplete.append(error)
+                        uncertain = True
+                        continue
+                    if bound is WindowMatch.REQUIRED:
+                        required = True
+                    elif bound is not None:
+                        bounds.append(bound)
+                if bounds and not uncertain and not required:
                     lo, hi = min(b[0] for b in bounds), max(b[1] for b in bounds)
                     if not lo <= int(values[(oi, ai)]) <= hi:
                         return True
+        if incomplete:
+            raise incomplete[0]
         if unknown:
             raise ExpansionError(f"cannot determine declared index window for {role}/{template}: "
                                  f"{', '.join(unknown)}; no unshifted domain binding is available")

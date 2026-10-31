@@ -19,23 +19,31 @@ class CheckContext:
 
     def acyclic(self, graph: dict[Any, list[Any]], path: str,
                 node_paths: dict[Any, str] | None = None) -> None:
-        active, finished = set(), set()
-
-        def visit(node: Any, chain: list[Any]) -> None:
-            if node in active:
-                self.require(False, node_paths[node] if node_paths else path,
-                             "cycle: " + " -> ".join(map(str, chain + [node])))
-                return
-            if node in finished:
-                return
-            active.add(node)
-            for target in graph.get(node, []):
-                visit(target, chain + [node])
-            active.remove(node)
-            finished.add(node)
-
-        for node in graph:
-            visit(node, [])
+        active, finished = {}, set()
+        for root in graph:
+            if root in finished:
+                continue
+            chain = [root]
+            active[root] = 0
+            stack = [(root, iter(graph.get(root, [])))]
+            while stack:
+                node, targets = stack[-1]
+                try:
+                    target = next(targets)
+                except StopIteration:
+                    stack.pop()
+                    chain.pop()
+                    active.pop(node)
+                    finished.add(node)
+                    continue
+                if target in active:
+                    cycle = chain[active[target]:] + [target]
+                    self.require(False, node_paths[target] if node_paths else path,
+                                 "cycle: " + " -> ".join(map(str, cycle)))
+                elif target not in finished:
+                    active[target] = len(chain)
+                    chain.append(target)
+                    stack.append((target, iter(graph.get(target, []))))
 
     def interval(self, value: list[Any], path: str) -> None:
         lo, hi = value
