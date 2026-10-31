@@ -6,7 +6,7 @@
 
 ## 1 确认任务、设计与实现起点
 
-读取任务要求、root 的共享 Contract、目标节点的完整 Design 和适用的 realization，确认节点与 root 的版本。多节点任务先用 `dispatch.md` 定位路径，再以 YAML 的 `when` 核对适用范围；派生节点使用同目录 root 的 Contract，不从 parent 拼接 Design。文件关系与选择条件见 [common](schema_docs/0.common.md#派生节点与-dispatch)。
+先用任务的 `dispatch.md` 定位路径，读取任务要求、root 的共享 Contract、目标节点的完整 Design 和适用的 realization，确认节点与 root 的版本，再按 YAML 的选择条件及其缺省规则核对适用范围。派生节点使用同目录 root 的 Contract，不从 parent 拼接 Design。文件关系与选择条件见 [common](schema_docs/0.common.md#派生节点与-dispatch)。
 
 从 Contract 和任务材料确认外部接口、全部输出与副作用、验收要求、实际 workload、优化目标及计时范围，找到构建、测试和测量入口。区分必须覆盖的有效域、优先优化的输入和已有测试样本；生成器或旧代码中的数值、布局与分布性质不能自动成为输入限制。有参考或已有实现时，沿实际入口核对调用路径，包含 wrapper、路径选择、辅助工作和输出写回。
 

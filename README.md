@@ -54,7 +54,7 @@ Kernel Agent 有两个普遍问题：**难以优化**——无法判断结果是
 | Design | [design.tile_pipeline](schema_docs/5.design.tile_pipeline.md) | 微流水线：worker 内执行角色的动作、依赖、片上资源及跨工作接续 | 同上 |
 | Realization | [realization](schema_docs/6.realization.md) | 实现交接：设计所依赖、但上面没有表达的实现条件，以及优先尝试的实现选择 | Planner 填写；Coder 仅可更新 `prefer[].feedback` |
 
-Design 三区从上到下排列，越靠上越难优化、收益越大、在源码里越难看出来：`math_reshape` 是前置（定下有哪些量、计算顺序、哪些量跨迭代携带、哪些中间量物化），`work_schedule` 与 `tile_pipeline` 分别表达宏观工作组织和局部执行约束。
+Design 三区按计算方式、工作组织和局部执行排列：`math_reshape` 先定下有哪些量、计算依赖、哪些量跨迭代携带、哪些中间量物化，`work_schedule` 与 `tile_pipeline` 再分别表达宏观工作组织和局部执行约束。优化收益取决于具体任务与证据，不由所在层级决定。
 
 通用 YAML 写法、元数据与任务组织见[公共约定](schema_docs/0.common.md)。
 

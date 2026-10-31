@@ -16,7 +16,7 @@ Contract 使用任务给定或经任务方确认的内容；转录已确认的�
 
 ### 2 创建文件或进入已有任务
 
-新任务使用独立目录，按[任务身份规则](../schema_docs/0.common.md#单份-plan-与元数据)命名。已有含 Contract 的 `root.yaml` 时保留它，补入后续设计；需要新建文件时可复制骨架，再接入给定或按任务确认的 Contract。下面的 `path/to/task` 替换为实际目录，例如 `schema_wiki/<batch>/<task>`；任务也可以位于仓库之外。从仓库根目录复制骨架，不覆盖已有文件：
+新任务使用独立目录，按[任务身份规则](../schema_docs/0.common.md#单份-plan-与元数据)命名，并按[索引规则](../schema_docs/0.common.md#选择条件与索引)建立 `dispatch.md`。已有含 Contract 的 `root.yaml` 时保留它，补入后续设计；需要新建文件时可复制骨架，再接入给定或按任务确认的 Contract。下面的 `path/to/task` 替换为实际目录，例如 `schema_wiki/<batch>/<task>`；任务也可以位于仓库之外。从仓库根目录复制骨架，不覆盖已有文件：
 
 ```sh
 mkdir -p path/to/task
@@ -60,7 +60,7 @@ python3 schema_template/check_yaml.py path/to/task/root.yaml
 
 ### 5 交付
 
-交付任务目录：`root.yaml`、存在的派生节点，以及多节点任务的 `dispatch.md`；只有 root 时索引可选。派生文件依赖共享 Contract，不作为脱离 root 的完整 plan 交付。源码、硬件资料和实验记录保留在各自实际位置，通过规定的引用定位，不复制进 YAML。
+交付任务目录中的 `root.yaml`、存在的派生节点，以及按[索引规则](../schema_docs/0.common.md#选择条件与索引)维护的 `dispatch.md`。派生文件依赖共享 Contract，不作为脱离 root 的完整 plan 交付。源码、硬件资料和实验记录保留在各自实际位置，通过规定的引用定位，不复制进 YAML。
 
 任务冻结时，将准备阶段用 tag 或 branch 定位的硬件与编程等 wiki 资料解析到 commit，按 Contract 修改权限确认后填回原 `ref`；引用更新也按版本规则修订 root，并重跑同一检查命令。核对设计出处、参考入口及实验记录均指向实际对象和所声明的版本，而不只是字符串格式合法。
 
@@ -86,6 +86,6 @@ python3 schema_template/tools/pipeline_graph.py path/to/task/root.yaml --set N=4
 
 当前关联检查包括节点与 phase 身份、显式 Contract 属性引用、launch/handoff 的 phase、事件及局部资源引用，以及动作族匹配。`realization.item`、数学区的其他语义绑定，以及公式、strategy 和动作契约中的引用仍需人工解析；改名后应沿这些位置核对。
 
-通过检查表示结构及已实现的关联检查通过，不证明数学等价、表达式正确、数值正确、资源可行、存储复用安全、活性或性能。当前检查器不展开完整动作实例，动作引用通过也不证明每个索引处的动作存在。dispatch 条件的互斥与覆盖、外部资料、修改权限、修订历史和实验依据仍需审阅；实际实现是否满足数值、执行约束及性能目标，需要相应运行证据。
+通过 `check_yaml.py` 表示结构及已实现的关联检查通过，不证明数学等价、表达式正确、数值正确、资源可行、存储复用安全、活性或性能。该入口不展开完整动作实例，动作引用通过也不证明每个索引处的动作存在；有限展开使用上面的[微流水线图工具](#微流水线图)。任务索引、dispatch 条件的互斥与覆盖、外部资料、修改权限、修订历史和实验依据仍需审阅；实际实现是否满足数值、执行约束及性能目标，需要相应运行证据。
 
 wiki 占位和 `unknown:` 仍是待解决的缺口，不能靠猜测补齐，也不能把结构通过称为资料或设计已验收。[examples](examples/README.md) 仅作可选参考，不是学习规范的前提。维护检查器时再读 [tools/README.md](tools/README.md)。

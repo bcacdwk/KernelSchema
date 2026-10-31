@@ -12,7 +12,7 @@
 
 从任务说明明确优化目标、优先 workload 和计量边界，区分必须覆盖的契约域与优先优化的输入。先围绕主要 workload 形成一条完整路线，不急于按 shape 拆节点。按[模板说明](schema_template/README.md#2-创建文件或进入已有任务)创建或续写任务，保留给定 Contract；元数据与引用遵循 [common](schema_docs/0.common.md)，只登记本次设计的实际依据。
 
-围绕当前判断查资料：能力与容量看 `wiki.hardware`，相对代价看 `wiki.microbench`，已选栈能否表达所需保证看 `wiki.programming`。能力存在、资源够用与工具链支持分别核实。资料缺口按 [DOC 2](schema_docs/2.contract.hardware_specification.md#省略与占位)处理，指出它影响的决定；占位不代表所需能力已知，不能默认为硬件资料完备。
+围绕当前判断查资料：能力与容量看 `wiki.hardware`，相对代价看 `wiki.microbench`，已选栈能否表达所需保证看 `wiki.programming`。能力存在、资源够用与工具链支持分别核实。资料不足时按[缺项规则](schema_template/README.md#1-确认资料与范围)说明受影响的决定；资料入口的占位写法见 [DOC 2](schema_docs/2.contract.hardware_specification.md#省略与占位)。
 
 需要案例时，带着具体问题查 `wiki.sota.schema`，核实实现依据时再查 `wiki.sota.kernel`。先核对任务域、环境、精度路径和验收状态，再判断借鉴的是数学思路、工作组织还是表达方法，以及本任务中成立的理由。只采用适用的决定与证据，重新审视案例的缺口；案例提供候选，不规定唯一答案。
 
