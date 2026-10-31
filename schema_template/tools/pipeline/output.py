@@ -1,113 +1,99 @@
-"""Publication and invalidation of generated pipeline review artifacts."""
+"""Atomic, sibling PNG output with provenance stored inside the image."""
 from __future__ import annotations
 
+import hashlib
 import json
-from html.parser import HTMLParser
 from pathlib import Path
+import struct
 from tempfile import TemporaryDirectory
+import zlib
 
-from .render import RenderError, dot_text, gallery, graphviz, viewer
+from .render import RenderError, dot_text, graphviz
 
-REPORT_SCHEMA = "pipeline-graph-trial-1"
-SUFFIXES = (".json", ".dot", ".svg", ".view.html")
+SIGNATURE = b"\x89PNG\r\n\x1a\n"
+METADATA_KEY = b"KernelSchema"
 
 
-class GalleryIdentity(HTMLParser):
-    """Read stable ownership metadata independently of gallery presentation."""
-    def __init__(self):
-        super().__init__()
-        self.sources = []
+def chunks(data: bytes):
+    if not data.startswith(SIGNATURE):
+        raise ValueError("not a PNG image")
+    offset = len(SIGNATURE)
+    while offset + 12 <= len(data):
+        length = struct.unpack_from(">I", data, offset)[0]
+        end = offset + 12 + length
+        if end > len(data):
+            raise ValueError("truncated PNG chunk")
+        kind, payload = data[offset + 4:offset + 8], data[offset + 8:end - 4]
+        if zlib.crc32(kind + payload) != struct.unpack_from(">I", data, end - 4)[0]:
+            raise ValueError("invalid PNG checksum")
+        yield kind, payload, data[offset:end]
+        offset = end
+        if kind == b"IEND" and offset == len(data):
+            return
+    raise ValueError("incomplete PNG image")
 
-    def handle_starttag(self, tag, attrs):
-        attributes = dict(attrs)
-        if tag == "meta" and attributes.get("name") == "kernelschema-gallery-source":
-            self.sources.append(attributes.get("content"))
+
+def metadata(path: Path) -> dict:
+    try:
+        entries = [json.loads(payload.split(b"\0", 1)[1]) for kind, payload, _ in chunks(path.read_bytes())
+                   if kind == b"tEXt" and payload.startswith(METADATA_KEY + b"\0")]
+        return entries[0] if len(entries) == 1 and isinstance(entries[0], dict) else {}
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return {}
+
+
+def owner(path: Path) -> str | None:
+    information = metadata(path)
+    source = information.get("source")
+    if (information.get("kind") == "pipeline_graph" and isinstance(source, str)
+            and Path(source).name == source and Path(source).suffix in {".yaml", ".yml"}
+            and Path(source).stem == path.stem):
+        return source
+    return None
+
+
+def stamp(data: bytes, information: dict) -> bytes:
+    payload = METADATA_KEY + b"\0" + json.dumps(information, sort_keys=True, ensure_ascii=True).encode("ascii")
+    record = struct.pack(">I", len(payload)) + b"tEXt" + payload + struct.pack(">I", zlib.crc32(b"tEXt" + payload))
+    result = [SIGNATURE]
+    for kind, content, raw in chunks(data):
+        if kind == b"IEND":
+            result.append(record)
+        if kind != b"tEXt" or not content.startswith(METADATA_KEY + b"\0"):
+            result.append(raw)
+    return b"".join(result)
 
 
 class GraphOutput:
-    def __init__(self, directory: Path):
-        self.directory = directory
-
-    def discard(self, node: str) -> None:
-        for suffix in SUFFIXES:
-            (self.directory / (node + suffix)).unlink(missing_ok=True)
-
-    def reports(self, task_directory: Path) -> dict[str, dict]:
-        reports = {}
-        for path in sorted(self.directory.glob("*.json")):
-            try:
-                report = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, UnicodeError, RecursionError):
-                continue
-            if (isinstance(report, dict) and report.get("schema") == REPORT_SCHEMA
-                    and isinstance(report.get("source"), str)
-                    and Path(report["source"]).parent.resolve() == task_directory
-                    and Path(report["source"]).stem == path.stem):
-                reports[path.stem] = report
-        return reports
-
-    def owns_gallery(self, task_directory: Path) -> bool:
-        try:
-            identity = GalleryIdentity()
-            identity.feed((self.directory / "index.html").read_text(encoding="utf-8"))
-            return identity.sources == [str(task_directory)]
-        except (OSError, UnicodeError, ValueError):
-            return False
-
     def begin(self, source: Path, *, all_nodes: bool) -> None:
-        """Invalidate the requested results before checking any input.
-
-        A whole-task refresh also retires reports for removed nodes. Recognize
-        those by their report format and source directory, not by file suffix.
-        """
-        task_directory = self.task_directory = source.parent.resolve()
-        reports = self.reports(task_directory)
-        nodes = {source.stem}
+        sources = {source}
         if all_nodes:
-            if task_directory.is_dir():
-                nodes.update(p.stem for p in task_directory.iterdir() if p.suffix in {".yaml", ".yml"})
-            nodes.update(reports)
-        conflicts = [self.directory / (node + suffix) for node in sorted(nodes - reports.keys())
-                     for suffix in SUFFIXES
-                     if (self.directory / (node + suffix)).exists() or (self.directory / (node + suffix)).is_symlink()]
-        index = self.directory / "index.html"
-        if (index.exists() or index.is_symlink()) and not self.owns_gallery(task_directory):
-            conflicts.append(index)
+            sources.update(path for path in source.parent.iterdir() if path.suffix in {".yaml", ".yml"})
+            for path in source.parent.glob("*.png"):
+                name = owner(path)
+                if name is not None:
+                    sources.add(source.parent / name)
+        conflicts = [path.with_suffix(".png") for path in sorted(sources)
+                     if (path.with_suffix(".png").exists() or path.with_suffix(".png").is_symlink())
+                     and owner(path.with_suffix(".png")) != path.name]
         if conflicts:
-            raise OSError("output conflicts with files not owned by this task: "
-                          + ", ".join(str(path) for path in conflicts) + "; choose a separate --out directory")
-        index.unlink(missing_ok=True)
-        for node in sorted(nodes):
-            self.discard(node)
+            raise OSError("output conflicts with PNG files not generated for these YAML files: "
+                          + ", ".join(str(path) for path in conflicts))
+        for path in sorted(sources):
+            path.with_suffix(".png").unlink(missing_ok=True)
 
-    def write(self, node: str, title: str, graphs: list, samples: dict, report: dict, format: str) -> None:
-        """Publish complete files; a rendering failure retains checked DOT/JSON."""
-        self.directory.mkdir(parents=True, exist_ok=True)
-        render_error = None
+    def write(self, source: Path, graphs: list, samples: dict, notes: list[str]) -> Path:
+        title = source.parent.name + " / " + source.stem
+        image = graphviz(dot_text(title, graphs, samples, notes))
+        information = {"kind": "pipeline_graph", "source": source.name, "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                       "samples": samples, "notes": notes, "acyclic": all(not graph.cycle for graph in graphs)}
         try:
-            with TemporaryDirectory(prefix=".pipeline-", dir=self.directory) as temporary:
-                base = Path(temporary) / node
-                base.with_suffix(".json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-                base.with_suffix(".dot").write_text(dot_text(title, graphs, samples), encoding="utf-8")
-                suffixes = [".json", ".dot"]
-                if format == "svg":
-                    try:
-                        graphviz(base.with_suffix(".dot"), base.with_suffix(".svg"))
-                        base.with_suffix(".view.html").write_text(viewer(title, node + ".svg", report), encoding="utf-8")
-                        suffixes.extend((".svg", ".view.html"))
-                    except RenderError as error:
-                        render_error = error
-                for suffix in suffixes:
-                    base.with_suffix(suffix).replace(self.directory / (node + suffix))
-        except OSError:
-            self.discard(node)
-            raise
-        if render_error is not None:
-            raise render_error
-
-    def write_gallery(self, title: str, entries: list[dict]) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
-        with TemporaryDirectory(prefix=".pipeline-", dir=self.directory) as temporary:
-            index = Path(temporary) / "index.html"
-            index.write_text(gallery(title, entries, str(self.task_directory)), encoding="utf-8")
-            index.replace(self.directory / "index.html")
+            image = stamp(image, information)
+        except ValueError as error:
+            raise RenderError(f"Graphviz returned an invalid PNG: {error}") from error
+        destination = source.with_suffix(".png")
+        with TemporaryDirectory(prefix=".pipeline-", dir=source.parent) as temporary:
+            staged = Path(temporary) / destination.name
+            staged.write_bytes(image)
+            staged.replace(destination)
+        return destination

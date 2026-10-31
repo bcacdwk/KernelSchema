@@ -32,7 +32,7 @@ class DomainTests(TaskCase):
     def run_graph(self, task):
         self.write_task(task)
         return subprocess.run([sys.executable, "-B", str(TEMPLATE_ROOT / "tools/pipeline_graph.py"),
-                               str(self.directory / "root.yaml"), "--format", "dot"], capture_output=True, text=True)
+                               str(self.directory / "root.yaml"), "--check-only"], capture_output=True, text=True)
 
     def test_local_shadow_and_unrelated_phase_domain_have_identical_edges(self):
         pipe = {"repeat": {"i": [0, 2]}, "steady": ["produce:Y(i)"]}

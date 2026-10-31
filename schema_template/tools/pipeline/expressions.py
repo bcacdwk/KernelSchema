@@ -221,7 +221,7 @@ class Domains:
                 if all(entry[c] == v for c, v in coordinates.items()):
                     return entry[name]
             raise GraphError(f"no coordinate in {name}: {coordinates}")
-        raise ExpansionError(f"unbound or unsupported expression {canonical!r}; supply it in the sample or --set")
+        raise ExpansionError(f"unbound or unsupported expression {canonical!r}; supply it with --set NAME=INT")
 
     def entries(self, name: str, env: dict[str, int]) -> list[dict[str, int]]:
         if name not in self.definitions:

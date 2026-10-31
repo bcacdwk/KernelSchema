@@ -1,4 +1,4 @@
-"""Deterministic DOT and a small, offline SVG viewer for graph review."""
+"""Deterministic graph layout and PNG rendering; DOT exists only in memory."""
 from __future__ import annotations
 
 import html
@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 from graphlib import CycleError, TopologicalSorter
-from pathlib import Path
+import textwrap
 
 from .model import PhaseGraph
 
@@ -31,7 +31,7 @@ def quote(value) -> str:
 def display_members(graph: PhaseGraph) -> set[str]:
     """Fold only identical member neighborhoods, and only if the quotient is a DAG.
 
-    Validation and JSON always keep every member. Asymmetric inter-member
+    The checked event graph always keeps every member. Asymmetric inter-member
     handoffs remain separate columns so the picture cannot conceal a cycle.
     """
     normalize = lambda event: re.sub(r"\[\d+\]/", "[*]/", event)
@@ -57,10 +57,14 @@ def display_members(graph: PhaseGraph) -> set[str]:
     return folded
 
 
-def dot_text(title: str, graphs: list[PhaseGraph], samples: dict) -> str:
-    label = title + "\nRepresentative event graph · NO TIME SCALE\n"
+def dot_text(title: str, graphs: list[PhaseGraph], samples: dict, notes=()) -> str:
+    status = "DEPENDENCY CYCLE" if any(graph.cycle for graph in graphs) else "Acyclic sample"
+    label = title + "\n" + status + " · Representative event graph · NO TIME SCALE\n"
     label += "Blue: data / completion   Gray dashed: program   Dotted: ordered completion\n"
     label += "Orange: reuse   Purple: sync   Red: dependency cycle\nPhases checked independently · identical members folded for display"
+    label += "\nIllustration parameters; no cross-phase or resource-safety proof."
+    for note in notes:
+        label += "\n" + textwrap.fill(note, 100)
     lines = ["digraph Pipeline {",
              'graph [rankdir=TB, compound=true, newrank=true,',
              f' bgcolor="white", pad=0.3, nodesep=0.16, ranksep=0.27, label={quote(label)},',
@@ -164,62 +168,15 @@ def dot_text(title: str, graphs: list[PhaseGraph], samples: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def graphviz(dot: Path, svg: Path) -> None:
+def graphviz(dot: str) -> bytes:
     executable = shutil.which("dot")
     if executable is None:
-        raise RenderError("Graphviz 'dot' is required for SVG; install Graphviz or use --format dot")
+        raise RenderError("Graphviz 'dot' is required for PNG; install Graphviz or use --check-only")
     try:
-        result = subprocess.run([executable, "-Tsvg", str(dot), "-o", str(svg)],
-                                capture_output=True, text=True, timeout=60)
+        result = subprocess.run([executable, "-Tpng"], input=dot.encode("utf-8"),
+                                capture_output=True, timeout=60)
     except subprocess.TimeoutExpired as error:
         raise RenderError("Graphviz exceeded 60 seconds; reduce the sample size") from error
     if result.returncode:
-        raise RenderError("Graphviz failed: " + result.stderr.strip())
-
-
-def viewer(title: str, svg_name: str, report: dict) -> str:
-    status = "Sample is acyclic" if report["acyclic"] else "DEPENDENCY CYCLE"
-    notes = "".join(f"<li>{html.escape(n)}</li>" for n in report.get("notes", []))
-    counts = ", ".join(f"{g['phase']}: {len(g['operations'])} actions / {len(g['edges'])} edges" for g in report["phases"])
-    return f'''<!doctype html>
-<html lang="en"><meta charset="utf-8"><title>{html.escape(title)}</title>
-<style>body{{margin:0;font:14px system-ui;color:#243449;background:#f5f7fa}}
-header{{padding:16px 24px;background:white;border-bottom:1px solid #dce4ec}}
-h1{{font-size:20px;margin:0 0 8px}}p{{margin:6px 0}}button,a{{margin-right:12px}}
-#canvas{{overflow:auto;flex:1;background:white}}object{{display:block;transform-origin:top left}}
-html,body{{height:100%}}body{{display:flex;flex-direction:column}}
-details{{margin:8px 0}}.status{{color:{'#a72b2b' if not report['acyclic'] else '#27664b'}}}</style>
-<header><h1>{html.escape(title)}</h1><p class="status">{status} · {html.escape(counts)}</p>
-<p>Representative phase-local constraints. No time scale; no cross-phase or resource-safety proof.</p>
-<button onclick="zoom(.8)">−</button><button onclick="zoom(1.25)">+</button><button onclick="fit()">Fit width</button>
-<a href="{html.escape(svg_name, quote=True)}">SVG</a><a href="{html.escape(Path(svg_name).with_suffix('.json').name)}">Audit JSON</a>
-<details><summary>Sample and review notes</summary><pre>{html.escape(json.dumps(report['samples'], indent=2))}</pre><ul>{notes}</ul></details></header>
-<div id="canvas"><object id="diagram" type="image/svg+xml" data="{html.escape(svg_name, quote=True)}"></object></div>
-<script>let width=1200;const diagram=document.getElementById('diagram');
-function zoom(f){{width*=f;diagram.style.width=width+'px'}}
-function fit(){{width=document.getElementById('canvas').clientWidth;diagram.style.width=width+'px'}}fit();</script></html>'''
-
-
-def gallery_entry(node: str, report: dict, format: str) -> dict:
-    count = sum(len(phase["operations"]) for phase in report["phases"])
-    status = "Acyclic sample" if report["acyclic"] else "DEPENDENCY CYCLE"
-    return {"name": node, "href": node + (".view.html" if format == "svg" else ".dot"),
-            "summary": f"{len(report['phases'])} phases · {count} actions · {status}"}
-
-
-def gallery(title: str, entries: list[dict], source: str) -> str:
-    cards = []
-    for item in entries:
-        href = html.escape(item["href"], quote=True)
-        cards.append(f'<a class="card" href="{href}"><b>{html.escape(item["name"])}</b>'
-                     f'<span>{html.escape(item["summary"])}</span></a>')
-    return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
-<meta name="kernelschema-gallery-source" content="{html.escape(source, quote=True)}">
-<title>{html.escape(title)}</title><style>
-body{{margin:40px auto;max-width:1100px;padding:0 24px;font:15px system-ui;color:#26384b;background:#f6f8fb}}
-h1{{font-size:28px}}p{{line-height:1.7}}main{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}}
-.card{{padding:20px;background:white;border:1px solid #d7e0ea;border-radius:10px;color:inherit;text-decoration:none}}
-.card:hover{{border-color:#46789f}}b,span{{display:block}}span{{margin-top:8px;color:#66798c;font-size:13px}}</style>
-<h1>{html.escape(title)}</h1><p>每个 YAML 一张图，phase 分区、role 分列。点击进入可缩放视图；SVG 中悬停可查看字段路径和边的来源，JSON 保留完整成员、事件和边界处理记录。</p>
-<p>按当前字段与规则展开代表性重复，不带时间尺度；检查各 phase 的已建模依赖，不据此证明跨 phase 活性或全部存储复用安全。</p>
-<main>{''.join(cards)}</main></html>'''
+        raise RenderError("Graphviz failed: " + result.stderr.decode("utf-8", errors="replace").strip())
+    return result.stdout

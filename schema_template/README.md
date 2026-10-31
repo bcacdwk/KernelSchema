@@ -71,12 +71,12 @@ python3 schema_template/check_yaml.py path/to/task/root.yaml
 需要检查具体动作实例或查看依赖图时，使用独立入口：
 
 ```sh
-python3 schema_template/tools/pipeline_graph.py path/to/task/root.yaml
+python3 schema_template/tools/pipeline_graph.py path/to/task/root.yaml --set N=4 --worktiles 2
 ```
 
-先通过同目录的 YAML 检查，再为指定文件生成一张图，按 phase 分区、role 分列。结果位于任务目录的 `pipeline_graphs/`：每个节点生成 `<id>.svg`、可缩放的 `<id>.view.html`、`<id>.dot` 和事件 `<id>.json`；加 `--all` 处理同目录全部节点并生成目录页 `index.html`。目录页与节点查看器分开命名，`index` 仍是合法节点 ID。生成 SVG 还需要 Graphviz 的 `dot`；`--format dot` 时每个节点只生成 DOT 和 JSON，`--all` 仍生成目录页。
+先通过同目录的 YAML 检查，再按 phase 分区、role 分列生成一张 PNG。`name.yaml` 的图片直接写为同目录的 `name.png`；加 `--all` 处理同目录全部节点。生成图片需要 Graphviz 的 `dot`。只检查有限展开的依赖、不写文件时加 `--check-only`，此时不需要 Graphviz。
 
-采用代表性规模展开起始、若干重复和收尾，不表示实测时间线。示例的取值保存在同目录 `pipeline_samples.json`，可用 `--set N=4`、`--worktiles 2` 覆盖；这些是绘图输入，不改写 plan。缺少取值、表达式尚不支持或展开超过工具上限时，会说明无法完成的原因，退出状态为 `2`，不据此判定 YAML 非法。
+采用代表性规模展开起始、若干重复和收尾，不表示实测时间线。按实际 YAML 中的符号使用 `--set NAME=INT` 明确给出取值，`--worktiles` 指定展示的工作序列长度，默认 1；上面的 `N` 仅是命令示例。全部维护示例的可复现命令见[生成 PNG](examples/README.md#生成-png)。取值只用于绘图，不改写 plan，也不从外部配置或旧图片自动补齐。缺少取值、表达式尚不支持或展开超过工具上限时，返回 `2`，不据此判定 YAML 非法。
 
 工具检查展开后的重复动作、悬空事件引用、成员匹配与依赖环；发现环时列出涉及的事件和边的来源，退出状态为 `1`。它不解析文字契约，只对可明确识别的 `mma / store / wait / release` 消费位置推导默认数据边；其余关系由显式边表达。无环只说明这次展开的已建模依赖无环，不能代替完整的死锁、复用安全或性能审计。
 

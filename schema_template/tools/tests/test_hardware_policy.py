@@ -4,15 +4,15 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 import io
-import json
 from unittest.mock import patch
 
 import check_yaml
 
 from .. import check_policy, schema
 from ..pipeline_graph import main as graph_main
+from ..pipeline import output as png_output
 from ..diagnostics import encode_value
-from .support import ALGO, HARD, PHASE, ROLE, TaskCase, drop, put
+from .support import ALGO, HARD, PHASE, ROLE, TaskCase, drop, put, tiny_png
 
 
 class HardwarePolicyTests(TaskCase):
@@ -116,14 +116,14 @@ class HardwarePolicyTests(TaskCase):
         self.assertIn("Valid:", output.getvalue())
         self.assertIn("Hardware exemption", errors.getvalue())
 
-    def test_graph_report_keeps_the_hardware_exemption_visible(self):
+    def test_png_and_cli_keep_the_hardware_exemption_visible(self):
         data = deepcopy(self.base)
         drop(data, HARD)
         file = self.write_at(data)
         output, errors = io.StringIO(), io.StringIO()
-        figures = self.active / "figures"
-        with redirect_stdout(output), redirect_stderr(errors):
-            self.assertEqual(graph_main([str(file), "--format", "dot", "--out", str(figures)]), 0)
-        report = json.loads((figures / "root.json").read_text())
+        with patch.object(png_output, "graphviz", return_value=tiny_png()) as render, redirect_stdout(output), redirect_stderr(errors):
+            self.assertEqual(graph_main([str(file)]), 0)
+        self.assertIn("Hardware exemption", render.call_args[0][0])
+        report = png_output.metadata(file.with_suffix(".png"))
         self.assertTrue(any("Hardware exemption" in note for note in report["notes"]))
         self.assertIn("Hardware exemption", errors.getvalue())

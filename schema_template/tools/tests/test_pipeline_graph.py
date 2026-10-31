@@ -14,9 +14,9 @@ from ..pipeline import GraphError, build_phase
 from ..pipeline.model import ExpansionError
 from ..pipeline.expressions import Domains
 from ..pipeline.render import display_members, dot_text
-from ..pipeline_graph import configuration, read_sample
+from ..pipeline_graph import analyze, configuration
 from .. import schema
-from .support import ROLE, PIPE, PHASE, TaskCase, TEMPLATE_ROOT, add_child, put
+from .support import ROLE, PIPE, PHASE, TaskCase, TEMPLATE_ROOT, EXAMPLE_PARAMETERS, put
 
 
 def role(sequence, execution_mode="serial", member="warp[0:1]", **extra):
@@ -445,9 +445,8 @@ class EventGraphTests(unittest.TestCase):
         for directory in sorted((TEMPLATE_ROOT / "examples").iterdir()):
             if not directory.is_dir() or not (directory / "root.yaml").is_file():
                 continue
-            sample = read_sample(directory / "pipeline_samples.json")
             for name, plan in schema.validate_directory(directory).items():
-                config = configuration(sample, name, {}, None)
+                config = configuration(EXAMPLE_PARAMETERS)
                 for pid, phase in plan["design"]["tile_pipeline"]["phase"].items():
                     worker = plan["design"]["work_schedule"]["phase"][pid]["mapping"]["worker"]
                     with self.subTest(task=directory.name, node=name, phase=pid):
@@ -474,7 +473,6 @@ class EventGraphTests(unittest.TestCase):
 
     def test_decode_empty_and_short_splits_only_wait_for_existing_setup(self):
         directory = TEMPLATE_ROOT / "examples/fa4_decode"
-        sample = read_sample(directory / "pipeline_samples.json")
         for name, plan in schema.validate_directory(directory).items():
             for pid, phase in plan["design"]["tile_pipeline"]["phase"].items():
                 if "active" not in phase.get("domain", {}):
@@ -482,7 +480,7 @@ class EventGraphTests(unittest.TestCase):
                 worker = plan["design"]["work_schedule"]["phase"][pid]["mapping"]["worker"]
                 for count in (0, 1, 2, 6):
                     with self.subTest(node=name, phase=pid, iterations=count):
-                        config = configuration(sample, name, {"N_r": count}, None)
+                        config = configuration({**EXAMPLE_PARAMETERS, "N_r": count})
                         members = Domains({}, config["parameters"], config["worktiles"]).integer(worker["unit_count"], {})
                         graph = build_phase(pid, phase, worker, **config)
                         self.assertFalse(graph.cycle, graph.cycle)
@@ -497,20 +495,20 @@ class EventGraphTests(unittest.TestCase):
 class GraphCliTests(TaskCase):
     def run_graph(self, *options, env=None):
         return subprocess.run([sys.executable, "-B", str(TEMPLATE_ROOT / "tools/pipeline_graph.py"),
-                               str(self.directory / "root.yaml"), "--out", str(self.directory / "figures"), *options],
+                               str(self.directory / "root.yaml"), "--check-only", *options],
                               cwd="/tmp", capture_output=True, text=True, env=env)
 
-    def test_missing_sample_is_not_reported_as_invalid_yaml(self):
+    def test_missing_parameters_are_not_reported_as_invalid_yaml(self):
         task = deepcopy(self.base)
         put(task, PIPE + ("domain",), {"i": [0, "N"]})
         put(task, ROLE + ("pipe",), {"repeat": "i", "steady": ["produce:Y(i)"]})
         self.write_task(task)
-        result = self.run_graph("--format", "dot")
+        result = self.run_graph()
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("Graph not completed", result.stderr)
         self.assertIn("phase.copy.role.Main.pipe.repeat", result.stderr)
         self.assertIn("--set", result.stderr)
-        result = self.run_graph("--format", "dot", "--set", "N=3")
+        result = self.run_graph("--set", "N=3")
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_mixed_fixed_coordinate_failure_has_context_and_exit_one(self):
@@ -520,7 +518,7 @@ class GraphCliTests(TaskCase):
         put(task, ROLE + ("waits_for",), {"data": {"produce:Y(n+99)": ["produce:Y(n[99,i])"]}})
         self.write_task(task)
         schema.validate_directory(self.directory)
-        result = self.run_graph("--format", "dot")
+        result = self.run_graph()
         self.assertEqual(result.returncode, 1, result.stderr)
         for text in ("Main.waits_for.data", "context=", "t=99 outside"):
             self.assertIn(text, result.stderr)
@@ -537,20 +535,20 @@ class GraphCliTests(TaskCase):
         })
         self.write_task(task)
         before = (self.directory / "root.yaml").read_bytes()
-        result = self.run_graph("--format", "dot", "--worktiles", "2")
+        result = self.run_graph("--worktiles", "2")
         self.assertEqual(result.returncode, 0, result.stderr)
-        report = json.loads((self.directory / "figures/root.json").read_text())
-        self.assertEqual([op["action"] for op in report["phases"][0]["operations"]],
+        graphs = analyze(task["root"], configuration({}, 2))
+        self.assertEqual([op.action for op in graphs[0].operations.values()],
                          ["zero:Init(0)", "zero:Init(1)", "release:Init(1)", "produce:Y(0)", "produce:Y(1)"])
         self.assertEqual(before, (self.directory / "root.yaml").read_bytes())
         put(task, PIPE + ("domain",), {"i": [0, 2]})
         put(task, ROLE + ("pipe",), {"repeat": {"t": "worktile"}, "steady": ["produce:Y(t)"],
                                   "epilogue": ["store:Y(last(t))"]})
         self.write_task(task)
-        result = self.run_graph("--format", "dot", "--worktiles", "2")
+        result = self.run_graph("--worktiles", "2")
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("count/last", result.stderr)
-        self.assertFalse((self.directory / "figures/root.json").exists())
+        self.assertFalse((self.directory / "root.png").exists())
 
     def test_unsupported_indexed_math_is_not_reported_as_invalid_yaml(self):
         for expression in ("offset[i]", "offset[0]", "f(i)"):
@@ -560,7 +558,7 @@ class GraphCliTests(TaskCase):
                 put(task, ROLE + ("pipe",), {"repeat": "i", "steady": [f"produce:Y({expression})"]})
                 self.write_task(task)
                 schema.validate_directory(self.directory)
-                result = self.run_graph("--format", "dot")
+                result = self.run_graph()
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn("Graph not completed", result.stderr)
                 self.assertIn("phase.copy.role.Main.pipe", result.stderr)
@@ -574,145 +572,27 @@ class GraphCliTests(TaskCase):
         put(task, ROLE + ("waits_for",), {"data": {"produce:Y(i+1)": ["produce:Y(i-1)"]}})
         self.write_task(task)
         schema.validate_directory(self.directory)
-        result = self.run_graph("--format", "dot")
+        result = self.run_graph()
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("cannot determine declared index window", result.stderr)
         self.assertIn("Graph not completed", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
-    def test_duplicate_sample_key_and_bad_options_have_clear_diagnostics(self):
-        path = self.directory / "pipeline_samples.json"
-        path.write_text('{"parameters":{"N":3,"N":9}}')
-        result = self.run_graph("--format", "dot")
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("duplicate sample key 'N'", result.stderr)
-        self.assertIn(str(path), result.stderr)
-        path.unlink()
-        for options in (("--set", "=4"), ("--worktiles", "-1")):
-            result = self.run_graph("--format", "dot", *options)
+    def test_duplicate_parameters_and_bad_options_have_clear_diagnostics(self):
+        for options in (("--set", "N=3", "--set", "N=9"), ("--set", "=4"), ("--set", "N=bad"),
+                        ("--worktiles", "-1"), ("--worktiles", "65")):
+            result = self.run_graph(*options)
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertNotIn("Traceback", result.stderr)
 
-    def test_dot_only_refresh_removes_stale_pictures(self):
-        output = self.directory / "figures"
-        result = self.run_graph("--format", "dot")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        for suffix in (".svg", ".view.html"):
-            (output / ("root" + suffix)).write_text("old picture")
-        result = self.run_graph("--format", "dot")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((output / "root.dot").is_file())
-        self.assertFalse((output / "root.svg").exists())
-        self.assertFalse((output / "root.view.html").exists())
-
-    def test_failed_refresh_invalidates_results_and_gallery(self):
-        output = self.directory / "figures"
-        sample = self.directory / "pipeline_samples.json"
-        for failure, code in (("schema", 1), ("yaml", 1), ("sample", 2), ("sample_node", 2),
-                              ("option", 2), ("parameter", 2), ("event", 1)):
-            with self.subTest(failure=failure):
-                self.write_task(deepcopy(self.base))
-                sample.unlink(missing_ok=True)
-                result = self.run_graph("--format", "dot", "--all")
-                self.assertEqual(result.returncode, 0, result.stderr)
-                for suffix in (".svg", ".view.html"):
-                    (output / ("root" + suffix)).write_text("previous successful rendering")
-                (output / "notes.txt").write_text("keep unrelated files")
-                options = []
-                if failure == "yaml":
-                    (self.directory / "root.yaml").write_text("meta_data: [")
-                elif failure == "sample":
-                    sample.write_text('{"parameters":')
-                elif failure == "sample_node":
-                    sample.write_text('{"nodes":{"missing":{}}}')
-                elif failure == "option":
-                    options = ["--set", "N=not-an-integer"]
-                else:
-                    task = deepcopy(self.base)
-                    if failure == "schema":
-                        put(task, ROLE + ("info", "execution_mode"), "sync")
-                    elif failure == "parameter":
-                        put(task, ROLE + ("pipe",), {"repeat": {"i": [0, "N"]}, "steady": ["produce:Y(i)"]})
-                    else:
-                        put(task, ROLE + ("pipe",), {"steady": ["produce:Y(0)"]})
-                        put(task, ROLE + ("waits_for",), {"data": {"produce:Y(0)": ["produce:Y(99)"]}})
-                    self.write_task(task)
-                source = self.directory / "root.yaml"
-                before = (source.read_bytes(), source.stat().st_mtime_ns, source.stat().st_mode)
-                result = self.run_graph("--format", "dot", *options)
-                self.assertEqual(result.returncode, code, result.stderr)
-                self.assertNotIn("Traceback", result.stderr)
-                self.assertEqual({p.name for p in output.iterdir()}, {"notes.txt"})
-                self.assertEqual(before, (source.read_bytes(), source.stat().st_mtime_ns, source.stat().st_mode))
-
-    def test_all_refresh_retires_removed_nodes_without_deleting_unrelated_reports(self):
-        task = deepcopy(self.base)
-        add_child(task)
-        self.write_task(task)
-        result = self.run_graph("--format", "dot", "--all")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        output = self.directory / "figures"
-        foreign = json.loads((output / "root.json").read_text())
-        foreign["source"] = str(self.directory.parent / "another_task/root.yaml")
-        (output / "foreign.json").write_text(json.dumps(foreign))
-        (output / "unrelated.json").write_text('{"notes":"not a pipeline report"}')
-        self.write_task(deepcopy(self.base))
-        result = self.run_graph("--format", "dot", "--all")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual({p.name for p in output.iterdir()},
-                         {"root.dot", "root.json", "index.html", "foreign.json", "unrelated.json"})
-        self.assertNotIn("small.dot", (output / "index.html").read_text())
-
-    def test_failed_whole_task_check_clears_every_requested_node(self):
-        task = deepcopy(self.base)
-        add_child(task)
-        self.write_task(task)
-        result = self.run_graph("--format", "dot", "--all")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        put(task, ("small", "design", "tile_pipeline", "phase", "copy", "role", "Main", "info", "execution_mode"), "sync")
-        self.write_task(task)
-        result = self.run_graph("--format", "dot", "--all")
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertEqual(list((self.directory / "figures").iterdir()), [])
-
-    def test_default_output_directory_has_the_same_failure_lifecycle(self):
-        command = [sys.executable, "-B", str(TEMPLATE_ROOT / "tools/pipeline_graph.py"),
-                   str(self.directory / "root.yaml"), "--format", "dot"]
-        result = subprocess.run(command, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        (self.directory / "pipeline_samples.json").write_text("{")
-        result = subprocess.run(command, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertEqual(list((self.directory / "pipeline_graphs").iterdir()), [])
-
-    def test_missing_graphviz_keeps_checked_graph_data(self):
-        output = self.directory / "figures"
-        result = self.run_graph("--format", "dot")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        for suffix in (".svg", ".view.html"):
-            (output / ("root" + suffix)).write_text("previous successful rendering")
-        result = self.run_graph(env={**os.environ, "PATH": ""})
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("Graphviz", result.stderr)
-        self.assertTrue((self.directory / "figures/root.dot").is_file())
-        self.assertTrue((self.directory / "figures/root.json").is_file())
-        self.assertFalse((self.directory / "figures/root.svg").exists())
-        self.assertFalse((self.directory / "figures/root.view.html").exists())
-        self.assertEqual({p.name for p in output.iterdir()}, {"root.dot", "root.json"})
-
-    def test_output_conflicts_preserve_unrelated_files_even_for_missing_inputs(self):
-        output = self.directory / "figures"
-        output.mkdir()
-        (output / "root.json").write_text('{"notes":"unrelated report"}')
-        (output / "index.html").write_text("independent index")
-        before = {p.name: p.read_bytes() for p in output.iterdir()}
-        for exists in (True, False):
-            if not exists:
-                (self.directory / "root.yaml").unlink()
-            result = self.run_graph("--format", "dot", "--all")
-            self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn("output conflicts", result.stderr)
-            self.assertEqual(before, {p.name: p.read_bytes() for p in output.iterdir()})
+    def test_check_only_is_read_only_and_needs_no_graphviz(self):
+        before = self.snapshot()
+        first = self.run_graph(env={**os.environ, "PATH": ""})
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self.run_graph(env={**os.environ, "PATH": ""})
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(first.stdout, second.stdout)
+        self.assertEqual(before, self.snapshot())
 
     def test_cycle_diagnostic_includes_the_rules_that_close_it(self):
         task = deepcopy(self.base)
@@ -720,26 +600,11 @@ class GraphCliTests(TaskCase):
         put(task, PIPE + ("role", "Peer"), {"info": {"execution_mode": "serial", "member": "warp[1:2]"}, "pipe": {"steady": ["produce:Y"]},
                                            "waits_for": {"data": {"produce:Y": ["Main/produce:Y"]}}})
         self.write_task(task)
-        result = self.run_graph("--format", "dot")
+        result = self.run_graph()
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("DEPENDENCY CYCLE", result.stdout)
         self.assertIn("Main.waits_for.data", result.stderr)
         self.assertIn("Peer.waits_for.data", result.stderr)
-
-    def test_external_task_read_only_and_deterministic_output(self):
-        command = [sys.executable, "-B", str(TEMPLATE_ROOT / "tools/pipeline_graph.py"),
-                   str(self.directory / "root.yaml"), "--format", "dot", "--out", str(self.directory / "figures")]
-        before = (self.directory / "root.yaml").stat().st_mtime_ns
-        result = subprocess.run(command, cwd="/tmp", capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        files = self.directory / "figures"
-        report = json.loads((files / "root.json").read_text())
-        self.assertTrue(report["acyclic"])
-        first = (files / "root.dot").read_bytes()
-        result = subprocess.run(command, cwd="/tmp", capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(first, (files / "root.dot").read_bytes())
-        self.assertEqual(before, (self.directory / "root.yaml").stat().st_mtime_ns)
 
     def test_argument_failure(self):
         result = subprocess.run([sys.executable, "-B", str(TEMPLATE_ROOT / "tools/pipeline_graph.py")], capture_output=True)

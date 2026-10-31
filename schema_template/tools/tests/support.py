@@ -6,6 +6,8 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+import struct
+import zlib
 
 from .. import schema
 from ..diagnostics import encode_value
@@ -18,6 +20,18 @@ WORK = ("root", "design", "work_schedule")
 PHASE = WORK + ("phase", "copy")
 PIPE = ("root", "design", "tile_pipeline", "phase", "copy")
 ROLE = PIPE + ("role", "Main")
+
+# A generic parameter pool for corpus checks, never read by production tools.
+EXAMPLE_PARAMETERS = {"N": 4, "Ssplit": 6, "N_r": 6, "ScoreStageCount": 4, "Lead": 2,
+                      "SplitCount": 2, "KVStageCount": 8, "Np": 6, "N(b)": 4}
+
+
+def tiny_png():
+    """A valid one-pixel PNG for testing output lifecycle without Graphviz."""
+    def chunk(kind, payload):
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\0\xff\xff\xff")) + chunk(b"IEND", b""))
 
 
 def at(data, path):

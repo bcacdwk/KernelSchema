@@ -13,9 +13,27 @@
 | [QSA prefill](qsa_prefill/dispatch.md) | 1 | 补实环境与 TMEM 容量；明确 ticket 交接、延迟 gather 发布及空 worker 的 drain 行为，保留未验证事项。 |
 | [GDN prefill](gdn_prefill/dispatch.md) | 2 | 还原前置类型转换提交；补实环境与 TMEM 容量；统一具名乘积及角色引用，显式登记 U 的生产者。 |
 
-共 21 个 YAML 节点，四份 `dispatch.md` 与来源快照一致。各节点独立维护修订号。所有节点使用现行字段和枚举；`pipeline_samples.json` 提供有限展开的代表性取值及检查边界，不替代实际 workload 或运行证据。
+共 21 个 YAML 节点，各算子目录保留自己的 `dispatch.md`、YAML 和同名 PNG。四份 `dispatch.md` 与来源快照一致；生成命令及验证边界见本页，节点关系、选择条件和修订号以 YAML 为准。
 
 本批 L20D 的融合 GDN 与之前 B200 上的多阶段示例具有不同的任务要求和数值路径；这里保留的是本批原有的两条设计，不从另一示例移植算法。
+
+## 生成 PNG
+
+需要 Python 3.10+、PyYAML 和 Graphviz 的 `dot`。从仓库根目录执行下面的命令，即可重建全部 21 张图：
+
+```sh
+python3 schema_template/tools/pipeline_graph.py schema_template/examples/fa4_prefill/root.yaml --all --set N=4 --set Ssplit=6 --worktiles 2
+python3 schema_template/tools/pipeline_graph.py schema_template/examples/fa4_decode/root.yaml --all --set N_r=6 --set ScoreStageCount=4 --set Lead=2 --set SplitCount=2 --set KVStageCount=8 --worktiles 1
+python3 schema_template/tools/pipeline_graph.py schema_template/examples/gdn_prefill/root.yaml --set Np=6 --worktiles 2
+python3 schema_template/tools/pipeline_graph.py schema_template/examples/gdn_prefill/m64_single_sequence.yaml --set Np=6 --worktiles 1
+python3 schema_template/tools/pipeline_graph.py schema_template/examples/qsa_prefill/root.yaml --set 'N(b)=4' --worktiles 2
+```
+
+每个 `name.yaml` 直接在同目录生成 `name.png`。去掉 `--all` 并换成目标 YAML 路径，可只重建一个节点。需要检查依赖而不写图片时加 `--check-only`，此时不需要 Graphviz。
+
+这些整数是明确选定的展示规模，不是新增的设计参数或真实 workload：prefill 展示环复用与跨工作接续，decode 展示短 split 的阶段关系，GDN 展示标量环及两份工作。QSA 的 `N(b)=4` 是缩小的示意展开，真实任务要求至少 32 个 union tile。生成器不猜测缺失取值、不按算子名称选择配置，也不从旧 PNG 读取生成参数。
+
+图中保留 phase、role、动作、依赖类型和展示取值，没有实测时间尺度。PNG 内保存来源文件名、内容指纹和生成取值，不再产生旁置配置或图报告；当前 YAML 与图片是否对应，由回归测试核对。
 
 ## 规范化依据
 

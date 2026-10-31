@@ -12,7 +12,7 @@ class ToolLimitTests(TaskCase):
         script = "tools/pipeline_graph.py" if graph else "check_yaml.py"
         command = [sys.executable, "-B", str(TEMPLATE_ROOT / script), str(self.directory / "root.yaml")]
         if graph:
-            command += ["--format", "dot"]
+            command += ["--check-only"]
         return subprocess.run(command, capture_output=True, text=True)
 
     def test_deep_flat_domain_chain_is_valid_but_exceeds_expansion_capacity(self):
@@ -49,10 +49,3 @@ class ToolLimitTests(TaskCase):
             self.assertIn("capacity", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(before, (path.read_bytes(), path.stat().st_mtime_ns))
-
-    def test_sample_json_depth_is_a_tool_limit(self):
-        (self.directory / "pipeline_samples.json").write_text('{"notes":' + "[" * 20000 + '"x"' + "]" * 20000 + "}")
-        result = self.command(True)
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("capacity", result.stderr)
-        self.assertNotIn("Traceback", result.stderr)
