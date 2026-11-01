@@ -127,3 +127,23 @@ class HardwarePolicyTests(TaskCase):
         report = png_output.metadata(file.with_suffix(".png"))
         self.assertTrue(any("Hardware exemption" in note for note in report["notes"]))
         self.assertIn("Hardware exemption", errors.getvalue())
+
+    def test_explicit_skip_ignores_supplied_hardware_but_preserves_default_and_other_checks(self):
+        data = deepcopy(self.base)
+        put(data, HARD, {"unexpected": [1, 2], "device": 123})
+        file = self.write_at(data, self.directory / "explicit")
+        before = file.read_bytes()
+        notices = []
+        self.assertEqual(schema.validate_file(file, skip_hardware=True, notices=notices)[1], data)
+        self.assertIn("Hardware skipped explicitly", notices[0])
+        self.assertEqual(file.read_bytes(), before)
+        with self.assertRaises(schema.SchemaError):
+            schema.validate_file(file)
+        output, errors = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            self.assertEqual(check_yaml.main(["--skip-hardware", str(file)]), 0)
+        self.assertIn("Hardware skipped explicitly", errors.getvalue())
+        drop(data, ALGO + ("compute",))
+        self.write_at(data, file.parent)
+        with self.assertRaisesRegex(schema.SchemaError, "compute"):
+            schema.validate_file(file, skip_hardware=True)

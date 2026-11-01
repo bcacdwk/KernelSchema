@@ -10,6 +10,8 @@ sys.dont_write_bytecode = True
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("yaml", help="root.yaml or a derived node in a complete task directory")
+    parser.add_argument("--skip-hardware", action="store_true",
+                        help="explicitly exclude hardware_specification and hardware-dependent checks")
     args = parser.parse_args(argv)
     if sys.version_info < (3, 10):
         print("Check not completed: Python 3.10 or newer is required.", file=sys.stderr)
@@ -21,7 +23,7 @@ def main(argv=None):
         return 2
     notices = []
     try:
-        directory, task = schema.validate_file(args.yaml, notices=notices)
+        directory, task = schema.validate_file(args.yaml, notices=notices, skip_hardware=args.skip_hardware)
     except schema.SchemaError as error:
         print(error, file=sys.stderr)
         return 1

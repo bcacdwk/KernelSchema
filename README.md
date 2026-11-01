@@ -17,6 +17,8 @@
 
 一次任务选择当前工作对应的入口，通过产物与必要说明交接。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
 
+本地批量提取使用 [Schema Extract](schema_extract/README.md)，提供固定执行器、协作复核、检查点恢复和 Supervisor 巡检入口；问题集中记录在[独立台账](schema_extract/ISSUES.md)。当前提取模式的硬件规格仅保留模板占位，不纳入撰写、检查、审阅和收尾。
+
 新建与优化均由 Planner 承担，按数学改写、工作调度、微流水线的顺序逐层推导和写入。先把上层方向收束，再向下投入优化精力；下层发现前提问题时，回到对应上层修正并复查受影响部分。
 
 ## 术语
@@ -75,6 +77,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 ├── DESIGN_SCHEMA.md     从已完成的 Contract 逐层设计新算子
 ├── OPTIMIZE_SCHEMA.md   判断实现反馈，逐层迭代已有设计
 ├── IMPLEMENT_SCHEMA.md  将 schema 落实为 kernel，验证并反馈
+├── schema_extract/      本地提取执行器、Supervisor 巡检与问题记录
 ├── schema_template/     共用的 YAML 操作与检查
 │   ├── README.md        创建、修订、检查与交付
 │   ├── starter.yaml     待填写骨架，复制为新任务的 root.yaml
@@ -126,4 +129,4 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 - **案例核对与验收**：按实际任务逐一核对已有 YAML，补齐资料与设计缺口；已规范化的案例及其状态见[示例索引](schema_template/examples/README.md)，数值及性能验收另行进行。
 - **更多转写与精简**：转写更多 SOTA kernel，收敛到最小交集原语。
 - **检查器与评估器**：在现有结构、具名关系及有限 phase 内依赖检查之上，继续完善资源记账、跨 phase 与更大规模的合法性和活性分析，以及尽量保序的性能估算。
-- **基础 Harness 设施**：支撑离线提取与在线撰写迭代的轻量平台，尚未放入仓库。
+- **运行验收设施**：GPU 数值和性能验收继续使用任务提供的入口；离线提取自动化已由 [Schema Extract](schema_extract/README.md)承接。

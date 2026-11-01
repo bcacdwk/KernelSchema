@@ -8,6 +8,8 @@
 
 开始前需要任务要求和目标硬件条件：输入输出与数学定义、参考入口和误差判据、目标设备、已选实现栈及相应资料。还需从任务说明取得实际 workload 和优化目标；当前规范尚未确定它们的字段格式，不自行增加字段。
 
+当前已有 kernel 的提取流程例外：`contract.hardware_specification` 只保留 starter 原样占位，不搜索、填写、检查或审阅硬件资料。提取固定使用下述 `--skip-hardware`；不要把硬件缺口作为提取问题，也不声称硬件已验证。普通设计／检查的默认行为不变。
+
 新建设计接收已经完成的 Contract，在其上填写 Design；提取任务按已确认的要求建立共享 Contract；优化任务使用原有 Contract。三者都不因当前设计选择而改写前提。
 
 Contract 使用任务给定或经任务方确认的内容；转录已确认的要求不等于获得修改要求的权限。需要改变任务边界、验收判据、设备或实现栈时，先向任务方指出问题，遵守[修改权限](../README.md#2-schema-是什么)。参考入口尚未形成时，按 [golden_reference 规则](../schema_docs/1.contract.algorithm_requirement.md#golden_reference)处理；不能用设计源码冒充参考入口。
@@ -48,6 +50,14 @@ cp -n schema_template/starter.yaml path/to/task/root.yaml
 python3 schema_template/check_yaml.py path/to/task/root.yaml
 ```
 
+提取流程显式排除整个硬件区（包括已有硬件字段的结构与依赖硬件的关联检查）：
+
+```sh
+python3 schema_template/check_yaml.py --skip-hardware path/to/task/root.yaml
+```
+
+该选项只影响内存中的检查视图，不改写文件，返回的任务仍保留原始硬件占位；YAML 文件本身仍须可解析，非硬件结构和关联照常检查。Python API 对应 `schema.validate_file(..., skip_hardware=True)` 或 `validate_directory(..., skip_hardware=True)`。不传参数时维持原有目录策略。
+
 也可传入派生节点。检查范围始终是该文件所在目录直属的全部 `.yaml / .yml`，不递归子目录；因此错误可能来自其他节点，目录内的备份 YAML 也会被当作任务节点。输入路径相对当前目录解析，在其他目录调用时使用检查脚本的绝对路径。
 
 缺少 PyYAML 时，检查器会给出一条安装命令；安装后重跑同一检查命令。检查本身不下载或安装依赖。
@@ -63,6 +73,8 @@ python3 schema_template/check_yaml.py path/to/task/root.yaml
 交付任务目录中的 `root.yaml`、存在的派生节点，以及按[索引规则](../schema_docs/0.common.md#选择条件与索引)维护的 `dispatch.md`。派生文件依赖共享 Contract，不作为脱离 root 的完整 plan 交付。源码、硬件资料和实验记录保留在各自实际位置，通过规定的引用定位，不复制进 YAML。
 
 任务冻结时，将准备阶段用 tag 或 branch 定位的硬件与编程等 wiki 资料解析到 commit，按 Contract 修改权限确认后填回原 `ref`；引用更新也按版本规则修订 root，并重跑同一检查命令。核对设计出处、参考入口及实验记录均指向实际对象和所声明的版本，而不只是字符串格式合法。
+
+上段硬件／编程 wiki 冻结要求不适用于显式 `--skip-hardware` 的当前提取流程；其硬件占位原样保留、该区收尾跳过。仍须核对非硬件的设计来源、参考入口和实际引用的实验记录。
 
 交付时简要说明改动范围、检查结果及仍未解决的资料、设计或运行验证问题，可以写在任务消息中，无需新增固定报告文件或 YAML 状态字段。若必需信息或设计尚未确定，明确交付的是草稿及其缺口；检查通过不能改变这一状态。
 
