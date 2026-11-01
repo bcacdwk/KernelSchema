@@ -1,0 +1,3146 @@
+{
+  "schema": "kernel_wiki.catalog.v1",
+  "batch": "aka-cuda-operators-20261030",
+  "manifest": "aka-cuda-operators-20261030/MANIFEST.json",
+  "manifest_sha256": "66fdc92dfa552e28f1e9ed09b2785413c569feab8fd1530f405b24039cde43f4",
+  "operator_count": 44,
+  "operators": [
+    {
+      "id": "bf16_gemm",
+      "title": "BF16 GEMM NT with caller output",
+      "category": "gemm",
+      "subcategory": "dense",
+      "summary": "BF16 A/B；D = αABᵀ + C，可选 C 与 D 别名",
+      "source_description": "D = alpha * A @ B.T + C. BF16 stored A/B; BF16 or FP32 D. C is optional and may alias D. Returns None. Independent FP32 reference with TF32 disabled. Prepared operands, no input-side conversion added to the candidate. General model-derived workload; no serving deployment or measured traffic.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G01",
+        "general",
+        "bf16",
+        "caller-out",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "56e91c6899f0fbc0a7fd9033ca962e13bb1a0537a91b0e34e15d90c48254d7b3",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, a, b, d, c=None, compiled_dims='nk', alpha=None",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, strided=False, accumulate=False, alpha=None, output_dtype='bfloat16', distribution='normal', c_alias_d=False, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/PRECISION.md"
+      }
+    },
+    {
+      "id": "bf16_nvfp4_gemm",
+      "title": "bf16 nvfp4 gemm",
+      "category": "gemm",
+      "subcategory": "dense",
+      "summary": "BF16 × NVFP4 普通 GEMM，原生载荷与缩放布局",
+      "source_description": "Native matrix multiplication from production-format operands, without batch/bias/outer epilogue adapters. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic.",
+      "precision_tags": [
+        "bf16",
+        "nvfp4"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G07",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/bf16_nvfp4_gemm.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, a, b, b_descale, alpha=None, *, backend=None, out_dtype=None, out=None, block_size=16, enable_pdl=True",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, alpha=None, distribution=None, output_dtype=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "fp8_mxfp4_gemm",
+      "title": "fp8 mxfp4 gemm",
+      "category": "gemm",
+      "subcategory": "dense",
+      "summary": "FP8 × MXFP4 普通 GEMM，含可选 C 累加",
+      "source_description": "Implement the pinned native GEMM interface; D = alpha*A@B.T + C (C optional, implicit coefficient 1). Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic.",
+      "precision_tags": [
+        "fp8",
+        "mxfp4"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G04",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "ad59e2614a0dbf8f94d1b5aa5b8de41dcd87da3b78ea5a997c88de6f6fa16628",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, a, b, d, c=None, recipe=None, recipe_a=None, recipe_b=None, compiled_dims='nk', disable_ue8m0_cast=False, alpha=None",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, a_block=None, accumulate=None, alpha=None, c_alias_d=None, distribution=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/PRECISION.md"
+      }
+    },
+    {
+      "id": "fp8_scaled_gemm",
+      "title": "fp8 scaled gemm",
+      "category": "gemm",
+      "subcategory": "dense",
+      "summary": "带显式缩放因子的 FP8 普通 GEMM",
+      "source_description": "Native matrix multiplication from production-format operands, without batch/bias/outer epilogue adapters. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic.",
+      "precision_tags": [
+        "fp8"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G02",
+        "general",
+        "gemm",
+        "sampled",
+        "patched_native"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "2c62016f0f748d724ec913ee34b7f4d10cf95210db0cafe5b95894df1b8dde72",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "paired_performance",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, a, b, a_scale, b_scale, scale_major_mode=None, mma_sm=1, scale_granularity_mnk=(1, 128, 128), out=None, out_dtype=None, backend='cutlass'",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, distribution=None, logical_m=None, output_dtype=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/PRECISION.md"
+      }
+    },
+    {
+      "id": "mxfp4_gemm",
+      "title": "mxfp4 gemm",
+      "category": "gemm",
+      "subcategory": "dense",
+      "summary": "MXFP4 普通 GEMM，含可选 C 累加",
+      "source_description": "Implement the pinned native GEMM interface; D = alpha*A@B.T + C (C optional, implicit coefficient 1). Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic.",
+      "precision_tags": [
+        "mxfp4"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G05",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-repair-20261021/raw/shared-storage/mxfp4_gemm/result.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, a, b, d, c=None, recipe=None, recipe_a=None, recipe_b=None, compiled_dims='nk', disable_ue8m0_cast=False, alpha=None",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, accumulate=None, alpha=None, c_alias_d=None, distribution=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "mxfp8_gemm",
+      "title": "mxfp8 gemm",
+      "category": "gemm",
+      "subcategory": "dense",
+      "summary": "MXFP8 普通 GEMM，含可选 C 累加",
+      "source_description": "Implement the pinned native GEMM interface; D = alpha*A@B.T + C (C optional, implicit coefficient 1). Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic.",
+      "precision_tags": [
+        "mxfp8"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G03",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-repair-20261021/raw/shared-storage/mxfp8_gemm/result.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, a, b, d, c=None, recipe=None, recipe_a=None, recipe_b=None, compiled_dims='nk', disable_ue8m0_cast=False, alpha=None",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, accumulate=None, alpha=None, c_alias_d=None, distribution=None, output_dtype=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "bf16_grouped_gemm",
+      "title": "bf16 grouped gemm",
+      "category": "gemm",
+      "subcategory": "grouped",
+      "summary": "BF16 M 分组连续 / PSUM GEMM",
+      "source_description": "Prepared M-grouped contiguous/PSUM GEMM; no per-expert Python launch loop. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G08",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "51495da673cc7fefc37d4482416dec6106416d8c609c68fefa2df74c2fe6ab80",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, a, b, d, grouped_layout, compiled_dims='nk', use_psum_layout=False, ensure_zero_padding=True, expected_m_for_psum_layout=None",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, groups, group_sizes=None, logical_group_sizes=None, mode=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/gemm/grouped/bf16_grouped_gemm/PRECISION.md"
+      }
+    },
+    {
+      "id": "fp8_mxfp4_grouped_gemm",
+      "title": "fp8 mxfp4 grouped gemm",
+      "category": "gemm",
+      "subcategory": "grouped",
+      "summary": "FP8 × MXFP4 M 分组连续 / PSUM GEMM",
+      "source_description": "Prepared M-grouped contiguous/PSUM GEMM; no per-expert Python launch loop. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic.",
+      "precision_tags": [
+        "fp8",
+        "mxfp4"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G11",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "4b6d4f8cb105e334d6436e491d12ef046aa26d31aaf21ca55a3bfa021e16ea74",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, a, b, d, grouped_layout, recipe=None, recipe_a=None, recipe_b=None, compiled_dims='nk', disable_ue8m0_cast=False, use_psum_layout=False, ensure_zero_padding=True, expected_m_for_psum_layout=None",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, groups, group_sizes=None, logical_group_sizes=None, mode=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_mxfp4_grouped_gemm/PRECISION.md"
+      }
+    },
+    {
+      "id": "fp8_scaled_grouped_gemm",
+      "title": "fp8 scaled grouped gemm",
+      "category": "gemm",
+      "subcategory": "grouped",
+      "summary": "带缩放的 FP8 分组 GEMM，以 indptr 定义分组",
+      "source_description": "Prepared indptr grouped GEMM, exact upstream API. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic.",
+      "precision_tags": [
+        "fp8"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G09",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/fp8_scaled_grouped_gemm.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, a, b, a_scale, b_scale, m_indptr, scale_granularity_mnk=(1, 128, 128), scale_major_mode='MN', mma_sm=1, out=None, out_dtype=None, backend='trtllm', segment_alignment=1",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, groups, b_scale_rows=None, group_sizes=None, logical_group_sizes=None, mode=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "mxfp4_grouped_gemm",
+      "title": "mxfp4 grouped gemm",
+      "category": "gemm",
+      "subcategory": "grouped",
+      "summary": "MXFP4 M 分组连续 / PSUM GEMM",
+      "source_description": "Prepared M-grouped contiguous/PSUM GEMM; no per-expert Python launch loop. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic.",
+      "precision_tags": [
+        "mxfp4"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G12",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "e96dfcec9e7824d676c312567d53b5edae55e18086d541276f2ceefbfc38b66e",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, a, b, d, grouped_layout, recipe=None, recipe_a=None, recipe_b=None, compiled_dims='nk', disable_ue8m0_cast=False, use_psum_layout=False, ensure_zero_padding=True, expected_m_for_psum_layout=None",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, groups, group_sizes=None, logical_group_sizes=None, mode=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp4_grouped_gemm/PRECISION.md"
+      }
+    },
+    {
+      "id": "mxfp8_grouped_gemm",
+      "title": "mxfp8 grouped gemm",
+      "category": "gemm",
+      "subcategory": "grouped",
+      "summary": "MXFP8 M 分组连续 / PSUM GEMM",
+      "source_description": "Prepared M-grouped contiguous/PSUM GEMM; no per-expert Python launch loop. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic.",
+      "precision_tags": [
+        "mxfp8"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G10",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "4ab04014941f4f905cbaa293b4c77de1fd39fb831b9dbbdd4e84c143527e93c5",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, a, b, d, grouped_layout, recipe=None, recipe_a=None, recipe_b=None, compiled_dims='nk', disable_ue8m0_cast=False, use_psum_layout=False, ensure_zero_padding=True, expected_m_for_psum_layout=None",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, groups, group_sizes=None, logical_group_sizes=None, mode=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/gemm/grouped/mxfp8_grouped_gemm/PRECISION.md"
+      }
+    },
+    {
+      "id": "bf16_grouped_gemm_masked",
+      "title": "bf16 grouped gemm masked",
+      "category": "gemm",
+      "subcategory": "grouped_masked",
+      "summary": "BF16 专家分组 GEMM，只写各组有效前缀",
+      "source_description": "Native masked per-expert GEMM, no conversion into contiguous/PSUM. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic. Masked capacity is prepared input; only each expert active prefix is written. Legacy m is descriptive; group_sizes determine active work.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G08",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/bf16_grouped_gemm_masked.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, a, b, d, masked_m, expected_m, compiled_dims='nk'",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, capacity, groups, distribution=None, group_sizes=None, mode=None, provenance=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "fp8_mxfp4_grouped_gemm_masked",
+      "title": "fp8 mxfp4 grouped gemm masked",
+      "category": "gemm",
+      "subcategory": "grouped_masked",
+      "summary": "FP8 × MXFP4 专家分组 GEMM，只写有效前缀",
+      "source_description": "Native masked per-expert GEMM, no conversion into contiguous/PSUM. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic. Masked capacity is prepared input; only each expert active prefix is written. Legacy m is descriptive; group_sizes determine active work.",
+      "precision_tags": [
+        "fp8",
+        "mxfp4"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G11",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/fp8_mxfp4_grouped_gemm_masked.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, a, b, d, masked_m, expected_m, recipe=None, recipe_a=None, recipe_b=None, compiled_dims='nk', disable_ue8m0_cast=False",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, capacity, groups, a_block=None, distribution=None, group_sizes=None, mode=None, provenance=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "mxfp4_grouped_gemm_masked",
+      "title": "mxfp4 grouped gemm masked",
+      "category": "gemm",
+      "subcategory": "grouped_masked",
+      "summary": "MXFP4 专家分组 GEMM，只写有效前缀",
+      "source_description": "Native masked per-expert GEMM, no conversion into contiguous/PSUM. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic. Masked capacity is prepared input; only each expert active prefix is written. Legacy m is descriptive; group_sizes determine active work.",
+      "precision_tags": [
+        "mxfp4"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G12",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "5627a2470b2894a761fb0ba3ec89b6ff216f09a36b6d7edebd426fe5c5e2bf39",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, a, b, d, masked_m, expected_m, recipe=None, recipe_a=None, recipe_b=None, compiled_dims='nk', disable_ue8m0_cast=False",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, capacity, groups, distribution=None, group_sizes=None, mode=None, provenance=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/PRECISION.md"
+      }
+    },
+    {
+      "id": "mxfp8_grouped_gemm_masked",
+      "title": "mxfp8 grouped gemm masked",
+      "category": "gemm",
+      "subcategory": "grouped_masked",
+      "summary": "MXFP8 专家分组 GEMM，只写有效前缀",
+      "source_description": "Native masked per-expert GEMM, no conversion into contiguous/PSUM. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic. Masked capacity is prepared input; only each expert active prefix is written. Legacy m is descriptive; group_sizes determine active work.",
+      "precision_tags": [
+        "mxfp8"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "G10",
+        "general",
+        "gemm",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "9abda9e424003985e9467422d50e709ab7097a9f1f1c611aa20d128f434b456d",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, a, b, d, masked_m, expected_m, recipe=None, recipe_a=None, recipe_b=None, compiled_dims='nk', disable_ue8m0_cast=False",
+        "forward_target": "forward",
+        "_make_inputs": "m, n, k, capacity, groups, distribution=None, group_sizes=None, mode=None, provenance=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/PRECISION.md"
+      }
+    },
+    {
+      "id": "bf16_fused_moe",
+      "title": "bf16 fused moe",
+      "category": "moe",
+      "subcategory": null,
+      "summary": "预路由 BF16 专家 FC1 → 激活 → FC2 → 加权归约",
+      "source_description": "Prepared routed inputs and expert weights -> fused FC1, activation, FC2, route-weighted reduction. Single-rank fused computation; not multigpu MegaMoE coverage.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "F01",
+        "general",
+        "moe",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "ae8b2188e8be2c86db2497dcf4cbeaa72df49d4fee3e63fbfa1890479b8bee8a",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, y, l1_weights, l2_weights, shared_l1_weights, shared_l2_weights, cumulative_local_expert_recv_stats, sym_buffer, sym_buffer_ptrs, rank_idx, num_max_tokens_per_rank, num_experts, num_topk, activation, activation_clamp_opt, fast_math, activation_alpha, activation_beta",
+        "forward_target": "forward",
+        "_make_inputs": "hidden, intermediate, local_experts, tokens, topk, activation_alpha=None, activation_beta=None, activation_limit=None, distribution=None, masked_routes=None, routing=None, model_geometry=None, expert_tp=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/PRECISION.md"
+      }
+    },
+    {
+      "id": "fp8_mxfp4_fused_moe",
+      "title": "fp8 mxfp4 fused moe",
+      "category": "moe",
+      "subcategory": null,
+      "summary": "预路由 FP8 / MXFP4 融合专家计算与加权归约",
+      "source_description": "Prepared routed inputs and expert weights -> fused FC1, activation, FC2, route-weighted reduction. Single-rank fused computation; not multigpu MegaMoE coverage.",
+      "precision_tags": [
+        "fp8",
+        "mxfp4"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "F04",
+        "general",
+        "moe",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "0bc43d75d4005c0e4affc4bef4132acb1a6456feb6430cd91e5bdd58e1d5a780",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, y, l1_weights, l2_weights, shared_l1_weights, shared_l2_weights, cumulative_local_expert_recv_stats, sym_buffer, sym_buffer_ptrs, rank_idx, num_max_tokens_per_rank, num_experts, num_topk, recipe, activation, activation_clamp_opt, fast_math, activation_alpha, activation_beta",
+        "forward_target": "forward",
+        "_make_inputs": "hidden, intermediate, local_experts, tokens, topk, a_block=None, activation=None, activation_alpha=None, activation_beta=None, activation_limit=None, distribution=None, masked_routes=None, routing=None, model_geometry=None, expert_tp=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/moe/fp8_mxfp4_fused_moe/PRECISION.md"
+      }
+    },
+    {
+      "id": "fp8_scaled_fused_moe",
+      "title": "fp8 scaled fused moe",
+      "category": "moe",
+      "subcategory": null,
+      "summary": "FP8 块缩放专家 SwiGLU FFN 与加权归约",
+      "source_description": "Precomputed routing + FP8 FP32-block-scaled payloads -> expert SwiGLU FFN and weighted reduction.  Explicit FP8 intermediate semantics; see reference.py module documentation.",
+      "precision_tags": [
+        "fp8"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "F02",
+        "general",
+        "moe",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/fp8_scaled_fused_moe.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, topk_ids, routing_bias, hidden_states, hidden_states_scale, gemm1_weights, gemm1_weights_scale, gemm2_weights, gemm2_weights_scale, num_experts, top_k, n_group, topk_group, intermediate_size, local_expert_offset, local_num_experts, routed_scaling_factor, routing_method_type=0, use_shuffled_weight=False, weight_layout=0, do_finalize=True, enable_pdl=None, gemm1_lora_delta=None, output=None, tune_max_num_tokens=8192, fp8_quantization_type=1, activation_type=3, gemm1_alpha=None, gemm1_beta=None, gemm1_clamp_limit=None, valid_hidden_size=None, valid_intermediate_size=None",
+        "forward_target": "forward",
+        "_make_inputs": "hidden, intermediate, local_experts, tokens, topk, activation_alpha=None, activation_beta=None, activation_limit=None, b_scale_rows=None, distribution=None, masked_routes=None, routing=None, model_geometry=None, expert_tp=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "mxfp8_fused_moe",
+      "title": "mxfp8 fused moe",
+      "category": "moe",
+      "subcategory": null,
+      "summary": "预路由 MXFP8 融合专家计算与加权归约",
+      "source_description": "Prepared routed inputs and expert weights -> fused FC1, activation, FC2, route-weighted reduction. Single-rank fused computation; not multigpu MegaMoE coverage.",
+      "precision_tags": [
+        "mxfp8"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "F03",
+        "general",
+        "moe",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "946562f1e33a749ac38ff95bfe52f05a36342e77370a35e1c3df73e43ac78e03",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, y, l1_weights, l2_weights, shared_l1_weights, shared_l2_weights, cumulative_local_expert_recv_stats, sym_buffer, sym_buffer_ptrs, rank_idx, num_max_tokens_per_rank, num_experts, num_topk, recipe, activation, activation_clamp_opt, fast_math, activation_alpha, activation_beta",
+        "forward_target": "forward",
+        "_make_inputs": "hidden, intermediate, local_experts, tokens, topk, activation=None, activation_alpha=None, activation_beta=None, activation_limit=None, distribution=None, masked_routes=None, routing=None, model_geometry=None, expert_tp=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/moe/mxfp8_fused_moe/PRECISION.md"
+      }
+    },
+    {
+      "id": "nvfp4_fused_moe",
+      "title": "nvfp4 fused moe",
+      "category": "moe",
+      "subcategory": null,
+      "summary": "NVFP4 路由 MoE；FC2 前含激活量化",
+      "source_description": "Precomputed routing and prepared FP4 weights -> native routed MoE.  Explicit post-activation NVFP4 block16 quantization before FC2; see reference.py module documentation.",
+      "precision_tags": [
+        "nvfp4"
+      ],
+      "state_dtype": null,
+      "stages": [],
+      "source_tags": [
+        "core",
+        "F06",
+        "general",
+        "moe",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/nvfp4_fused_moe.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, topk_ids, routing_bias, hidden_states, hidden_states_scale, gemm1_weights, gemm1_weights_scale, gemm1_bias, gemm1_alpha, gemm1_beta, gemm1_clamp_limit, gemm2_weights, gemm2_weights_scale, gemm2_bias, output1_scale_scalar, output1_scale_gate_scalar, output2_scale_scalar, num_experts, top_k, n_group, topk_group, intermediate_size, local_expert_offset, local_num_experts, routed_scaling_factor, routing_method_type=0, do_finalize=True, enable_pdl=None, activation_type=3, per_token_scale=None, output=None, tune_max_num_tokens=8192, gemm1_lora_delta=None, valid_hidden_size=None, valid_intermediate_size=None, num_fused_shared_experts=None, hidden_states_scale_layout=None",
+        "forward_target": "forward",
+        "_make_inputs": "hidden, intermediate, local_experts, tokens, topk, activation=None, activation_alpha=None, activation_beta=None, activation_limit=None, distribution=None, masked_routes=None, routing=None, model_geometry=None, expert_tp=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "fmha_bf16",
+      "title": "FMHA BF16",
+      "category": "fmha",
+      "subcategory": null,
+      "summary": "BF16 Q/K/V → BF16 O；分页 MHA / GQA / MQA",
+      "source_description": "BF16 Q/K/V → BF16 O. Prepared Q/KV/scales/index metadata -> QK -> softmax -> PV -> native outputs; excludes projection/RoPE/cache writer. MHA/GQA/MQA、HD64/128/256、page16/32/64/128、prefill/prefix/decode/MTP、window、sink、可选 LSE；causal/noncausal。 不是各轴任意笛卡尔积；以 shapes.full.json 所列模型几何和功能组合为准。",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill",
+        "prefix",
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "D01",
+        "general",
+        "dense_attention",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/fmha_bf16.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, query, kv_cache, workspace_buffer, block_tables, seq_lens, max_q_len, max_kv_len, bmm1_scale, bmm2_scale, batch_size, cum_seq_lens_q, cum_seq_lens_kv, window_left=-1, out=None, out_dtype=None, o_sf_scale=None, o_sf_vec_size=None, kv_layout='HND', enable_pdl=None, sinks=None, kv_cache_sf=None, skip_softmax_threshold_scale_factor=None, uses_shared_paged_kv_idx=True, causal=True, lse=None, return_lse=False, multi_ctas_kv_counter_buffer=None, use_fp16_softmax=None, uses_spcompress=None, backend='trtllm-gen'",
+        "forward_target": "forward",
+        "_make_inputs": "head_dim, heads, kv_heads, kv_lengths, page_size, query_lengths, causal=None, distribution=None, precision=None, return_lse=None, sink=None, window_left=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "fmha_bf16_fp8",
+      "title": "FMHA BF16-Q / FP8-KV",
+      "category": "fmha",
+      "subcategory": null,
+      "summary": "BF16 Q + FP8 KV；per-tensor 缩放",
+      "source_description": "BF16 Q + E4M3 KV、per-tensor scales → BF16 O. Prepared Q/KV/scales/index metadata -> QK -> softmax -> PV -> native outputs; excludes projection/RoPE/cache writer. MHA/GQA/MQA、HD64/128/256、page16/32/64/128、prefill/prefix/decode/MTP、window、sink、可选 LSE；global/local causal。 不是各轴任意笛卡尔积；以 shapes.full.json 所列模型几何和功能组合为准。 当前附带原生 solution 子域：固定 TRTLLM 的 BF16 Q / FP8 KV 路径缺少 HD256 kernel；已验证的子域使用其他已支持 head dimensions。 题目支持域允许更宽。",
+      "precision_tags": [
+        "bf16",
+        "fp8"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill",
+        "prefix",
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "D04",
+        "general",
+        "dense_attention",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/fmha_bf16_fp8.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, query, kv_cache, workspace_buffer, block_tables, seq_lens, max_seq_len, bmm1_scale=1.0, bmm2_scale=1.0, window_left=-1, out=None, out_dtype=None, o_sf_scale=None, o_sf_vec_size=None, sinks=None, kv_layout='HND', enable_pdl=None, backend='auto', q_len_per_req=1, o_scale=1.0, mask=None, max_q_len=None, cum_seq_lens_q=None, skip_softmax_threshold_scale_factor=None, kv_cache_sf=None, uses_shared_paged_kv_idx=True, lse=None, return_lse=False, bmm1_scale_log2=None, multi_ctas_kv_counter_buffer=None, enable_block_sparse_attention=False, cp_world=1, cp_rank=0, causal_seqlens_kv_global=None, bf16q_fp8kv_transform_mode=None, request_order=None, request_order_plan=None",
+        "forward_target": "forward",
+        "_make_inputs": "head_dim, heads, kv_heads, kv_lengths, page_size, query_lengths, causal=None, distribution=None, k_scale_value=None, precision=None, return_lse=None, sink=None, v_scale_value=None, window_left=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16_fp8/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16_fp8/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16_fp8/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16_fp8/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16_fp8/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16_fp8/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16_fp8/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16_fp8/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16_fp8/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16_fp8/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/fmha/fmha_bf16_fp8/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "fmha_fp16",
+      "title": "FMHA FP16",
+      "category": "fmha",
+      "subcategory": null,
+      "summary": "FP16 Q/K/V → FP16 O；分页注意力",
+      "source_description": "FP16 Q/K/V → FP16 O. Prepared Q/KV/scales/index metadata -> QK -> softmax -> PV -> native outputs; excludes projection/RoPE/cache writer. MHA/GQA/MQA、HD64/128/256、page16/32/64/128、prefill/prefix/decode/MTP、window、sink、可选 LSE；causal/noncausal。 不是各轴任意笛卡尔积；以 shapes.full.json 所列模型几何和功能组合为准。",
+      "precision_tags": [
+        "fp16"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill",
+        "prefix",
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "D02",
+        "general",
+        "dense_attention",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "4ad52168ba37264eee10f12223b7ccb284ba2e53cf349dd9ac81f14f09a180c2",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, query, kv_cache, workspace_buffer, block_tables, seq_lens, max_q_len, max_kv_len, bmm1_scale, bmm2_scale, batch_size, cum_seq_lens_q, cum_seq_lens_kv, window_left=-1, out=None, out_dtype=None, o_sf_scale=None, o_sf_vec_size=None, kv_layout='HND', enable_pdl=None, sinks=None, kv_cache_sf=None, skip_softmax_threshold_scale_factor=None, uses_shared_paged_kv_idx=True, causal=True, lse=None, return_lse=False, multi_ctas_kv_counter_buffer=None, use_fp16_softmax=None, uses_spcompress=None, backend='trtllm-gen'",
+        "forward_target": "forward",
+        "_make_inputs": "head_dim, heads, kv_heads, kv_lengths, page_size, query_lengths, causal=None, distribution=None, precision=None, return_lse=None, sink=None, window_left=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch",
+          "tvm_ffi"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/fmha/fmha_fp16/PRECISION.md"
+      }
+    },
+    {
+      "id": "fmha_fp8",
+      "title": "FMHA 全 FP8",
+      "category": "fmha",
+      "subcategory": null,
+      "summary": "FP8 Q/K/V；标量缩放，普通 FMHA 几何",
+      "source_description": "E4M3 Q/K/V、scalar fused scales → BF16 O. Prepared Q/KV/scales/index metadata -> QK -> softmax -> PV -> native outputs; excludes projection/RoPE/cache writer. 普通FMHA：Q/K/V E4M3；Dqk=Dv∈{64,128,256}；MHA/GQA/MQA；paged prefill/prefix/decode/MTP；causal/noncausal/window/sink/LSE。不是任意笛卡尔积。原12个D192/V128展开MLA配置迁至D14，未删除。",
+      "precision_tags": [
+        "fp8"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill",
+        "prefix",
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "D03",
+        "general",
+        "dense_attention",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/fmha_fp8.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, **prepared",
+        "forward": "self, query, kv_cache, workspace_buffer, block_tables, seq_lens, max_q_len, max_kv_len, bmm1_scale, bmm2_scale, batch_size, cum_seq_lens_q, cum_seq_lens_kv, window_left=-1, out=None, out_dtype=None, o_sf_scale=None, o_sf_vec_size=None, kv_layout='HND', enable_pdl=None, sinks=None, kv_cache_sf=None, skip_softmax_threshold_scale_factor=None, uses_shared_paged_kv_idx=True, causal=True, lse=None, return_lse=False, multi_ctas_kv_counter_buffer=None, use_fp16_softmax=None, uses_spcompress=None, backend='trtllm-gen'",
+        "forward_target": "forward",
+        "_make_inputs": "head_dim, heads, kv_heads, kv_lengths, page_size, query_lengths, causal=None, distribution=None, k_scale_value=None, precision=None, q_scale_value=None, return_lse=None, sink=None, v_scale_value=None, window_left=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "fmha_fp8_per_token_head",
+      "title": "FMHA per-token-head FP8 KV",
+      "category": "fmha",
+      "subcategory": null,
+      "summary": "BF16 Q + FP8 KV；每 token / head 缩放，O-only",
+      "source_description": "BF16 Q + E4M3 KV、inline FP32 token/head scales → BF16 O. Prepared Q/KV/scales/index metadata -> QK -> softmax -> PV -> native outputs; excludes projection/RoPE/cache writer. HD64/128/256, MHA/GQA/MQA, page16/32/64/128, HND/NHD; prefill/prefix/decode/MTP, global bottom-right causal, O-only.",
+      "precision_tags": [
+        "bf16",
+        "fp8"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill",
+        "prefix",
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "D05",
+        "general",
+        "dense_attention",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/fmha_fp8_per_token_head.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, q, k, v, out, cu_seqlens_q, max_seqlen_q, seqused_k, max_seqlen_k, softmax_scale, causal, window_size, block_table, softcap, q_descale, k_descale, v_descale, seq_threshold_3D=None, num_par_softmax_segments=None, softmax_segm_output=None, softmax_segm_max=None, softmax_segm_expsum=None, alibi_slopes=None, output_scale=None, qq_bias=None, sinks=None, mm_prefix_range=None, rswa_prefix_lens=None, rswa_window=None, use_alibi_sqrt=False, kv_quant_mode=0, k_scale_cache=None, v_scale_cache=None, chunk_lookback=-1, use_td=False, mm_prefix_clamp_sliding_window=False",
+        "forward_target": "forward",
+        "_make_inputs": "head_dim, heads, kv_heads, kv_lengths, page_size, query_lengths, distribution=None, physical_layout=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "fmha_mxfp8_qkv",
+      "title": "FMHA 全 QKV MXFP8",
+      "category": "fmha",
+      "subcategory": null,
+      "summary": "MXFP8 Q/K/V block32；连续布局，无分页 / ragged",
+      "source_description": "E4M3 Q/K/V + E8M0 block32 → BF16 O / FP32 ln-LSE. Prepared native FROST instance + Q/K/V/scales/workspace -> execute; constructor/check_support/compile/quantization outside core timing. BHSD logical / BSHD physical；HD128/256；MHA/GQA/MQA；Q1/4/6 decode/MTP、首次/prefix prefill；causal bottom-right/noncausal/window；可选ln-LSE；SM100/103。当前不含paged/ragged/sink。 Caller workspace is mutable scratch; its contents are not mathematical scoring outputs. The standard evaluator checks the declared writable regions. Explicit FP8 intermediate semantics; see reference.py module documentation.",
+      "precision_tags": [
+        "mxfp8"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill",
+        "prefix",
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "D15",
+        "general",
+        "dense_attention",
+        "sampled",
+        "patched_native"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/fmha_mxfp8_qkv.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, sample_q=None, sample_k=None, sample_v=None, sample_o=None, sample_lse=None, is_causal=False, causal_bottom_right=False, window_size_left=None, scale_softmax=None, dtype_o=torch.bfloat16, pertensor_fp8=False, has_amax_o=False, seq_kv_lens_present=False, **extra_setup",
+        "forward": "self, q_tensor, k_tensor, v_tensor, o_tensor, lse_tensor=None, sinks=None, seq_q_lens=None, seq_kv_lens=None, scale_softmax=None, current_stream=None, sf_q=None, sf_k=None, sf_v=None, amax_o=None, descale_q=None, descale_k=None, descale_v=None, scale_o=None, workspace=None, block_table=None, block_table_v=None, gate=None, sf_o=None",
+        "forward_target": "forward",
+        "_make_inputs": "batch, head_dim, heads, kv_heads, kv_len, query_len, causal=None, distribution='normal', return_lse=True, window_left=None, device='cuda'",
+        "prepare_model": "model_class, inputs, init_kwargs, input_kwargs"
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "fmha_nvfp4_kv",
+      "title": "FMHA NVFP4 KV",
+      "category": "fmha",
+      "subcategory": null,
+      "summary": "FP8 Q + NVFP4 KV；group16 缩放",
+      "source_description": "E4M3 Q + E2M1 KV、group16 E4M3 scales → BF16 O. Prepared Q/KV/scales/index metadata -> QK -> softmax -> PV -> native outputs; excludes projection/RoPE/cache writer. MHA/GQA/MQA、HD64/128/256、page16/32/64/128、prefill/prefix/decode/MTP、window、sink、可选 LSE；causal/noncausal。 不是各轴任意笛卡尔积；以 shapes.full.json 所列模型几何和功能组合为准。",
+      "precision_tags": [
+        "fp8",
+        "nvfp4"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill",
+        "prefix",
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "D06",
+        "general",
+        "dense_attention",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "d18fc42478f465a89a2478481de923b3a8cec6d696d85bff71bb862c7a156ff8",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, query, kv_cache, workspace_buffer, block_tables, seq_lens, max_q_len, max_kv_len, bmm1_scale, bmm2_scale, batch_size, cum_seq_lens_q, cum_seq_lens_kv, window_left=-1, out=None, out_dtype=None, o_sf_scale=None, o_sf_vec_size=None, kv_layout='HND', enable_pdl=None, sinks=None, kv_cache_sf=None, skip_softmax_threshold_scale_factor=None, uses_shared_paged_kv_idx=True, causal=True, lse=None, return_lse=False, multi_ctas_kv_counter_buffer=None, use_fp16_softmax=None, uses_spcompress=None, backend='trtllm-gen'",
+        "forward_target": "forward",
+        "_make_inputs": "head_dim, heads, kv_heads, kv_lengths, page_size, query_lengths, causal=None, distribution=None, precision=None, return_lse=None, sink=None, window_left=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch",
+          "tvm_ffi"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_kv/PRECISION.md"
+      }
+    },
+    {
+      "id": "fmha_nvfp4_qkpv",
+      "title": "FMHA NVFP4 QK + PV pipeline",
+      "category": "fmha",
+      "subcategory": null,
+      "summary": "BF16 外部 Q/K/V，内部 NVFP4 QK 与 PV；非因果变长",
+      "source_description": "BF16 external Q/K/V -> native NVFP4 QK and NVFP4 PV -> BF16 O Implement the exact native ABI over the declared input domain. THD contiguous；HD128 MHA；noncausal packed varlen；empty segments；H8/16，长度1..8192；无GQA/causal/decode/cache/window/sink/LSE宣称；SM100/103。 Explicit Q/P quantization graph; see reference.py module documentation.",
+      "precision_tags": [
+        "bf16",
+        "nvfp4"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill"
+      ],
+      "source_tags": [
+        "core",
+        "D16",
+        "general",
+        "dense_attention",
+        "sampled",
+        "patched_native"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "accepted_by_user_with_performance_waiver",
+      "problem_verification": "compatible_latest_receipt_missing",
+      "requires_receipt": true,
+      "performance_waiver": true,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": null,
+        "design": "as_recorded"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "within_1pct": 9,
+        "over_1pct": 1
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": null,
+        "forward": "self, query, key, value, cu_seqlens, *, pv_mode='fp8', softmax_scale=None, out=None, cu_seqlens_host=None, backend='cake'",
+        "forward_target": "forward",
+        "_make_inputs": "heads, lengths, distribution='normal', host_lengths=True, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch",
+          "tvm_ffi"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/PRECISION.md",
+        "user_acceptance": "aka-cuda-operators-20261030/operators/fmha/fmha_nvfp4_qkpv/USER_ACCEPTANCE.md"
+      }
+    },
+    {
+      "id": "mla_absorbed_fp8",
+      "title": "吸收 MLA FP8",
+      "category": "mla",
+      "subcategory": null,
+      "summary": "吸收式 FP8 MLA：Q/K D576，V 为 K 前 512 维",
+      "source_description": "E4M3 Q/KV D576、shared V512 → BF16 O. Prepared Q/KV/scales/index metadata -> QK -> softmax -> PV -> native outputs; excludes projection/RoPE/cache writer. 吸收式 MLA：Q/K D576、V D512（alias K 前512），MQA，H12/16/32/64/96/128；page1/32/64/128；prefill/prefix/decode/MTP、固定 bottom-right causal、无滑窗、可选 sink 与自然对数 LSE。以 shape_range.json 的动态参数域与跨字段约束为准。 当前附带原生 solution 子域：固定 TRTLLM MLA 使用 page_size32/64；不支持96个Q heads，也不支持变长Q同时返回LSE的组合。 题目支持域允许更宽。",
+      "precision_tags": [
+        "fp8"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill",
+        "prefix",
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "D09",
+        "general",
+        "dense_attention",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "c9bb1bf98176d138814b5f8ffad866fa4161c83f38c40a224c4ebbeeb46484e1",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": null,
+        "forward": "self, query, kv_cache, workspace_buffer, qk_nope_head_dim, kv_lora_rank, qk_rope_head_dim, block_tables, seq_lens, max_seq_len, sparse_mla_top_k=0, out=None, bmm1_scale=1.0, bmm2_scale=1.0, sinks=None, skip_softmax_threshold_scale_factor=None, enable_pdl=None, backend='auto', is_var_seq=True, uses_shared_paged_kv_idx=True, lse=None, return_lse=False, cute_dsl_impl='auto', kv_scale_format='auto', cum_seq_lens_q=None, max_q_len=None, multi_ctas_kv_counter_buffer=None, sparse_mla_top_k_lens=None, enable_dcp=False, cp_world=1, cp_rank=0, causal_seqlens_kv_global=None, use_fp16_softmax=None, return_lse_base=None",
+        "forward_target": "forward",
+        "_make_inputs": "head_dim, heads, kv_heads, kv_lengths, page_size, query_lengths, causal=None, precision=None, return_lse=None, sink=None, value_dim=None, window_left=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/PRECISION.md"
+      }
+    },
+    {
+      "id": "mla_expanded_bf16",
+      "title": "展开 MLA BF16",
+      "category": "mla",
+      "subcategory": null,
+      "summary": "展开式 BF16 MLA：Q/K D192，V D128；ragged prefill",
+      "source_description": "BF16 Q/K D192、V D128 → BF16 O. Prepared Q/KV/scales/index metadata -> QK -> softmax -> PV -> native outputs; excludes projection/RoPE/cache writer. BF16展开MLA：Q/K192、V128，Hq=Hkv，H12/16/24/32/48/64/96/128；ragged首次causal prefill，长度1..16384，可选log2-LSE。输入是连续ragged Q/K/V；历史page字段仅是输入准备来源。",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill"
+      ],
+      "source_tags": [
+        "core",
+        "D07",
+        "general",
+        "dense_attention",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/mla_expanded_bf16.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, query, key, value, workspace_buffer, seq_lens, max_q_len, max_kv_len, bmm1_scale, bmm2_scale, o_sf_scale, batch_size, window_left, cum_seq_lens_q, cum_seq_lens_kv, enable_pdl, is_causal, return_lse, attention_sinks=None, skip_softmax_threshold_scale_factor=None, out=None, lse=None, sage_attn_sfs=(None, None, None, None), num_elts_per_sage_attn_blk=(0, 0, 0, 0), backend='trtllm-gen', q_seq_lens_cpu=None, kv_seq_lens_cpu=None, use_fp16_softmax=None, uses_spcompress=None, skip_all_rows_active_check=True",
+        "forward_target": "forward",
+        "_make_inputs": "head_dim, heads, kv_heads, kv_lengths, page_size, query_lengths, causal=None, distribution=None, precision=None, return_lse=None, sink=None, value_dim=None, window_left=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "mla_expanded_fp8",
+      "title": "展开 MLA 全 FP8",
+      "category": "mla",
+      "subcategory": null,
+      "summary": "展开式 FP8 MLA：Q/K D192，V D128；ragged prefill",
+      "source_description": "E4M3 Q/K D192、V D128；per-tensor composite scales → BF16 O. Prepared Q/KV/scales/index metadata -> QK -> softmax -> PV -> native outputs; excludes projection/RoPE/cache writer. E4M3全FP8展开MLA：Q/K192、V128，Hq=Hkv，H12/16/24/32/48/64/96/128；ragged首次causal prefill，长度1..16384，可选log2-LSE。输入是连续ragged Q/K/V；历史page字段仅是输入准备来源。",
+      "precision_tags": [
+        "fp8"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill"
+      ],
+      "source_tags": [
+        "core",
+        "D14",
+        "general",
+        "dense_attention",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/mla_expanded_fp8.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, **kwargs",
+        "forward": "self, query, key, value, workspace_buffer, seq_lens, max_q_len, max_kv_len, bmm1_scale, bmm2_scale, o_sf_scale, batch_size, window_left, cum_seq_lens_q, cum_seq_lens_kv, enable_pdl, is_causal, return_lse, attention_sinks=None, skip_softmax_threshold_scale_factor=None, out=None, lse=None, sage_attn_sfs=(None, None, None, None), num_elts_per_sage_attn_blk=(0, 0, 0, 0), backend='trtllm-gen', q_seq_lens_cpu=None, kv_seq_lens_cpu=None, use_fp16_softmax=None, uses_spcompress=None, skip_all_rows_active_check=True",
+        "forward_target": "forward",
+        "_make_inputs": "head_dim, heads, kv_heads, kv_lengths, page_size, query_lengths, causal=None, distribution=None, precision=None, return_lse=None, sink=None, value_dim=None, window_left=None, device='cuda'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "mla_nvfp4",
+      "title": "Dense MLA NVFP4",
+      "category": "mla",
+      "subcategory": null,
+      "summary": "NVFP4 dense MQA：Q/K/V D512，K=V；分页 decode / MTP",
+      "source_description": "E2M1 Q/KV + E4M3 group16；shared K=V D512 → BF16. Prepared Q/KV/scales/index metadata -> QK -> softmax -> PV -> native outputs; excludes projection/RoPE/cache writer. Dense MQA D512/shared K=V；page64；decode/MTP Q1/3/6/16，H16/32/64/128；上下文63..65537；sink、可选ln-LSE；B*Q*H>=128；SM100/103。不是 sparse C2/C3，也不是 absorbed D576。 Caller workspace is mutable scratch; its contents are not mathematical scoring outputs. The standard evaluator checks the declared writable regions.",
+      "precision_tags": [
+        "nvfp4"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "D13",
+        "general",
+        "dense_attention",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "ec04354c05d105d4d0c7075583180d01cecff62ddb571bb139d5401d4897f882",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, query, query_scale, kv_cache, kv_scale, block_tables, seq_lens, workspace_buffer, *, sm_scale, sinks=None, out=None, lse=None, return_lse=False, seq_lens_cpu=None, backend='cake'",
+        "forward": "self",
+        "forward_target": "forward",
+        "_make_inputs": "heads, kv_lengths, query_len, distribution=None, return_lse=None, sink=None, device='cuda'",
+        "prepare_model": "model_class, inputs, init_kwargs, input_kwargs"
+      },
+      "dependencies": {
+        "python": [
+          "torch",
+          "tvm_ffi"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/mla/mla_nvfp4/PRECISION.md"
+      }
+    },
+    {
+      "id": "dual_cache_latent_bf16",
+      "title": "dual cache latent bf16",
+      "category": "sparse_attention",
+      "subcategory": null,
+      "summary": "BF16 单 / 双 latent KV 缓存，联合 softmax",
+      "source_description": "BF16 Q/KV/O. Prepared single/dual latent KV caches and indices -> one joint softmax attention. D512; H8/16/32/64/128; page128/256, SWA128, compressed top512/1024 or all-C128 up to8192; prefill/decode/MTP, ratio0/1/2/4/128 legal model-derived combinations.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill",
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "dual_cache_latent_bf16",
+        "general",
+        "sparse_attention",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/dual_cache_latent_bf16.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, query: torch.Tensor, swa_kv_cache: torch.Tensor, workspace_buffer: torch.Tensor, sparse_indices: torch.Tensor, compressed_kv_cache: Optional[torch.Tensor]=None, sparse_topk_lens: Optional[torch.Tensor]=None, seq_lens: Optional[torch.Tensor]=None, out: Optional[torch.Tensor]=None, bmm1_scale: Union[float, torch.Tensor]=1.0, bmm2_scale: Union[float, torch.Tensor]=1.0, sinks: Optional[torch.Tensor]=None, kv_layout: Literal['HND', 'NHD']='HND', cum_seq_lens_q: Optional[torch.Tensor]=None, max_q_len: Optional[int]=None, enable_pdl: bool | None=None, swa_topk_lens: Optional[torch.Tensor]=None, extra_sparse_indices: Optional[torch.Tensor]=None, extra_sparse_topk_lens: Optional[torch.Tensor]=None",
+        "forward_target": "forward",
+        "_make_inputs": "query_lens: list[int], seq_lens_values: list[int], num_heads: int, compress_ratio: int, index_topk: int, page_size: int, distribution: str='normal', device: str='cuda', index_pattern: str='random', physical_layout: str='scattered'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "dual_cache_latent_fp8",
+      "title": "dual cache latent fp8",
+      "category": "sparse_attention",
+      "subcategory": null,
+      "summary": "FP8 单 / 双 latent KV 缓存，独立 QK / PV descale",
+      "source_description": "E4M3 Q/KV, independent QK/PV descales, BF16 O. Prepared single/dual latent KV caches and indices -> one joint softmax attention. D512; H8/16/32/64/128; page128/256, SWA128, compressed top512/1024 or all-C128 up to8192; prefill/decode/MTP, ratio0/1/2/4/128 legal model-derived combinations.",
+      "precision_tags": [
+        "fp8"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill",
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "dual_cache_latent_fp8",
+        "general",
+        "sparse_attention",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "1a8419d9412e3111ef81ea57a00b86f1b1032ba46098e0c546f75ea4c407f28b",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": null,
+        "forward": "self, query, swa_kv_cache, workspace_buffer, sparse_indices, compressed_kv_cache=None, sparse_topk_lens=None, seq_lens=None, out=None, bmm1_scale=1.0, bmm2_scale=1.0, sinks=None, kv_layout='HND', cum_seq_lens_q=None, max_q_len=None, enable_pdl=None, swa_topk_lens=None, extra_sparse_indices=None, extra_sparse_topk_lens=None",
+        "forward_target": "forward",
+        "_make_inputs": "query_lens: list[int], seq_lens_values: list[int], num_heads: int, compress_ratio: int, index_topk: int, page_size: int, distribution: str='normal', device: str='cuda', q_scale: float=1.0, kv_scale: float=1.0, index_pattern: str='random', physical_layout: str='scattered'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch",
+          "tvm_ffi"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/PRECISION.md",
+        "variants": "aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_fp8/VARIANTS.md"
+      }
+    },
+    {
+      "id": "paged_indexed_latent_fp8",
+      "title": "paged indexed latent fp8",
+      "category": "sparse_attention",
+      "subcategory": null,
+      "summary": "物理 token 索引访问分页 FP8 latent KV；D512 / D576",
+      "source_description": "Sparse latent attention from plain E4M3 Q and paged E4M3 latent KV, addressed by physical token indices. Produces BF16 output; QK dimensions 512/576, value dimension 512, head counts 8/16/32/64/128 and page sizes 1/32/64/128. Caller-owned output, workspace and multi-CTA counter buffers retain their declared alias, write regions and lifecycle.",
+      "precision_tags": [
+        "fp8"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "prefill",
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "paged_indexed_latent_fp8",
+        "general",
+        "sparse_attention",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "a3494422139afc60d493a1523329f6d361c0bae03ef2006516d24c450c7f374d",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, query, kv_cache, block_tables, seq_lens, sparse_mla_top_k_lens, bmm1_scale, bmm2_scale, workspace_buffer, multi_ctas_kv_counter_buffer, out",
+        "forward_target": "forward",
+        "_make_inputs": "query_lengths, lengths, heads, page_size, topk, dim=576, q_scale=0.5, k_scale=0.25, v_scale=0.25, domain='normal', device='cuda', physical_layout='scattered', index_pattern='score'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/PRECISION.md"
+      }
+    },
+    {
+      "id": "paged_latent_mxfp8_nvfp4",
+      "title": "paged latent mxfp8 nvfp4",
+      "category": "sparse_attention",
+      "subcategory": null,
+      "summary": "BF16 Q + MXFP8 滑窗 KV + NVFP4 压缩 KV",
+      "source_description": "BF16 Q + MXFP8 SWA + NVFP4 compressed KV Excludes indexer/cache writer/projection/RoPE/Mega/full model and steady-state performance D512/V512 MQA; S1/3, physical H64/128, TP1/2/4/8; SWA128 plus compressed Top512, ratio0/1/2. Decode/MTP; no long-prefill claim.",
+      "precision_tags": [
+        "bf16",
+        "mxfp8",
+        "nvfp4"
+      ],
+      "state_dtype": null,
+      "stages": [
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "paged_latent_mxfp8_nvfp4",
+        "general",
+        "sparse_attention",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "accepted_by_user_with_performance_waiver",
+      "problem_verification": "compatible_latest_receipt_missing",
+      "requires_receipt": true,
+      "performance_waiver": true,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": null,
+        "design": "as_recorded"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "over_1pct": 4,
+        "within_1pct": 6
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, q, k_cache, indices, extra_k_cache, extra_indices, sm_scale, attn_sink, out",
+        "forward_target": "forward",
+        "_make_inputs": "lengths, tp, ratio, query_len, domain='normal', mixed=True, physical_heads=64, device='cuda', physical_layout='scattered', index_pattern='score'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/PRECISION.md",
+        "user_acceptance": "aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/USER_ACCEPTANCE.md"
+      }
+    },
+    {
+      "id": "gdn_conv_mtp_bf16_state_bf16",
+      "title": "gdn conv mtp bf16 state bf16",
+      "category": "linear_attention",
+      "subcategory": null,
+      "summary": "卷积 → SiLU → GDN 递推 → gated RMSNorm；BF16 检查点",
+      "source_description": "GDN decode/MTP from projected BF16 QKV through causal four-tap convolution, SiLU, normalized recurrence and gated RMSNorm. Preserves the rolling convolution history, caller output and all indexed BF16 recurrent checkpoints, including accepted-token and null-request behavior. D=128; TP and head-ratio configurations remain correlated as defined by the complete shape catalog.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": "bf16",
+      "stages": [
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "GDN05",
+        "general",
+        "linear_attention",
+        "sampled",
+        "patched_native"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-repair-20261021/raw/conv-state-vector/results/result.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, mixed_qkv, conv_state, conv_weight, a, b, A_log, dt_bias, state_indices, cu_seqlens, num_accepted_tokens, state, output_gate, norm_weight, out=None, scale=128 ** (-0.5), norm_eps=1e-05, output_gate_activation='silu'",
+        "forward_target": "forward",
+        "_make_inputs": "tp, width, lengths, accepted_mode='cycle', domain='normal', state_dtype='bf16', device='cuda', head_ratio=3, state_regime='continuation', pool_size=2048, state_slot_padding=32, slot_pattern='scattered', conv_slot_padding=32",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "gdn_conv_mtp_bf16_state_fp32",
+      "title": "gdn conv mtp bf16 state fp32",
+      "category": "linear_attention",
+      "subcategory": null,
+      "summary": "卷积 → SiLU → GDN 递推 → gated RMSNorm；FP32 检查点",
+      "source_description": "GDN decode/MTP from projected BF16 QKV through causal four-tap convolution, SiLU, normalized recurrence and gated RMSNorm. Preserves the rolling convolution history, caller output and all indexed FP32 recurrent checkpoints, including accepted-token and null-request behavior. D=128; TP and head-ratio configurations remain correlated as defined by the complete shape catalog.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": "fp32",
+      "stages": [
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "GDN06",
+        "general",
+        "linear_attention",
+        "sampled",
+        "patched_native"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "cuda_event_forward",
+      "comparison": {
+        "kind": "historical_candidate",
+        "identity": "94ce62f56404a285d9df6b38a3389234ee6594d8668af56c1435d976dcbef0fc",
+        "design": "paired_jobs"
+      },
+      "primary_measurement": "balanced_order_performance",
+      "measurement_groups": 3,
+      "primary_row_status_counts": {
+        "ratio_only": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, mixed_qkv, conv_state, conv_weight, a, b, A_log, dt_bias, state_indices, cu_seqlens, num_accepted_tokens, state, output_gate, norm_weight, out=None, scale=128 ** (-0.5), norm_eps=1e-05, output_gate_activation='silu'",
+        "forward_target": "forward",
+        "_make_inputs": "tp, width, lengths, accepted_mode='cycle', domain='normal', state_dtype='fp32', device='cuda', head_ratio=3, state_regime='continuation', pool_size=2048, state_slot_padding=32, slot_pattern='scattered', conv_slot_padding=32",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/PRECISION.md"
+      }
+    },
+    {
+      "id": "gdn_decode_core_bf16_state_fp32",
+      "title": "gdn decode core bf16 state fp32",
+      "category": "linear_attention",
+      "subcategory": null,
+      "summary": "普通 decode ABI：卷积、GDN 递推与原位 gated RMSNorm",
+      "source_description": "Ordinary GDN decode from packed qkvz/ba through causal convolution, recurrent update and in-place gated RMSNorm. Returns None and writes the existing BF16 output, rolling convolution history and FP32 state buffers. Scheduler metadata controls active requests and state indices; inactive output/state regions remain unchanged. D=128 with value/key head ratios 2/3 plus the H4/HV32 ABI geometry; this is a separate ordinary-decode ABI from the MTP checkpoint interface.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": "fp32",
+      "stages": [
+        "decode"
+      ],
+      "source_tags": [
+        "core",
+        "GDN06",
+        "general",
+        "linear_attention",
+        "sampled",
+        "patched_native"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/gdn_decode_core_bf16_state_fp32.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, qkvz, ba, conv_weight, conv_state, A_log, dt_bias, state, norm_weight, out, metadata",
+        "forward_target": "__call__",
+        "_make_inputs": "tp, batch, domain='normal', spare=0, null_mode='none', state_dtype='fp32', device='cuda', head_ratio=3, state_regime='continuation', pool_size=2048, state_slot_padding=32, slot_pattern='scattered', conv_slot_padding=32",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "gdn_postconv_mtp_bf16_state_bf16",
+      "title": "gdn postconv mtp bf16 state bf16",
+      "category": "linear_attention",
+      "subcategory": null,
+      "summary": "卷积后 GDN 递推与 gated RMSNorm；BF16 检查点",
+      "source_description": "Post-convolution GDN decode/MTP: packed BF16 QKV and raw gates feed QK normalization, decay/beta gates, recurrence and gated RMSNorm. Writes caller output and every indexed BF16 checkpoint, selecting the source state from the accepted-token count. D=128 with value/key head ratios 2/3 and the additional H4/HV32 ABI geometry. Convolution and its rolling history are outside this boundary.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": "bf16",
+      "stages": [
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "GDN03",
+        "general",
+        "linear_attention",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-interface-20261021/campaign/selected-results/gdn_postconv_mtp_bf16_state_bf16.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": null,
+        "forward": "self, mixed_qkv, a, b, A_log, dt_bias, state_indices, cu_seqlens, num_accepted_tokens, state, output_gate, norm_weight, out=None, scale=128 ** (-0.5), norm_eps=1e-05, output_gate_activation='silu'",
+        "forward_target": "forward",
+        "_make_inputs": "tp, width, lengths, accepted_mode='cycle', domain='normal', state_dtype='bf16', device='cuda', head_ratio=3, state_regime='continuation', pool_size=2048, state_slot_padding=32, slot_pattern='scattered'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "gdn_postconv_mtp_bf16_state_fp32",
+      "title": "gdn postconv mtp bf16 state fp32",
+      "category": "linear_attention",
+      "subcategory": null,
+      "summary": "卷积后 GDN 递推与 gated RMSNorm；FP32 检查点",
+      "source_description": "Post-convolution GDN decode/MTP: packed BF16 QKV and raw gates feed QK normalization, decay/beta gates, recurrence and gated RMSNorm. Writes caller output and every indexed FP32 checkpoint, selecting the source state from the accepted-token count. D=128 with value/key head ratios 2/3 and the additional H4/HV32 ABI geometry. Convolution and its rolling history are outside this boundary.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": "fp32",
+      "stages": [
+        "decode",
+        "mtp"
+      ],
+      "source_tags": [
+        "core",
+        "GDN04",
+        "general",
+        "linear_attention",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "Online open-source vLLM fused GDN post-convolution MTP; frozen production wrapper",
+        "design": "as_recorded"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, mixed_qkv, a, b, A_log, dt_bias, state_indices, cu_seqlens, num_accepted_tokens, state, output_gate, norm_weight, out=None, scale=128 ** (-0.5), norm_eps=1e-05, output_gate_activation='silu'",
+        "forward_target": "forward",
+        "_make_inputs": "tp, width, lengths, accepted_mode='cycle', domain='normal', state_dtype='fp32', device='cuda', head_ratio=3, state_regime='continuation', pool_size=2048, state_slot_padding=32, slot_pattern='scattered'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/PRECISION.md"
+      }
+    },
+    {
+      "id": "gdn_prefill_bf16_state_bf16",
+      "title": "gdn prefill bf16 state bf16",
+      "category": "linear_attention",
+      "subcategory": null,
+      "summary": "GDN packed prefill；只读 BF16 初态，可选新 FP32 终态",
+      "source_description": "Packed GDN prefill from BF16 Q/K/V, FP32 log-decay and beta, and readonly BF16 initial state. Returns BF16 attention output and optional newly allocated FP32 final state; preserves caller-provided output alias. D=128, TP=1/2/4/8, value/key head ratios 2/3; H4/HV32 is an additional ABI geometry case. The fixed native route uses use_cp=False. Projection, convolution and output normalization are outside this boundary.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": "bf16",
+      "stages": [
+        "prefill"
+      ],
+      "source_tags": [
+        "core",
+        "GDN01",
+        "general",
+        "linear_attention",
+        "sampled"
+      ],
+      "solution_origin": "AKA",
+      "acceptance_status": "certified",
+      "problem_verification": "exact_supplied_problem",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "/Users/ruibo/work/ppu-flashinfer/aka-cuda-reference-candidates/evidence/ncu-repair-20261021/raw/prefill-bf16-full10-phase9/results/result.json",
+        "design": "independent_jobs"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self, *args, **kwargs",
+        "forward": "self, q, k, v, g, beta, initial_state, output_final_state, cu_seqlens=None, chunk_indices=None, chunk_offsets=None, use_qk_l2norm_in_kernel=True, core_attn_out=None",
+        "forward_target": "forward",
+        "_make_inputs": "tp, lengths, state_mode='continuation', domain='normal', state_dtype='bf16', device='cuda', head_ratio=3",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/performance/CERTIFIED_BEST.json"
+      }
+    },
+    {
+      "id": "gdn_prefill_bf16_state_fp32",
+      "title": "gdn prefill bf16 state fp32",
+      "category": "linear_attention",
+      "subcategory": null,
+      "summary": "GDN packed prefill；只读 FP32 初态，可选新 FP32 终态",
+      "source_description": "Packed GDN prefill from BF16 Q/K/V, FP32 log-decay and beta, and readonly FP32 initial state. Returns BF16 attention output and optional newly allocated FP32 final state; preserves caller-provided output alias. D=128, TP=1/2/4/8, value/key head ratios 2/3; H4/HV32 is an additional ABI geometry case. The fixed native route uses use_cp=False. Projection, convolution and output normalization are outside this boundary.",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": "fp32",
+      "stages": [
+        "prefill"
+      ],
+      "source_tags": [
+        "core",
+        "GDN02",
+        "general",
+        "linear_attention",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "compatible_latest_receipt_missing",
+      "requires_receipt": true,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "Online open-source FlashInfer 0.7.1 CuTe DSL GDN CP-prefill (FP32 state) behind vLLM c723a831 ChunkGatedDeltaRule.forward_cuda; frozen production wrapper",
+        "design": "as_recorded"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "measured": 10
+      },
+      "unsupported_baseline_shapes": {},
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, q, k, v, g, beta, initial_state, output_final_state, cu_seqlens=None, chunk_indices=None, chunk_offsets=None, use_qk_l2norm_in_kernel=True, core_attn_out=None",
+        "forward_target": "forward",
+        "_make_inputs": "tp, lengths, state_mode='continuation', domain='normal', state_dtype='fp32', device='cuda', head_ratio=3",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "filelock",
+          "torch",
+          "tvm_ffi"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/PRECISION.md"
+      }
+    },
+    {
+      "id": "kda_raw_prefill_state_bf16",
+      "title": "Raw-beta KDA prefill · BF16 state",
+      "category": "linear_attention",
+      "subcategory": null,
+      "summary": "KDA 原始门控 prefill；逐通道衰减、BF16 终态与检查点",
+      "source_description": "Packed KDA prefill from stored BF16 Q/K/V and raw gate/beta: QK L2 normalization, channel-wise safe decay with lower_bound=-5, beta sigmoid and recurrence. Produces BF16 output, in-place BF16 final state and optional periodic checkpoints. D=128; beta may be contiguous or row-strided with unit head stride, total tokens exceed one, and individual sequences may have length one. Projection, convolution and output RMSNorm are outside this boundary; unsupported native layouts remain recorded. 当前附带原生 solution 子域：固定 CuTe prefill 接口要求连续 beta；本题 row-strided beta 配置仍保留，当前 solution 不支持。 题目支持域允许更宽。",
+      "precision_tags": [
+        "bf16"
+      ],
+      "state_dtype": "bf16",
+      "stages": [
+        "prefill"
+      ],
+      "source_tags": [
+        "core",
+        "K01",
+        "general",
+        "linear_attention",
+        "sampled"
+      ],
+      "solution_origin": "REFERENCE",
+      "acceptance_status": "passed_sampled",
+      "problem_verification": "exact_accepted_problem_core",
+      "requires_receipt": false,
+      "performance_waiver": false,
+      "metric": "ncu_kernel_sum",
+      "comparison": {
+        "kind": "production",
+        "identity": "Online open-source FlashInfer recurrent_kda backend=cute-dsl; frozen production wrapper",
+        "design": "as_recorded"
+      },
+      "primary_measurement": "ncu",
+      "measurement_groups": 1,
+      "primary_row_status_counts": {
+        "baseline_unsupported": 2,
+        "measured": 8
+      },
+      "unsupported_baseline_shapes": {
+        "ncu": [
+          "0",
+          "2"
+        ]
+      },
+      "fixed_case_count": 10,
+      "interface": {
+        "__init__": "self",
+        "forward": "self, q, k, v, g, beta, A_log=None, dt_bias=None, scale=None, initial_state=None, output_final_state=False, use_qk_l2norm_in_kernel=True, use_gate_in_kernel=False, lower_bound=None, cu_seqlens=None, beta_is_logit=False, output=None, state_checkpoints=None, checkpoint_cu_starts=None, checkpoint_every_n_tokens=0",
+        "forward_target": "forward",
+        "_make_inputs": "lengths, tp, state_mode=None, distribution='normal', device='cuda', heads=None, checkpoint_every=0, output_owner='caller', beta_layout='contiguous'",
+        "prepare_model": null
+      },
+      "dependencies": {
+        "python": [
+          "torch",
+          "tvm_ffi"
+        ],
+        "toolchain": [
+          "CUDA Toolkit",
+          "C++ compiler"
+        ],
+        "authority": "candidate/solution.py and its local build modules"
+      },
+      "paths": {
+        "readme": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/README.md",
+        "candidate": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/candidate",
+        "entrypoint": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/candidate/solution.py",
+        "metadata": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/problem/metadata.json",
+        "input": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/problem/input.py",
+        "reference": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/problem/reference.py",
+        "production": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/problem/solution.py",
+        "shape_cases": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/problem/shape_cases.json",
+        "shape_range": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/problem/shape_range.json",
+        "performance": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/performance/SUMMARY.json",
+        "acceptance": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/performance/ACCEPTANCE.json",
+        "precision": "aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/PRECISION.md"
+      }
+    }
+  ]
+}

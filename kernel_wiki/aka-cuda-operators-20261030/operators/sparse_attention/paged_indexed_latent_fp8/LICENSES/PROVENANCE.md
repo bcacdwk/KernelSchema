@@ -1,0 +1,1 @@
+Frozen V4 delivery 2cf10270e9cc2dc1e2cfad92b9e0a89194d5c4ada13d2fb8c40e99a06d748cad, operator paged_indexed_latent_fp8. FlashInfer/Cake-derived CUDA and TVM FFI helper attribution is retained in the source; accompanying Apache-2.0 text is preserved. This is an independent source reorganization, not a new license grant for unrelated native binaries.

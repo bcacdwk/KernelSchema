@@ -1,0 +1,1 @@
+Frozen V4 delivery acb7998d1d46387251bcc657104dc952057625b93eeb37621d74afded674a87d, operator mla_nvfp4. FlashInfer/Cake-derived CUDA and TVM FFI helper attribution is retained in the source; accompanying Apache-2.0 text is preserved. This is an independent source reorganization, not a new license grant for unrelated native binaries.

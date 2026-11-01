@@ -1,0 +1,1 @@
+Frozen V4 delivery f9ea2efd642f227a1b1a7f6179885331d8fb06f3231436fd3bfcf4da8ec27139, operator kda_raw_prefill_state_bf16. FlashInfer/Cake-derived CUDA and TVM FFI helper attribution is retained in the source; accompanying Apache-2.0 text is preserved. This is an independent source reorganization, not a new license grant for unrelated native binaries.

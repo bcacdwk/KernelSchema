@@ -90,8 +90,9 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 │   ├── 5.design.tile_pipeline.md
 │   ├── 6.realization.md
 │   └── archived/        旧版草稿与旧 README（只读，不再维护）
-├── kernel_wiki/         任务材料与源实现（参考、候选、evidence、验证记录）
-│   └── <batch>/<task>/  按批次、按任务组织
+├── kernel_wiki/         算子实现与证据库；README、分类索引与本地检索入口
+│   └── <batch>/operators/<family>/[<subcategory>/]<task>/
+│                       按批次、功能和稳定算子 ID 组织源码、题目与性能证据
 └── schema_wiki/         schema 实例库（含尚未按现行规范验收的设计）
     └── <batch>/<task>/  root.yaml / <id>.yaml + dispatch.md
 ```
@@ -110,7 +111,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 2. 按上方分区表依次读第 1–6 篇：先 Contract，再 Design，最后 Realization。各篇的“核心思想”与设计指导解释如何思考，字段表和结构轮廓用于查阅，局部片段解释具体用法，不组成完整算子。
 3. 选择一个任务入口，把规范用于具体工作；用[模板说明](schema_template/README.md)完成文件操作与检查。
 
-**查阅案例与来源：** 学习现行写法时先看[示例索引及状态](schema_template/examples/README.md)；追溯或修改某份设计时读 `schema_wiki` 的任务目录，核对源码时进入对应 `kernel_wiki` 批次与任务说明。当前源材料的文件身份见[批次入口](kernel_wiki/aka-four-problems-20261019/README.md)。案例与实验的适用范围需要核实，完整实例不是开始工作的前提。
+**查阅案例与来源：** 学习现行写法时先看[示例索引及状态](schema_template/examples/README.md)；追溯或修改某份设计时读 `schema_wiki` 的任务目录，核对源码时进入对应 `kernel_wiki` 批次与任务说明。[Kernel Wiki](kernel_wiki/README.md)现收录 L20D 的 44 个算子实现，提供[分类总索引](kernel_wiki/CATALOG.md)、[精度／阶段／来源检索](kernel_wiki/FACETS.md)与[验证状态说明](kernel_wiki/EVIDENCE.md)。案例与实验的适用范围需要核实，完整实例不是开始工作的前提。
 
 旧规范仅在追溯时查阅 `schema_docs/archived`；维护规范或检查器时，再读 [tools/README.md](schema_template/tools/README.md)。
 

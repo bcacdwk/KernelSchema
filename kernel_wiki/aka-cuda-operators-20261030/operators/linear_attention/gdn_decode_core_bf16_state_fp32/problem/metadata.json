@@ -1,0 +1,201 @@
+{
+  "schema_version": "atrex.collection_operator_metadata.v3",
+  "display_name": "gdn decode core bf16 state fp32",
+  "description": "Ordinary GDN decode from packed qkvz/ba through causal convolution, recurrent update and in-place gated RMSNorm. Returns None and writes the existing BF16 output, rolling convolution history and FP32 state buffers. Scheduler metadata controls active requests and state indices; inactive output/state regions remain unchanged. D=128 with value/key head ratios 2/3 plus the H4/HV32 ABI geometry; this is a separate ordinary-decode ABI from the MTP checkpoint interface.\n\nProduction entry: vllm qwen_gdn_attention_core_fused_norm_packed -> _forward_core_decode_non_spec -> gated norm; fixed source revision source-package-sha256:a58fecb6ecd5d73c569bd3b6d820860c8db26bbde0a1261db505e7952aa6b018.\n\nParameter domain: shape_range.json defines dynamic request ranges and correlated model/ABI constraints; shape_cases.json fixes 10 representative workloads, not the complete support domain. Pool capacity is independent of active requests; reserve slot 0 and distinct destination/checkpoint slots. Inactive requests and arbitrary slot padding remain supported. Q/K heads=16/TP; value/state heads=16*head_ratio/TP; state per slot is [value_heads,128,128]. No measured traffic weights are claimed. Existing GPU evidence covers only the unchanged fixed sample, not every point in this dynamic domain.\n\nInput construction: State matrices retain [Hv,128,128] and production strides, offsets and shared backing. Normal carried states now come from 32 previous valid tokens with fixed layer A_log/bias and the declared GDN per-head or KDA per-channel decay recurrence, FP32 between stores and actual state dtype at checkpoints. Synthetic raw projections have channel/head gains and AR(1) coefficient .5. Conv history and the current request are contiguous windows of that same process; candidate checkpoint j and convolution accepted-prefix shift refer to the same past endpoint. This is generated history, not captured model data. Existing tiny/zero/saturation/cancellation cases retain their stress construction. Pool capacity and physical slot pattern are independent input parameters, not inferred from request count or candidate width. Slot0/null semantics and unused storage guards remain.\n\nNumerical contract reference-materialization-v1-20261013: Convolution products and accumulation use FP32 on stored inputs; SiLU QKV is materialized in qkvz.dtype (BF16) before normalization/recurrence. Recurrent raw output is materialized in out.dtype (BF16) before gated RMSNorm. State is stored in its declared BF16/FP32 dtype. Native BF16 convolution-product truncation is not part of the reference contract. Independent FP32 between specified storage/QDQ boundaries; TF32 disabled. Unchanged upstream torch.allclose(reference_float, candidate_float, atol=0.01, rtol=0.05). Prior version: evidence/reference-revision-20261013/before.tar.gz. Source and causal evidence: docs/production-bench-v3/CORE_NUMERICAL_ATTRIBUTION_20261013.md.\n\nCurrent baseline: patched_native; install dependencies/native-fixes/apply.py after the pinned production dependencies. Original native failures are retained; this repair has no new performance baseline.",
+  "operator_family": "attention",
+  "tags": [
+    "core",
+    "GDN06",
+    "general",
+    "linear_attention",
+    "sampled",
+    "patched_native"
+  ],
+  "benchmark_contract": {
+    "mutates_inputs": [
+      "qkvz",
+      "conv_state",
+      "state",
+      "out"
+    ],
+    "defined_outputs": {
+      "outputs_and_state": "out active rows, each positive SSM slot exactly once and conv first3 history columns. QKV prefix of positive-slot rows is scratch; Z, null-row QKV, tails, page padding, spare history and all other backing protected. None return; native packed subcall out and state aliases verified."
+    },
+    "scratch_inputs": [],
+    "correctness_min_cases": 1,
+    "correctness_seeds": [
+      2026101221,
+      2026101223
+    ],
+    "preserve_input_storage": true,
+    "iteration_protocol": "restore_before_each_call",
+    "correctness_tolerances": {
+      "default": {
+        "atol": 0.01,
+        "rtol": 0.05,
+        "max_mismatch_fraction": 0.0
+      }
+    }
+  },
+  "validation": {
+    "status": "numerical_failure",
+    "correctness_scope": "Original library, validation_scope=sampled, SM103; fixed shape IDs 0-9, at most 2 recorded seeds per shape. 有限值数值失败. Counts={'passed': 12, 'numerical_failure': 8}. No prior patched results inherited. Shared-GPU timings are execution checks only.",
+    "evidence": [
+      "validation_summary:docs/validation-status.md",
+      "native_solution_manifest:docs/native-solutions.json",
+      "solution_sha256:edbfba561fbf410fa29cfa7b9346b8005bf9e2a3ca98e36741e482d1d4b1c062"
+    ]
+  },
+  "cases": {
+    "0": {
+      "current_case_sha256": "7711061b535b96d9fc2c97ba2cb1bb3e4b0f2b176a189dc5a205457fc817eaa1",
+      "frequency_weight": null,
+      "frequency_weight_basis": "general_no_measured_traffic",
+      "real_input_sample_ids": []
+    },
+    "1": {
+      "current_case_sha256": "a49f07c4881aa6509fe05934c543243fa2fe3fb00fe6f89e3c182d5bdd6bc71e",
+      "frequency_weight": null,
+      "frequency_weight_basis": "general_no_measured_traffic",
+      "real_input_sample_ids": []
+    },
+    "2": {
+      "current_case_sha256": "2a28c01db320c66f50160aa0c5caf9c3542af52114720ec265c4963f40f2c7bf",
+      "frequency_weight": null,
+      "frequency_weight_basis": "general_no_measured_traffic",
+      "real_input_sample_ids": []
+    },
+    "3": {
+      "current_case_sha256": "27dbd1717ad3a413894d8167c0e6297adb5c87b45bd180c6b0d392d9c3db3bec",
+      "frequency_weight": null,
+      "frequency_weight_basis": "general_no_measured_traffic",
+      "real_input_sample_ids": []
+    },
+    "4": {
+      "current_case_sha256": "396aa09c3cc5bc37aa865f7479a573901c57c32e67a06b04413103162ec196dc",
+      "frequency_weight": null,
+      "frequency_weight_basis": "general_no_measured_traffic",
+      "real_input_sample_ids": []
+    },
+    "5": {
+      "current_case_sha256": "144efb45de957d1971082ec33993dd3fb817b9b9b55a86cc7382ed2e2ca9739e",
+      "frequency_weight": null,
+      "frequency_weight_basis": "general_no_measured_traffic",
+      "real_input_sample_ids": []
+    },
+    "6": {
+      "current_case_sha256": "c64a6067290343da62ac85fb568d20aa74b470a19e0f788d49277f08e8fb3571",
+      "frequency_weight": null,
+      "frequency_weight_basis": "general_no_measured_traffic",
+      "real_input_sample_ids": []
+    },
+    "7": {
+      "current_case_sha256": "883c680c26317719227b96cb5d062fac7e136ba266e3aa1ae54e39a27133ffa4",
+      "frequency_weight": null,
+      "frequency_weight_basis": "general_no_measured_traffic",
+      "real_input_sample_ids": []
+    },
+    "8": {
+      "current_case_sha256": "782e530322695b78ae08c9456710db57a4703f543416cf9f681ba0993607a53a",
+      "frequency_weight": null,
+      "frequency_weight_basis": "general_no_measured_traffic",
+      "real_input_sample_ids": []
+    },
+    "9": {
+      "current_case_sha256": "05e90afef2b3118ef19ea72594840f6f55f5d72d30169e43e3aa35c84ed9e252",
+      "frequency_weight": null,
+      "frequency_weight_basis": "general_no_measured_traffic",
+      "real_input_sample_ids": []
+    }
+  },
+  "scoring": {
+    "schema_version": "atrex.collection_scoring.v2",
+    "status": "unscored",
+    "operator_weight": null,
+    "operator_weight_basis": "general_no_measured_traffic",
+    "normalization_scope": "selected_collection_operators",
+    "source_manifest_sha256": null,
+    "limitations": [
+      "No deployment-specific frequency or device-time weight is claimed."
+    ]
+  },
+  "real_inputs": {
+    "schema_version": "atrex.collection_real_inputs.v1",
+    "availability": "not_captured",
+    "samples": {},
+    "reason": "General source-derived shapes and stored-precision synthetic payloads; real traffic is not part of this core contract."
+  },
+  "performance_objective": "shape_speedup_geometric_mean",
+  "shapes": {
+    "0": {
+      "production_performance": {
+        "performance_us": 100.0,
+        "basis": "fixed_scoring_normalization",
+        "measured": false
+      }
+    },
+    "1": {
+      "production_performance": {
+        "performance_us": 100.0,
+        "basis": "fixed_scoring_normalization",
+        "measured": false
+      }
+    },
+    "2": {
+      "production_performance": {
+        "performance_us": 100.0,
+        "basis": "fixed_scoring_normalization",
+        "measured": false
+      }
+    },
+    "3": {
+      "production_performance": {
+        "performance_us": 100.0,
+        "basis": "fixed_scoring_normalization",
+        "measured": false
+      }
+    },
+    "4": {
+      "production_performance": {
+        "performance_us": 100.0,
+        "basis": "fixed_scoring_normalization",
+        "measured": false
+      }
+    },
+    "5": {
+      "production_performance": {
+        "performance_us": 100.0,
+        "basis": "fixed_scoring_normalization",
+        "measured": false
+      }
+    },
+    "6": {
+      "production_performance": {
+        "performance_us": 100.0,
+        "basis": "fixed_scoring_normalization",
+        "measured": false
+      }
+    },
+    "7": {
+      "production_performance": {
+        "performance_us": 100.0,
+        "basis": "fixed_scoring_normalization",
+        "measured": false
+      }
+    },
+    "8": {
+      "production_performance": {
+        "performance_us": 100.0,
+        "basis": "fixed_scoring_normalization",
+        "measured": false
+      }
+    },
+    "9": {
+      "production_performance": {
+        "performance_us": 100.0,
+        "basis": "fixed_scoring_normalization",
+        "measured": false
+      }
+    }
+  }
+}
