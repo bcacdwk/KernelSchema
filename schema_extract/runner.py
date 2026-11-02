@@ -21,7 +21,8 @@ from .codex_cli import CodexCLI, terminate_owned, write_json
 from .protocol import RECEIPT, prompt_for, validate_receipt
 from .records import (Store, StateError, artifact_manifest, clone_artifacts, digest,
                       freeze_inputs, hardware_issue, issue_disposition, read_json, run_check,
-                      schema_parts, semantic_digests, tree_manifest)
+                      review_current, schema_parts, semantic_digests, tree_manifest)
+from .review_context import build_review_context
 
 
 DEFAULTS = {"model": "gpt-6-astra", "effort": "xhigh", "jobs": 2}
@@ -274,6 +275,8 @@ def bound_review(state, baseline, receipt, checkpoint):
     semantics = read_json(checkpoint / "checkpoint.json")["semantics"]
     return {"fingerprint": state["fingerprint"], "checkpoint": state["checkpoint"],
             "contract": semantics["contract"], "layout": semantics["layout"],
+            "conditions": semantics["conditions"], "dispatches": semantics["dispatches"],
+            "selection_revision": semantics["selection_revision"],
             "nodes": semantics["nodes"], "receipt": receipt,
             "complete": not any(issue_disposition(i) in {"fix", "needs_input"} for i in receipt["issues"]),
             "reviewed_at": time.time()}
@@ -291,14 +294,7 @@ def eligible(store, state):
     if state["dispatches"]:
         expected |= set(semantics["nodes"])
     for scope in expected:
-        review = state["reviews"].get(scope)
-        if not review or review["fingerprint"] != state["fingerprint"] or review["contract"] != semantics["contract"]:
-            return False
-        if not review.get("complete"):
-            return False
-        if scope == "final" and review["checkpoint"] != state["checkpoint"]:
-            return False
-        if scope not in {"contract", "final"} and review["nodes"].get(scope) != semantics["nodes"].get(scope):
+        if not review_current(state, scope, semantics):
             return False
     files = artifact_manifest(checkpoint / "artifacts")
     return "dispatch.md" in files and {p[:-5] for p in files if p.endswith(".yaml")} == {"root", *(v["id"] for v in state["dispatches"])}
@@ -371,6 +367,12 @@ class Runner:
             if mode:
                 return finish(self.store, state, mode, stopped=True)
             baseline = self.store.verify_baseline(state)
+            if (attempt is None and state["dispatches"]
+                    and ((state["phase"] == "worker" and state["stage"] == "index"
+                          and not state.get("revision_request"))
+                         or (state["phase"] == "reviewer" and state["review_scope"] == "final"))
+                    and self.pending_review(state)):
+                self.store.save(state)
             role = state["phase"]
             if attempt is None:
                 if role == "worker" and author_session:
@@ -397,12 +399,22 @@ class Runner:
                 mode = self.control_mode()
                 if mode:
                     return finish(self.store, state, mode, stopped=True)
+                review_context = build_review_context(self.store, state, baseline, work, role)
+                prompt = prompt_for(state, baseline, work, role, resumed=bool(thread_id), review_context=review_context)
+                # Only registered invocations need termination evidence on
+                # recovery. Preparation may fail or receive a control request
+                # while constructing the checkpoint-bound prompt.
+                mode = self.control_mode()
+                if mode:
+                    return finish(self.store, state, mode, stopped=True)
                 state["usage"]["calls"] += 1
                 attempt["calls"].append(str(records))
                 self.store.save(state)
-                result = self.cli.run(cwd=work, records=records, prompt=prompt_for(state, baseline, work, role, resumed=bool(thread_id)),
+                result = self.cli.run(cwd=work, records=records, prompt=prompt,
                                       schema=RECEIPT, role=role, thread_id=thread_id,
                                       cancel=lambda: self.control_mode() == "cancel", on_process=started)
+                if review_context is not None:
+                    write_json(records / "review_context.json", review_context)
             finally:
                 if role == "reviewer":
                     self.review_slot.release()
@@ -459,7 +471,6 @@ class Runner:
                 if role == "worker":
                     state = self.store.commit_checkpoint(state, work, receipt, check)
                     attempt = next(v for v in state["attempts"] if v["id"] == attempt["id"])
-                    state["dispatches"] = receipt["dispatches"]
                     state["worker_status"] = receipt["status"]
                     author_session = (attempt["id"], work, result["thread_id"])
                     merge_issues(state, receipt)
@@ -483,6 +494,9 @@ class Runner:
                             state["stage"], state["node"] = "contract", "root"
                             state["allow_contract_correction"] = True
                             state["reviews"].clear()
+                        elif receipt["impact"] == "index":
+                            state["stage"], state["node"] = "index", "root"
+                            state["reviews"].pop("final", None)
                         elif receipt["impact"] in {"root", "layout"}:
                             state["stage"], state["node"] = "node", "root"
                             state["reviews"] = {k: v for k, v in state["reviews"].items() if k == "contract"}
@@ -521,6 +535,8 @@ class Runner:
 
     def after_worker(self, state):
         stage = state["stage"]
+        if stage == "index" and state["dispatches"] and self.pending_review(state):
+            return
         state["phase"] = "reviewer"
         state["review_scope"] = "contract" if stage == "contract" else (
             "final" if stage == "index" or (state["node"] == "root" and not state["dispatches"]) else state["node"])
@@ -535,16 +551,34 @@ class Runner:
                 state["phase"] = "reviewer"
                 state["review_scope"] = "root" if state["dispatches"] else "final"
             return
-        order = ["root", *(item["id"] for item in state["dispatches"])]
-        checkpoint = self.store.verify_checkpoint(state)
-        files = artifact_manifest(checkpoint / "artifacts")
-        for node in order:
-            if node not in state["reviews"]:
-                state["stage"], state["node"] = "node", node
-                if node + ".yaml" in files:
-                    state["phase"], state["review_scope"] = "reviewer", node
-                return
+        if self.pending_review(state):
+            return
         state["stage"], state["node"] = "index", "root"
+        checkpoint = self.store.verify_checkpoint(state)
+        receipt = read_json(checkpoint / "checkpoint.json").get("worker_receipt", {})
+        if receipt.get("stage") == "index" and receipt.get("status") == "complete":
+            # An index author's actual YAML edit may have required a node
+            # review. Once that review is complete, this same checkpoint's
+            # finished index can go straight to independent final review.
+            state["phase"], state["review_scope"] = "reviewer", "final"
+
+    def pending_review(self, state):
+        """Schedule missing or stale independent reviews before index/final."""
+        checkpoint = self.store.verify_checkpoint(state)
+        if checkpoint is None:
+            return False
+        record = read_json(checkpoint / "checkpoint.json")
+        semantics = record["semantics"]
+        for scope in ["contract", "root", *(item["id"] for item in state["dispatches"])]:
+            if review_current(state, scope, semantics):
+                continue
+            state["reviews"].pop(scope, None)
+            state["stage"] = "contract" if scope == "contract" else "node"
+            state["node"] = "root" if scope == "contract" else scope
+            state["phase"] = "reviewer" if state["node"] + ".yaml" in record["files"] else "worker"
+            state["review_scope"] = scope
+            return True
+        return False
 
     def run(self):
         with ThreadPoolExecutor(max_workers=self.config["jobs"]) as pool:

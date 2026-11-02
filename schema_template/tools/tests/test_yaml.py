@@ -10,6 +10,33 @@ from .support import (TaskCase, ALGO, ROLE, MATH, add_child, at, drop, put)
 
 
 class YamlTests(TaskCase):
+    def test_memory_and_file_parser_share_exact_scalars_marks_and_hashes(self):
+        root = self.directory / "root.yaml"
+        text = ('base: &base {flag: on, date: 2026-11-02, count: 080}\r\n'
+                'meta_data: {<<: *base, explicit: !!str 1e3, exact: 1.000000000000000000000001}\r\n')
+        root.write_bytes(text.encode("utf-8"))
+        before = self.snapshot()
+        file_document = yaml_source.load(root, "root")
+        memory_document = yaml_source.loads(text, "root", path=root)
+        self.assertEqual(file_document, memory_document)
+        values = memory_document.value["meta_data"]
+        self.assertEqual("on", values["flag"])
+        self.assertEqual("2026-11-02", values["date"])
+        self.assertEqual(80, values["count"])
+        self.assertEqual("1e3", values["explicit"])
+        self.assertEqual(Decimal("1.000000000000000000000001"), values["exact"])
+        self.assertEqual(before, self.snapshot())
+
+    def test_memory_parser_keeps_errors_and_location_without_creating_files(self):
+        before = self.snapshot()
+        for text, message in (("key: 1\nkey: 2\n", "duplicate mapping key"),
+                              ("key: &loop {again: *loop}", "recursive aliases"),
+                              ("key: 1\n---\nkey: 2", "exactly one YAML mapping"),
+                              ("key: " + chr(0xD800), "valid UTF-8")):
+            with self.subTest(message=message), self.assertRaisesRegex(yaml_source.ReadError, "projection.yaml.*" + message):
+                yaml_source.loads(text, "root", path="projection.yaml")
+        self.assertEqual(before, self.snapshot())
+
     def test_source_hashes_describe_the_exact_bytes_parsed(self):
         root = self.directory / "root.yaml"
         original = self.source.replace("\n", "\r\n").encode("utf-8")

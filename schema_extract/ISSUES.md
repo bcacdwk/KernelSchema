@@ -60,7 +60,7 @@
 
 ## SE-005 会话切分与复核成本尚需小规模实测
 
-- **状态／日期：** `open`；2026-11-02。
+- **状态／日期：** `resolved`（具体返工改进已验收，独立成本对照不列待办）；2026-11-02。
 - **范围：** 节点提取、独立复核、交接和自动修订效率。
 - **问题与依据：** 设计评审认为，默认按分区重建上下文、重复 root 与最终复核，以及重复记录正文事实，可能增加成本。首轮两题真实调用仅形成 Contract 草稿，未进入节点和独立复核；尚不能据此断言某种切分更优。
 - **已做处理：** 保留 Contract 常规独立复核；单节点合并 root 与最终复核；多节点复用仍适用的已核验结论，但所有节点实质语义仍须独立核验。实际工作收敛为 contract／node／index，node 内部逐段读写，不固定每个 schema 分区启动会话。交接引用正文，程序生成机械元数据；执行器不建立通用语义依赖图。提取、复核、修订统一 `xhigh`，切分与轮数列为试点参数。
@@ -69,9 +69,11 @@
 - **新政策实测：** `policy_xhigh_20261101_fp8` / `fp8_scaled_gemm-dcb921aefcb5` 复用旧草稿，经 Contract、root、小 M、index/final 达到 `ready`；最终 `cp-0003-0bd256ca55`。接入政策后的两份 YAML 全程原字节保留，实际 worker 只修正并精简索引（8,858→4,452字节），两项非硬件 note 保留。新增13次调用、累计 CLI 1,804.8秒、增量 reported tokens 5,322,265（含缓存输入）；无新额度或导出。完整分项见该 run 的 `verification.json`。
 - **本轮效率问题：** 6次额外续接都用于回执路径修正：5次把版本化来源引用写入 `evidence.path`，1次改成了绝对路径；最终相对路径通过，产物未改。索引旧检查状态的小修还触发了一次节点重新复核。后续新计划优先明确回执路径与来源引用的区别，并减少仅改索引时的重复上下文；本轮记录保留这些实际成本，不据单个任务断言默认切分已最优。
 - **2026-11-02 复现与改进：** 新 masked Contract reviewer `a-0002-6218cc08/call-01` 再把 4 个来源路径写成当前 `KernelSchema@2574b7d054a930b6406ef0eeec7e24329e4c96e0:...`，触发仅修格式的 call-02，额外 39.492 秒／73,477 增量 tokens、没有工具调用或产物改动。回执 schema／提示已明确两种路径；程序现在仅把精确匹配当前来源前缀或当前目录内绝对路径转为相对路径，完整校验文件、行范围、原文后留下转换记录，原始回执不变。对这份真实被拒回执的离线重放已通过，依据为该 run 的 `receipt-replay.json`；错误 commit、越界和不匹配引文仍拒绝。其他回执纠错只发具体错误及必要规则，不重复整套指令。新 MLA 将验证实际调用路径，不将离线重放当作已节省的真实用量。
-- **下一步／关闭条件：** 在固定来源、模型和检查标准下，以单节点和多节点任务观察耗时、调用／用量、实质遗漏、有效修订与返工；仅在一个代表性任务对照会话切分。确认效率收益没有以漏掉副作用、数值路径、复制错误或证据缺口为代价，再确定默认参数。
+- **当前处理／关闭条件：** 按用户最新要求，不单独再做会话切分或成本对照实验。落实 SE-018／SE-025 的具体读取、绑定和修订流程改进，并随功能验收观察是否减少截断补读和无效重审；统计只用于解释真实改动，不为降低数字删减必要源码核验。
 - **新 masked 基线完成：** `trial_20261102_masked_baseline` 从零达到 ready，最终 `cp-0005-949e9eb079`，root v8／single_cta v5／mma_sync v4，Contract、三个节点、final 共五项审阅 complete。28 次调用、12,758,962 差分 reported tokens（含缓存输入）、3,641.907 CLI 秒；其中 18 次回执修正占 2,387,484 tokens／659.988 秒，实际首错分类 17 path＋1 quote。逐调用终止确认与 131 个历史 PID 身份检查均无残留，未导出。父端在冻结旧执行器中再次验证 eligible，报告为该 run 的 `verification.json`。不同算子不能直接给出总成本的因果降幅。
 - **新 MLA 改进版完成：** `trial_20261102_mla_improved` / `mla_expanded_fp8-aa60ab8be0d4` 从空目录、新 plan、新 thread 达到 ready，最终 `cp-0002-b297748059`、root v8。4 次调用、6,016,647 差分 reported tokens、1,761.009 CLI 秒，无未知用量、回执拒绝或纠错。作者 Contract→root 沿用 thread `01a19834-fdd3-70f1-a823-e75fd493ca47`，两次 reviewer 均独立；单节点完整 final 已核验，算法 Contract 字节不变，非硬件检查通过。五项源材料 note 保留。所有调用终止确认、44 个记录 PID 无残留、runner 锁释放；未导出／提交／推送。父端在冻结执行器中复验 eligible，依据为该 run 的 `verification.json`；仍有输出截断，见 SE-018。
+
+- **本轮关闭依据：** `refine_20261102_fp8` 从零完成 Contract、root、small_m_transpose、index 及相应独立审阅，8 次调用达到 ready，无回执修正或重派已完成节点。真实读取和 final 范围见 SE-018／SE-025。分页有工具往返，统计留在 run 记录；不以不同任务总 token／耗时推断因果降幅，不再为找“最优切分”另开实验。
 
 <a id="se-006"></a>
 
@@ -142,11 +144,14 @@
 
 ## SE-018 批量读取的外层截断导致重复读取，CLI 事件不足以诊断
 
-- **状态／日期：** `open`（提示缓解，真实运行仍复现）；2026-11-02。
+- **状态／日期：** `resolved`（受支持入口已验收；任意外部合批不在保证内）；2026-11-02。
 - **真实依据：** 同一 masked Contract thread `01a197fc-7406-7622-92f3-06c6f6b30b45` 的定向 rollout 第 22 行并行读取规范，每条内层命令指定 16k／18k 输出，却没有调整 `functions.exec` 外层预算；第 27 行回包报告 `truncated output (original token count: 14605)`，第 31 行重新读取 common／starter／模板。第 45 行又发生 14,196-token 外层截断。CLI `events.jsonl` 保留了完整内层命令结果，单看它会误把重读归因于模型重复理解。
 - **处理：** 提示要求按行段／JSON key 读长文件，批量调用同时考虑外层组合输出预算；截断后仅补缺失片段。观察者只定位本次 thread 的日志，不搜索或加载历史会话库。
-- **验证／关闭条件：** 待新 MLA 真实调用观察截断与补读次数；保留规范逐段读写回查，不以减少必要核验换取表面 token 下降。
-- **新 MLA 的反证与后续：** 首次 Contract 作者无外层截断，但独立 Contract reviewer 的定向 rollout 第 25 行仍因合批 13,926 tokens 截断并重读；同一作者 node 续接第 129 行又因 11,863 tokens 截断，随后自行补 `@exec max_output_tokens` 并定点补读。另有少量内层截断。说明泛泛要求“控制组合预算”不足以保证行为。本轮后续提示补充可复制的 `// @exec: {"max_output_tokens": 20000}` 语法及按范围拆读，不改正在运行的冻结版本；该提示尚无后续真实模型调用验证，问题保持 open，不能宣称截断已消失。
+- **前一轮 MLA 的反证：** 首次 Contract 作者无外层截断，但独立 Contract reviewer 的定向 rollout 第 25 行因合批 13,926 tokens 截断并重读；作者 node 续接第 129 行又因 11,863 tokens 截断，随后自行提高外层输出预算并定点补读。当时只补充预算语法，未据此关闭问题。下列改动保留规范逐段读写回查，转为有界入口处理。
+- **本轮机制改进：** 新增标准库 `reading.py`，整批共享每页 6,000 包装后 UTF-8 字节上限；保留原行／列、换行、内容 SHA、准确未读位置和可重放游标。每次校验整批内容与请求，改变文件、坏游标、越界路径均明确拒绝。普通完整行省略默认列号／完成标记，避免元数据挤占正文。固定调用模板一页一外层调用，不再靠临时猜总输出预算；任意绕过入口的大合批仍不在保证内。
+- **真实验收补修：** 新 agent 独立实现，父端复审后压缩重复元数据并补 shell 参数／调用模板验证。`refine_20261102_fp8` / `fp8_scaled_gemm-97d141747cf0` 在内容页之外用普通 `rg -n` 查 12 个关键词，两文件合计命中 600 行，输出 161,243 字节（内层 reported 40,311 tokens），在 2,500 的工具预算被截断。现为同一读取器增加 `find` 字面子串定位，只返回原行号与总数，条件、请求、整批文件摘要均绑定游标。对同一冻结输入的真实查询重放一次返回全部 600 个有序行号，与 `rg` 完全一致，最终 v2 含一次包装 3,833 字节。另将调用模板改为由 JS 保存原命令、游标与重放位置，避免手抄错误。这些补修在 run 冻结后实现，不冒充已被该 run 的模型使用。
+- **完整验收：** 5 个实际 thread 的 324 个工具回包中，读取器成功返回 288 页（242 次续页），每页均可解析且不超过 6,000 包装字节；读取器没有截断标记，未出现外层截断。另有 2 次手抄坏游标被拒、3 次绕开入口的直接 `rg` 内层截断。对后者逐项重放：600 行、532 行两组定位各在一页返回，原有序行号均相同；等价于读全文的第三组分 5 页完整重组，原文逐字节相同。
+- **位置完整性：** 父端进一步指出，仅校验批次摘要和坐标范围还不足以拒绝“误改后仍合法”的坐标。v2 游标将版本、摘要和坐标一起校验，固定 92 字符；损坏报 `invalid_cursor`、输入变化报 `stale_cursor`、未校验的旧版本要求重建批次。校验用于检测损坏，不是权限认证。24 项读取回归通过；父端用现行模板的真实工具调用验证客户端自动续到同一原行第 74 列，并逐字相同地重放该页。完整 run 使用冻结时的分页版本，当前定位与游标补修由真实输入重放及边界回归验证。依据：`.schema_extract/runs/refine_20261102_fp8/verification.json`。
 
 <a id="se-019"></a>
 
@@ -207,11 +212,15 @@
 
 ## SE-025 索引阶段扩展为重新理解已审阅的 Design
 
-- **状态／日期：** `open`（实现已调整，真实多节点效果待验证）；2026-11-02。
+- **状态／日期：** `resolved`（权威绑定、修订回路及真实多节点收尾验收通过）；2026-11-02。
 - **真实依据：** masked index `a-0009-031bb070/call-01` 除整读 79,826 字符产物外，item_8/11 两次读 root 281–561 行完整 pipeline/realization，item_7/12 完整读 math 规范，item_15 读 schedule/pipeline 规范，item_16 读 root 源码 1240–1591 行。此时三个节点已有 complete 独立审阅。最终实际只将 dispatch.md 从 9,292 字节精简为 6,480 字节，三个 YAML 的 SHA 与 `cp-0004-06f1ff3c9a` 相同，item_25 非硬件检查及 item_26 链接／文件集合检查通过。
 - **final 复现：** `cp-0005-949e9eb079` 正确保留四项既有审阅且直接进入 final，没有另派节点审阅；但新 reviewer `a-0010-9c4b2377/call-01` item_4 又读 53,214 字符 Design 规范，item_5 打印 root 全部非硬件正文，item_7/9 读 single_cta 1–453 全文，item_13 读 mma_sync 全文，随后再读各路实现／参考。此时三份 YAML 与此前已独立审阅版本完全一致。
 - **处理：** 作者提示明确显示已完成审阅的范围，index 只处理索引与选择关系，有具体矛盾才重新展开 Design。多节点 final 只有在每个节点已有同 fingerprint、同 Contract 的 complete 审阅且未被失效时，才使用独立审阅摘要并聚焦当前 metadata／index／host selector；缺任意审阅或单节点 final 保持完整实质审阅。所有当前文件锚点和 ready 语义绑定条件不变。
-- **验证／关闭条件：** 52 项回归通过，包含多节点 final 使用索引范围、删掉任一节点审阅即恢复完整范围、单节点仍完整审阅。MLA 实际为单节点，完整 final 分支已实证；它没有覆盖新版多节点 index/final，不能声称新范围提示已在真实多节点任务减少读取。待后续代表性多节点任务验证该效果，不省略各节点第一次独立语义核验。
+- **前一轮验证范围：** 当时 52 项回归覆盖多节点 final 路由及缺失审阅后的完整范围。MLA 为单节点，当时只实证了单节点完整 final，故保留此项待后续多节点验收。
+- **本轮机制改进：** `review_current` 统一用于复用、补审和 ready 判断；checkpoint 原子保存完整 dispatch 声明，选择关系修订号随既有 when／parent 改变递增。单纯 reason 润色只撤销 final，不撤销节点。索引上下文由当前 checkpoint 派生；仅索引小修用 `impact=index`，实际修改节点则补独立审阅，完成后直接 final，避免再派一次 index 作者。
+- **父端验收修正：** 拦下了把自然语言 reason 也当成全量失效依据的初稿。还实证 AST 直接序列化会把 `!!str 080` 等变成数字；现改为使用固定 parser 取值与读回严格比较，新增 `yaml_source.loads` 供内存复核，解析规则只有一份，不写临时文件。核心类型、alias／merge、失效与暂停恢复的回归已覆盖。
+- **真实关闭依据：** 两个全新实现 agent 分工，父端集成与验收。`refine_20261102_fp8` / `fp8_scaled_gemm-97d141747cf0` 达到 ready，最终 `cp-0004-36afb82b91`。root v8、small_m_transpose v4 的首次独立审阅均完成。`cp-0003-d2537e9996`→最终检查点只改 dispatch.md，两份 YAML 的 SHA 不变。index 作者只展开索引和 host 选择源码，final 读取 root 的 metadata／Contract 最远至第 130 行（Design 从 144 行开始），派生节点只读第 1–9 行（Design 从 10 行开始）；没有重新展开两个节点的 Design 正文或分区规范。两次调用各有由当前检查点派生的 `review_context.json`，共 8 次调用，无额外节点重审。最终 eligible 已用冻结执行器复验。
+- **验收边界：** 真实 final 当时仍读了三份通用说明。其后把有效索引上下文的规则入口收窄至 `schema_docs/0.common.md` 的 dispatch／索引章节，已在同一真实上下文离线核对路由；未把后续提示冒充冻结 run 行为。索引小修、实际 YAML 变化补审、reason 润色、when／parent 变化、旧选择版本、暂停恢复与标量读回等分支另有回归。最终执行器相关 95 项、检查器 147 项测试通过。
 
 <a id="se-026"></a>
 
@@ -285,6 +294,7 @@
 - **基线／检查点：** `dcb921aefcb5896535d13ce6f7018d5ac4b8ebf9a0d06bde22cdfc85087e7388` / `cp-0003-0bd256ca55`。
 - **问题来源：** `fp8_scaled_gemm-1efaafba78b1` / `cp-0001-9e60b8bf88`；保留原问题身份。
 - **影响与重启条件：** Complete numerical acceptance semantics and certification beyond recorded evidence.；Supply the fixed numerical checker or authoritative comparison precision and non-finite handling semantics.
+- **本轮复现：** `refine_20261102_fp8` / `fp8_scaled_gemm-97d141747cf0` 的本地 note `comparison_policy_details` 复现同一来源问题，沿用本条稳定 ID。新输入基线 `97d141747cf0e43826efcc96d0d65c82f4e0c363d738abcde9d6d568af1de588`，初次 `cp-0001-51b2c0fb7a`，最终 `cp-0004-36afb82b91`；依据为本题 `performance/ACCEPTANCE.json:135–141`、`root.yaml:123–130`、`dispatch.md:14`。未另建重复条目。
 
 <!-- /extraction -->
 
@@ -299,6 +309,7 @@
 - **基线／检查点：** `dcb921aefcb5896535d13ce6f7018d5ac4b8ebf9a0d06bde22cdfc85087e7388` / `cp-0003-0bd256ca55`。
 - **问题来源：** `fp8_scaled_gemm-1efaafba78b1` / `cp-0001-9e60b8bf88`；保留原问题身份。
 - **影响与重启条件：** Complete semantics and implementation coverage of the additionally declared branches.；Supply fixed ABI facts defining the additional branches or authoritative clarification of their applicability.
+- **本轮来源核对：** `refine_20261102_fp8` 的最终 `dispatch.md:12` 保留了 metadata 中的可选 C 别名描述、实际 ABI 无 C 参数以及 logical_m 不缩小写区的区别。索引的分派覆盖结论限于已定义的共享 Contract 域，不据此关闭本条来源差异。
 
 <!-- /extraction -->
 
@@ -373,6 +384,8 @@
 - **状态／日期：** `resolved`；2026-11-01。
 - **范围／依据：** runner 等待 reviewer 名额前登记 call，随后 pause 会留下不存在的调用；CLI 版本预检或 Popen 失败也会留下无 process/result 的记录。旧恢复与 seed 不能确认终止，导致实际没有 agent 的任务无法再用。
 - **处理／验证：** 调用登记移至取得名额并复查控制请求后；已确定未启动的预检／spawn 错误保存 `preflight_error`／`spawn_error` 与 `process_not_started` 证据。允许使用既有明确恢复终止记录，仍不把“缺 process 文件”当安全证明。暂停竞态、不存在的可执行文件→显式恢复／seed、spawn失败与版本预检超时的回归通过。
+
+- **本轮收尾：** index/final 的上下文与提示先准备完成，再复查 pause/cancel，最后才登记和派发调用。故障注入验证准备失败不会增加调用计数或留下未启动的 process，可从原 accepted checkpoint 显式恢复；准备期间收到 pause/cancel 也不派发模型。
 
 <a id="se-015"></a>
 

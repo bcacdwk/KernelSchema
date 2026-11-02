@@ -32,6 +32,18 @@ class Document:
 
 
 def load(path: Path, name: str) -> Document:
+    """Parse a file with the same rules as the in-memory entry point."""
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ReadError(f"{path}: YAML must be valid UTF-8") from error
+    return loads(text, name, path=path)
+
+
+def loads(text: str, name: str, *, path: Path | str = "<memory>") -> Document:
+    """Parse exact UTF-8 text without temporary files or alternate scalar rules."""
+    if not isinstance(text, str):
+        raise ReadError(f"{path}: YAML input must be text")
     try:
         import yaml
     except ModuleNotFoundError as error:
@@ -125,8 +137,8 @@ def load(path: Path, name: str) -> Document:
 
     loader = None
     try:
-        source_bytes = path.read_bytes()
-        loader = Loader(source_bytes.decode("utf-8"))
+        source_bytes = text.encode("utf-8")
+        loader = Loader(text)
         node = loader.get_node() if loader.check_node() else None
         if node is None or not isinstance(node, yaml.MappingNode) or loader.check_node():
             raise problem("expected exactly one YAML mapping document per node", node.start_mark if node else None)
@@ -134,7 +146,7 @@ def load(path: Path, name: str) -> Document:
         return Document(value, positions, values, hashlib.sha256(source_bytes).hexdigest())
     except yaml.YAMLError as error:
         raise problem(getattr(error, "problem", None) or str(error), getattr(error, "problem_mark", None)) from error
-    except UnicodeDecodeError as error:
+    except UnicodeError as error:
         raise problem("YAML must be valid UTF-8") from error
     except RecursionError as error:
         raise CapacityError(f"{path}: YAML nesting exceeds the parser's capacity") from error

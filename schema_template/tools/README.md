@@ -68,7 +68,7 @@ python3 -B -m unittest discover -s schema_template/tools/tests -t schema_templat
 
 - 字段、必填项、值形式：修改 `rules/structure.py`，共用值检查放进 `rules/values.py`，补 `test_structure.py`。
 - 引用或一致性条件：修改对应关联模块；只有影响后续遍历安全的声明前提才放进 `declarations.py`，补 `test_relations.py`。
-- YAML 解析或源位置：修改 `yaml_source.py`，补 `test_yaml.py`；诊断显示改 `diagnostics.py`，补 `test_cli.py`。
+- YAML 解析或源位置：修改 `yaml_source.py`，补 `test_yaml.py`。文件 `load(path, name)` 和内存文本 `loads(text, name, *, path=...)` 共享同一套解析规则、源位置与精确数值语义，可用于无临时文件的投影读回；诊断显示改 `diagnostics.py`，补 `test_cli.py`。
 - 新工具保持独立用途；需要现有校验能力时复用 `schema.py`，日常作者入口保持单文件参数。
 
 字段规则统一接收 `(value, path, errors)`；关联规则通过 `CheckContext.require` 收集诊断。路径统一使用 `field_path` 表达特殊映射键，缺失字段标记 `missing=True`。公共入口和解析器不承载新的领域规则。

@@ -139,6 +139,54 @@ def semantic_digests(path: Path, parser_root: str | None = None) -> dict:
             "conditions": {name: digest(data.get("meta_data", {}).get("dispatch")) for name, data in parts.items()}}
 
 
+def dispatch_digests(dispatches: list[dict]) -> dict[str, str]:
+    """Bind declared relationships too, including before their YAML exists."""
+    return {item["id"]: digest({"id": item["id"], "parent": item["parent"]}) for item in dispatches}
+
+
+def selection_changed(before: dict, after: dict) -> bool:
+    """A new node is additive; changing an existing selector is not."""
+    return any(after.get(field, {}).get(node) != value
+               for field in ("conditions", "dispatches")
+               for node, value in before.get(field, {}).items())
+
+
+def review_current(state: dict, scope: str, semantics: dict) -> bool:
+    """Recheck a task's review against the current accepted semantic boundary.
+
+    Adding a new node does not change conclusions for existing nodes. Changing
+    an existing selection condition or relationship does: those conclusions
+    were reached in the earlier selection context. This is deliberately the
+    same conservative rule as checkpoint invalidation, not a dependency graph.
+    """
+    review = state.get("reviews", {}).get(scope, {})
+    if (not review.get("complete") or review.get("fingerprint") != state["fingerprint"]
+            or review.get("contract") != semantics["contract"]):
+        return False
+    if scope == "contract":
+        return True
+    if ("selection_revision" not in review
+            or review["selection_revision"] != semantics.get("selection_revision")):
+        return False
+    if scope == "final":
+        return (review.get("checkpoint") == state.get("checkpoint")
+                and review.get("nodes") == semantics["nodes"]
+                and review.get("conditions") == semantics.get("conditions")
+                and review.get("dispatches") == semantics.get("dispatches"))
+    if (scope not in semantics["nodes"]
+            or review.get("nodes", {}).get(scope) != semantics["nodes"][scope]
+            or review.get("nodes", {}).get("root") != semantics["nodes"].get("root")):
+        return False
+    for field in ("conditions", "dispatches"):
+        # Missing bindings are not evidence of an independent review of the
+        # current selection context. Explicit recovery schedules that review.
+        if field not in review or field not in semantics:
+            return False
+        if any(semantics[field].get(node) != value for node, value in review[field].items()):
+            return False
+    return True
+
+
 def check_versions(previous: Path | None, current: Path, parser_root: str | None = None):
     old = schema_parts(previous, parser_root) if previous else {}
     for node, value in schema_parts(current, parser_root).items():
@@ -199,9 +247,7 @@ def invalidate_reviews(state: dict, before: dict | None, after: dict) -> list[st
     else:
         changed = {node for node in set(before["nodes"]) | set(after["nodes"])
                    if before["nodes"].get(node) != after["nodes"].get(node)}
-        old_conditions = before.get("conditions", {})
-        existing_layout_changed = any(after.get("conditions", {}).get(node) != condition
-                                      for node, condition in old_conditions.items())
+        existing_layout_changed = selection_changed(before, after)
         for key in list(reviews):
             if key == "final" or key in changed or (("root" in changed or existing_layout_changed) and key != "contract"):
                 invalidated.append(key)
@@ -270,10 +316,12 @@ class Store:
         checkpoint = self.checkpoint(state)
         if checkpoint:
             receipt = read_json(checkpoint / "checkpoint.json")
-            if receipt["fingerprint"] != state["fingerprint"]:
+            if receipt.get("id") != state["checkpoint"] or receipt["fingerprint"] != state["fingerprint"]:
                 raise StateError("checkpoint belongs to another input baseline")
             if artifact_manifest(checkpoint / "artifacts") != receipt["files"]:
                 raise StateError("accepted checkpoint has been modified")
+            if "dispatches" in receipt and receipt["dispatches"] != state["dispatches"]:
+                raise StateError("task dispatch declarations do not match its accepted checkpoint")
         return checkpoint
 
     def commit_checkpoint(self, state: dict, artifacts: Path, receipt: dict, check: dict) -> dict:
@@ -282,9 +330,18 @@ class Store:
         files = artifact_manifest(artifacts)
         check_versions(previous / "artifacts" if previous else None, artifacts, baseline["snapshot"])
         semantics = semantic_digests(artifacts, baseline["snapshot"])
+        semantics["dispatches"] = dispatch_digests(receipt["dispatches"])
         before = read_json(previous / "checkpoint.json")["semantics"] if previous else None
-        changed = previous is None or files != read_json(previous / "checkpoint.json")["files"]
+        # A root review can predate the creation of derived YAML. Preserve the
+        # revision for additions, but revoke that review too if a subsequently
+        # introduced selector is later changed. The value lives only in the
+        # existing immutable checkpoint, not in a second mutable state record.
+        semantics["selection_revision"] = ((before or {}).get("selection_revision", 0)
+                                            + int(before is not None and selection_changed(before, semantics)))
+        changed = (previous is None or files != read_json(previous / "checkpoint.json")["files"]
+                   or state["dispatches"] != receipt["dispatches"])
         next_state = deepcopy(state)
+        next_state["dispatches"] = deepcopy(receipt["dispatches"])
         invalidated = invalidate_reviews(next_state, before, semantics) if changed else []
         checkpoint_id = f"cp-{len(state.get('history', [])) + 1:04d}-{uuid4().hex[:10]}"
         parent = self.task_dir(state["key"]) / "checkpoints"
@@ -294,6 +351,7 @@ class Store:
         clone_artifacts(artifacts, temporary / "artifacts")
         record = {"id": checkpoint_id, "fingerprint": state["fingerprint"], "files": files,
                   "semantics": semantics, "worker_receipt": receipt, "check": check,
+                  "dispatches": deepcopy(receipt["dispatches"]),
                   "previous": state.get("checkpoint"), "invalidated_reviews": invalidated,
                   "created_at": time.time()}
         write_json(temporary / "checkpoint.json", record)
@@ -354,6 +412,9 @@ class Store:
                   "seed": seed, "check": check, "previous": None, "invalidated_reviews": [],
                   "imported_worker_receipt": old_record.get("worker_receipt", old_record.get("imported_worker_receipt")),
                   "created_at": time.time()}
+        record["dispatches"] = deepcopy(old_state["dispatches"])
+        record["semantics"]["dispatches"] = dispatch_digests(old_state["dispatches"])
+        record["semantics"]["selection_revision"] = 0
         if policy_edit:
             record["policy_edit"] = policy_edit
         write_json(temporary / "checkpoint.json", record)
