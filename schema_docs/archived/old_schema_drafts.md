@@ -2160,7 +2160,7 @@ Contract 规定任务与硬件；Design 确定数学改写、工作分配与流�
 
 #### 4. 具体 case
 
-下面只展开三个案例的 `realization`，Contract 与 Design 沿用前文。FA4 选择 work_schedule 版本二，不混入版本三的 CLC 调度。本轮是固定版本源码的静态核对，没有 GPU 实验反馈；`prefer` 是实现起点，不是已经验收的性能结论。
+下面只展开三个案例的 `realization`，Contract 与 Design 沿用前文。FA4 选择 work_schedule 版本二，不混入版本三的 CLC 调度。算子已经真实跑过 GPU；当前算子和 schema 都不需要 GPU 正确性验收。`prefer` 是实现起点。
 
 **1）FA4 · SM100 · 因果单 CTA**
 

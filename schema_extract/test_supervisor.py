@@ -115,6 +115,7 @@ class SupervisorTests(unittest.TestCase):
     def test_pause_arriving_during_model_call_prevents_dispatch(self):
         def decide(**kwargs):
             write_json(self.directory / "control.json", {"mode": "pause"})
+            self.assertFalse(kwargs["cancel"]())
             return self.result("start_queued")
 
         with patch.object(supervisor, "CodexCLI") as cli, patch.object(supervisor.subprocess, "Popen") as spawn:
@@ -123,6 +124,42 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(result["runner"]["outcome"], "control_requested")
         spawn.assert_not_called()
         self.assertEqual(self.store.load(self.task["key"])["status"], "queued")
+
+    def test_cancel_arriving_during_model_call_stops_the_inspection(self):
+        before = deepcopy(self.store.load(self.task["key"]))
+
+        def inspect(**kwargs):
+            self.assertIn("cancel", kwargs)
+            self.assertFalse(kwargs["cancel"]())
+            write_json(self.directory / "control.json", {"mode": "cancel"})
+            self.assertTrue(kwargs["cancel"]())
+            return {**self.result("start_queued"), "outcome": "cancelled", "response": None}
+
+        with patch.object(supervisor, "CodexCLI") as cli, patch.object(supervisor, "start_runner") as launch:
+            cli.return_value.run.side_effect = inspect
+            self.assertEqual(supervisor.tick(self.store, "selected")["outcome"], "cancelled")
+            self.assertEqual(supervisor.tick(self.store, "selected")["outcome"], "idle")
+        self.assertEqual(cli.return_value.run.call_count, 1)
+        launch.assert_not_called()
+        self.assertNotIn("pending", read_json(self.directory / "supervisor" / "state.json"))
+        self.assertEqual(self.store.load(self.task["key"]), before)
+
+    def test_two_busy_workers_leave_an_independent_read_only_inspection_slot(self):
+        self.task["status"] = "running"
+        self.store.save(self.task)
+        other = {**self.task, "key": "other-task", "operator_id": "other-operator"}
+        self.store.task_dir(other["key"]).mkdir()
+        self.store.save(other)
+        self.plan["tasks"].append(other["key"])
+        write_json(self.directory / "plan.json", self.plan)
+        before = [deepcopy(self.store.load(key)) for key in self.plan["tasks"]]
+        with self.store.lock(), patch.object(supervisor, "CodexCLI") as cli:
+            cli.return_value.run.return_value = self.result()
+            self.assertEqual(supervisor.tick(self.store, "selected")["outcome"], "observed")
+        cli.return_value.run.assert_called_once()
+        self.assertEqual(cli.return_value.run.call_args.kwargs["role"], "supervisor")
+        self.assertNotIn("timeout", cli.return_value.run.call_args.kwargs)
+        self.assertEqual([self.store.load(key) for key in self.plan["tasks"]], before)
 
     def test_failed_or_out_of_scope_response_never_dispatches(self):
         failed = self.result("start_queued")
@@ -199,6 +236,47 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(Path(plist["ProgramArguments"][0]).is_absolute())
         self.assertIn("/synthetic/bin/codex", plist["ProgramArguments"])
         self.assertNotEqual(supervisor.schedule_label(self.store, "selected"), supervisor.schedule_label(self.store, "other"))
+
+    def test_schedule_changes_wait_for_active_tick_and_exclude_new_ticks(self):
+        directory = self.directory / "supervisor"
+        directory.mkdir()
+        with patch.object(supervisor.sys, "platform", "darwin"), \
+                patch.object(Path, "home", return_value=self.store.repo / "home"), \
+                patch.object(supervisor, "launchd_state", return_value={"loaded": True}) as query, \
+                patch.object(supervisor.subprocess, "run") as launchctl:
+            config = supervisor.schedule_config(self.store, "selected", "/synthetic/bin/codex")
+            config["outcome"] = "enabled"
+            write_json(directory / "schedule.json", config)
+            plist = Path(config["plist"])
+            plist.parent.mkdir(parents=True)
+            plist.write_bytes(supervisor.plistlib.dumps(supervisor.launchd_plist(config)))
+            original = plist.read_bytes()
+            launchctl.return_value = supervisor.subprocess.CompletedProcess([], 0, stderr="")
+            with supervisor.try_lock(directory / ".tick.lock") as active:
+                self.assertIsNotNone(active)
+                for enable in (False, True):
+                    with self.subTest(active=True, enable=enable):
+                        with self.assertRaisesRegex(StateError, "tick is active"):
+                            supervisor.schedule(self.store, "selected", "/synthetic/bin/codex", enable=enable)
+            query.assert_not_called()
+            launchctl.assert_not_called()
+            self.assertEqual(read_json(directory / "schedule.json"), config)
+            self.assertEqual(plist.read_bytes(), original)
+
+            def update(command, **kwargs):
+                self.assertEqual(supervisor.tick(self.store, "selected")["outcome"], "tick_already_active")
+                return supervisor.subprocess.CompletedProcess(command, 0, stderr="")
+
+            launchctl.side_effect = update
+            for enable, outcome in ((True, "enabled"), (False, "disabled")):
+                with self.subTest(active=False, enable=enable):
+                    result = supervisor.schedule(self.store, "selected", "/synthetic/bin/codex", enable=enable)
+                    self.assertEqual(result["outcome"], outcome)
+            self.assertEqual([call.args[0][1] for call in launchctl.call_args_list], ["bootout", "bootstrap", "bootout"])
+            self.assertFalse(plist.exists())
+            self.assertFalse((self.directory / "control.json").exists())
+            with supervisor.try_lock(directory / ".tick.lock") as released:
+                self.assertIsNotNone(released)
 
     def test_unselected_decision_is_rejected(self):
         value = self.result()["response"]

@@ -132,23 +132,41 @@ class CodexCLI:
         write_json(schema_path, schema)
         (records / "prompt.txt").write_text(prompt)
         command = self.command(cwd, schema_path, output_path, role, thread_id)
-        invocation = {"cli_version": self.version(), "argv": command, "cwd": str(cwd),
+        invocation = {"cli_version": None, "argv": command, "cwd": str(cwd),
                       "model": self.model, "effort": self.effort, "role": role,
                       "resume_thread_id": thread_id, "started_at": time.time()}
-        write_json(records / "invocation.json", invocation)
         started = time.monotonic()
+
+        def not_started(outcome, error):
+            result = {**invocation, "thread_id": None, "exit_code": None,
+                      "elapsed_seconds": round(time.monotonic() - started, 3),
+                      "event_types": [], "jsonl_error_lines": [], "usage": {}, "usage_scope": "thread_cumulative",
+                      "termination": {"confirmed": True, "actions": [], "survivors": [], "reason": "process_not_started"},
+                      "outcome": outcome, "error": str(error), "response": None}
+            write_json(records / "result.json", result)
+            return result
+
+        try:
+            invocation["cli_version"] = self.version()
+        except (OSError, subprocess.SubprocessError) as error:
+            write_json(records / "invocation.json", invocation)
+            return not_started("preflight_error", error)
+        write_json(records / "invocation.json", invocation)
         reason, termination, known = None, None, []
         last_scan, previous_processes = 0, None
         with (records / "events.jsonl").open("w") as out, (records / "stderr.txt").open("w") as err:
-            process = subprocess.Popen(command, cwd=cwd, stdin=subprocess.PIPE, stdout=out,
-                                       stderr=err, text=True, start_new_session=True)
+            try:
+                process = subprocess.Popen(command, cwd=cwd, stdin=subprocess.PIPE, stdout=out,
+                                           stderr=err, text=True, start_new_session=True)
+            except OSError as error:
+                return not_started("spawn_error", error)
             identity = process_table().get(process.pid)
             if not identity:
                 process.wait(timeout=10)
                 identity = {"pid": process.pid, "started": "already-exited"}
-            write_json(records / "process.json", {"identity": identity, "descendants": []})
-            on_process({"identity": identity, "descendants": [], "records": str(records)})
             try:
+                write_json(records / "process.json", {"identity": identity, "descendants": []})
+                on_process({"identity": identity, "descendants": [], "records": str(records)})
                 process.stdin.write(prompt)
                 process.stdin.close()
                 while process.poll() is None:
@@ -169,7 +187,7 @@ class CodexCLI:
                 terminate_owned(identity, known)
                 process.wait(timeout=10)
                 raise
-            if termination is None and owned_processes(identity, known):
+            if termination is None:
                 # A successful parent exit is not proof its tool subprocesses stopped.
                 termination = terminate_owned(identity, known)
             if termination and not termination["confirmed"]:
@@ -198,7 +216,7 @@ class CodexCLI:
             pass
         if not reason and (exit_code != 0 or not completed or not found_thread or response is None or parse_errors):
             reason = "cli_error"
-        if thread_id and found_thread != thread_id:
+        if thread_id and found_thread != thread_id and reason not in {"cancelled", "termination_unconfirmed"}:
             reason = "session_mismatch"
         result = {**invocation, "thread_id": found_thread, "exit_code": exit_code,
                   "elapsed_seconds": round(time.monotonic() - started, 3),

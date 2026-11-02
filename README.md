@@ -129,4 +129,4 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 - **案例核对与验收**：按实际任务逐一核对已有 YAML，补齐资料与设计缺口；已规范化的案例及其状态见[示例索引](schema_template/examples/README.md)，数值及性能验收另行进行。
 - **更多转写与精简**：转写更多 SOTA kernel，收敛到最小交集原语。
 - **检查器与评估器**：在现有结构、具名关系及有限 phase 内依赖检查之上，继续完善资源记账、跨 phase 与更大规模的合法性和活性分析，以及尽量保序的性能估算。
-- **运行验收设施**：GPU 数值和性能验收继续使用任务提供的入口；离线提取自动化已由 [Schema Extract](schema_extract/README.md)承接。
+- **提取范围**：算子已经真实跑过 GPU；当前算子和 schema 都不需要 GPU 正确性验收。[Schema Extract](schema_extract/README.md)完全忽略 GPU 验收与实测。

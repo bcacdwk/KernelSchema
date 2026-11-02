@@ -156,6 +156,39 @@ def check_versions(previous: Path | None, current: Path, parser_root: str | None
                 raise StateError(f"{node}: version changed without a data change")
 
 
+def seed_hardware_placeholder(artifacts: Path, baseline: dict) -> dict:
+    """Replace only the old seed's hardware block; retain all other source text."""
+    root = artifacts / "root.yaml"
+    starter = Path(baseline["snapshot"]) / "schema_template/starter.yaml"
+    parser = parser_for(baseline["snapshot"])
+    before = parser.load(root, "root").value
+    placeholder = parser.load(starter, "starter").value["contract"]["hardware_specification"]
+    text, starter_text = root.read_text(), starter.read_text()
+    block = re.compile(r"(?ms)^  hardware_specification:.*?(?=^\S|^  \S|\Z)")
+    original, replacement = block.search(text), block.search(starter_text)
+    if not original or not replacement or len(block.findall(text)) != 1:
+        raise StateError("seed hardware block does not have the audited block layout")
+    updated = text[:original.start()] + replacement.group() + text[original.end():]
+    version = before.get("meta_data", {}).get("version")
+    if type(version) is not int or version < 1:
+        raise StateError("seed needs a positive root version")
+    changed = before["contract"].get("hardware_specification") != placeholder
+    if changed:
+        updated, count = re.subn(r"(?m)^(  version:\s*)[0-9]+(\s*(?:#.*)?)$",
+                                 lambda match: match[1] + str(version + 1) + match[2], updated)
+        if count != 1:
+            raise StateError("seed root version does not have the audited scalar layout")
+    old_digest = file_digest(root)
+    root.write_text(updated)
+    expected = deepcopy(before)
+    expected["contract"]["hardware_specification"] = placeholder
+    expected["meta_data"]["version"] = version + int(changed)
+    if parser.load(root, "root").value != expected:
+        raise StateError("seed placeholder edit changed non-hardware content")
+    return {"kind": "starter_hardware_placeholder", "file": "root.yaml", "before": old_digest,
+            "after": file_digest(root), "version_before": version, "version_after": version + int(changed)}
+
+
 def invalidate_reviews(state: dict, before: dict | None, after: dict) -> list[str]:
     reviews = state.setdefault("reviews", {})
     invalidated = []
@@ -291,11 +324,12 @@ class Store:
         state["attempts"].append(record)
         state["active_attempt"] = attempt_id
         state["status"] = "running"
+        state.pop("receipt_correction", None)  # Receipt-only repair belongs to the old attempt's files.
         self.save(state)
         return record, work
 
     def seed_checkpoint(self, state, old_state, seed):
-        """Import an already accepted draft unchanged; never fabricate a model receipt."""
+        """Reuse accepted drafts and provenance; never fabricate a model receipt."""
         if state.get("checkpoint") or state["attempts"]:
             return state
         baseline = self.verify_baseline(state)
@@ -309,6 +343,8 @@ class Store:
         clone_artifacts(old / "artifacts", temporary / "artifacts")
         if artifact_manifest(temporary / "artifacts") != seed["files"]:
             raise StateError("seed checkpoint changed during copy")
+        policy_edit = seed_hardware_placeholder(temporary / "artifacts", baseline) if seed.get("policy_update") else None
+        check_versions(old / "artifacts", temporary / "artifacts", baseline["snapshot"])
         check = run_check(baseline, temporary / "artifacts", temporary)
         if check["exit_code"] == 2:
             raise StateError("cannot seed draft: checker did not complete")
@@ -318,6 +354,8 @@ class Store:
                   "seed": seed, "check": check, "previous": None, "invalidated_reviews": [],
                   "imported_worker_receipt": old_record.get("worker_receipt", old_record.get("imported_worker_receipt")),
                   "created_at": time.time()}
+        if policy_edit:
+            record["policy_edit"] = policy_edit
         write_json(temporary / "checkpoint.json", record)
         seal(temporary)
         os.rename(temporary, parent / checkpoint_id)

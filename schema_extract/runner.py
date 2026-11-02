@@ -1,10 +1,11 @@
-"""Finite runner: staged extraction, independent review, bounded retry and export."""
+"""Staged extraction, cooperative review, explicit recovery and export."""
 
 from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
+from difflib import unified_diff
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,16 @@ from .records import (Store, StateError, artifact_manifest, clone_artifacts, dig
 
 
 DEFAULTS = {"model": "gpt-6-astra", "effort": "xhigh", "jobs": 2}
+
+# SE-012: the audited strict -> skip-hardware policy edit, not a general bypass.
+# All kernel sources, schema_docs, starter and remaining checker files must match.
+SEED_POLICY_CHANGES = {
+    "EXTRACT_SCHEMA.md": ("f9a9065e359006357c67f3fa619414a59cd66b8fa6f64ddee54d4f3006f93f51", "6f88c87a70d7d24097fa4753de92a929acc448b17ce3641bea85722e3c41e34c"),
+    "README.md": ("ed247552d58997274c488844443430536599d96fbbefb53eab35b156df0aa399", "d5afd5442724befd3fa32492dbf5c17246af514adebeef96df3011fc79c20e88"),
+    "schema_template/README.md": ("f16873db1c9c525c165ade74a28492bd90b78ff1f4faeac6da9d063890b9e3b6", "2bdacc0937281a7e0c1a0f1b077b21932f1a5b6db4c6eef4998f37b1fcc8e0bd"),
+    "schema_template/check_yaml.py": ("be4739ff04b86ed770b509cb225a9318c1d653938cd5b4c9a44c68076d36433c", "c90bc96077fd6d0caad8f5a11731d49b5dad77cb064abb7a3a1f1e4f0f660009"),
+    "schema_template/tools/schema.py": ("f4e1ee38b7f31b105184c07afa9d7217e8aeb1b947b915cdb4c541747b5021bf", "93eda52c3ca31851acc6aaf0a2e752eb38b626fbb4beb932cfcb712a0613c81a"),
+}
 
 
 def new_task(store, baseline, output):
@@ -63,7 +74,9 @@ def seed_inputs(store, old_run, operator):
     for attempt in old["attempts"]:
         for call in attempt["calls"]:
             result_path = Path(call) / "result.json"
-            if not result_path.is_file() or not read_json(result_path).get("termination", {}).get("confirmed"):
+            recovery_path = Path(call) / "recovery_termination.json"
+            confirmed = result_path.is_file() and read_json(result_path).get("termination", {}).get("confirmed")
+            if not confirmed and not (recovery_path.is_file() and read_json(recovery_path).get("confirmed")):
                 raise StateError("seed invocation termination is not confirmed")
     baseline = store.verify_baseline(old, verify_runtime=False)
     checkpoint = store.verify_checkpoint(old)
@@ -80,20 +93,32 @@ def seed_inputs(store, old_run, operator):
     return old, baseline, seed
 
 
-def verify_seed_inputs(old_baseline, new_baseline):
+def verify_seed_inputs(old_baseline, new_baseline, policy_update=None):
     if old_baseline["identity"]["entry"] != new_baseline["identity"]["entry"]:
         raise StateError("seed operator selection/metadata changed; old draft cannot be imported")
+    if policy_update:
+        if (policy_update != "skip-hardware" or
+                old_baseline["identity"]["check_policy"] != "strict-no-hardware-waiver" or
+                new_baseline["identity"]["check_policy"] != "skip-hardware"):
+            raise StateError("seed policy update requires the audited strict-to-skip-hardware transition")
+        for name, hashes in SEED_POLICY_CHANGES.items():
+            if (old_baseline["files"].get(name), new_baseline["files"].get(name)) != hashes:
+                raise StateError(f"seed policy update does not match audited file hashes: {name}")
     for name, expected in old_baseline["files"].items():
         if name.startswith("schema_extract/") and name.endswith(".py"):
             continue  # New execution code/protocol is explicit in the new plan.
+        if policy_update and name in SEED_POLICY_CHANGES:
+            continue
         if new_baseline["files"].get(name) != expected:
             raise StateError(f"seed source/spec changed or removed: {name}")
-    if old_baseline["identity"]["check_policy"] != new_baseline["identity"]["check_policy"]:
+    if not policy_update and old_baseline["identity"]["check_policy"] != new_baseline["identity"]["check_policy"]:
         raise StateError("seed checker policy changed")
 
 
-def make_plan(store, ids, work_root, output_root, extras, config, run_id=None, *, seed_run=None):
+def make_plan(store, ids, work_root, output_root, extras, config, run_id=None, *, seed_run=None, seed_policy_update=None):
     config = {key: config.get(key, value) for key, value in DEFAULTS.items()}
+    if seed_policy_update and not seed_run:
+        raise StateError("--seed-policy-update requires --seed-run")
     if not ids or len(set(ids)) != len(ids):
         raise StateError("select one or more distinct operator IDs explicitly; no default all")
     if not 1 <= config["jobs"] <= 2 or config["effort"] != "xhigh":
@@ -117,9 +142,16 @@ def make_plan(store, ids, work_root, output_root, extras, config, run_id=None, *
     tasks = []
     for operator in ids:
         old, old_baseline, seed = seed_inputs(store, seed_run, operator) if seed_run else (None, None, None)
+        if seed_policy_update:
+            seed["policy_update"] = seed_policy_update
+            seed["policy_changes"] = {name: {"before": before, "after": after}
+                                      for name, (before, after) in SEED_POLICY_CHANGES.items()}
+            # Changed policy text is not an alias for its older frozen bytes.
+            for binding in seed["source_bindings"]:
+                binding["paths"] = [name for name in binding["paths"] if name not in SEED_POLICY_CHANGES]
         baseline = freeze_inputs(store, entries[operator], extras, config, seed=seed)
         if old is not None:
-            verify_seed_inputs(old_baseline, baseline)
+            verify_seed_inputs(old_baseline, baseline, seed_policy_update)
         state = new_task(store, baseline, output_root / operator)
         if old is not None:
             state = store.seed_checkpoint(state, old, seed)
@@ -129,6 +161,8 @@ def make_plan(store, ids, work_root, output_root, extras, config, run_id=None, *
             "work_root": str(work_root), "output_root": str(output_root), "created_at": time.time()}
     if seed_run:
         plan["seed_run"] = seed_run
+    if seed_policy_update:
+        plan["seed_policy_update"] = seed_policy_update
     write_json(directory / "plan.json", plan)
     return plan
 
@@ -194,6 +228,46 @@ def finish(store, state, reason, *, stopped=False):
         state["eligible"] = False
     store.save(state)
     return state
+
+
+def task_status(store, state, now=None):
+    """Small, read-only progress view; in-flight usage is deliberately unknown."""
+    now = time.time() if now is None else now
+    summary = {name: state.get(name) for name in (
+        "key", "operator_id", "status", "phase", "stage", "node", "review_scope",
+        "checkpoint", "result", "reason", "last_error")}
+    usage = state.get("usage", {})
+    summary["usage"] = {"calls_started": usage.get("calls", 0),
+                        "completed_call_seconds": usage.get("elapsed_seconds", 0),
+                        "reported_tokens": usage.get("reported_tokens", 0),
+                        "unknown_usage_calls": usage.get("unknown_usage_calls", 0),
+                        "tokens_include_active_call": False}
+    summary["check"] = {name: state["check"].get(name) for name in ("exit_code", "policy")} if state.get("check") else None
+    summary["reviews"] = list(state.get("reviews", {}))
+    summary["open_issues"] = {kind: sum(i.get("state") == "open" and issue_disposition(i) == kind
+                                      for i in state.get("issues", []))
+                              for kind in ("fix", "note", "needs_input")}
+    active = state.get("active_process")
+    summary["active_call"] = None
+    if active:
+        records = Path(active["records"]).resolve()
+        if not records.is_relative_to((store.task_dir(state["key"]) / "attempts").resolve()):
+            raise StateError("invocation path leaves the selected task")
+        call = {"records": str(records), "pid": active.get("identity", {}).get("pid"),
+                "elapsed_seconds": round(max(0, now - active.get("started_at", now)), 1),
+                "thread_id": None, "events_bytes": 0, "event_age_seconds": None}
+        events = records / "events.jsonl"
+        try:
+            stat = events.stat()
+            call.update(events_bytes=stat.st_size, event_age_seconds=round(max(0, now - stat.st_mtime), 1))
+            with events.open("rb") as handle:
+                first = json.loads(handle.readline(4096))
+            if first.get("type") == "thread.started":
+                call["thread_id"] = first.get("thread_id")
+        except (FileNotFoundError, ValueError, AttributeError):
+            pass  # The first event may not yet exist or may still be being written.
+        summary["active_call"] = call
+    return summary
 
 
 def bound_review(state, baseline, receipt, checkpoint):
@@ -291,6 +365,7 @@ class Runner:
         if state["status"] != "queued":
             return state
         attempt, work, thread_id = None, None, None
+        author_session = None  # In-memory only: recovery always starts a fresh context.
         while state["status"] in {"queued", "running"}:
             mode = self.control_mode()
             if mode:
@@ -298,13 +373,19 @@ class Runner:
             baseline = self.store.verify_baseline(state)
             role = state["phase"]
             if attempt is None:
-                attempt, work = self.store.new_attempt(state, Path(self.plan["work_root"]), role)
+                if role == "worker" and author_session:
+                    attempt_id, work, thread_id = author_session
+                    checkpoint = self.store.verify_checkpoint(state)
+                    if tree_manifest(work) != artifact_manifest(checkpoint / "artifacts"):
+                        raise StateError("author workspace changed after its accepted checkpoint; recover into a new attempt")
+                    attempt = next(item for item in state["attempts"] if item["id"] == attempt_id)
+                    state.update(active_attempt=attempt_id, status="running")
+                    self.store.save(state)
+                else:
+                    attempt, work = self.store.new_attempt(state, Path(self.plan["work_root"]), role)
             before = tree_manifest(work)
             records = self.store.task_dir(key) / "attempts" / attempt["id"] / f"call-{len(attempt['calls']) + 1:02d}"
             records.parent.mkdir(parents=True, exist_ok=True)
-            state["usage"]["calls"] += 1
-            attempt["calls"].append(str(records))
-            self.store.save(state)
 
             def started(process):
                 state["active_process"] = {**process, "started_at": time.time()}
@@ -313,9 +394,13 @@ class Runner:
             if role == "reviewer":
                 self.review_slot.acquire()
             try:
-                if self.control_mode():
-                    return finish(self.store, state, self.control_mode(), stopped=True)
-                result = self.cli.run(cwd=work, records=records, prompt=prompt_for(state, baseline, work, role),
+                mode = self.control_mode()
+                if mode:
+                    return finish(self.store, state, mode, stopped=True)
+                state["usage"]["calls"] += 1
+                attempt["calls"].append(str(records))
+                self.store.save(state)
+                result = self.cli.run(cwd=work, records=records, prompt=prompt_for(state, baseline, work, role, resumed=bool(thread_id)),
                                       schema=RECEIPT, role=role, thread_id=thread_id,
                                       cancel=lambda: self.control_mode() == "cancel", on_process=started)
             finally:
@@ -339,6 +424,10 @@ class Runner:
                 return finish(self.store, state, "engineering_failure")
             self.store.verify_baseline(state)
             try:
+                if role == "reviewer" and tree_manifest(work) != before:
+                    raise StateError("read-only reviewer changed artifacts")
+                if attempt.get("receipt_repair_files") is not None and tree_manifest(work) != attempt["receipt_repair_files"]:
+                    raise StateError("receipt-only correction modified artifacts")
                 try:
                     receipt = validate_receipt(result["response"], state, baseline, work, role)
                 except StateError as error:
@@ -348,11 +437,14 @@ class Runner:
                     write_json(records / "receipt_rejection.json", {"reason": str(error), "retry_same_session": True})
                     self.store.save(state)
                     continue
-                if attempt.get("receipt_repair_files") is not None and tree_manifest(work) != attempt["receipt_repair_files"]:
-                    raise StateError("receipt-only correction modified artifacts")
                 state.pop("receipt_correction", None)
-                if role == "reviewer" and tree_manifest(work) != before:
-                    raise StateError("read-only reviewer changed artifacts")
+                attempt.pop("receipt_repair_files", None)
+                normalizations = [{"field": key, "index": index, "before": before["path"], "after": after["path"]}
+                                  for key in ("source_evidence", "artifact_evidence")
+                                  for index, (before, after) in enumerate(zip(result["response"][key], receipt[key]))
+                                  if before["path"] != after["path"]]
+                if normalizations:
+                    write_json(records / "receipt_normalization.json", {"paths": normalizations, "anchors_validated": True})
                 if role == "worker":
                     validate_source_bindings(baseline, work, state.get("source_bindings", []))
                     checkpoint = self.store.verify_checkpoint(state)
@@ -369,6 +461,7 @@ class Runner:
                     attempt = next(v for v in state["attempts"] if v["id"] == attempt["id"])
                     state["dispatches"] = receipt["dispatches"]
                     state["worker_status"] = receipt["status"]
+                    author_session = (attempt["id"], work, result["thread_id"])
                     merge_issues(state, receipt)
                     if receipt["status"] == "continue":
                         self.store.save(state)
@@ -413,6 +506,9 @@ class Runner:
                                 attempt, work, thread_id = None, None, None
                                 continue
                             state["eligible"] = eligible(self.store, state)
+                            mode = self.control_mode()
+                            if mode:
+                                return finish(self.store, state, mode, stopped=True)
                             return finish(self.store, state, "ready" if state["eligible"] else "evidence_gaps")
                         self.after_review(state)
                 self.store.save(state)
@@ -433,6 +529,11 @@ class Runner:
         state["phase"] = "worker"
         if state["review_scope"] == "contract":
             state["stage"], state["node"] = "node", "root"
+            checkpoint = self.store.verify_checkpoint(state)
+            parser_root = self.store.baseline(state["key"])["snapshot"]
+            if state.get("seed") and schema_parts(checkpoint / "artifacts", parser_root)["root"].get("design"):
+                state["phase"] = "reviewer"
+                state["review_scope"] = "root" if state["dispatches"] else "final"
             return
         order = ["root", *(item["id"] for item in state["dispatches"])]
         checkpoint = self.store.verify_checkpoint(state)
@@ -508,6 +609,20 @@ def publish(store, state, target=None):
     return str(target)
 
 
+def initial_issue(store, key, checkpoint, issue_id):
+    """Retain concrete first findings when a closing review uses shorthand."""
+    if not isinstance(checkpoint, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", checkpoint):
+        return None
+    try:
+        record = read_json(store.task_dir(key) / "checkpoints" / checkpoint / "checkpoint.json")
+    except FileNotFoundError:
+        return None  # Historical records may have been explicitly cleaned up.
+    receipt = record.get("worker_receipt") or record.get("imported_worker_receipt") or {}
+    if record.get("id") != checkpoint or receipt.get("task_key") != key:
+        return None
+    return next((item for item in receipt.get("issues", []) if item["id"] == issue_id), None)
+
+
 def sync_issues(store, plan):
     """Prepare a reviewable patch; the supervisor applies repository text edits."""
     path = store.repo / "schema_extract/ISSUES.md"
@@ -518,6 +633,12 @@ def sync_issues(store, plan):
             disposition = issue_disposition(issue)
             issue_state = "ignored" if disposition == "ignored" else issue["state"]
             ledger_key = issue.get("ledger_task_key", key)
+            first = issue.get("first_checkpoint")
+            original = initial_issue(store, ledger_key, first, issue["id"])
+            origin = ""
+            if original and (original["detail"] != issue["detail"] or original["evidence"] != issue["evidence"]):
+                origin = (f"- **初次发现（`{first}`）：** {original['detail']}\n"
+                          f"- **初次证据：** {'; '.join(original['evidence'])}\n")
             marker = f"<!-- extraction:{ledger_key}:{issue['id']} -->"
             end = "<!-- /extraction -->"
             block = (f"{marker}\n\n## SE-{ledger_key}-{issue['id']}\n\n"
@@ -525,6 +646,7 @@ def sync_issues(store, plan):
                      f"- **任务／阶段：** `{state['operator_id']}` / {issue['scope']}；run `{plan['run_id']}`。\n"
                      f"- **现象与依据：** {issue['detail']}\n"
                      f"- **证据：** {'; '.join(issue['evidence'])}\n"
+                     + origin +
                      f"- **基线／检查点：** `{state['fingerprint']}` / `{issue.get('checkpoint')}`。\n"
                      + (f"- **问题来源：** `{ledger_key}` / `{issue.get('first_checkpoint')}`；保留原问题身份。\n" if ledger_key != key else "") +
                      f"- **影响与重启条件：** {', '.join(issue['blocks'])}；{issue['restart_condition']}\n\n{end}")
@@ -536,7 +658,9 @@ def sync_issues(store, plan):
                 text = text[:start] + block + text[stop:]
     old = path.read_text()
     if text != old:
-        patch = "*** Begin Patch\n*** Update File: " + str(path) + "\n@@\n" + "".join("-" + line + "\n" for line in old.splitlines()) + "".join("+" + line + "\n" for line in text.splitlines()) + "*** End Patch\n"
+        changes = list(unified_diff(old.splitlines(), text.splitlines(), lineterm=""))[2:]
+        hunks = "\n".join("@@" if line.startswith("@@ ") else line for line in changes)
+        patch = "*** Begin Patch\n*** Update File: " + str(path) + "\n" + hunks + "\n*** End Patch\n"
         output = store.root / "runs" / plan["run_id"] / "issues.patch"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(patch)
@@ -555,6 +679,8 @@ def main(argv=None):
     plan_cmd.add_argument("--id", action="append", required=True)
     plan_cmd.add_argument("--run-id")
     plan_cmd.add_argument("--seed-run", help="reuse verified accepted drafts from this stopped run; preserve usage and re-review Contract")
+    plan_cmd.add_argument("--seed-policy-update", choices=("skip-hardware",),
+                          help="explicitly apply only the audited strict-to-skip-hardware policy edit to a seed")
     plan_cmd.add_argument("--work-root", required=True, type=Path)
     plan_cmd.add_argument("--output-root", required=True, type=Path)
     plan_cmd.add_argument("--source", action="append", default=[], help="extra fixed repository-relative material")
@@ -563,6 +689,8 @@ def main(argv=None):
     for name in ("run", "status", "pause", "cancel", "resume", "retry", "export"):
         command = sub.add_parser(name)
         command.add_argument("run_id")
+        if name == "status":
+            command.add_argument("--full", action="store_true", help="show complete authoritative task records instead of compact progress")
         if name in {"resume", "retry", "export"}:
             command.add_argument("--id", action="append", required=True)
         if name in {"resume", "retry"}:
@@ -579,12 +707,14 @@ def main(argv=None):
         if args.command == "plan":
             config = {**DEFAULTS, "model": args.model, "jobs": args.jobs}
             with store.lock():
-                plan = make_plan(store, args.id, args.work_root, args.output_root, args.source, config, args.run_id, seed_run=args.seed_run)
+                plan = make_plan(store, args.id, args.work_root, args.output_root, args.source, config, args.run_id,
+                                 seed_run=args.seed_run, seed_policy_update=args.seed_policy_update)
             print(json.dumps(plan, ensure_ascii=False, indent=2))
             return 0
         plan = read_json(store.root / "runs" / args.run_id / "plan.json")
         if args.command == "status":
-            print(json.dumps([store.load(key) for key in plan["tasks"]], ensure_ascii=False, indent=2))
+            states = [store.load(key) for key in plan["tasks"]]
+            print(json.dumps(states if args.full else [task_status(store, state) for state in states], ensure_ascii=False, indent=2))
             return 0
         if args.command in {"pause", "cancel"}:
             write_json(store.root / "runs" / args.run_id / "control.json", {"mode": args.command, "requested_at": time.time()})
