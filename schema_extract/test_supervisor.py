@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from .codex_cli import write_json
+from .framework import candidate_report
 from .records import StateError, Store, read_json
 from . import supervisor
 
@@ -69,6 +70,37 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(calls[0].kwargs["cwd"], calls[1].kwargs["cwd"])
         self.assertNotEqual(calls[0].kwargs["records"], calls[1].kwargs["records"])
         self.assertNotIn("timeout", calls[1].kwargs)
+
+    def test_candidate_survives_later_tick_and_is_independent_of_dispatch(self):
+        (self.store.repo / "schema_extract/issues").mkdir(parents=True)
+        task = self.store.task_dir(self.task["key"]) / "task.json"
+        before = task.read_bytes()
+        proposal = {"id": "missing-baseline", "category": "extract_tools", "problem": "Unknown baseline in snapshot.",
+                    "proposal": "Report the baseline.", "necessity": "Otherwise each tick repeats the investigation.",
+                    "evidence": ["selected-task: synthetic summary shows unknown baseline."]}
+        first = self.result()
+        first["response"]["framework_candidates"] = [proposal]
+        invalid = self.result("start_queued")
+        invalid["response"]["framework_candidates"] = [{"id": "not-enough"}]
+        results = iter([first, invalid, self.result()])
+        def respond(**kwargs):
+            result = next(results)
+            kwargs["records"].mkdir()
+            write_json(kwargs["records"] / "result.json", result)
+            return result
+        with patch.object(supervisor, "CodexCLI") as cli, patch.object(supervisor, "start_runner", return_value={}) as launch:
+            cli.return_value.run.side_effect = respond
+            for _ in range(3):
+                self.assertEqual(supervisor.tick(self.store, "selected")["outcome"], "observed")
+            launch.assert_called_once()
+            self.assertIn("framework_candidates", cli.return_value.run.call_args.kwargs["prompt"])
+        self.assertEqual(task.read_bytes(), before)
+        groups = candidate_report(self.store, self.plan)
+        self.assertEqual([g["id"] for g in groups], [proposal["id"]])
+        source, = groups[0]["reports"][0]["sources"]
+        self.assertEqual(source["role"], "supervisor")
+        self.assertEqual(read_json(self.store.root / source["record"])["response"]["framework_candidates"], [proposal])
+        self.assertIn("selected-task", read_json(self.store.root / source["summary"])["snapshot"]["tasks"])
 
     def test_changed_terminal_problems_are_observed_once_without_dispatch(self):
         with patch.object(supervisor, "CodexCLI") as cli, patch.object(supervisor, "start_runner") as launch:

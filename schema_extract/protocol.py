@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shlex
 
+from .framework import CANDIDATES, GUIDANCE, candidates_from
 from .reading import MAX_PAGE_BYTES
 from .records import StateError, hardware_issue, issue_disposition
 
@@ -34,6 +35,7 @@ RECEIPT = obj({
     "continuation_reason": TEXT, "unsupported_claims": TEXTS,
     "dispatches": {"type": "array", "items": obj({"id": TEXT, "parent": TEXT, "reason": TEXT})},
     "issues": {"type": "array", "items": ISSUE}, "resolved_issue_ids": TEXTS,
+    "framework_candidates": CANDIDATES,
     "source_evidence": {"type": "array", "items": EVIDENCE},
     "artifact_evidence": {"type": "array", "items": EVIDENCE},
     "impact": {"type": "string", "enum": ["none", "index", "node", "root", "contract", "layout"]},
@@ -63,6 +65,8 @@ def validate_shape(value, schema, where="receipt"):
 
 
 def validate_receipt(value, state, baseline, artifacts, role):
+    if isinstance(value, dict):
+        value = {**value, "framework_candidates": candidates_from(value)}
     validate_shape(value, RECEIPT)
     for key, expected in {"task_key": state["key"], "fingerprint": state["fingerprint"],
                           "base_checkpoint": state.get("checkpoint") or "none", "stage": state["stage"],
@@ -252,6 +256,7 @@ Read-only fixed repository: {baseline['snapshot']}
 Echo receipt identity exactly: {json.dumps(binding)}
 Validation error: {state['receipt_correction']}
 {evidence_rules}
+{GUIDANCE}
 Read only the exact lines needed to repair the rejected anchor, if necessary. Return the complete corrected receipt.
 """
     seed = {key: state["seed"][key] for key in ("run_id", "task_key", "checkpoint", "fingerprint")} if state.get("seed") else None
@@ -289,6 +294,7 @@ Requested small revisions: {json.dumps(revision, ensure_ascii=False)}
 Non-hardware checker result: {json.dumps(check_summary, ensure_ascii=False)}
 Continue section-by-section write/read-back checks. Keep fixed source citations, increment versions for changed YAML, and use apply_patch only in this workspace. This is a plain artifact directory without Git metadata; inspect files and run the checker directly. Hardware stays at the starter placeholder; no hardware work, network, source/spec/checker edits or invented fallbacks/proofs. Known implementation defects and unresolved source relationships may remain notes; needs_input is only for fundamental missing definitions/source.
 Use the same bounded reader and exact cursor continuation as before; fetch only the new relevant ranges.
+{GUIDANCE}
 Return the complete receipt, with continuation=not_assessed; complete finishes this stage, continue saves useful intermediate progress. Preserve issue IDs and report actual corrections. {evidence_rules}
 """
     prompt = f"""You are the {role} collaborating on ONE kernel-to-schema extraction.
@@ -322,6 +328,7 @@ Requested small revisions: {json.dumps(revision, ensure_ascii=False)}
 Non-hardware checker result: {json.dumps(check_summary, ensure_ascii=False)}
 
 Receipt: complete means the useful work for this stage is finished, with notes allowed. Worker may request continue for more work; reviewer uses revise only for concrete worthwhile fixes, combined into one small revision request. needs_input is reserved for fundamental task ambiguity or missing necessary source, with the exact missing input stated. Issue disposition is fix (specific actionable correction), note (known source defect/proof limitation), needs_input (the fundamental cases above), or ignored (outside scope). Do not create hardware issues. Do not seek a quota of problems, impose formatting preferences or demand extra experiments/proofs. Keep existing issue IDs and origin; resolved_issue_ids records actual corrections, not facts invented to close an item. Short source and artifact evidence anchors should match real local line ranges; do not construct a field-by-field matrix. Return the receipt, not an extra workspace report.
+{GUIDANCE}
 {evidence_rules}
 """
     if role == "worker":

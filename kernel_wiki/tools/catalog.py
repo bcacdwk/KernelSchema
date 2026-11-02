@@ -42,7 +42,7 @@ PRECISIONS = ("bf16", "fp16", "fp8", "mxfp8", "mxfp4", "nvfp4")
 STAGES = ("prefill", "prefix", "decode", "mtp")
 
 # Editorial summaries are grounded in each problem/metadata.json description,
-# input.py, reference.py and shape_cases.json. They classify contracts, not a new
+# input.py, reference.py, shape_range.json and shape_cases.json. They classify contracts, not a new
 # correctness/performance claim. Keep architecture-specific details in source.
 NOTES = {
     "bf16_gemm": "BF16 A/B；D = αABᵀ + C，可选 C 与 D 别名",
@@ -74,8 +74,8 @@ NOTES = {
     "fmha_nvfp4_kv": "FP8 Q + NVFP4 KV；group16 缩放",
     "fmha_nvfp4_qkpv": "BF16 外部 Q/K/V，内部 NVFP4 QK 与 PV；非因果变长",
     "mla_absorbed_fp8": "吸收式 FP8 MLA：Q/K D576，V 为 K 前 512 维",
-    "mla_expanded_bf16": "展开式 BF16 MLA：Q/K D192，V D128；ragged prefill",
-    "mla_expanded_fp8": "展开式 FP8 MLA：Q/K D192，V D128；ragged prefill",
+    "mla_expanded_bf16": "展开式 BF16 MLA，Q/K D192、V D128，连续 ragged prefill",
+    "mla_expanded_fp8": "展开式 FP8 MLA，Q/K D192、V D128，连续 ragged prefill",
     "mla_nvfp4": "NVFP4 dense MQA：Q/K/V D512，K=V；分页 decode / MTP",
     "dual_cache_latent_bf16": "BF16 单 / 双 latent KV 缓存，联合 softmax",
     "dual_cache_latent_fp8": "FP8 单 / 双 latent KV 缓存，独立 QK / PV descale",
@@ -125,6 +125,17 @@ def build():
         name = op["operator"]
         directory = SOURCE / op["directory"]
         meta = read(directory / "problem/metadata.json")
+        note = NOTES[name]
+        source_description = meta["description"].split("\n\n", 1)[0]
+        if name in {"mla_expanded_bf16", "mla_expanded_fp8"}:
+            # Mark only the superseded clause in the imported excerpt. The
+            # surrounding scope, lengths and optional outputs remain searchable.
+            source_description = source_description.replace(
+                "H12/16/24/32/48/64/96/128；ragged首次causal prefill",
+                "〔头数与因果模式见本题 problem/shape_range.json〕", 1)
+            domain = read(directory / "problem/shape_range.json")["input_kwargs"]["properties"]
+            heads = ", ".join(str(h) for h in sorted(domain["heads"]["values"]))
+            note += f"，Hq=Hkv ∈ {{{heads}}}，支持因果和非因果模式，可选 attention sinks"
         summary = read(directory / "performance/SUMMARY.json")
         primary = next(r for r in summary["measurements"] if r["id"] == summary["primary_measurement"])
         formats = set(name.split("_state_")[0].split("_")) & set(PRECISIONS)
@@ -152,8 +163,8 @@ def build():
                        for r in summary["measurements"]}
         entries.append({
             "id": name, "title": op["display_name"], "category": op["category"],
-            "subcategory": op["subcategory"], "summary": NOTES[name],
-            "source_description": meta["description"].split("\n\n")[0],
+            "subcategory": op["subcategory"], "summary": note,
+            "source_description": source_description,
             "precision_tags": [p for p in PRECISIONS if p in formats],
             "state_dtype": name.split("_state_")[1] if "_state_" in name else None,
             "stages": stages_for(name, op["category"]), "source_tags": op["tags"],
@@ -331,7 +342,7 @@ def main():
             print(f"{entry['id']}\n{entry['summary']}")
             print(f"来源: {entry['solution_origin']} | 验收: {STATUS[entry['acceptance_status']]} | 题目: {AUDIT[entry['problem_verification']]}")
             print(f"测量: {entry['metric']} | 对照: {entry['comparison']['kind']}")
-            print("原合同边界: " + entry["source_description"])
+            print("导入元数据摘录：" + entry["source_description"])
             for key, target in entry["paths"].items():
                 print(f"{key}: {ROOT / target}")
             print("interface: " + json.dumps(entry["interface"], ensure_ascii=False))

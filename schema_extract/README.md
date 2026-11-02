@@ -1,6 +1,6 @@
 # Schema Extract
 
-本地执行器从显式选择的 kernel 材料调用已登录的 Codex CLI，形成可追溯的 schema。恢复、非硬件检查和合作审阅已有回归验证，本机真实调用与试点的依据、边界见 [ISSUES.md](ISSUES.md)。
+本地执行器从显式选择的 kernel 材料调用已登录的 Codex CLI，形成可追溯的 schema。待维护者决策的框架改进见[分类台账](issues/README.md)。本机真实调用、试点的依据和验证边界见[迁移前的历史台账](issues/archive/ISSUES.md)。
 
 ## 当前政策
 
@@ -30,6 +30,8 @@ schema_extract/
   codex_cli.py          无 agent 超时的 CLI 调用、事件与取消确认
   records.py            固定输入、原子 task.json、不可变检查点
   protocol.py           提取与合作审阅提示／回执
+  framework.py          框架候选回执格式、只读汇总与台账检查
+  issues/               一项一文件的待决提案与 archive 归档
   reading.py            有界批量读取与无状态续页
   review_context.py     从当前检查点派生索引审阅上下文
   supervisor.py         独立的巡检与可选 15 分钟调度入口
@@ -68,6 +70,8 @@ python3 -m schema_extract plan --run-id NEW_RUN --id OPERATOR \
 python3 -m schema_extract run NEW_RUN
 python3 -m schema_extract status NEW_RUN
 python3 -m schema_extract status NEW_RUN --full
+python3 -m schema_extract candidates NEW_RUN
+python3 -m schema_extract issues
 python3 -m schema_extract pause NEW_RUN
 python3 -m schema_extract cancel NEW_RUN
 python3 -m schema_extract resume NEW_RUN --id OPERATOR
@@ -89,13 +93,15 @@ python3 -B /absolute/snapshot/schema_extract/reading.py \
 
 `status` 默认只读紧凑进度：阶段、检查点、检查结果、已审阅范围、问题计数及当前调用 PID／thread／持续时间／事件更新时间。用量只含已结束调用，明确不包含活跃调用尚未报告的 token；没有事件更新本身不表示卡死。`--full` 返回完整 task 记录，供需要回执／历史的调查使用。
 
-维护工具时，既有 plan 的执行器摘要不会随代码修改更新。需要让一次试跑继续使用其已冻结版本，可从该 task 的 `inputs.lock.json` 取得 `snapshot`，以该目录为 cwd 执行 `python3 -B -m schema_extract --repo /Users/hanyong/KernelSchema run RUN_ID`；自定义 state-root 时仍须显式传入原绝对路径。所有读取和检查继续核验原摘要。要测试工具修改，建立新的无 seed 计划；不要编辑旧快照或 task 来绕过校验。
+既有 plan 始终核对冻结的执行器摘要。继续使用该版本时，从 task 的 `inputs.lock.json` 取得 `snapshot`，以该目录为 cwd 执行 `python3 -B -m schema_extract --repo /Users/hanyong/KernelSchema --state-root /absolute/original/state-root run RUN_ID`。若冻结版本收尾时仍读取旧单文件台账，把 `--repo` 指向含当时 `schema_extract/ISSUES.md` 的历史 checkout，`--state-root` 仍指向原运行区。旧版对已迁移仓库运行时，会在收尾因找不到旧文件退出，此前接受的任务状态仍可从原记录读取。测试新工具请建新的无 seed 计划。
 
 `plan --seed-run OLD_RUN` 逐文件核对来源、规范、检查器与政策，复用已接受草稿及其回执、来源、用量和问题身份，清空旧审阅后重新协作复核。已有 Design 直接进入复核，不重新提取。
 
 旧政策 plan 仍不能直接续跑。此次已审计的过渡可显式增加 `--seed-policy-update skip-hardware`：只接受 SE-012 记录的五组政策文件摘要，其余原有来源／规范必须一致；仅在新检查点副本中恢复 starter 硬件占位、递增 root 版本并记录变更。旧 task、检查点与回执保持原样；这不是通用迁移或跳过来源核验的入口。
 
-结束时生成 `.schema_extract/runs/<id>/issues.patch`，仅包含变化条目的上下文补丁，由 Supervisor 审阅后使用内置 `apply_patch` 更新台账。收尾简写不同于初次发现时，从可用的首个不可变 worker 回执保留原发现／源码证据，并列当前结论；原记录不可用时不臆造来源。程序不直接改仓库 ISSUES；已知 issue 沿用原 ID／`ledger_task_key`，不因新 fingerprint 复制问题。
+算子 issues 保存在 task 和已接受的检查点中，seed 延续已有问题身份。提取收尾提示的 `candidates RUN_ID` 命令按稳定 ID 汇总已接受的 worker 和 reviewer 提报，以及该 run 的有效巡检提报。相同内容只列一次，保留每个来源。多个 plan 可以共享同一 task，导入的 seed 回执只供追溯。没有候选时命令返回 `[]`。
+
+主 agent 或维护者在清理运行记录前核实必要性，将合格的新项登记在维护仓库。候选和归档决定独立于任务的 ready 与 export，台账条目不属于默认冻结输入。[入账与归档规则](issues/README.md)
 
 ## 观察与 Supervisor
 
@@ -130,7 +136,7 @@ MLA 最终检查点为 `cp-0002-b297748059`。作者跨 Contract/root 保持同�
 
 ## 已有试点与验证边界
 
-2026-11-02 已按用户要求确认停止并清理下面三轮 FP8／GDN 的运行记录、专属快照和暂存产物；源码、正式产物、问题台账及独立 CLI／Supervisor 探针保留。下述路径与数字是历史依据，问题和结论摘要保留在 ISSUES，不应再把已清理路径当作可恢复的 seed。
+2026-11-02 已按用户要求确认停止并清理下面三轮 FP8／GDN 的运行记录、专属快照和暂存产物。源码、正式产物、问题台账及独立 CLI／Supervisor 探针保留。已清理的路径仅供历史查证，无法用作恢复 seed。[台账归档原文](issues/archive/ISSUES.md)
 
 旧政策下，两题都只在运行区保存，未导出：
 
@@ -143,4 +149,4 @@ MLA 最终检查点为 `cp-0002-b297748059`。作者跨 Contract/root 保持同�
 
 第二轮 FP8 曾遇旧 900 秒超时并从检查点恢复。该自动超时与预算逻辑现已移除。旧 GDN 累计计量存在续接重复相加，实证差分为 5,874,314；FP8 已报告 8,777,991，另一次超时用量未知。历史报告保持原样，见 `.schema_extract/runs/pilot_xhigh_20261101_r2/supervisor-verification.json`。
 
-回归入口：`python3 -B -m unittest discover -s schema_extract -t .`；检查器使用 `python3 -B -m unittest discover -s schema_template/tools/tests -t schema_template`。独立真实探针保存在 `.schema_extract/probes/policy_20261101/`；已清理运行的历史结论见 ISSUES。
+执行器回归使用 `python3 -B -m unittest discover -s schema_extract -t .`，检查器回归使用 `python3 -B -m unittest discover -s schema_template/tools/tests -t schema_template`。独立真实探针保存在 `.schema_extract/probes/policy_20261101/`。已清理运行的结论保存在[历史台账](issues/archive/ISSUES.md)。

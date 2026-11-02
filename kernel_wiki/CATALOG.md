@@ -66,8 +66,8 @@
 | 算子 | 计算边界 | 格式 / 状态 | 阶段 | 来源 / 验收 |
 | --- | --- | --- | --- | --- |
 | [mla_absorbed_fp8](aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/README.md) | 吸收式 FP8 MLA：Q/K D576，V 为 K 前 512 维 | FP8 | prefill / prefix / decode / mtp | REFERENCE；采样验收通过 |
-| [mla_expanded_bf16](aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/README.md) | 展开式 BF16 MLA：Q/K D192，V D128；ragged prefill | BF16 | prefill | AKA；原包认证 |
-| [mla_expanded_fp8](aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/README.md) | 展开式 FP8 MLA：Q/K D192，V D128；ragged prefill | FP8 | prefill | AKA；原包认证 |
+| [mla_expanded_bf16](aka-cuda-operators-20261030/operators/mla/mla_expanded_bf16/README.md) | 展开式 BF16 MLA，Q/K D192、V D128，连续 ragged prefill，Hq=Hkv ∈ {12, 16, 24, 96, 128}，支持因果和非因果模式，可选 attention sinks | BF16 | prefill | AKA；原包认证 |
+| [mla_expanded_fp8](aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/README.md) | 展开式 FP8 MLA，Q/K D192、V D128，连续 ragged prefill，Hq=Hkv ∈ {12, 24, 32, 96, 128}，支持因果和非因果模式，可选 attention sinks | FP8 | prefill | AKA；原包认证 |
 | [mla_nvfp4](aka-cuda-operators-20261030/operators/mla/mla_nvfp4/README.md) | NVFP4 dense MQA：Q/K/V D512，K=V；分页 decode / MTP | NVFP4 | decode / mtp | REFERENCE；采样验收通过 |
 
 ## 稀疏注意力（4）

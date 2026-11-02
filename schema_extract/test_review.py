@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from .codex_cli import write_json
+from .framework import candidate_report
 from .records import StateError, artifact_manifest, digest, parser_for, read_json, review_current, schema_parts
 from .protocol import prompt_for
 from .review_context import build_review_context, field_excerpt
@@ -323,6 +324,7 @@ class ReviewTests(unittest.TestCase):
                         owner.assertNotIn("/schema_docs/3.design.math_reshape.md", kwargs["prompt"])
                         if self.final_count == 1:
                             response.update(status="revise", impact=impact, revision_node="positive" if impact == "node" else "")
+                            response["framework_candidates"] = [fixtures.PROPOSAL]
                             response["issues"] = [{"id": "specific_fix", "kind": "extraction_error", "disposition": "fix",
                                                    "scope": "dispatch.md" if impact == "index" else "positive.yaml:design.math_reshape",
                                                    "detail": "Correct the concrete synthetic label or node description.",
@@ -349,6 +351,11 @@ class ReviewTests(unittest.TestCase):
         scopes = [call["scope"] for call in cli.calls if call["role"] == "reviewer"]
         self.assertEqual(scopes, ["contract", "root", "positive", "final", "final"])
         finals = [call for call in cli.calls if call["role"] == "reviewer" and call["scope"] == "final"]
+        reports = candidate_report(self.f.store, self.f.plan)[0]["reports"]
+        self.assertEqual(len(reports), 1)
+        source, = reports[0]["sources"]
+        self.assertEqual(source["checkpoint"], finals[0]["checkpoint"])
+        self.assertNotEqual(source["checkpoint"], finals[1]["checkpoint"])
         self.assertEqual(finals[0]["reviews"]["root"], finals[1]["reviews"]["root"])
         self.assertEqual(finals[0]["reviews"]["positive"], finals[1]["reviews"]["positive"])
         for call in cli.calls:

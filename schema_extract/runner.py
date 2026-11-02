@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
-from difflib import unified_diff
 import json
 import os
 from pathlib import Path
@@ -18,6 +17,7 @@ import time
 from uuid import uuid4
 
 from .codex_cli import CodexCLI, terminate_owned, write_json
+from .framework import candidate_report, registry
 from .protocol import RECEIPT, prompt_for, validate_receipt
 from .records import (Store, StateError, artifact_manifest, clone_artifacts, digest,
                       freeze_inputs, hardware_issue, issue_disposition, read_json, run_check,
@@ -435,6 +435,7 @@ class Runner:
                     return finish(self.store, state, "cancelled", stopped=True)
                 return finish(self.store, state, "engineering_failure")
             self.store.verify_baseline(state)
+            review_report = None
             try:
                 if role == "reviewer" and tree_manifest(work) != before:
                     raise StateError("read-only reviewer changed artifacts")
@@ -480,9 +481,15 @@ class Runner:
                         continue
                     self.after_worker(state)
                 else:
+                    proposals = receipt.pop("framework_candidates", [])
                     merge_issues(state, receipt, reviewer=True)
                     state["last_review"] = bound_review(state, baseline, receipt, self.store.verify_checkpoint(state))
                     actions = {issue_disposition(i) for i in receipt["issues"]}
+                    if proposals:
+                        source = {"role": "reviewer", "checkpoint": state["checkpoint"],
+                                  "record": str((records / "result.json").relative_to(self.store.root))}
+                        review_report = {"source": source, "candidates": proposals}
+                        state.setdefault("review_candidate_reports", []).append(review_report)
                     if "needs_input" in actions:
                         return finish(self.store, state, "needs_input")
                     if "fix" in actions:
@@ -528,6 +535,8 @@ class Runner:
                 self.store.save(state)
                 attempt, work, thread_id = None, None, None
             except (StateError, ValueError, OSError) as error:
+                if review_report:
+                    state["review_candidate_reports"].pop()  # This review transition was rejected.
                 state["last_error"] = str(error)
                 write_json(records / "rejection.json", {"reason": str(error), "checkpoint_accepted": False})
                 return finish(self.store, state, "protocol_failure")
@@ -643,65 +652,6 @@ def publish(store, state, target=None):
     return str(target)
 
 
-def initial_issue(store, key, checkpoint, issue_id):
-    """Retain concrete first findings when a closing review uses shorthand."""
-    if not isinstance(checkpoint, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", checkpoint):
-        return None
-    try:
-        record = read_json(store.task_dir(key) / "checkpoints" / checkpoint / "checkpoint.json")
-    except FileNotFoundError:
-        return None  # Historical records may have been explicitly cleaned up.
-    receipt = record.get("worker_receipt") or record.get("imported_worker_receipt") or {}
-    if record.get("id") != checkpoint or receipt.get("task_key") != key:
-        return None
-    return next((item for item in receipt.get("issues", []) if item["id"] == issue_id), None)
-
-
-def sync_issues(store, plan):
-    """Prepare a reviewable patch; the supervisor applies repository text edits."""
-    path = store.repo / "schema_extract/ISSUES.md"
-    text = path.read_text()
-    for key in plan["tasks"]:
-        state = store.load(key)
-        for issue in state["issues"]:
-            disposition = issue_disposition(issue)
-            issue_state = "ignored" if disposition == "ignored" else issue["state"]
-            ledger_key = issue.get("ledger_task_key", key)
-            first = issue.get("first_checkpoint")
-            original = initial_issue(store, ledger_key, first, issue["id"])
-            origin = ""
-            if original and (original["detail"] != issue["detail"] or original["evidence"] != issue["evidence"]):
-                origin = (f"- **初次发现（`{first}`）：** {original['detail']}\n"
-                          f"- **初次证据：** {'; '.join(original['evidence'])}\n")
-            marker = f"<!-- extraction:{ledger_key}:{issue['id']} -->"
-            end = "<!-- /extraction -->"
-            block = (f"{marker}\n\n## SE-{ledger_key}-{issue['id']}\n\n"
-                     f"- **状态：** `{issue_state}`；类型 `{issue['kind']}`；处理 `{disposition}`。\n"
-                     f"- **任务／阶段：** `{state['operator_id']}` / {issue['scope']}；run `{plan['run_id']}`。\n"
-                     f"- **现象与依据：** {issue['detail']}\n"
-                     f"- **证据：** {'; '.join(issue['evidence'])}\n"
-                     + origin +
-                     f"- **基线／检查点：** `{state['fingerprint']}` / `{issue.get('checkpoint')}`。\n"
-                     + (f"- **问题来源：** `{ledger_key}` / `{issue.get('first_checkpoint')}`；保留原问题身份。\n" if ledger_key != key else "") +
-                     f"- **影响与重启条件：** {', '.join(issue['blocks'])}；{issue['restart_condition']}\n\n{end}")
-            start = text.find(marker)
-            if start < 0:
-                text = text.rstrip() + "\n\n" + block + "\n"
-            else:
-                stop = text.index(end, start) + len(end)
-                text = text[:start] + block + text[stop:]
-    old = path.read_text()
-    if text != old:
-        changes = list(unified_diff(old.splitlines(), text.splitlines(), lineterm=""))[2:]
-        hunks = "\n".join("@@" if line.startswith("@@ ") else line for line in changes)
-        patch = "*** Begin Patch\n*** Update File: " + str(path) + "\n" + hunks + "\n*** End Patch\n"
-        output = store.root / "runs" / plan["run_id"] / "issues.patch"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(patch)
-        return str(output)
-    return None
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
@@ -709,6 +659,7 @@ def main(argv=None):
     parser.add_argument("--codex", default="codex", help="local Codex executable")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("discover")
+    sub.add_parser("issues", help="list and count pending maintenance proposals and archived decisions")
     plan_cmd = sub.add_parser("plan")
     plan_cmd.add_argument("--id", action="append", required=True)
     plan_cmd.add_argument("--run-id")
@@ -720,7 +671,7 @@ def main(argv=None):
     plan_cmd.add_argument("--source", action="append", default=[], help="extra fixed repository-relative material")
     plan_cmd.add_argument("--model", default=DEFAULTS["model"])
     plan_cmd.add_argument("--jobs", type=int, choices=(1, 2), default=DEFAULTS["jobs"])
-    for name in ("run", "status", "pause", "cancel", "resume", "retry", "export"):
+    for name in ("run", "status", "candidates", "pause", "cancel", "resume", "retry", "export"):
         command = sub.add_parser(name)
         command.add_argument("run_id")
         if name == "status":
@@ -732,12 +683,18 @@ def main(argv=None):
         if name == "export":
             command.add_argument("--to", type=Path, help="only with one selected task; must be a new directory")
     args = parser.parse_args(argv)
-    store = Store(args.repo, args.state_root or args.repo / ".schema_extract")
-    if args.command == "discover":
-        entries = read_json(store.repo / "kernel_wiki/catalog.json")["operators"]
-        print(json.dumps([{k: entry.get(k) for k in ("id", "title", "category")} for entry in entries], ensure_ascii=False, indent=2))
-        return 0
     try:
+        if args.command == "issues":
+            records = registry(args.repo)
+            pending = {key: value for key, value in records.items() if value["status"] == "pending"}
+            print(json.dumps({"pending": len(pending), "records": pending, "archived": len(records) - len(pending)},
+                             ensure_ascii=False, indent=2))
+            return 0
+        store = Store(args.repo, args.state_root or args.repo / ".schema_extract")
+        if args.command == "discover":
+            entries = read_json(store.repo / "kernel_wiki/catalog.json")["operators"]
+            print(json.dumps([{k: entry.get(k) for k in ("id", "title", "category")} for entry in entries], ensure_ascii=False, indent=2))
+            return 0
         if args.command == "plan":
             config = {**DEFAULTS, "model": args.model, "jobs": args.jobs}
             with store.lock():
@@ -745,7 +702,14 @@ def main(argv=None):
                                  seed_run=args.seed_run, seed_policy_update=args.seed_policy_update)
             print(json.dumps(plan, ensure_ascii=False, indent=2))
             return 0
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", args.run_id):
+            raise StateError("invalid run ID")
         plan = read_json(store.root / "runs" / args.run_id / "plan.json")
+        if plan.get("run_id") != args.run_id:
+            raise StateError("plan does not identify the selected run")
+        if args.command == "candidates":
+            print(json.dumps(candidate_report(store, plan), ensure_ascii=False, indent=2))
+            return 0
         if args.command == "status":
             states = [store.load(key) for key in plan["tasks"]]
             print(json.dumps(states if args.full else [task_status(store, state) for state in states], ensure_ascii=False, indent=2))
@@ -783,7 +747,7 @@ def main(argv=None):
                 signal.signal(sig, lambda *_: runner.cancel_event.set())
             try:
                 runner.run()
-                print(json.dumps({"issues_patch": sync_issues(store, plan)}, ensure_ascii=False), flush=True)
+                print(json.dumps({"review_framework_candidates": ["candidates", plan["run_id"]]}), flush=True)
             finally:
                 for sig, handler in old_handlers.items():
                     signal.signal(sig, handler)

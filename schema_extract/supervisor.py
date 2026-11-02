@@ -18,6 +18,7 @@ import time
 from uuid import UUID, uuid4
 
 from .codex_cli import CodexCLI, process_table, write_json
+from .framework import CANDIDATES, GUIDANCE, candidates_from
 from .records import StateError, Store, digest, read_json
 
 
@@ -25,11 +26,12 @@ INTERVAL_SECONDS = 15 * 60
 INVESTIGATE_SECONDS = 60 * 60  # An observation threshold, never a deadline.
 DECISION = {
     "type": "object", "additionalProperties": False,
-    "required": ["run_id", "action", "summary", "observations"],
+    "required": ["run_id", "action", "summary", "observations", "framework_candidates"],
     "properties": {
         "run_id": {"type": "string"},
         "action": {"type": "string", "enum": ["observe", "start_queued", "needs_attention"]},
         "summary": {"type": "string"},
+        "framework_candidates": CANDIDATES,
         "observations": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
             "required": ["task_key", "finding", "suggestion"],
@@ -226,6 +228,8 @@ def attention_changes(current, delta):
 
 
 def validate_decision(value, plan):
+    if isinstance(value, dict):
+        value = {**value, "framework_candidates": candidates_from(value)}
     if not isinstance(value, dict) or set(value) != set(DECISION["required"]):
         raise StateError("invalid supervisor decision fields")
     if value["run_id"] != plan["run_id"] or not isinstance(value["action"], str) or value["action"] not in {"observe", "start_queued", "needs_attention"}:
@@ -372,6 +376,7 @@ def tick(store, run_id, codex="codex", *, new_session=False):
                         "action仅可observe、needs_attention、start_queued；最后一项只请求固定程序启动此run中queued工作，"
                         "固定程序会再次核对控制请求和互斥锁。不请求执行任意命令、换算子、发布或修改源码。"
                         "用简短summary与逐任务observations返回结构化建议，不复述所有上下文。\n"
+                        + GUIDANCE + " Cite only this tick's compact summary and selected task identifiers.\n"
                         + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
                     )
                     state["pending"] = {"records": str(call_dir / "codex"), "thread_id": thread_id}
@@ -391,6 +396,11 @@ def tick(store, run_id, codex="codex", *, new_session=False):
                     else:
                         decision = validate_decision(result["response"], plan)
                         report.update(outcome="observed", decision=decision)
+                        if decision["framework_candidates"]:
+                            source = {"role": "supervisor", "record": str((call_dir / "codex/result.json").relative_to(store.root)),
+                                      "summary": str((call_dir / "summary.json").relative_to(store.root))}
+                            state.setdefault("candidate_reports", []).append({
+                                "source": source, "candidates": decision["framework_candidates"]})
                         # Failed/interrupted observations leave the previous
                         # snapshot intact, so an unreported terminal problem
                         # is not silently turned into idle on the next tick.

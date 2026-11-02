@@ -42,6 +42,8 @@ kernel_wiki/
 
 一个算子只存一份完整材料；精度、阶段等维度通过索引交叉引用。稳定 ID 和原库内部相对路径均保留，便于追溯引用和复用整个 `candidate/`。各题还可能附带 `PRECISION.md`、`VARIANTS.md`、`USER_ACCEPTANCE.md` 和许可资料。
 
+`catalog.json` 的 `summary` 是 Wiki 的计算概要，`source_description` 摘自导入的 `problem/metadata.json`，其中的 `〔…〕` 表示 Wiki 校注。核对合法输入时，沿条目的 `paths.shape_range` 查看动态参数域和跨字段约束。`paths.shape_cases` 列出固定用例。
+
 本批次来自 `/Users/hanyong/aka-cuda-operator-library`，于 2026-11-01 导入。除未列入源清单的 `.DS_Store` 缓存外，**1,266 个文件、51,906,145 字节均与源文件一致**。完整性信息见 [IMPORT.json](IMPORT.json)。
 
 ## 命令行检索

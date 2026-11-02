@@ -14,16 +14,20 @@ import unittest
 from unittest.mock import Mock, patch
 
 from .codex_cli import CodexCLI, process_table, terminate_owned, write_json
+from .framework import candidate_report, registry
 from .protocol import RECEIPT, validate_receipt, prompt_for, check_feedback
 from .records import (Store, StateError, artifact_manifest, digest, freeze_inputs,
                       file_digest, read_json, run_check, schema_parts, semantic_digests, tree_manifest)
 from .runner import (DEFAULTS, Runner, bound_review, eligible, make_plan, new_task, publish)
 from .runner import (SEED_POLICY_CHANGES, merge_issues, observe_usage, seed_inputs,
-                     sync_issues, validate_source_bindings, verify_seed_inputs, main)
+                     validate_source_bindings, verify_seed_inputs, main)
 
 
 REPO = Path(__file__).resolve().parents[1]
 FIXTURE = REPO / "schema_template/tools/tests/fixtures/minimal/root.yaml"
+PROPOSAL = {"id": "selector-diagnostics", "category": "extract_tools", "problem": "Synthetic ambiguous diagnostic.",
+            "evidence": ["schema_template/check_yaml.py:1 (synthetic example)"], "proposal": "Identify the selector.",
+            "necessity": "Otherwise any selected task can be sent to fix the wrong node."}
 
 
 class ExtractionTests(unittest.TestCase):
@@ -101,11 +105,13 @@ class ExtractionTests(unittest.TestCase):
                                       for path in work.iterdir() if path.is_file()]
         return value
 
-    def checkpoint(self, state=None, *, gap=False):
+    def checkpoint(self, state=None, *, gap=False, candidates=()):
         state = state or self.state
         work = self.base / ("artifact-" + str(time.monotonic_ns()))
         self.draft(work, gap=gap)
-        return self.store.commit_checkpoint(state, work, self.receipt(state), {"exit_code": 0, "policy": "skip-hardware"})
+        receipt = self.receipt(state)
+        receipt["framework_candidates"] = list(candidates)
+        return self.store.commit_checkpoint(state, work, receipt, {"exit_code": 0, "policy": "skip-hardware"})
 
     def test_checkpoint_commit_is_atomic_and_unaccepted_draft_is_not_recovered(self):
         self.state = self.checkpoint()
@@ -182,6 +188,9 @@ class ExtractionTests(unittest.TestCase):
                     response = owner.review_receipt(state, work, status="complete", gap=True)
                     response["unsupported_claims"] = ["Only supplied synthetic source facts are represented."]
                     response["issues"][0]["blocks"] = []
+                response["framework_candidates"] = [PROPOSAL, {"id": "incomplete"}, PROPOSAL]
+                if role == "reviewer" and state["review_scope"] == "final":
+                    response["framework_candidates"].append({**PROPOSAL, "evidence": ["New final review evidence."]})
                 return {"outcome": "completed", "response": response,
                         "thread_id": "00000000-0000-0000-0000-000000000001", "elapsed_seconds": 1, "usage": {"input_tokens": 10}}
         fake = GapCLI()
@@ -198,7 +207,20 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(state["check"]["exit_code"], 0)
         self.assertEqual(state["check"]["policy"], "skip-hardware")
         self.assertIn("design", schema_parts(self.store.checkpoint(state) / "artifacts")["root"])
-        self.assertTrue(Path(publish(self.store, state)).is_dir())
+        target = Path(publish(self.store, state))
+        self.assertNotIn(PROPOSAL["id"], (target / ".extraction/receipt.json").read_text())
+        self.assertEqual([issue["id"] for issue in state["issues"]], ["missing_material"])
+        groups = candidate_report(self.store, self.plan)
+        self.assertEqual([group["id"] for group in groups], [PROPOSAL["id"]])
+        self.assertIsNone(groups[0]["registered"])
+        reports = groups[0]["reports"]
+        original, followup = reports
+        self.assertEqual(original["candidate"], PROPOSAL)
+        self.assertEqual(len(original["sources"]), 4)
+        self.assertEqual({s["role"] for s in original["sources"]}, {"worker", "reviewer"})
+        self.assertEqual({s["checkpoint"] for s in original["sources"]}, set(state["history"]))
+        self.assertEqual(followup["candidate"]["evidence"], ["New final review evidence."])
+        self.assertEqual(followup["sources"], [original["sources"][-1]])
 
     def test_fundamental_contract_block_is_confirmed_by_independent_review(self):
         owner = self
@@ -364,11 +386,28 @@ class ExtractionTests(unittest.TestCase):
         self.assertIn("read-only reviewer changed artifacts", state["last_error"])
         self.assertEqual(state["checkpoint"], self.state["checkpoint"])
 
+    def test_failed_review_transition_discards_its_candidate(self):
+        state = self.checkpoint()
+        state["phase"] = "reviewer"
+        self.store.save(state)
+        def respond(**kwargs):
+            kwargs["records"].mkdir(parents=True)
+            response = self.review_receipt(state, kwargs["cwd"])
+            response["framework_candidates"] = [PROPOSAL]
+            return {"outcome": "completed", "response": response, "thread_id": "synthetic",
+                    "elapsed_seconds": 0.1, "usage": {}}
+        runner = Runner(self.store, self.plan, Mock(run=respond))
+        with patch.object(runner, "after_review", side_effect=StateError("rejected transition")):
+            result = runner.work(state["key"])
+        self.assertEqual(result["result"], "protocol_failure")
+        self.assertEqual(candidate_report(self.store, self.plan), [])
+
     def test_receipt_path_aliases_still_require_bound_sources_and_exact_quotes(self):
         self.state = self.checkpoint()
         self.state["phase"] = "reviewer"
         work = self.store.checkpoint(self.state) / "artifacts"
         receipt = self.review_receipt(self.state, work)
+        receipt.pop("framework_candidates")  # Receipts from older protocols remain readable.
         source = receipt["source_evidence"][0]["path"]
         prefix = self.baseline["repository_id"] + "@" + self.baseline["snapshot_commit"] + ":"
         for alias in (prefix + source, str(Path(self.baseline["snapshot"]) / source)):
@@ -376,7 +415,7 @@ class ExtractionTests(unittest.TestCase):
             raw["source_evidence"][0]["path"] = alias
             raw["artifact_evidence"][0]["path"] = str(work / raw["artifact_evidence"][0]["path"])
             normalized = validate_receipt(raw, self.state, self.baseline, work, "reviewer")
-            self.assertEqual(normalized, receipt)
+            self.assertEqual(normalized, {**receipt, "framework_candidates": []})
             self.assertEqual(raw["source_evidence"][0]["path"], alias)
         for bad in ("other@commit:" + source, prefix + "../" + source,
                     str(self.repo / source), prefix + source + "::symbol"):
@@ -585,18 +624,17 @@ class ExtractionTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(main(args), 0)
 
-    def test_issue_projection_is_a_patch_and_never_edits_repository(self):
-        original = (self.repo / "schema_extract/ISSUES.md").read_text()
+    def test_ordinary_task_issues_never_enter_framework_ledger(self):
+        root = self.repo / "schema_extract/issues"
+        original = tree_manifest(root)
         merge_issues(self.state, self.receipt(gap=True))
         self.store.save(self.state)
-        patch_path = Path(sync_issues(self.store, self.plan))
-        self.assertTrue(patch_path.is_relative_to(self.store.root))
-        self.assertIn("Synthetic required material is absent", patch_path.read_text())
-        self.assertLess(len(patch_path.read_text()), len(original))
-        self.assertEqual((self.repo / "schema_extract/ISSUES.md").read_text(), original)
+        self.assertEqual(candidate_report(self.store, self.plan), [])
+        self.assertEqual(tree_manifest(root), original)
+        self.assertFalse(any(path.startswith("schema_extract/issues/") for path in self.baseline["files"]))
 
     def stopped_seed_run(self):
-        self.state = self.checkpoint(gap=True)
+        self.state = self.checkpoint(gap=True, candidates=[PROPOSAL])
         merge_issues(self.state, self.receipt(gap=True))
         self.state.update(status="ended", result="draft_with_gaps", reviews={"contract": {"legacy_review": True}})
         self.state["usage"] = {"calls": 1, "reported_tokens": 1234, "elapsed_seconds": 12.5, "unknown_usage_calls": 0}
@@ -607,7 +645,7 @@ class ExtractionTests(unittest.TestCase):
         write_json(directory / "plan.json", old_plan)
         return self.state
 
-    def test_issue_projection_keeps_first_source_facts_after_summary_only_review(self):
+    def test_task_note_keeps_accepted_source_facts_after_summary_only_review(self):
         work = self.base / "origin"
         self.draft(work)
         first = self.receipt(gap=True)
@@ -621,12 +659,43 @@ class ExtractionTests(unittest.TestCase):
         self.store.save(state)
         task = self.store.task_dir(state["key"]) / "task.json"
         original_bytes = task.read_bytes()
-        projection = Path(sync_issues(self.store, self.plan)).read_text()
-        self.assertIn("Retained unchanged.", projection)
-        self.assertIn("Concrete original finding from the fixed source.", projection)
-        self.assertIn("kernel_wiki/test/operators/synthetic/reference.txt:1", projection)
-        self.assertIn(state["checkpoint"], projection)
+        self.assertEqual(candidate_report(self.store, self.plan), [])
+        self.assertEqual(state["issues"][0]["detail"], "Retained unchanged.")
+        record = read_json(self.store.checkpoint(state) / "checkpoint.json")
+        self.assertEqual(record["worker_receipt"]["issues"][0], first["issues"][0])
         self.assertEqual(task.read_bytes(), original_bytes)
+
+    def test_replayed_candidate_respects_archive_and_excludes_orphan_checkpoint(self):
+        state = self.checkpoint(candidates=[PROPOSAL])
+        work = self.store.checkpoint(state) / "artifacts"
+        receipt = self.receipt(state)
+        receipt["framework_candidates"] = [{**PROPOSAL, "id": "unaccepted"}]
+        with patch.object(self.store, "save", side_effect=OSError("interrupt")), self.assertRaises(OSError):
+            self.store.commit_checkpoint(state, work, receipt, {"exit_code": 0})
+        root = self.repo / "schema_extract/issues"
+        pending = root / PROPOSAL["category"] / (PROPOSAL["id"] + ".json")
+        write_json(pending, PROPOSAL)
+        groups = candidate_report(self.store, self.plan)
+        self.assertEqual([g["id"] for g in groups], [PROPOSAL["id"]])
+        self.assertEqual(groups[0]["registered"]["status"], "pending")
+        archive = pending.rename(root / "archive" / pending.name)
+        for outcome in ("declined", "resolved", "partially_adopted"):
+            decision = {"outcome": outcome, "reason": "Synthetic decision and its basis."}
+            if outcome == "partially_adopted":
+                write_json(archive, {**PROPOSAL, "decision": decision})
+                with self.assertRaisesRegex(StateError, "partial decision"):
+                    registry(self.repo)
+                decision.update(adopted="Show current selector.", remaining="Defer selector history.")
+            write_json(archive, {**PROPOSAL, "decision": decision})
+            original = tree_manifest(root)
+            replay = candidate_report(self.store, self.plan)
+            self.assertEqual(replay[0]["registered"]["status"], outcome)
+            self.assertEqual(candidate_report(self.store, self.plan), replay)
+            self.assertFalse(pending.exists())
+            self.assertEqual(original, tree_manifest(root))
+        write_json(pending, PROPOSAL)
+        with self.assertRaisesRegex(StateError, "duplicate"):
+            registry(self.repo)
 
     def test_seed_preserves_draft_usage_and_issue_identity_but_restarts_independent_review(self):
         old = self.stopped_seed_run()
@@ -667,17 +736,14 @@ class ExtractionTests(unittest.TestCase):
             validate_source_bindings(baseline, copy, state["source_bindings"])
         self.assertEqual((self.store.task_dir(old["key"]) / "task.json").read_bytes(), old_task_bytes)
         self.assertEqual(state["usage"]["elapsed_seconds"], 12.5)
-        # Known IDs keep their original ledger identity after a fresh baseline.
-        old_marker = f"<!-- extraction:{old['key']}:missing_material -->"
-        ledger = self.repo / "schema_extract/ISSUES.md"
-        ledger.write_text(ledger.read_text() + "\n" + old_marker + "\nold issue body\n<!-- /extraction -->\n")
+        # A seed retains the local issue's identity, but importing its old
+        # worker receipt is not a second framework proposal in this run.
         updated = self.receipt(state, gap=True)
         updated["issues"][0]["detail"] = "Independently confirmed narrower unsupported hardware claims."
         merge_issues(state, updated, reviewer=True)
         self.store.save(state)
-        patch_text = Path(sync_issues(self.store, plan)).read_text()
-        self.assertIn(old_marker, patch_text)
-        self.assertNotIn(f"<!-- extraction:{state['key']}:missing_material -->", patch_text)
+        self.assertEqual([g["id"] for g in candidate_report(self.store, self.plan)], [PROPOSAL["id"]])
+        self.assertEqual(candidate_report(self.store, plan), [])
         self.assertEqual(state["issues"][0]["ledger_task_key"], old["key"])
 
     def test_seed_rejects_changed_source_or_spec_and_keeps_old_task(self):
