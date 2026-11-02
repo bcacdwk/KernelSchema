@@ -1,4 +1,4 @@
-"""Immutable inputs/checkpoints and the single authoritative task.json record."""
+"""Task records, immutable checkpoints and checks on extracted artifacts."""
 
 from __future__ import annotations
 
@@ -41,6 +41,27 @@ def issue_disposition(issue: dict) -> str:
 
 def read_json(path: Path):
     return json.loads(path.read_text())
+
+
+def optional_json(path):
+    try:
+        return read_json(path)
+    except FileNotFoundError:
+        return None
+
+
+@contextmanager
+def try_lock(path):
+    with path.open("a+") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield None
+            return
+        try:
+            yield handle
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def digest(value) -> str:
@@ -98,8 +119,9 @@ def artifact_manifest(path: Path) -> dict[str, str]:
 
 
 @lru_cache(maxsize=8)
-def parser_for(root: str):
+def parser_for(root: str | None = None):
     """Load the same fixed parser as the checker, under an isolated package name."""
+    root = root or str(Path(__file__).resolve().parents[2])
     source = Path(root) / "schema_template/tools/__init__.py"
     name = "_schema_extract_checker_" + hashlib.sha256(root.encode()).hexdigest()[:16]
     spec = importlib.util.spec_from_file_location(name, source, submodule_search_locations=[str(source.parent)])
@@ -110,7 +132,7 @@ def parser_for(root: str):
 
 
 def schema_parts(path: Path, parser_root: str | None = None) -> dict:
-    parser = parser_for(parser_root or str(Path(__file__).resolve().parents[1]))
+    parser = parser_for(parser_root)
     result = {}
     for item in path.glob("*.yaml"):
         try:
@@ -204,39 +226,6 @@ def check_versions(previous: Path | None, current: Path, parser_root: str | None
                 raise StateError(f"{node}: version changed without a data change")
 
 
-def seed_hardware_placeholder(artifacts: Path, baseline: dict) -> dict:
-    """Replace only the old seed's hardware block; retain all other source text."""
-    root = artifacts / "root.yaml"
-    starter = Path(baseline["snapshot"]) / "schema_template/starter.yaml"
-    parser = parser_for(baseline["snapshot"])
-    before = parser.load(root, "root").value
-    placeholder = parser.load(starter, "starter").value["contract"]["hardware_specification"]
-    text, starter_text = root.read_text(), starter.read_text()
-    block = re.compile(r"(?ms)^  hardware_specification:.*?(?=^\S|^  \S|\Z)")
-    original, replacement = block.search(text), block.search(starter_text)
-    if not original or not replacement or len(block.findall(text)) != 1:
-        raise StateError("seed hardware block does not have the audited block layout")
-    updated = text[:original.start()] + replacement.group() + text[original.end():]
-    version = before.get("meta_data", {}).get("version")
-    if type(version) is not int or version < 1:
-        raise StateError("seed needs a positive root version")
-    changed = before["contract"].get("hardware_specification") != placeholder
-    if changed:
-        updated, count = re.subn(r"(?m)^(  version:\s*)[0-9]+(\s*(?:#.*)?)$",
-                                 lambda match: match[1] + str(version + 1) + match[2], updated)
-        if count != 1:
-            raise StateError("seed root version does not have the audited scalar layout")
-    old_digest = file_digest(root)
-    root.write_text(updated)
-    expected = deepcopy(before)
-    expected["contract"]["hardware_specification"] = placeholder
-    expected["meta_data"]["version"] = version + int(changed)
-    if parser.load(root, "root").value != expected:
-        raise StateError("seed placeholder edit changed non-hardware content")
-    return {"kind": "starter_hardware_placeholder", "file": "root.yaml", "before": old_digest,
-            "after": file_digest(root), "version_before": version, "version_after": version + int(changed)}
-
-
 def invalidate_reviews(state: dict, before: dict | None, after: dict) -> list[str]:
     reviews = state.setdefault("reviews", {})
     invalidated = []
@@ -263,20 +252,31 @@ class Store:
 
     @contextmanager
     def lock(self):
-        with (self.root / ".runner.lock").open("a+") as handle:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise StateError("another runner is active; cancel uses a control request") from error
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+        with try_lock(self.root / ".runner.lock") as handle:
+            if handle is None:
+                raise StateError("another runner is active; cancel uses a control request")
+            yield
 
     def task_dir(self, key):
-        if not re.fullmatch(r"[a-zA-Z0-9_-]+", key):
+        if not isinstance(key, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", key):
             raise StateError("invalid task key")
         return self.root / "tasks" / key
+
+    def run_dir(self, run_id):
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+            raise StateError("invalid run ID")
+        return self.root / "runs" / run_id
+
+    def load_plan(self, run_id):
+        directory = self.run_dir(run_id)
+        plan = read_json(directory / "plan.json")
+        if not isinstance(plan, dict) or plan.get("run_id") != run_id or not isinstance(plan.get("tasks"), list):
+            raise StateError("plan does not identify the selected run")
+        for key in plan["tasks"]:
+            self.task_dir(key)
+        if len(plan["tasks"]) != len(set(plan["tasks"])):
+            raise StateError("plan contains duplicate tasks")
+        return directory, plan
 
     def load(self, key):
         return read_json(self.task_dir(key) / "task.json")
@@ -305,10 +305,11 @@ class Store:
             raise StateError("source manifest does not match bound identity")
         # Calls must use the runner/prompt version named by this baseline too.
         # A code upgrade requires a new explicit plan, never silent continuation.
-        runtime = Path(__file__).resolve().parent
+        runtime = Path(__file__).resolve().parents[2]
         for name, expected in baseline["files"].items() if verify_runtime else ():
             if name.startswith("schema_extract/") and name.endswith(".py"):
-                if file_digest(runtime / Path(name).name) != expected:
+                path = runtime / name
+                if not path.is_file() or file_digest(path) != expected:
                     raise StateError(f"executor/protocol changed since plan: {name}; create a new plan")
         return baseline
 
@@ -401,8 +402,6 @@ class Store:
         clone_artifacts(old / "artifacts", temporary / "artifacts")
         if artifact_manifest(temporary / "artifacts") != seed["files"]:
             raise StateError("seed checkpoint changed during copy")
-        policy_edit = seed_hardware_placeholder(temporary / "artifacts", baseline) if seed.get("policy_update") else None
-        check_versions(old / "artifacts", temporary / "artifacts", baseline["snapshot"])
         check = run_check(baseline, temporary / "artifacts", temporary)
         if check["exit_code"] == 2:
             raise StateError("cannot seed draft: checker did not complete")
@@ -415,8 +414,6 @@ class Store:
         record["dispatches"] = deepcopy(old_state["dispatches"])
         record["semantics"]["dispatches"] = dispatch_digests(old_state["dispatches"])
         record["semantics"]["selection_revision"] = 0
-        if policy_edit:
-            record["policy_edit"] = policy_edit
         write_json(temporary / "checkpoint.json", record)
         seal(temporary)
         os.rename(temporary, parent / checkpoint_id)
@@ -438,101 +435,6 @@ class Store:
                 issue["state"] = "ignored"
         self.save(imported)
         return imported
-
-
-def selected_files(repo: Path, entry: dict, extras: list[str]) -> list[Path]:
-    candidates = {repo / "EXTRACT_SCHEMA.md", repo / "README.md", repo / "schema_template/README.md",
-                  repo / "schema_template/starter.yaml", repo / "schema_template/check_yaml.py"}
-    candidates.update((repo / "schema_docs").glob("*.md"))
-    candidates.update(p for p in (repo / "schema_template/tools").rglob("*.py") if "tests" not in p.parts)
-    candidates.update(p for p in (repo / "schema_extract").glob("*.py")
-                      if not p.name.startswith("test_") and p.name not in {"probe.py", "supervisor.py"})
-    operator = repo / "kernel_wiki" / entry["paths"]["readme"]
-    candidates.update(operator.parent.rglob("*"))
-    batch = repo / "kernel_wiki" / Path(entry["paths"]["readme"]).parts[0]
-    for name in ("README.md", "EVIDENCE.md", "GUIDE.md", "CATALOG.md", "FACETS.md", "IMPORT.json"):
-        if (repo / "kernel_wiki" / name).is_file():
-            candidates.add(repo / "kernel_wiki" / name)
-    for directory in operator.parent.parents:
-        if directory.is_relative_to(batch / "operators") and (directory / "README.md").is_file():
-            candidates.add(directory / "README.md")
-    for name in ("README.md", "CONVENTIONS.md", "PROBLEM_NOTES.md"):
-        if (batch / name).is_file():
-            candidates.add(batch / name)
-    for extra in extras:
-        path = repo / extra
-        if not path.exists():
-            raise StateError(f"missing extra source: {extra}")
-        candidates.update(path.rglob("*") if path.is_dir() else [path])
-    files = []
-    for path in sorted(candidates):
-        if path.is_symlink() or not path.resolve().is_relative_to(repo.resolve()):
-            raise StateError(f"source outside repository or symlink: {path}")
-        if any(part in {".git", "__pycache__"} for part in path.parts) or path.name == ".DS_Store":
-            continue
-        if path.is_file():
-            files.append(path)
-    for name, relative in entry["paths"].items():
-        if not (repo / "kernel_wiki" / relative).exists():
-            raise StateError(f"catalog {name} path is missing: {relative}")
-    return files
-
-
-def freeze_inputs(store: Store, entry: dict, extras: list[str], config: dict, *, seed=None) -> dict:
-    files = {p.relative_to(store.repo).as_posix(): file_digest(p)
-             for p in selected_files(store.repo, entry, extras)}
-    origin = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=store.repo, text=True).strip()
-    # Source references retain the real repository commit when the selected
-    # materials match it. Uncommitted runner/spec text is independently bound by
-    # file digest; it does not rewrite clean kernel provenance.
-    source_names = [name for name in files if name.startswith("kernel_wiki/") or any(
-        name == extra.rstrip("/") or name.startswith(extra.rstrip("/") + "/") for extra in extras)]
-    dirty_sources = []
-    for name in source_names:
-        result = subprocess.run(["git", "show", f"{origin}:{name}"], cwd=store.repo, capture_output=True)
-        if result.returncode or hashlib.sha256(result.stdout).hexdigest() != files[name]:
-            dirty_sources.append(name)
-    identity = {"entry": entry, "files": files, "config": config, "origin_head": origin,
-                "dirty_sources": dirty_sources, "check_policy": "skip-hardware"}
-    if seed is not None:
-        identity["seed"] = seed
-    fingerprint = digest(identity)
-    base = store.root / "inputs" / fingerprint
-    lock = base / "inputs.lock.json"
-    if lock.exists():
-        return read_json(lock)
-    temporary = base.with_name(".building-" + fingerprint + "-" + uuid4().hex[:8])
-    snapshot = temporary / "repo"
-    snapshot.mkdir(parents=True)
-    for name, expected in files.items():
-        target = snapshot / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(store.repo / name, target)
-        if file_digest(target) != expected:
-            raise StateError(f"source changed during snapshot: {name}")
-    commit, repository_id = origin, store.repo.name
-    if dirty_sources:
-        # Only selected dirty source material needs a private referenced commit;
-        # never stage or commit the original workspace or unrelated user edits.
-        env = os.environ.copy()
-        env.update({"GIT_AUTHOR_NAME": "Schema Extract", "GIT_AUTHOR_EMAIL": "schema-extract@localhost",
-                    "GIT_COMMITTER_NAME": "Schema Extract", "GIT_COMMITTER_EMAIL": "schema-extract@localhost",
-                    "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
-        for args in (["init", "-q"], ["add", "--all"],
-                     ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "-qm", "Fixed selected extraction inputs"]):
-            subprocess.run(["git", *args], cwd=snapshot, env=env, check=True, capture_output=True)
-        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=snapshot, text=True).strip()
-        repository_id = "KernelSchemaInputs_" + fingerprint[:12]
-    baseline = {"fingerprint": fingerprint, "identity": identity, "files": files,
-                "origin_repository": str(store.repo), "origin_head": origin,
-                "snapshot": str(base / "repo"), "snapshot_commit": commit,
-                "repository_id": repository_id, "source_ref_kind": "private_snapshot" if dirty_sources else "existing_commit",
-                "created_at": time.time()}
-    write_json(temporary / "inputs.lock.json", baseline)
-    seal(temporary)
-    base.parent.mkdir(parents=True, exist_ok=True)
-    os.rename(temporary, base)
-    return baseline
 
 
 def run_check(baseline: dict, artifacts: Path, records: Path) -> dict:

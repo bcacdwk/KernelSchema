@@ -8,8 +8,8 @@ import subprocess
 import tempfile
 import unittest
 
-from . import reading
-from .protocol import GPU_POLICY, prompt_for, reading_instructions
+from .. import reading
+from ..prompts import GPU_POLICY, check_feedback, prompt_for, reading_instructions
 
 
 class ProtocolTests(unittest.TestCase):
@@ -18,9 +18,9 @@ class ProtocolTests(unittest.TestCase):
             root = Path(temporary).resolve()
             snapshot = root / "source $(touch INJECTED) 'with spaces'"
             workspace = root / "artifacts 'with spaces'"
-            (snapshot / "schema_extract").mkdir(parents=True)
+            (snapshot / "schema_extract/tools").mkdir(parents=True)
             workspace.mkdir()
-            shutil.copyfile(Path(reading.__file__), snapshot / "schema_extract/reading.py")
+            shutil.copyfile(Path(reading.__file__), snapshot / "schema_extract/tools/reading.py")
             content = "真实来源\\\"\r\n" * 100
             (snapshot / "EXTRACT_SCHEMA.md").write_bytes(content.encode())
             instructions = reading_instructions({"snapshot": str(snapshot)}, workspace)
@@ -74,6 +74,26 @@ class ProtocolTests(unittest.TestCase):
         contract.update(stage="contract", review_scope="contract")
         self.assertNotIn("Verified index context", prompt_for(contract, baseline, Path("/work"), "worker", review_context=context))
         self.assertNotIn("Verified index context", prompt_for(contract, baseline, Path("/work"), "reviewer", review_context=context))
+
+
+class CheckFeedbackTests(unittest.TestCase):
+    def test_diagnostic_locations_shorten_without_hiding_actual_values_or_errors(self):
+        raw = {"exit_code": 1, "policy": "skip-hardware", "argv": ["python", "/long/work/root.yaml"],
+               "stderr": '/long/work/root.yaml:3:2\n  contract.field: wrong value\n'
+                         '  Actual: "/long/work/keep-this-literal"\n  See: /fixed/repo/schema_docs/1.contract.algorithm_requirement.md\n\n'
+                         '/long/work/derived.yaml:7:4\n  design.field: missing name\n  Shared root: /long/work/root.yaml\n'}
+        before = deepcopy(raw)
+        compact = check_feedback(raw, {"snapshot": "/fixed/repo"})
+        self.assertEqual(raw, before)
+        self.assertEqual(compact["exit_code"], 1)
+        self.assertEqual(compact["argv"], raw["argv"])
+        for expected in ('root.yaml:3:2', 'derived.yaml:7:4', 'contract.field: wrong value',
+                         'design.field: missing name', 'Actual: "/long/work/keep-this-literal"',
+                         'See: schema_docs/1.contract.algorithm_requirement.md', 'Shared root: root.yaml'):
+            self.assertIn(expected, compact["stderr"])
+        self.assertNotIn("/fixed/repo/schema_docs", compact["stderr"])
+        passed = {"exit_code": 0, "stderr": "Hardware skipped explicitly.\n"}
+        self.assertEqual(check_feedback(passed, {"snapshot": "/fixed/repo"}), passed)
 
 
 if __name__ == "__main__":

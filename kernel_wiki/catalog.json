@@ -219,7 +219,7 @@
       "title": "fp8 scaled gemm",
       "category": "gemm",
       "subcategory": "dense",
-      "summary": "带显式缩放因子的 FP8 普通 GEMM",
+      "summary": "带显式缩放的 FP8 GEMM。接口无 C 输入，写满 m 行并返回调用方的 out，logical_m 只描述输入生成时的行数关系",
       "source_description": "Native matrix multiplication from production-format operands, without batch/bias/outer epilogue adapters. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic.",
       "precision_tags": [
         "fp8"
@@ -770,8 +770,8 @@
       "title": "bf16 grouped gemm masked",
       "category": "gemm",
       "subcategory": "grouped_masked",
-      "summary": "BF16 专家分组 GEMM，只写各组有效前缀",
-      "source_description": "Native masked per-expert GEMM, no conversion into contiguous/PSUM. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic. Masked capacity is prepared input; only each expert active prefix is written. Legacy m is descriptive; group_sizes determine active work.",
+      "summary": "BF16 专家分组 GEMM。合同只允许写各组有效前缀，当前候选按块写回，尾块可能改写未启用的行",
+      "source_description": "Native masked per-expert GEMM, no conversion into contiguous/PSUM. Stored payload/scales and native caller output are unchanged. General source-derived inputs; no serving deployment or measured traffic. Masked capacity is prepared input; only each expert active prefix is written.〔合同要求，当前候选可能写入尾块的非活动行〕 Legacy m is descriptive; group_sizes determine active work.",
       "precision_tags": [
         "bf16"
       ],
@@ -2190,7 +2190,8 @@
         "shape_cases": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/shape_cases.json",
         "shape_range": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/shape_range.json",
         "performance": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/performance/SUMMARY.json",
-        "acceptance": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/performance/CERTIFIED_BEST.json"
+        "acceptance": "aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/performance/CERTIFIED_BEST.json",
+        "annotated_entrypoint": "annotations/mla_expanded_fp8/solution.py"
       }
     },
     {
@@ -2854,7 +2855,7 @@
       "title": "gdn postconv mtp bf16 state fp32",
       "category": "linear_attention",
       "subcategory": null,
-      "summary": "卷积后 GDN 递推与 gated RMSNorm；FP32 检查点",
+      "summary": "卷积后 GDN 递推与 gated RMSNorm。合同允许槽间填充 0 到 65536 个 FP32 元素，当前候选要求首地址 16 字节对齐且槽步长为 4 个元素的倍数",
       "source_description": "Post-convolution GDN decode/MTP: packed BF16 QKV and raw gates feed QK normalization, decay/beta gates, recurrence and gated RMSNorm. Writes caller output and every indexed FP32 checkpoint, selecting the source state from the accepted-token count. D=128 with value/key head ratios 2/3 and the additional H4/HV32 ABI geometry. Convolution and its rolling history are outside this boundary.",
       "precision_tags": [
         "bf16"

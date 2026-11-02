@@ -45,18 +45,18 @@ def registry(repo):
         raise StateError(f"framework issue directory missing: {root}; select the maintained repository with --repo")
     index = {}
     for path in sorted(root.rglob("*.json")):
-        if len(path.relative_to(root).parts) != 2:
-            raise StateError(f"expected one JSON per category or archive: {path}")
         record = read_json(path)
-        category = path.parent.name
-        archived = category == "archive"
+        directories = path.parent.relative_to(root).parts
+        archived = directories[:1] == ("archive",)
         if not isinstance(record, dict):
             raise StateError(f"invalid framework record: {path}")
         proposal = {k: v for k, v in record.items() if k != "decision"}
         if not valid_candidate(proposal) or proposal["id"] != path.stem or path.stem in index:
             raise StateError(f"invalid or duplicate framework identity: {path}")
-        if not archived and (category != record["category"] or "decision" in record):
-            raise StateError(f"wrong pending category or decision: {path}")
+        category = proposal["category"]
+        expected = ("archive", category) if archived else (category,)
+        if directories != expected or (not archived and "decision" in record):
+            raise StateError(f"expected issue under {root.joinpath(*expected)}: {path}")
         if archived:
             decision = record.get("decision")
             if (not isinstance(decision, dict) or decision.get("outcome") not in OUTCOMES

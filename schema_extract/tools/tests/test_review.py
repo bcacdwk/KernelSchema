@@ -9,20 +9,20 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from .codex_cli import write_json
-from .framework import candidate_report
-from .records import StateError, artifact_manifest, digest, parser_for, read_json, review_current, schema_parts
-from .protocol import prompt_for
-from .review_context import build_review_context, field_excerpt
-from .runner import Runner, bound_review, eligible
-from . import test_runner as fixtures
+from ..codex_cli import write_json
+from ..framework import candidate_report
+from ..records import StateError, artifact_manifest, digest, parser_for, read_json, review_current, schema_parts
+from ..prompts import prompt_for
+from ..review_context import build_review_context, field_excerpt
+from ..execution import Runner, bound_review, eligible
+from . import support as fixtures
 
 
 class ReviewTests(unittest.TestCase):
     def setUp(self):
         # Reuse the existing selected-source fixture, not its test methods or
         # any earlier extraction artifacts, schemas, or model conversations.
-        self.f = fixtures.ExtractionTests()
+        self.f = fixtures.ExtractionCase()
         self.f.setUp()
         self.addCleanup(self.f.doCleanups)
         self.dispatches = [{"id": "positive", "parent": "root", "reason": "Positive scalar path."}]
@@ -67,7 +67,7 @@ class ReviewTests(unittest.TestCase):
         receipt = self.f.review_receipt(state, work)
         receipt["dispatches"] = deepcopy(state["dispatches"])
         receipt["summary"] = "Independent " + scope + " semantic review is complete."
-        state["reviews"][scope] = bound_review(state, self.f.baseline, receipt, self.f.store.checkpoint(state))
+        state["reviews"][scope] = bound_review(state, receipt, self.f.store.checkpoint(state))
 
     def test_context_is_a_small_current_projection_and_missing_review_refuses_reuse(self):
         state, work = self.reviewed(include_final=True)
@@ -416,7 +416,7 @@ class ReviewTests(unittest.TestCase):
         for target in ("build_review_context", "prompt_for"):
             with self.subTest(target=target):
                 runner = Runner(self.f.store, self.f.plan, cli)
-                with patch("schema_extract.runner." + target, side_effect=StateError("injected preparation failure")), patch("builtins.print"):
+                with patch("schema_extract.tools.execution." + target, side_effect=StateError("injected preparation failure")), patch("builtins.print"):
                     runner.run()
                 stopped = self.f.store.load(state["key"])
                 self.assertEqual((stopped["status"], stopped["reason"]), ("stopped", "runner_failure"))
@@ -449,7 +449,7 @@ class ReviewTests(unittest.TestCase):
                     write_json(runner.control, {"mode": mode})
                     return prompt
 
-                with patch("schema_extract.runner.prompt_for", side_effect=prepare):
+                with patch("schema_extract.tools.execution.prompt_for", side_effect=prepare):
                     stopped = runner.work(state["key"])
                 cli.run.assert_not_called()
                 self.assertEqual((stopped["status"], stopped["reason"]), ("stopped", mode))

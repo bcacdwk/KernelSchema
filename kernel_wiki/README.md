@@ -44,6 +44,8 @@ kernel_wiki/
 
 `catalog.json` 的 `summary` 是 Wiki 的计算概要，`source_description` 摘自导入的 `problem/metadata.json`，其中的 `〔…〕` 表示 Wiki 校注。核对合法输入时，沿条目的 `paths.shape_range` 查看动态参数域和跨字段约束。`paths.shape_cases` 列出固定用例。
 
+若条目有 `paths.annotated_entrypoint`，可直接阅读修正了注释的源码。它与 `paths.entrypoint` 的导入原件逐行对应。`catalog.py check` 核对两者的 Python 语法树和内嵌 CUDA 的非注释内容，提取计划随本算子冻结两份文件。[展开式 FP8 MLA 校注版](annotations/mla_expanded_fp8/solution.py)
+
 本批次来自 `/Users/hanyong/aka-cuda-operator-library`，于 2026-11-01 导入。除未列入源清单的 `.DS_Store` 缓存外，**1,266 个文件、51,906,145 字节均与源文件一致**。完整性信息见 [IMPORT.json](IMPORT.json)。
 
 ## 命令行检索

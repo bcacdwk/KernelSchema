@@ -10,7 +10,10 @@
 | --- | --- | --- |
 | [普通 GEMM](aka-cuda-operators-20261030/operators/gemm/dense/README.md) | 单次矩阵乘法；各题分别规定输出、缩放、可选 C 与别名 | 不同输入格式、块缩放与普通矩阵乘调度 |
 | [分组 GEMM](aka-cuda-operators-20261030/operators/gemm/grouped/README.md) | 多组矩阵乘，连续 / PSUM 或 indptr 分组 | 多组任务的工作分配；不能假定每题使用同一种分组 ABI |
-| [带掩码分组 GEMM](aka-cuda-operators-20261030/operators/gemm/grouped_masked/README.md) | 保留每专家物理容量，只写各组有效前缀 | 容量与有效工作量的区别、无效区域保护 |
+| [带掩码分组 GEMM](aka-cuda-operators-20261030/operators/gemm/grouped_masked/README.md) | 每个专家保留物理容量，合同规定只写各组有效前缀 | 容量、有效工作量及候选的实际写回边界 |
+
+- `bf16_grouped_gemm_masked` 的合同要求尾部存储保持原值，参考实现也只写 `d[e, :masked_m[e]]`。当前候选的三条默认路径按整块写回。当一个专家只启用 1 行时，最后一块里的其他行也可能被改写。输入工具的数值比较视图只取有效前缀。[写区合同](aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/problem/metadata.json) · [参考实现](aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/problem/reference.py) · [候选写回](aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/candidate/solution.py)
+- `fp8_scaled_gemm` 的导入元数据提到可选 C 别名。公开接口没有 C 参数，参考实现把结果写入并返回同一个 `out`。提供 `logical_m` 时，任务要求 `m = 4 * ceil(logical_m / 4)`。例如固定用例 `logical_m=1, m=4` 会写满 4 行。[输入范围](aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/problem/shape_range.json) · [输入生成](aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/problem/input.py) · [参考实现](aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/problem/reference.py)
 
 格式覆盖如下。表中的空缺表示本批次没有该组合，不能据此推断硬件不支持。
 
@@ -49,6 +52,8 @@
 
 多数注意力合同从已准备的 Q/KV、scale 和索引开始，projection、RoPE、cache writer 或 indexer 在边界外。上下文长度也不等于稀疏算子实际处理的 token 数。阶段标签只帮助找题，不能替代 shape_range 中的相关约束，也不能当作整个动态域的验收证明。
 
+展开式 FP8 MLA 的普通路径按 256 缩放 softmax 权重。首个 tile 建立行最大值，此后只有以 log2 为单位的增幅超过 0.75 才更新。主机从本次调用的长度构造调度表，短行重算用独立的共享内存。下面的校注版与导入原件使用同一行号。[修正注释的源码](annotations/mla_expanded_fp8/solution.py) · [导入原件](aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py)
+
 ## GDN / KDA：融合边界与状态是两条独立轴
 
 | 入口系列 | 计算边界 | 状态版本 |
@@ -60,6 +65,8 @@
 | `kda_raw_prefill_state_bf16` | 原始门控、QK L2 归一化、逐通道衰减和递推 | 原位 BF16 终态与可选周期检查点 |
 
 全部入口见 [线性注意力目录](aka-cuda-operators-20261030/operators/linear_attention/README.md)。`state_bf16` 不能被理解为所有中间量、初态和终态都用 BF16；例如 GDN prefill 的输出终态另有约定。decode / MTP 的 accepted-token、null request、状态索引和未写区域也是算法合同的一部分。
+
+`gdn_postconv_mtp_bf16_state_fp32` 的任务允许相邻状态槽之间填充 0 到 65536 个 FP32 元素。候选入口要求首地址按 16 字节对齐，槽步长 `HV*128*128 + state_slot_padding` 必须是 4 的倍数。例如填充 1 个元素符合任务域，但会被这个入口拒绝。[任务范围](aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/problem/shape_range.json) · [槽步长构造](aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/problem/input.py) · [候选入口检查](aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/candidate/launch.cu)
 
 ## 每个算子的阅读顺序
 

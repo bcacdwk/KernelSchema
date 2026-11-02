@@ -1,0 +1,16 @@
+{
+  "id": "gdn-slot-padding-coverage",
+  "category": "kernel_wiki",
+  "problem": "GDN 的 FP32 状态槽填充域比当前候选所接受的布局更宽。",
+  "evidence": [
+    "历史来源 candidate_padding_mismatch。gdn_postconv_mtp_bf16_state_fp32/problem/shape_range.json:55–59 允许 0 到 65536 个填充元素。problem/input.py:233–236 建立相应步长，candidate/launch.cu:194–198 要求槽首地址和步长满足 16 字节对齐。"
+  ],
+  "proposal": "区分题目域和候选可接受的对齐布局。要覆盖全部合法填充量需在上游支持未对齐槽。",
+  "necessity": "调用方对合法的 padding=1 会遇到入口拒绝。",
+  "decision": {
+    "outcome": "partially_adopted",
+    "reason": "已在目录和阅读指南记录完整填充域、候选对齐检查和一个合法但被拒绝的例子。",
+    "adopted": "明确 FP32 槽步长必须为 4 个元素的倍数，并保留任务原有的填充域。",
+    "remaining": "支持其余填充量需修改上游候选的读取实现，本轮保留该覆盖限制。"
+  }
+}

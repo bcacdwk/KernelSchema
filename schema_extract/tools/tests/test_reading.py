@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from . import reading
+from .. import reading
 
 
 class ReadingTests(unittest.TestCase):

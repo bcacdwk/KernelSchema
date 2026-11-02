@@ -56,7 +56,7 @@ def field_excerpt(path: Path, fields: tuple[str, ...], *, include_text=False, pa
     if include_text:
         # AST tags above are used only to locate source spans. The fixed
         # checker's parser is the sole authority for scalar and merge values.
-        parser = parser_for(parser_root or str(Path(__file__).resolve().parents[1]))
+        parser = parser_for(parser_root)
         value = parser.load(path, path.stem).value
         for field in fields:
             value = value[field]

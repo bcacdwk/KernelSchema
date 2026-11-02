@@ -15,7 +15,7 @@
 | [bf16_gemm](aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm/README.md) | BF16 A/B；D = αABᵀ + C，可选 C 与 D 别名 | BF16 | — | REFERENCE；采样验收通过 |
 | [bf16_nvfp4_gemm](aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/README.md) | BF16 × NVFP4 普通 GEMM，原生载荷与缩放布局 | BF16 / NVFP4 | — | AKA；原包认证 |
 | [fp8_mxfp4_gemm](aka-cuda-operators-20261030/operators/gemm/dense/fp8_mxfp4_gemm/README.md) | FP8 × MXFP4 普通 GEMM，含可选 C 累加 | FP8 / MXFP4 | — | REFERENCE；采样验收通过 |
-| [fp8_scaled_gemm](aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/README.md) | 带显式缩放因子的 FP8 普通 GEMM | FP8 | — | REFERENCE；采样验收通过 |
+| [fp8_scaled_gemm](aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/README.md) | 带显式缩放的 FP8 GEMM。接口无 C 输入，写满 m 行并返回调用方的 out，logical_m 只描述输入生成时的行数关系 | FP8 | — | REFERENCE；采样验收通过 |
 | [mxfp4_gemm](aka-cuda-operators-20261030/operators/gemm/dense/mxfp4_gemm/README.md) | MXFP4 普通 GEMM，含可选 C 累加 | MXFP4 | — | AKA；原包认证 |
 | [mxfp8_gemm](aka-cuda-operators-20261030/operators/gemm/dense/mxfp8_gemm/README.md) | MXFP8 普通 GEMM，含可选 C 累加 | MXFP8 | — | AKA；原包认证 |
 
@@ -33,7 +33,7 @@
 
 | 算子 | 计算边界 | 格式 / 状态 | 阶段 | 来源 / 验收 |
 | --- | --- | --- | --- | --- |
-| [bf16_grouped_gemm_masked](aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/README.md) | BF16 专家分组 GEMM，只写各组有效前缀 | BF16 | — | AKA；原包认证 |
+| [bf16_grouped_gemm_masked](aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/README.md) | BF16 专家分组 GEMM。合同只允许写各组有效前缀，当前候选按块写回，尾块可能改写未启用的行 | BF16 | — | AKA；原包认证 |
 | [fp8_mxfp4_grouped_gemm_masked](aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/README.md) | FP8 × MXFP4 专家分组 GEMM，只写有效前缀 | FP8 / MXFP4 | — | AKA；原包认证 |
 | [mxfp4_grouped_gemm_masked](aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp4_grouped_gemm_masked/README.md) | MXFP4 专家分组 GEMM，只写有效前缀 | MXFP4 | — | REFERENCE；采样验收通过 |
 | [mxfp8_grouped_gemm_masked](aka-cuda-operators-20261030/operators/gemm/grouped_masked/mxfp8_grouped_gemm_masked/README.md) | MXFP8 专家分组 GEMM，只写有效前缀 | MXFP8 | — | REFERENCE；采样验收通过 |
@@ -87,7 +87,7 @@
 | [gdn_conv_mtp_bf16_state_fp32](aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_fp32/README.md) | 卷积 → SiLU → GDN 递推 → gated RMSNorm；FP32 检查点 | BF16；state FP32 | decode / mtp | REFERENCE；采样验收通过 |
 | [gdn_decode_core_bf16_state_fp32](aka-cuda-operators-20261030/operators/linear_attention/gdn_decode_core_bf16_state_fp32/README.md) | 普通 decode ABI：卷积、GDN 递推与原位 gated RMSNorm | BF16；state FP32 | decode | AKA；原包认证 |
 | [gdn_postconv_mtp_bf16_state_bf16](aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_bf16/README.md) | 卷积后 GDN 递推与 gated RMSNorm；BF16 检查点 | BF16；state BF16 | decode / mtp | AKA；原包认证 |
-| [gdn_postconv_mtp_bf16_state_fp32](aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/README.md) | 卷积后 GDN 递推与 gated RMSNorm；FP32 检查点 | BF16；state FP32 | decode / mtp | REFERENCE；采样验收通过 |
+| [gdn_postconv_mtp_bf16_state_fp32](aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/README.md) | 卷积后 GDN 递推与 gated RMSNorm。合同允许槽间填充 0 到 65536 个 FP32 元素，当前候选要求首地址 16 字节对齐且槽步长为 4 个元素的倍数 | BF16；state FP32 | decode / mtp | REFERENCE；采样验收通过 |
 | [gdn_prefill_bf16_state_bf16](aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/README.md) | GDN packed prefill；只读 BF16 初态，可选新 FP32 终态 | BF16；state BF16 | prefill | AKA；原包认证 |
 | [gdn_prefill_bf16_state_fp32](aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_fp32/README.md) | GDN packed prefill；只读 FP32 初态，可选新 FP32 终态 | BF16；state FP32 | prefill | REFERENCE；采样验收通过；**待回执** |
 | [kda_raw_prefill_state_bf16](aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/README.md) | KDA 原始门控 prefill；逐通道衰减、BF16 终态与检查点 | BF16；state BF16 | prefill | REFERENCE；采样验收通过 |

@@ -169,10 +169,15 @@ class StructureTests(TaskCase):
         }))
 
     def test_work_dimensions_and_assignment(self):
-        def partition(d):
-            put(d, PHASE + ("decomposition", "partition"), {"x": {"size": "N", "tile": 1, "range": [1, None]}})
+        def partition(d, size="N", tile=1, bounds=(1, None)):
+            put(d, PHASE + ("decomposition", "partition"), {"x": {"size": size, "tile": tile, "range": list(bounds)}})
             put(d, PHASE + ("schedule", "worktile_order"), [{"by": "x", "direction": "ascending"}])
         self.assert_valid(partition)
+        self.assert_valid(lambda d: partition(d, bounds=(0, None)))
+        self.assert_valid(lambda d: partition(d, size=0, bounds=(0, 0)))
+        for fields in ({"size": -1}, {"bounds": (-1, None)}, {"bounds": (0, -1)}, {"tile": 0}):
+            with self.subTest(fields=fields):
+                self.assert_invalid(lambda d: partition(d, **fields), "literal must be >=")
         self.assert_valid(lambda d: (partition(d), put(d, PHASE + ("schedule", "worktile_order"),
             [{"by": ["x"], "group": 8, "direction": "ascending"}, {"by": "x", "direction": "descending"}])))
         self.assert_invalid(lambda d: (partition(d), drop(d, PHASE + ("schedule", "worktile_order"))))

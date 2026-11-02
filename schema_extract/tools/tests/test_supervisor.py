@@ -7,10 +7,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from .codex_cli import write_json
-from .framework import candidate_report
-from .records import StateError, Store, read_json
-from . import supervisor
+from ..codex_cli import write_json
+from ..framework import candidate_report
+from ..records import StateError, Store, read_json
+from .. import scheduling, supervisor
 
 
 THREAD = "11111111-1111-4111-8111-111111111111"
@@ -39,6 +39,9 @@ class SupervisorTests(unittest.TestCase):
         resolve = patch.object(supervisor, "executable_path", return_value="/synthetic/bin/codex")
         resolve.start()
         self.addCleanup(resolve.stop)
+        scheduler_path = patch.object(scheduling, "executable_path", return_value="/synthetic/bin/codex")
+        scheduler_path.start()
+        self.addCleanup(scheduler_path.stop)
 
     def result(self, action="observe"):
         return {"outcome": "completed", "thread_id": THREAD, "termination": {"confirmed": True},
@@ -150,7 +153,7 @@ class SupervisorTests(unittest.TestCase):
             self.assertFalse(kwargs["cancel"]())
             return self.result("start_queued")
 
-        with patch.object(supervisor, "CodexCLI") as cli, patch.object(supervisor.subprocess, "Popen") as spawn:
+        with patch.object(supervisor, "CodexCLI") as cli, patch.object(scheduling.subprocess, "Popen") as spawn:
             cli.return_value.run.side_effect = decide
             result = supervisor.tick(self.store, "selected")
         self.assertEqual(result["runner"]["outcome"], "control_requested")
@@ -208,7 +211,7 @@ class SupervisorTests(unittest.TestCase):
     def test_queued_dispatch_uses_existing_runner_and_only_records_a_request(self):
         (self.directory / "supervisor").mkdir()
         before = deepcopy(self.store.load(self.task["key"]))
-        with patch.object(supervisor.subprocess, "Popen") as spawn:
+        with patch.object(scheduling.subprocess, "Popen") as spawn:
             spawn.return_value.pid = 12345
             result = supervisor.start_runner(self.store, "selected", "/synthetic/bin/codex")
         args, kwargs = spawn.call_args
@@ -216,8 +219,8 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(args[0][1:3], ["-m", "schema_extract"])
         self.assertIn("/synthetic/bin/codex", args[0])
         self.assertTrue(kwargs["start_new_session"])
-        self.assertEqual(kwargs["stdin"], supervisor.subprocess.DEVNULL)
-        self.assertEqual(kwargs["stderr"], supervisor.subprocess.STDOUT)
+        self.assertEqual(kwargs["stdin"], scheduling.subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], scheduling.subprocess.STDOUT)
         self.assertEqual(result["outcome"], "requested")
         self.assertEqual(self.store.load(self.task["key"]), before)
         spawn.return_value.wait.assert_not_called()
@@ -259,37 +262,37 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(read_json(directory / "state.json")["thread_id"], THREAD)
 
     def test_schedule_is_periodic_without_immediate_or_persistent_execution(self):
-        config = supervisor.schedule_config(self.store, "selected", "/synthetic/bin/codex")
-        plist = supervisor.launchd_plist(config)
+        config = scheduling.schedule_config(self.store, "selected", "/synthetic/bin/codex")
+        plist = scheduling.launchd_plist(config)
         self.assertEqual(plist["StartInterval"], 900)
         self.assertFalse(plist["RunAtLoad"])
         self.assertFalse(plist["KeepAlive"])
         self.assertEqual(set(plist["EnvironmentVariables"]), {"PATH"})
         self.assertTrue(Path(plist["ProgramArguments"][0]).is_absolute())
         self.assertIn("/synthetic/bin/codex", plist["ProgramArguments"])
-        self.assertNotEqual(supervisor.schedule_label(self.store, "selected"), supervisor.schedule_label(self.store, "other"))
+        self.assertNotEqual(scheduling.schedule_label(self.store, "selected"), scheduling.schedule_label(self.store, "other"))
 
     def test_schedule_changes_wait_for_active_tick_and_exclude_new_ticks(self):
         directory = self.directory / "supervisor"
         directory.mkdir()
         with patch.object(supervisor.sys, "platform", "darwin"), \
                 patch.object(Path, "home", return_value=self.store.repo / "home"), \
-                patch.object(supervisor, "launchd_state", return_value={"loaded": True}) as query, \
-                patch.object(supervisor.subprocess, "run") as launchctl:
-            config = supervisor.schedule_config(self.store, "selected", "/synthetic/bin/codex")
+                patch.object(scheduling, "launchd_state", return_value={"loaded": True}) as query, \
+                patch.object(scheduling.subprocess, "run") as launchctl:
+            config = scheduling.schedule_config(self.store, "selected", "/synthetic/bin/codex")
             config["outcome"] = "enabled"
             write_json(directory / "schedule.json", config)
             plist = Path(config["plist"])
             plist.parent.mkdir(parents=True)
-            plist.write_bytes(supervisor.plistlib.dumps(supervisor.launchd_plist(config)))
+            plist.write_bytes(scheduling.plistlib.dumps(scheduling.launchd_plist(config)))
             original = plist.read_bytes()
-            launchctl.return_value = supervisor.subprocess.CompletedProcess([], 0, stderr="")
+            launchctl.return_value = scheduling.subprocess.CompletedProcess([], 0, stderr="")
             with supervisor.try_lock(directory / ".tick.lock") as active:
                 self.assertIsNotNone(active)
                 for enable in (False, True):
                     with self.subTest(active=True, enable=enable):
                         with self.assertRaisesRegex(StateError, "tick is active"):
-                            supervisor.schedule(self.store, "selected", "/synthetic/bin/codex", enable=enable)
+                            scheduling.schedule(self.store, "selected", "/synthetic/bin/codex", enable=enable)
             query.assert_not_called()
             launchctl.assert_not_called()
             self.assertEqual(read_json(directory / "schedule.json"), config)
@@ -297,12 +300,12 @@ class SupervisorTests(unittest.TestCase):
 
             def update(command, **kwargs):
                 self.assertEqual(supervisor.tick(self.store, "selected")["outcome"], "tick_already_active")
-                return supervisor.subprocess.CompletedProcess(command, 0, stderr="")
+                return scheduling.subprocess.CompletedProcess(command, 0, stderr="")
 
             launchctl.side_effect = update
             for enable, outcome in ((True, "enabled"), (False, "disabled")):
                 with self.subTest(active=False, enable=enable):
-                    result = supervisor.schedule(self.store, "selected", "/synthetic/bin/codex", enable=enable)
+                    result = scheduling.schedule(self.store, "selected", "/synthetic/bin/codex", enable=enable)
                     self.assertEqual(result["outcome"], outcome)
             self.assertEqual([call.args[0][1] for call in launchctl.call_args_list], ["bootout", "bootstrap", "bootout"])
             self.assertFalse(plist.exists())

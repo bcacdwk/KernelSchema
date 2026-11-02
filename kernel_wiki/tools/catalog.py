@@ -5,6 +5,7 @@ The source snapshot is immutable. `render` emits an apply_patch patch for derive
 indexes; `check` checks freshness, links, and every imported file's SHA-256.
 """
 import argparse
+import ast
 from collections import Counter
 import hashlib
 import json
@@ -47,7 +48,7 @@ STAGES = ("prefill", "prefix", "decode", "mtp")
 NOTES = {
     "bf16_gemm": "BF16 A/B；D = αABᵀ + C，可选 C 与 D 别名",
     "bf16_nvfp4_gemm": "BF16 × NVFP4 普通 GEMM，原生载荷与缩放布局",
-    "fp8_scaled_gemm": "带显式缩放因子的 FP8 普通 GEMM",
+    "fp8_scaled_gemm": "带显式缩放的 FP8 GEMM。接口无 C 输入，写满 m 行并返回调用方的 out，logical_m 只描述输入生成时的行数关系",
     "fp8_mxfp4_gemm": "FP8 × MXFP4 普通 GEMM，含可选 C 累加",
     "mxfp4_gemm": "MXFP4 普通 GEMM，含可选 C 累加",
     "mxfp8_gemm": "MXFP8 普通 GEMM，含可选 C 累加",
@@ -56,7 +57,7 @@ NOTES = {
     "fp8_mxfp4_grouped_gemm": "FP8 × MXFP4 M 分组连续 / PSUM GEMM",
     "mxfp4_grouped_gemm": "MXFP4 M 分组连续 / PSUM GEMM",
     "mxfp8_grouped_gemm": "MXFP8 M 分组连续 / PSUM GEMM",
-    "bf16_grouped_gemm_masked": "BF16 专家分组 GEMM，只写各组有效前缀",
+    "bf16_grouped_gemm_masked": "BF16 专家分组 GEMM。合同只允许写各组有效前缀，当前候选按块写回，尾块可能改写未启用的行",
     "fp8_mxfp4_grouped_gemm_masked": "FP8 × MXFP4 专家分组 GEMM，只写有效前缀",
     "mxfp4_grouped_gemm_masked": "MXFP4 专家分组 GEMM，只写有效前缀",
     "mxfp8_grouped_gemm_masked": "MXFP8 专家分组 GEMM，只写有效前缀",
@@ -84,7 +85,7 @@ NOTES = {
     "gdn_conv_mtp_bf16_state_bf16": "卷积 → SiLU → GDN 递推 → gated RMSNorm；BF16 检查点",
     "gdn_conv_mtp_bf16_state_fp32": "卷积 → SiLU → GDN 递推 → gated RMSNorm；FP32 检查点",
     "gdn_postconv_mtp_bf16_state_bf16": "卷积后 GDN 递推与 gated RMSNorm；BF16 检查点",
-    "gdn_postconv_mtp_bf16_state_fp32": "卷积后 GDN 递推与 gated RMSNorm；FP32 检查点",
+    "gdn_postconv_mtp_bf16_state_fp32": "卷积后 GDN 递推与 gated RMSNorm。合同允许槽间填充 0 到 65536 个 FP32 元素，当前候选要求首地址 16 字节对齐且槽步长为 4 个元素的倍数",
     "gdn_decode_core_bf16_state_fp32": "普通 decode ABI：卷积、GDN 递推与原位 gated RMSNorm",
     "gdn_prefill_bf16_state_bf16": "GDN packed prefill；只读 BF16 初态，可选新 FP32 终态",
     "gdn_prefill_bf16_state_fp32": "GDN packed prefill；只读 FP32 初态，可选新 FP32 终态",
@@ -127,6 +128,10 @@ def build():
         meta = read(directory / "problem/metadata.json")
         note = NOTES[name]
         source_description = meta["description"].split("\n\n", 1)[0]
+        if name == "bf16_grouped_gemm_masked":
+            source_description = source_description.replace(
+                "only each expert active prefix is written.",
+                "only each expert active prefix is written.〔合同要求，当前候选可能写入尾块的非活动行〕")
         if name in {"mla_expanded_bf16", "mla_expanded_fp8"}:
             # Mark only the superseded clause in the imported excerpt. The
             # surrounding scope, lengths and optional outputs remain searchable.
@@ -154,6 +159,8 @@ def build():
             "shape_range": "problem/shape_range.json", "performance": "performance/SUMMARY.json",
         }.items()}
         paths["acceptance"] = f"{BATCH}/{op['performance']['record']}"
+        if name == "mla_expanded_fp8":
+            paths["annotated_entrypoint"] = "annotations/mla_expanded_fp8/solution.py"
         for key, filename in [("precision", "PRECISION.md"), ("variants", "VARIANTS.md"),
                               ("user_acceptance", "USER_ACCEPTANCE.md")]:
             if (directory / filename).is_file():
@@ -248,6 +255,22 @@ def products(catalog):
             "CATALOG.md": render_catalog(catalog), "FACETS.md": render_facets(catalog)}
 
 
+def annotation_program(path):
+    """Compare executable syntax and line positions in the two MLA listings."""
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    if ast.get_docstring(tree, clean=False) is not None:
+        del tree.body[0]
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "_CUDA_SRC" and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            # Ignore CUDA // prose only after an unquoted prefix, retaining the
+            # prefix, newlines, quoted instructions and backslash continuations.
+            node.value.value = re.sub(r"""(?m)^([^/'"\n]*//)[^\\\n]*$""", r"\1", node.value.value)
+    return len(source.splitlines()), ast.dump(tree, include_attributes=True)
+
+
 def check(catalog):
     for name, expected in products(catalog).items():
         if not (ROOT / name).is_file() or (ROOT / name).read_text(encoding="utf-8") != expected:
@@ -274,6 +297,10 @@ def check(catalog):
         for target in entry["paths"].values():
             if not (ROOT / target).exists():
                 raise ValueError(f"Missing catalog target: {target}")
+        paths = entry["paths"]
+        if ("annotated_entrypoint" in paths and
+                annotation_program(ROOT / paths["entrypoint"]) != annotation_program(ROOT / paths["annotated_entrypoint"])):
+            raise ValueError(f"Annotated source differs in executable content or line positions: {entry['id']}")
     for doc in ROOT.rglob("*.md"):
         text = re.sub(r"```.*?```", "", doc.read_text(encoding="utf-8"), flags=re.S)
         for target in re.findall(r"\]\(([^)]+)\)", text):
@@ -381,6 +408,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, KeyError, OSError) as error:
+    except (ValueError, KeyError, OSError, SyntaxError) as error:
         print(f"catalog: {error}", file=sys.stderr)
         sys.exit(1)
