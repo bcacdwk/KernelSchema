@@ -14,7 +14,8 @@ from ..framework import candidate_report
 from ..records import StateError, artifact_manifest, digest, parser_for, read_json, review_current, schema_parts
 from ..prompts import prompt_for
 from ..review_context import build_review_context, field_excerpt
-from ..execution import Runner, bound_review, eligible
+from ..execution import Runner, bound_review, eligible, request_revision
+from ..planning import make_plan
 from . import support as fixtures
 
 
@@ -68,6 +69,59 @@ class ReviewTests(unittest.TestCase):
         receipt["dispatches"] = deepcopy(state["dispatches"])
         receipt["summary"] = "Independent " + scope + " semantic review is complete."
         state["reviews"][scope] = bound_review(state, receipt, self.f.store.checkpoint(state))
+
+    def test_tolerance_only_correction_focuses_but_does_not_approve_nodes(self):
+        state, work = self.reviewed(include_final=True)
+        store, baseline = self.f.store, self.f.baseline
+        fix = {"impact": "contract", "correction": "transcription",
+               "issues": [{"kind": "transcription", "disposition": "fix", "evidence": ["source"]}]}
+        request_revision(state, fix, store.checkpoint(state))
+        self.edit_node(work, "root", lambda n: n["contract"]["algorithm_requirement"]["golden_reference"]["tolerance"].update(Y="corrected predicate"))
+        state = store.commit_checkpoint(state, work, self.receipt(state), {"exit_code": 0})
+        self.add_review(state, work, "contract")
+        state.pop("revision_request")
+        state.update(phase="reviewer", stage="node", node="positive", review_scope="positive")
+        ctx = build_review_context(store, state, baseline, work, "reviewer")
+        self.assertEqual((ctx["before"], ctx["after"]), ({"Y": "exact"}, {"Y": "corrected predicate"}))
+        self.assertIn("TOLERANCE CHANGE REVIEW", prompt_for(state, baseline, work, "reviewer", review_context=ctx))
+        self.assertNotIn("positive", state["reviews"])
+        self.assertFalse(eligible(store, state))
+        self.edit_node(work, "positive", lambda n: n["design"]["math_reshape"].update(thesis="A changed design."))
+        state = store.commit_checkpoint(state, work, self.receipt(state), {"exit_code": 0})
+        self.assertIsNone(build_review_context(store, state, baseline, work, "reviewer"))
+
+    def test_seed_keeps_review_context_only_for_identical_semantic_inputs(self):
+        state, _ = self.reviewed(include_final=True)
+        state.update(status="ended", result="ready")
+        self.f.store.save(state)
+        run = self.f.store.run_dir("source")
+        run.mkdir(parents=True)
+        write_json(run / "plan.json", {**self.f.plan, "run_id": "source"})
+        extra = self.f.repo / "extra.txt"
+        extra.write_text("New source evidence.\n")
+        for name, extras in [("same", []), ("changed", [extra.name])]:
+            plan = make_plan(self.f.store, ["synthetic"], self.f.base / name, self.f.base / "out", extras,
+                             self.f.config, name, seed_run="source")
+            imported = self.f.store.load(plan["tasks"][0])
+            self.assertEqual(imported["reviews"], {})
+            if extras:
+                self.assertNotIn("node_review_basis", imported)
+            else:
+                self.assertEqual(set(imported["node_review_basis"]["reviews"]), {"root", "positive"})
+
+    def test_tolerance_and_another_contract_change_require_full_review(self):
+        state, work = self.reviewed()
+        store, baseline = self.f.store, self.f.baseline
+        fix = {"impact": "contract", "correction": "transcription",
+               "issues": [{"kind": "transcription", "disposition": "fix", "evidence": ["source"]}]}
+        request_revision(state, fix, store.checkpoint(state))
+        self.edit_node(work, "root", lambda n: n["contract"]["algorithm_requirement"]["golden_reference"].update(
+            tolerance={"Y": "changed"}, gap="Another change to the reference contract."))
+        state = store.commit_checkpoint(state, work, self.receipt(state), {"exit_code": 0})
+        self.add_review(state, work, "contract")
+        state.pop("revision_request")
+        state.update(phase="reviewer", stage="node", node="positive", review_scope="positive")
+        self.assertIsNone(build_review_context(store, state, baseline, work, "reviewer"))
 
     def test_context_is_a_small_current_projection_and_missing_review_refuses_reuse(self):
         state, work = self.reviewed(include_final=True)

@@ -1,6 +1,8 @@
 """Structured stage receipts and source-evidence validation."""
 
+from bisect import bisect_left
 from copy import deepcopy
+import json
 from pathlib import Path
 import re
 
@@ -15,6 +17,7 @@ def obj(properties):
 
 TEXT = {"type": "string"}
 TEXTS = {"type": "array", "items": TEXT}
+RELATIVE_TO = re.compile(r'"relative_to"\s*:\s*("(?:[^"\\]|\\.)*")')
 EVIDENCE = obj({"path": {"type": "string", "description": "Plain relative file path: source_evidence is relative to the fixed repository; artifact_evidence to the workspace. No absolute path, repository@commit prefix or line suffix."},
                 "line_start": {"type": "integer"}, "line_end": {"type": "integer"},
                 "quote": {"type": "string", "description": "Exact substring within the cited lines. Prefer a short single-line excerpt; preserve whitespace exactly."}, "note": TEXT})
@@ -57,6 +60,39 @@ def validate_shape(value, schema, where="receipt"):
         raise StateError(f"{where}: expected string")
     if "enum" in schema and value not in schema["enum"]:
         raise StateError(f"{where}: unsupported value")
+
+
+def missing_comparator_anchors(baseline, evidence=()):
+    """One source locator per declared comparison operand not already cited."""
+    relative = baseline["identity"]["entry"].get("paths", {}).get("acceptance")
+    path = "kernel_wiki/" + relative if relative else None
+    if path not in baseline.get("files", {}):
+        return []
+    text = (Path(baseline["snapshot"]) / path).read_text()
+    if '"relative_to"' not in text:
+        return []
+    missing, cited = {}, set()
+    decoder = json.JSONDecoder()
+    newlines = [match.start() for match in re.finditer("\n", text)]
+    for field in re.finditer(r'"tolerance"\s*:\s*(?=\{)', text):
+        try:
+            rule, end = decoder.raw_decode(text, field.end())
+        except ValueError:
+            continue
+        operand = rule.get("relative_to")
+        if not isinstance(operand, str) or operand in cited or (not evidence and operand in missing):
+            continue
+        match = next((m for m in RELATIVE_TO.finditer(text, field.end(), end) if json.loads(m[1]) == operand), None)
+        if match is not None:
+            first = bisect_left(newlines, match.start()) + 1
+            last = first + match[0].count("\n")
+            if any(e["path"] == path and e["line_start"] <= first and last <= e["line_end"]
+                   and match[0] in e["quote"] for e in evidence):
+                cited.add(operand)
+                missing.pop(operand, None)
+            else:
+                missing.setdefault(operand, {"path": path, "line_start": first, "line_end": last, "quote": match[0]})
+    return list(missing.values())
 
 
 def validate_receipt(value, state, baseline, artifacts, role):
@@ -121,8 +157,13 @@ def validate_receipt(value, state, baseline, artifacts, role):
             raise StateError("review needs_input requires an issue identifying the missing fundamental input")
         if value["status"] == "revise" and "fix" not in actions:
             raise StateError("review revise requires a concrete fix issue")
-        if state["review_scope"] == "contract" and not actions.intersection({"fix", "needs_input"}) and value["continuation"] != "proceed":
-            raise StateError("completed Contract review must explicitly confirm continuation=proceed")
+        if state["review_scope"] == "contract" and not actions.intersection({"fix", "needs_input"}):
+            if value["continuation"] != "proceed":
+                raise StateError("completed Contract review must explicitly confirm continuation=proceed")
+            missing = missing_comparator_anchors(baseline, value["source_evidence"])
+            if missing:
+                raise StateError("verify the Contract tolerance and cite its declared comparison operand in source_evidence: "
+                                 + ", ".join(f"{a['path']}:{a['line_start']} {a['quote']}" for a in missing))
         if not value["source_evidence"]:
             raise StateError("review needs an actual source anchor")
         required = {"root.yaml"} if state["review_scope"] == "contract" else {state["node"] + ".yaml"}

@@ -11,7 +11,7 @@ from ...runner import main
 from ..codex_cli import CodexCLI, write_json
 from ..execution import Runner, bound_review, eligible, merge_issues, publish
 from ..framework import candidate_report
-from ..planning import seed_inputs
+from ..planning import freeze_inputs, new_task, seed_inputs
 from ..prompts import prompt_for
 from ..protocol import validate_receipt
 from ..records import StateError, read_json, run_check, schema_parts
@@ -19,6 +19,29 @@ from .support import FIXTURE, PROPOSAL, ExtractionCase
 
 
 class RunnerTests(ExtractionCase):
+    def test_contract_approval_cites_actual_comparison_operands(self):
+        path = "kernel_wiki/" + self.entry["paths"]["acceptance"]
+        (self.repo / path).write_text('[\n{"timing":{"relative_to":"clock"}},\n'
+                                     '{"tolerance":{"relative_to":\n "candidate"}},\n'
+                                     '{"tolerance":{"relative_to":"reference"}},\n'
+                                     '{"tolerance":{"relative_to": "candidate"}}]\n')
+        self.baseline = freeze_inputs(self.store, self.entry, [], self.config)
+        state = new_task(self.store, self.baseline, self.base / "comparator-output")
+        work = self.base / "comparator-draft"
+        self.draft(work)
+        value = self.review_receipt(state, work)
+        value["source_evidence"] = [e for e in value["source_evidence"] if e["path"] != path]
+        with self.assertRaisesRegex(StateError, "comparison operand"):
+            validate_receipt(value, state, self.baseline, work, "reviewer")
+        for line, quote in [(5, '"relative_to":"reference"'), (6, '"relative_to": "candidate"')]:
+            value["source_evidence"].append({"path": path, "line_start": line, "line_end": line,
+                                             "quote": quote, "note": "Verified comparator operand."})
+        validate_receipt(value, state, self.baseline, work, "reviewer")
+        for role in ("worker", "reviewer"):
+            prompt = prompt_for(state, self.baseline, work, role)
+            self.assertIn('"line_start": 3, "line_end": 4', prompt)
+            self.assertNotIn("clock", prompt)
+
     def test_notes_and_skipped_hardware_allow_reviewed_design_to_finish_without_repeating(self):
         import yaml
         owner = self

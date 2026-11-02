@@ -33,6 +33,22 @@ class ReadingTests(unittest.TestCase):
         path.write_bytes(text.encode("utf-8") if isinstance(text, str) else text)
         return path
 
+    def test_cli_pairs_bounded_pages_and_can_replay_either_page(self):
+        path = self.write("long.txt", '行 "\\' + "x" * 250 + "\r\n" + "y" * 8000)
+        requests = [{"path": str(path)}]
+        command = [sys.executable, "-B", reading.__file__, "--root", str(self.sources), "--root", str(self.artifacts),
+                   "--requests", json.dumps(requests), "--max-bytes", "1500"]
+        expected = list(self.pages(requests, max_bytes=1500))
+        self.assertGreater(len(expected), 2)
+        for offset in range(0, len(expected), 2):
+            cursor = ["--cursor", expected[offset]["cursor"]] if offset else []
+            raw = subprocess.check_output([*command, "--pages", "2", *cursor], text=True)
+            self.assertEqual(json.loads(raw), expected[offset:offset + 2])
+            self.assertLessEqual(len(json.dumps(raw, ensure_ascii=False).encode()), 3000)
+        for page in expected[:2]:
+            replay = subprocess.check_output([*command, "--cursor", page["cursor"]], text=True)
+            self.assertEqual(json.loads(replay), page)
+
     def read(self, requests, **kwargs):
         return reading.read_page(requests, roots=self.roots, **kwargs)
 

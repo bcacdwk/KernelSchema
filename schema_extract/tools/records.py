@@ -82,6 +82,11 @@ def file_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def semantic_inputs(baseline):
+    return {name: sha for name, sha in baseline["files"].items()
+            if not (name.startswith("schema_extract/") and name.endswith(".py"))}
+
+
 def tree_manifest(path: Path) -> dict[str, str]:
     result = {}
     for item in sorted(path.rglob("*")):
@@ -207,6 +212,23 @@ def review_current(state: dict, scope: str, semantics: dict) -> bool:
         if any(semantics[field].get(node) != value for node, value in review[field].items()):
             return False
     return True
+
+
+def remember_node_reviews(target, source, semantics, checkpoint):
+    """Keep a reading aid for a later review, separate from current approvals."""
+    reviews = {}
+    for node in semantics["nodes"]:
+        if node not in {"contract", "final"} and review_current(source, node, semantics):
+            review = source["reviews"][node]
+            receipt = review.get("receipt", {})
+            summary = receipt.get("summary")
+            if isinstance(summary, str) and summary.strip() and review.get("checkpoint") in source.get("history", ()):
+                reviews[node] = {"checkpoint": review["checkpoint"], "summary": summary,
+                                 "source_locations": [{k: anchor[k] for k in ("path", "line_start", "line_end")}
+                                                      for anchor in receipt.get("source_evidence", [])]}
+    if reviews:
+        target["node_review_basis"] = {"fingerprint": target["fingerprint"], "checkpoint": checkpoint,
+                                       "source_task": source["key"], "reviews": reviews}
 
 
 def check_versions(previous: Path | None, current: Path, parser_root: str | None = None):
@@ -425,6 +447,8 @@ class Store:
                         issues=deepcopy(old_state["issues"]),
                         worker_status=(record["imported_worker_receipt"] or {}).get("status"))
         imported["source_bindings"] = seed["source_bindings"]
+        if semantic_inputs(self.baseline(old_state["key"])) == semantic_inputs(baseline):
+            remember_node_reviews(imported, old_state, old_record["semantics"], checkpoint_id)
         imported["observed_thread_usage"] = deepcopy(old_state.get("observed_thread_usage", {}))
         imported["usage_observations"] = deepcopy(old_state.get("usage_observations", {}))
         for issue in imported["issues"]:

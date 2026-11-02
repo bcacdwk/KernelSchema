@@ -1,4 +1,4 @@
-"""Mechanical, checkpoint-bound reading context for index work and review.
+"""Mechanical, checkpoint-bound reading context for focused reviews.
 
 The packet is a projection of task.json and its immutable checkpoint. It is
 never loaded to decide progress, and carries no substitute semantic verdict.
@@ -8,7 +8,7 @@ from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
 
-from .records import StateError, artifact_manifest, digest, parser_for, read_json, review_current
+from .records import StateError, artifact_manifest, digest, issue_disposition, parser_for, read_json, review_current
 
 
 def field_excerpt(path: Path, fields: tuple[str, ...], *, include_text=False, parser_root=None) -> dict:
@@ -82,11 +82,66 @@ def field_excerpt(path: Path, fields: tuple[str, ...], *, include_text=False, pa
     return result
 
 
+def _contract_and_tolerance(checkpoint, snapshot):
+    root = parser_for(snapshot).load(checkpoint / "artifacts/root.yaml", "root").value
+    contract = root["contract"]
+    algorithm = dict(contract["algorithm_requirement"])
+    golden = dict(algorithm["golden_reference"])
+    tolerance = golden.pop("tolerance", None)
+    algorithm["golden_reference"] = golden
+    return digest({**contract, "algorithm_requirement": algorithm}), tolerance
+
+
+def _tolerance_context(store, state, baseline, work):
+    basis = state.get("node_review_basis") or {}
+    scope = state["review_scope"]
+    prior = basis.get("reviews", {}).get(scope)
+    if (not prior or state.get("revision_request") or basis.get("fingerprint") != state["fingerprint"]
+            or basis["checkpoint"] == state["checkpoint"] or basis["checkpoint"] not in state["history"]):
+        return None
+    if any(i.get("state") == "open" and issue_disposition(i) in {"fix", "needs_input"} for i in state["issues"]):
+        return None
+    current = store.verify_checkpoint(state)
+    if current is None:
+        return None
+    now = read_json(current / "checkpoint.json")
+    if not review_current(state, "contract", now["semantics"]):
+        return None
+    previous = current.parent / basis["checkpoint"]
+    try:
+        old = read_json(previous / "checkpoint.json")
+        if (not isinstance(old, dict) or old.get("id") != basis["checkpoint"]
+                or old.get("fingerprint") != state["fingerprint"]
+                or artifact_manifest(previous / "artifacts") != old.get("files")):
+            return None
+    except (FileNotFoundError, StateError, ValueError):
+        return None  # An unavailable historical reading aid requires full review.
+    if (old["check"]["exit_code"] != 0 or now["check"]["exit_code"] != 0
+            or old["semantics"]["contract"] == now["semantics"]["contract"]
+            or any(old["semantics"].get(k) != now["semantics"][k]
+                   for k in ("nodes", "conditions", "dispatches", "selection_revision"))):
+        return None
+    if artifact_manifest(work) != now["files"]:
+        raise StateError("tolerance review requires the current accepted checkpoint artifacts")
+    old_rest, before = _contract_and_tolerance(previous, baseline["snapshot"])
+    new_rest, after = _contract_and_tolerance(current, baseline["snapshot"])
+    if old_rest != new_rest or not isinstance(before, dict) or not isinstance(after, dict) or before.keys() != after.keys():
+        return None
+    changed = [name for name in before if before[name] != after[name]]
+    if not changed:
+        return None
+    return {"kind": "tolerance", "fingerprint": state["fingerprint"], "checkpoint": state["checkpoint"],
+            "basis_checkpoint": basis["checkpoint"], "node": scope, "previous_task": basis["source_task"],
+            "previous_review": prior, "before": {n: before[n] for n in changed}, "after": {n: after[n] for n in changed}}
+
+
 def build_review_context(store, state, baseline, work: Path, role: str) -> dict | None:
-    """Return focused context only when every independent node review applies."""
-    if (state.get("receipt_correction") or not state.get("dispatches")
-            or not ((role == "worker" and state["stage"] == "index")
-                    or (role == "reviewer" and state["review_scope"] == "final"))):
+    if state.get("receipt_correction") or not state.get("dispatches"):
+        return None
+    if role == "reviewer" and state["review_scope"] not in {"contract", "final"}:
+        return _tolerance_context(store, state, baseline, work)
+    if not ((role == "worker" and state["stage"] == "index") or
+            (role == "reviewer" and state["review_scope"] == "final")):
         return None
     checkpoint = store.verify_checkpoint(state)
     if checkpoint is None:

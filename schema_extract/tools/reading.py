@@ -23,9 +23,9 @@ Cursor codec v2 checks the version, batch digest and exact position together
 for accidental damage. A valid cursor whose inputs have changed is stale.
 To start a new batch after an old v1 cursor, omit --cursor.
 
-This bounds one reader invocation, not an arbitrary outer batch of tools.
-Use one invocation per tool result with enough output allowance for the page
-and the tool's own metadata. No read state or temporary files are written.
+The CLI returns one page by default. With --pages 2 it follows one cursor
+itself and returns a JSON array of at most two bounded pages, in order.
+No read state or temporary files are written.
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ import sys
 
 
 DEFAULT_MAX_BYTES = MAX_PAGE_BYTES = 6000
+MAX_PAGES_PER_CALL = 2
 MIN_PAGE_BYTES = 1024
 FORMAT = "schema_extract.read_page.v1"
 # Version, raw SHA-256 batch digest, request index, line index, character offset.
@@ -64,7 +65,7 @@ def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def serialize_page(page: dict) -> str:
+def serialize_page(page: dict | list[dict]) -> str:
     return _json(page) + "\n"
 
 
@@ -376,13 +377,21 @@ def main(argv=None) -> int:
     parser.add_argument("--requests", required=True, help='JSON ranges with path, optional start_line/end_line and optional find:["literal", ...]')
     parser.add_argument("--cursor", help="next_cursor from the preceding page; repeat unchanged --requests")
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES, help=f"JSON-wrapped bytes per page ({MIN_PAGE_BYTES}..{MAX_PAGE_BYTES})")
+    parser.add_argument("--pages", type=int, choices=range(1, MAX_PAGES_PER_CALL + 1), default=1,
+                        help="requesting multiple pages returns a bounded array of consecutive pages")
     try:
         args = parser.parse_args(argv)
         try:
             requests = json.loads(args.requests)
         except (ValueError, TypeError) as exc:
             raise ReadingError("invalid_request", "requests must be valid JSON") from exc
-        result = read_page(requests, roots=args.root, cursor=args.cursor, max_bytes=args.max_bytes)
+        page = read_page(requests, roots=args.root, cursor=args.cursor, max_bytes=args.max_bytes)
+        result = page
+        if args.pages > 1:
+            result = [page]
+            while not page["complete"] and len(result) < args.pages:
+                page = read_page(requests, roots=args.root, cursor=page["next_cursor"], max_bytes=args.max_bytes)
+                result.append(page)
     except ReadingError as exc:
         result = {"error": exc.code, "message": _label(exc)}
         sys.stdout.buffer.write(serialize_page(result).encode("utf-8"))

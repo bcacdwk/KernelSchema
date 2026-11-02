@@ -12,7 +12,7 @@ import time
 from uuid import uuid4
 
 from .codex_cli import write_json
-from .records import Store, StateError, artifact_manifest, digest, file_digest, read_json, seal
+from .records import Store, StateError, artifact_manifest, digest, file_digest, read_json, seal, semantic_inputs
 
 
 DEFAULTS = {"model": "gpt-6-astra", "effort": "xhigh", "jobs": 2}
@@ -173,9 +173,7 @@ def seed_inputs(store, old_run, operator):
 def verify_seed_inputs(old_baseline, new_baseline):
     if old_baseline["identity"]["entry"] != new_baseline["identity"]["entry"]:
         raise StateError("seed operator selection/metadata changed; old draft cannot be imported")
-    for name, expected in old_baseline["files"].items():
-        if name.startswith("schema_extract/") and name.endswith(".py"):
-            continue  # New execution code/protocol is explicit in the new plan.
+    for name, expected in semantic_inputs(old_baseline).items():
         if new_baseline["files"].get(name) != expected:
             raise StateError(f"seed source/spec changed or removed: {name}")
     if old_baseline["identity"]["check_policy"] != new_baseline["identity"]["check_policy"]:

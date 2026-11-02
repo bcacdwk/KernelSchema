@@ -16,7 +16,8 @@ from .codex_cli import CodexCLI, terminate_owned, write_json
 from .prompts import prompt_for
 from .protocol import RECEIPT, validate_receipt
 from .records import (StateError, artifact_manifest, clone_artifacts, hardware_issue, issue_disposition,
-                      optional_json, read_json, review_current, run_check, schema_parts, semantic_digests, tree_manifest)
+                      optional_json, read_json, remember_node_reviews, review_current, run_check, schema_parts,
+                      semantic_digests, tree_manifest)
 from .review_context import build_review_context
 
 
@@ -134,7 +135,7 @@ def bound_review(state, receipt, checkpoint):
             "reviewed_at": time.time()}
 
 
-def request_revision(state, receipt):
+def request_revision(state, receipt, checkpoint):
     """Return only the affected scope and concrete fixes to the author."""
     state["revision_request"] = deepcopy(receipt)
     state["revision_request"]["issues"] = [i for i in receipt["issues"] if issue_disposition(i) == "fix"]
@@ -142,6 +143,7 @@ def request_revision(state, receipt):
     if impact == "contract":
         if receipt["correction"] != "transcription" or not any(i["kind"] == "transcription" and i["evidence"] for i in receipt["issues"]):
             raise StateError("Contract revision must be a source-backed transcription correction; preserve actual requirements")
+        remember_node_reviews(state, state, read_json(checkpoint / "checkpoint.json")["semantics"], state["checkpoint"])
         state.update(stage="contract", node="root", allow_contract_correction=True)
         state["reviews"].clear()
     elif impact == "index":
@@ -356,7 +358,8 @@ class Runner:
                 else:
                     proposals = receipt.pop("framework_candidates", [])
                     merge_issues(state, receipt, reviewer=True)
-                    state["last_review"] = bound_review(state, receipt, self.store.verify_checkpoint(state))
+                    checkpoint = self.store.verify_checkpoint(state)
+                    state["last_review"] = bound_review(state, receipt, checkpoint)
                     actions = {issue_disposition(i) for i in receipt["issues"]}
                     if proposals:
                         source = {"role": "reviewer", "checkpoint": state["checkpoint"],
@@ -366,7 +369,7 @@ class Runner:
                     if "needs_input" in actions:
                         return finish(self.store, state, "needs_input")
                     if "fix" in actions:
-                        request_revision(state, receipt)
+                        request_revision(state, receipt, checkpoint)
                     else:
                         state["reviews"][state["review_scope"]] = state["last_review"]
                         state.pop("revision_request", None)
