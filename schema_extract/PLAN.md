@@ -1,121 +1,82 @@
-# Schema Extract 迁移与实现计划
+# Schema Extract 第二轮审计与实施计划
 
-一次提取以一个完整算子为单位。Supervisor 指定 kernel 来源和 schema 输出位置，Runner 自动完成共享 Contract、路径划分、root、全部派生节点和终审。每个设计决定能追到固定源码，每次放行能追到对应产物，每次中断能找到接手位置。
+审计基线为 2026-11-03 的 `2.0.4`，本地 HEAD 与远端 main 均为 `f984cc80a63e71a09f446627143e343f30940536`。原 A–F 计划可用 `git show f984cc8:schema_extract/PLAN.md` 查看。下文 R1–R5 是本轮开发里程碑，算子提取仍然按 P1–P6 运行。代码位置按审计提交给出，工具归目录后仍可追溯。
 
-本文区分两种阶段。**P1–P6** 是每个算子运行时都遵循的提取流程。**A–F** 是开发新版工具的里程碑。当前交付是本计划，下面的命令和目录布局描述实施目标。
+## 验收到什么程度
 
-## 一、迁移边界与对外入口
+| 范围 | 本轮核对 | 判断 |
+| --- | --- | --- |
+| 单条命令与真实产物 | 已发布 GDN root 和 dispatch 的 SHA-256 都与交付凭据一致，重新执行 `check_yaml.py --skip-hardware` 退出 0。比较基准 `relative_to=candidate`、host 的对齐拒绝和 BF16 中间舍入均可在固定材料中定位。 | 单 root 的真实闭环成立。7 个会话、9 次调用来自远端验收记录，本机没有该 v2 run 的原始会话日志。其 P5 为 skipped。 |
+| 并行与阶段边界 | 受控 CLI 测试实际启动独立进程，覆盖兄弟同时写、同时审、孙节点先于另一兄弟启动，以及计划修订后的迟到结果。P5 私有目录只包含 root、祖先和目标文件。 | 无固定 jobs 或 reviewer 槽的调度已实现。仍缺真实 Codex 从源码派生多个节点并发布的证据。 |
+| 全量回归与输入 | 本机 macOS、Python 3.12.13，82 项提取回归全部通过（740.957 秒），147 项检查器测试全部通过（6.357 秒）。当前 catalog 的 44 个 ID 都能解析绑定。基线 147 份 Markdown 中的 1,505 条本地链接（含标题）和 14 个本仓历史 Git 目标也重新核对通过。 | 普通路径和大量恢复边界已有回归，可作为修改基线。下面的反例是额外运行的探针。 |
+| 旧任务 | 本机五个真实 v1 checkpoint 仍在。在仓库外临时运行区执行 `import-legacy --queue`，四个成功排队，一个失败。 | 已验证的范围是读取和导入草稿。导入没有继承旧批准，也没有启动新提取。 |
 
-旧版已经能冻结输入、直接调用 Codex CLI、校验证据、保存不可变 checkpoint 并独立审阅。它把 dispatch 草案放在 Contract 阶段，正式索引放在分支之后。通常一个 worker 续写整个算子，单算子内逐节点推进，`jobs` 限制并行算子数，reviewer 共用一个槽。新版需要重新设计的是阶段放行、会话归属和单算子内的并行提交。[旧版入口](../schema_extract_old/README.md) · [旧版推进逻辑](../schema_extract_old/tools/execution.py)
+反例使用仓库外的临时目录，主要沿用 `schema_extract/tests/test_c_independent.py` 的 `IndependentFixture`，运行真实 Runner、受控 CLI 和冻结检查器。测试替身的批准特意模拟 reviewer 漏判，用来区分程序保证的事实与依赖人工判断的事实。此次没有发起新的真实模型提取。
 
-| 对象 | 迁移安排 |
+值得保留的设计有三处。其一，源码与规则分别冻结，草稿 checkpoint、独立批准和合入是三个不同事件，子节点只从已审父节点出发。其二，Runner 单写者提交本节点差异，能让未受影响的兄弟继续，也能拒绝过期结果。其三，原 reviewer 有一次受限裁决，最终产物由裁决者修改时才另开一次独立签收。P1/P2 续用原角色、其他阶段与分支换上下文、终审先审后修、硬件占位和离线检查均继续作为验收条件。[真实验收记录](README.md#验收记录) · [并行实现与进程测试](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/tests/test_d_independent.py#L197-L244) · [发布凭据](../schema_wiki/extract-v2-acceptance/gdn_postconv_mtp_bf16_state_fp32/.extraction/receipt.json) · [GDN 的实际判据](../schema_wiki/extract-v2-acceptance/gdn_postconv_mtp_bf16_state_fp32/root.yaml#L158-L178)
+
+## R1 · 让每次调度都有确定的出口
+
+**已复现。** 在一次已结束的 agent 调用中，仅让写 `event.json` 抛出 `OSError`。工作线程退出，内存队列没有收到完成事件。超过设定的算子 deadline 后 Runner 仍活着，P1 仍在途，提交 cancel 后也没有结束。另一个反例是 P4 的节点顺序为 root、c、b，c 的父是 b，b 的父不存在。当前校验遍历到缺失祖先时抛 `KeyError`，state 保持 running，resume 重放同一结果再次抛错。[完成事件与等待循环](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/runner.py#L789-L855) · [计划校验](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/artifacts.py#L148-L177)
+
+**改动与验收。**
+
+- 分开处理“通知调度器调用已结束”和“持久化审计记录”。注入事件文件写入失败、线程异常或取消，主循环必须在有限时间内返回可定位错误。能确认终止才释放对应尝试，磁盘持续不可写时也要返回错误。保留成功结果的幂等重放与原预算。
+- 先检查全部直接父节点存在，再检查环和可达性。打乱合法树的输入顺序应照常通过。用同一个坏计划的两种节点顺序走 CLI 和 resume，均给出具体节点与缺失父节点，不能留下反复重放的崩溃。修订或停止沿用现有协议。
+
+## R2 · 让错误停在有权限修它的阶段
+
+| 已复现的行为 | 要求及验收 |
 | --- | --- |
-| `schema_extract_old/` | 作为旧实现和回归案例的参考。按行为选取源码冻结、证据校验、进程终止确认、checkpoint 和导出逻辑。新版自行管理阶段、会话和分支，运行时独立于旧包。 |
-| 旧运行数据 | 旧任务继续使用各自 `inputs.lock.json` 指向的快照，从快照内调用 `python3 -m schema_extract`，指定对应版本的 `--repo` 和原 `--state-root`。这样能加载旧包原有的导入路径。迁移准备时已用冻结入口读回全部五个任务的状态，四个 ready，一个已取消，均保有 checkpoint。 |
-| 新运行数据 | 使用独立的 `.schema_extract/v2/` 和显式状态格式版本。需要沿用旧成果时，从已确认终止的任务导入固定 checkpoint 的产物与来源，按新阶段重新审阅。旧回执可作阅读线索。 |
-| schema 规范和检查器 | 继续由 `schema_docs/` 定义字段，由 `schema_template/` 提供骨架和检查入口。保留逐段读取源码、写入、回查的提取方法。硬件段原样保留 starter 占位，检查使用 `--skip-hardware`。GPU 实测在本流程范围之外。[提取方法](../EXTRACT_SCHEMA.md) · [检查边界](../schema_template/README.md#校验边界) |
+| 删除共享 Contract 的 `algorithm_requirement.output` 后，受控 worker/reviewer 让 P1、P2 均通过。P3 worker 无权改 Contract，连续四次遇到同一个问题后耗尽测试预算。另一个用例让固定验收材料写明误差相对 candidate，YAML 却相对 reference，P1 的 acceptance 锚点只引用 JSON 第一行的 `{`，最终仍能 ready 并发布。44 个 catalog 算子中，22 个绑定的验收文件显式写了 candidate。例如 candidate=1.061、reference=1 时，两种判据的通过结果相反。实际 GDN 产物的比较基准是正确的。 | P1 的 complete/approve 复用冻结检查器已有的算法区字段及关联规则，允许尚未填写的 Design。对于来源明确给出 `relative_to` 的输出，要求审阅依据落到该输出的声明行，并核对 YAML 中的实际判据。已有旧版回归可复用。缺失必填项、引用文件开头代替声明行的反例在 P1 得到修正或阻塞。保留未知比较细节的写法，无需实现通用自然语言公式证明器。 |
+| 多节点清单在 P4 获批，但已审 root 没有 `dispatch.when`，P5 才报 root 缺少 dispatch，子节点耗尽预算。另一次完整受控运行中，计划和 `leaf.yaml` 的父节点为 `a`，索引却写成 `root`，仍然发布成功。现行索引校验只比对 YAML 链接集合。 | P4 按计划核对已有 root 的身份和选择条件，缺失时定位上游修复，再开放 P5。树、链接与父子差异由已审结构化清单生成或做确定性核对，精确条件仍在 YAML。单 root 索引留选择理由、链接和实际覆盖缺口。保留 GDN 对齐缺口，避免再复制流水线正文与通用规范。不要直接改已签收的发布物来刷新凭据。 |
+| 派生节点重新序列化整个父 YAML。根中合法文本 `math: "1e3"` 通过检查，复制后变成 `Decimal('1E+3')`，派生检查退出 1。`"0o12"` 同样可能变成整数。FA4 示例的 Design 加 Realization 在相同语义下由 204 行展开成 531 行。 | 优先只更改复制文件的元数据和 Contract，保留可读的原 Design。若需要重写 YAML，用冻结解析器读回核对类型和值，覆盖数值形文本、精确 Decimal、alias 和多行文本。在 P5 初始化、旧稿导入及裁决选稿路径共用正确的写法。用上例证明根和派生公式都保持字符串并通过检查。 |
 
-**拟议入口**采用 `python3 -m schema_extract extract --id <算子> --output <任务目录>`，也可用 `--source <固定源码位置>` 代替 `--id`。catalog ID 和显式来源归一为同一种输入描述，分别绑定实现入口、输入构造、reference、验收材料和适用范围。本地目录要冻结所用文件，历史 Git 来源要解析到实际 commit。源码版本和本次规范、检查器、执行器的版本分别记录。根本性材料缺失时，返回所缺的具体输入。
+现行 [P1 回执验证](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/receipts.py#L225-L243) 能定位来源文件。P1 还可复用 [Contract 结构规则](../schema_template/tools/rules/structure.py#L16-L36) 和 [旧版比较基准反例](../schema_extract_old/issues/archive/extract_workflow/contract-comparator-evidence.json)。P4 与 P5 的反例分别落在[索引门槛](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/artifacts.py#L166-L196)与[父文件复制](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/store.py#L338-L370)。旧版也有[以冻结解析器核对回写类型的做法](../schema_extract_old/tools/review_context.py#L64-L81)。
 
-正常路径用这一个命令完成创建计划、执行和向指定目录交付。`status / pause / resume / cancel` 用于观察和控制，发布冲突可从已审 checkpoint 另行导出。worker 和 reviewer 的 effort 分别配置，默认均为 `xhigh`，同一角色跨阶段统一。退修上限默认 5。算子和阶段的时间预算在创建任务时固定。一次选择多个算子时，各自有独立状态与目标目录。
+## R3 · 整理工具目录并守住冻结入口
 
-## 二、算子的六个提取阶段
+当前 `schema_extract/` 根有 19 个 Python 文件，共 4,068 行生产代码，`runner.py` 占 978 行。测试和夹具另有 3,606 行。参照 [`schema_template/check_yaml.py`](../schema_template/check_yaml.py)，新版根目录只留一个 Python 入口 `extract.py`，移除根 `__init__.py` 和 `__main__.py`。`extract.py` 直接调用 `tools/` 中的 CLI，版本号也在工具层单点定义。README、PLAN、阶段页、tests 和 issues 各保留现有用途。
 
-| 阶段 | 阅读与工作 | 放行条件及交付 | 会话 |
-| --- | --- | --- | --- |
-| P1 共享 Contract | 从 starter 建立 `root.yaml` 草稿。读公共约定、算法 Contract、任务 IO、reference 和数值验收依据。写 `meta_data` 与 `contract.algorithm_requirement`。 | reviewer 确认外部计算、有效域、输出与误差依据可独立理解。只有外部要求确实无法共用才拆成两个算子。实现覆盖不足按事实记录。此时按 Contract 审阅，Design 仍可留作草稿。 | 新建 worker 和 reviewer，各自独立。 |
-| P2 dispatch 草案 | 沿 host 选择条件找到真实路径。选择能代表主要 workload 的 root，区分参数变化与实质设计差异。写简短 `dispatch.md` 草案，必要时补 root 的 `when`。 | reviewer 先验 root 选择、划分理由、主要路径和已知覆盖缺口，再放行 Design。此时允许只有拟议节点，分支 YAML 在 P5 生成。 | 分别续用 P1 的两个会话，各自收到 P2 任务页。 |
-| P3 root 设计 | 读已审 Contract、dispatch 草案和本路径源码，依次完成 `math_reshape → work_schedule → tile_pipeline → realization`。各段按需读规范 3–6，边写边核对。 | 选一例适用调用从输入走到输出。完整 root 通过 `check_yaml.py --skip-hardware`，reviewer 对照源码验收主线、依赖和必要的实现交接。 | 全新一对。 |
-| P4 dispatch 定稿 | 据已审 root 和 host 选择证据修订索引。确定每个节点的 ID、直接父节点、相对父节点的变化和选择依据。 | reviewer 批准整棵树。Runner 检查唯一 root、ID 唯一、父节点存在、无环且全部可达，从清单得出分支数和先后依赖。只有 root 的任务也保留简短索引。 | 再开全新一对。 |
-| P5 派生节点 | Runner 从计划指定的、已审的直接父节点复制 YAML。派生文件移除 Contract，设新 ID、parent 和 `version: 1`。worker 写独立的 `when`，核实差异及复制来的内容，补齐完整 Design 和适用的 Realization。 | 本节点通过脚本和独立 review，Runner 合入当前任务后才解锁其子节点。每个节点只交自己的 YAML 和验证回执。分支数为零时直接进入 P6。 | 每个节点全新一对，节点内返工续用。 |
-| P6 全算子终审 | 在当前计划的所有节点均已合入且审阅仍有效后，reviewer 先读索引、选择条件、host 源码和有效的节点结论。 | 核对实有文件、树、链接、条件互斥与覆盖、引用及未决项。需要修改时才启动 worker，受影响的节点重新核对。最终整个任务目录检查通过，终审通过才达到 `ready`。 | 全新 reviewer 先审，全新 worker 按需加入。 |
+目标命令为 `python3 schema_extract/extract.py extract --id <算子> --output <目录>`。`status`、`resume` 等现有子命令也通过同一脚本调用。
 
-表中列的是正常放行路径，第 5 次退修走第四节的裁决。P1、P2、P4 按本阶段产物验收。P3、P5、P6 对完成的 YAML 要求检查器退出码为 0，再核对设计与源码。退出码 1 的诊断交给当前修改者，退出码 2 作为工具或环境问题处理。两者在回执中分别记录。
+下表的四组职责用于决定哪些脚本应合并，不要求再建四层包。
 
-root 保存全域的共享 Contract，自身 Design 只负责选中 root 的输入。每个派生节点的 `when` 在同一契约域内独立求值，`parent` 表示这份设计从哪里复制和派生。P4 回执提供结构化的节点清单，Runner 据此调度并核对索引。`dispatch.md` 只保留当前树、节点链接、workload 和设计差异，精确条件以各 YAML 为准。计划历史、退修和完成数存于运行目录。P5 发现现有父节点选得不合适时，通过 P4 修订选择。[公共约定](../schema_docs/0.common.md#派生节点与-dispatch) · [FA4 索引示例](../schema_template/examples/fa4_prefill/dispatch.md)
-
-## 三、谁推进，谁继承上下文
-
-**Supervisor** 发起命令、查看状态、处理需要外部输入的事项。可选巡检只读运行摘要，可以请求启动已排队工作。**Runner** 根据当前阶段、节点依赖和经验证的回执启动下一次调用，是任务状态的唯一写入者。**worker** 写本阶段允许的产物。**reviewer** 通常只读检查点副本，给出通过、具体退修意见或阻塞原因。针对源码本身的已知缺陷可以保留备注。
-
-Runner 直接启动独立的 `codex exec` 会话。正常续写用 `codex exec resume <会话 ID>` 精确找回原角色。P1 和 P2 共用一组会话，但分别验收、分别计算退修。P3、P4、各个 P5 节点及 P6 各有自己的会话。新上下文从固定产物接力。中断恢复先确认旧调用已经终止，再从 checkpoint 和当前阶段任务页建立新上下文。
-
-文档分三层，分别服务于不同读者。
-
-| 位置 | 内容与使用者 |
+| 职责 | 应当放在一起的逻辑 |
 | --- | --- |
-| 根 `EXTRACT_SCHEMA.md` | 给人和 Supervisor 的全流程总览。说明阶段顺序、角色、产物与验收，保留七段 schema 内容的阅读导航，链接具体步骤。 |
-| `schema_extract/README.md` | Supervisor 操作手册。写明输入与输出、命令、运行状态、恢复与导出。区分主窗口的操作和可选的只读巡检。 |
-| `schema_extract/phases/` | 六张随执行器冻结的阶段任务页。每页给出前置产物、应读规范及源码、worker 的可写范围、reviewer 的检查项、回执及交接。P5 引用 P3 页的节点逐段撰写方法，另写父节点复制与差异核对。 |
+| 命令与运行 | CLI、只读巡检、就绪节点派发及单写者提交。让调度循环只管理调用生命周期和提交时机。 |
+| 阶段与产物 | 阶段定义、允许读写的范围、prompt、回执和产物验证。阶段页保有写审方法，代码保有可机械判断的规则，消除两处各自维护的阶段权限表。 |
+| 证据与持久化 | 输入绑定、文件读取、快照、checkpoint、发布和旧版导入。统一源码和规则根目录的定位。 |
+| Agent 与恢复 | CLI 会话和进程、事件交付、中断对账与恢复。保留精确 UUID、进程归属和终止确认。 |
 
-阶段页依次规划为 `01_contract.md`、`02_dispatch_draft.md`、`03_root.md`、`04_dispatch_plan.md`、`05_branch.md`、`06_final.md`。每页分列 worker 的操作和 reviewer 的验收。Runner 通过阶段 ID 选择任务页，按阶段读取，不要求 agent 翻阅整份迁移计划。
+**迁移时一起验三件事。**
 
-每次调用只传**本阶段任务页和本次任务的定位信息**，包括角色、节点、固定源码入口、checkpoint、可写范围、应读产物和本轮退修意见。下一阶段即使复用会话，也明确注入新的任务页。P1 读规范 0、1 与 starter，P2 读派生规则及 host 路由，P3/P5 按段读规范 3–6，P6 按具体不一致回查源码。证据保留精确的文件、行号和短引文，长文件可按范围续读。
+1. 冻结清单包含 `extract.py` 及 `tools/` 中的运行代码。同步调整执行器校验、reader 路径、巡检和入口跳转。Runner 按已验证的快照清单选择入口。新快照直接运行其中的 `schema_extract/extract.py`，2.0.4 快照仍从它自己的 `rules/` 目录运行 `python3 -B -m schema_extract`。从仓库外以脚本绝对路径验证 `--help` 和 `--version`。显式指定仓库与运行区，验证新旧任务的 `status/resume`、冻结 reader 和检查器，并覆盖暂停、取消、发布与巡检。根目录的 `*.py` 必须恰好只有 `extract.py`。手册和测试中的新版示例切到脚本，历史验收记录保留当时的命令。[冻结清单与校验](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/snapshots.py#L21-L31) · [冻结入口](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/cli.py#L65-L74)
+2. 最早的真实 `bf16_grouped_gemm_masked` v1 快照不接受 `status --full`，普通 `status RUN_ID` 退出 0，且返回与原 task.json 完全相同的整份记录。按冻结版本支持的参数取回状态，继续逐项核对身份、来源、checkpoint 与终止证明。两代真实接口都要通过。没有原 Mac 状态的环境可使用历史 `2574b7d` 的普通 status 与 `69e3027` 的 --full 行为建回归，不能用“命令失败即读当前状态”绕过验证。[旧稿导入入口](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/legacy.py#L44-L70)
+3. 两个输出不同、输入完全相同的排队请求同时发布同一快照时，本机稳定复现一个成功，另一个在 `freeze_inputs` 的 rename 处收到 `PermissionError`。增加竞争用例。先成功者发布，后到者验证同一不可变快照后复用，两个 run 保持独立。其他权限或 I/O 错误仍如实报告。[快照发布](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/snapshots.py#L135-L156)
 
-P2→P3、P3→P4、P4→P5 换上下文时，reviewer 在回执中填写短交接，由 Runner 在对应运行记录中生成 `handoff.md`。通常约 10 行，最多 20 个非空短行，正文上限建议 1,200 字符。写清已定事项及理由、源码位置、需继续核对的缺口和下一步入口。checkpoint 与来源标识由 Runner 自动附上。P5 的输入为 P4 交接、root 及已审父节点。P5 完成只留节点回执，子节点直接读取父产物，P6 汇总有效结论。
+P4 阶段页引用的可选 FA4 索引也未进入冻结规则清单。让需要的示例在实际冻结环境中可读，或在阶段页内放最小的格式示例。验收阶段页的导航时要从冻结树出发。
 
-## 四、退修、裁决与停止
+## R4 · 用同一负载验证瘦身收益
 
-1. 每个阶段单独计数，P5 按节点计数。reviewer 提出有证据且可执行的修改时，Runner 登记一次退修。低于上限，原 worker 修改、原 reviewer 再审。`continue` 保存段内草稿，格式错误可以在原角色会话中修正回执。这两类调用与实质退修分别记账。
-2. 达到上限，默认是第 5 次退修，原 reviewer 接手一次裁决。可以选定已有写法，也可以由原会话提交限于当前产物的补丁，Runner 在隔离副本应用并运行该阶段检查。符合门槛就记录裁决及修订，推进下一阶段。关键事实仍缺失、补丁应用失败或必需检查仍未通过，就保存草稿、阻塞原因和恢复条件。裁决只有这两个出口。若 reviewer 已核实工作必须等待外部输入，可在正常审阅时直接结束为 `blocked`。
-3. P6 若由裁决者亲自改了最终交付，再开一位独立 reviewer 做一次签收，仅判 `ready` 或 `blocked`。签收覆盖最后改动及受影响的结论。阶段内的一般修订仍按正常 worker / reviewer 回合处理。
-4. 退修次数、已用时间与截止条件随状态持久化。段内续写、回执修复、CLI 暂时失败和裁决本身都受有限预算约束，给裁决预留调用时间。超时保存最后可恢复的 checkpoint。恢复或重开计划继续使用原计数和预算。同一问题和同一份证据只触发一次重开。
-5. 某分支阻塞，仅其后代等待，独立分支继续。所有可继续的工作结束后，仍有必需节点阻塞的算子以 `blocked` 结束，交付进展和具体原因。`pause` 在调用边界暂停。`cancel` 请求终止已启动的调用，并记录确认结果。恢复时能定位暂停前的 checkpoint。
+在仓库外用现有 `IndependentFixture`、平级节点 `b_0…b_n` 和受控 CLI 运行，统计 `_protected` 的调用次数及实际交给 SHA-256 的字节。下表为单次本机样本，MB 为十进制，prompt 字节是 UTF-8 文件大小。
 
-## 五、并行调度和结果合入
+| 派生数 | Agent 调用 | 全运行目录扫描 | 守护扫描累计哈希 | 最大单条 prompt |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 9 | 37 | 8.2 MB | 21.1 kB |
+| 4 | 17 | 69 | 31.5 MB | 30.8 kB |
+| 10 | 29 | 117 | 95.7 MB | 48.0 kB |
 
-**所有就绪节点立即派发。** 并行度由依赖决定，执行器不设固定 jobs 数、worker 槽或 reviewer 槽。一个节点只允许一个在途写入，同一节点先写再审。兄弟节点可以同时写、同时审。先完成的节点立即解锁自己的子节点，无需等整层结束。FA4 示例中 `packed_persistent` 和 `splitkv_dual_load` 均可从 root 启动，`splitkv_joint_load` 只需等 `splitkv_dual_load`。示例现有 root 加 10 个派生节点，实际重提时按固定源码重新定树。
+- 保留越权写入检测，减少反复读取已经封存的历史日志与 checkpoint。在同机用基线提交及修订版的相同 0/4/10 负载报告前后字节、扫描次数和耗时。以 10 分支重复哈希量至少减半为本轮优化目标，结果未达到时交代瓶颈。用同长度内容替换、保留 mtime、增加文件、符号链接和并发控制请求验证检测仍有效。[现行完整性保护](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/runner.py#L78-L119)
+- P5 现在会收到全计划、各阶段批准以及所有已审节点记录。将普通分支的定位信息收束到本节点、实际祖先、P4 交接、相关依据和当前反馈。终审按需读取整树，裁决按需读取候选。对固定依赖链增加无关兄弟时，P5 prompt 不应随兄弟审批正文增长。减少模型抄录程序已知字段的工作，同时维持当前回执与产物的身份绑定、源码引文核验和独立审阅。[现行 prompt](https://github.com/bcacdwk/KernelSchema/blob/f984cc80a63e71a09f446627143e343f30940536/schema_extract/prompts.py#L42-L67)
+- Supervisor 手册保留入口、参数、状态解释、停止与恢复。重复的机器协议说明就近放在工具维护说明或阶段页，只留一个定义。整理测试夹具时保留独立黑盒 CLI 的性质。报告生产代码和测试代码的前后体量，以重复职责是否消除作为取舍依据。
 
-**每个分支独立工作。** Runner 在私有目录放入已审 root、所需祖先和本节点文件。普通 worker 只能交本节点的改动。日常检查器即使接收一个 YAML 路径也会扫描同目录，因此兄弟节点的在写草稿必须隔离。一个退修中的节点不会让其他分支读到半成品。[模板的检查说明](../schema_template/README.md#4-检查与处理反馈)
+## R5 · 用一次真实分支提取收尾
 
-**同一算子由 Runner 串行提交结果。** 调用时记下尝试 ID、输入指纹、阶段、节点、计划修订、起始 checkpoint 和实际依赖的内容摘要。返回时核对来源、回执、许可的文件差异和检查结果。将该节点的改动合入最新已审目录，复查整目录和依赖后，先持久化不可变 checkpoint，再原子更新任务指针。若仅兄弟节点先完成，已有审阅仍可用于本次合入。父节点、Contract 或本节点的选择条件已改变时，重新核对受影响的结果。重复收到同一回执只提交一次。
+建议在新输出目录无 seed 提取 `bf16_grouped_gemm_masked`。当前源包含按条件选择 `_f2 / _f1 / _f0` 的 host 路由，既有 v1 树可供完成后对照。节点身份和个数仍由本次固定源码及 reviewer 决定。完整 FA4 重提继续单列为长程验收。[候选 host 路由](../kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/candidate/solution.py#L2468-L2495)
 
-**计划修订有唯一入口。** P5 用定位到源码的新证据申请重开 P4，由 P4 的 worker 和 reviewer 修订并审阅清单。Runner 比较受影响的节点和依赖，保留可证明仍有效的兄弟结论，拒绝已失效的在途回执。若要改选代表路径，回到 P2 说明划分，再验 P3。修改现有 root 的设计或选择条件要复核 P3。涉及共享 Contract 时先回到 P1 核实并重新评估下游。来源明确的转录错误可修正，外部任务要求改变则需要任务方确认。整个算子的时间预算跨重开累计，防止 P4 和 P5 循环。
+1. 使用实际 Codex，经单条命令完成包含 P5 的算子。给出源与执行器身份、计划树、父 checkpoint、节点会话与调用起止、验证结果、最终 manifest 及发布位置。核对每个分支从已审父 YAML 出发、兄弟实际重叠、终审在全部节点合入后开始。若算子经源码核定只有一条路径，用确有分支的算子完成这项验收。
+2. 重跑 `python3 -B -m unittest discover -s schema_extract/tests -p 'test_*.py'` 和 `python3 -B -m unittest discover -s schema_template/tools/tests -t schema_template`。保留 2.0.4 的冻结入口、旧证据和 GDN 原交付，新的结果独立发布。继续使用 `--skip-hardware`。
+3. 报告各修复的最小反例及其现在的结果、真实性能对比、真实模型验收与受控测试各自覆盖什么。阻塞时保留原因、最后有效 checkpoint 和已完成的分支。
 
-**完成数由已审集合推导。** P6 的启动条件是当前计划的节点集合与当前有效、已合入的节点集合一致，且 P1–P4 验收仍有效。草稿 checkpoint 用于恢复，reviewer 的放行另行绑定内容摘要，只有通过验收才能解锁子节点。最终向目标目录原子发布。同一结果重复发布可安全重试，目标已有不同内容时保留双方结果并报告冲突。
-
-开发时划清四处职责，便于独立测试。
-
-| 职责 | 接口边界 |
-| --- | --- |
-| 命令与输入快照 | 解析一次提取请求，返回算子 ID、输出目录、冻结来源与规范版本、预算和运行 ID。对外控制命令提交明确的运行请求。 |
-| 阶段推进 | 输入已保存的任务状态与经校验的回执，算出下一组可执行调用或终态。阶段定义绑定任务页、会话复用规则、可写产物和放行条件。相同的输入应得到相同的决策。 |
-| Agent 调用 | 根据角色和任务页组装 prompt，启动或续接指定会话，返回结构化结果、证据锚点、进程及终止记录。模型输出是待验证的提案。 |
-| 状态与交付 | 每个算子一份权威任务记录，保存计划修订、各阶段或节点的草稿与已审 checkpoint 指针、当前尝试、退修次数、截止条件和阻塞原因。从这份记录计算就绪集合、进度和终审条件。产物内容随 checkpoint 单独落盘。 |
-
-## 六、实施里程碑
-
-按 A→F 推进，每个里程碑都有可独立复查的交付物。C 先把规则跑通，D 再验证真实并发下的行为。这一先后只用于开发。
-
-### A · 写清提取总览、操作手册与阶段任务页
-
-- **交付。** 改写根提取总览，补全 Supervisor 手册及六张阶段任务页。逐项安置现有七段内容、来源要求、硬件占位、缺口处理和框架问题提报。把模板说明等文件引用的旧章节链接一并校正。
-- **验收。** 按 P1 页指定的材料能建立并审阅 Contract。按 P5 页、P4 交接和已审产物能完成一个派生节点。每页都给出准入条件、读写范围、放行条件和下一位接手者。操作手册明确标识哪些命令已经实现。
-
-### B · 建立一条能运行的 P1→P2 路径
-
-- **交付。** 实现新版入口、两种输入解析、固定快照、独立运行目录和持久状态。区分 `stage`（P1–P6）、`role`、节点和尝试。接入 Codex CLI、按范围读文件、作用域明确的结构化回执及来源锚点校验。阶段页和使用到的规范、检查器与执行器一并纳入快照。
-- **验收。** 用可控 CLI 替身走通 P1、P2 两次独立审批。断言有两个不同的角色会话，P2 分别续用正确 ID 并加载新任务页。验证不完整的 root 可保存，错误引用、越界写入和重复回执均不能推进。catalog 与历史源码入口均能找到指定实现。
-
-### C · 串行跑通完整算子的六阶段
-
-- **交付。** 实现 P3 root 验证、P4 计划冻结、P5 父文件复制、P6 先审后修及 `ready` 判定。接入短交接、阶段退修、一次裁决和时间预算。先用受控调用顺序跑通单 root，再跑多级派生树。
-- **验收。** 单 root 的 P5 自动跳过，P6 仍由新 reviewer 启动。多节点任务中核对 P3/P4 全新会话，每个 P5 节点独立，父节点审过后才复制。第 5 次实质退修能分别走到裁决推进和阻塞，最终裁决修改后的额外签收只执行一次。
-
-### D · 按依赖派发并原子合入
-
-- **交付。** 将 P5 接到就绪节点调度器。实现独立工作区、并发写审、节点增量合入、依赖校验、计划修订和终审启动条件。`status` 能列出就绪、在途、退修、已审、等待父节点和阻塞的具体节点。
-- **验收。** 用至少三个同时就绪的兄弟节点验证 worker 和 reviewer 都能实际重叠运行。让它们逆序完成，让一个孙节点在另一兄弟仍运行时启动。再覆盖同一回执重复抵达、父节点修订期间旧结果迟到、一个分支阻塞而独立分支完成。逐项验证产物、已审集合及 P6 只启动一次。
-
-### E · 恢复、旧数据和 Supervisor 接入
-
-- **交付。** 补齐暂停、取消、崩溃恢复、发布重试和可选只读巡检。接入旧草稿的显式导入与独立重审，保留来源和旧 checkpoint 身份。将框架问题台账及已有决定按稳定 ID 接入新版维护入口，算子自身的证据缺口随任务保存。核对既有定时巡检所指向的执行器版本。[旧版台账规则](../schema_extract_old/issues/README.md)
-- **验收。** 分别在模型调用中、checkpoint 落盘而指针未切换时、节点合入后而派发前、发布后而回执未写时模拟中断。能确认旧进程终止才重发，确认不了就停在该范围。已审产物可重用，同一结果只合入和计数一次。验证旧状态仍由冻结执行器读取，新任务只写新版运行区，目标目录冲突可从原 checkpoint 处理。
-
-### F · 端到端验收与切换
-
-- **交付。** 在小型真实算子上，从单条 Supervisor 命令走到最终输出。用回执核对直接 CLI 调用、各阶段会话、冻结来源、检查结果和最终发布路径。更新根 README 与新版手册的正式入口、状态和恢复示例，核对所有仓库内链接。
-- **验收。** 自动回归覆盖 A–E 的正常、返工、并行和恢复路径。真实运行由 Runner 提供所有阶段提示，产物可以从目标目录重新执行 `check_yaml.py --skip-hardware`。记录真实运行的算子、来源版本、执行器版本、节点数和结果。
-- **FA4 的使用。** 现有示例用于检查多层父依赖和比较设计表达。其实现、输入与 reference 可从本地 Git 的 `01fff90d714abc6e84904ea9c44523ba66d34a0e` 取得，源码和当前规范分别冻结。完整重提 FA4 prefill 单列为长程验收。届时由 worker 从源码定树，完成后再与示例对照。[示例的固定来源](../schema_template/examples/fa4_prefill/root.yaml#L4)
-
-**下一次实施从 A 开始。** A 的成果应当足以让另一位开发者按 P1/P2 任务页实现 B，也足以让 Supervisor 看出何时可以开始一次真正的提取。
+每个里程碑先复现、再修最小范围、最后独立验收。R1–R5 都维持原定的会话边界、就绪即派发、第五次退修的一次裁决以及按内容合入。
