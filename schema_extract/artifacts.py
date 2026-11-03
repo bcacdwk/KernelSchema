@@ -1,0 +1,318 @@
+"""Artifact scope gates and calls to the frozen schema parser/checker."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from decimal import Decimal
+from functools import lru_cache
+import hashlib
+import importlib.util
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+from .common import ExtractError, manifest, regular_file, relative_name
+from .inputs import validate_source_reference
+
+
+@lru_cache(maxsize=16)
+def parser_for(root: str):
+    """Use the frozen checker's scalar, Decimal, alias, and duplicate-key rules."""
+    source = Path(root) / "schema_template/tools/__init__.py"
+    name = "_schema_extract_v2_checker_" + hashlib.sha256(root.encode()).hexdigest()[:16]
+    spec = importlib.util.spec_from_file_location(name, source, submodule_search_locations=[str(source.parent)])
+    package = importlib.util.module_from_spec(spec)
+    sys.modules[name] = package
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(package)
+        return importlib.import_module(name + ".yaml_source")
+    finally:
+        sys.dont_write_bytecode = previous
+
+
+def load_yaml(directory: Path, filename: str, *, parser_root: Path | None = None) -> dict:
+    parser = parser_for(str(parser_root or Path(__file__).resolve().parent.parent))
+    try:
+        value = parser.load(regular_file(directory, filename), Path(filename).stem).value
+    except (parser.ReadError, parser.DependencyError, parser.CapacityError) as exc:
+        raise ExtractError(f"{filename} is not parseable YAML: {exc}") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("meta_data"), dict):
+        raise ExtractError(f"{filename} requires a meta_data mapping")
+    return value
+
+
+def load_root(directory: Path, filename: str = "root.yaml", *, parser_root: Path | None = None) -> dict:
+    value = load_yaml(directory, filename, parser_root=parser_root)
+    if not isinstance(value.get("contract"), dict):
+        raise ExtractError("root.yaml requires meta_data and contract mappings")
+    return value
+
+
+def write_yaml(path: Path, value: dict) -> None:
+    """Emit parsed parent values without converting exact Decimal scalars to float."""
+    import yaml
+    class Dumper(yaml.SafeDumper):
+        pass
+    Dumper.add_representer(Decimal, lambda dumper, number:
+                          dumper.represent_scalar("tag:yaml.org,2002:float", str(number)))
+    path.write_text(yaml.dump(value, Dumper=Dumper, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def _same(left, right) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same(value, right[key]) for key, value in left.items())
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def _without_p1_fields(value: dict) -> dict:
+    result = deepcopy(value)
+    metadata = result.pop("meta_data")
+    result["protected_metadata"] = {key: metadata[key] for key in ("dispatch", "id", "parent") if key in metadata}
+    result["contract"].pop("algorithm_requirement", None)
+    return result
+
+
+def _without_p2_fields(value: dict) -> dict:
+    result = deepcopy(value)
+    result["meta_data"].pop("dispatch", None)
+    result["meta_data"].pop("version", None)
+    return result
+
+
+def _without_design(value: dict, *, root_revision=False) -> dict:
+    result = deepcopy(value)
+    result.pop("design", None)
+    result.pop("realization", None)
+    result["meta_data"].pop("version", None)
+    if root_revision and isinstance(result["meta_data"].get("dispatch"), dict):
+        result["meta_data"]["dispatch"].pop("when", None)
+        if not result["meta_data"]["dispatch"]:
+            result["meta_data"].pop("dispatch")
+    return result
+
+
+def _version(value: dict) -> int:
+    version = value["meta_data"].get("version")
+    if type(version) is not int or version < 1:
+        raise ExtractError("meta_data.version must be a positive integer")
+    return version
+
+
+def _versions(old: dict, new: dict, *, first_draft: bool = False) -> None:
+    old_version, new_version = _version(old), _version(new)
+    if new_version < old_version:
+        raise ExtractError("node version decreased")
+    left, right = deepcopy(old), deepcopy(new)
+    left["meta_data"].pop("version", None)
+    right["meta_data"].pop("version", None)
+    if first_draft and new_version != 1:
+        raise ExtractError("new node starts at version 1")
+    if not first_draft and not _same(left, right) and new_version <= old_version:
+        raise ExtractError("node content changed without increasing version")
+
+
+def validate_artifact_sources(directory: Path, lock: dict, *, decision: str) -> None:
+    parser_root = Path(lock["snapshot"]) / "rules"
+    root = load_root(directory, parser_root=parser_root)
+    algorithm = root["contract"].get("algorithm_requirement")
+    golden = algorithm.get("golden_reference") if isinstance(algorithm, dict) else None
+    reference = golden.get("source") if isinstance(golden, dict) else None
+    if reference is not None or decision in {"complete", "approve"}:
+        validate_source_reference(reference, lock, role="reference")
+    for name in manifest(directory):
+        if name.endswith((".yaml", ".yml")):
+            value = load_yaml(directory, name, parser_root=parser_root)["meta_data"].get("source")
+            if value is not None or decision in {"complete", "approve"}:
+                validate_source_reference(value, lock, role="implementation")
+
+
+def validate_plan(plan: list, directory: Path, parser_root: Path, *, require_files: bool = False) -> None:
+    """Validate the scheduling graph, reusing the checker's existing ID rule."""
+    if not isinstance(plan, list) or not plan:
+        raise ExtractError("P4 requires a nonempty structured plan")
+    parser = parser_for(str(parser_root))
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        node_id = importlib.import_module(parser.__package__ + ".rules.values").node_id
+    finally:
+        sys.dont_write_bytecode = previous
+    nodes, files = {}, set()
+    for entry in plan:
+        expected = {"id", "file", "parent", "workload", "difference", "selection", "evidence"}
+        if not isinstance(entry, dict) or set(entry) != expected:
+            raise ExtractError("plan node fields must be id/file/parent/workload/difference/selection/evidence")
+        errors = []
+        node_id(entry["id"], "plan.id", errors)
+        if errors:
+            raise ExtractError(errors[0].message)
+        if entry["id"] in nodes or entry["file"] in files:
+            raise ExtractError("plan node IDs and files must be unique")
+        if relative_name(entry["file"]) != entry["id"] + ".yaml":
+            raise ExtractError("plan filename must be <id>.yaml")
+        if any(not isinstance(entry[key], str) or not entry[key].strip()
+               for key in ("workload", "difference", "selection")):
+            raise ExtractError("plan node needs workload, difference, and selection evidence")
+        nodes[entry["id"]] = entry
+        files.add(entry["file"])
+    roots = [entry["id"] for entry in plan if entry["parent"] == ""]
+    if roots != ["root"] or nodes["root"]["file"] != "root.yaml":
+        raise ExtractError("plan must contain exactly one root, named root, with an empty parent")
+    for entry in plan:
+        if entry["id"] != "root" and entry["parent"] not in nodes:
+            raise ExtractError("plan parent does not exist: " + entry["id"])
+        visited, current = set(), entry["id"]
+        while current != "root":
+            if current in visited:
+                raise ExtractError("plan has a cycle or an unreachable node: " + entry["id"])
+            visited.add(current)
+            current = nodes[current]["parent"]
+    validate_index(directory, plan)
+    if require_files:
+        actual = {name for name in manifest(directory) if name.endswith((".yaml", ".yml"))}
+        if actual != files:
+            raise ExtractError("final YAML file set differs from the approved plan")
+        for entry in plan:
+            value = load_yaml(directory, entry["file"], parser_root=parser_root)
+            dispatch = value["meta_data"].get("dispatch", {})
+            if not isinstance(dispatch, dict):
+                raise ExtractError("node dispatch must be a mapping")
+            if dispatch.get("id", "root") != entry["id"] or dispatch.get("parent", "" if entry["id"] == "root" else "root") != entry["parent"]:
+                raise ExtractError("YAML identity/parent differs from the approved plan")
+
+
+def validate_index(directory: Path, plan: list) -> None:
+    text = regular_file(directory, "dispatch.md").read_text(encoding="utf-8")
+    links = {target.removeprefix("./").split("#", 1)[0]
+             for target in re.findall(r"\]\(([^)\s]+\.(?:yaml|yml)(?:#[^)\s]*)?)\)", text)}
+    if not text.strip() or links != {entry["file"] for entry in plan}:
+        raise ExtractError("dispatch.md YAML links differ from the approved node plan")
+
+
+def validate_revision_scope(scopes: list, plan: list) -> None:
+    files = {entry["file"] for entry in plan}
+    seen = set()
+    for item in scopes:
+        path, fields = item["path"], item["fields"]
+        if path in seen or path not in files | {"dispatch.md"} or not fields or len(set(fields)) != len(fields):
+            raise ExtractError("P6 revision scope requires unique planned files and explicit fields")
+        seen.add(path)
+        if path == "dispatch.md":
+            if fields != ["*"]:
+                raise ExtractError("dispatch.md revision scope uses fields ['*']")
+            continue
+        # Root/Contract/tree changes enter the same reviewed upstream route.
+        if path == "root.yaml":
+            raise ExtractError("P6 root changes require upstream stage reopening")
+        for field in fields:
+            if not any(field == allowed or field.startswith(allowed + ".")
+                       for allowed in ("design", "realization", "meta_data.source", "meta_data.dispatch.when")):
+                raise ExtractError("P6 field requires upstream reopening or exceeds the allowed node scope: " + field)
+            if any(not part or part in {"*", ".."} for part in field.split(".")):
+                raise ExtractError("invalid P6 field path")
+
+
+def _erase_fields(value: dict, fields: list[str]) -> dict:
+    value = deepcopy(value)
+    for field in [*fields, "meta_data.version"]:
+        parts = field.split(".")
+        current = value
+        for part in parts[:-1]:
+            if not isinstance(current, dict):
+                break
+            current = current.get(part)
+        else:
+            if isinstance(current, dict):
+                current.pop(parts[-1], None)
+    return value
+
+
+def validate_artifacts(stage: str, role: str, before: Path, after: Path, starter: Path,
+                       *, decision: str, node_entry: dict | None = None, revision_scope: list | None = None,
+                       first_draft: bool = False, root_revision: bool = False) -> dict:
+    old_files, new_files = manifest(before), manifest(after)
+    changed = sorted(name for name in old_files.keys() | new_files.keys() if old_files.get(name) != new_files.get(name))
+    allowed = {"P1": {"root.yaml"}, "P2": {"root.yaml", "dispatch.md"}, "P3": {"root.yaml"},
+               "P4": {"dispatch.md"}, "P5": {node_entry["file"]} if node_entry else set(),
+               "P6": {item["path"] for item in revision_scope or []}}[stage]
+    if role == "reviewer" and changed:
+        raise ExtractError("reviewer changed its read-only checkpoint copy: " + ", ".join(changed))
+    if set(changed) - (allowed if role == "worker" else set()) or not set(old_files) <= set(new_files):
+        raise ExtractError("write outside stage scope or deleted artifact: " + ", ".join(changed))
+    if stage in {"P1", "P2", "P3", "P4"} and set(new_files) - {"root.yaml", "dispatch.md"}:
+        raise ExtractError("unexpected artifacts for this stage")
+    if stage in {"P3", "P4", "P5", "P6"} and set(new_files) != set(old_files):
+        raise ExtractError("this stage cannot add or delete artifacts")
+    parser_root = starter.parent.parent
+    old, new = load_root(before, parser_root=parser_root), load_root(after, parser_root=parser_root)
+    template = load_root(starter.parent, starter.name, parser_root=parser_root)
+    if not _same(new.get("contract", {}).get("hardware_specification"), template["contract"]["hardware_specification"]):
+        raise ExtractError("hardware placeholder changed")
+    if stage == "P1" and not _same(_without_p1_fields(old), _without_p1_fields(new)):
+        raise ExtractError("P1 changed protected Design, hardware, dispatch, or other fields")
+    if stage == "P2" and not _same(_without_p2_fields(old), _without_p2_fields(new)):
+        raise ExtractError("P2 changed Contract, Design, source, or other protected fields")
+    if stage == "P3" and not _same(_without_design(old, root_revision=root_revision), _without_design(new, root_revision=root_revision)):
+        raise ExtractError("P3 changed Contract, selection, source, or other protected fields")
+    if stage in {"P1", "P2", "P3"}:
+        _versions(old, new, first_draft=_same(old, template))
+    if stage == "P5":
+        if not node_entry:
+            raise ExtractError("P5 requires the approved node entry")
+        name = node_entry["file"]
+        left, right = load_yaml(before, name, parser_root=parser_root), load_yaml(after, name, parser_root=parser_root)
+        metadata = right["meta_data"]
+        dispatch = metadata.get("dispatch", {})
+        if "contract" in right:
+            raise ExtractError("derived nodes must omit the whole Contract")
+        if not isinstance(dispatch, dict) or dispatch.get("id") != node_entry["id"] or dispatch.get("parent") != node_entry["parent"]:
+            raise ExtractError("derived ID/parent must match the approved direct-parent plan")
+        if any(not _same(metadata.get(key), new["meta_data"].get(key)) for key in ("name", "describe")):
+            raise ExtractError("derived name/describe must equal root")
+        _versions(left, right, first_draft=first_draft)
+        if decision in {"complete", "approve"} and (not isinstance(dispatch.get("when"), str) or not dispatch["when"].strip()):
+            raise ExtractError("derived node needs its own nonempty when")
+    if stage == "P6":
+        scope_map = {item["path"]: item["fields"] for item in revision_scope or []}
+        for name in changed:
+            if name == "dispatch.md":
+                continue
+            left, right = load_yaml(before, name, parser_root=parser_root), load_yaml(after, name, parser_root=parser_root)
+            if not _same(_erase_fields(left, scope_map[name]), _erase_fields(right, scope_map[name])):
+                raise ExtractError("P6 changed fields outside the reviewer's explicit scope: " + name)
+            _versions(left, right)
+    if decision in {"complete", "approve"}:
+        for field in ("name", "describe", "source"):
+            if not isinstance(new["meta_data"].get(field), str) or not new["meta_data"][field].strip():
+                raise ExtractError(f"completion requires meta_data.{field}")
+        if not isinstance(new["contract"].get("algorithm_requirement"), dict):
+            raise ExtractError("completion requires algorithm_requirement")
+        if stage == "P2":
+            dispatch = regular_file(after, "dispatch.md").read_text(encoding="utf-8")
+            if not dispatch.strip() or not re.search(r"\]\((?:\./)?root\.yaml(?:#[^)]*)?\)", dispatch):
+                raise ExtractError("P2 dispatch.md must link root.yaml")
+    return {"changed_files": changed, "artifact_digests": new_files,
+            "check": {"kind": "stage_gate", "stage": stage, "exit_code": 0,
+                      "full_yaml_check": "not_run_in_P1_P2_P4" if stage in {"P1", "P2", "P4"} else "pending",
+                      "hardware": "placeholder_unchanged"}}
+
+
+def check_complete(directory: Path, rules_root: Path, *, filename="root.yaml", timeout=120.0) -> dict:
+    """Run the frozen executable; never replace schema checks with local rules."""
+    command = [sys.executable, "-B", str(rules_root / "schema_template/check_yaml.py"),
+               "--skip-hardware", str(directory / filename)]
+    try:
+        result = subprocess.run(command, cwd=rules_root, capture_output=True, text=True, timeout=max(0.01, timeout))
+        code = result.returncode if result.returncode in {0, 1, 2} else 2
+        return {"kind": "frozen_checker", "command": command, "exit_code": code,
+                "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"kind": "frozen_checker", "command": command, "exit_code": 2, "returncode": None,
+                "stdout": "", "stderr": str(exc)}

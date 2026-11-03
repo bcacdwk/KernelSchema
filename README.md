@@ -17,7 +17,7 @@
 
 一次任务选择当前工作对应的入口，通过产物与必要说明交接。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
 
-本地批量提取绑定执行器版本，支持协作复核、检查点恢复和 Supervisor 巡检。算子问题随任务记录保存。需要维护者决策的规范、检查工具、资料或流程改进单独入账。当前提取模式的硬件规格仅保留模板占位，不纳入撰写、检查、审阅和收尾。[Schema Extract 使用说明](schema_extract/README.md) · [框架问题台账](schema_extract/issues/README.md)
+Schema Extract `2.0.4` 已完成真实算子的单命令验收，提供六阶段提取、依赖并发、暂停/取消、崩溃恢复、旧稿重审与原子发布。Supervisor 从手册发起 `python3 -m schema_extract extract --id <算子> --output <目录>`，运行始终使用自己的冻结执行器。算子问题随任务记录保存，规范、检查工具、资料或流程问题按稳定 ID 提报。当前硬件规格只保留模板原样占位，检查使用 `--skip-hardware`。[Schema Extract 手册](schema_extract/README.md) · [状态与恢复](schema_extract/README.md#恢复与交付) · [验收记录](schema_extract/README.md#验收记录) · [框架问题维护入口与历史决定](schema_extract/issues/README.md)
 
 新建与优化均由 Planner 承担，按数学改写、工作调度、微流水线的顺序逐层推导和写入。先把上层方向收束，再向下投入优化精力；下层发现前提问题时，回到对应上层修正并复查受影响部分。
 
@@ -77,7 +77,8 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 ├── DESIGN_SCHEMA.md     从已完成的 Contract 逐层设计新算子
 ├── OPTIMIZE_SCHEMA.md   判断实现反馈，逐层迭代已有设计
 ├── IMPLEMENT_SCHEMA.md  将 schema 落实为 kernel，验证并反馈
-├── schema_extract/      本地提取执行器、Supervisor 巡检与问题记录
+├── schema_extract/      新版 P1–P6 Runner、依赖并发、恢复、旧稿重审与原子发布
+├── schema_extract_old/  旧实现与台账参考；旧运行仍使用各自冻结快照
 ├── schema_template/     共用的 YAML 操作与检查
 │   ├── README.md        创建、修订、检查与交付
 │   ├── starter.yaml     待填写骨架，复制为新任务的 root.yaml

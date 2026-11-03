@@ -1,73 +1,52 @@
 # 从已有 kernel 提取 schema
 
-本流程将固定实现转换为可追溯的 schema：先建立共享 Contract，再选择 root，逐层提取设计，最后完成其他 dispatch。保留原实现的设计、代价与缺口，不在提取中优化或修复。
+一次提取以一个完整算子为单位，将固定实现转换为可追溯的 schema。先建立共享 Contract，再审定路径划分、完成 root、定稿派生树、提取全部派生节点，最后独立终审。保留原实现的设计、代价与缺口；提取过程中不优化或修复 kernel。
 
-**Less is more。** 删掉这个细节，读者会不会读错或漏掉设计？用这个问题复查每一段。保留影响计算、写入边界、调度或同步的事实，引用上游已有定义，删去重复叙述。
+本页是流程总览，[Supervisor 手册](schema_extract/README.md)说明输入、输出、操作及命令的当前实现状态，六张阶段任务页给出具体工作。旧任务的冻结执行器与新版的边界见手册，开发步骤见[迁移计划](schema_extract/PLAN.md)。
 
-算子已经真实跑过 GPU；当前算子和 schema 都不需要 GPU 正确性验收。extract 完全忽略 GPU 验收与实测，不将其列为待办、缺口或交付条件。
+## 提取顺序与交付
 
-**以七段产物组织：元数据、算法要求、硬件占位、数学改写、工作调度、微流水线、实现交接。** 当前硬件段只保留 starter 占位并跳过；其余每段围绕当前问题读取材料，写入并回查，保存后再进入下一段；复杂段可拆成多轮。下层发现前提有误时，回到定义处修正，再复查受影响的下游。
+| 阶段 | 工作与产物 | 放行与下一步 |
+| --- | --- | --- |
+| [P1 共享 Contract](schema_extract/phases/01_contract.md) | 从 starter 建立 `root.yaml`，填写元数据和算法要求，保留硬件占位。 | reviewer 验收可独立理解的外部计算、有效域、输出与误差依据；Design 可留作草稿，随后进入 P2。 |
+| [P2 dispatch 草案](schema_extract/phases/02_dispatch_draft.md) | 对照 host 路由，选代表主要 workload 的真实路径作 root，写 `dispatch.md` 草案及必要的 root `when`。 | reviewer 先验 root 选择、设计划分与已知覆盖缺口，再放行 P3。 |
+| [P3 root 设计](schema_extract/phases/03_root.md) | 逐段完成 root 的数学改写、工作调度、微流水线和必要的实现交接。 | 完整 root 通过 `--skip-hardware` 检查及源码审阅，交给 P4。 |
+| [P4 dispatch 定稿](schema_extract/phases/04_dispatch_plan.md) | 据已审 root 定稿索引，明确每个节点的 ID、直接父节点、设计差异和选择依据。 | reviewer 批准整棵树，Runner 核验结构化节点清单，再按依赖派发 P5。 |
+| [P5 派生节点](schema_extract/phases/05_branch.md) | 从已审的直接父节点复制，为每个节点写完整 Design 和适用的 Realization。 | 各节点检查、独立审阅并合入后解锁子节点；没有分支时跳过 P5。 |
+| [P6 全算子终审](schema_extract/phases/06_final.md) | 新 reviewer 先核对全树、条件、链接、引用和未决项，必要时再请 worker 修改。 | 当前计划全部节点已有效合入，整个目录检查与终审通过后才达到 `ready`，再向指定目录交付。 |
 
-源码从 host 接口、IO、路径选择和调用关系向内展开，读到能写出本段就先写，再按问题回查。允许必要的跨函数、跨层阅读，不一次通读源码树或一次生成整份 YAML。
+交付目录包含 `root.yaml`、所有计划内的 `<id>.yaml` 和中文 `dispatch.md`；只有 root 的任务也保留索引。共享 Contract 只在 root 中定义，各节点的 Design 均完整。精确选择条件以各 YAML 为准，`parent` 只表示设计派生关系。[节点与索引规则](schema_docs/0.common.md#派生节点与-dispatch)
 
-## 1 建立任务与元数据
+Supervisor 指定来源和输出位置，处理需要外部材料或任务方确认的事项。Runner 管理依赖、调用、回执、checkpoint 与发布，是运行状态的唯一写入者。worker 只改本阶段允许的产物，reviewer 独立核对产物和来源。会话复用、退修、裁决、分支隔离与恢复统一见[Supervisor 手册](schema_extract/README.md#角色与会话)。
 
-从任务说明和外部 IO 关系识别核心计算，如矩阵收缩、归约、状态递推及其组合，初步区分独立轴与依赖关系。分清 reference、baseline 与选定实现，固定源码版本与调用范围；分别核实任务允许的输入与实现支持的路径。
+## 七段内容的阅读导航
 
-**第 1 段：**`meta_data`**。** 按[模板说明](schema_template/README.md)确认创建要求，将当前模板复制为任务目录中的 `root.yaml`，按[公共约定](schema_docs/0.common.md)填写任务身份、来源与修订号。root 路径在 Contract 后确定。修正已有提取结果时，保留文件与版本关系，从受影响的段落进入流程。
+六个阶段负责推进，七段 schema 内容负责表达。每段的提取方法只在下表对应的任务页定义；P5 复用 P3 的逐段方法。字段语义仍由 `schema_docs/` 定义，创建、修订和检查操作见[模板说明](schema_template/README.md)。
 
-## 2 建立共享 Contract
+| 段 | schema 内容 | 提取方法与规范 |
+| --- | --- | --- |
+| 1 | `meta_data` | [P1 元数据](schema_extract/phases/01_contract.md#第-1-段元数据) · [公共约定](schema_docs/0.common.md) |
+| 2 | `contract.algorithm_requirement` | [P1 算法要求](schema_extract/phases/01_contract.md#第-2-段算法要求) · [算法规范](schema_docs/1.contract.algorithm_requirement.md) |
+| 3 | `contract.hardware_specification` | [P1 硬件占位](schema_extract/phases/01_contract.md#第-3-段硬件占位)；提取只保留 starter 原样占位，不读取硬件资料 |
+| 4 | `design.math_reshape` | [P3 数学改写](schema_extract/phases/03_root.md#第-4-段数学改写) · [数学规范](schema_docs/3.design.math_reshape.md) |
+| 5 | `design.work_schedule` | [P3 工作调度](schema_extract/phases/03_root.md#第-5-段工作调度) · [调度规范](schema_docs/4.design.work_schedule.md) |
+| 6 | `design.tile_pipeline` | [P3 微流水线](schema_extract/phases/03_root.md#第-6-段微流水线) · [流水线规范](schema_docs/5.design.tile_pipeline.md) |
+| 7 | `realization` | [P3 实现交接](schema_extract/phases/03_root.md#第-7-段实现交接) · [实现交接规范](schema_docs/6.realization.md) |
 
-Contract 只在 root 中保存一份，供全部 dispatch 共用。算法区定义算子的外部数学要求，独立于具体设计的分块、映射、缓冲和执行顺序。当前提取阶段不处理硬件区，只保留 starter 占位。
+**Less is more。** 每段复查“删掉这个细节，读者会不会读错或漏掉设计”。保留影响计算、写入边界、调度和同步的事实；已有决定直接引用，不重复叙述。源码从 host 接口、IO、路由和调用关系向内展开，读到能写出本段就先写、保存，再按问题回查。可以跨函数、跨层读取或分多轮完成复杂段，不一次通读源码树或一次生成整份 YAML。下层发现前提有误时，回到唯一定义处修正并复查受影响下游；跨阶段修改经 Runner 重开对应阶段。
 
-**第 2 段：**`contract.algorithm_requirement`**。** 沿任务的输入构造、reference 和验收入口，写清输入输出、有效域、数学关系、边界、精度转换与副作用。核对实际调用的 shape、布局、可选参数、读写及初始化区域，避免默认值域排除合法输入；验收判据核对比较对象、相对误差基准、计算精度和非有限值处理。
+## 来源、缺项与验收边界
 
-写完后，读者应能不依赖 Design 理解标准答案。生成参数、函数签名和候选实现的限制不能单独决定任务要求；候选的数学改写也不写回 Contract。字段表达见[算法要求规范](schema_docs/1.contract.algorithm_requirement.md)。
+输入构造、reference、baseline 和选定实现分别核实。来源要固定到实际版本；设计决定的证据保留文件、行号和短引文，长文件按相关范围续读。已有 schema 可帮助阅读，但事实回源码核实、表达按当前规范。[来源与证据](schema_docs/0.common.md#来源与证据) · [输入冻结与回执](schema_extract/README.md#输入与输出)
 
-**第 3 段：**`contract.hardware_specification`**。** 当前阶段硬件资料一概不在提取范围：只保留 [starter.yaml](schema_template/starter.yaml) 中的原样占位，撰写、搜索、检查、审阅与收尾均跳过该区。提取检查显式使用 `--skip-hardware`；不填设备或能力事实，不提出硬件缺口，也不因此停止。其余 Design 仍如实描述源码中实际使用的运算、执行者和同步关系，不由此推断设备保证。
+算子已经真实跑过 GPU；当前算子和 schema 都不需要 GPU 正确性验收。GPU 验收与实测不列为待办、缺口或交付条件。硬件区在撰写、搜索、检查、审阅及收尾中跳过，原样保留 starter 占位；完成 YAML 的检查显式使用 `--skip-hardware`。检查通过仅说明结构和已实现的关联通过，数学、调度、存储复用、选择条件和来源仍须独立审阅。[检查边界](schema_template/README.md#校验边界)
 
-Contract 不随 dispatch 改变。提取所需资料的真实缺项按[缺项规则](schema_template/README.md#1-确认资料与范围)处理；已知实现缺陷或尚未确定的源码关系如实备注，不一律否决源码忠实的提取。真正任务要求不能为迁就实现而改；来源明确的转录错误可纠正并复查受影响节点，实际要求变更仍需任务方确认。
+实现覆盖不足或已知缺陷要说明适用范围，忠实记录源码，不缩小共享 Contract、虚构 fallback 或补加等待来修复原实现。确实不同的外部任务要求才拆成两个算子。来源明确的转录错误可纠正，实际任务要求变更仍须任务方确认。
 
-## 3 从实现事实形成设计表达
+非硬件必需材料不足时，记录缺什么、影响哪个字段或结论、已有证据及恢复所需输入；继续不受影响的部分。缺项写法遵循[模板规则](schema_template/README.md#1-确认资料与范围)，不能编造 reference、误差或源码关系，也不能用 `null` 把未完成内容当作正式设计。已知实现问题和待核实关系要区分；草稿和结构通过都不能替代完整验收。放行、退修或阻塞由当前 reviewer 按阶段门槛判断。
 
-### 划分 dispatch，选择 root
+## 框架问题分流
 
-在已明确的任务有效域内，回看 host 选择条件与各路径入口，只深入到足以区分核心设计的程度：数学改写、工作拆分、中间结果物化或局部执行组织是否改变。同一套规则能用参数覆盖的变化保留在一个节点，实质不同的设计再拆分；函数、文件、kernel 和 shape 的数量都不是节点数。
+当前算子的实现差异、证据缺项和待修转录写入任务回执。规范、检查器、资料或流程本身造成错误、遗漏或重复劳动时，先核实已有规则，再在 `framework_candidates` 中提供可复查反例、最小改动及不改的影响；没有合格发现时返回 `[]`，正常完成本阶段。worker、reviewer 与 Supervisor 都可提报，不在算子任务中自行修改框架。
 
-从选定实现的真实路径中，优先选择覆盖主要 workload、较通用且便于对照其他设计的一条作为 root。root 保存全任务 Contract，自身 Design 则只负责其选择条件；无需另造一个覆盖全域的 baseline。
-
-先按[索引规则](schema_docs/0.common.md#选择条件与索引)在 `dispatch.md` 写明 root 选择；需要多条路径时，列出预计需要的其他设计及差异，并把 root 的选择条件写入元数据。路径划分可随深入理解修正，但先完成 root 各层的提取与核对，再逐个展开派生节点。节点身份与选择条件按[公共约定](schema_docs/0.common.md)表达。
-
-### 逐层完成 root
-
-**第 4 段：**`design.math_reshape`**。** 对照 Contract，追踪实际求值、舍入、状态推进和物化，将变化写成从输入到全部输出的数学关系。凡是会改变数值行为的协作关系，也要深入源码核实，再抽象为分组、映射或递推；数学区不写线程布局、屏障编号或指令组织。留给下游确定的参数按规范绑定。
-
-写完后，沿公式核对值的定义、精度路径、初末状态与寿命。用可核对的量同时表达收益和代价，包括实际执行的掩码、补齐与辅助计算；算法名称和源码注释不能代替公式或依据。字段表达见[数学改写规范](schema_docs/3.design.math_reshape.md)。
-
-**第 5 段：**`design.work_schedule`**。** 从一份完整的可分配工作出发，回看 launch、工作索引、循环与领取逻辑，写清输入、局部遍历、产物和执行者，再确定 phase、映射、分配、提交与交接。数据块描述整份工作，不把每线程的 fragment 当作 worktile；辅助计算和部分结果合并也须有实际执行者。
-
-写完后，核对数学计算是否都有工作归属，局部归约是否被误拆为独立工作，以及生产区域能否覆盖消费区域。字段表达见[工作调度规范](schema_docs/4.design.work_schedule.md)。
-
-**第 6 段：**`design.tile_pipeline`**。** 在已确定的工作边界内，追踪影响推进与重叠的值和状态，包括主数据缓冲、寄存器预取、辅助统计量及工作领取协议。沿产生、保留、发布、全部读取、覆盖或重置的关系划分动作，再落实执行角色、重复索引、依赖和资源视图。分别核实操作发射、数据可读与存储可覆盖的保证，将同步调用还原为所保护的关系。
-
-写完后，检查首轮、稳态、末轮、未取得工作和终止路径，并追到相邻工作及跨调用状态。既要确认下一份工作何时可开始，也要确认前一份工作的哪些读取或写回仍在继续。被丢弃或没有消费者的值若仍发生求值、搬运或状态更新，应如实保留；源码未排空的流水不能在 schema 中隐含重置。字段表达见[微流水线规范](schema_docs/5.design.tile_pipeline.md)。
-
-**第 7 段：**`realization` **与 root 复核。** 对源码中的实现选择做删除测试：替换它会破坏哪项既定语义或执行关系，或有什么具体成本理由需要交接？只保留上游尚未表达的必要条件与有依据的选择，不因“源码使用了它”就列为硬要求；没有新增内容时省略本区。原语顺序、近似误差和容量判断须有匹配版本的依据。字段表达见[实现交接规范](schema_docs/6.realization.md)。
-
-最后选 root 适用范围内的具体调用，将各层从输入连到输出，核对符号、工作、资源和事件引用，并反查关键决定的源码或资料依据。按模板运行检查，区分已通过的检查与尚未解决的设计、证据问题。
-
-## 4 派生、核对与交付
-
-root 各层提取完成后，按路径计划逐个建立其他节点。复制最相关节点为 `<id>.yaml`，更新元数据、parent 和选择条件，删除 Contract，再按第 4–7 段逐层核对并改写。只深入当前路径及其差异，但每个节点都须包含完整 Design 和适用的实现交接，不能依赖 parent 拼接；同一路径的修订保留原节点身份。
-
-按[索引规则](schema_docs/0.common.md#选择条件与索引)收束 `dispatch.md`，核对实际节点及其链接。核对包含 root 在内的选择条件是否互斥、是否共同覆盖 Contract 有效域；未覆盖的范围明确说明，不通过缩小 Contract 或虚构 fallback 补齐。
-
-发现源码与任务要求不一致时，保留实现事实并说明影响范围，不改算法或增加等待来修补它。尚未核实的源码关系或抽象方法也按[缺项规则](schema_template/README.md#1-确认资料与范围)定位并说明。参考已有 schema 时，事实回源码核实，表达以当前规范为准。
-
-按[模板说明](schema_template/README.md)维护版本、检查并交付整个任务目录，说明来源、覆盖范围、schema 检查结果及提取中的未决问题。
-
-## 5 留存必要的框架改进建议
-
-当前算子的实现差异、证据缺项和待修转录记在任务回执中。若工作中发现规范、检查器、资料或提取流程本身会造成错误、遗漏或重复劳动，先核实已有规则能否处理。确需改进时，给出可复查的证据、能解决问题的最小改动，以及不改的具体影响。一个明确的反例就足以提报。
-
-Worker 和 reviewer 可在回执的 `framework_candidates` 中提报，Supervisor 可根据本轮只读摘要在巡检决定中提报。没有合格发现时返回 `[]`，照常完成提取与审阅。收尾时，主 agent 或维护者在清理运行记录前核实候选、查重，把合格的新项写入维护仓库的对应分类。维护者作出决定后再归档。[入账与归档规则](schema_extract/issues/README.md)
+清理运行记录前，由主 agent 或维护者通过[新版维护入口](schema_extract/issues/README.md)查重、核实稳定 ID 和已有决定，再将合格项登记入账。入口继续读取[旧版台账规则与历史决定](schema_extract_old/issues/README.md)；其中的旧 CLI 只适用于旧冻结执行器。任务回执和必要交接保存在运行记录中，不为提报增设 schema 字段或固定报告文件。
