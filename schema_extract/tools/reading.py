@@ -14,9 +14,7 @@ def encoded(value) -> bytes:
     return (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
 
 
-def read_range(root: Path, path: str, start_line: int = 1, end_line: int | None = None,
-               *, max_bytes: int = 6000, cursor: str | None = None,
-               expected_sha256: str | None = None) -> dict:
+def _read_file(root: Path, path: str, expected_sha256: str | None):
     root = root.resolve(strict=True)
     name = PurePosixPath(path)
     if not path or name.is_absolute() or ".." in name.parts or name.as_posix() != path or "\\" in path:
@@ -38,6 +36,31 @@ def read_range(root: Path, path: str, start_line: int = 1, end_line: int | None 
     file_hash = hashlib.sha256(data).hexdigest()
     if expected_sha256 is not None and file_hash != expected_sha256:
         raise ValueError("file digest does not match fixed input")
+    return root, data, file_hash
+
+
+def read_evidence(root: Path, path: str, start_line: int, end_line: int,
+                  *, quote_offset: int = 0, expected_sha256: str | None = None) -> dict:
+    """Generate a precise excerpt from the caller's range, without choosing evidence."""
+    _, data, file_hash = _read_file(root, path, expected_sha256)
+    lines = data.decode("utf-8").splitlines()
+    if (type(start_line) is not int or type(end_line) is not int or
+            not 1 <= start_line <= end_line <= len(lines) or end_line - start_line >= 12):
+        raise ValueError("invalid evidence range (maximum 12 lines)")
+    selected = "\n".join(lines[start_line - 1:end_line])
+    if type(quote_offset) is not int or not 0 <= quote_offset < len(selected):
+        raise ValueError("quote_offset must select a character within the evidence range")
+    quote = selected[quote_offset:quote_offset + 320]
+    if not quote.strip():
+        raise ValueError("evidence excerpt is empty; select the relevant range/quote_offset")
+    return {"path": path, "sha256": file_hash, "line_start": start_line,
+            "line_end": end_line, "quote": quote}
+
+
+def read_range(root: Path, path: str, start_line: int = 1, end_line: int | None = None,
+               *, max_bytes: int = 6000, cursor: str | None = None,
+               expected_sha256: str | None = None) -> dict:
+    root, data, file_hash = _read_file(root, path, expected_sha256)
     lines = data.decode("utf-8").splitlines(keepends=True)
     end_line = min(start_line + 79, len(lines)) if end_line is None else end_line
     if not 1024 <= max_bytes <= 24000 or not 1 <= start_line <= end_line <= len(lines):
@@ -96,11 +119,22 @@ def main(argv=None) -> int:
     parser.add_argument("--max-bytes", type=int, default=6000)
     parser.add_argument("--cursor")
     parser.add_argument("--expected-sha256")
+    parser.add_argument("--evidence", action="store_true", help="generate an exact short evidence anchor")
+    parser.add_argument("--quote-offset", type=int, default=0,
+                        help="zero-based character offset within the selected evidence lines")
     args = parser.parse_args(argv)
     try:
-        result = read_range(args.root, args.path, args.start_line, args.end_line,
-                            max_bytes=args.max_bytes, cursor=args.cursor,
-                            expected_sha256=args.expected_sha256)
+        if args.evidence:
+            if args.end_line is None or args.cursor is not None:
+                raise ValueError("--evidence requires --end-line and does not use --cursor")
+            result = read_evidence(args.root, args.path, args.start_line, args.end_line,
+                                   quote_offset=args.quote_offset, expected_sha256=args.expected_sha256)
+        else:
+            if args.quote_offset:
+                raise ValueError("--quote-offset requires --evidence")
+            result = read_range(args.root, args.path, args.start_line, args.end_line,
+                                max_bytes=args.max_bytes, cursor=args.cursor,
+                                expected_sha256=args.expected_sha256)
     except (ValueError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

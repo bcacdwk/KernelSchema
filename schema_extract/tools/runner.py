@@ -18,29 +18,29 @@ from .agent import CodexCLI
 from .artifacts import (UpstreamRequired, _same, check_complete, load_yaml, validate_artifact_sources, validate_artifacts,
                         validate_plan, write_yaml)
 from .comparators import validate_comparisons
-from .common import (RUN_WRITES, ExtractError, StaleResult, copy_artifacts, digest, json_bytes, manifest,
-                     read_json, regular_file, relative_name, sha256, write_json, write_text, rules_root)
+from .common import (STATE_GUARD, ExtractError, StaleResult, copy_artifacts, digest, json_bytes, manifest,
+                     read_json, sha256, write_json, write_text, rules_root)
 from .inputs import resolve_request
 from .prompts import build_prompt
-from .receipts import ReceiptFormatError, evidence_identity, receipt_schema, validate_receipt
+from .receipts import (ReceiptFormatError, check_proposal_identity, evidence_identity,
+                       normalize_response, proposal_schema, validate_receipt)
 from .recovery import account, confirm_termination, consume_controls, elapsed_on_disk, handoff_session
-from .snapshots import freeze_inputs, verify_executor, verify_snapshot
+from .snapshots import freeze_inputs, verify_executor, verify_run_inputs
 from .stages import (NODE_STOPS, advance, affected_nodes, call_view, effective_nodes, final_eligible,
                      next_calls, node_signature, owner_for, plan_impact, plan_signature, scope_for, scope_key,
                      session_group, settle)
-from .store import Store
+from .store import Store, summary
 
 
 DEFAULT_CONFIG = {"worker_effort": "xhigh", "reviewer_effort": "xhigh", "model": None,
                   "codex_binary": "codex", "revision_limit": 5, "operator_seconds": 7200,
                   "stage_seconds": 3600, "call_seconds": 1800, "max_calls": 32}
-TRANSPORT_FILES = {"response.schema.json", "response.json", "prompt.txt", "events.jsonl", "stderr.txt",
-                   "invocation.json", "process.json", "result.json", "launch.json", "event.json"}
 
 
 def create_run(repo: Path, state_root: Path, output: Path, *, operator_id: str | None = None,
                source: str | None = None, bindings: Path | None = None,
-               config: dict | None = None, import_seed: dict | None = None, queued=False) -> tuple[Store, dict, dict]:
+               config: dict | None = None, import_seed: dict | None = None, queued=False,
+               run_id: str | None = None, created_at: float | None = None) -> tuple[Store, dict, dict]:
     config = {**DEFAULT_CONFIG, **(config or {})}
     if set(config) != set(DEFAULT_CONFIG):
         raise ExtractError("unknown extraction configuration field")
@@ -64,179 +64,54 @@ def create_run(repo: Path, state_root: Path, output: Path, *, operator_id: str |
     source_directory = tree.root / normalized["directory"]
     if state_root.is_relative_to(source_directory) and ".schema_extract" not in state_root.relative_to(source_directory).parts:
         raise ExtractError("runtime storage inside selected sources must be under .schema_extract, or use a separate directory")
-    marker = state_root / "format.json"
-    if marker.exists():
-        if read_json(marker) != {"format": "schema_extract.store.v2"}:
-            raise ExtractError("state root belongs to another format")
-    elif state_root.exists() and any(state_root.iterdir()):
-        raise ExtractError("state root is nonempty and is not a v2 store; use a separate .schema_extract/v2 directory")
-    else:
-        write_json(marker, {"format": "schema_extract.store.v2"})
+    store = Store(state_root)
+    store.initialize()
     lock = freeze_inputs(state_root, tree, normalized, names, config,
                          source_aliases=import_seed.get("source_aliases") if import_seed else None)
-    store = Store(state_root)
-    return store, store.create(lock, output, seed=import_seed, queued=queued), lock
-
-
-def _file_stamp(info) -> tuple:
-    # mtime/size alone miss same-length replacements with restored timestamps.
-    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
-            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-
-
-def _read_protected(path: Path, name: str, stamp=None) -> bytes:
-    if stamp is None:
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode):
-            raise _AuthorityChanged("unsupported file outside an allowed workspace", path=name)
-        stamp = _file_stamp(info)
-    with path.open("rb") as stream:
-        if _file_stamp(os.fstat(stream.fileno())) != stamp:
-            raise _AuthorityChanged("protected file changed while opening: " + name, path=name)
-        data = stream.read()
-        if _file_stamp(os.fstat(stream.fileno())) != stamp or _file_stamp(path.lstat()) != stamp:
-            raise _AuthorityChanged("protected file changed while reading: " + name, path=name)
-    return data
-
-
-def _protected(store: Store, state: dict, cache: dict | None = None) -> dict:
-    """A run-wide authority guard excludes every active call's mutable transport.
-
-    Always enumerate names and reject links/special files. Unchanged stat stamps
-    reuse hashes in memory; the cache never grants permission to change a file.
-    """
-    directory = store.run_dir(state["run_id"])
-    active = set(state["active_attempts"].values())
-    result = {}
-    for base, directories, files in os.walk(directory, followlinks=False):
-        parent = Path(base).relative_to(directory)
-        parts = parent.parts
-        mutable = len(parts) == 2 and parts[0] == "attempts" and parts[1] in active
-        for name in list(directories):
-            path = Path(base) / name
-            if path.is_symlink():
-                raise _AuthorityChanged("symlink outside an allowed workspace", path=path.relative_to(directory).as_posix())
-            if mutable and name == "workspace":
-                directories.remove(name)
-        for name in files:
-            if mutable and (name in TRANSPORT_FILES or any(name.startswith("." + transport + ".") and name.endswith(".tmp")
-                                                           for transport in TRANSPORT_FILES)):
-                continue
-            path = Path(base) / name
-            info = path.lstat()
-            if not stat.S_ISREG(info.st_mode):
-                raise _AuthorityChanged("unsupported file outside an allowed workspace", path=path.relative_to(directory).as_posix())
-            name = path.relative_to(directory).as_posix()
-            stamp = _file_stamp(info)
-            known = cache.get(name) if cache is not None else None
-            if known and known[0] == stamp:
-                result[name] = known[1]
-                continue
-            value = sha256(_read_protected(path, name, stamp))
-            result[name] = value
-            if cache is not None:
-                cache[name] = (stamp, value)
-    return result
+    return store, store.create(lock, output, seed=import_seed, queued=queued,
+                               run_id=run_id, created_at=created_at), lock
 
 
 class _AuthorityChanged(ExtractError):
-    """A failed run-wide integrity check must preserve the last authored state."""
-
-    def __init__(self, message, *, expected_files=None, path=None):
-        super().__init__(message)
-        self.expected_files = expected_files or {}
-        self.path = path
+    """An external state edit must preserve the last Runner-authored bytes."""
 
 
-class _RunGuard:
+class _StateGuard:
     def __init__(self, store: Store, state: dict):
-        self.store = store
         self.directory = store.run_dir(state["run_id"])
-        self.cache, self.pending = {}, {}
+        self.path = self.directory / "state.json"
+        self.thread_id = threading.get_ident()
         self.state_bytes = json_bytes(state)
-        self.expected = _protected(store, state, self.cache)
-        self.active = set(state["active_attempts"].values())
 
-    def scan(self, state: dict) -> dict:
+    def verify(self, state: dict | None = None) -> None:
+        if threading.get_ident() != self.thread_id:
+            raise _AuthorityChanged("only the Runner's owning thread may access its state guard")
         try:
-            return _protected(self.store, state, self.cache)
-        except (ExtractError, OSError) as exc:
-            name = getattr(exc, "path", None)
-            if name is None and getattr(exc, "filename", None):
-                name = Path(exc.filename).relative_to(self.directory).as_posix()
-            known = {**self.expected, **self.pending}
-            affected = {key: value for key, value in known.items()
-                        if name is None or key == name or key.startswith(name + "/")}
-            raise _AuthorityChanged(str(exc), expected_files=affected or {name: None}) from exc
+            # O_NONBLOCK also prevents a substituted FIFO from stalling the
+            # Runner. No directory enumeration or historical hash cache is used.
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                before = os.fstat(stream.fileno())
+                if not stat.S_ISREG(before.st_mode):
+                    raise OSError("state.json is not a regular file")
+                data = stream.read()
+                after = self.path.lstat()
+                if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+                        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+                    raise OSError("state.json changed during reading")
+        except OSError as exc:
+            raise _AuthorityChanged("Runner state changed externally: " + str(exc)) from exc
+        if data != self.state_bytes:
+            raise _AuthorityChanged("Runner state changed externally: state.json differs from the last committed bytes")
 
-    def changed(self, actual: dict, expected: dict) -> dict:
-        return {name: expected.get(name) for name in actual.keys() | expected.keys()
-                if actual.get(name) != expected.get(name)}
-
-    def verify(self, state: dict) -> None:
-        changed = self.changed(self.scan(state), self.expected)
-        if changed:
-            raise _AuthorityChanged("agent modified Runner state, checkpoint, or files outside its workspace",
-                                    expected_files=changed)
-
-    def refresh(self, state: dict) -> None:
-        actual = self.scan(state)
-        active = set(state["active_attempts"].values())
-        released = self.active - active
-        expected = {**self.expected, **self.pending}
-        expected = {name: value for name, value in expected.items() if value is not None}
-        for name, value in actual.items():
-            parts = Path(name).parts
-            # These are the only files previously excluded by _protected. A
-            # released invocation has finished; its workspace/transport now
-            # joins the protected history. Unknown siblings never get a waiver.
-            if (len(parts) >= 3 and parts[0] == "attempts" and parts[1] in released and
-                    (parts[2] == "workspace" or len(parts) == 3 and parts[2] in TRANSPORT_FILES)):
-                expected.setdefault(name, value)
-        if actual != expected:
-            changed = self.changed(actual, expected)
-            raise _AuthorityChanged("agent modified Runner state, checkpoint, or files outside its workspace during Runner writes: " +
-                                    ", ".join(sorted(changed)[:12]), expected_files=changed)
-        self.expected, self.active = actual, active
-        self.pending.clear()
-        self.cache = {name: self.cache[name] for name in actual}
-
-    def written(self, path: Path, data: bytes) -> None:
-        if path.is_relative_to(self.directory):
-            name = path.relative_to(self.directory).as_posix()
-            # Temporary checkpoint builders disappear before the next scan;
-            # checkpoint() records the verified manifest at its final location.
-            if not any(part.startswith(".") for part in Path(name).parts):
-                self.pending[name] = sha256(data)
-                if name == "state.json":
-                    self.state_bytes = data
+    def written(self, data: bytes) -> None:
+        if threading.get_ident() != self.thread_id:
+            raise _AuthorityChanged("only the Runner's owning thread may commit state")
+        self.state_bytes = data
 
     def read_state(self) -> dict:
-        try:
-            data = _read_protected(regular_file(self.directory, "state.json"), "state.json")
-        except (ExtractError, OSError) as exc:
-            raise _AuthorityChanged("agent modified Runner state during result validation: " + str(exc),
-                                    expected_files={"state.json": sha256(self.state_bytes)}) from exc
-        if data != self.state_bytes:
-            raise _AuthorityChanged("agent modified Runner state during result validation: state.json",
-                                    expected_files={"state.json": sha256(self.state_bytes)})
-        return json.loads(data)
-
-    def tree_written(self, directory: Path, files: dict) -> None:
-        for name, value in files.items():
-            self.pending[(directory / name).relative_to(self.directory).as_posix()] = value
-
-    def copied(self, source: Path, destination: Path) -> None:
-        if source.is_dir():
-            self.tree_written(destination, manifest(source))
-        else:
-            self.written(destination, source.read_bytes())
-
-    def removed(self, directory: Path) -> None:
-        prefix = directory.relative_to(self.directory).as_posix() + "/"
-        for name in self.expected.keys() | self.pending.keys():
-            if name.startswith(prefix):
-                self.pending[name] = None
+        self.verify()
+        return json.loads(self.state_bytes)
 
 
 def _release(state: dict, attempt: dict) -> None:
@@ -290,8 +165,6 @@ def _rebuild_directory(directory: Path) -> None:
         raise ExtractError("derived working directory became a symlink")
     if directory.exists():
         shutil.rmtree(directory)
-        if guard := RUN_WRITES.get():
-            guard.removed(directory)
 
 
 def _artifact_gate(state: dict, lock: dict, attempt: dict, before: Path, after: Path,
@@ -312,6 +185,8 @@ def _draft(store: Store, state: dict, attempt: dict, workspace: Path, *, plan=No
     if attempt["stage"] != "P5":
         state["checkpoint"] = checkpoint_id
     state["recoverable_checkpoint"] = checkpoint_id
+    if attempt["attempt_id"] in state.get("attempt_usage", {}):
+        state["attempt_usage"][attempt["attempt_id"]]["result_checkpoint"] = checkpoint_id
     node = state["nodes"][attempt["node"]]
     node["draft_checkpoint"] = checkpoint_id
     if attempt["stage"] == "P5":
@@ -587,18 +462,18 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
     if result.get("outcome") != "completed" or not result.get("termination", {}).get("confirmed"):
         raise ExtractError("agent call did not complete with confirmed termination")
     session_id = _session(state, attempt, result)
-    verify_snapshot(lock)
+    verify_run_inputs(state, lock)
     before, checkpoint = store.verify_checkpoint(state, attempt["base_checkpoint"])
     if checkpoint["files"] != attempt["dependency_digests"]:
         raise ExtractError("attempt dependency digests do not match the fixed checkpoint")
     workspace = Path(attempt["workspace"])
-    receipt = result.get("response")
-    if not isinstance(receipt, dict):
-        raise ReceiptFormatError("missing structured receipt")
+    proposal = result.get("response")
+    check_proposal_identity(proposal, attempt)
     # An adjudicator reads the current draft but may select/patch a different
     # final artifact. Enforce read-only scope now and completion on that result.
-    gate_decision = "continue" if attempt.get("mode") == "adjudicate" else receipt.get("decision")
+    gate_decision = "continue" if attempt.get("mode") == "adjudicate" else proposal.get("decision")
     validation = _artifact_gate(state, lock, attempt, before, workspace, gate_decision)
+    receipt = normalize_response(proposal, lock, attempt, workspace)
     receipt = validate_receipt(receipt, state, lock, attempt, workspace, validation["changed_files"])
     receipt_hash = digest(receipt)
     directory = Path(attempt["directory"])
@@ -654,6 +529,8 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
         planned = _plan_workspace(store, state, attempt, receipt, workspace, validation)
         checkpoint_id = store.checkpoint(state, planned, attempt_id=attempt["attempt_id"], parent=state["merged_checkpoint"])
     write_json(directory / "validated.json", {"receipt_sha256": receipt_hash, **validation})
+    if attempt["attempt_id"] in updated.get("attempt_usage", {}):
+        updated["attempt_usage"][attempt["attempt_id"]]["result_checkpoint"] = checkpoint_id
     updated = advance(updated, receipt, checkpoint_id, receipt_hash, validation=validation)
     if receipt["decision"] == "reopen":
         updated = _begin_reopen(store, updated, attempt, receipt)
@@ -669,8 +546,10 @@ def _recover_call(store: Store, state: dict, lock: dict, attempt: dict, result: 
                   fresh_context=False) -> dict:
     """A finite same-role repair preserves safe edits and an already established UUID."""
     updated = deepcopy(state)
+    if kind == "receipt_repair":
+        check_proposal_identity(result.get("response"), attempt)
     session_id = _session(state, attempt, result, required=kind == "receipt_repair")
-    verify_snapshot(lock)
+    verify_run_inputs(state, lock)
     before, _ = store.verify_checkpoint(state, attempt["base_checkpoint"])
     workspace = Path(attempt["workspace"])
     validation = _artifact_gate(state, lock, attempt, before, workspace, "continue")
@@ -689,12 +568,25 @@ def _recover_call(store: Store, state: dict, lock: dict, attempt: dict, result: 
     if kind == "receipt_repair":
         scope["invalid_receipts"] += 1
     owner["reason"] = {"code": kind, "summary": reason, "checkpoint": call_view(updated, attempt)["checkpoint"]}
+    if kind == "cli_retry" and result.get("outcome") == "cli_error" and result.get("exit_code") == 75:
+        # EX_TEMPFAIL is an explicit process-level temporary-failure signal.
+        # Missing responses, timeouts and generic nonzero exits are not one.
+        recorded = Path(attempt["directory"]) / "result.json"
+        owner["reason"].update(classification="transient_execution", attempt_id=attempt["attempt_id"],
+                               scope=scope_key(attempt["stage"], attempt["node"]),
+                               result_sha256=digest(read_json(recorded) if recorded.is_file() else result))
     owner["feedback"] = [*owner["feedback"], owner["reason"]]
     limit = updated["config"]["retry_limit"]
     if scope[key] > limit:
         owner["status"] = "invalid_receipt" if kind == "receipt_repair" else "cli_error"
         scope["status"] = owner["status"]
         owner["reason"]["code"] += "_budget_exhausted"
+        owner["reason"].pop("classification", None)
+    elif owner["reason"].get("classification") == "transient_execution":
+        # A positively identified temporary failure becomes an observable
+        # stopped scope. Only an explicit, budgeted monitor authorization may
+        # retry it; independent ready scopes continue in the same Runner.
+        owner["status"] = scope["status"] = "cli_error"
     else:
         owner["status"] = "draft" if attempt["stage"] == "P5" else "running"
     write_json(Path(attempt["directory"]) / "repair.json", {**owner["reason"], "validation": validation})
@@ -757,6 +649,8 @@ def _receive(store: Store, state: dict, lock: dict, attempt: dict, result: dict 
         if outcome != "completed":
             raise ExtractError("Codex CLI call did not complete: " + str(outcome))
         return accept_result(store, state, lock, attempt, result)
+    except _AuthorityChanged:
+        raise
     except StaleResult as exc:
         return _retire_stale(store, state, attempt, result, str(exc))
     except ReceiptFormatError as exc:
@@ -764,6 +658,8 @@ def _receive(store: Store, state: dict, lock: dict, attempt: dict, result: dict 
         if confirmed and attempt["mode"] == "normal":
             try:
                 return _recover_call(store, state, lock, attempt, result, kind="receipt_repair", reason=str(exc))
+            except _AuthorityChanged:
+                raise
             except (ExtractError, OSError) as unsafe:
                 return _reject(store, state, attempt, result, unsafe)
         return _reject(store, state, attempt, result, exc)
@@ -821,11 +717,13 @@ def _interrupted(store: Store, state: dict, lock: dict, attempt: dict,
 
 
 def _reconcile(store: Store, state: dict, lock: dict, *, terminate_only=False) -> tuple[dict, list]:
-    """Read every unfinished disk result, including formerly in-memory deferred ones."""
+    """Reconcile only state-registered fences and unfinished accounting commits."""
     pending = []
-    for attempt_id in state["attempts"]:
-        if terminate_only and attempt_id not in state["active_attempts"].values():
-            continue
+    unsettled = state.setdefault("unsettled_attempts", {})
+    registered = dict.fromkeys([*state["active_attempts"].values(), *state["unconfirmed_attempts"]])
+    if not terminate_only:
+        registered.update(dict.fromkeys(unsettled))
+    for attempt_id in registered:
         directory = store.run_dir(state["run_id"]) / "attempts" / attempt_id
         attempt = read_json(directory / "attempt.json")
         if attempt["attempt_id"] != attempt_id or attempt["run_id"] != state["run_id"]:
@@ -833,32 +731,67 @@ def _reconcile(store: Store, state: dict, lock: dict, *, terminate_only=False) -
         if Path(attempt["directory"]) != directory or Path(attempt["workspace"]) != directory / "workspace":
             raise ExtractError("saved invocation path leaves its run")
         if terminate_only:
-            termination = confirm_termination(attempt, None)
+            try:
+                result = read_json(directory / "result.json") if (directory / "result.json").is_file() else None
+            except (ExtractError, OSError):
+                # A damaged result cannot prevent cancellation from checking
+                # and terminating the recorded process and its descendants.
+                result = None
+            termination = confirm_termination(attempt, result, launch_state=unsettled.get(attempt_id))
             if termination["confirmed"]:
-                # Keep the attempt for normal reconciliation after history is
-                # repaired: that path charges time and retires interrupted UUIDs.
+                # Cancellation grants no new draft/approval authority. Resume
+                # still accounts for this attempt and retires interrupted UUIDs.
                 state["unconfirmed_attempts"].pop(attempt_id, None)
             else:
                 state["unconfirmed_attempts"][attempt_id] = termination
             continue
-        result = read_json(directory / "result.json") if (directory / "result.json").is_file() else None
         active = state["active_attempts"].get(scope_key(attempt["stage"], attempt["node"])) == attempt_id
+        try:
+            result = None
+            if (directory / "result.json").is_file():
+                result = read_json(directory / "result.json")
+                if not isinstance(result, dict):
+                    raise ExtractError("saved result is not a JSON object")
+        except (ExtractError, OSError) as exc:
+            if state.get("control", {}).get("action") != "cancel":
+                raise
+            termination = confirm_termination(attempt, None, launch_state=unsettled.get(attempt_id))
+            reason = {"code": "unreadable_result", "summary": str(exc), "termination": termination,
+                      "recovery_condition": "先保留原调用及坏result；修复结果记录后按原预算resume对账。"}
+            owner = owner_for(state, attempt)
+            owner["reason"] = reason
+            if active:
+                owner["status"] = "invalid_receipt" if termination["confirmed"] else "termination_unconfirmed"
+                _scope_at(state, attempt)["status"] = owner["status"]
+                if termination["confirmed"]:
+                    state["unconfirmed_attempts"].pop(attempt_id, None)
+                else:
+                    state["unconfirmed_attempts"][attempt_id] = reason
+            # Keep active/unsettled identities: cancellation proves exit only,
+            # and cannot turn a damaged result into an accepted or settled one.
+            store.save(state)
+            continue
         # Close a previous checking interval before replaying, so a repeated
         # resume cannot count the same interrupted check again.
         processing = directory / "processing.json"
+        old = None
         if processing.is_file():
             old = read_json(processing)
             if old.get("started_at") is not None:
-                old["elapsed_seconds"] += max(0.0, time.time() - old["started_at"])
+                estimate = max(0.0, time.time() - old["started_at"])
+                old["elapsed_seconds"] += estimate
+                old["estimated_seconds"] = old.get("estimated_seconds", 0.0) + estimate
                 old["started_at"] = None
                 write_json(processing, old)
         elapsed = elapsed_on_disk(attempt, result)
-        account(state, attempt, elapsed)
+        account(state, attempt, elapsed, result=result, processing=old)
         if not active:
             if not (directory / "finished.json").exists():
                 write_json(directory / "finished.json", {"elapsed_seconds": elapsed, "status": state["status"], "recovered": True})
+            state["unsettled_attempts"].pop(attempt_id, None)
+            account(state, attempt, elapsed, result=result, processing=old, final=True)
             continue
-        termination = confirm_termination(attempt, result)
+        termination = confirm_termination(attempt, result, launch_state=unsettled.get(attempt_id))
         if not termination["confirmed"]:
             state = _interrupted(store, state, lock, attempt, result, termination, "恢复未能确认旧调用终止；仅该范围保留fence。")
             continue
@@ -878,6 +811,8 @@ def _reconcile(store: Store, state: dict, lock: dict, *, terminate_only=False) -
         else:
             state = _interrupted(store, state, lock, attempt, result, termination, "旧调用已确认终止；从当前阶段页与安全checkpoint重建上下文。")
             write_json(directory / "finished.json", {"elapsed_seconds": elapsed, "status": state["status"], "recovered": True})
+            state["unsettled_attempts"].pop(attempt_id, None)
+            account(state, attempt, elapsed, result=result, processing=old, final=True)
     settle(state)
     store.save(state)
     return state, pending
@@ -887,78 +822,54 @@ def _resume_stopped(state: dict) -> None:
     control = state["control"]
     if state["status"] in {"paused", "cancelled"}:
         state["status"] = control["resume_status"] or "running"
-    elif state["status"] == "queued":
+    if state["status"] == "queued":
         state["status"] = "running"
     control["action"], control["resume_status"] = None, None
+    control["hold_id"] = None
+    # Hold/queued/retry entries only restore their stopped control boundary.
+    # Explicit manual resume separately authorizes ordinary failed scopes.
+    if state["stage"] == "P5":
+        settle(state)
+
+
+def _resume_failed_scopes(state: dict) -> None:
+    """An explicit manual retry keeps all counters, deadlines and hard stops."""
+    hard = {"external_confirmation", "adjudication_already_used", "interrupted_single_decision",
+            "continuation_budget_exhausted", "budget_exhausted", "checker_budget_exhausted", "reopen_already_used"}
     owners = [(state["nodes"][entry["id"]], state["nodes"][entry["id"]]["stage"])
               for entry in state.get("plan") or [] if entry["id"] != "root"] if state["stage"] == "P5" else [(state, scope_for(state))]
     for owner, scope in owners:
         if (owner["status"] in NODE_STOPS and owner.get("mode", "normal") == "normal" and
-                (owner.get("reason") or {}).get("code") not in {"external_confirmation", "adjudication_already_used"}):
+                (owner.get("reason") or {}).get("code") not in hard):
             owner["status"] = "draft" if owner is not state else "running"
             scope["status"] = "reviewing" if owner.get("role") == "reviewer" else "draft"
     if state["stage"] == "P5":
         settle(state)
 
 
-def _unrepaired_authority(store: Store, state: dict) -> list[str]:
-    reason = state.get("reason") or {}
-    if reason.get("code") != "authority_changed":
-        return []
-    directory, changed = store.run_dir(state["run_id"]), []
-    for name, expected in reason.get("expected_files", {}).items():
-        path = directory / relative_name(name)
-        try:
-            if expected is None:
-                intact = not path.exists() and not path.is_symlink()
-            else:
-                intact = sha256(regular_file(directory, name).read_bytes()) == expected
-        except (ExtractError, OSError):
-            intact = False
-        if not intact:
-            changed.append(name)
-    return changed
+def _authority_failure(store: Store, guard: _StateGuard, exc: Exception) -> dict:
+    # Restore only Runner-authored bytes. Keep every active fence and unfinished
+    # accounting record, even when the current event already confirms its exit.
+    state = json.loads(guard.state_bytes)
+    state["status"] = "invalid_receipt"
+    state["reason"] = {"code": "authority_changed", "summary": str(exc), "path": "state.json",
+                       "expected_sha256": sha256(guard.state_bytes),
+                       "recovery_condition": "核对state外改原因及最后可信checkpoint；resume保留原预算并确认旧调用终止。"}
+    token = STATE_GUARD.set(None)
+    try:
+        store.save(state)
+    finally:
+        STATE_GUARD.reset(token)
+    return state
 
 
-def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=False) -> dict:
+def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=False,
+        launch_id: str | None = None) -> dict:
     with store.writer(run_id):
         state = store.load(run_id)
-        if queued_only and state["status"] != "queued":
-            raise ExtractError("queued work changed before startup; inspect cannot resume paused or interrupted work")
-        lock = read_json(store.run_dir(run_id) / "inputs.lock.json")
-        verify_snapshot(lock)
-        verify_executor(lock)
-        if state["input_fingerprint"] != lock["fingerprint"]:
-            raise ExtractError("run input fingerprint differs from its lock")
-        if state["config"] != lock["config"]:
-            raise ExtractError("run configuration differs from its fixed input lock")
-        unrepaired = _unrepaired_authority(store, state)
-        if unrepaired:
-            reason = deepcopy(state["reason"])
-            consume_controls(store, state)
-            if state["control"]["action"] == "cancel":
-                # History repair must not prevent cleanup of still owned
-                # processes. This path grants no draft or approval authority.
-                state, _ = _reconcile(store, state, lock, terminate_only=True)
-                state["status"], state["reason"] = "cancelled", reason
-                store.save(state)
-                return state
-            raise ExtractError("unrepaired Runner history after authority_changed: " + ", ".join(unrepaired[:12]))
-        if resume:
-            _resume_stopped(state)
-            store.save(state)
-        consume_controls(store, state)
-        held_status = state["status"] if state["status"] in {"paused", "cancelled"} else None
-        state, pending = _reconcile(store, state, lock)
-        if held_status and not resume:
-            state["status"] = "cancelled" if state["control"]["action"] == "cancel" else held_status
-            store.save(state)
-            return state
-        cli = transport or CodexCLI(state["config"]["codex_binary"], state["config"]["model"])
-        guard, events, running, deferred = _RunGuard(store, state), queue.Queue(), {}, []
-        write_token = RUN_WRITES.set(guard)
+        guard, events, running, deferred = _StateGuard(store, state), queue.Queue(), {}, []
+        write_token = STATE_GUARD.set(guard)
         cancel_event = threading.Event()
-        accepts_cancel = "cancel_event" in inspect.signature(cli.run).parameters
 
         def invoke(attempt, prompt, schema, effort, timeout):
             result, error, started = None, None, time.monotonic()
@@ -985,16 +896,97 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                     events.put((attempt, result, error, elapsed, False))
 
         try:
+            guard.verify()
+            if queued_only and state["status"] != "queued":
+                raise ExtractError("queued work changed before startup; inspect cannot resume paused or interrupted work")
+            lock = read_json(store.run_dir(run_id) / "inputs.lock.json")
+            verify_run_inputs(state, lock)
+            verify_executor(lock)
+            consume_controls(store, state)
+            initial_ledger = store.read_supervisor()
+            initial_entry = initial_ledger["starts"].get(run_id, {}).get("launch", {})
+            retry_evidence = None
+            if launch_id and initial_entry.get("mode") == "retry":
+                from .monitor import restart_evidence
+                retry = initial_ledger["retries"].get(initial_entry.get("retry_id"))
+                if not retry:
+                    raise ExtractError("automatic restart has no failure-bound authorization")
+                retry_evidence = restart_evidence(store, state, retry["scope"])
+                if any(retry_evidence.get(key) != retry.get(key) for key in ("failure_id", "run_id", "scope", "attempt_id", "state_revision")):
+                    raise ExtractError("automatic restart target changed after authorization")
+            with store.supervisor() as ledger:
+                entry = ledger["starts"].get(run_id, {}).get("launch", {})
+                if launch_id and (entry.get("id") != launch_id or entry.get("status") != "claimed"):
+                    raise ExtractError("run launch authorization was replaced")
+                if resume:
+                    store.assert_startable(run_id, ledger)
+                    if launch_id and entry.get("control_revision") != ledger["controls"].get(run_id, {}).get("revision", 0):
+                        resume = False  # A later pause/cancel wins the launch window.
+                    if launch_id and set(state["control"]["requests"]) - set(entry.get("request_ids", [])):
+                        resume = False  # Request persistence may precede its ledger commit.
+                    if entry.get("mode") == "hold" and launch_id:
+                        hold_id = entry["hold_id"]
+                        member = ledger["holds"][hold_id]["members"][run_id]
+                        latest = ledger["controls"].get(run_id, {})
+                        if (state["status"] != "paused" or state["control"].get("hold_id") != hold_id or
+                                member.get("request_id") != latest.get("id") or state["active_attempts"] or
+                                state.get("unconfirmed_attempts") or state.get("unsettled_attempts")):
+                            raise ExtractError("hold no longer owns a confirmed pause")
+                    if retry_evidence:
+                        request = ledger["retries"][entry["retry_id"]]
+                        if (not resume or request["status"] != "authorized" or
+                                request["control_revision"] != ledger["controls"].get(run_id, {}).get("revision", 0)):
+                            raise ExtractError("automatic restart was consumed or superseded by manual control")
+                        request.update(status="consumed", consumed_at=time.time())
+                        stage, _, node = request["scope"].partition(":")
+                        target = {"stage": stage, "node": node or "root"}
+                        owner = owner_for(state, target)
+                        owner["status"] = "draft" if stage == "P5" else "running"
+                        scope_for(state, target)["status"] = "reviewing" if owner.get("role") == "reviewer" else "draft"
+                        if stage == "P5":
+                            state["status"] = "running"
+                            settle(state)
+                elif ledger["active_hold"]:
+                    store.hold_member(ledger, state)
+                if run_id in ledger["continuations"] and not state["control"]["action"]:
+                    raise ExtractError("this run has a reserved successor")
+            if state["status"] == "queued" and not resume and not state["control"]["action"]:
+                return state
+            if resume:
+                _resume_stopped(state)
+                if not launch_id or entry.get("mode") == "resume":
+                    _resume_failed_scopes(state)
+                store.save(state)
+            consume_controls(store, state)
+            from .monitor import _identity
+            state["runner"] = {"identity": _identity(), "observed_at": time.time()}
+            store.save(state)
+            if ((state.get("reason") or {}).get("code") == "authority_changed" and
+                    state["control"]["action"] == "cancel"):
+                reason = deepcopy(state["reason"])
+                state, _ = _reconcile(store, state, lock, terminate_only=True)
+                state["status"], state["reason"] = "cancelled", reason
+                store.save(state)
+                return state
+            held_status = state["status"] if state["status"] in {"paused", "cancelled"} else None
+            state, pending = _reconcile(store, state, lock)
+            if held_status and not resume:
+                state["status"] = "cancelled" if state["control"]["action"] == "cancel" else held_status
+                store.save(state)
+                return state
+            cli = transport or CodexCLI(state["config"]["codex_binary"], state["config"]["model"])
+            accepts_cancel = "cancel_event" in inspect.signature(cli.run).parameters
             while True:
-                if consume_controls(store, state, verify=lambda: guard.verify(state)):
-                    guard.refresh(state)
+                consume_controls(store, state)
                 if state["control"]["action"] == "cancel":
                     cancel_event.set()
                 # Every ready sibling is launched before waiting. Control is
                 # checked at each call boundary, including between siblings.
                 for call in next_calls(state) if not state["control"]["action"] else []:
-                    if consume_controls(store, state, verify=lambda: guard.verify(state)):
-                        guard.refresh(state)
+                    with store.supervisor() as ledger:
+                        if ledger["active_hold"]:
+                            store.hold_member(ledger, state)
+                    consume_controls(store, state)
                     if state["control"]["action"]:
                         break
                     if call["stage"] == "P6":
@@ -1006,7 +998,6 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                             state["reason"] = {"code": "invalid_final_prerequisites", "summary": str(exc),
                                                "recovery_condition": "重新核对已审节点/上游验收的固定回执和产物后才能终审。"}
                             store.save(state)
-                            guard.refresh(state)
                             break
                     view = call_view(state, call)
                     timeout, exhausted = _budget(view)
@@ -1017,17 +1008,32 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                                            "recovery_condition": "保留原计数与截止条件；需要明确处理已耗尽预算。"}
                         settle(state)
                         store.save(state)
-                        guard.refresh(state)
                         continue
                     guard.verify(state)
-                    attempt = store.prepare_attempt(state, call["session_id"], call=call)
+                    attempt = store.prepare_attempt(state, call["session_id"], call=call, timeout_seconds=timeout)
                     prompt = build_prompt(state, lock, attempt)
-                    guard.refresh(state)
-                    schema = receipt_schema(attempt, source_id=lock["source"]["id"], source_files=lock["source"]["files"])
+                    schema = proposal_schema(attempt, source_files=lock["source"]["files"])
                     thread = threading.Thread(target=invoke, args=(attempt, prompt, schema,
                         state["config"][f"{attempt['role']}_effort"], timeout), daemon=True)
-                    running[attempt["attempt_id"]] = thread
-                    thread.start()
+                    with store.supervisor() as ledger:
+                        denied = bool(ledger["active_hold"] or run_id in ledger["continuations"])
+                        if ledger["active_hold"]:
+                            store.hold_member(ledger, state)
+                        if not denied:
+                            state["unsettled_attempts"][attempt["attempt_id"]] = "dispatched"
+                            store.save(state)
+                            guard.verify(state)
+                            running[attempt["attempt_id"]] = thread
+                            thread.start()
+                    if denied:
+                        _release(state, attempt)
+                        state["unsettled_attempts"].pop(attempt["attempt_id"], None)
+                        write_json(Path(attempt["directory"]) / "termination.json", {
+                            "confirmed": True, "actions": [], "survivors": [], "reason": "control gate denied dispatch"})
+                        write_json(Path(attempt["directory"]) / "finished.json", {"elapsed_seconds": 0.0, "status": "not_dispatched"})
+                        consume_controls(store, state)
+                        store.save(state)
+                        break
                 if deferred and (not state.get("reopening") or state["status"] != "running"):
                     event = deferred.pop(0)
                 elif pending:
@@ -1041,14 +1047,11 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                 else:
                     break
                 attempt, result, error, elapsed, recovering = event
-                try:
-                    guard.verify(state)
-                except (ExtractError, OSError) as exc:
-                    error = exc
+                guard.verify(state)
                 if attempt["stage"] == "P5" and state.get("reopening") and state["status"] == "running" and not error:
                     deferred.append(event)
                     continue
-                account(state, attempt, elapsed)
+                account(state, attempt, elapsed, result=result)
                 store.save(state)
                 processing_path = Path(attempt["directory"]) / "processing.json"
                 processing = read_json(processing_path) if processing_path.is_file() else {"elapsed_seconds": 0.0}
@@ -1061,12 +1064,18 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                     state = _receive(store, state, lock, attempt, result, error, recovering=recovering)
                 processing["elapsed_seconds"] += time.monotonic() - started
                 processing["started_at"] = None
+                processing["completed_at"] = time.time()
                 write_json(processing_path, processing)
                 elapsed += processing["elapsed_seconds"]
-                account(state, attempt, elapsed)
                 write_json(Path(attempt["directory"]) / "finished.json", {"elapsed_seconds": elapsed, "status": state["status"]})
+                state["unsettled_attempts"].pop(attempt["attempt_id"], None)
+                account(state, attempt, elapsed, result=result, processing=processing, final=True)
                 store.save(state)
-                guard.refresh(state)
+            with store.supervisor() as ledger:
+                if ledger["active_hold"]:
+                    store.hold_member(ledger, state)
+            consume_controls(store, state)
+            guard.verify(state)
             action = state["control"]["action"]
             if action:
                 state["control"]["resume_status"] = state["status"]
@@ -1078,21 +1087,21 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                 state = publish(store, state, Path(state["output"]))
             return state
         except _AuthorityChanged as exc:
-            # A failed refresh must not leave an attacker-supplied budget or
-            # checkpoint pointer for the next resume. Preserve every active
-            # attempt until the normal reconciliation confirms termination.
-            state = json.loads(guard.state_bytes)
-            state["status"] = "invalid_receipt"
-            state["reason"] = {"code": "authority_changed", "summary": str(exc),
-                               "expected_files": {name: value for name, value in exc.expected_files.items() if name != "state.json"},
-                               "recovery_condition": "核对完整性拒绝记录及最后有效checkpoint；恢复保留原预算并确认旧调用终止。"}
-            store.save(state)
-            return state
+            cancel_event.set()
+            return _authority_failure(store, guard, exc)
         finally:
             cancel_event.set()
             for thread in running.values():
                 thread.join(timeout=3)
-            RUN_WRITES.reset(write_token)
+            try:
+                if launch_id:
+                    with store.supervisor() as ledger:
+                        entry = ledger["starts"].get(run_id, {}).get("launch", {})
+                        if entry.get("id") == launch_id:
+                            entry.update(status="termination_unknown" if any(thread.is_alive() for thread in running.values()) else "finished",
+                                         finished_at=time.time())
+            finally:
+                STATE_GUARD.reset(write_token)
 
 
 def _reject(store: Store, state: dict, attempt: dict, result: dict | None, exc: Exception) -> dict:
@@ -1125,56 +1134,14 @@ def export_checkpoint(store: Store, run_id: str, output: Path) -> dict:
     from .publication import publish
     with store.writer(run_id):
         state = store.load(run_id)
-        verify_executor(read_json(store.run_dir(run_id) / "inputs.lock.json"))
-        return publish(store, state, output, export=True)["exports"][-1]
-
-
-def summary(store: Store, state: dict) -> dict:
-    planned = {entry["id"] for entry in state.get("plan") or []}
-    approved, invalid = set(), {}
-    for node_id in effective_nodes(state):
+        guard = _StateGuard(store, state)
+        token = STATE_GUARD.set(guard)
         try:
-            store.verify_node(state, node_id)
-            approved.add(node_id)
-        except ExtractError as exc:
-            invalid[node_id] = str(exc)
-    groups = {key: [] for key in ("ready", "in_flight", "revision", "approved", "waiting_parent", "blocked")}
-    ready = {call["node"] for call in next_calls(state)} if state["status"] == "running" and state["stage"] != "P6" else set()
-    details = {}
-    observed = planned | {key.removeprefix("P5:") for key in state["active_attempts"] if key.startswith("P5:")}
-    for node_id in sorted(observed):
-        node = state["nodes"][node_id]
-        attempt_id = state["active_attempts"].get("P5:" + node_id)
-        if node_id == "root":
-            attempt_id = state["active_attempts"].get(state["stage"])
-        if attempt_id:
-            groups["in_flight"].append(node_id)
-        elif node_id in approved:
-            groups["approved"].append(node_id)
-        elif node["status"] in NODE_STOPS or node_id in invalid:
-            groups["blocked"].append(node_id)
-        elif node_id in ready:
-            groups["ready"].append(node_id)
-        elif node["parent"] and node["parent"] not in approved:
-            groups["waiting_parent"].append(node_id)
-        if node.get("stage", {}).get("status") in {"revision", "adjudicating"}:
-            groups["revision"].append(node_id)
-        details[node_id] = {"parent": node["parent"], "status": node["status"], "role": node.get("role"),
-                            "mode": node.get("mode", "normal"), "attempt_id": attempt_id,
-                            "reason": invalid.get(node_id) or node.get("reason"), "generation": node["generation"],
-                            "planned": node_id in planned}
-    return {key: state[key] for key in ("run_id", "operator_id", "status", "stage", "role", "node",
-                                       "checkpoint", "output", "published", "reason")} | {
-        "mode": state.get("mode", "normal"), "state_directory": str(store.run_dir(state["run_id"])),
-        "approved_stages": [key for key, value in state["stages"].items() if value["status"] == "approved"],
-        "approved_nodes": sorted(approved), "nodes_by_status": groups, "node_details": details,
-        "active_attempts": dict(state["active_attempts"]),
-        "unconfirmed_attempts": dict(state["unconfirmed_attempts"]),
-        "control": state.get("control"), "publication": state.get("publication"),
-        "exports": state.get("exports", []),
-        "elapsed_seconds": sum(item["elapsed_seconds"] for item in state.get("attempt_usage", {}).values()),
-        "imported_checkpoint": state.get("imported_draft", {}).get("checkpoint"),
-        "legacy_usage": state.get("imported_draft", {}).get("usage"),
-        "completed_node_count": len(approved), "plan_revision": state["plan_revision"], "p6_starts": state["p6_starts"],
-        "planned_node_count": len(state.get("plan") or []), "attempt_count": len(state["attempts"]),
-        "merged_checkpoint": state.get("merged_checkpoint")}
+            guard.verify()
+            verify_executor(read_json(store.run_dir(run_id) / "inputs.lock.json"))
+            return publish(store, state, output, export=True)["exports"][-1]
+        except _AuthorityChanged as exc:
+            _authority_failure(store, guard, exc)
+            raise
+        finally:
+            STATE_GUARD.reset(token)

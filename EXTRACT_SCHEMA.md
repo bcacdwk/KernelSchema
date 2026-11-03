@@ -1,6 +1,6 @@
 # 从已有 kernel 提取 schema
 
-一次提取以一个完整算子为单位，将固定实现转换为可追溯的 schema。先建立共享 Contract，再审定路径划分、完成 root、定稿派生树、提取全部派生节点，最后独立终审。保留原实现的设计、代价与缺口；提取过程中不优化或修复 kernel。
+一次提取以一个完整算子为单位，将固定实现压缩为可追溯的 schema，保留数学与数值含义、工作组织、依赖、复用及适用范围。先建立共享 Contract，再审定路径划分、完成 root、定稿派生树、提取全部派生节点，最后独立终审。原实现的设计、代价与缺口按事实保留；提取过程中不优化或修复 kernel。
 
 本页是流程总览，[Supervisor 手册](schema_extract/README.md)说明输入、输出、操作及命令，六张阶段任务页给出具体工作。catalog 算子的输出路径见 [schema_wiki 导航](schema_wiki/README.md)，检查显式使用 `--skip-hardware`。
 
@@ -17,7 +17,7 @@
 
 交付目录包含 `root.yaml`、所有计划内的 `<id>.yaml` 和中文 `dispatch.md`；只有 root 的任务也保留索引。共享 Contract 只在 root 中定义，各节点的 Design 均完整。精确选择条件以各 YAML 为准，`parent` 只表示设计派生关系。[节点与索引规则](schema_docs/0.common.md#派生节点与-dispatch)
 
-Supervisor 指定来源和输出位置，处理需要外部材料或任务方确认的事项。Runner 管理依赖、调用、回执、checkpoint 与发布，是运行状态的唯一写入者。worker 只改本阶段允许的产物，reviewer 独立核对产物和来源。会话复用、退修、裁决、分支隔离与恢复统一见[Supervisor 手册](schema_extract/README.md#角色与会话)。
+Supervisor 指定来源和输出位置，处理需要外部材料或任务方确认的事项。Runner 管理依赖、调用、回执、checkpoint 与发布，是运行状态的唯一写入者。worker 只改本阶段允许的产物，reviewer 独立对照固定 kernel 判断设计语义与压缩是否忠实，正确且必要信息齐备时直接批准。工具代办调用身份、摘要和精确锚点；模型选择证据并说明语义，不为机械字段或可选工具建议增加篇幅。会话、退修、裁决与恢复见[Supervisor 手册](schema_extract/README.md#角色与会话)，通用协议见[工具手册](schema_extract/tools/README.md#回执与短交接)。
 
 ## 七段内容的阅读导航
 

@@ -9,10 +9,12 @@ from pathlib import Path
 import shutil
 import stat
 import sys
+import time
 from uuid import uuid4
 
-from .common import ExtractError, digest, fsync_directory, manifest, read_json, sync_tree, write_json
-from .snapshots import verify_snapshot
+from .common import (ExtractError, digest, fsync_directory, json_bytes, manifest, read_json, sha256,
+                     sync_tree, verify_manifest, write_json)
+from .snapshots import verify_run_inputs
 
 
 def rename_new(source: Path, target: Path) -> None:
@@ -144,7 +146,7 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
     if state["status"] != "ready" or state["active_attempts"]:
         raise ExtractError("only the final independently reviewed ready checkpoint can be published")
     lock = read_json(store.run_dir(state["run_id"]) / "inputs.lock.json")
-    verify_snapshot(lock)
+    verify_run_inputs(state, lock)
     receipt, reviewed = store.verify_approval(state, state["stages"]["P6"]["approval"])
     artifacts, checkpoint = store.verify_checkpoint(state)
     if checkpoint["id"] != reviewed["id"] or checkpoint["id"] != state["merged_checkpoint"]:
@@ -190,22 +192,46 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
             path.chmod(0o755 if path.is_dir() else 0o644)
         temporary.chmod(0o755)
         write_json(temporary / ".extraction/receipt.json", proof)
-        expected = manifest(temporary)
+        expected = {**checkpoint["files"], ".extraction/receipt.json": sha256(json_bytes(proof))}
+        verify_manifest(temporary, expected)
         sync_tree(temporary)
-        _prepare_scaffold(output, backup, intent, intent_path)
-        try:
-            rename_new(temporary, output)
-            fsync_directory(output.parent)
-            status = "published"
-        except FileExistsError:
+        if store.load(state["run_id"]) != state:
+            raise ExtractError("Runner state changed before publication")
+        with store.supervisor() as ledger:
+            denied = ledger["active_hold"]
+            if state["run_id"] in ledger["continuations"]:
+                raise ExtractError("a superseded run cannot publish")
+            if denied:
+                store.hold_member(ledger, state)
+                status = "held"
+            else:
+                _prepare_scaffold(output, backup, intent, intent_path)
+                try:
+                    rename_new(temporary, output)
+                    fsync_directory(output.parent)
+                    status = "published"
+                except FileExistsError:
+                    status = "existing"
+                if status == "published":
+                    ledger.setdefault("commits", {})[state["run_id"]] = {
+                        "publication_id": publication_id, "target": str(output), "checkpoint": checkpoint["id"],
+                        "at": time.time(), "control_revision": ledger["revision"] + 1}
+        if status == "existing":
             try:
                 same = manifest(output) == expected
             except ExtractError:
                 same = False
             status = "published" if same else "conflict"
+        if status == "held":
+            from .recovery import consume_controls
+            consume_controls(store, state)
+            if not export and state["control"]["action"]:
+                state["control"].update(resume_status="ready", stopped_at=time.time())
+                state["status"] = "cancelled" if state["control"]["action"] == "cancel" else "paused"
         published = status == "published"
         record = {**intent, "status": status, "artifacts": str(artifacts),
-                  "reason": None if status == "published" else "目标已有不同内容；目标与已审checkpoint均已保留。"}
+                  "hold_id": denied,
+                  "reason": None if status == "published" else "全局 hold 阻止发布。" if denied else "目标已有不同内容；目标与已审checkpoint均已保留。"}
         # The target may already be visible if the Runner dies here. Replay
         # checks its complete manifest and writes this same receipt once.
         write_json(directory / (publication_id + ".json"), record)

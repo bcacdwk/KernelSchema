@@ -24,7 +24,7 @@ Runner 提供算子身份、输出位置、固定来源入口、输入构造、r
 
 验收判据逐输出核对比较对象、相对误差基准（包括材料中的 `relative_to`）、计算精度、阈值及非有限值处理。阅读数值验收依据不等于执行 GPU 验收；本流程不安排 GPU 测试或实测。
 
-绑定的验收 JSON 若在具名输出的 `tolerance` 中明确写了 `relative_to`，P1 回执用 `comparisons: [{output, source_output, evidence}]` 将它绑定到实际 YAML 的 `golden_reference.tolerance.<output>`。`source_output` 是验收记录的 `name` 或 `outputs` 的键；例如 `out → Y`、`input.state[*] → State`，名称相同则绑定同名输出。仅 `input.state[0]`、`input.state[1]` 这类已知状态族可用 `input.state[*]` 汇总，每种不同的比较基准或阈值仍要有声明行的独立锚点。返回位置（如 `output[0]`、`output[1]`）及其他下标保留各自完整名称，即使基准与阈值相同也不合并，必须分别引用对应的声明行。`evidence` 引用本回执 `source_evidence`，引文必须包含该输出的 `"relative_to": "candidate"` 等实际声明，不能只引用 JSON 开头。worker 和 reviewer 各自核对映射并提供自己的锚点；没有这类明确声明时用 `comparisons: []`。
+绑定的验收 JSON 若在具名输出的 `tolerance` 中明确写了 `relative_to`，P1 提案用 `comparisons: [{output, source_output, evidence}]` 将它绑定到实际 YAML 的 `golden_reference.tolerance.<output>`。`source_output` 是验收记录的 `name` 或 `outputs` 的键；例如 `out → Y`、`input.state[*] → State`，名称相同则绑定同名输出。仅 `input.state[0]`、`input.state[1]` 这类已知状态族可用 `input.state[*]` 汇总，每种不同的比较基准或阈值仍要有声明行的独立锚点。返回位置（如 `output[0]`、`output[1]`）及其他下标保留各自完整名称，即使基准与阈值相同也不合并，必须分别引用对应的声明行。`evidence` 引用本次 `source_evidence`；所选行范围与 `quote_offset` 生成的引文必须包含该输出的 `"relative_to": "candidate"` 等实际声明，不能只取 JSON 开头。worker 和 reviewer 各自核对映射并选择自己的锚点；没有这类明确声明时用 `comparisons: []`。
 
 对应 YAML 判据明确保留 `relative_to=candidate` 或来源给出的其他值。例如材料已给出 elementwise、`atol=0.01`、`rtol=0.05` 时，可写 `abs(candidate-reference) <= 0.01 + 0.05*abs(candidate); relative_to=candidate`，并在后面说明未声明的比较器精度或 NaN/Inf 行为。Runner 核对这个显式基准、已有标准公式中的比较对象与可直接核对的阈值；自由公式及输出映射的语义仍由独立 reviewer 核实。不因单独一个 `relative_to` 字段推断 elementwise/L2 公式、运算精度或非有限值政策。
 
@@ -44,7 +44,7 @@ Runner 提供算子身份、输出位置、固定来源入口、输入构造、r
 
 ## reviewer：放行门槛
 
-读取独立 checkpoint，对照相同固定材料核对：
+从独立 checkpoint 和固定材料确认：这份紧凑的 Contract 已说清外部任务的数学含义、有效域及全部输出，读者无需展开 Design 才能理解标准答案。重点核对：
 
 - 元数据身份和来源准确；YAML 可解析，硬件占位保持原样。
 - 输入有效域、全部输出、边界、精度转换与副作用可独立理解；没有把实现限制或 Design 选择转成算法前提。
@@ -55,6 +55,6 @@ P1 按元数据和共享 Contract 验收，Design 可以保留 starter 草稿。
 
 ## 回执与下一位
 
-按[回执约定](../tools/README.md#回执与短交接)返回根文件改动、IO/reference/验收依据的文件行号与短引文、共享 Contract 结论、实现覆盖范围和未决项；框架问题按[分流规则](../../EXTRACT_SCHEMA.md#框架问题分流)填 `framework_candidates`。退修与裁决遵循[统一规则](../tools/README.md#退修与裁决)。
+按[回执约定](../tools/README.md#回执与短交接)提交语义提案：共享 Contract 结论、IO/reference/验收依据、实现覆盖范围和未决项。
 
 Runner 验证并保存本阶段放行后进入 [P2](02_dispatch_draft.md)。P1 的 worker 与 reviewer 各自独立，P2 分别续用这两个会话并加载新任务页；本页不生成额外短交接文件。

@@ -8,22 +8,174 @@ import fcntl
 import os
 from pathlib import Path
 import shutil
+import stat
 import time
 from uuid import UUID, uuid4
 
-from .common import (RUN_WRITES, ExtractError, RunnerBusy, StaleResult, copy_artifacts, digest, json_bytes,
+from . import __version__
+from .common import (STATE_GUARD, ExtractError, RunnerBusy, StaleResult, copy_artifacts, digest, json_bytes,
                      fsync_directory, manifest, read_json, seal, sync_tree, verify_manifest, write_json, write_text, rules_root)
 from .artifacts import _same, load_yaml, validate_artifact_sources, write_yaml
-from .stages import (call_view, effective_nodes, new_scope, next_call, node_signature,
+from .stages import (NODE_STOPS, call_view, effective_nodes, new_scope, next_call, next_calls, node_signature,
                      scope_for, scope_key, session_group, writable_files)
 
 
 STATE_FORMAT = "schema_extract.run.v2"
+SUMMARY_FORMAT = "schema_extract.summary.v1"
+SUPERVISOR_FORMAT = "schema_extract.supervisor.v1"
+
+
+def _state_stamp(path: Path) -> dict:
+    """A small observation token, never an integrity or approval decision."""
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ExtractError("state.json is not a regular file")
+    return {"device": info.st_dev, "inode": info.st_ino, "size": info.st_size,
+            "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns}
 
 
 class Store:
     def __init__(self, root: Path):
         self.root = root.resolve()
+
+    def initialize(self) -> None:
+        marker = self.root / "format.json"
+        if marker.exists():
+            if read_json(marker) != {"format": "schema_extract.store.v2"}:
+                raise ExtractError("state root belongs to another format")
+            return
+        self.root.mkdir(parents=True, exist_ok=True)
+        with (self.root / "supervisor.lock").open("a") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                if marker.exists():
+                    if read_json(marker) != {"format": "schema_extract.store.v2"}:
+                        raise ExtractError("state root belongs to another format")
+                elif any(path.name != "supervisor.lock" for path in self.root.iterdir()):
+                    raise ExtractError("state root is nonempty and is not a v2 store")
+                else:
+                    write_json(marker, {"format": "schema_extract.store.v2"})
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+    def run_ids(self) -> list[str]:
+        """Only one directory level; attempts and checkpoints are not an index."""
+        directory = self.root / "runs"
+        if not directory.exists():
+            return []
+        return sorted(path.name for path in directory.iterdir() if path.is_dir() and not path.is_symlink())
+
+    def read_supervisor(self) -> dict:
+        path = self.root / "supervisor.json"
+        if not path.exists():
+            return {"format": SUPERVISOR_FORMAT, "revision": 0, "active_hold": None,
+                    "holds": {}, "starts": {}, "controls": {}, "continuations": {},
+                    "retries": {}, "auto_restart": {}, "observations": {}}
+        value = read_json(path)
+        if not isinstance(value, dict) or value.get("format") != SUPERVISOR_FORMAT:
+            raise ExtractError("unsupported supervisor control ledger")
+        for name in ("holds", "starts", "controls", "continuations", "retries", "auto_restart", "observations"):
+            if not isinstance(value.get(name), dict):
+                raise ExtractError("invalid supervisor field: " + name)
+        return value
+
+    @contextmanager
+    def supervisor(self):
+        """Short control transaction. Never acquire a run lock or wait here."""
+        self.initialize()
+        with (self.root / "supervisor.lock").open("a") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                value = self.read_supervisor()
+                before = deepcopy(value)
+                yield value
+                if value != before:
+                    value["revision"] = before["revision"] + 1
+                    value["updated_at"] = time.time()
+                    write_json(self.root / "supervisor.json", value)
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+    def writer_status(self, run_id: str) -> str:
+        """Observe a lock without creating a file or changing run authority."""
+        path = self.run_dir(run_id) / "runner.lock"
+        try:
+            with path.open("r") as stream:
+                try:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return "held"
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                return "free"
+        except FileNotFoundError:
+            return "absent"
+        except OSError:
+            return "unknown"
+
+    def assert_startable(self, run_id: str, ledger: dict | None = None) -> None:
+        ledger = self.read_supervisor() if ledger is None else ledger
+        if run_id in ledger["continuations"]:
+            raise ExtractError("run has a reserved successor; use " + ledger["continuations"][run_id]["run_id"])
+        self.assert_constructed(run_id, ledger)
+        if ledger["active_hold"]:
+            raise ExtractError("global hold is active: " + ledger["active_hold"])
+
+    def assert_constructed(self, run_id: str, ledger: dict | None = None) -> None:
+        """Both dispatch and further continuation require committed inheritance."""
+        ledger = self.read_supervisor() if ledger is None else ledger
+        if any(value["run_id"] == run_id and value["status"] != "ready" for value in ledger["continuations"].values()):
+            raise ExtractError("successor is still being constructed; its original budget is not yet committed")
+
+    def append_control(self, ledger: dict, run_id: str, action: str, *, hold_id=None) -> dict:
+        """Caller holds supervisor.lock; requests remain the Runner's input."""
+        previous = ledger["controls"].get(run_id, {})
+        request = {"format": "schema_extract.control.v2", "run_id": run_id,
+                   "id": str(uuid4()), "action": action, "created_at": time.time(),
+                   "control_revision": previous.get("revision", 0) + 1,
+                   "origin": "hold" if hold_id else "manual", "hold_id": hold_id}
+        write_json(self.root / "requests" / run_id / (request["id"] + ".json"), request)
+        ledger["controls"][run_id] = {"revision": request["control_revision"], "id": request["id"],
+                                      "action": action, "hold_id": hold_id, "at": request["created_at"]}
+        return request
+
+    def hold_member(self, ledger: dict, state: dict) -> dict | None:
+        """Register the gate's actual effect, including late-arriving Runners."""
+        hold_id = ledger["active_hold"]
+        if not hold_id:
+            return None
+        run_id = state["run_id"]
+        hold = ledger["holds"][hold_id]
+        existing = hold["members"].get(run_id)
+        if existing and not (existing["status"] == "queued_blocked" and state["status"] in {"running", "ready"}):
+            return existing
+        latest = ledger["controls"].get(run_id, {})
+        # Resume may have passed its entry gate while the saved state was still
+        # queued. Upgrade the original hold effect at the Runner's next boundary.
+        member = existing or {"original_status": state["status"], "state_revision": state.get("state_revision"),
+                  "prior_control_revision": latest.get("revision", 0), "status": "preserved",
+                  "gate_capable": "hold.v1" in state.get("executor", {}).get("capabilities", [])}
+        hold["members"][run_id] = member
+        commit = ledger.get("commits", {}).get(run_id)
+        if (commit and commit["control_revision"] < hold["revision"] and commit["checkpoint"] == state["checkpoint"] and
+                commit["target"] == state["output"] and state["status"] == "ready" and not state["active_attempts"]):
+            member.update(status="completed_before_hold", publication=deepcopy(commit))
+            return member
+        pending_manual = any(not request.get("hold_id") and request["id"] not in state["control"]["requests"]
+                             for request in self.control_requests(run_id))
+        if state["published"] or state["status"] in {"paused", "cancelled"} or pending_manual or (
+                state["control"].get("action") in {"pause", "cancel"} and not state["control"].get("hold_id")) or (
+                latest.get("action") in {"pause", "cancel"} and not latest.get("hold_id")):
+            member["status"] = "preserved"
+            if pending_manual:
+                member["reason"] = "已落盘的手动请求先于本 hold；其控制账本可能尚未提交。"
+            return member
+        if state["status"] == "queued":
+            member["status"] = "queued_blocked"
+        elif state["status"] in {"running", "ready"} or state.get("active_attempts"):
+            request = self.append_control(ledger, run_id, "pause", hold_id=hold_id)
+            member.update(status="pause_requested", request_id=request["id"],
+                          control_revision=request["control_revision"])
+        return member
 
     def run_dir(self, run_id: str) -> Path:
         try:
@@ -35,9 +187,9 @@ class Store:
 
     def load(self, run_id: str) -> dict:
         path = self.run_dir(run_id) / "state.json"
-        guard = RUN_WRITES.get()
+        guard = STATE_GUARD.get()
         value = guard.read_state() if guard and path.parent == guard.directory else read_json(path)
-        if value.get("format") != STATE_FORMAT or value.get("run_id") != run_id:
+        if not isinstance(value, dict) or value.get("format") != STATE_FORMAT or value.get("run_id") != run_id:
             raise ExtractError("unsupported or mismatched state; v1 runs must use their frozen executor")
         if "active_attempts" not in value or "reopen_requests" not in value:
             raise ExtractError("this older serial run must use its frozen executor; import its checkpoint into a new run")
@@ -46,7 +198,50 @@ class Store:
     def save(self, state: dict) -> None:
         if state.get("format") != STATE_FORMAT:
             raise ExtractError("cannot save another state format")
-        write_json(self.run_dir(state["run_id"]) / "state.json", state)
+        directory = self.run_dir(state["run_id"])
+        guard = STATE_GUARD.get()
+        guard = guard if guard and guard.directory == directory else None
+        if guard:
+            guard.verify()
+        revision = state.get("state_revision", 0)
+        if type(revision) is not int or revision < 0:
+            raise ExtractError("invalid state revision")
+        saved = {**state, "state_revision": revision + 1, "updated_at": time.time()}
+        write_json(directory / "state.json", saved)
+        state.update(state_revision=saved["state_revision"], updated_at=saved["updated_at"])
+        if guard:
+            guard.written(json_bytes(saved))
+        # The authoritative commit is complete. A failed observer projection
+        # must not roll it back or turn a completed invocation into a retry.
+        try:
+            stamp = _state_stamp(directory / "state.json")
+            projection = summary(self, state)
+            projection["state_file"] = stamp
+            write_json(directory / "summary.json", projection)
+        except Exception:
+            # read_summary detects the old/missing token and falls back once.
+            pass
+
+    def read_summary(self, run_id: str, *, fallback=True) -> dict:
+        """Read one projection plus one state stat; fallback never validates nodes."""
+        directory = self.run_dir(run_id)
+        observation = {"observed_at": time.time(), "source": "summary", "status": "unknown",
+                       "deep_verified": False}
+        try:
+            value = read_json(directory / "summary.json")
+            if (not isinstance(value, dict) or value.get("format") != SUMMARY_FORMAT or
+                    value.get("run_id") != run_id or type(value.get("state_revision")) is not int):
+                raise ExtractError("unsupported or mismatched summary projection")
+            if value.get("state_file") == _state_stamp(directory / "state.json"):
+                observation["status"] = "current"
+                return {**value, "observation": observation}
+            observation.update(status="stale", reason="state changed after this projection")
+        except (ExtractError, OSError) as exc:
+            observation["reason"] = str(exc)
+        if not fallback:
+            return {"format": SUMMARY_FORMAT, "run_id": run_id, "observation": observation}
+        observation["source"] = "state"
+        return {**summary(self, self.load(run_id)), "observation": observation}
 
     @contextmanager
     def writer(self, run_id: str):
@@ -67,10 +262,8 @@ class Store:
         self.load(run_id)
         if action not in {"pause", "cancel"}:
             raise ExtractError("control action must be pause or cancel")
-        request = {"format": "schema_extract.control.v2", "run_id": run_id,
-                   "id": str(uuid4()), "action": action, "created_at": time.time()}
-        write_json(self.root / "requests" / run_id / (request["id"] + ".json"), request)
-        return request
+        with self.supervisor() as ledger:
+            return self.append_control(ledger, run_id, action)
 
     def control_requests(self, run_id: str) -> list[dict]:
         directory = self.root / "requests" / run_id
@@ -85,11 +278,16 @@ class Store:
             requests.append(value)
         return sorted(requests, key=lambda item: (item["created_at"], item["id"]))
 
-    def create(self, lock: dict, output: Path, *, seed: dict | None = None, queued=False) -> dict:
-        run_id = str(uuid4())
+    def create(self, lock: dict, output: Path, *, seed: dict | None = None, queued=False,
+               run_id: str | None = None, created_at: float | None = None) -> dict:
+        if not (self.root / "format.json").exists():
+            write_json(self.root / "format.json", {"format": "schema_extract.store.v2"})
+        run_id = run_id or str(uuid4())
         directory = self.run_dir(run_id)
-        directory.mkdir(parents=True)
-        now = time.time()
+        directory.mkdir(parents=True, exist_ok=True)
+        if (directory / "state.json").exists():
+            raise ExtractError("run already exists: " + run_id)
+        now = time.time() if created_at is None else created_at
         state = {"format": STATE_FORMAT, "run_id": run_id,
                  "operator_id": lock["source"]["bindings"]["id"], "output": str(output.resolve()),
                  "input_fingerprint": lock["fingerprint"], "snapshot": lock["snapshot"],
@@ -97,6 +295,10 @@ class Store:
                  "mode": "normal", "plan": None, "plan_draft": None, "merged_checkpoint": None,
                  "revision_scope": [], "pending_rechecks": [], "recoverable_checkpoint": None,
                  "plan_revision": 1, "created_at": now,
+                 "executor": {"version": __version__, "rules_id": lock["rules"]["id"],
+                              "digest": digest({name: value for name, value in lock["rules"]["files"].items()
+                                                if name.startswith("schema_extract/") and name.endswith(".py")}),
+                              "capabilities": ["summary.v1", "state_guard.v1", "hold.v1", "scoped_restart.v1", "continuation.v1", "audit.v1", "proposal.v1"]},
                  "reopening": None, "reopen_requests": {}, "plan_history": [],
                  "stale_results": {}, "unconfirmed_attempts": {}, "p6_starts": 0, "final_review_started": False,
                  "config": lock["config"], "deadline": now + lock["config"]["operator_seconds"],
@@ -107,13 +309,13 @@ class Store:
                                      "draft_checkpoint": None, "approved_checkpoints": {},
                                      "approval": None, "approved_sha256": None,
                                      "generation": 0, "approved_generation": None}},
-                 "checkpoint": None, "attempts": [], "active_attempts": {},
+                 "checkpoint": None, "attempts": [], "active_attempts": {}, "unsettled_attempts": {},
                  "accepted_receipts": {}, "reason": None, "feedback": [],
                  "attempt_usage": {}, "recovered_attempts": {}, "session_handoffs": [],
                  "control": {"action": None, "requests": {}, "resume_status": None},
                  "published": False, "publication": None, "exports": []}
         write_json(directory / "inputs.lock.json", lock)
-        initial = directory / "initial"
+        initial = directory / (".initial-" + uuid4().hex)
         initial.mkdir()
         shutil.copyfile(rules_root(lock) / "schema_template/starter.yaml", initial / "root.yaml")
         if seed:
@@ -144,6 +346,10 @@ class Store:
         state["nodes"]["root"]["draft_checkpoint"] = state["checkpoint"]
         shutil.rmtree(initial)
         self.save(state)
+        with self.supervisor() as ledger:
+            ledger["starts"].setdefault(run_id, {"run_id": run_id, "output": state["output"],
+                                                "operator_id": state["operator_id"], "created_at": state["created_at"],
+                                                "authorized": False, "status": "preexisting"})
         fsync_directory(directory.parent)
         fsync_directory(self.root)
         return state
@@ -170,11 +376,6 @@ class Store:
         sync_tree(temporary)
         os.rename(temporary, destination)
         fsync_directory(base)
-        if guard := RUN_WRITES.get():
-            guard.tree_written(destination / "artifacts", files)
-            # Bind to the exact JSON already authored, never to a refresh's
-            # later read of a possibly changed checkpoint record.
-            guard.written(destination / "checkpoint.json", json_bytes({**identity, "id": checkpoint_id}))
         return checkpoint_id
 
     def verify_checkpoint(self, state: dict, checkpoint_id: str | None = None) -> tuple[Path, dict]:
@@ -183,7 +384,7 @@ class Store:
             raise ExtractError("invalid checkpoint ID")
         directory = self.run_dir(state["run_id"]) / "checkpoints" / checkpoint_id
         info = read_json(directory / "checkpoint.json")
-        if digest({k: v for k, v in info.items() if k != "id"}) != checkpoint_id:
+        if info.get("id") != checkpoint_id or digest({k: v for k, v in info.items() if k != "id"}) != checkpoint_id:
             raise ExtractError("checkpoint identity mismatch")
         for key in ("run_id", "input_fingerprint"):
             if info[key] != state[key]:
@@ -281,7 +482,8 @@ class Store:
             if attempt["generation"] != scope_for(state, attempt)["generation"] or attempt["base_checkpoint"] != state["checkpoint"]:
                 raise StaleResult("stage generation or checkpoint changed")
 
-    def prepare_attempt(self, state: dict, session_id: str | None, *, call: dict | None = None) -> dict:
+    def prepare_attempt(self, state: dict, session_id: str | None, *, call: dict | None = None,
+                        timeout_seconds: float | None = None) -> dict:
         call = call or next_call(state)
         if call is None:
             raise ExtractError("no dependency-ready call can be prepared")
@@ -298,10 +500,11 @@ class Store:
         if scope["started_at"] is None:
             scope["started_at"] = time.time()
             scope["deadline"] = scope["started_at"] + state["config"]["stage_seconds"]
-            scope["baseline_checkpoint"] = view["checkpoint"]
-            scope["candidates"].append({"checkpoint": view["checkpoint"], "plan": state.get("plan_draft")})
             scope["adjudication_reserved_seconds"] = state["config"]["adjudication_seconds"]
             scope["signoff_reserved_seconds"] = state["config"]["adjudication_seconds"] if call["stage"] == "P6" else 0
+        if scope["baseline_checkpoint"] is None:
+            scope["baseline_checkpoint"] = view["checkpoint"]
+            scope["candidates"].append({"checkpoint": view["checkpoint"], "plan": state.get("plan_draft")})
         mode = call.get("mode", "normal")
         if mode in {"adjudicate", "signoff"}:
             counter = "adjudications" if mode == "adjudicate" else "signoffs"
@@ -322,6 +525,7 @@ class Store:
         invocation = {key: view[key] for key in ("run_id", "input_fingerprint", "stage", "role", "node", "plan_revision")}
         entry = next((entry for entry in state.get("plan") or [] if entry["id"] == call["node"]), None)
         invocation.update({"attempt_id": attempt_id, "base_checkpoint": view["checkpoint"],
+                           "response_format": "schema_extract.proposal.v1",
                            "dependency_digests": checkpoint["files"], "session_id": session_id,
                            "session_group": group, "mode": mode, "writable_files": writable_files(state, call),
                            "generation": state["nodes"][call["node"]]["generation"] if call["stage"] == "P5" else scope["generation"],
@@ -329,6 +533,8 @@ class Store:
                            "revision_scope": state["revision_scope"],
                            "workspace": str(directory / "workspace"), "directory": str(directory),
                            "created_at": time.time()})
+        if timeout_seconds is not None:
+            invocation["timeout_seconds"] = timeout_seconds
         handoff = next((item for item in reversed(state.get("session_handoffs", []))
                         if item["session_group"] == group and item["role"] == call["role"] and
                         not item.get("next_attempt_id")), None)
@@ -338,6 +544,7 @@ class Store:
         write_json(directory / "attempt.json", invocation)
         state["attempts"].append(attempt_id)
         state["active_attempts"][key] = attempt_id
+        state.setdefault("unsettled_attempts", {})[attempt_id] = "prepared"
         if call["stage"] == "P6" and not state["final_review_started"]:
             state["final_review_started"] = True
             state["p6_starts"] += 1
@@ -404,3 +611,71 @@ class Store:
         write_text(directory / "handoff.md", body)
         sync_tree(directory)
         fsync_directory(directory.parent)
+
+
+def summary(store: Store, state: dict) -> dict:
+    """Project recorded progress without reading or approving any artifact."""
+    planned = {entry["id"] for entry in state.get("plan") or []}
+    approved = effective_nodes(state)
+    groups = {key: [] for key in ("ready", "in_flight", "revision", "approved", "waiting_parent", "blocked")}
+    ready = ({call["node"] for call in next_calls(state)}
+             if state["status"] == "running" and state["stage"] != "P6" and
+             not (state.get("control") or {}).get("action") else set())
+    active = state.get("active_attempts", {})
+    details = {}
+    observed = planned | {"root"} | {key.removeprefix("P5:") for key in active if key.startswith("P5:")}
+    for node_id in sorted(observed):
+        node = state["nodes"][node_id]
+        attempt_id = active.get("P5:" + node_id)
+        if node_id == "root":
+            attempt_id = active.get(state["stage"])
+        if attempt_id:
+            groups["in_flight"].append(node_id)
+        elif node_id in approved:
+            groups["approved"].append(node_id)
+        elif node["status"] in NODE_STOPS:
+            groups["blocked"].append(node_id)
+        elif node_id in ready:
+            groups["ready"].append(node_id)
+        elif node["parent"] and node["parent"] not in approved:
+            groups["waiting_parent"].append(node_id)
+        if node.get("stage", {}).get("status") in {"revision", "adjudicating"}:
+            groups["revision"].append(node_id)
+        details[node_id] = {"parent": node["parent"], "status": node["status"], "role": node.get("role"),
+                            "mode": node.get("mode", "normal"), "attempt_id": attempt_id,
+                            "reason": node.get("reason"), "generation": node["generation"],
+                            "planned": node_id in planned}
+    scopes = {**state["stages"], **{"P5:" + node: state["nodes"][node]["stage"]
+                                   for node in observed if "stage" in state["nodes"][node]}}
+    budget_fields = ("status", "calls", "revisions", "elapsed_seconds", "started_at", "deadline",
+                     "adjudications", "signoffs")
+    return {key: state.get(key) for key in ("run_id", "operator_id", "status", "stage", "role", "node",
+                                          "checkpoint", "output", "published", "reason")} | {
+        "format": SUMMARY_FORMAT, "input_fingerprint": state["input_fingerprint"],
+        "executor": deepcopy(state.get("executor", {"version": None, "digest": None, "rules_id": None,
+                                                     "capabilities": []})),
+        "state_revision": state.get("state_revision"), "generated_at": time.time(),
+        "created_at": state.get("created_at"), "updated_at": state.get("updated_at"),
+        "content_verified": False,
+        "mode": state.get("mode", "normal"), "state_directory": str(store.run_dir(state["run_id"])),
+        "approved_stages": [key for key, value in state["stages"].items() if value["status"] == "approved"],
+        "approved_nodes": sorted(approved), "nodes_by_status": groups, "node_details": details,
+        "active_attempts": dict(active), "unsettled_attempts": dict(state.get("unsettled_attempts", {})),
+        "runner": state.get("runner"), "continuation": state.get("continuation"),
+        "unconfirmed_attempts": dict(state.get("unconfirmed_attempts", {})),
+        "control": state.get("control"), "publication": state.get("publication"),
+        "exports": state.get("exports", []),
+        "elapsed_seconds": sum(item.get("elapsed_seconds", 0) for item in state.get("attempt_usage", {}).values()),
+        "budget": {"deadline": state.get("deadline"),
+                   "limits": {key: state.get("config", {}).get(key) for key in
+                              ("operator_seconds", "stage_seconds", "call_seconds", "max_calls",
+                               "revision_limit", "adjudication_seconds")},
+                   "scopes": {key: {field: value.get(field) for field in budget_fields}
+                              for key, value in scopes.items()}},
+        "imported_checkpoint": state.get("imported_draft", {}).get("checkpoint"),
+        "legacy_usage": state.get("imported_draft", {}).get("usage"),
+        "completed_node_count": len(approved), "plan_revision": state["plan_revision"],
+        "p6_starts": state.get("p6_starts", 0), "planned_node_count": len(planned),
+        "attempt_count": len(state.get("attempts", [])),
+        "last_attempt_id": next(iter(state.get("attempts", [])[::-1]), None),
+        "merged_checkpoint": state.get("merged_checkpoint")}

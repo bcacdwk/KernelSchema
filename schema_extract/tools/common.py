@@ -12,9 +12,9 @@ import stat
 from uuid import uuid4
 
 
-# Only the Runner's serial thread records authorized writes. Agent transports
-# and concurrent control submitters do not inherit this authority.
-RUN_WRITES = ContextVar("schema_extract_run_writes", default=None)
+# Only Store's current Runner thread may advance its trusted state bytes.
+# Agent transports and concurrent control submitters do not own this guard.
+STATE_GUARD = ContextVar("schema_extract_state_guard", default=None)
 
 
 class ExtractError(ValueError):
@@ -69,26 +69,20 @@ def write_json(path: Path, value: object) -> None:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         fsync_directory(path.parent)
-        if guard := RUN_WRITES.get():
-            guard.written(path, body)
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
-    if guard := RUN_WRITES.get():
-        guard.written(path, text.encode("utf-8"))
 
 
 def copy_artifacts(source: Path, destination: Path) -> None:
-    """Record the source bytes authorized for a Runner-created working copy."""
+    """Copy a Runner-created working file or directory."""
     if source.is_dir():
         shutil.copytree(source, destination)
     else:
         shutil.copyfile(source, destination)
-    if guard := RUN_WRITES.get():
-        guard.copied(source, destination)
 
 
 def fsync_directory(path: Path) -> None:

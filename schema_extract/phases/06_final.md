@@ -12,7 +12,7 @@ Runner 确认当前计划的全部节点与当前有效、已合入节点集合�
 
 1. 对照计划检查实有文件：唯一 `root.yaml`、所有计划内节点和 `dispatch.md` 均在；ID 唯一、parent 存在、树无环且全部可达，索引树与 YAML 一致，节点链接可打开。目录没有未计划的备份或草稿 YAML。
 2. 对照 host 核查包含 root 和中间节点在内的独立 `when`，检查互斥与完整契约域覆盖；精确条件以 YAML 为准。已知源码覆盖不足明确记录实际范围，不能靠收窄 Contract、虚构节点或 fallback 掩盖。源码已知缺陷和提取尚未完成要区分，关键未知仍须给出恢复条件。
-3. 核对各节点依赖的共享 Contract、来源、选择条件与审阅内容仍一致；引用能定位实际对象和版本，未决项的处理与有效结论相符。硬件原样占位与 GPU 排除沿用 [P1](01_contract.md#第-3-段硬件占位)，不把该区纳入收尾。
+3. 核对各节点依赖的共享 Contract、来源和审阅内容仍一致；引用能定位实际对象和版本，未决项与有效结论相符。发现跨节点条件或共用内容不一致时，沿实际影响复查数值、工作组织、依赖及复用；既有审阅仍适用的节点无需重新提取。交付应保留理解整棵树所需的信息，清除相互矛盾的重复叙述。硬件与 GPU 边界沿用 [P1](01_contract.md#第-3-段硬件占位)。
 4. 对最终整个任务目录运行已实现的检查器，从仓库根目录执行，替换为实际 root 路径：
 
 ```sh
@@ -33,6 +33,6 @@ python3 schema_template/check_yaml.py --skip-hardware path/to/task/root.yaml
 
 `revision_scope` 为 `[{path, fields}]`，`fields` 使用点分字段路径；`affected_nodes` 列出受影响节点 ID。退修必须给出范围：`dispatch.md` 使用 `["*"]`，派生 YAML 可限域修改 `design`、`realization`、`meta_data.source`、`meta_data.dispatch.when` 下的字段。worker 原样保留授权范围并随内容提高版本。Runner 将受影响后代加入 `pending_rechecks`，批准/签收必须逐项覆盖；root、共享 Contract 或树变化走上游重开。终审派发及放行前都验证有效回执、Runner 门禁、checkpoint 与实际内容一致。
 
-按[回执约定](../tools/README.md#回执与短交接)返回当前计划与实有文件、树和链接核对、条件互斥/覆盖、引用及未决项结论，附必要源码锚点和最终检查命令/退出码。若修改，列出实际文件、影响范围及重新核对的节点；框架候选放 `framework_candidates`。无需新增固定终审报告或 schema 状态字段。
+按[回执约定](../tools/README.md#回执与短交接)提交树和链接、条件互斥/覆盖、引用与未决项结论，附必要源码依据和实际检查。若修改，给出影响范围及重新核对的节点，无需新增固定终审报告或 schema 状态字段。
 
 Runner 验证最终结论并保存已审 checkpoint 后才记录 `ready`，再按[交付规则](../README.md#恢复与交付)向指定目录原子发布；目标冲突保留双方并向 Supervisor 报告。不能放行时保存草稿、具体阻塞原因与恢复条件，由 Supervisor 补充外部输入或处理工具问题，不能把草稿当正式完成。

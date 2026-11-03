@@ -35,7 +35,7 @@ P3 完整 root 已通过检查与独立审阅，P1、P2 的放行仍有效。Run
 
 ## reviewer：放行门槛
 
-独立核对整棵树的划分理由、直接父节点选择、主要路径、选择证据和已知覆盖缺口。确认清单与索引相同，节点差异能指导新 worker，从 root 到任意节点都有明确来源；root 文件未被越权改写。
+独立对照 host 路由和已审 root，确认整棵树以最少必要节点保留真实设计差异，直接父节点能提供合理的复制起点。每个条目的 workload、差异和选择依据足以让新 worker 精确接手，覆盖缺口保持真实；清单与索引相同，root 文件未被越权改写。
 
 批准时返回与 worker 相同的节点语义清单；自己的 `source_evidence` 顺序和 `evidence` 编号独立，不必复制 worker 的局部编号。重开时可从调用中列出的 `reviewed_artifacts` 读取此前已审 YAML，判断其是否仍适用。
 
@@ -43,6 +43,6 @@ Runner 对 complete/approve 检查唯一 root、ID 与文件身份唯一、父�
 
 ## 回执与下一位
 
-按[回执约定](../tools/README.md#回执与短交接)返回经审阅的结构化节点清单、树与来源核对、覆盖缺口及影响范围。reviewer 给出 P4→P5 短交接，保留选父理由、路径入口及分支需要核实的差异，由 Runner 保存。框架候选放 `framework_candidates`，退修与裁决遵循[统一规则](../tools/README.md#退修与裁决)。
+按[回执约定](../tools/README.md#回执与短交接)提交经审阅的节点清单、划分与选父依据、覆盖缺口及影响范围。reviewer 的 P4→P5 短交接保留路径入口和各分支待核实的差异。
 
 Runner 验证后保存当前计划，立即为直接父节点已审并合入的节点启动 [P5](05_branch.md)，每节点全新一对 worker/reviewer。没有派生节点时跳过 P5，仍由 [P6](06_final.md) 的新 reviewer 终审。

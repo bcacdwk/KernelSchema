@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import signal
@@ -10,7 +9,8 @@ import subprocess
 import time
 from uuid import UUID
 
-from .common import ExtractError, read_json, write_json
+from .audit import parse_events, result_usage
+from .common import ExtractError, digest, read_json, sha256, write_json
 from .processes import owned_processes, process_table, terminate_owned
 
 
@@ -53,6 +53,8 @@ class CodexCLI:
                                role=attempt["role"], effort=effort, session_id=attempt["session_id"])
         invocation = {"argv": command, "role": attempt["role"], "effort": effort, "model": self.model,
                       "resume_session_id": attempt["session_id"], "started_at": time.time(), "cli_version": None}
+        invocation.update({key: attempt.get(key) for key in ("run_id", "attempt_id", "stage", "node", "session_group")})
+        invocation.update(prompt_sha256=sha256(prompt.encode("utf-8")), response_schema_digest=digest(schema))
         started = time.monotonic()
         termination = {"confirmed": True, "actions": [], "survivors": [], "reason": "not_started"}
         exit_code, outcome, process = None, "completed", None
@@ -123,28 +125,20 @@ class CodexCLI:
         except (OSError, subprocess.SubprocessError) as exc:
             outcome = "cli_error" if termination["confirmed"] else "termination_unconfirmed"
             invocation["error"] = str(exc)
-        events, session_ids, parse_errors, completed = [], [], [], False
-        if (directory / "events.jsonl").is_file():
-            for number, line in enumerate((directory / "events.jsonl").read_text(encoding="utf-8").splitlines(), 1):
-                try:
-                    event = json.loads(line)
-                    events.append(event["type"])
-                    if event["type"] == "thread.started":
-                        found = event["thread_id"]
-                        if str(UUID(found)) != found:
-                            raise ValueError("invalid UUID")
-                        session_ids.append(found)
-                    if event["type"] == "turn.completed":
-                        completed = True
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    parse_errors.append(number)
+        parsed = parse_events(directory / "events.jsonl")
+        trace = parsed["trace"]
+        events, session_ids = list(trace["event_counts"]), trace["session_ids"]
+        parse_errors = trace["parse_error_lines"]
+        if trace["truncated_line"]:
+            parse_errors = [*parse_errors, trace["truncated_line"]]
+        completed = bool(trace["event_counts"].get("turn.completed"))
         session_id = session_ids[0] if len(set(session_ids)) == 1 else None
         try:
             response = read_json(response_path)
         except ExtractError:
             response = None
         if outcome == "completed":
-            if exit_code != 0 or not completed or not session_id or parse_errors:
+            if exit_code != 0 or not completed or not session_id or parse_errors or trace["error"] or not trace["stable"]:
                 outcome = "cli_error"
             elif attempt["session_id"] and session_id != attempt["session_id"]:
                 outcome = "session_mismatch"
@@ -152,6 +146,8 @@ class CodexCLI:
                 outcome = "receipt_error"
         result = {**invocation, "outcome": outcome, "exit_code": exit_code, "session_id": session_id,
                   "event_types": events, "parse_error_lines": parse_errors, "termination": termination,
-                  "elapsed_seconds": time.monotonic() - started, "response": response}
+                  "elapsed_seconds": time.monotonic() - started, "completed_at": time.time(), "response": response,
+                  "trace": trace, "usage": result_usage(parsed, outcome=outcome, termination=termination),
+                  "timing_source": "elapsed_seconds: monotonic CLI transport including setup, termination and event parsing; processing.json: Runner checks/processing"}
         write_json(directory / "result.json", result)
         return result

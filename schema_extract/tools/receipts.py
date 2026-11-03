@@ -7,6 +7,7 @@ from pathlib import Path
 from .common import ExtractError, manifest, regular_file, rules_root, source_root
 from .artifacts import validate_plan, validate_revision_scope
 from .comparators import validate_comparisons
+from .reading import read_evidence
 from .stages import STAGES, plan_signature, scope_key
 
 
@@ -29,10 +30,6 @@ IDENTITY_FIELDS = ("run_id", "attempt_id", "input_fingerprint", "stage", "role",
 
 class ReceiptFormatError(ExtractError):
     """An otherwise scoped proposal may repair its JSON shape in the same session."""
-
-
-class QuoteTextMismatch(ExtractError):
-    """A bounded quote does not match its otherwise verified fixed file/range."""
 
 
 def call_identity(attempt: dict) -> dict:
@@ -62,8 +59,7 @@ def required_artifact_evidence(state: dict, attempt: dict, files) -> set[str]:
     return {"root.yaml"} if attempt["stage"] == "P1" else {"root.yaml", "dispatch.md"}
 
 
-def receipt_schema(attempt: dict, *, source_id: str | None = None,
-                   source_files: dict[str, str] | None = None) -> dict:
+def receipt_schema(attempt: dict) -> dict:
     identity = {}
     for key, value in call_identity(attempt).items():
         if isinstance(value, dict):
@@ -90,25 +86,9 @@ def receipt_schema(attempt: dict, *, source_id: str | None = None,
         fixed = attempt["dependency_digests"]
         known = {"path": {"type": "string", "enum": sorted(fixed)},
                  "sha256": {"type": "string", "enum": sorted(set(fixed.values()))}}
-        # These values are already fixed before a read-only call. Constrain
-        # transcription at generation; the validators still require exact
-        # path-to-digest pairing and independently verify every quotation.
+        # A reviewer receipt can only refer to its fixed read-only input bytes.
         fields["artifacts"]["items"] = obj(known)
         fields["artifact_evidence"]["items"] = obj({**ANCHOR_FIELDS, **known})
-    if source_id is not None or source_files is not None:
-        source_fields = {**SOURCE_ANCHOR["properties"]}
-        if source_id is not None:
-            source_fields["source_id"] = {"type": "string", "enum": [source_id]}
-        if source_files is not None:
-            source_fields["path"] = {"type": "string", "enum": sorted(source_files)}
-            source_fields["sha256"] = {"type": "string", "enum": sorted(set(source_files.values()))}
-            if attempt["role"] == "worker":
-                # Generation only: new artifacts have no known digest yet.
-                # Build fresh dictionaries; default receiving shapes stay intact.
-                sha_type = {"type": "string", "pattern": "^[a-f0-9]{64}$"}
-                fields["artifacts"]["items"] = obj({**ARTIFACT["properties"], "sha256": sha_type})
-                fields["artifact_evidence"]["items"] = obj({**ANCHOR_FIELDS, "sha256": sha_type})
-        fields["source_evidence"]["items"] = obj(source_fields)
     if attempt["stage"] == "P1":
         fields["comparisons"] = {"type": "array", "items": obj({"output": TEXT, "source_output": TEXT, "evidence": INDICES})}
     if attempt["stage"] == "P4":
@@ -130,6 +110,78 @@ def receipt_schema(attempt: dict, *, source_id: str | None = None,
                                 "reason": TEXT, "evidence": INDICES})
         fields["reopen"]["type"] = ["object", "null"]
     return obj(fields)
+
+
+def proposal_schema(attempt: dict, *, source_files: dict[str, str] | None = None) -> dict:
+    """Only semantic choices and this invocation's nonce are model-authored."""
+    fields = {key: value for key, value in receipt_schema(attempt)["properties"].items()
+              if key not in {"format", "identity", "artifacts", "changed_files"}}
+    fields = {"format": {"type": "string", "enum": ["schema_extract.proposal.v1"]},
+              "attempt_id": {"type": "string", "enum": [attempt["attempt_id"]]}, **fields}
+    anchor = {"path": TEXT, "line_start": {"type": "integer"}, "line_end": {"type": "integer"},
+              "quote_offset": {"type": "integer", "minimum": 0}, "note": TEXT}
+    source = {"category": SOURCE_ANCHOR["properties"]["category"], **anchor}
+    if source_files is not None:
+        source["path"] = {"type": "string", "enum": sorted(source_files)}
+    fields["source_evidence"] = {"type": "array", "items": obj(source)}
+    files = sorted(set(attempt["dependency_digests"]) | set(attempt["writable_files"]))
+    fields["artifact_evidence"] = {"type": "array", "items": obj({**anchor, "path": {"type": "string", "enum": files}})}
+    if attempt.get("mode", "normal") == "normal":
+        fields["decision"] = {"type": "string", "enum":
+            (["complete", "continue", "blocked"] if attempt["role"] == "worker" else ["approve", "revise", "blocked"]) +
+            (["reopen"] if attempt["stage"] in REOPEN_TARGETS else [])}
+    return obj(fields)
+
+
+def check_proposal_identity(value, attempt: dict) -> None:
+    """A malformed or late response must not acquire a new invocation identity."""
+    if not isinstance(value, dict) or value.get("attempt_id") != attempt["attempt_id"]:
+        raise ExtractError("proposal requires the exact current attempt_id nonce")
+    if value.get("format") != "schema_extract.proposal.v1":
+        raise ExtractError("proposal format does not match this invocation")
+    schema = proposal_schema(attempt)
+    extra = set(value) - set(schema["properties"])
+    if extra:
+        raise ExtractError("proposal supplies unexpected or machine-owned fields: " + ", ".join(sorted(extra)))
+    for key in ("source_evidence", "artifact_evidence"):
+        entries = value.get(key)
+        allowed = set(schema["properties"][key]["items"]["properties"])
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, dict) and set(entry) - allowed:
+                raise ExtractError(f"{key} supplies unexpected or machine-owned fields")
+
+
+def normalize_response(value: dict, lock: dict, attempt: dict, artifacts: Path) -> dict:
+    """Derive a complete receipt from a nonce-bound proposal and the actual bytes."""
+    check_proposal_identity(value, attempt)
+    validate_shape(value, proposal_schema(attempt, source_files=lock["source"]["files"]), "proposal")
+    files = manifest(artifacts)
+    changed = sorted(name for name in files.keys() | attempt["dependency_digests"].keys()
+                     if files.get(name) != attempt["dependency_digests"].get(name))
+    if attempt["role"] == "reviewer" and changed:
+        raise ExtractError("reviewer proposal differs from its read-only checkpoint bytes")
+    submitted = {attempt["node"] + ".yaml": files[attempt["node"] + ".yaml"]} if attempt["stage"] == "P5" else files
+    def anchors(key, root, hashes):
+        result = []
+        for selection in value[key]:
+            path = selection["path"]
+            if path not in hashes:
+                raise ExtractError("evidence is outside the fixed manifest: " + path)
+            try:
+                anchor = read_evidence(root, path, selection["line_start"], selection["line_end"],
+                                       quote_offset=selection["quote_offset"], expected_sha256=hashes[path])
+            except (OSError, ValueError) as exc:
+                raise ExtractError(f"{key}: {exc}") from exc
+            if key == "source_evidence":
+                anchor.update(source_id=lock["source"]["id"], category=selection["category"])
+            result.append({**anchor, "note": selection["note"]})
+        return result
+    return {**{key: item for key, item in value.items() if key != "attempt_id"},
+            "format": "schema_extract.receipt.v2", "identity": call_identity(attempt),
+            "artifacts": [{"path": path, "sha256": checksum} for path, checksum in sorted(submitted.items())],
+            "changed_files": changed,
+            "source_evidence": anchors("source_evidence", source_root(lock), lock["source"]["files"]),
+            "artifact_evidence": anchors("artifact_evidence", artifacts, files)}
 
 
 def validate_shape(value, schema: dict, location="receipt") -> None:
@@ -174,7 +226,7 @@ def _anchor(evidence: dict, directory: Path, hashes: dict) -> None:
     if not quote.strip() or len(quote) > 320:
         raise ExtractError(f"evidence quote does not match cited lines or exceeds 320 characters: {name}:{first}-{last}")
     if quote not in "\n".join(lines[first - 1:last]):
-        raise QuoteTextMismatch(f"quote text does not match {name}:{first}-{last}")
+        raise ExtractError(f"quote text does not match {name}:{first}-{last}")
 
 
 def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
@@ -210,32 +262,18 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
     declared = {item["path"]: item["sha256"] for item in value["artifacts"]}
     submitted_files = ({state["nodes"][attempt["node"]]["file"]: files[state["nodes"][attempt["node"]]["file"]]}
                        if attempt["stage"] == "P5" else files)
-    if len(declared) != len(value["artifacts"]) or any(
-            name not in submitted_files or expected != submitted_files[name]
-            for name, expected in declared.items()):
+    if len(declared) != len(value["artifacts"]) or declared != submitted_files:
         raise ExtractError("receipt artifact digests differ from actual contents")
-    missing_artifacts = sorted(submitted_files.keys() - declared.keys())
-    if missing_artifacts and set(missing_artifacts) & set(attempt["writable_files"]):
-        raise ExtractError("receipt omitted writable artifacts: " + ", ".join(missing_artifacts))
     source = lock["source"]
     bindings = source["bindings"]
-    quote_errors = []
-    for index, evidence in enumerate(value["source_evidence"]):
+    for evidence in value["source_evidence"]:
         if evidence["source_id"] != source["id"]:
             raise ExtractError("evidence source version mismatch")
-        key = "entrypoint" if evidence["category"] == "implementation" else evidence["category"]
-        locators = bindings[key] if isinstance(bindings[key], list) else [bindings[key]]
         # A role may follow calls into helpers in the frozen tree. Completion also
         # anchors each required role's bound entry below, without relabeling helpers.
-        try:
-            _anchor(evidence, source_root(lock), source["files"])
-        except QuoteTextMismatch as exc:
-            quote_errors.append(f"source_evidence[{index}].quote: {exc}")
-    for index, evidence in enumerate(value["artifact_evidence"]):
-        try:
-            _anchor(evidence, artifacts, files)
-        except QuoteTextMismatch as exc:
-            quote_errors.append(f"artifact_evidence[{index}].quote: {exc}")
+        _anchor(evidence, source_root(lock), source["files"])
+    for evidence in value["artifact_evidence"]:
+        _anchor(evidence, artifacts, files)
     for item in [*value["conclusions"], *value["issues"], *value["framework_candidates"]]:
         if any(index < 0 or index >= len(value["source_evidence"]) for index in item["evidence"]):
             raise ExtractError("conclusion/issue evidence index is outside source_evidence")
@@ -321,15 +359,4 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
             raise ExtractError("only patch adjudication may contain patches")
         if adjudication["action"] == "patch" and not adjudication["patches"]:
             raise ExtractError("patch adjudication requires an explicit patch")
-    # A rejected proposal may be resubmitted only after all other hard gates
-    # passed. Never supply a corrected quote or accept the failed proposal.
-    repairs = []
-    if missing_artifacts:
-        repairs.append("receipt artifacts omitted read-only files: " + ", ".join(missing_artifacts))
-    if quote_errors:
-        repairs.extend(quote_errors)
-        repairs.append("重新读取上述固定文件的行范围，重新核对各引用支持的结论；不要沿用不准确的引文或假定仍可批准。")
-    if repairs:
-        raise ReceiptFormatError("; ".join(repairs) +
-                                 "; keep the saved artifacts unchanged and resubmit the complete receipt for full validation.")
     return value

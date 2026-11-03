@@ -219,6 +219,14 @@ def verify_executor(lock: dict) -> None:
         raise ExtractError("executor differs from inputs.lock; run " + shlex.join(command) + " from " + str(directory))
 
 
+def verify_run_inputs(state: dict, lock: dict) -> None:
+    """Bind the lock being adopted to this run before reading its fixed trees."""
+    for field, lock_field in (("input_fingerprint", "fingerprint"), ("config", "config"), ("snapshot", "snapshot")):
+        if state[field] != lock[lock_field]:
+            raise ExtractError(f"run {field} differs from its fixed input lock")
+    verify_snapshot(lock)
+
+
 def _script_layout(lock: dict) -> bool:
     """Select only entry points present in the verified frozen manifest."""
     files = lock["rules"]["files"]
@@ -230,7 +238,7 @@ def _script_layout(lock: dict) -> bool:
 
 
 def frozen_invocation(lock: dict, arguments: list[str]) -> tuple[list[str], Path, dict[str, str]]:
-    """Verify before execution; both commands and inspection use this boundary."""
+    """Verify before entering a frozen executor; projections need no invocation."""
     verify_snapshot(lock)
     directory = rules_root(lock)
     entry = [str(directory / "schema_extract/extract.py")] if _script_layout(lock) else ["-m", "schema_extract"]

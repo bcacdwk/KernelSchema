@@ -7,7 +7,7 @@ from pathlib import Path
 import shlex
 
 from .artifacts import _same, load_root
-from .receipts import call_identity, required_artifact_evidence
+from .receipts import REOPEN_TARGETS, required_artifact_evidence
 from .stages import STAGES, owner_for, scope_for
 from .common import read_json, rules_root, source_root
 from .snapshots import frozen_reader
@@ -50,7 +50,9 @@ def build_prompt(state: dict, lock: dict, attempt: dict) -> str:
         baseline = run_dir / "checkpoints" / attempt["base_checkpoint"] / "artifacts"
         first_draft = _same(load_root(baseline, parser_root=rules),
                             load_root(rules / "schema_template", "starter.yaml", parser_root=rules))
-    locating = {"identity": call_identity(attempt), "mode": attempt.get("mode", "normal"),
+    locating = {"attempt_id": attempt["attempt_id"], "stage": attempt["stage"], "role": attempt["role"],
+                "node": attempt["node"], "mode": attempt.get("mode", "normal"),
+                "base_checkpoint": attempt["base_checkpoint"],
                 "source_id": lock["source"]["id"], "source_ref": lock["source"]["ref"],
                 "source_root": str(source), "rules_id": lock["rules"]["id"],
                 "rules_root": str(rules), "phase_page": str(page_path), "workspace": attempt["workspace"],
@@ -73,7 +75,8 @@ def build_prompt(state: dict, lock: dict, attempt: dict) -> str:
                                    if key in relevant_nodes and value.get("approval")},
                 "reviewed_artifacts": {key: str(run_dir / "checkpoints" / value["approval"]["checkpoint"] / "artifacts" / value["file"])
                                        for key, value in state["nodes"].items() if key in relevant_nodes and value.get("approval")},
-                "budget": {key: scope[key] for key in ("revisions", "continues", "receipt_repairs", "cli_failures", "calls", "deadline")}}
+                "budget": {**{key: scope[key] for key in ("revisions", "continues", "receipt_repairs", "cli_failures", "calls", "deadline")},
+                           "revision_limit": state["config"]["revision_limit"]}}
     if attempt["stage"] == "P5":
         locating.pop("plan")
         locating["ancestor_entries"] = ancestors
@@ -83,6 +86,13 @@ def build_prompt(state: dict, lock: dict, attempt: dict) -> str:
         # whole-tree history and an imported legacy tree are not branch input.
         locating.pop("reopening")
         locating.pop("imported_draft")
+    continuation = state.get("continuation")
+    if continuation and attempt["stage"] != "P6":
+        old = Path(continuation["evidence"]) / "artifacts"
+        names = ({state["nodes"][node]["file"] for node in relevant_nodes} if attempt["stage"] == "P5" else
+                 {"root.yaml"} if attempt["stage"] == "P1" else {"root.yaml", "dispatch.md"})
+        locating["continued_draft"] = {"predecessor": continuation["predecessor"],
+            "artifacts": {name: str(old / name) for name in sorted(names) if (old / name).is_file()}}
     if attempt.get("mode") == "adjudicate":
         locating["candidates"] = [{**entry, "artifacts": str(run_dir / "checkpoints" / entry["checkpoint"] / "artifacts")}
                                   for entry in scope["candidates"]]
@@ -91,57 +101,40 @@ def build_prompt(state: dict, lock: dict, attempt: dict) -> str:
     checker = rules / "schema_template/check_yaml.py"
     target = node_entry["file"] if attempt["stage"] == "P5" else "root.yaml"
     check_command = f"python3 -B {shlex.quote(str(checker))} --skip-hardware {shlex.quote(str(Path(attempt['workspace']) / target))}"
-    stage_requirements = (f"{attempt['stage']} complete/approve 必须引用 {', '.join(definition['evidence'])}；"
-                          f"conclusions 包含 {', '.join(definition['conclusions'])}。")
-    if attempt["stage"] == "P1":
-        stage_requirements += " first_draft按起始checkpoint与starter的实际内容判断；true时本次提交的root初版version必须为1，同一调用内先复制再填写不算第二版。false时沿起始checkpoint版本修订，内容改变则递增。"
-        stage_requirements += " comparisons按P1页将具名验收JSON的relative_to声明绑定到实际tolerance输出；没有明确声明时为[]。complete/approve会运行冻结算法区字段及关联检查，Design可暂留草稿。"
-    if attempt["stage"] in {"P2", "P3", "P4"} and attempt["role"] == "reviewer":
-        stage_requirements += " approve 的 handoff 最多20个非空行、1200字符。"
-    if attempt["stage"] == "P3" and state.get("reopening"):
-        stage_requirements += " 本轮由Runner明确重开P3，可复核并修订root的design/realization/meta_data.dispatch.when，内容变更仍提高version；Contract、source和dispatch id/parent继续只读，改选代表路径需回P2。"
-    if attempt["stage"] == "P4":
-        stage_requirements += " plan 每项为 id/file/parent/workload/difference/selection/evidence；root 为 root/root.yaml/空parent。派生file=<id>.yaml，evidence引用本回执的host来源索引。两角色complete/approve返回相同节点语义清单，source_evidence顺序与evidence编号各自独立。dispatch.md按P4页固定表格逐项对应plan，并保留覆盖缺口。多节点root需已有when；缺失或错误按权限请求上游重开，不能交无权改root的P5。"
-    if attempt["stage"] == "P5":
-        stage_requirements += " artifacts 只列本节点YAML；artifact_evidence可引用只读root/直接父与本节点。node_entry.evidence只属于plan_receipt，已解析的P4来源锚点在node_evidence；本次证据独立编号。first_draft=true时首次稿version=1；已有ID重开或返工沿本次baseline版本递增，不回1。节点自己的when不能为空，共享内容也要核实。"
-    if attempt["stage"] == "P6":
-        stage_requirements += " P6回执含revision_scope:[{path,fields:[点分字段路径]}]和affected_nodes:[节点ID]。需退修必须列明限域；dispatch.md用fields:[\"*\"]，派生YAML可指定design/realization/meta_data.source/meta_data.dispatch.when下的具体字段。root/Contract/树变更需通过reopen请求上游复核。worker原样保留授权revision_scope；最终approve覆盖pending_rechecks全部节点。"
     mode = attempt.get("mode", "normal")
-    mode_instructions = "worker只能complete/continue/blocked；reviewer只能approve/revise/blocked。continue保存草稿，不能算放行。"
-    mode_instructions += " worker的blocked是请求独立审阅：合法草稿及具体缺项交本阶段reviewer判断approve/revise/blocked，不自动结束任务。reviewer独立判断已知事实、缺项的实际影响和可继续的工作；未完成草稿可revise退回撰写，complete/approve仍须全部阶段证据和必需检查通过，真正基础缺项仍blocked。"
-    if attempt["stage"] != "P1" and mode == "normal":
-        mode_instructions += " 如固定源码新发现推翻上游决定，两角色均可decision=reopen并提供reopen:{issue_id,target,reason,evidence:[source_evidence索引]}与issues具体恢复条件。普通回执reopen=null。target仅指上游：P2→P1；P3→P2/P1；P4→P3/P2/P1；P5/P6→P4/P3/P2/P1。树/选父变更回P4，代表路径改选回P2，现有root Design/when回P3，共享Contract回P1。外部任务要求改变使用target=external，等待任务方明确确认，禁止擅改。新源码锚点可触发重开；已读源行的转录错误用issues.kind=transcription、scope定位产物，并以artifact_evidence精确引用当前错误字段。相同issue_id与固定源码范围只重开一次，换note/短引文不能重新计次，原预算不重置。"
+    mode_instructions = """worker返回complete/continue/blocked；continue保存草稿，blocked将合法草稿和缺项交独立reviewer判断。
+reviewer返回approve/revise/blocked：正确且必要信息齐备就approve；revise只列有证据的语义问题、影响与可执行修改；关键外部事实缺失则blocked并给恢复条件。未完成草稿可退修，非关键未知可如实备注。
+普通退修沿用原角色；达到budget.revision_limit（默认5）后由原reviewer仅裁决一次。格式修复不算实质退修，所有调用与恢复继续原预算。"""
+    if attempt["stage"] in REOPEN_TARGETS and mode == "normal":
+        locating["reopen_targets"] = sorted(REOPEN_TARGETS[attempt["stage"]]) + ["external"]
+        mode_instructions += """
+固定来源推翻上游时可reopen，填写稳定issue_id、target、reason和本次来源证据索引；普通提案reopen=null。
+树/选父回P4，代表路径回P2，现有root Design/when回P3，共享Contract回P1；仅能使用reopen_targets。
+外部任务要求改变用external，等待任务方明确确认。已读源行的转录错误用issues.kind=transcription、scope定位错误产物，并以artifact_evidence引用该字段；其他重开需新源码发现。同一issue_id与固定源码范围只重开一次，换note/引文不重计。"""
     if mode == "adjudicate":
         mode_instructions = """本轮为原reviewer的一次裁决，只有approve或blocked两个出口；不得直接改workspace。
-额外adjudication={action:select|patch|blocked,checkpoint:候选checkpoint,patches:[{path,old,new}]}。
-select选择已列出的草稿；patch选择当前checkpoint并给出限于当前阶段/已授权字段的唯一匹配文本替换，old必须非空且仅出现一次。
-Runner在隔离副本应用、按需提升恢复旧稿的版本并运行门禁；缺事实、补丁失败或检查未通过都blocked，不能请求再裁决。
-artifacts/changed_files/artifact_evidence仍绑定你实际读取的原workspace（changed_files=[]），补丁后的摘要由Runner另存。
-P6仅当你亲自patch最终交付时另开独立reviewer签收一次；不自行请求额外返工。"""
+adjudication的select只能选已列候选；patch基于当前checkpoint，patches为当前阶段/授权字段内的{path,old,new}，old非空且唯一匹配。
+Runner在隔离副本应用、核对版本并检查；关键事实缺失、补丁或检查失败即blocked，不再裁决或重试。证据仍指你实际读取的原workspace，补丁后摘要另存。
+P6亲自patch最终稿后，由全新独立reviewer签收一次；选择已有稿不追加签收。"""
     elif mode == "signoff":
         mode_instructions = "本轮为P6裁决补丁后的全新独立reviewer签收。只允许approve或blocked，检查最终改动及全部pending_rechecks；本次不再返工、裁决或重试。"
-    checking = ("P1/P2/P4按本阶段产物门禁，不要求尚未完成或未生成的Design通过完整检查。"
+    checking = ("本阶段使用阶段产物门禁；未完成或未生成的Design不要求完整检查。"
                 if attempt["stage"] in {"P1", "P2", "P4"} else
-                f"完成的YAML必须运行冻结检查器：{check_command}\n退出0才满足完成门槛；1交当前修改者，2报工具/环境问题。Runner还会独立运行，不采信声明代替检查。")
+                f"完成/批准前运行冻结检查器：{check_command}\n退出0才满足完成门槛；1交当前修改者，2报工具/环境问题。Runner独立复验。")
     return f"""你是独立的 {attempt['role']}，只执行 {attempt['stage']} / {attempt['node']} / {mode}。
-Runner是运行状态的唯一写入者。只允许修改writable_files中本阶段允许的字段；reviewer只读。
-全部材料已固定。只读source_root/rules_root、本次workspace、列出的plan_receipt/reviewed_artifacts、prior_approvals/node_approvals中的receipt、imported_draft.artifacts旧稿及明确给出的candidate副本；不要访问原工作树、修改运行记录、开子代理或GPU测试。
-每次先读本页，再按页指定范围读取规范和源码；本页明确引用的方法章节可以读取。不要读取PLAN。
-长文件按行读取；有next_cursor时用相同范围和--cursor继续，不丢弃未读的行：
+目标是把固定kernel压缩为忠实、足够简洁的流水线设计。reviewer独立对照源码与checkpoint，按当前阶段核对数学/数值、工作组织、依赖、寿命、复用及适用范围；检查器退出码不代替语义审阅。
+语义正确且必要信息齐备就直接approve，不要求找问题、增加篇幅或重复已有决定。删除细节会使读者读错或漏掉设计时才保留；不扩张schema字段义务。源码既有缺陷忠实记录，不能补造等待、fallback或外部保证。
+Runner唯一写运行状态。worker只改writable_files及当前页授权字段，reviewer只读；不开子代理，不做GPU测试。
+只读固定source_root/rules_root、当前workspace、列明的回执/已审产物/candidates及旧稿线索，不访问原工作树或旧状态。先按嵌入的当前页工作，再沿当前问题读规范与源码；可读页内引用的方法，不读PLAN。
+长文件按范围读，有next_cursor时沿相同范围用--cursor继续，不丢行：
 {example}
-所有摘要是完整文件的SHA-256；worker新写产物须实际计算完整64位小写十六进制摘要，可用sha256sum。output-schema固定identity/source_id，来源path/摘要及reviewer产物path/摘要只从已知标量候选生成；来源path与摘要须按reader结果正确配对。reviewer仍须按dependency_digests返回完整artifacts（P5只列本节点YAML）及changed_files=[]。来源和产物引用仍须独立亲读。
-来源/产物证据给出相对path、sha256、1起始行号、最多12行范围、不超过320字符的精确短引文；note说明支持的字段/决定。
-source_evidence.category使用implementation/host/io/input/reference/acceptance/scope。证据索引从0开始；每类至少引用对应绑定入口，调用链固定文件可补充。
-{stage_requirements}
-artifacts是交付文件摘要清单，changed_files是实际变更清单，artifact_evidence是支持审阅结论的文件/行号/原文锚点。
-reviewer的artifact_evidence必须覆盖调用required_artifact_evidence列出的每个具体文件，不只引用可写文件。
-最后按output-schema返回JSON，不写额外回执文件。原样回传identity；changed_files只列实际改动文件（字典序）。
-artifacts绑定本次完整交付视图：除P5只列本节点YAML外，必须列workspace中全部交付文件及其SHA-256，包括只读、未修改的root.yaml、dispatch.md和已审节点；不能只列改动文件。
+最后按output-schema仅返回schema_extract.proposal.v1 JSON，原样回传本次attempt_id nonce；缺失或陈旧nonce硬拒绝。identity、摘要、文件清单、实际差异由Runner从已登记调用与真实字节生成，不手填、不另写回执文件。
+证据由你亲读并选择：相对path、1起始line_start/line_end（最多12行）、quote_offset（范围原文中从0开始的字符偏移，通常0）和说明语义的note；来源另选category。用reader --evidence --end-line N [--quote-offset N]预览该范围生成的最多320字符精确引文，不会替你寻找依据。不要回传sha256/source_id/quote。
+complete/approve覆盖required_evidence、required_conclusions；每类至少选对应绑定入口，调用链可补充。conclusions/issues等的evidence从0索引本次source_evidence。reviewer的artifact_evidence覆盖required_artifact_evidence每个文件，不能用父节点批准代替本节点核对。
 {mode_instructions}
-若有recovery_handoff，本次旧调用已经确认终止；以本页、当前checkpoint和固定来源建立新上下文，不沿用已中断会话。保留原退修、调用及截止预算。
-若有imported_draft，旧产物和来源只是只读线索；旧批准无效，必须按当前阶段独立核对。新回执证据仍指向本次source_root。
-缺项和退修给出issues范围、证据及恢复条件。checks只记真实执行命令；未执行用[]并填写checks_note。framework_candidates没有建议时为[]。
-framework_candidates的id使用与运行无关的小写字母数字及-或_稳定短名，scope定位共享规则或工具，summary说明必要的最小改动；算子自身缺口写issues。不要直接写台账或为可选候选改变任务结论。
+有recovery_handoff时以本页、当前checkpoint和固定来源重建上下文，旧会话已确认中断并退休。imported_draft/continued_draft仅为列明的只读旧稿线索；旧state/批准不授予本次写权限或放行，证据仍指当前source_root/workspace。
+checks仅记真实命令/退出码；未执行为[]并说明checks_note。issues写范围、证据、影响和恢复条件。framework_candidates无必要建议为[]；有则给跨运行稳定的小写数字及-_短ID、规则/工具scope与最小改动，不写台账，不因可选候选扣住正确产物。
+P2/P3/P4 reviewer批准时handoff只写已定事项、理由、关键入口和缺口，最多20个非空行/1200字符；其他阶段无交接则用空串。
 {checking}
 
 <invocation>
