@@ -11,7 +11,7 @@
 ```text
 tools/
 ├── schema.py              任务文件发现、检查编排、失败状态
-├── check_policy.py        未归档 schema_wiki 的显式硬件占位豁免
+├── check_policy.py        可选目录策略的兼容读取；当前仓库未启用
 ├── yaml_source.py         YAML 解析、精确数值与源位置
 ├── diagnostics.py         统一诊断、字段路径、值显示
 ├── errors.py              工具环境与处理容量错误
@@ -62,7 +62,7 @@ python3 -m pip install -r schema_template/tools/requirements.txt
 python3 -B -m unittest discover -s schema_template/tools/tests -t schema_template -v
 ```
 
-这条命令同时运行规则、解析、入口和现有示例测试。`-t schema_template` 指定测试包的导入根，`-B` 避免生成字节码缓存。测试底稿中的 `testing.invalid` 引用仅标识合成数据；历史 `schema_wiki` 不在默认验收范围内。
+这条命令同时运行规则、解析、入口和现有示例测试。`-t schema_template` 指定测试包的导入根，`-B` 避免生成字节码缓存。测试底稿中的 `testing.invalid` 引用仅标识合成数据；`schema_wiki` 中后续发布的任务需要单独检查。
 
 修改时按职责定位：
 
@@ -89,11 +89,9 @@ dtype、外部入口名称和数学表达式保持开放；日常入口 `check_y
 
 ## 硬件占位豁免
 
-仓库内的 [schema_wiki/check_policy.json](../../schema_wiki/check_policy.json) 显式设置 `allow_missing_hardware: true`。只对该仓库未归档 `schema_wiki` 内的任务生效；`archived`、现行示例和仓库外的任务仍使用完整检查。删除配置或改为 `false` 即恢复完整检查，不接受其他豁免开关或旧版字段。
+当前仓库未启用目录级硬件豁免。提取任务显式运行 `check_yaml.py --skip-hardware`，保留原始硬件占位并跳过整个硬件区及依赖硬件的检查；算法、工作分配、动作、索引、成员数量和其他引用照常检查。不传该选项时执行完整检查。
 
-豁免允许 `contract.hardware_specification` 整段或其中字段省略、写 `null`、空字符串、空映射，或保留 `unknown:` / `<...@pending:...>`。检查器保留原文，不代填设备、容量或能力；依赖硬件资料才能判断的执行单元登记、模板资料配对暂缓检查。已填写的非空内容仍检查当前字段名与类型。
-
-算法、工作分配、动作、索引、成员数量和引用继续检查。其他区域的资料占位不会因这个设置自动通过。两种命令都会显示豁免说明，生成的 PNG 标题与图片元数据也保留这条说明；配置格式错误返回 `2`，不伪装为 YAML 设计错误。
+[check_policy.py](check_policy.py) 保留可选目录策略的兼容读取及对应测试；现行提取流程不依赖这项配置。`--skip-hardware` 的操作与 Python API 见[作者入口](../README.md#4-检查与处理反馈)。
 
 ## 微流水线图的维护边界
 

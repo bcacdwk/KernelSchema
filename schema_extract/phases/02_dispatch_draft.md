@@ -27,6 +27,6 @@ P1 的元数据和共享 Contract 已通过，Runner 提供对应 root checkpoin
 
 ## 回执与下一位
 
-按[回执约定](../README.md#回执与短交接)返回 root 选择及理由、主要路径与实质差异、host 文件行号和短引文、已知覆盖缺口及仍需核实的入口。reviewer 同时给出 P2→P3 短交接，由 Runner 保存；不要把计划历史或退修记录塞进索引。框架候选放 `framework_candidates`，退修与裁决遵循[统一规则](../README.md#退修与裁决)。
+按[回执约定](../tools/README.md#回执与短交接)返回 root 选择及理由、主要路径与实质差异、host 文件行号和短引文、已知覆盖缺口及仍需核实的入口。reviewer 同时给出 P2→P3 短交接，由 Runner 保存；不要把计划历史或退修记录塞进索引。框架候选放 `framework_candidates`，退修与裁决遵循[统一规则](../tools/README.md#退修与裁决)。
 
 本阶段放行后，Runner 启动 [P3](03_root.md) 的全新 worker/reviewer。接手者读取已审 root 草稿、dispatch 草案、短交接和选定路径源码，开始逐段设计。

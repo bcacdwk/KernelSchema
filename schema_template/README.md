@@ -18,7 +18,7 @@ Contract 使用任务给定或经任务方确认的内容；转录已确认的�
 
 ### 2 创建文件或进入已有任务
 
-新任务使用独立目录，按[任务身份规则](../schema_docs/0.common.md#单份-plan-与元数据)命名，并按[索引规则](../schema_docs/0.common.md#选择条件与索引)建立 `dispatch.md`。已有含 Contract 的 `root.yaml` 时保留它，补入后续设计；需要新建文件时可复制骨架，再接入给定或按任务确认的 Contract。下面的 `path/to/task` 替换为实际目录，例如 `schema_wiki/<batch>/<task>`；任务也可以位于仓库之外。从仓库根目录复制骨架，不覆盖已有文件：
+新任务使用独立目录，按[任务身份规则](../schema_docs/0.common.md#单份-plan-与元数据)命名，并按[索引规则](../schema_docs/0.common.md#选择条件与索引)建立 `dispatch.md`。已有含 Contract 的 `root.yaml` 时保留它，补入后续设计；需要新建文件时可复制骨架，再接入给定或按任务确认的 Contract。下面的 `path/to/task` 替换为实际目录；catalog 算子使用 [schema_wiki 导航](../schema_wiki/README.md)给出的镜像路径，其他任务也可以位于仓库之外。从仓库根目录复制骨架，不覆盖已有文件：
 
 ```sh
 mkdir -p path/to/task
@@ -56,7 +56,7 @@ python3 schema_template/check_yaml.py path/to/task/root.yaml
 python3 schema_template/check_yaml.py --skip-hardware path/to/task/root.yaml
 ```
 
-该选项只影响内存中的检查视图，不改写文件，返回的任务仍保留原始硬件占位；YAML 文件本身仍须可解析，非硬件结构和关联照常检查。Python API 对应 `schema.validate_file(..., skip_hardware=True)` 或 `validate_directory(..., skip_hardware=True)`。不传参数时维持原有目录策略。
+该选项只影响内存中的检查视图，不改写文件，返回的任务仍保留原始硬件占位；YAML 文件本身仍须可解析，非硬件结构和关联照常检查。Python API 对应 `schema.validate_file(..., skip_hardware=True)` 或 `validate_directory(..., skip_hardware=True)`。当前仓库不启用目录硬件豁免，不传参数时执行完整检查。
 
 也可传入派生节点。检查范围始终是该文件所在目录直属的全部 `.yaml / .yml`，不递归子目录；因此错误可能来自其他节点，目录内的备份 YAML 也会被当作任务节点。输入路径相对当前目录解析，在其他目录调用时使用检查脚本的绝对路径。
 
@@ -65,8 +65,6 @@ python3 schema_template/check_yaml.py --skip-hardware path/to/task/root.yaml
 成功时输出任务目录和节点数；失败时按文件、字段路径和修改提示处理，已有字段同时显示 YAML 行列位置，缺字段可能没有行号。先修结构问题，再处理具名关系；修改后重跑同一命令，前一轮错误可能阻止了后续检查。退出状态为：`0` 通过，`1` 输入未通过检查，`2` 参数或工具环境问题导致检查未完成。
 
 检查不补字段、不重排、不改写 YAML，也不改变文件权限或修改时间。若诊断与文档允许的表达冲突，核对具体规则并报告冲突，不为通过检查删除必要设计信息。人工审阅或实现反馈指出问题时，回到上一步确定修改范围，再检查整个任务。
-
-未归档 `schema_wiki` 的硬件资料允许待补：仓库的 [check_policy.json](../schema_wiki/check_policy.json) 明确开启硬件占位豁免，检查时会提示。它允许硬件区为空或缺失，并暂缓依赖这些资料的检查；算法、调度和动作仍按当前规则检查。具体范围见[硬件占位豁免](tools/README.md#硬件占位豁免)。
 
 ### 5 交付
 

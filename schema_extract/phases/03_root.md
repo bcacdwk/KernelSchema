@@ -10,7 +10,7 @@ P1 共享 Contract 和 P2 dispatch 草案已通过。Runner 提供已审 root �
 
 ## worker：可写范围
 
-只可修改 `root.yaml` 的 `design`、必要的 `realization` 及随实际内容修订递增的 `meta_data.version`。共享 Contract、来源、root 选择条件、dispatch 草案及其他文件只读。当前任务页不足以授权修改先前已定的前提；新证据需要改动这些内容时，在回执定位问题，由 Runner 按[计划修订规则](../README.md#并行合入与计划修订)重开对应阶段。
+只可修改 `root.yaml` 的 `design`、必要的 `realization` 及随实际内容修订递增的 `meta_data.version`。共享 Contract、来源、root 选择条件、dispatch 草案及其他文件只读。当前任务页不足以授权修改先前已定的前提；新证据需要改动这些内容时，在回执定位问题，由 Runner 按[计划修订规则](../tools/README.md#并行合入与计划修订)重开对应阶段。
 
 如果本轮定位信息明确说明由 Runner 重开 P3，并授权复核现有 root 条件，可一并修订 `meta_data.dispatch.when`；Contract、source、dispatch ID/parent 仍只读，改选代表路径先回 P2。来源明确的转录差异可按手册用当前产物锚点和已读源码请求重开上游，不需要寻找无关的新源行。
 
@@ -58,6 +58,6 @@ python3 schema_template/check_yaml.py --skip-hardware path/to/task/root.yaml
 
 ## 回执与下一位
 
-按[回执约定](../README.md#回执与短交接)返回 root 改动、具体调用的贯通核对、精确源码锚点、检查命令/退出码与未决项。reviewer 给出 P3→P4 短交接，说明已定设计及理由、会影响派生树的发现和后续入口，由 Runner 保存。框架候选放 `framework_candidates`；退修与裁决遵循[统一规则](../README.md#退修与裁决)。
+按[回执约定](../tools/README.md#回执与短交接)返回 root 改动、具体调用的贯通核对、精确源码锚点、检查命令/退出码与未决项。reviewer 给出 P3→P4 短交接，说明已定设计及理由、会影响派生树的发现和后续入口，由 Runner 保存。框架候选放 `framework_candidates`；退修与裁决遵循[统一规则](../tools/README.md#退修与裁决)。
 
 Runner 保存有效放行后，启动 [P4](04_dispatch_plan.md) 的全新 worker/reviewer。P4 从完整已审 root 定稿路径树，不从旧会话猜测设计。

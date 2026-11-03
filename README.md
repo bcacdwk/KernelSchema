@@ -17,7 +17,7 @@
 
 一次任务选择当前工作对应的入口，通过产物与必要说明交接。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
 
-Schema Extract `2.0.4` 已完成真实算子的单命令验收，提供六阶段提取、依赖并发、暂停/取消、崩溃恢复、旧稿重审与原子发布。Supervisor 从手册发起 `python3 -m schema_extract extract --id <算子> --output <目录>`，运行始终使用自己的冻结执行器。算子问题随任务记录保存，规范、检查工具、资料或流程问题按稳定 ID 提报。当前硬件规格只保留模板原样占位，检查使用 `--skip-hardware`。[Schema Extract 手册](schema_extract/README.md) · [状态与恢复](schema_extract/README.md#恢复与交付) · [验收记录](schema_extract/README.md#验收记录) · [框架问题维护入口与历史决定](schema_extract/issues/README.md)
+Schema Extract `2.1.3` 提供六阶段提取、依赖并发、暂停/取消、崩溃恢复、旧稿重审与原子发布。Supervisor 入口为 `python3 schema_extract/extract.py extract --id <算子> --output <目录>`，运行使用自己的冻结执行器。硬件区保留模板占位，检查显式使用 `--skip-hardware`。`schema_wiki` 现按 catalog 预建 44 个算子的输出目录，尚无提取成果；真实多分支 P5/P6 与发布尚未完成验收。[Schema Extract 手册](schema_extract/README.md) · [输出目录导航](schema_wiki/README.md) · [状态与恢复](schema_extract/README.md#恢复与交付) · [框架问题维护入口](schema_extract/issues/README.md)
 
 新建与优化均由 Planner 承担，按数学改写、工作调度、微流水线的顺序逐层推导和写入。先把上层方向收束，再向下投入优化精力；下层发现前提问题时，回到对应上层修正并复查受影响部分。
 
@@ -77,8 +77,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 ├── DESIGN_SCHEMA.md     从已完成的 Contract 逐层设计新算子
 ├── OPTIMIZE_SCHEMA.md   判断实现反馈，逐层迭代已有设计
 ├── IMPLEMENT_SCHEMA.md  将 schema 落实为 kernel，验证并反馈
-├── schema_extract/      新版 P1–P6 Runner、依赖并发、恢复、旧稿重审与原子发布
-├── schema_extract_old/  旧实现与台账参考；旧运行仍使用各自冻结快照
+├── schema_extract/      新版 P1–P6 Runner、依赖并发、恢复、旧稿重审、原子发布与维护台账
 ├── schema_template/     共用的 YAML 操作与检查
 │   ├── README.md        创建、修订、检查与交付
 │   ├── starter.yaml     待填写骨架，复制为新任务的 root.yaml
@@ -97,11 +96,12 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 ├── kernel_wiki/         算子实现与证据库；README、分类索引与本地检索入口
 │   └── <batch>/operators/<family>/[<subcategory>/]<task>/
 │                       按批次、功能和稳定算子 ID 组织源码、题目与性能证据
-└── schema_wiki/         schema 实例库（含尚未按现行规范验收的设计）
-    └── <batch>/<task>/  root.yaml / <id>.yaml + dispatch.md
+└── schema_wiki/         按 catalog 镜像的提取输出目录与导航
+    └── <batch>/operators/<family>/[<subcategory>/]<task>/
+                        当前以 .gitkeep 占位；发布后为 root.yaml / <id>.yaml + dispatch.md
 ```
 
-- `kernel_wiki` 保存任务与实现，`schema_wiki` 保存提取或撰写的设计；对应关系以 `meta_data.source` 等实际引用为准，不靠目录同名或批次号推定。
+- `kernel_wiki` 保存任务与实现，`schema_wiki` 接收提取或撰写的设计；输出路径按 `kernel_wiki/catalog.json` 的 `paths.readme` 父目录镜像，具体操作见[输出目录导航](schema_wiki/README.md)。设计来源仍以 `meta_data.source` 等实际引用为准。
 - 任务目录中的文件身份、共享 Contract 与派生关系见[公共约定](schema_docs/0.common.md#派生节点与-dispatch)。
 - 基础 Harness 设施尚未纳入仓库，实际实现使用任务提供的构建、测试与测量入口。
 
@@ -121,7 +121,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 
 ## 5 现状与 TODO
 
-**已有：** 提取、新建设计、优化设计和实现四个任务入口，公共约定与六个分区文档，YAML 填写骨架、统一 Python 检查入口及内部正反例测试；`kernel_wiki` 与尚未逐一按现行规范验收的 `schema_wiki`。使用方法与校验边界见[模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
+**已有：** 提取、新建设计、优化设计和实现四个任务入口，公共约定与六个分区文档，YAML 填写骨架、统一 Python 检查入口及检查器正反例测试；`kernel_wiki` 的 44 个算子与对应的 `schema_wiki` 输出目录。使用方法与校验边界见[模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
 
 独立的[微流水线图工具](schema_template/README.md#微流水线图)按明确给出的展示规模展开各 phase 的动作和依赖，检查重复动作、悬空引用、成员匹配与依赖环，并在每份 YAML 旁生成同名 PNG。它不解析文字契约，也不证明跨 phase 活性或全部存储复用安全。
 

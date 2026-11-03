@@ -9,17 +9,22 @@ from .common import CheckContext
 from .values import literal_integer
 
 
+def contract_descriptors(algorithm: dict[str, Any], path: str) -> list:
+    descriptors = []
+    for group in ("input", "output"):
+        descriptors.extend((obj, f"{path}.{group}.{name}")
+                           for name, obj in algorithm.get(group, {}).items())
+    for i, step in enumerate(algorithm.get("compute", [])):
+        descriptors.extend((obj, f"{path}.compute[{i}].symbol.{name}")
+                           for name, obj in step.get("symbol", {}).items())
+    return descriptors
+
+
 def properties(check: CheckContext, plan: dict[str, Any], contract_objects: dict[str, Any], path: str) -> None:
     # Visit descriptor positions, not every mapping key spelled "shape":
     # that spelling is also a valid domain, milestone or object name.
-    descriptors = []
-    algorithm = plan.get("contract", {}).get("algorithm_requirement", {})
-    for group in ("input", "output"):
-        descriptors.extend((obj, f"{path}.contract.algorithm_requirement.{group}.{name}")
-                           for name, obj in algorithm.get(group, {}).items())
-    for i, step in enumerate(algorithm.get("compute", [])):
-        descriptors.extend((obj, f"{path}.contract.algorithm_requirement.compute[{i}].symbol.{name}")
-                           for name, obj in step.get("symbol", {}).items())
+    descriptors = contract_descriptors(plan.get("contract", {}).get("algorithm_requirement", {}),
+                                       path + ".contract.algorithm_requirement")
     for i, step in enumerate(plan["design"]["math_reshape"]["rewrite"]):
         descriptors.extend((obj, f"{path}.design.math_reshape.rewrite[{i}].symbol.{name}")
                            for name, obj in step.get("symbol", {}).items())
@@ -36,6 +41,10 @@ def properties(check: CheckContext, plan: dict[str, Any], contract_objects: dict
         for name, resource in phase.get("resource", {}).items():
             descriptors.extend((view, field_path(f"{path}.design.tile_pipeline.phase.{pid}.resource.{name}.view", value))
                                for value, view in resource.get("view", {}).items())
+    descriptor_properties(check, descriptors, contract_objects)
+
+
+def descriptor_properties(check: CheckContext, descriptors: list, contract_objects: dict[str, Any]) -> None:
     for descriptor, p in descriptors:
         shape_field = "member_slot_shape" if "member_slot_shape" in descriptor else "shape"
         shape = descriptor.get(shape_field)

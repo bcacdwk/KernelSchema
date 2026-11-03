@@ -6,7 +6,20 @@ from typing import Any
 from ..diagnostics import Diagnostic
 from . import declarations, pipeline, schedule, symbols
 from .common import CheckContext
-from .structure import validate_task as validate_structure
+from .structure import algorithm as algorithm_structure, validate_task as validate_structure
+
+
+def validate_algorithm(algorithm: dict[str, Any]) -> list[Diagnostic]:
+    """Validate Contract shapes and relations without requiring any Design."""
+    path, errors = "root.contract.algorithm_requirement", []
+    algorithm_structure(algorithm, path, errors)
+    if errors:
+        return errors
+    check = CheckContext()
+    declarations.algorithm_outputs(check, algorithm)
+    objects = symbols.contract(check, algorithm, path)
+    symbols.descriptor_properties(check, symbols.contract_descriptors(algorithm, path), objects)
+    return check.errors
 
 
 def validate_relations(task: dict[str, Any], *, allow_missing_hardware=False) -> list[Diagnostic]:

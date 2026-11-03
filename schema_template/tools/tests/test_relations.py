@@ -3,10 +3,34 @@ from __future__ import annotations
 
 from copy import deepcopy
 from .. import schema
+from ..rules import validate_algorithm
 from .support import (TaskCase, ALGO, ROLE, MATH, PHASE, PIPE, WORK, add_child, add_phase, at, drop, put)
 
 
 class RelationsTests(TaskCase):
+    def test_contract_only_gate_reuses_shapes_interfaces_and_property_relations(self):
+        original = at(self.base, ALGO)
+        self.assertFalse(validate_algorithm(deepcopy(original)))
+        cases = [
+            (lambda a: a.pop("output"), "output"),
+            (lambda a: a["golden_reference"].update(tolerance={"Z": "exact"}), "every Contract output"),
+            (lambda a: a["golden_reference"]["tolerance"].update(Z="exact"), "undeclared output"),
+            (lambda a: a["compute"][0].update(symbol={"X": {"meaning": "Duplicate", "shape": [], "dtype": "fp32"}}), "duplicate Contract"),
+            (lambda a: a["compute"][0].update(symbol={"A": {"meaning": "Intermediate", "shape": [], "dtype": "ref:Missing.dtype"}}), "unknown Contract"),
+            (lambda a: a["compute"][0].update(symbol={"A": {"meaning": "Intermediate", "shape": [], "dtype": "ref:A.dtype"}}), "cycle"),
+            (lambda a: a["input"]["X"].update(shape=[{"D": 2}, {"D": 3}]), "axis names"),
+            (lambda a: a["input"]["X"].update(range=[2, 1]), "range endpoints are reversed"),
+            (lambda a: a["input"]["X"].update(shape=[{"D": "Y"}]), "runtime extent"),
+        ]
+        for change, message in cases:
+            with self.subTest(message=message):
+                algorithm = deepcopy(original)
+                change(algorithm)
+                self.assertTrue(any(message in str(error) for error in validate_algorithm(algorithm)))
+        unknown = deepcopy(original)
+        unknown["golden_reference"]["tolerance"]["Y"] = "Exact; external arithmetic and nonfinite handling are not specified."
+        self.assertFalse(validate_algorithm(unknown))
+
     def test_integer_literal_spellings_have_identical_resource_and_member_checks(self):
         for literal in (int, str):
             with self.subTest(spelling=literal.__name__):

@@ -6,11 +6,8 @@ from .common import CheckContext, as_list
 from .values import literal_integer
 
 
-def validate(check: CheckContext, task: dict, *, allow_missing_hardware=False) -> None:
-    """Conditions that keep identities, references and handoffs readable."""
-    root = task["root"]
-    algorithm = root["contract"]["algorithm_requirement"]
-    hardware = None if allow_missing_hardware else root["contract"]["hardware_specification"]
+def algorithm_outputs(check: CheckContext, algorithm: dict) -> None:
+    """The shared output/criterion relation also applies to Contract-only drafts."""
     outputs, tolerance = algorithm["output"], algorithm["golden_reference"]["tolerance"]
     for name in outputs.keys() - tolerance.keys():
         check.require(False, "root.contract.algorithm_requirement.golden_reference.tolerance." + name,
@@ -18,6 +15,13 @@ def validate(check: CheckContext, task: dict, *, allow_missing_hardware=False) -
     for name in tolerance.keys() - outputs.keys():
         check.require(False, "root.contract.algorithm_requirement.golden_reference.tolerance." + name,
                      "tolerance names an undeclared output; correct the key, do not invent an output")
+
+
+def validate(check: CheckContext, task: dict, *, allow_missing_hardware=False) -> None:
+    """Conditions that keep identities, references and handoffs readable."""
+    root = task["root"]
+    algorithm_outputs(check, root["contract"]["algorithm_requirement"])
+    hardware = None if allow_missing_hardware else root["contract"]["hardware_specification"]
     if hardware is not None:
         stack, programming = hardware["stack"], hardware["wiki"]["programming"]
         if ("template" in stack) != ("template" in programming):

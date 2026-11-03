@@ -2,7 +2,7 @@
 
 一次提取以一个完整算子为单位，将固定实现转换为可追溯的 schema。先建立共享 Contract，再审定路径划分、完成 root、定稿派生树、提取全部派生节点，最后独立终审。保留原实现的设计、代价与缺口；提取过程中不优化或修复 kernel。
 
-本页是流程总览，[Supervisor 手册](schema_extract/README.md)说明输入、输出、操作及命令的当前实现状态，六张阶段任务页给出具体工作。旧任务的冻结执行器与新版的边界见手册，开发步骤见[迁移计划](schema_extract/PLAN.md)。
+本页是流程总览，[Supervisor 手册](schema_extract/README.md)说明输入、输出、操作及命令，六张阶段任务页给出具体工作。catalog 算子的输出路径见 [schema_wiki 导航](schema_wiki/README.md)，检查显式使用 `--skip-hardware`。
 
 ## 提取顺序与交付
 
@@ -49,4 +49,4 @@ Supervisor 指定来源和输出位置，处理需要外部材料或任务方确
 
 当前算子的实现差异、证据缺项和待修转录写入任务回执。规范、检查器、资料或流程本身造成错误、遗漏或重复劳动时，先核实已有规则，再在 `framework_candidates` 中提供可复查反例、最小改动及不改的影响；没有合格发现时返回 `[]`，正常完成本阶段。worker、reviewer 与 Supervisor 都可提报，不在算子任务中自行修改框架。
 
-清理运行记录前，由主 agent 或维护者通过[新版维护入口](schema_extract/issues/README.md)查重、核实稳定 ID 和已有决定，再将合格项登记入账。入口继续读取[旧版台账规则与历史决定](schema_extract_old/issues/README.md)；其中的旧 CLI 只适用于旧冻结执行器。任务回执和必要交接保存在运行记录中，不为提报增设 schema 字段或固定报告文件。
+清理运行记录前，由主 agent 或维护者通过[维护入口](schema_extract/issues/README.md)查重、核实稳定 ID 和已有决定，再将合格项登记入账。台账及[历史原文](schema_extract/issues/archive/ISSUES.md)集中保存在 `schema_extract/issues/`；历史 CLI 命令只适用于相应的冻结执行器。任务回执和必要交接保存在运行记录中，不为提报增设 schema 字段或固定报告文件。
