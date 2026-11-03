@@ -18,6 +18,8 @@ from .agent import CodexCLI
 from .artifacts import (UpstreamRequired, _same, check_complete, load_yaml, validate_artifact_sources, validate_artifacts,
                         validate_plan, write_yaml)
 from .comparators import validate_comparisons
+from .budget import (BUDGET_STOPS, RECOVERY as BUDGET_RECOVERY, call_budget as _budget,
+                     check_timeout as _check_timeout, extend as extend_budget)
 from .common import (STATE_GUARD, ExtractError, StaleResult, copy_artifacts, digest, json_bytes, manifest,
                      read_json, sha256, write_json, write_text, rules_root)
 from .inputs import resolve_request
@@ -50,6 +52,8 @@ def create_run(repo: Path, state_root: Path, output: Path, *, operator_id: str |
     for key in ("revision_limit", "operator_seconds", "stage_seconds", "call_seconds", "max_calls"):
         if type(config[key]) is not int or config[key] < 1:
             raise ExtractError(f"{key} must be a positive integer")
+    if config["max_calls"] < 3:
+        raise ExtractError("max_calls must be at least 3: P6 needs review, adjudication and signoff allowances")
     config["adjudication_seconds"] = min(config["call_seconds"], config["stage_seconds"] / 4,
                                          config["operator_seconds"] / 12)
     config["retry_limit"] = 2
@@ -195,12 +199,6 @@ def _draft(store: Store, state: dict, attempt: dict, workspace: Path, *, plan=No
     return checkpoint_id
 
 
-def _check_timeout(state: dict) -> float:
-    now = time.time()
-    remaining = min(state["deadline"], scope_for(state)["deadline"] or now + 120) - now
-    return max(0.0, min(120.0, remaining - _reserved_calls(state) * state["config"]["adjudication_seconds"]))
-
-
 def _record_check_budget(store: Store, state: dict, attempt: dict, receipt: dict,
                         receipt_hash: str, workspace: Path, validation: dict, session_id: str) -> dict:
     updated = deepcopy(state)
@@ -211,8 +209,8 @@ def _record_check_budget(store: Store, state: dict, attempt: dict, receipt: dict
     updated["accepted_receipts"][attempt["attempt_id"]] = receipt_hash
     owner = owner_for(updated, attempt)
     owner["status"] = scope_for(updated, attempt)["status"] = "budget_exhausted"
-    owner["reason"] = {"code": "checker_budget_exhausted", "summary": "已保存合法草稿；普通检查预算已耗尽，未动用裁决/签收预留。",
-                       "checkpoint": call_view(updated, attempt)["checkpoint"], "recovery_condition": "保留原计数与截止条件，处理已耗尽预算。"}
+    owner["reason"] = {"code": "checker_budget_exhausted", "summary": "已保存合法草稿；检查预算已耗尽，未动用后续审阅/裁决/签收预留。",
+                       "checkpoint": call_view(updated, attempt)["checkpoint"], "recovery_condition": BUDGET_RECOVERY.format(run_id=state["run_id"])}
     validation["check"] = {"kind": "budget", "exit_code": None, "not_run": True}
     write_json(Path(attempt["directory"]) / "validated.json", {"receipt_sha256": receipt_hash, **validation})
     if attempt.get("mode") in {"adjudicate", "signoff"}:
@@ -595,27 +593,6 @@ def _recover_call(store: Store, state: dict, lock: dict, attempt: dict, result: 
     return updated
 
 
-def _reserved_calls(state: dict) -> int:
-    mode = state.get("mode", "normal")
-    scope = scope_for(state)
-    adjudication = int(not scope["adjudications"])
-    signoff = int(state["stage"] == "P6" and not scope["signoffs"])
-    return adjudication + signoff if mode == "normal" else signoff if mode == "adjudicate" else 0
-
-
-def _budget(state: dict) -> tuple[float, str | None]:
-    config, scope, now = state["config"], scope_for(state), time.time()
-    remaining = min(state["deadline"], scope["deadline"] or now + config["stage_seconds"]) - now
-    mode = state.get("mode", "normal")
-    if mode in {"adjudicate", "signoff"} and scope["adjudications" if mode == "adjudicate" else "signoffs"]:
-        return 0, "本范围的一次裁决/签收已使用；重开不能重置该决定。"
-    reserved_calls = _reserved_calls(state)
-    reserve = config["adjudication_seconds"] * reserved_calls
-    if scope["calls"] >= config["max_calls"] - reserved_calls or remaining <= reserve:
-        return 0, "本阶段/节点调用或时间预算已耗尽；裁决与签收保留各自调用和时间。"
-    return min(config["call_seconds"] if mode == "normal" else config["adjudication_seconds"], remaining - reserve), None
-
-
 def _retire_stale(store: Store, state: dict, attempt: dict, result: dict | None, reason: str) -> dict:
     confirmed = bool(result and result.get("termination", {}).get("confirmed"))
     record = {"attempt_id": attempt["attempt_id"], "node": attempt["node"], "reason": reason,
@@ -833,16 +810,25 @@ def _resume_stopped(state: dict) -> None:
 
 
 def _resume_failed_scopes(state: dict) -> None:
-    """An explicit manual retry keeps all counters, deadlines and hard stops."""
+    """Manual retry keeps counters and hard decisions; budget stops need available credit."""
     hard = {"external_confirmation", "adjudication_already_used", "interrupted_single_decision",
-            "continuation_budget_exhausted", "budget_exhausted", "checker_budget_exhausted", "reopen_already_used"}
-    owners = [(state["nodes"][entry["id"]], state["nodes"][entry["id"]]["stage"])
-              for entry in state.get("plan") or [] if entry["id"] != "root"] if state["stage"] == "P5" else [(state, scope_for(state))]
-    for owner, scope in owners:
+            "reopen_already_used"}
+    calls = [{"stage": "P5", "node": entry["id"], **{key: state["nodes"][entry["id"]][key] for key in ("role", "mode")}}
+             for entry in state.get("plan") or [] if entry["id"] != "root"] if state["stage"] == "P5" else [state]
+    for call in calls:
+        owner, scope = owner_for(state, call), scope_for(state, call)
+        reason = owner.get("reason") or {}
+        if reason.get("code") in BUDGET_STOPS:
+            if (any(item.endswith(":single_decision_used") for item in reason.get("scopes", [])) or
+                    _budget(call_view(state, call))[1]):
+                continue
         if (owner["status"] in NODE_STOPS and owner.get("mode", "normal") == "normal" and
-                (owner.get("reason") or {}).get("code") not in hard):
+                reason.get("code") not in hard):
             owner["status"] = "draft" if owner is not state else "running"
             scope["status"] = "reviewing" if owner.get("role") == "reviewer" else "draft"
+            if reason and (not owner["feedback"] or owner["feedback"][-1] != reason):
+                owner["feedback"].append(reason)
+            owner["reason"] = None
     if state["stage"] == "P5":
         settle(state)
 
@@ -953,6 +939,8 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
             if state["status"] == "queued" and not resume and not state["control"]["action"]:
                 return state
             if resume:
+                if launch_id:
+                    extend_budget(state, entry.get("budget_addition", {}), identity=launch_id, origin="resume")
                 _resume_stopped(state)
                 if not launch_id or entry.get("mode") == "resume":
                     _resume_failed_scopes(state)
@@ -1005,7 +993,7 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                         owner, scope = owner_for(state, call), scope_for(state, call)
                         owner["status"] = scope["status"] = "blocked" if call["mode"] != "normal" else "budget_exhausted"
                         owner["reason"] = {"code": "budget_exhausted", "summary": exhausted, "checkpoint": view["checkpoint"],
-                                           "recovery_condition": "保留原计数与截止条件；需要明确处理已耗尽预算。"}
+                                           "recovery_condition": BUDGET_RECOVERY.format(run_id=state["run_id"])}
                         settle(state)
                         store.save(state)
                         continue

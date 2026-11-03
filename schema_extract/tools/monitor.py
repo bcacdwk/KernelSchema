@@ -122,7 +122,7 @@ def classify(run: dict) -> list[dict]:
                                 (run.get("stage"), budget.get("scopes", {}).get(run.get("stage"), {}).get("deadline"))):
             if isinstance(deadline, (int, float)) and now >= deadline:
                 anomalies.append({"run_id": run["run_id"], "scope": scope, "classification": "deadline_exceeded",
-                                  "summary": "原截止已过且没有在途调用；需诊断 Runner 边界进展。",
+                                  "summary": "当前截止已过且没有在途调用；需诊断 Runner 边界进展。",
                                   "evidence": run["state_directory"] + "/state.json",
                                   "recovery_condition": "保留原截止和计数；巡检不终止进程或自动重试。"})
     if run.get("status") == "running" and runner.get("lock") != "held":
@@ -330,7 +330,8 @@ def _check_clock_binding(ledger: dict, binding: dict | None, *, require_complete
         raise ExtractError("clock scan authorization was stopped or superseded")
 
 
-def reserve_launch(store, state: dict, *, mode="resume", hold_id=None, retry_id=None, background=False) -> dict:
+def reserve_launch(store, state: dict, *, mode="resume", hold_id=None, retry_id=None, background=False,
+                   budget_addition=None) -> dict:
     table = process_table()
     identity = _identity(table)
     requests = store.control_requests(state["run_id"])
@@ -364,6 +365,8 @@ def reserve_launch(store, state: dict, *, mode="resume", hold_id=None, retry_id=
                   "launcher": identity, "created_at": time.time(),
                   "request_ids": [request["id"] for request in requests],
                   "control_revision": ledger["controls"].get(state["run_id"], {}).get("revision", 0)}
+        if budget_addition and any(budget_addition.values()):
+            launch["budget_addition"] = budget_addition
         if not background:
             launch.update(status="claimed", identity=identity)
         start["launch"] = launch
@@ -490,7 +493,9 @@ def registered_extract(repo: Path, store, output: Path, *, operator_id=None, sou
                     raise ExtractError("output belongs to another operator run " + run_id)
                 preexisting = True
             elif registration["request_key"] != key:
-                raise ExtractError("output is already registered to run " + run_id)
+                raise ExtractError("output is already registered to run " + run_id +
+                                   " with different request parameters; its frozen inputs are unchanged. "
+                                   "Use status " + run_id + " --full, resume that run, or extract to a different --output for new inputs/parameters")
         else:
             if output.exists():
                 entries = list(output.iterdir()) if output.is_dir() else []
@@ -518,6 +523,7 @@ def registered_extract(repo: Path, store, output: Path, *, operator_id=None, sou
                                          created_at=registration["created_at"])
     except RunnerBusy:
         return {"run_id": run_id, "status": "creation_or_runner_active", "output": str(output),
+                "reused": True, "authorized": registration["authorized"],
                 "background": store.read_supervisor()["starts"][run_id].get("launch")}, None
     with store.supervisor() as ledger:
         ledger["starts"][run_id]["status"] = "created"

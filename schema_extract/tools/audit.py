@@ -684,6 +684,7 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
                            "pause_wait_seconds": None, "model_execution_seconds": None,
                            "unavailable": "pause intervals and model-only time are not recorded reliably",
                            "budget_deadline": state.get("deadline"),
+                           "budget_extensions": deepcopy(state.get("budget_extensions", [])),
                            "cli_scope": "monotonic transport including setup, termination and event parsing",
                            "processing_scope": "Runner checks/processing; estimated crash intervals are separately marked"},
                   "verification": {"status": "not_requested"}, "archive": None}

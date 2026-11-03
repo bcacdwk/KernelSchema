@@ -9,6 +9,7 @@ import time
 from uuid import uuid4
 
 from .artifacts import _same, load_yaml, validate_artifact_sources, write_yaml
+from .budget import RECOVERY as BUDGET_RECOVERY, addition, call_budget, extend
 from .common import (ExtractError, digest, read_json, rules_root, seal, source_root,
                      sync_tree, verify_manifest, write_json)
 from .inputs import SourceTree
@@ -79,7 +80,7 @@ def _inherit(store, state: dict, old: dict, old_lock: dict, new_lock: dict,
                         role="worker", mode="normal", feedback=[], reason=None)
             if "stage" in node:
                 node["stage"] = _scope(node["stage"])
-        for name in ("deadline", "p6_starts", "reopen_requests", "plan_history", "attempt_usage", "recovered_attempts", "stale_results"):
+        for name in ("deadline", "p6_starts", "reopen_requests", "plan_history", "attempt_usage", "recovered_attempts", "stale_results", "budget_extensions"):
             state[name] = deepcopy(old.get(name, state.get(name)))
         for attempt_id, usage in state["attempt_usage"].items():
             usage.setdefault("origin_run_id", old.get("continuation", {}).get("attempt_origins", {}).get(attempt_id, old["run_id"]))
@@ -99,9 +100,9 @@ def _inherit(store, state: dict, old: dict, old_lock: dict, new_lock: dict,
         state["nodes"]["root"]["draft_checkpoint"] = state["checkpoint"]
     finally:
         shutil.rmtree(initial)
-    # A fresh review has real work to perform. Check the original scopes without
-    # granting new calls, stage deadlines, adjudications or signoffs.
-    from .runner import _budget, _reserved_calls
+    extend(state, relation.get("budget_addition", {}), identity=relation["run_id"], origin="continue:" + old["run_id"])
+    # Validate inherited allowances plus the explicit grant. A fresh review
+    # never renews one-shot decisions.
     calls = [{"stage": name, "node": "root", "role": "reviewer" if name == "P6" else "worker", "mode": "normal"}
              for name in ("P1", "P2", "P3", "P4", "P6")]
     calls += [{"stage": "P5", "node": item["id"], "role": "worker", "mode": "normal"}
@@ -110,9 +111,8 @@ def _inherit(store, state: dict, old: dict, old_lock: dict, new_lock: dict,
     for call in calls:
         view = call_view(state, call)
         scope = scope_for(view)
-        _, problem = _budget(view)
-        minimum = 1 if call["stage"] == "P6" else 2
-        if problem or scope["calls"] + minimum + _reserved_calls(view) > state["config"]["max_calls"]:
+        _, problem = call_budget(view)
+        if problem:
             exhausted.append(call["stage"] + (":" + call["node"] if call["stage"] == "P5" else ""))
         previous = old["nodes"][call["node"]] if call["stage"] == "P5" else old if old["stage"] == call["stage"] else {}
         if previous.get("mode") in {"adjudicate", "signoff"} and (scope["adjudications"] or scope["signoffs"]):
@@ -120,13 +120,14 @@ def _inherit(store, state: dict, old: dict, old_lock: dict, new_lock: dict,
     if exhausted:
         state["status"] = "blocked"
         state["reason"] = {"code": "continuation_budget_exhausted", "scopes": sorted(set(exhausted)),
-                           "summary": "原截止、调用余额或一次性决定不足以完成必要重审；接续不重置预算。",
-                           "recovery_condition": "保留原任务与预算；不能通过 resume 或再次 continue 重新授予。"}
+                           "summary": "截止、调用余额或一次性决定不足以完成必要重审；接续不重置已用计数。",
+                           "recovery_condition": BUDGET_RECOVERY.format(run_id=state["run_id"])}
     store.save(state)
     return state
 
 
-def continue_run(repo: Path, store, old_id: str, checkpoint_id: str) -> dict:
+def continue_run(repo: Path, store, old_id: str, checkpoint_id: str, *, add_seconds=0, add_calls=0) -> dict:
+    budget_addition = addition(add_seconds, add_calls)
     with store.writer(old_id):
         store.assert_constructed(old_id)
         old = store.load(old_id)
@@ -143,6 +144,8 @@ def continue_run(repo: Path, store, old_id: str, checkpoint_id: str) -> dict:
             if existing:
                 if existing["checkpoint"] != checkpoint_id:
                     raise ExtractError("old run already has a successor for another checkpoint")
+                if existing.get("budget_addition", addition()) != budget_addition:
+                    raise ExtractError("successor already has a different budget request; use resume " + existing["run_id"] + " --add-seconds N / --add-calls N")
                 relation = deepcopy(existing)
             else:
                 # A new launch could have been reserved after the observation.
@@ -151,7 +154,8 @@ def continue_run(repo: Path, store, old_id: str, checkpoint_id: str) -> dict:
                 if launch != observed:
                     raise ExtractError("old launch changed before continuation reservation")
                 relation = {"run_id": str(uuid4()), "predecessor": old_id, "checkpoint": checkpoint_id,
-                            "state_sha256": state_digest, "status": "preparing", "created_at": time.time()}
+                            "state_sha256": state_digest, "status": "preparing", "created_at": time.time(),
+                            "budget_addition": budget_addition}
                 ledger["continuations"][old_id] = relation
                 relation = deepcopy(relation)
         if relation["status"] == "ready":

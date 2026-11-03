@@ -15,6 +15,7 @@ from .runner import DEFAULT_CONFIG, export_checkpoint, run, summary
 from .snapshots import frozen_invocation
 from .store import Store
 from . import monitor
+from .budget import CAPABILITY as BUDGET_CAPABILITY, addition
 
 
 CATEGORIES = {"schema_docs", "schema_template", "kernel_wiki", "extract_workflow", "extract_tools"}
@@ -114,7 +115,7 @@ def parser() -> argparse.ArgumentParser:
     for name, help_text in (("status", "read a saved run without advancing it"),
                             ("pause", "request a pause at invocation boundaries"),
                             ("cancel", "request termination of all started invocations"),
-                            ("resume", "reconcile old processes and resume with the original budgets"),
+                            ("resume", "resume the frozen run; add finite budget only with explicit options"),
                             ("export", "export the final reviewed checkpoint to another destination"),
                             ("candidates", "read accepted framework proposals and prior stable-ID decisions")):
         command = sub.add_parser(name, help=help_text)
@@ -129,6 +130,7 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--all", action="store_true")
         if name == "resume":
             command.add_argument("--hold", help="release only the named global hold")
+            _budget_options(command)
     for name in ("issues", "inspect"):
         command = sub.add_parser(name, help="read-only framework registry" if name == "issues" else "read-only run summaries; does not install a scheduler")
         command.add_argument("--repo", type=Path, default=Path.cwd())
@@ -142,6 +144,7 @@ def parser() -> argparse.ArgumentParser:
     continued.add_argument("--checkpoint", required=True)
     continued.add_argument("--repo", type=Path, default=Path.cwd())
     continued.add_argument("--state-root", type=Path)
+    _budget_options(continued)
     audit = sub.add_parser("audit", help="read recorded usage/session evidence; explicitly verify or archive selected evidence")
     audit.add_argument("run_id")
     selection = audit.add_mutually_exclusive_group()
@@ -190,6 +193,13 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def _budget_options(command):
+    command.add_argument("--add-seconds", type=int, default=0,
+                         help="explicitly extend operator and started scope deadlines from max(now, deadline); keep used time")
+    command.add_argument("--add-calls", type=int, default=0,
+                         help="explicitly add this many calls to each stage/node limit; keep used calls and decisions")
+
+
 def _frozen_entry(lock: dict, command: list[str]) -> None:
     arguments, rules, environment = frozen_invocation(lock, command)
     if rules_root() == rules.resolve():
@@ -221,17 +231,72 @@ def _print_observations(rows, *, as_json=False):
             print(f"  successor={row['successor']['run_id']} status={row['successor']['status']} saved_status={row['status']}")
         for item in row.get("anomalies", []):
             print(f"  {item.get('classification')} {item.get('scope')}: {item.get('summary')} [{item.get('evidence')}]")
+            if item.get("recovery_condition"):
+                print("  next: " + item["recovery_condition"])
 
 
-def _launch_context(store, state: dict, *, mode="resume") -> dict:
+def _launch_context(store, state: dict, *, mode="resume", budget_addition=None) -> dict:
     token = os.environ.get("SCHEMA_EXTRACT_ENTRY_ID")
     entry = store.read_supervisor()["starts"].get(state["run_id"], {}).get("launch", {})
     if token and entry.get("id") == token and entry.get("status") == "claimed" and entry.get("identity", {}).get("pid") == os.getpid():
         return entry
-    entry = monitor.reserve_launch(store, state, mode=mode)
+    entry = monitor.reserve_launch(store, state, mode=mode, budget_addition=budget_addition)
     if not entry.get("reused") and entry.get("id"):
         os.environ["SCHEMA_EXTRACT_ENTRY_ID"] = entry["id"]
     return entry
+
+
+def _registration_result(store, registration: dict, state: dict | None, *, queued=False, background=False):
+    """Report registration separately from execution and delivery, including fixed inputs."""
+    run_id = registration["run_id"]
+    directory = store.run_dir(run_id)
+    observed = state or (store.read_summary(run_id) if (directory / "state.json").is_file() else {})
+    result = {**registration, "run_status": observed.get("status"), "published": observed.get("published", False),
+              "stage": observed.get("stage"), "reason": observed.get("reason"), "publication": observed.get("publication")}
+    lock_path = directory / "inputs.lock.json"
+    if lock_path.is_file():
+        lock = read_json(lock_path)
+        if observed and observed["input_fingerprint"] != lock["fingerprint"]:
+            raise ExtractError("registered run differs from its input lock")
+        result["frozen"] = {"inputs_lock": str(lock_path), "input_fingerprint": lock["fingerprint"],
+                            "source": {key: lock["source"][key] for key in ("id", "repository_id", "ref", "ref_kind")},
+                            "rules_id": lock["rules"]["id"], "executor": observed.get("executor"), "config": lock["config"]}
+    if registration.get("reused"):
+        result["input_policy"] = "沿用已登记的固定源码、规则和参数，本次未重新读取工作树。采用源码或参数变更请换输出目录重新 extract；采用工具修复请显式 continue。"
+    successor = store.read_supervisor()["continuations"].get(run_id)
+    launch = registration.get("background") or {}
+    if successor:
+        outcome, next_step = "superseded", "查看接续任务 " + successor["run_id"] + "；旧任务已停止派发。"
+        result["successor"] = successor
+    elif result["run_status"] == "ready" and result["published"]:
+        outcome, next_step = "published", "交付回执：" + str(Path(registration["output"]) / ".extraction/receipt.json")
+    elif background and launch.get("status") in {"launching", "claimed"}:
+        outcome = "already_running" if launch.get("reused") or state is None else "start_requested"
+        next_step = "status " + run_id + " 查看阶段；后台启动成功不表示已完成发布。"
+    elif background and launch.get("status") == "held":
+        outcome, next_step = "held", "resume --all --hold " + launch["hold_id"] + " 释放该次暂停。"
+    elif result["run_status"] == "queued":
+        outcome, next_step = "queued", "resume " + run_id + " 显式启动已登记的固定任务。"
+    elif result["run_status"] == "running" and store.writer_status(run_id) == "held":
+        outcome, next_step = "already_running", "status " + run_id + " 查看进度；本命令仅返回原运行身份。"
+    elif state is None:
+        outcome, next_step = "creation_or_runner_active", "status " + run_id + " 查看原任务；启动窗口中断后可重复原命令对账。"
+    elif result["run_status"] == "ready":
+        outcome, next_step = "publication_pending", "status " + run_id + " 查看发布原因；目标冲突时用 export " + run_id + " --output NEW_DIRECTORY 另行交付。"
+    else:
+        outcome = "stopped"
+        next_step = "status " + run_id + " 查看原因；resume 续用原执行器，continue 才采用当前工具。"
+    result.update(result=outcome, next_step=next_step)
+    success = (outcome == "published" and state is not None or queued and outcome == "queued" or
+               background and outcome in {"start_requested", "already_running", "held"})
+    return result, 0 if success else 1
+
+
+def _busy_result(state: dict, entry: dict) -> int:
+    print(json.dumps({"run_id": state["run_id"], "result": "already_running" if entry.get("reused") else "preserved",
+                      "status": state["status"], "published": state["published"], "launch": entry,
+                      "next_step": "status " + state["run_id"] + " 查看原任务；本命令未执行到发布，也未追加预算。"}, ensure_ascii=False, indent=2))
+    return 1
 
 
 def main(argv=None) -> int:
@@ -280,10 +345,13 @@ def main(argv=None) -> int:
             return Clock(Store(state_root), args.repo).run(args.launch_id, args.lock_fd)
         if args.command == "continue":
             from .continuation import continue_run
-            state = continue_run(args.repo, Store(state_root), args.run_id, args.checkpoint)
+            state = continue_run(args.repo, Store(state_root), args.run_id, args.checkpoint,
+                                 add_seconds=args.add_seconds, add_calls=args.add_calls)
             print(json.dumps(summary(Store(state_root), state), ensure_ascii=False, indent=2))
             return 0 if state["status"] == "queued" else 1
         if args.command in {"pause", "resume"} and args.all:
+            if args.command == "resume" and (args.add_seconds or args.add_calls):
+                raise ExtractError("budget additions require a single run UUID; releasing a hold does not add budget")
             if args.run_id or (args.command == "resume" and not args.hold):
                 raise ExtractError("--all takes no run UUID; resume --all requires --hold ID")
             store = Store(state_root)
@@ -314,9 +382,8 @@ def main(argv=None) -> int:
                 if lock["fingerprint"] != state["input_fingerprint"]:
                     raise ExtractError("run input fingerprint differs from its lock")
                 entry = _launch_context(store, state, mode="queued")
-                if entry.get("reused"):
-                    print(json.dumps(entry, ensure_ascii=False, indent=2))
-                    return 0
+                if entry.get("reused") or entry.get("status") == "preserved":
+                    return _busy_result(state, entry)
                 _frozen_entry(lock, ["inspect", "--start", args.start, "--repo", str(args.repo), "--state-root", str(state_root)])
                 state = run(store, args.start, resume=True, queued_only=True, launch_id=entry.get("id"))
                 print(json.dumps(summary(store, state), ensure_ascii=False, indent=2))
@@ -340,11 +407,17 @@ def main(argv=None) -> int:
                 raise ExtractError("run input fingerprint differs from its lock")
             entry, request = None, None
             if args.command in {"resume", "export"}:
+                budget_addition = addition(args.add_seconds, args.add_calls) if args.command == "resume" else addition()
+                if any(budget_addition.values()):
+                    if BUDGET_CAPABILITY not in state.get("executor", {}).get("capabilities", []):
+                        raise ExtractError("this frozen executor cannot add budget; use continue " + args.run_id +
+                                           " --checkpoint " + state["checkpoint"] + " --add-seconds " + str(args.add_seconds) +
+                                           " --add-calls " + str(args.add_calls))
+                    command.extend(["--add-seconds", str(args.add_seconds), "--add-calls", str(args.add_calls)])
                 store.assert_startable(args.run_id)
-                entry = _launch_context(store, state, mode=args.command)
+                entry = _launch_context(store, state, mode=args.command, budget_addition=budget_addition)
                 if entry.get("reused"):
-                    print(json.dumps(entry, ensure_ascii=False, indent=2))
-                    return 0
+                    return _busy_result(state, entry)
             elif args.command in {"pause", "cancel"}:
                 request_id = os.environ.get("SCHEMA_EXTRACT_CONTROL_REQUEST")
                 if request_id:
@@ -390,11 +463,12 @@ def main(argv=None) -> int:
                     registered, state = monitor.registered_extract(args.repo, store, target["output"], operator_id=target["operator_id"], config=config, queued=args.queue)
                     if state is not None and args.background and registered["authorized"]:
                         registered["background"] = monitor.start_background(store, state["run_id"], args.repo)
-                    results.append({"operator_id": target["operator_id"], **registered})
+                    result, code = _registration_result(store, registered, state, queued=args.queue, background=args.background)
+                    results.append({"operator_id": target["operator_id"], **result, "exit_code": code})
                 except (ExtractError, OSError, KeyError, TypeError, AttributeError) as exc:
                     results.append({"operator_id": target["operator_id"], "error": str(exc)})
             print(json.dumps(results, ensure_ascii=False, indent=2, default=str))
-            return 1 if any(value.get("error") or (value.get("background") or {}).get("status") == "launch_failed" for value in results) else 0
+            return 1 if any(value.get("error") or value.get("exit_code") for value in results) else 0
         if not args.output or args.output_root:
             raise ExtractError("single-source extraction requires --output and does not take --output-root")
         if args.command == "import-legacy":
@@ -413,8 +487,9 @@ def main(argv=None) -> int:
             if state is None or args.background or (registered.get("reused") and (not registered["authorized"] or state["status"] != "queued")):
                 if state is not None and args.background and registered["authorized"]:
                     registered["background"] = monitor.start_background(store, state["run_id"], args.repo)
-                print(json.dumps(registered, ensure_ascii=False, indent=2))
-                return 1 if (registered.get("background") or {}).get("status") == "launch_failed" else 0
+                result, code = _registration_result(store, registered, state, queued=args.queue, background=args.background)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return code
         print(json.dumps({"run_id": state["run_id"], "state_directory": str(store.run_dir(state["run_id"])),
                           "status": state["status"]}, ensure_ascii=False), file=sys.stderr, flush=True)
         if args.queue:
@@ -422,8 +497,7 @@ def main(argv=None) -> int:
             return 0
         entry = _launch_context(store, state, mode="queued" if state["status"] == "queued" else "resume")
         if entry.get("reused") or entry.get("status") == "preserved":
-            print(json.dumps(entry, ensure_ascii=False, indent=2))
-            return 0
+            return _busy_result(state, entry)
         _frozen_entry(read_json(store.run_dir(state["run_id"]) / "inputs.lock.json"),
                       ["resume", state["run_id"], "--repo", str(args.repo), "--state-root", str(state_root)])
         state = run(store, state["run_id"], resume=True, queued_only=entry.get("mode") == "queued", launch_id=entry.get("id"))

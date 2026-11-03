@@ -49,4 +49,4 @@ Supervisor 指定来源和输出位置，处理需要外部材料或任务方确
 
 当前算子的实现差异、证据缺项和待修转录写入任务回执。规范、检查器、资料或流程本身造成错误、遗漏或重复劳动时，先核实已有规则，再在 `framework_candidates` 中提供可复查反例、最小改动及不改的影响；没有合格发现时返回 `[]`，正常完成本阶段。worker、reviewer 与 Supervisor 都可提报，不在算子任务中自行修改框架。
 
-清理运行记录前，由主 agent 或维护者通过[维护入口](schema_extract/issues/README.md)查重、核实稳定 ID 和已有决定，再将合格项登记入账。台账及[历史原文](schema_extract/issues/archive/ISSUES.md)集中保存在 `schema_extract/issues/`；历史 CLI 命令只适用于相应的冻结执行器。任务回执和必要交接保存在运行记录中，不为提报增设 schema 字段或固定报告文件。
+由主 agent 或维护者通过[维护入口](schema_extract/issues/README.md)按稳定 ID 和根因查重，再登记问题与决定。任务回执和必要交接保存在运行记录中，不为提报增设 schema 字段或固定报告文件。

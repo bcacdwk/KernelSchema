@@ -17,7 +17,7 @@
 
 一次任务选择当前工作对应的入口，通过产物与必要说明交接。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
 
-Schema Extract `2.2.0` 提供六阶段提取、独立语义审阅、依赖并发、批量后台、轻量巡检、同线程提醒、暂停/取消、崩溃恢复、显式旧稿接续、原子发布和用量审计/证据封存。Supervisor 使用 `python3 schema_extract/extract.py extract --id <算子> --output <目录>`，批量入口为 `extract --ids <算子...> --output-root schema_wiki --background`；已有运行沿用各自冻结的执行器与能力。硬件区保留模板占位，检查显式使用 `--skip-hardware`。`schema_wiki` 现按 catalog 预建 44 个输出目录，尚无提取成果。有界真实 bf16 P1 的 worker 回执已通过门禁，独立 reviewer 在普通调用预算到期后超时；完整真实多分支提取仍未验收。[Schema Extract 手册](schema_extract/README.md) · [输出目录导航](schema_wiki/README.md) · [状态与恢复](schema_extract/README.md#恢复与交付) · [审计与封存](schema_extract/README.md#审计与封存) · [框架问题维护入口](schema_extract/issues/README.md)
+Schema Extract `2.2.1` 自动完成六阶段提取、独立审阅、返工、依赖并发和发布。Supervisor 用 `python3 schema_extract/extract.py extract --id <算子> --output <目录> --background` 发起，以 `status <run-uuid>` 查看进度；只有 `ready` 且 `published: true` 才表示已交付。恢复使用原冻结执行器，预算可显式追加；硬件保留占位，检查使用 `--skip-hardware`。完整真实多分支提取仍待试用验收。[开始试用](schema_extract/README.md#开始一次试用) · [输出目录](schema_wiki/README.md) · [恢复与交付](schema_extract/README.md#恢复与交付) · [验证边界](schema_extract/README.md#验证边界)
 
 新建与优化均由 Planner 承担，按数学改写、工作调度、微流水线的顺序逐层推导和写入。先把上层方向收束，再向下投入优化精力；下层发现前提问题时，回到对应上层修正并复查受影响部分。
 

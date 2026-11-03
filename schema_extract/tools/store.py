@@ -16,6 +16,7 @@ from . import __version__
 from .common import (STATE_GUARD, ExtractError, RunnerBusy, StaleResult, copy_artifacts, digest, json_bytes,
                      fsync_directory, manifest, read_json, seal, sync_tree, verify_manifest, write_json, write_text, rules_root)
 from .artifacts import _same, load_yaml, validate_artifact_sources, write_yaml
+from .budget import CAPABILITY as BUDGET_CAPABILITY, call_limit, review_seconds
 from .stages import (NODE_STOPS, call_view, effective_nodes, new_scope, next_call, next_calls, node_signature,
                      scope_for, scope_key, session_group, writable_files)
 
@@ -291,6 +292,7 @@ class Store:
         state = {"format": STATE_FORMAT, "run_id": run_id,
                  "operator_id": lock["source"]["bindings"]["id"], "output": str(output.resolve()),
                  "input_fingerprint": lock["fingerprint"], "snapshot": lock["snapshot"],
+                 "source_identity": {key: lock["source"][key] for key in ("id", "repository_id", "ref", "ref_kind")},
                  "status": "queued" if queued else "running", "stage": "P1", "role": "worker", "node": "root",
                  "mode": "normal", "plan": None, "plan_draft": None, "merged_checkpoint": None,
                  "revision_scope": [], "pending_rechecks": [], "recoverable_checkpoint": None,
@@ -298,10 +300,11 @@ class Store:
                  "executor": {"version": __version__, "rules_id": lock["rules"]["id"],
                               "digest": digest({name: value for name, value in lock["rules"]["files"].items()
                                                 if name.startswith("schema_extract/") and name.endswith(".py")}),
-                              "capabilities": ["summary.v1", "state_guard.v1", "hold.v1", "scoped_restart.v1", "continuation.v1", "audit.v1", "proposal.v1"]},
+                              "capabilities": ["summary.v1", "state_guard.v1", "hold.v1", "scoped_restart.v1", "continuation.v1", "audit.v1", "proposal.v1", BUDGET_CAPABILITY]},
                  "reopening": None, "reopen_requests": {}, "plan_history": [],
                  "stale_results": {}, "unconfirmed_attempts": {}, "p6_starts": 0, "final_review_started": False,
                  "config": lock["config"], "deadline": now + lock["config"]["operator_seconds"],
+                 "budget_extensions": [],
                  "sessions": {group: {"worker": None, "reviewer": None}
                               for group in ("P1_P2", "P3", "P4", "P6", "P6_signoff")},
                  "stages": {stage: new_scope() for stage in ("P1", "P2", "P3", "P4", "P5", "P6")},
@@ -502,6 +505,7 @@ class Store:
             scope["deadline"] = scope["started_at"] + state["config"]["stage_seconds"]
             scope["adjudication_reserved_seconds"] = state["config"]["adjudication_seconds"]
             scope["signoff_reserved_seconds"] = state["config"]["adjudication_seconds"] if call["stage"] == "P6" else 0
+            scope["review_reserved_seconds"] = review_seconds(state["config"])
         if scope["baseline_checkpoint"] is None:
             scope["baseline_checkpoint"] = view["checkpoint"]
             scope["candidates"].append({"checkpoint": view["checkpoint"], "plan": state.get("plan_draft")})
@@ -652,6 +656,8 @@ def summary(store: Store, state: dict) -> dict:
     return {key: state.get(key) for key in ("run_id", "operator_id", "status", "stage", "role", "node",
                                           "checkpoint", "output", "published", "reason")} | {
         "format": SUMMARY_FORMAT, "input_fingerprint": state["input_fingerprint"],
+        "source_identity": deepcopy(state.get("source_identity")),
+        "execution": {key: state.get("config", {}).get(key) for key in ("worker_effort", "reviewer_effort", "model", "codex_binary")},
         "executor": deepcopy(state.get("executor", {"version": None, "digest": None, "rules_id": None,
                                                      "capabilities": []})),
         "state_revision": state.get("state_revision"), "generated_at": time.time(),
@@ -669,7 +675,9 @@ def summary(store: Store, state: dict) -> dict:
         "budget": {"deadline": state.get("deadline"),
                    "limits": {key: state.get("config", {}).get(key) for key in
                               ("operator_seconds", "stage_seconds", "call_seconds", "max_calls",
-                               "revision_limit", "adjudication_seconds")},
+                               "revision_limit", "adjudication_seconds")} | {"max_calls": call_limit(state)},
+                   "extensions": [{key: item[key] for key in ("id", "run_id", "origin", "at", "seconds", "calls")}
+                                  for item in state.get("budget_extensions", [])],
                    "scopes": {key: {field: value.get(field) for field in budget_fields}
                               for key, value in scopes.items()}},
         "imported_checkpoint": state.get("imported_draft", {}).get("checkpoint"),

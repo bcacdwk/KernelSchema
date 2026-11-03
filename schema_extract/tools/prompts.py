@@ -7,6 +7,7 @@ from pathlib import Path
 import shlex
 
 from .artifacts import _same, load_root
+from .budget import call_limit
 from .receipts import REOPEN_TARGETS, required_artifact_evidence
 from .stages import STAGES, owner_for, scope_for
 from .common import read_json, rules_root, source_root
@@ -76,6 +77,7 @@ def build_prompt(state: dict, lock: dict, attempt: dict) -> str:
                 "reviewed_artifacts": {key: str(run_dir / "checkpoints" / value["approval"]["checkpoint"] / "artifacts" / value["file"])
                                        for key, value in state["nodes"].items() if key in relevant_nodes and value.get("approval")},
                 "budget": {**{key: scope[key] for key in ("revisions", "continues", "receipt_repairs", "cli_failures", "calls", "deadline")},
+                           "call_seconds": attempt.get("timeout_seconds"), "max_calls": call_limit(state),
                            "revision_limit": state["config"]["revision_limit"]}}
     if attempt["stage"] == "P5":
         locating.pop("plan")
@@ -97,7 +99,7 @@ def build_prompt(state: dict, lock: dict, attempt: dict) -> str:
         locating["candidates"] = [{**entry, "artifacts": str(run_dir / "checkpoints" / entry["checkpoint"] / "artifacts")}
                                   for entry in scope["candidates"]]
     reader = frozen_reader(lock)
-    example = f"python3 -B {shlex.quote(str(reader))} --root {shlex.quote(str(source))} --path {shlex.quote(bindings['host']['path'])} --start-line 1"
+    example = f"python3 -B {shlex.quote(str(reader))} --root {shlex.quote(str(source))} --path {shlex.quote(bindings['host']['path'])} --start-line 1 --end-line 80"
     checker = rules / "schema_template/check_yaml.py"
     target = node_entry["file"] if attempt["stage"] == "P5" else "root.yaml"
     check_command = f"python3 -B {shlex.quote(str(checker))} --skip-hardware {shlex.quote(str(Path(attempt['workspace']) / target))}"
@@ -120,20 +122,20 @@ P6亲自patch最终稿后，由全新独立reviewer签收一次；选择已有�
         mode_instructions = "本轮为P6裁决补丁后的全新独立reviewer签收。只允许approve或blocked，检查最终改动及全部pending_rechecks；本次不再返工、裁决或重试。"
     checking = ("本阶段使用阶段产物门禁；未完成或未生成的Design不要求完整检查。"
                 if attempt["stage"] in {"P1", "P2", "P4"} else
-                f"完成/批准前运行冻结检查器：{check_command}\n退出0才满足完成门槛；1交当前修改者，2报工具/环境问题。Runner独立复验。")
+                f"Runner接收完成/批准时自动运行冻结检查器，退出0才放行；1的诊断交当前修改者，2报工具/环境问题。\n需要提前自检或定位诊断时可运行：{check_command}；不要求worker/reviewer各自重复执行。")
     return f"""你是独立的 {attempt['role']}，只执行 {attempt['stage']} / {attempt['node']} / {mode}。
 目标是把固定kernel压缩为忠实、足够简洁的流水线设计。reviewer独立对照源码与checkpoint，按当前阶段核对数学/数值、工作组织、依赖、寿命、复用及适用范围；检查器退出码不代替语义审阅。
 语义正确且必要信息齐备就直接approve，不要求找问题、增加篇幅或重复已有决定。删除细节会使读者读错或漏掉设计时才保留；不扩张schema字段义务。源码既有缺陷忠实记录，不能补造等待、fallback或外部保证。
 Runner唯一写运行状态。worker只改writable_files及当前页授权字段，reviewer只读；不开子代理，不做GPU测试。
-只读固定source_root/rules_root、当前workspace、列明的回执/已审产物/candidates及旧稿线索，不访问原工作树或旧状态。先按嵌入的当前页工作，再沿当前问题读规范与源码；可读页内引用的方法，不读PLAN。
-长文件按范围读，有next_cursor时沿相同范围用--cursor继续，不丢行：
+只读固定source_root/rules_root、当前workspace、列明的回执/已审产物/candidates及旧稿线索，不访问原工作树或旧状态。先按嵌入的当前页工作，再沿当前问题读规范与源码；可读页内引用的方法。
+先定位当前问题需要的源码范围；不因文件较长而通读。有next_cursor表示所选范围尚未读完，需要续读该范围时保留起止行并用--cursor：
 {example}
 最后按output-schema仅返回schema_extract.proposal.v1 JSON，原样回传本次attempt_id nonce；缺失或陈旧nonce硬拒绝。identity、摘要、文件清单、实际差异由Runner从已登记调用与真实字节生成，不手填、不另写回执文件。
 证据由你亲读并选择：相对path、1起始line_start/line_end（最多12行）、quote_offset（范围原文中从0开始的字符偏移，通常0）和说明语义的note；来源另选category。用reader --evidence --end-line N [--quote-offset N]预览该范围生成的最多320字符精确引文，不会替你寻找依据。不要回传sha256/source_id/quote。
 complete/approve覆盖required_evidence、required_conclusions；每类至少选对应绑定入口，调用链可补充。conclusions/issues等的evidence从0索引本次source_evidence。reviewer的artifact_evidence覆盖required_artifact_evidence每个文件，不能用父节点批准代替本节点核对。
 {mode_instructions}
 有recovery_handoff时以本页、当前checkpoint和固定来源重建上下文，旧会话已确认中断并退休。imported_draft/continued_draft仅为列明的只读旧稿线索；旧state/批准不授予本次写权限或放行，证据仍指当前source_root/workspace。
-checks仅记真实命令/退出码；未执行为[]并说明checks_note。issues写范围、证据、影响和恢复条件。framework_candidates无必要建议为[]；有则给跨运行稳定的小写数字及-_短ID、规则/工具scope与最小改动，不写台账，不因可选候选扣住正确产物。
+checks仅记亲自执行的命令/退出码；交Runner自动检查时填[]，checks_note说明由Runner执行。issues写范围、证据、影响和恢复条件。framework_candidates无必要建议为[]；有则给跨运行稳定的小写数字及-_短ID、规则/工具scope与最小改动，不写台账，不因可选候选扣住正确产物。
 P2/P3/P4 reviewer批准时handoff只写已定事项、理由、关键入口和缺口，最多20个非空行/1200字符；其他阶段无交接则用空串。
 {checking}
 
