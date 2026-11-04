@@ -1,0 +1,524 @@
+"meta_data":
+  "name": "mxfp8_qkv_attention"
+  "describe": "Dense grouped-query attention on block-scaled FP8 Q/K/V with FP8 probability\
+    \ rounding, BF16 output, and optional FP32 natural-log LSE."
+  "source": "source@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward"
+  "version": 1
+  "dispatch":
+    "id": "fused_d256"
+    "parent": "root"
+    "when": |
+      Let active mean window_left is neither None nor -1, and let wl be
+      window_left when active, otherwise 0. Let HostPlan be the actual Plan from
+      fmha_mxfp8::plan_geometry(B,H,KH,Sq,Skv,D,is_causal,wl,active), in
+      source@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/fmha_mxfp8_qkv.cu::fmha_mxfp8::plan_geometry.
+      This includes its fixed split-cost/workspace policy and cached runtime
+      probe/capacity results. Let SmCount be its device_sm_count() result.
+      Let split mean HostPlan.use_tc and HostPlan.nsplit>1 and W>0 and
+      W>=HostPlan.workspace, matching the actual forward workspace guard.
+      Select exactly when HostPlan.use_tcg and not split and D=256.
+      The fixed defaults select launch_tcg<256,PASS_FUSED,2>.
+      Successful K and V descriptors select TMA with MIDPIPE; otherwise the
+      source selects its cp.async loop. Both variants use SF_AHEAD.
+design:
+  math_reshape:
+    thesis: >-
+      Fuse increasing 128-key groups with a carried numerator and delayed normalizer,
+      avoiding full score/probability materialization. One 128-key score product
+      feeds a full-group maximum and two separately carried half-group denominators.
+      Native MXFP8 products, unit-bias approximate probabilities and the final
+      denominator fold retain the source's numerical choices.
+    rewrite:
+      - step: domain
+        name: Grouped rows and the useful key-group interval
+        math: |
+          Let G=H/KH, Qph=Br/G and q0=a*Qph, where
+          0 <= a < ceil_div(Sq,Qph). Each (b,kh,a) instance has rows
+          u=0,...,Br-1 mapped to h=kh*G+floor(u/Qph), i=q0+(u mod Qph).
+          A row is valid iff i<Sq; set ic=min(i,Sq-1) for mask calculation.
+          Use the Contract's scale addressing and inclusive mask definitions.
+          Qb denotes the original E4M3 query with its E8M0 block scales for a
+          valid row; invalid query payloads are zero with unit scales.
+          Let lo(u)=max(0,ic+Skv-Sq-window_left) when the window is active,
+          otherwise 0; hi(u)=ic+Skv-Sq when causal, otherwise Skv-1.
+          Let imin=q0, imax=min(q0+Qph-1,Sq-1),
+          cLo=floor((active ? max(0,imin+Skv-Sq-window_left) : 0)/KeyGroup),
+          cHi=floor((is_causal ? imax+Skv-Sq : Skv-1)/KeyGroup),
+          Ng=cHi-cLo+1. Process g=cLo,...,cHi in increasing order.
+          Within each group j=g*KeyGroup+v, 0<=v<KeyGroup; Kb[v,d] and Vb[v,d]
+          denote the original E4M3 operands and their scales at (b,kh,j,d), with zero payload
+          for j>=Skv. Scale addressing extends through the allocated padded
+          final group: stored padding atom bytes are still loaded, not replaced
+          by unit scales. Groups outside this interval are not evaluated.
+          All Br rows and all KeyGroup keys of an evaluated group take part in
+          the products, including padded rows and masked keys. Only valid rows
+          are written to caller storage; padding creates no extra output.
+        symbol:
+          Br: {meaning: Number of grouped query rows per worktile, binding: "bind:design.work_schedule::Br"}
+      - step: scores
+        name: Full-group product and maximum
+        math: |
+          Start A[-1]=0 and for k=0,...,7 form
+          A[k]=mma32(Qb[:,32*k:32*k+32],Kb[:,32*k:32*k+32]^T,A[k-1]).
+          Score[u,v]=A[7][u,v] if lo(u)<=g*KeyGroup+v<=hi(u),
+          and -inf otherwise. Let scale=fp32(D^(-1/2)).
+          RawMax[u]=fmax over both 64-key halves of Score[u,:], starting at -inf;
+          the maximum uses the source fmaxf NaN behavior. GroupMax[u]=RawMax[u]*scale.
+        symbol:
+          Score: {meaning: Masked unscaled scores for the whole current group, shape: [row: Br, key: KeyGroup], dtype: fp32, retention: "keep_value (b,kh,a,g)"}
+        arithmetic:
+          accumulate: >-
+            The mma32 operands denote native block-scaled values of the stored
+            E4M3 payloads and their E8M0 blocks, without separately rounded FP32
+            operand decoding. Actual products consume those narrow payloads
+            and scales directly with native block-scaled tcgen05 MMA, eight ordered
+            32-channel contractions; there is no FP32 decoded operand
+            array or intervening BF16 cast. FP32 accumulation does not assert
+            reference reduction order or a bound on native internal rounding.
+      - step: normalize
+        name: Delayed state and the actual probability approximation
+        math: |
+          Initialize MaxState(cLo-1,u)=-inf and HalfDen(cLo-1,u,z)=0 for z=0,1.
+          MaxState(g,u)=GroupMax[u] if GroupMax[u]-MaxState(g-1,u)>
+          fp32(2.7725887222397812), otherwise MaxState(g-1,u).
+          The comparison is false for NaN. safe[u]=MaxState(g,u) if finite,
+          otherwise 0. alpha[u]=expf(MaxState(g-1,u)-safe[u]) if the old state
+          is finite, otherwise 0.
+          For each Score entry, x=(Score[u,v]*scale)-safe[u], with a separate
+          FP32 multiply and subtract. Define the actual E1 approximation by:
+          t=sat01(fma32(x,fp32(0.0057249800302088261),0.5)),
+          w=fma_rm32(t,252,12582913), e=fma32(x,fp32(1.4426950216293335),12583039-w),
+          d=bitcast_f32((bitcast_u32(w)<<23) mod 2^32),
+          E1(x)=d*ex2_ftz(e).
+          Here fma_rm32 rounds the fused result toward negative infinity;
+          sat01 is the source saturating FP32 conversion to [0,1], including
+          its NaN-to-zero behavior; ex2_ftz is the source approximate base-two
+          exponential with flush-to-zero. No low log2(e) correction is added.
+          Prob[u,v]=E1(x); Prob8[u,v]=satfinite_e4m3_rne(Prob[u,v]).
+          The latter is the source hardware saturating RNE conversion, with
+          unit probability scale; for nonnegative finite values it rounds
+          min(Prob,ProbabilityMax) to E4M3FN.
+          For each half z=0,1 and p=0,1, let E[z,p] sum
+          Prob[u,64*z+2*s+p] over s=0,...,31 by ordered FP32 additions from zero.
+          HalfDen(g,u,z)=HalfDen(g-1,u,z)*alpha[u]+(E[z,0]+E[z,1]),
+          using the source's scalar FP32 update under its compiler defaults;
+          no additional contraction restriction is imposed. Only after the last
+          group form DenState[u]=HalfDen(cHi,u,0)+HalfDen(cHi,u,1).
+          The denominator never uses Prob8. MaxState and both HalfDen states
+          are discarded after output.
+        symbol:
+          MaxState: {meaning: Delayed maximum for the current group, shape: [row: Br], dtype: fp32, retention: "carry_forward (b,kh,a); g=cLo-1..cHi"}
+          HalfDen: {meaning: Independently carried unrounded-probability half sums, shape: [row: Br, half: 2], dtype: fp32, retention: "carry_forward (b,kh,a); g=cLo-1..cHi"}
+          DenState: {meaning: Final folded normalizer used by output and LSE, shape: [row: Br], dtype: fp32}
+          Prob: {meaning: Current unrounded probabilities consumed by denominator accumulation and conversion, shape: [row: Br, key: KeyGroup], dtype: fp32}
+          Prob8: {meaning: Current unit-scale rounded probability operand, shape: [row: Br, key: KeyGroup], dtype: fp8_e4m3fn, retention: "keep_value (b,kh,a,g)"}
+        arithmetic:
+          approx: >-
+            E1 is expf2_bias<0> with FMHA_EXP_NO_KTINY=1 and no bias multiply,
+            including ex2.approx.ftz.f32. alpha uses
+            scalar CUDA expf. unknown: a reliable error bound for these paths
+            and their effect at probability-rounding boundaries is not supplied;
+            the external tolerance record supplies no numerical design guarantee.
+      - step: value_output
+        name: Carry the native PV accumulator through all groups
+        math: |
+          Let NumState(cLo-1)=0 denote the initial mathematical numerator.
+          For g=cLo, start C[-1]=0 using overwrite semantics, without reading
+          uninitialized storage. For later groups, C[-1][u,d]=
+          NumState(g-1,u,d)*alpha[u]; a rescale by exactly one may be skipped.
+          For k=0,...,3 and n=0,1, write the disjoint channel slice
+          C[k][:,128*n:128*n+128]=mma32(Prob8[:,32*k:32*k+32],
+            Vb[32*k:32*k+32,128*n:128*n+128],C[k-1][:,128*n:128*n+128]).
+          NumState(g)=C[3]. This carries the FP32 accumulator across groups,
+          rather than first rounding a separate group PV subtotal and adding it.
+          At g=cHi, let live[u]=(DenState[u]>0) and
+          inv[u]=1/DenState[u] when live, otherwise 0.
+          For each valid row write O[b,h,i,d]=bf16(NumState(g,u,d)*inv[u])
+          when live, otherwise bf16(0), using RNE conversion.
+          When LSE is present write MaxState(g,u)+logf(DenState[u])
+          if live and MaxState is finite, otherwise -inf.
+          If the group interval is empty, use zero numerator/denominator and
+          -inf maximum; do not read an uninitialized numerator. NumState is
+          discarded after output. This fused path leaves workspace untouched
+          and returns None through the host entry.
+        symbol:
+          NumState: {meaning: FP32 rounded-probability value numerator, shape: [row: Br, channel: D], dtype: fp32, retention: "carry_forward (b,kh,a); g=cLo-1..cHi"}
+        arithmetic:
+          accumulate: >-
+            PV uses the native block-scaled path described in scores: E4M3
+            probabilities with E8M0 unit scales and original E4M3 V with its
+            key-axis E8M0 scales, with FP32 accumulation and no BF16 intermediate.
+          approx: >-
+            The final reciprocal/division and scalar CUDA logf retain the
+            source compilation path. unknown: no matched numerical error bound
+            for them or for final O/LSE is established by the supplied sources.
+    ledger:
+      baseline: >-
+        Direct Contract evaluation materializing the full FP32 scores and
+        probabilities and E4M3 probabilities before the value product; count
+        logical payload bytes. Worktile figures below explicitly include the
+        source's Br-row padding and useful-group traversal.
+      footprint:
+        - {item: Full score and probability intermediates, change: "9*B*H*Sq*Skv bytes -> none globally; per worktile retained Score and Prob8 use 5*Br*KeyGroup bytes, plus 4*Br*(D+3) logical bytes of carried state", by: [scores, normalize, value_output]}
+      matmul:
+        - {item: Dense products including padding and masks, change: "Per (b,kh,a), 2*G*min(Qph,Sq-q0)*Skv*D MACs -> 2*Br*KeyGroup*Ng*D MACs; masked boundary groups still execute fully, wholly excluded groups are skipped", by: [domain, scores, value_output]}
+      depth:
+        - {item: Group state dependence, change: "ceil_div(Skv,KeyGroup) -> Ng ordered state transitions per worktile; no inter-group reassociation of delayed maxima", by: [domain, normalize]}
+      error:
+        - {item: Numerical departures, change: "Native block-scaled contraction order, carried PV accumulation, separately recurrent half denominators folded only at output, E1 without the low log2(e) correction, and output reciprocal/logf replace reference evaluation choices; no end-to-end error bound is asserted", by: [scores, normalize, value_output]}
+  work_schedule:
+    thesis: >-
+      Give each CTA all grouped heads for one query tile and the complete useful
+      key interval, reusing Q across groups and K/V across those heads. This
+      eliminates cross-CTA split-state traffic and combine kernels, at the cost of one
+      sequential group recurrence per CTA; mask-dependent CTA remapping spreads
+      long and short work without dynamic work claiming.
+    flow:
+      launch: [{phase: [main]}]
+    phase:
+      main:
+        describe: >-
+          One fused tcgen05 kernel computes scores, normalization, PV, O and
+          optional LSE. Model.forward reaches launch_sequence directly or via
+          replay of its captured graph; both submit this same main phase on the
+          caller stream. There is no scratch initialization or auxiliary kernel
+          in this selected path and no host completion synchronization.
+        decomposition:
+          strategy: >-
+            Br=128. Use the domain step's G, Qph, row map and cLo..cHi interval.
+            Each worktile is (kvflat=b*KH+kh, a), covering G heads and Qph query
+            positions. Its last query tile is padded for computation but targets
+            only i<Sq. Each CTA has two warpgroups: both own all Br rows,
+            splitting the current group's keys into [0,64) and [64,128).
+            They exchange maxima every group but carry separate HalfDen states
+            until the final sum. Each owns 128 output channels for numerator
+            rescale/readout; one issuer submits the full QK and both PV channel
+            slices. LSE is written by the first warpgroup when its destination
+            exists. All reductions are local; no worktile reduction follows.
+          partition:
+            kvflat: {size: "B*KH", tile: 1}
+            query: {size: Sq, tile: Qph}
+          worktile:
+            invariant:
+              q_tensor: {shape: [head: G, query: Qph, channel: D], dtype: "ref:contract.algorithm_requirement::q_tensor.dtype"}
+              sf_q: {shape: [scale_row: Br, scale_column: "D/Block"], dtype: "ref:contract.algorithm_requirement::sf_q.dtype"}
+            iteration:
+              k_tensor: {shape: [key: KeyGroup, channel: D], dtype: "ref:contract.algorithm_requirement::k_tensor.dtype", direction: ascending}
+              v_tensor: {shape: [key: KeyGroup, channel: D], dtype: "ref:contract.algorithm_requirement::v_tensor.dtype", direction: ascending}
+              sf_k: {shape: [scale_row: KeyGroup, scale_column: "D/Block"], dtype: "ref:contract.algorithm_requirement::sf_k.dtype", direction: ascending}
+              sf_v: {shape: [channel: D, sequence_block: "KeyGroup/Block"], dtype: "ref:contract.algorithm_requirement::sf_v.dtype", direction: ascending}
+          target:
+            single_tile:
+              O: {shape: [head: G, query: "min(Qph,Sq-q0)", channel: D], dtype: "ref:contract.algorithm_requirement::O.dtype"}
+              LSE: {shape: [head: G, query: "min(Qph,Sq-q0)"], dtype: "ref:contract.algorithm_requirement::LSE.dtype"}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: "B*KH*ceil_div(Sq,Qph)"
+        schedule:
+          strategy: |
+            Let nx=ceil_div(Sq,Qph), ny=B*KH, N=nx*ny and P=SmCount from
+            this node's when. Physical grid=(nx,ny,1); worker_id=d=x+nx*y.
+            The following bijection defines (a(d),k(d)) and
+            WorkId(d)=k(d)*nx+a(d), the logical ascending worktile number.
+            Without a causal/window mask, or with N<=P,
+            a(d)=d mod nx, k(d)=floor(d/nx).
+            With a mask and N>P, let r=N-1-d:
+            a(d)=floor(r/ny), k(d)=r mod ny (source lpt=1).
+            The pair-class lpt=2 branch is unreachable here: D256 sets slots=P.
+            This is a work assignment, not a guarantee of SM placement or
+            simultaneous execution. Each worker ends after its single tile;
+            different CTAs share no recurrence or writable intermediate state.
+          worktile_order:
+            - {by: kvflat, direction: ascending}
+            - {by: query, direction: ascending}
+          worker_assignment:
+            preassigned: {start: "WorkId(worker_id)", count: 1}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: >-
+      Two cooperative warpgroups share a 128-column score tile and a 256-column
+      numerator in a 512-column TMEM allocation. TMA MIDPIPE reissues QK after
+      score readout and the maximum exchange, overlapping it with probabilities
+      and PV; retiring the previous PV protects the single probability tile and
+      numerator. The cp.async variant keeps head-issued QK and same-iteration PV
+      retirement. Both prefetch scale atoms independently of payloads.
+    phase:
+      main:
+        domain:
+          g: [cLo, "cHi+1"]
+        resource:
+          Query:
+            space: SMEM
+            member_slot_shape: [row: Br, channel: D]
+            dtype: fp8_e4m3fn
+            slot_count: 1
+          Key:
+            space: SMEM
+            member_slot_shape: [key: KeyGroup, channel: D]
+            dtype: fp8_e4m3fn
+            slot_count: 3
+            view: {"Key(g)": {slot_index: "(g-cLo)%KeySlotsUsed"}}
+          Value:
+            space: SMEM
+            member_slot_shape: [key: KeyGroup, channel: D]
+            dtype: fp8_e4m3fn
+            slot_count: 2
+            view: {"Value(g)": {slot_index: "(g-cLo)%2"}}
+          KeyAtom:
+            space: SMEM
+            member_slot_shape: [element: 1024]
+            dtype: uint8
+            slot_count: 3
+            view: {"KeyAtom(g)": {slot_index: "(g-cLo)%3"}}
+          ValueAtom:
+            space: SMEM
+            member_slot_shape: [element: 1024]
+            dtype: uint8
+            slot_count: 3
+            view: {"ValueAtom(g)": {slot_index: "(g-cLo)%3"}}
+          TensorMemory:
+            space: TMEM
+            member_slot_shape: [row: Br, column: 512]
+            dtype: fp32
+            slot_count: 1
+            view:
+              ScoreTile: {part: {column: [0, 128]}}
+              NumState: {part: {column: [128, 384]}}
+              QueryScale: {part: {column: [384, 392]}, dtype: uint8}
+              "KeyScale(g)": {part: {column: ["392+8*(g%2)", "400+8*(g%2)"]}, dtype: uint8}
+              UnitScale: {part: {column: [408, 416]}, dtype: uint8}
+              "ValueScale(g)": {part: {column: ["416+8*(g%ValueScaleSlots)", "424+8*(g%ValueScaleSlots)"]}, dtype: uint8}
+              Prob8: {part: {column: [448, 480]}, dtype: fp8_e4m3fn}
+          QueryPrefetch:
+            space: register
+            member_slot_shape: [element: "Br*D+Br*(D/Block)"]
+            dtype: uint8
+            slot_count: 1
+          Score:
+            space: register
+            member_slot_shape: [row: Br, key: KeyGroup]
+            dtype: fp32
+            slot_count: 1
+          RowState:
+            space: register
+            member_slot_shape: [row: Br, half: 2, column: 2]
+            dtype: fp32
+            slot_count: 1
+            view:
+              MaxState: {part: {column: [0, 1]}}
+              HalfDen: {part: {column: [1, 2]}}
+          Exchange:
+            space: SMEM
+            member_slot_shape: [half: 2, row: Br]
+            dtype: fp32
+            slot_count: 1
+            view:
+              HalfMax: {}
+              FinalHalfDen: {}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:8]"
+              verb:
+                setup: >-
+                  Establish the work_schedule coordinates and masks. The q0>=Sq
+                  guard returns before allocation/copying; the exact grid never
+                  takes it. Let TMA mean maps.valid in launch_tcg; MIDPIPE=TMA
+                  under these fixed defaults, KeySlotsUsed=3 if TMA else 2, and
+                  ValueScaleSlots=3 if TMA else 2. SF_AHEAD is true in both.
+                  Thread 0 initializes QK/PV completion barriers and, on TMA,
+                  separate three-slot K and two-slot V transaction barriers,
+                  publishing initialization with the source async-proxy fence.
+                  Threads u and 128+u own row u in the two key halves; MaxState
+                  is duplicated, HalfDen is separate, and PSK is false so padded
+                  rows still compute. Thread 0 issues all MMAs and TMA requests.
+                prepare: >-
+                  Prefetch Q payload and scale words into QueryPrefetch registers
+                  before the first warp allocates 512 TMEM columns. A CTA barrier
+                  publishes the base, then that warp relinquishes its allocation
+                  permit. All warps store Query; only warps 0..3 write replicated
+                  QueryScale and UnitScale atoms and wait for those TMEM stores.
+                  Discard QueryPrefetch after its stores. Query and its scales
+                  survive all groups. Initialize both MaxState copies to -inf
+                  and HalfDen to zero; NumState is not cleared. Unlike root,
+                  the SF_AHEAD prime is not hoisted before this preparation.
+                prime: >-
+                  If Ng>0, TMA issues K(cLo), K(cLo+1) when present, and
+                  V(cLo) separately; each payload is
+                  32768 bytes on its own transaction barrier, with no atoms on
+                  that barrier. cp.async instead stages K/V(cLo) together.
+                  Then issue atoms for cLo through min(cLo+2,cHi) with cp.async
+                  into the three-slot atom rings.
+                  Commit one cp.async group, wait_group 0, and fence shared
+                  visibility. TMA additionally waits for K(cLo); K(cLo+1) and
+                  V(cLo) may remain in flight. A CTA barrier publishes the bytes.
+                  Warps 0..3 copy cLo's K/V atoms to their TMEM slots and wait
+                  for stores, then a before-thread-sync fence and CTA barrier
+                  publish scales and Query. On TMA, thread 0 applies the matching
+                  after-thread-sync fence, enqueues the eight QK contractions
+                  for cLo into ScoreTile and commits QK completion. cp.async
+                  issues no QK here. Ng=0 makes prime a no-op.
+                prefetch: >-
+                  At g, TMA issues K(g+2) when in range; cp.async issues K/V(g+1)
+                  when in range. Both issue K/V atoms(g+3) when in range, commit
+                  one cp.async group and wait_group 1. This completes older
+                  copies, not the newest group. TMA's K refill reuses K(g-1)
+                  only after its QK was waited in the previous iteration.
+                  cp.async's payload refill follows that previous iteration's
+                  QK and PV waits. The atom refill reuses atoms whose TMEM-copy
+                  readers were joined by the preceding CTA publication barrier.
+                stage_scale: >-
+                  Warps 0..3 copy atoms(g+1) from the shared three-slot rings to
+                  KeyScale(g+1) and ValueScale(g+1), then wait for TMEM stores.
+                  These source atoms were proved by the prime or the preceding
+                  iteration's wait_group 1 and published by its CTA barrier.
+                  K alternates two TMEM slots; TMA rotates three V-scale slots
+                  to avoid the still-running PV(g-1), while cp.async uses two
+                  because its previous PV already retired. Even at g=cHi this
+                  read/write executes: its ring bytes can be stale or uninitialized,
+                  stay within the allocation, and have no MMA consumer. No zero
+                  fill or extra wait is introduced for that unused scale write.
+                land_head: >-
+                  cp.async only: fence the completed current K/V shared payloads,
+                  apply the before-thread-sync fence and CTA barrier. This also
+                  publishes the next group's scale stores and completed atom
+                  copies. TMA has no head payload wait, fence or CTA barrier here.
+                qk_head: >-
+                  cp.async only: thread 0 applies the after-thread-sync fence,
+                  enqueues the scores step's eight 32-channel contractions into
+                  all 128 columns of ScoreTile, and commits one QK completion.
+                  The first contraction overwrites. TMA's QK(g) was issued in
+                  prime or the preceding qk_next. done denotes enqueue only.
+                read_score: >-
+                  All threads wait for QK(g), advance its parity once and apply
+                  the after-thread-sync fence. Each warpgroup reads its 64 keys
+                  per row into Score with two self-retiring 32-column TMEM loads,
+                  applies masks, and reduces its half maximum. Retain all scores
+                  for probabilities; each row's reduction is lane-local here.
+                retire: >-
+                  Previous(g) waits for PV(g-1) only on TMA and g>cLo;
+                  Current(g) waits for PV(g) only on cp.async. Other cases are
+                  no-ops. A real wait advances the PV phase once and applies the
+                  after-thread-sync fence, completing NumState updates and all
+                  reads of that PV's Value, ValueScale and Prob8. The first TMA
+                  iteration has no previous PV; the final PV retires at drain.
+                mid_land: >-
+                  TMA only, after Previous: issue V(g+1) when present into the
+                  initially unused slot, or the slot freed by PV(g-1), then
+                  wait separately for K(g+1) when present and V(g). Fence shared visibility and
+                  apply the before-thread-sync fence. Per-slot barrier parity
+                  follows floor((g-cLo+1)/3)%2 for the next K and
+                  floor((g-cLo)/2)%2 for current V. This action leaves publication
+                  to combine_max's CTA barrier; it introduces no head barrier.
+                combine_max: >-
+                  Both warpgroups write their HalfMax rows into Exchange,
+                  CTA-sync, and read both halves to form the full-group maximum.
+                  On TMA this same barrier joins every ScoreTile readout and
+                  publishes the head scale stores and mid_land operands before
+                  the next QK. Exchange readers finish before advance's later
+                  publication barrier, which protects its next overwrite.
+                qk_next: >-
+                  TMA only and g<cHi: thread 0 applies the after-thread-sync fence,
+                  enqueues QK(g+1) into the now-reusable single ScoreTile using
+                  K(g+1) and KeyScale(g+1), and commits its completion. done means
+                  enqueue. It can run during advance, PV(g), and the next head;
+                  the next read_score owns its wait. All other cases are no-ops.
+                advance: >-
+                  Apply normalize to each retained key half and its HalfDen,
+                  with identical MaxState updates in both warpgroups. After the
+                  first group, any warp with alpha unequal to one rescales its
+                  own 128 NumState channels in 32-column load/multiply/store
+                  chunks and waits for stores; all lanes of that warp participate.
+                  The first group never reads NumState. Each warpgroup computes
+                  and packs its Prob8 half directly into TMEM and waits for its
+                  stores. A before-thread-sync fence and CTA barrier publish all
+                  probability/rescale writes before PV and protect Exchange reuse.
+                  Score and group temporaries are now dead.
+                pv: >-
+                  Thread 0 applies the after-thread-sync fence, enqueues four
+                  ordered key contractions for each of two 128-channel output
+                  slices (key block outer, channel slice inner), and commits PV
+                  completion. Prob8 is TMEM A, Value(g) is shared B, with unit
+                  probability scales and ValueScale(g). For each channel slice,
+                  the first contraction of cLo overwrites NumState; later ones
+                  accumulate. done means enqueue, with no numerator readback or
+                  tail CTA barrier. Completion belongs to retire or drain.
+                drain: >-
+                  TMA and Ng>0: wait for the one final outstanding PV and apply
+                  its completion fence before output. cp.async already retired
+                  that PV in Current. All requested payloads and atoms have been
+                  consumed and waited; the final cp.async commit is empty. The
+                  source adds no final wait_group 0 or generic pipeline reset.
+                fold: >-
+                  Write each warpgroup's final HalfDen into the reused Exchange,
+                  CTA-sync, and add half 0 then half 1, giving both warpgroups
+                  DenState and inv. This is the only denominator exchange.
+                write: >-
+                  Each warpgroup reads its own 128 NumState channels in four
+                  self-retiring 32-column loads, or uses zero chunks if Ng=0.
+                  Valid rows issue BF16 RNE stores into their disjoint caller O
+                  regions using value_output. Only warpgroup 0 writes optional
+                  LSE. Padded rows compute/read but store no output. Initial
+                  destination bytes are never read. done means ordinary stores
+                  issued with their register sources consumed, not global completion.
+                finish: >-
+                  A before-thread-sync fence and CTA barrier join final TMEM
+                  readers, then the first warp deallocates all 512 columns.
+                  This CTA has no next worktile. Other CTAs have independent
+                  resources; kernel completion gives caller-stream visibility.
+                  Every invocation initializes fresh numerical state; host
+                  descriptor/graph caches retain no recurrence state.
+            pipe:
+              prologue: ["setup:Local", "prepare:Query", "prime:Inputs"]
+              steady:
+                - repeat: g
+                  steady:
+                    - "prefetch:Inputs(g)"
+                    - "stage_scale:Next(g)"
+                    - "land_head:Current(g)"
+                    - "qk_head:ScoreTile(g)"
+                    - "read_score:Score(g)"
+                    - "retire:Previous(g)"
+                    - "mid_land:Operands(g)"
+                    - "combine_max:HalfMax(g)"
+                    - "qk_next:ScoreTile(g)"
+                    - "advance:StateProb(g)"
+                    - "pv:NumState(g)"
+                    - "retire:Current(g)"
+              epilogue: ["drain:LastPV", "fold:FinalHalfDen", "write:Output", "finish:Local"]
+realization:
+  require:
+    - item: "design.tile_pipeline::main"
+      choice: >-
+        Bind completion and visibility to the fixed fmha_tcg_ptx.cuh wrappers:
+        tcg_commit plus parity mbar_wait for QK/PV chains, tcg_ld32's wait::ld,
+        wait::st for TMEM stores, and before/after thread-sync fences around the
+        stated CTA barriers. TMA uses transaction-byte completion for payloads;
+        scale atoms always use cp.async committed-group completion here.
+      reason: >-
+        CTA synchronization alone does not finish asynchronous products, retire
+        TMEM accesses or establish shared async-proxy visibility. Those distinct
+        guarantees protect the single score, probability and numerator regions.
+    - item: "design.tile_pipeline::main.TensorMemory"
+      choice: >-
+        Preserve compatible SWIZZLE_128B shared operands and tcgen05
+        block_scale.scale_vec::1X descriptors: QK uses K-major Q/K, PV uses
+        packed TMEM A and MN-major V. The shared operand window is 1024-byte
+        aligned and scale atoms use the replicated TMEM representation.
+      reason: >-
+        Payloads, probabilities and E8M0 atoms must select the same contractions
+        across both 128-channel chunks and the two key-half readers.
+    - item: "design.tile_pipeline::main"
+      choice: >-
+        launch_tcg passes TcgSmem<256,PASS_FUSED,2>::bytes=222208 to
+        tmem_safe_smem for both variants. This includes the unused 16384-byte
+        shared probability reservation, 1024-byte Q-scale reservation and
+        1024-byte alignment allowance; cp.async also leaves the third allocated
+        32768-byte K slot unused. At this size the helper publishes the dynamic
+        request without growing it. Preserve its attribute/launch failure behavior.
+      reason: >-
+        Actual allocation exceeds the live buffers; with 512 TMEM columns it
+        affects launch capacity. The request and runtime probes do not guarantee
+        successful residency, and the source provides no additional recovery here.

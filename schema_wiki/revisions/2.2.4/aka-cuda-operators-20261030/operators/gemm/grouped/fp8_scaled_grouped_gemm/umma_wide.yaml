@@ -1,0 +1,458 @@
+meta_data:
+  name: fp8_scaled_grouped_gemm
+  describe: Compute independently scaled FP8 grouped NT matrix products into a caller-owned BF16 output.
+  source: KernelSchema@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate/fp8gg_umma.cu::umma_wide
+  version: 1
+  dispatch:
+    id: umma_wide
+    parent: root
+    when: |
+      Let U mean that Model.engines.engine retains "umma" in the normal build.
+      Initialization queries CUDA device 0 and attempts UMMA only for major=10;
+      build/load success retains U, even if the optional C binding fails.
+      Otherwise initialization attempts mma.sync. Use the indptr address p,
+      dimensions G,m,n,k and saved SM count S actually passed to fp8umma_run
+      after argument-memo handling. Let R be sched_policy's returned engine.
+      Its single-entry module cache is keyed by (p,G,m,n,k); a hit reuses R
+      without rereading indptr contents or checking S.
+      On a miss, start R=0. Evaluate the gates only if G<=116, indptr D2H copy
+      and stream synchronization succeed, h[0]>=0, and every copied pair obeys
+      h[i+1]>=h[i] and h[i+1]<=m. Let A count positive group lengths,
+      T=sum_i ceil_div(h[i+1]-h[i],128), B=k/128, and I=T*(n/256).
+      Set R=1 exactly when n%256=0, A>0, S>0, and at least one holds:
+        B>=32 and ((I>=4*S and T>=4*A) or (B<=48 and 2*I>=5*S and T>=A));
+        B>=16 and I>=8*S and T>=2*A;
+        8<=B<=12 and I>=10*S and T>=A;
+        B>=16 and I>=8*S and T==A;
+        8<=B<=20 and I>=4*S and T>=2*A.
+      If R=1 and B<=20 and 2*T>=3*A, set R=2. Cache the result, including
+      R=0 after failed copy, synchronization or endpoint checks.
+      Select this node exactly when U and R is 1 or 2. R=1 uses w1f;
+      R=2 uses w1g unless g_w1g_off is already set or its direct launch reports
+      an immediate error, which sets g_w1g_off and attempts w1f. Both are this
+      node. Selection does not guarantee configuration or execution success.
+      Diagnostic force-engine, force-SAREG and force-dual macros are absent.
+design:
+  math_reshape:
+    thesis: >-
+      Contract the stored FP8 operands independently within each scale block,
+      then promote each partial product with the product of its two FP32 scales.
+      This avoids full dequantized operands, at the cost of padded row work and
+      a different rounding path from the reference. These relations describe the
+      launch operands; the host memo described below does not ensure that saved
+      ABI arguments still describe the current tensor views after metadata changes.
+    rewrite:
+      - step: block_product
+        name: Independent unscaled scale-block products
+        math: |
+          For 0<=e<E, let L_e = m_indptr[e+1]-m_indptr[e], T_e = ceil_div(L_e,Bm),
+          T = sum_e T_e, Mr = Bm*T, NB = N/Bn, KB = K/ScaleK, NG = Bn/ScaleN.
+          A tile (e,mt,nt) has r0=m_indptr[e]+mt*Bm, c0=nt*Bn,
+          V=min(Bm,m_indptr[e+1]-r0), with 0<=mt<T_e and 0<=nt<NB.
+          For each 0<=h<KB, define D(h) on 0<=u<V, 0<=v<Bn by
+            D(h)[u,v] = mm32(a[r0:r0+V,h*ScaleK:(h+1)*ScaleK],
+                            b[e,c0:c0+Bn,h*ScaleK:(h+1)*ScaleK]^T)[u,v].
+          Each D(h) starts from zero and contracts four consecutive 32-element
+          segments; partial products of different h are not accumulated together.
+          The implementation also evaluates the same independent rows up to Bm:
+          rows u>=V use the payloads retained or loaded by the tile pipeline and
+          their products are discarded. They cannot contribute to a valid row.
+        symbol:
+          Bm: {meaning: Output tile row extent., binding: "bind:design.work_schedule::Bm"}
+          Bn: {meaning: Output tile column extent., binding: "bind:design.work_schedule::Bn"}
+          D:
+            meaning: Unscaled FP32 product for one reduction scale block, including discarded padded rows.
+            shape: [row: Bm, column: Bn]
+            dtype: fp32
+            retention: "keep_value (e,mt,nt,h)"
+        arithmetic:
+          accumulate: >-
+            Each four-segment product uses the source tcgen05 f8f6f4 path with
+            FP32 destination; its first segment disables accumulation and the
+            next three accumulate. This describes the issued grouping, without
+            asserting a software FP32 reduction tree or reference bitwise equality.
+      - step: promote
+        name: Ordered scale promotion and final output
+        math: |
+          For every tile, S(-1)[u,v]=0 for 0<=u<Bm, 0<=v<Bn.
+          For h=0..KB-1 in increasing order, let
+            alpha_h[u] = a_scale[h,r0+u] if r0+u<M, else 0,
+            sigma_h[u,g] = fp32(alpha_h[u]*b_scale[e,h,nt*NG+g]), 0<=g<NG,
+            S(h)[u,v] = fma32(sigma_h[u,floor(v/ScaleN)],D(h)[u,v],S(h-1)[u,v]).
+          This also evaluates the discarded u>=V rows; alpha is masked by M,
+          not by the group endpoint. Only for u<V, write
+            Y[r0+u,c0+v] = bf16(S(KB-1)[u,v]).
+          No previous out value is consumed. Return out by identity after
+          submission; the kernel writes its view only. Empty groups have no tiles.
+        symbol:
+          S:
+            meaning: Scaled output accumulator reset for each tile and retained until BF16 writeback.
+            shape: [row: Bm, column: Bn]
+            dtype: fp32
+            retention: "carry_forward (e,mt,nt); h=-1..KB-1"
+    ledger:
+      baseline: >-
+        Materialize the Contract's full FP32 A_dequant and B_dequant, then perform
+        each group's unpadded FP32 matrix product and convert its result to BF16.
+      footprint:
+        - item: Full dequantized operands
+          change: "Remove 4*(M*K+E*N*K) bytes of global intermediate storage; retain only bounded tile products and scaled accumulators."
+          by: [block_product, promote]
+      matmul:
+        - item: Contraction work including masked rows
+          change: "2*M*N*K unpadded FP32 FLOPs become 2*Mr*N*K FP8-input contraction FLOPs; 2*(Mr-M)*N*K FLOPs produce discarded rows."
+          by: [block_product]
+      vector:
+        - item: Scale application
+          change: "Replace M*K+E*N*K FP32 dequantization multiplies by Mr*(N/ScaleN)*KB FP32 scale products and Mr*N*KB FP32 FMAs, including discarded rows."
+          by: [promote]
+      error:
+        - item: Changed rounding locations
+          change: >-
+            Remove per-input dequantization rounding, introduce rounded products
+            of scales and scale-block FP32 partials followed by ordered FMAs;
+            retain final RNE BF16 conversion. No numerical error bound is supplied
+            for this reassociation; the Contract acceptance source gap remains.
+          by: [block_product, promote]
+  work_schedule:
+    thesis: >-
+      Assign complete 128-by-256 output tiles to persistent CTAs with static
+      grid-stride ownership. Keep the K reduction local, one scale block per
+      round; wider columns reuse A across two weight-scale groups but double
+      each tile's output state.
+    flow:
+      launch: [{phase: [main]}]
+    phase:
+      main:
+        describe: Compute every group's physical rows and all columns directly into out.
+        decomposition:
+          strategy: |
+            Bm=128 and Bn=256. Let Q_0=0 and Q_{e+1}=Q_e+T_e.
+            Independent work IDs satisfy 0<=w<W=T*NB. Find the nonempty group e
+            with Q_e*NB<=w<Q_{e+1}*NB, then nt=floor((w-Q_e*NB)/T_e)
+            and mt=(w-Q_e*NB)%T_e. Thus group is outermost, column tile next,
+            row tile innermost. Each worktile owns V-by-Bn outputs and traverses
+            h=0..KB-1. There is no split-K or cross-work merge.
+            Each CTA rereads m_indptr into local storage; its first thread builds
+            Q. Producer and epilogue each retain a monotonic group-search hint.
+            A/B payloads and scales vary by h. A is shared across Bn columns;
+            each row uses one a_scale and two b_scale values, one per ScaleN
+            columns. The two column groups independently load that same a_scale.
+          partition:
+            work: {size: "T*NB", tile: 1}
+          worktile:
+            invariant:
+              m_indptr: {shape: [boundary: "E+1"], dtype: "ref:contract.algorithm_requirement::m_indptr.dtype"}
+            iteration:
+              a: {shape: [row: Bm, reduction: ScaleK], dtype: "ref:contract.algorithm_requirement::a.dtype", direction: ascending}
+              b: {shape: [column: Bn, reduction: ScaleK], dtype: "ref:contract.algorithm_requirement::b.dtype", direction: ascending}
+              a_scale: {shape: [reduction_block: 1, row: Bm], dtype: "ref:contract.algorithm_requirement::a_scale.dtype", direction: ascending}
+              b_scale: {shape: [reduction_block: 1, column_block: NG], dtype: "ref:contract.algorithm_requirement::b_scale.dtype", direction: ascending}
+          target:
+            single_tile:
+              Y: {shape: [row: V, column: Bn], dtype: "ref:contract.algorithm_requirement::Y.dtype"}
+        mapping:
+          strategy: |
+            Wub=(ceil_div(M,Bm)+E)*NB; C=max(1,min(Wub,SavedSM)).
+            SavedSM is the engine's retained CUDA-device-0 SM count actually
+            passed by the argument wrapper. Launch C CTAs of 320 threads each;
+            C is an upper-bound-based submission count, not exact work count
+            or a guaranteed resident count.
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: C
+        schedule:
+          strategy: |
+            Model.forward reaches fp8umma_run through the C binding or ctypes,
+            then submits umma_wide by graph or direct launch. Forward returns
+            the same out without waiting for this kernel to complete. Nonzero
+            return codes raise RuntimeError; there is no runtime mma.sync rescue.
+            Six live weakref identities select saved pointers and dimensions:
+            the C module memo is shared; the Python fallback memo is per Model.
+            Hits refresh the stream but skip tensor metadata validation and pointer
+            extraction. Misses validate and replace the memo; failed C memo setup
+            or storage disables that path, retaining the ordinary binding/ctypes
+            path. Tensor metadata immutability is not checked or guaranteed.
+            sched_policy's retained key/selection is defined in this node's when; its
+            pp flag defaults to zero and, on a successful valid miss, is one iff
+            the copied total row-tile count equals its count of nonempty groups.
+            pp requests B evict-first loads. Device Q is rebuilt even on host hits.
+            Tensor maps are cached by (pointer,rows,columns): A and out have
+            four slots each; B256 and each smaller A-height map have two each.
+            Misses replace slots round-robin. If any smaller A map fails, abox=0
+            and all A loads use height 128; primary A/B/out map failure returns 1002.
+            Each wide variant has its own module-local single-node graph slot
+            and permanent graph-disable flag. Its hit key is six pointers plus
+            M,N,K,E,C,abox; it omits stream and pp. A hit launches saved ParamsW,
+            including saved bstream, on the current stream. A miss attempts to
+            destroy the old graph/exec, ignoring destruction return codes,
+            then rebuilds with current ParamsW and map
+            copies. Failure of a checked graph create, add-node, instantiate or
+            launch call permanently disables this graph path and attempts direct
+            launch of that variant. An immediate error from direct w1g sets
+            g_w1g_off permanently and attempts w1f; this adds no completion wait.
+            A preexisting g_w1g_off also redirects engine=2 to w1f. A map or
+            capacity error returns directly; asynchronous faults are not tested
+            here. No attempt is guaranteed to succeed.
+            On first configuration the host checks capacity for all UMMA engines
+            against CUDA device 0, returning 1003 on insufficient capacity; it
+            ignores the function-attribute setters' status and retains cfg.
+            The ABI stages argument is ignored. w1f instantiates
+            umma_wide<4,32768,0>; w1g instantiates umma_wide<3,65536,1>.
+          worktile_order: [{by: work, direction: ascending}]
+          worker_assignment:
+            preassigned: {start: worker_id, step: worker_count}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: >-
+      Overlap single-block operand transfers, two TMEM product slots and
+      register-scale promotion. Use (L,Cs)=(4,128) for w1f or (3,256) for w1g:
+      L operand stages trade against Cs columns of output staging. Products
+      release after their last read, before the last promotion batch; output
+      stores can continue across worktiles.
+    phase:
+      main:
+        domain:
+          t: worktile
+          h: [0, KB]
+          n: {flatten: [t, h]}
+          d: [0, 4]
+          z: [0, "Bn/Cs"]
+        resource:
+          OperandRing:
+            space: SMEM
+            member_slot_shape: [element: 49152]
+            dtype: fp8_e4m3fn
+            slot_count: L
+            view:
+              "A(n)": {slot_index: "n%L", part: {element: [0, 16384]}}
+              "B(n)": {slot_index: "n%L", part: {element: [16384, 49152]}}
+          Products:
+            space: TMEM
+            member_slot_shape: [row: Bm, column: Bn]
+            dtype: fp32
+            slot_count: 2
+            view:
+              "DBlock(n)": {slot_index: "n%2"}
+          ScaleAhead:
+            space: register
+            member_slot_shape: [row: Bm, column_block: NG, operand: 2, reduction_block: 2]
+            dtype: fp32
+            slot_count: 1
+          ScaleProduct:
+            space: register
+            member_slot_shape: [row: Bm, column_block: NG]
+            dtype: fp32
+            slot_count: 1
+          Fragments:
+            space: register
+            member_slot_shape: [row: Bm, column_block: NG, column: 32]
+            dtype: fp32
+            slot_count: 2
+            view:
+              "Fragment(n,d)": {slot_index: "d%2"}
+          S:
+            space: register
+            member_slot_shape: [row: Bm, column: Bn]
+            dtype: fp32
+            slot_count: 1
+          Staging:
+            space: SMEM
+            member_slot_shape: [row: Bm, column: Cs]
+            dtype: bf16
+            slot_count: 1
+            view:
+              "Output(t,z)": {}
+          Schedule:
+            space: SMEM
+            member_slot_shape: [element: "2*(E+1)"]
+            dtype: int32
+            slot_count: 1
+        role:
+          Setup:
+            info:
+              execution_mode: serial
+              member: "warp[0:10]"
+              verb:
+                publish: >-
+                  Cooperatively copy m_indptr, synchronize, then thread 0 builds
+                  Q and initializes L operand-ready and L product-done barriers
+                  with count 1, plus two reader barriers with count 256.
+                  Warp 9 allocates 512 TMEM columns and relinquishes its permit.
+                  Publish Context after the initialization fence and CTA barrier.
+                  Operand storage is not cleared. Counters start at zero; initial
+                  parity waits permit first use without old readers. Schedule
+                  retains offsets and Q throughout this CTA.
+                release: >-
+                  Join at the final CTA barrier, then warp 9 deallocates TMEM.
+                  There is no per-worktile CTA barrier or ring-counter reset.
+                  CTAs without assigned work still initialize, join and deallocate.
+            pipe:
+              prologue: ["publish:Context"]
+              epilogue: ["release:Context"]
+            waits_for:
+              sync:
+                "release:Context": ["Producer/arrive:Exit", "MMA/arrive:Exit", "Epilogue/wait:OutputDrain"]
+          Producer:
+            info:
+              execution_mode: async
+              member: "warp[8:9]"
+              verb:
+                wait: {execution_mode: serial, meaning: Wait for Context publication before issuing transfers.}
+                load: >-
+                  Lane 0 decodes the worktile and issues AB(n), its single-block
+                  A/B payloads. With abox, choose the smallest H in {16,32,64,128}
+                  covering V; otherwise H=128. Expect H*128+256*128 transaction
+                  bytes, then load H-by-128 A and 256-by-128 B bytes into slot n%L.
+                  Done means both TMA transfers completed. A boxes can cross the
+                  group endpoint; global tensor-map OOB rows are zero-filled.
+                  Rows H..127 are unwritten and retain old or initially
+                  uninitialized bytes, which MMA still reads for discarded rows.
+                  B uses the effective ParamsW.bstream hint from the host schedule.
+                arrive: Reach the final CTA join after issuing all assigned transfers; this adds no independent transfer drain.
+            pipe:
+              prologue: ["wait:Context"]
+              steady:
+                - repeat: n
+                  steady: ["load:AB(n)"]
+              epilogue: ["arrive:Exit"]
+            waits_for:
+              reuse:
+                "load:AB(n+L)": ["MMA/mma:A(n)@B(n)"]
+          MMA:
+            info:
+              execution_mode: async
+              member: "warp[9:10]"
+              verb:
+                wait: {execution_mode: serial, meaning: Wait for Context publication before issuing products.}
+                mma: >-
+                  Lane 0 waits for operands and prior readers of Products slot
+                  n%2, then applies the TMEM synchronization fence. Issue four
+                  consecutive 128-by-256-by-32 products, initializing DBlock(n)
+                  on the first and accumulating the other three. DBlock(n) is
+                  D(h) for this worktile. Commit once to the operand-stage
+                  product-done barrier. Done publishes DBlock(n) and ends every
+                  operand read, allowing OperandRing reuse; it does not imply
+                  that the epilogue has consumed the product.
+                arrive: Reach the final CTA join after issuing all assigned products, without an extra MMA drain.
+            pipe:
+              prologue: ["wait:Context"]
+              steady:
+                - repeat: n
+                  steady: ["mma:A(n)@B(n)"]
+              epilogue: ["arrive:Exit"]
+            waits_for:
+              data:
+                "mma:A(n)@B(n)": ["Producer/load:AB(n)"]
+              reuse:
+                "mma:A(n+2)@B(n+2)": ["Epilogue/release:DBlock(n)"]
+          Epilogue:
+            info:
+              execution_mode: serial
+              member: "warp[0:8]"
+              verb:
+                zero: >-
+                  Each thread owns row (warp%4)*32+lane and column group
+                  floor(warp/4), holding that row's 128 columns of S. Decode
+                  group/row/column bounds and reset S per worktile. Padded rows
+                  follow the same compute path but never store output.
+                seed: >-
+                  Issue register loads of current and next a_scale/b_scale
+                  (h=0 and 1) into ScaleAhead. A is masked by r0+u<M, not by the
+                  group endpoint; a false predicate supplies zero. B selects
+                  nt*NG+group. Done means load issue, not lookahead readiness;
+                  actual register uses wait for their loads. No scale SMEM or
+                  collective scale barrier is used.
+                capture: >-
+                  Consume the current A/B scalars and compute sigma_h as
+                  ScaleProduct, retained through all four promotion batches.
+                  Rotate next into current and issue lookahead for h+2; entries
+                  outside KB become zero without loading. Done covers current
+                  consumption, rotation and lookahead issue, without requiring
+                  lookahead completion. At work end all prefetched payloads
+                  have been consumed; there is no added scale drain or reset
+                  protocol beyond seeding the next worktile.
+                load:
+                  execution_mode: async
+                  meaning: >-
+                    Before d=0, wait for the product-done barrier and apply the
+                    TMEM synchronization fence. Fragment(n,d) is columns 32*d..32*d+31 within each
+                    thread's 128-column group, read by two x16 TMEM loads.
+                    Done means the all-outstanding TMEM-load wait retired them.
+                compute: >-
+                  Promote Fragment(n,d) into the corresponding S columns using
+                  ScaleProduct. For d<3 the next fragment loads have already
+                  issued, overlapping this register-only FMA batch.
+                release: >-
+                  For DBlock(n), each thread arrives at its reader barrier after
+                  its last TMEM reads retire and before its own final FMAs,
+                  without waiting for peers; MMA slot reuse requires all 256
+                  arrivals. For Staging(t,z), only on full tiles, warp 0 lane 0
+                  waits until all earlier bulk stores finish reading staging
+                  (if any), then all 256 epilogue threads synchronize. This is
+                  also required between w1f's two column halves. Tail tiles do
+                  neither, so prior bulk stores may remain in flight across them.
+                stage: >-
+                  For full tiles, pack S columns z*Cs..(z+1)*Cs to BF16 in
+                  Staging, publish writes to the asynchronous proxy, then
+                  synchronize all 256 epilogue threads. With Cs=128 only the
+                  matching column group packs; with Cs=256 both groups pack.
+                  Tail tiles do nothing here.
+                store:
+                  execution_mode: async
+                  meaning: >-
+                    On full tiles, warp 0 lane 0 issues Cs/64 TMA boxes, each
+                    128 rows by 64 BF16 columns, and commits one bulk group.
+                    Thus w1f submits two boxes in each of two passes and w1g
+                    submits four in one pass. Tail tiles only at z=0 convert
+                    and issue 16-byte direct stores for all columns of rows
+                    u<V; later z is a no-op. Done means global writes completed,
+                    distinct from staging becoming reusable. This action no
+                    longer reads its S columns after issue.
+                wait: >-
+                  Context waits for setup. OutputDrain makes the designated
+                  issuer wait for all bulk writes if any full tile was stored,
+                  then reaches the final CTA join. A worker with no work has
+                  no writes to drain. Direct tail stores need no bulk-group wait.
+            pipe:
+              prologue: ["wait:Context"]
+              steady:
+                - repeat: t
+                  steady:
+                    - "zero:S(t)"
+                    - "seed:ScaleAhead(t)"
+                    - repeat: "n[t]"
+                      steady:
+                        - "capture:Scales(n)"
+                        - "load:Fragment(n,0)"
+                        - repeat: "d[0:3]"
+                          steady: ["load:Fragment(n,d+1)", "compute:SFragment(n,d)"]
+                        - "release:DBlock(n)"
+                        - "compute:SFragment(n,3)"
+                    - repeat: z
+                      steady: ["release:Staging(t,z)", "stage:Output(t,z)", "store:Y(t,z)"]
+              epilogue: ["wait:OutputDrain"]
+            waits_for:
+              data:
+                "load:Fragment(n,0)": ["MMA/mma:A(n)@B(n)"]
+                "compute:SFragment(n,d)": ["load:Fragment(n,d)"]
+                "release:DBlock(n)": ["load:Fragment(n,3)"]
+              sync:
+                "load:Fragment(n,d+1)": ["load:Fragment(n,d)"]
+realization:
+  require:
+    - item: ["design.tile_pipeline::main.OperandRing", "design.tile_pipeline::main.Staging"]
+      choice: >-
+        Use mutually compatible 128-byte-swizzled TMA maps, shared operand
+        descriptors and staging layouts. Input maps interpret byte payloads with
+        K-byte row stride; the MMA descriptor uses 16-byte leading and 1024-byte
+        stride offsets. The output UINT16 map uses a 2*N-byte row stride and
+        64-column by 128-row boxes, each matching a 16-KiB swizzled BF16 region
+        of staging. Request 49152*L+2*Bm*Cs+1024 dynamic shared bytes: 230400 for
+        w1f or 214016 for w1g, including the 1-KiB barrier/schedule tail and no
+        SMEM scale ring. Use the source's 1024-byte shared-base alignment.
+      reason: >-
+        Descriptor interpretation must agree with transfer and packing layout;
+        otherwise the established payload and output coordinates change. The
+        capacity includes required non-payload storage and is only a launch
+        request, not proof that configuration or launch succeeded.

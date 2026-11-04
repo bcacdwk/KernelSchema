@@ -1,0 +1,680 @@
+"meta_data":
+  "name": "nvfp4_fused_moe"
+  "describe": "Compute a pre-routed expert MLP with prepared NVFP4 weights, blockwise\
+    \ activation quantization, and a weighted expert reduction."
+  "source": "source@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward"
+  "version": 1
+  "dispatch":
+    "id": "ws12_mono"
+    "parent": "ws_fused_mono"
+    "when": |
+      Let a be the effective ABI after Model.forward validation and content gates,
+      or the cached ABI reused by its host fast path; use the launch choices baked
+      into a replayed graph. Select exactly when a.zflag=0, the actual FC1 selected
+      by launch_gemm is f4_ws_g1<64,4,4> (cfg26 with an encoded weight map), and
+      the actual FC2 is f4_body with GEMM1=false and REDF=false. Classify FC2 by
+      its terminal implementation, including source-provided map-refusal fallback.
+      FC1 cfg26 map refusal instead selects monolithic cp.async FC1 and is outside
+      this node. A rejected submission acquires no replacement kernel. Parent is
+      only the copying origin; this condition applies independently over the shared
+      Contract. In-place tensor changes do not rebuild cached configuration.
+      Let S be a.small_thresh when positive, otherwise native small_threshold();
+      graph replay uses its captured preparation choice. Rcap=T*K. The sticky
+      FC1 diagnostic flag and timeout behavior below do not narrow this selection.
+design:
+  math_reshape:
+    thesis: |-
+      Compact routes by expert, gather stored input bytes inside FC1, and fuse paired projection, scalar approximate activation and corrected-quotient FP4 quantization. Packed intermediates avoid full FP32 materialization, at the cost of dense padded arithmetic and repeated input reads per FC1 channel tile.
+    rewrite:
+    - step: routing
+      name: Compact routes and enumerate expert tiles
+      math: |
+        Rcap = T*K. V = {(t,k) | 0 <= route_ids[t,k] < E}; Rv = count(V).
+        counts[e] = count({(t,k) in V | route_ids[t,k]=e}).
+        offs[0]=toffs[0]=0; offs[e+1]=offs[e]+counts[e];
+        toffs[e+1]=toffs[e]+ceil_div(counts[e],Bm). J=toffs[E]; P=Bm*J.
+        The preparation policy is bound by design.work_schedule.
+        With multi-kernel preparation, fill starts at zero. Each consecutive group of
+        256 slots (aggregated scatter) or 32 slots (warp scatter) reserves counts_group[e]
+        positions at offs[e]+old(fill[e]); fill[e] increases by counts_group[e]. Local
+        ranks fill the reservation, unordered for aggregated scatter and in slot order otherwise.
+        With small preparation, split Rcap slots into up to 32 consecutive groups of
+        L=32*ceil_div(ceil_div(Rcap,32),32) slots. Prefix their expert counts in group order;
+        local atomic ranks place each group's routes after all earlier groups' routes.
+        New counts/fill scratch is zero-initialized. Small preparation does not touch global fill;
+        its prior value is unused.
+        Thus route_of maps V bijectively onto [0,Rv), grouped by expert but unordered within
+        an expert; route_of[t,k]=-1 outside V. Route[route_of[t,k],:] = (t,k,route_ids[t,k]).
+        For toffs[e] <= j < toffs[e+1], Tile[j,:]=(e,Bm*(j-toffs[e])).
+        Jcap=ceil_div(Rcap,Bm)+min(E,Rcap). Only Route[0:Rv] and Tile[0:J] are written;
+        their remaining capacity retains unspecified prior bytes. All route_of entries are written.
+        Prepared denotes the logical union (counts,offs,toffs,Route,route_of,Tile) written
+        by small preparation, in exactly these same allocations; it adds no copy.
+      symbol:
+        Bm: {meaning: Dense route rows per projection worktile, binding: 'bind:design.work_schedule::Bm'}
+        Bn1: {meaning: Intermediate channels per fused FC1 worktile, binding: 'bind:design.work_schedule::Bn1'}
+        Bn2: {meaning: Hidden channels per FC2 worktile, binding: 'bind:design.work_schedule::Bn2'}
+        counts: {meaning: Active route histogram, shape: [{expert: E}], dtype: int32, retention: keep_value invocation}
+        fill: {meaning: Multi-kernel scatter counters ending at counts; unused and unchanged by small preparation, shape: [
+            {expert: E}], dtype: int32, retention: keep_value invocation}
+        counts_group: {meaning: Histogram contribution from one group of slots, shape: [{expert: E}], dtype: int32}
+        offs: {meaning: Exclusive route prefixes, shape: [{prefix: E+1}], dtype: int32, retention: keep_value invocation}
+        toffs: {meaning: Exclusive tile prefixes, shape: [{prefix: E+1}], dtype: int32, retention: keep_value invocation}
+        Route:
+          meaning: Logical columns ptok pslot pexp in separate arrays; FC1 reads ptok directly
+          shape: [{route: Rcap}, {field: 3}]
+          dtype: int32
+          retention: keep_value invocation
+        route_of: {meaning: Original slot to compact row mapping, shape: [{token: T}, {slot: K}], dtype: int32, retention: keep_value
+            invocation}
+        Tile: {meaning: Logical columns texp and tm0 in separate arrays, shape: [{tile: Jcap}, {field: 2}], dtype: int32,
+          retention: keep_value invocation}
+        Prepared: {meaning: Logical union of the small preparation outputs in their existing arrays, shape: [{word: 3*E+2+4*Rcap+2*Jcap}],
+          dtype: int32, retention: keep_value invocation}
+    - step: operands
+      name: Decode stored values without a global gather
+      math: |
+        Decode hidden_states and hidden_states_scale by Contract's stored-operand rule.
+        Decode W1 and W2 by Contract's prepared weight row/scale layout, without
+        materializing decoded tensors. FC1 reads the original token through Route;
+        there is no route-major input allocation or separate gather pass.
+    - step: fc1
+      name: Paired projection with dense padded rows
+      math: |
+        For each j<J and n1<I/Bn1, let (e,m0)=Tile[j], b=offs[e]+m0,
+        v=min(Bm,counts[e]-m0), and n=n1*Bn1. Evaluate all Bm rows.
+        Both payload and scales for row m come from hidden token
+        Route[b+(m if m<v else 0),0]. All Bm rows are read and evaluated; padded rows
+        repeat the first valid route and their results are discarded.
+        These equations require FC1's diagnostic waits to observe their requested
+        completions. If a wait is bypassed as described in tile_pipeline, the source
+        continues without readiness/reuse guarantees; D1, Aq, As and Y then have no
+        established mathematical result. This behavior remains in this node's scope.
+        Let Xtile be these decoded operands and Wpair concatenate W1[e,n:n+Bn1,:]
+        with W1[e,I+n:I+n+Bn1,:]. D1(-1)=0;
+        D1(s)=mma32(Xtile[:,64*s:64*(s+1)],Wpair[:,64*s:64*(s+1)]^T,D1(s-1)),
+        s=0..H/64-1. up=D1(H/64-1)[:,:Bn1]; gate=D1(H/64-1)[:,Bn1:].
+      symbol: {D1: {meaning: Paired up and gate projection accumulator, shape: [{row: Bm}, {channel: 2*Bn1}], dtype: fp32,
+          retention: 'carry_forward (j,n1); s=-1..H/64-1'}}
+      arithmetic:
+        accumulate: |-
+          mma32 here denotes native block-scaled E2M1 products with E4M3 scale per G channels and an FP32 accumulator, not an FP32 decoded-operand GEMM implementation. Four ascending 64-channel updates form each 256-channel stage; the first update disables the previous accumulator. Native internal product/reduction rounding is not a bitwise FP32 reference promise.
+    - step: activate
+      name: Scalar fast activation and corrected-quotient quantization
+      math: |
+        Apply Contract's asymmetric clamp to up and gate, including padded rows.
+        Let a=gemm1_alpha[e], bpar=gemm1_beta[e], ia=rcp_rn(a), ib=rcp_rn(bpar),
+        Sg(x)=rcp_approx(1+exp_fast(-x)), where exp_fast is CUDA __expf,
+        and Th(x)=fma32(Sg(2*x),2,-1).
+        For activation_type=3, Ap=(gate*Sg(a*gate))*(up+bpar).
+        For activation_type=10, tg=a*Th(gate*ia), tu=bpar*Th(up*ib),
+        and Ap=(tg*Sg(gate))*tu. Parenthesized FP32 operations retain this order;
+        the exponential prescale is not folded into a, ia or ib.
+        ia and ib are evaluated per workitem even for SwiGLU, where they are unused.
+        For every row and consecutive G-channel block, amax is the ascending left
+        fold of fmax over [0,abs(Ap[0]),...,abs(Ap[G-1])]. fmax ignores a NaN
+        operand when the other operand is numeric.
+        s8=fp8_e4m3fn(min(amax*fp32(1/6),448)). If fp32(s8)>0, let
+        inv=rcp_rn(fp32(s8)), q0[i]=Ap[i]*inv, r[i]=fma32(-fp32(s8),q0[i],Ap[i]),
+        q1[i]=fma32(r[i],inv,q0[i]), and q[i]=Q4(q1[i]). Otherwise all q codes are zero;
+        no reciprocal or quotient is evaluated for that block.
+        Q4 uses Contract's RNE saturating E2M1 code rule and low-even-nibble packing.
+        For m<v, store Aq[b+m,n/2:(n+Bn1)/2] as packed q and
+        As[b+m,n/G:(n+Bn1)/G]=s8. Rows [Rv,Rcap) retain prior bytes.
+        Padded-row activation and quantization are computed without stores.
+      symbol:
+        Aq: {meaning: Packed post-activation payload for FC2, shape: [{route: Rcap}, {packed_intermediate: I/2}], dtype: uint8,
+          retention: keep_value invocation}
+        As: {meaning: Post-activation block scales for FC2, shape: [{route: Rcap}, {intermediate_block: I/G}], dtype: fp8_e4m3fn,
+          retention: keep_value invocation}
+      arithmetic:
+        approx: |-
+          Sg uses CUDA __expf and rcp.approx.f32; Th uses the sigmoid identity with rounded reciprocal input scaling. Quantization retains the explicit two-FMA quotient correction. unknown: the fixed source supplies no verified bound for composed output error over the entire path; source comments do not establish bitwise equivalence or a full-domain error bound.
+    - step: fc2
+      name: Materialize BF16 route outputs
+      math: |
+        The D2/Rout equations below apply when the actual FC2 payload geometry matches
+        its worktile: not TMA, or MapBn=Bn2, with MapBn bound in work_schedule.
+        With J>0, TMA and MapBn!=Bn2, the source stalls at its first payload transaction
+        wait before any FC2 MMA: D2 and Rout are not produced and Y completion is not
+        established. J=0 has no projection work and does not encounter this wait.
+        For j<J and n2<H/Bn2 on the completing geometry, use e,b,v from fc1 and n=n2*Bn2.
+        At all Bm rows, As uses row b+m for m<v, b otherwise. With TMA, Aq uses row b+m,
+        which may cross an expert boundary or enter unwritten capacity; rows beyond the
+        Rcap-row payload matrix are zero-filled. With cp.async payload staging, Aq
+        instead uses row b+(m if m<v else 0). Let QTile decode these
+        operands. TMA here is the FC2-local parameter bound in work_schedule. D2(-1)=0;
+        D2(s)=mma32(QTile[:,64*s:64*(s+1)],W2[e,n:n+Bn2,64*s:64*(s+1)]^T,D2(s-1)),
+        s=0..I/64-1. For m<v, Rout[b+m,n:n+Bn2]=bf16(D2(I/64-1)[m,:]).
+        Other rows are discarded; Rout[Rv:Rcap] remains unwritten. FC2 evaluates a,
+        bpar, ia, ib and the clamp limit, but does not use them. It also evaluates
+        folded constants with L2E=fp32(-1.44269504): a*L2E for SwiGLU, or L2E,
+        ia*(2*L2E), ib*(2*L2E) for SiTU; these are likewise unused by FC2.
+      symbol:
+        TMA: {meaning: FC2 box-payload selector, binding: 'bind:design.work_schedule::TMA'}
+        MapBn: {meaning: Actual FC2 TMA weight-box rows, binding: 'bind:design.work_schedule::MapBn'}
+        D2: {meaning: FC2 accumulator, shape: [{row: Bm}, {hidden: Bn2}], dtype: fp32, retention: 'carry_forward (j,n2);
+            s=-1..I/64-1'}
+        Rout: {meaning: BF16 route outputs before weighting, shape: [{route: Rcap}, {hidden: H}], dtype: bf16, retention: keep_value
+            invocation}
+      arithmetic: {accumulate: Same native block-scaled arithmetic and ascending 64-channel updates as fc1.}
+    - step: finalize
+      name: Fixed slot-order weighted reduction
+      math: |
+        After completing fc2, including J=0, for every (t,h), Z(-1)=0.
+        The stalled map-mismatch path above supplies no fc2 completion or final Y guarantee.
+        For k=0..K-1, if route_of[t,k]<0 then Z(k)=Z(k-1);
+        otherwise Z(k)=fma32(fp32(Rout[route_of[t,k],h]),route_weights[t,k],Z(k-1)).
+        Y[t,h]=bf16(Z(K-1)); overwrite the supplied output view and return [output].
+        Empty routing performs no projection payload work and still overwrites Y with zeros.
+      symbol: {Z: {meaning: Per-output slot reduction state, shape: [], dtype: fp32, retention: 'carry_forward (t,h);
+            k=-1..K-1'}}
+    ledger:
+      baseline: Direct active-route Contract evaluation with materialized FP32 up/gate, activation and decoded quantized
+        activation, and BF16 route outputs.
+      footprint:
+      - {item: FC1 intermediates, change: 16*Rv*I bytes of FP32 intermediates -> 9*Rv*I/16 live payload/scale bytes;
+          physical act allocation remains 2*Rcap*I bytes, by: [fc1, activate]}
+      matmul:
+      - {item: Dense expert padding, change: 'With FC1 waits satisfied and completing geometry, 3*Rv*H*I -> 3*P*H*I MACs including discarded rows; the mismatched FC2 stalls before its first MMA, after 2*P*H*I FC1 MACs', by: [fc1, fc2]}
+      vector:
+      - {item: Quantized activation evaluation, change: 'Rv*I -> P*I elements for clamp/activation/quantization, including
+          discarded rows', by: [activate]}
+      - item: Routing auxiliaries
+        change: |-
+          + two Rcap-slot histogram/scatter traversals, two E-wide prefixes, J tile-map entries and Rcap inverse-map entries; small preparation stages Rcap IDs once and also prefixes up to 32 group counts per expert
+        by: [routing]
+      error:
+      - item: Approximate activation
+        change: Affects P*I evaluations through the explicitly defined approximations; no established full-domain output
+          error bound
+        by: [activate]
+  work_schedule:
+    thesis: |-
+      Compact routes with one small preparation kernel or count/scan/scatter kernels, then submit twelve-warp fused FC1, monolithic FC2 and finalize. Each projection owns a full reduction and strides a capped static work sequence; FC1 overlaps separate producers, MMA and epilogue, while FC2 uses four cooperative warps.
+      Let Small mean Rcap<=S with S defined in when. Only prepare is submitted for Small; only count/scan/scatter are submitted otherwise. The launch and handoff entries enumerate these conditional alternatives, not extra no-op kernels: entries for absent phases do not apply.
+      FC2 map mismatch described below can prevent fc2.kernel_done and every downstream completion; launch entries enumerate submissions, not completion guarantees.
+      The actual stream chain is prepare -> fc1 -> fc2 -> finalize, or memset -> count -> scan -> scatter -> fc1 -> fc2 -> finalize. Every successor waits for its actual predecessor grid before reading; no bypassed phase creates an event or wait. All routing handoffs from count/scan/scatter apply only to the large chain; Prepared carries the same arrays in the small chain.
+      source_pdl is active when effective pdl_on()!=0 and (pdl_big_r()<0 or Rcap<pdl_big_r()), default threshold 49152. It permits early admission through launch_ready, not early consumption. Otherwise the stream serializes kernels; the in-kernel grid dependency controls are inert. The API enable_pdl argument does not choose this policy.
+    flow:
+      launch:
+      - {phase: [prepare], protocol: source_pdl}
+      - {phase: [count], protocol: source_pdl}
+      - {phase: [scan], protocol: source_pdl, start_after: count.launch_ready}
+      - {phase: [scatter], protocol: source_pdl, start_after: scan.launch_ready}
+      - {phase: [fc1], protocol: source_pdl}
+      - {phase: [fc2], protocol: source_pdl, start_after: fc1.launch_ready}
+      - {phase: [finalize], protocol: source_pdl, start_after: fc2.launch_ready}
+      handoff:
+        counts: {producer: count, consumer: [scan, fc1, fc2], storage: global, initialize: 0, ready: count.kernel_done}
+        offs: {producer: scan, consumer: [scatter, fc1, fc2], storage: global, ready: scan.kernel_done}
+        toffs: {producer: scan, consumer: [fc1, fc2], storage: global, ready: scan.kernel_done}
+        Tile: {producer: scan, consumer: [fc1, fc2], storage: global, ready: scan.kernel_done}
+        route_of: {producer: scatter, consumer: [finalize], storage: global, ready: scatter.kernel_done}
+        Aq: {producer: fc1, consumer: [fc2], storage: global, ready: fc1.kernel_done}
+        As: {producer: fc1, consumer: [fc2], storage: global, ready: fc1.kernel_done}
+        Rout: {producer: fc2, consumer: [finalize], storage: global, ready: fc2.kernel_done}
+        Prepared: {producer: prepare, consumer: [fc1, fc2, finalize], storage: global, ready: prepare.kernel_done}
+        Route: {producer: scatter, consumer: [fc1], storage: global, ready: scatter.kernel_done}
+    phase:
+      prepare:
+        describe: 'Only for Small: one CTA stages IDs, forms private histograms and prefixes, scatters routes and builds
+          all tiles.'
+        decomposition:
+          partition: {}
+          worktile: {invariant: {route_ids: {shape: [{slot: Rcap}], dtype: int32}}}
+          target: {single_tile: {Prepared: {shape: [{word: 3*E+2+4*Rcap+2*Jcap}], dtype: int32}}}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: 1}
+        schedule: {worker_assignment: {preassigned: {start: 0, count: 1}, refill: none, exit: assigned_done}}
+      count:
+        describe: 'Only outside Small: Produce block histogram contributions and atomically merge counts.'
+        decomposition:
+          strategy: The stream memset resets all E counts and E fill words before this kernel; no split counters exist
+            here.
+          partition: {slot: {size: Rcap, tile: 256}}
+          worktile: {invariant: {route_ids: {shape: [{slot: 256}], dtype: int32}}}
+          target:
+            single_tile: {counts_group: {shape: [{expert: E}], dtype: int32}}
+            tile_reduction: {dimension: slot, input: counts_group, output: counts, method: 'design.math_reshape::routing'}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: 'ceil_div(Rcap,256)'}
+        schedule: {worktile_order: [{by: slot, direction: ascending}], worker_assignment: {preassigned: {start: worker_id,
+              count: 1}, refill: none, exit: assigned_done}}
+      scan:
+        describe: 'Only outside Small: Joint route/tile prefix scan followed by tile-map construction.'
+        decomposition:
+          partition: {}
+          worktile: {invariant: {counts: {shape: [{expert: E}], dtype: int32}}}
+          target:
+            single_tile: {offs: {shape: [{prefix: E+1}], dtype: int32}, toffs: {shape: [{prefix: E+1}], dtype: int32},
+              Tile: {shape: [{tile: J}, {field: 2}], dtype: int32}}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: 1}
+        schedule: {worker_assignment: {preassigned: {start: 0, count: 1}, refill: none, exit: assigned_done}}
+      scatter:
+        describe: 'Only outside Small: Reserve per-expert ranges and publish forward and inverse route maps.'
+        decomposition:
+          strategy: |-
+            Aggregated scatter reserves once per block/expert and ranks with shared atomics; otherwise each warp matches equal IDs, reserves once per expert and ranks by lane order.
+          partition: {slot: {size: Rcap, tile: 256}}
+          worktile: {invariant: {route_ids: {shape: [{slot: 256}], dtype: int32}, offs: {shape: [{prefix: E+1}], dtype: int32}}}
+          target: {single_tile: {Route: {shape: [{route: 256}, {field: 3}], dtype: int32}, route_of: {shape: [{slot: 256}],
+                dtype: int32}}}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: 'ceil_div(Rcap,256)'}
+        schedule: {worktile_order: [{by: slot, direction: ascending}], worker_assignment: {preassigned: {start: worker_id,
+              count: 1}, refill: none, exit: assigned_done}}
+      fc1:
+        describe: |-
+          One expert tile and Bn1 paired channels over the full hidden reduction,
+          followed by scalar activation and packed quantization. Input slices follow
+          the original token indices in Route, repeating the first valid route for padding.
+        decomposition:
+          strategy: |-
+            Bm=128, Bn1=64, Bk=256, Depth1=4. The actual FC1 is f4_ws_g1<64,4,4>:
+            paired payload/scale slots, two accumulators, no split-K and no separate activation kernel.
+            It launches 384 threads. Warps 0/1/3 stage operands, warp 2 issues MMA,
+            warps 4..7 drain/activate/store, and warps 8..11 have no body work.
+            For a GEMM with Nx output channel tiles and cap C, define
+            Gy(C,Nx)=max(1,floor(C/Nx)) if C>0 and Nx*Jcap>C, otherwise Jcap.
+            C2=grid_cap(), normally twice the runtime SM count, or 0 on query failure.
+            C1=ceil_div(C2,2) when C2>0; otherwise query the runtime SM count, or use
+            0 on failure. Grid1(Nx)=Nx*Gy(C1,Nx); Grid2(Nx)=Nx*Gy(C2,Nx).
+            This preserves the source's floor and minimum-one-y-row behavior even
+            when Nx exceeds the cap. FC1 uses Grid1; FC2 uses Grid2 and 128 threads.
+            Both stride flattened work IDs with channel fastest. Runtime J bounds
+            work. FC1 surplus CTAs return before allocation; FC2 surplus CTAs still
+            allocate and retire when J>0.
+          partition: {tile: {size: J, tile: 1}, channel: {size: I, tile: Bn1}}
+          worktile:
+            invariant:
+              Tile: {shape: [{field: 2}], dtype: int32}
+              counts: {shape: [{expert: 1}], dtype: int32}
+              offs: {shape: [{prefix: 1}], dtype: int32}
+              Parameters: {shape: [{value: 3}], dtype: fp32}
+              Route: {shape: [{route: Bm}, {field: 1}], dtype: int32}
+            iteration:
+              hidden_states: {shape: [{row: Bm}, {packed_hidden: Bk/2}], dtype: uint8, direction: ascending}
+              hidden_states_scale: {shape: [{row: Bm}, {hidden_block: Bk/G}], dtype: fp8_e4m3fn, direction: ascending}
+              gemm1_weights: {shape: [{row: 2*Bn1}, {packed_hidden: Bk/2}], dtype: uint8, direction: ascending}
+              gemm1_weights_scale: {shape: [{row: 2*Bn1}, {hidden_block: Bk/G}], dtype: fp8_e4m3fn, direction: ascending}
+          target: {single_tile: {Aq: {shape: [{row: Bm}, {packed_intermediate: Bn1/2}], dtype: uint8}, As: {shape: [
+                  {row: Bm}, {intermediate_block: Bn1/G}], dtype: fp8_e4m3fn}}}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: Grid1(I/Bn1)}
+        schedule:
+          strategy: Flattened channel tile is fastest. Runtime J bounds the work; surplus submitted CTAs have empty sequences.
+          worktile_order: [{by: tile, direction: ascending}, {by: channel, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, step: worker_count}, refill: none, exit: assigned_done}
+      fc2:
+        describe: One expert tile and Bn2 output channels over the entire intermediate reduction, followed by BF16 route
+          materialization.
+        decomposition:
+          strategy: |-
+            Use Bm=128, Bk=256 and Grid2 from fc1. All parameters here are FC2-local; AMODE=0, SK=1, FUSE=BRLESS=REDF=false. Bind the actual f4_body instantiation after launch_gemm dispatch, including map fallback.
+            With TMA=true, ordinary forms are (Bn2,STAGES,SFS,SFPRE,SFCP,PIPE)=(64,2,2,0,false,false) or (128,3,3,0,false,false). cfg38 selects (128,3,2,2,false,false); cfg44 selects (128,3,3,0,true,false); cfg52/53 select (128,3/2,2,2,false,true). The cfg19..35 except 22 branch, plus 37/39/40, selects (128,3,3,1,false,false), after earlier special cases. Among remaining monolithic TMA selections, local cfg in {12,15,16,17,18,48,49} uses the 128-channel ordinary form, otherwise the 64-channel form.
+            The TMA weight map is encoded independently of Bn2. Let MapBn=128 for local cfg in {12,15,18,19,38,44,48,49,52,53} among this node's TMA selections, otherwise 64; this is launch_gemm's wide selector. The A box always has Bm=128 rows. Actual bytes per stage are (Bm+MapBn)*(Bk/2), but f4_body arms (Bm+Bn2)*(Bk/2).
+            In particular local cfg in {16,17,20,21,24,25,26,27,28,29,30,31,32,33,34,35,37,39,40} has MapBn=64 and Bn2=128 when maps encode successfully: 24576 bytes are issued against 32768 expected, a deficit of 8192 bytes per stage. With J>0 the first transaction wait cannot complete from these transfers; no FC2 MMA, Rout write or finalize completion follows. This is an accepted-map source defect, not a map refusal. Worktile operands and target below describe the completing computation; the defective path still allocates Bn2 capacity but stages only MapBn B rows. J=0 returns before allocation/staging and can still finalize zeros.
+            With TMA=false, SFS=STAGES, SFPRE=0 and SFCP=PIPE=false. cfg7..11 choose (Bn2,STAGES)=(128,2),(128,3),(128,4),(64,2),(64,3), respectively. After the source's refusal branches, map failure selects (128,3) for local cfg in {12,15,18,19,36,38,44,48,49,52,53}, otherwise (64,2). cfg23 first retries through local cfg12 after its flat-map refusal. Source refusal branches return an error instead of a fallback; attribute/launch failures also propagate.
+            The same four warps execute the stage loop and then read TMEM in 32-channel chunks, converting valid rows to BF16 and issuing vector stores. There are no separate epilogue warps, ping-pong accumulators or bulk-store sink.
+          partition: {tile: {size: J, tile: 1}, channel: {size: H, tile: Bn2}}
+          worktile:
+            invariant:
+              Tile: {shape: [{field: 2}], dtype: int32}
+              counts: {shape: [{expert: 1}], dtype: int32}
+              offs: {shape: [{prefix: 1}], dtype: int32}
+              Parameters: {shape: [{value: 3}], dtype: fp32}
+            iteration:
+              Aq: {shape: [{row: Bm}, {packed_intermediate: Bk/2}], dtype: uint8, direction: ascending}
+              As: {shape: [{row: Bm}, {intermediate_block: Bk/G}], dtype: fp8_e4m3fn, direction: ascending}
+              gemm2_weights: {shape: [{row: Bn2}, {packed_intermediate: Bk/2}], dtype: uint8, direction: ascending}
+              gemm2_weights_scale: {shape: [{row: Bn2}, {intermediate_block: Bk/G}], dtype: fp8_e4m3fn, direction: ascending}
+          target: {single_tile: {Rout: {shape: [{row: Bm}, {hidden: Bn2}], dtype: bf16}}}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: Grid2(H/Bn2)}
+        schedule:
+          worktile_order: [{by: tile, direction: ascending}, {by: channel, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, step: worker_count}, refill: none, exit: assigned_done}
+      finalize:
+        describe: Reduce all route slots locally for a block of output channels and overwrite the caller view.
+        decomposition:
+          strategy: |-
+            Vfin=16 when 2*Rcap*H >= fin16_mb()*2^20, otherwise Vfin=4 when fin_wide()!=0 and T<=fin_tmax(), otherwise 8. Defaults are 40 MiB, enabled and 128 tokens. Each worktile covers one token and 128*Vfin channels.
+          partition: {token: {size: T, tile: 1}, hidden: {size: H, tile: 128*Vfin}}
+          worktile:
+            invariant: {route_of: {shape: [{slot: K}], dtype: int32}, route_weights: {shape: [{slot: K}], dtype: fp32}}
+            iteration: {Rout: {shape: [{hidden: 128*Vfin}], dtype: bf16, direction: ascending}}
+          target: {single_tile: {Y: {shape: [{hidden: 128*Vfin}], dtype: bf16}}}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: 'T*ceil_div(H,128*Vfin)'}
+        schedule:
+          worktile_order: [{by: token, direction: ascending}, {by: hidden, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+  tile_pipeline:
+    thesis: |-
+      FC1 ties payload and three scale images to one Depth1-slot ring. Two accumulators
+      let the next worktile's MMA overlap the preceding scalar epilogue; four launched
+      warps remain idle apart from setup/teardown. AccCols=2*Bn1, TCOLS1=2*AccCols+48*Depth1,
+      TALLOC1=512 (448 used columns). FC1 stage slots continue across worktiles.
+      All FC1 parity waits use ws_mbar_wait. With a clear g_ws26_dbg[0], a wait polls
+      its parity until success or until elapsed clock64 exceeds 2^28 cycles. Timeout
+      records diagnostic atomics and returns; any already-set sticky flag returns
+      immediately. The stage/accumulator data and reuse edges below apply only to
+      waits that observe completion. Bypass continues the same loads, MMAs and stores
+      without these guarantees; it is neither a safe fallback nor an abort. Ordinary
+      cp.async, TMEM-load, warp and CTA waits still execute. The flag persists across
+      calls and is not reset by Model.forward/run_pipeline; timeout may also write
+      an optional registered host mirror. No output or safe resource retirement is
+      promised after bypass, and no extra drain is inserted here.
+      FC2 uses one cooperative four-warp loop and one accumulator. Nk=I/Bk,
+      TCOLS2=Bn2+32*SFS, TALLOC2=256 when TCOLS2<=256, otherwise 512. Its payload
+      and scale rings use base=t*Nk for TMA, base=0 for cp.async. TMA stage and MMA
+      counters continue across worktiles; cp.async slots restart only after the prior
+      worktile's real copies and MMA reads complete. FC1's diagnostic bypass does
+      not change FC2's waits, including the unsatisfied map-mismatch transaction.
+    phase:
+      prepare:
+        resource:
+          IDs: {space: SMEM, member_slot_shape: [{slot: Rcap}], dtype: int32, slot_count: 1}
+          PrivateCounts: {space: SMEM, member_slot_shape: [{group: 32}, {expert: 256}], dtype: int32, slot_count: 1}
+          Prefixes: {space: SMEM, member_slot_shape: [{word: 643}], dtype: int32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:32]
+              verb:
+                enter: Wait for preceding stream work; the first warp triggers successor admission.
+                produce: |-
+                  With prep2_on()==0, stage all IDs and clear the full 32x256 private table, rendezvous, histogram each warp's contiguous L-slot range, then rendezvous. PREP2 instead lets only nw=min(32,ceil_div(Rcap,L)) active warps clear their E counters and stage their own ranges, sync locally before their histogram, then all rendezvous. The cross-warp prefix reads all 32 rows in the first form, only nw initialized rows in PREP2.
+                  Per expert, replace private counts with group-exclusive bases and write global counts, rendezvous, then scan route/tile counts using warp sums and CTA rendezvous. Publish offs/toffs and rendezvous before scatter from staged IDs through private atomic bases. Build Tile by binary search of shared tile prefixes. Scatter and tile writes are disjoint; kernel completion publishes both. Global fill is untouched, and there are no split-K arrival counters here.
+            pipe: {prologue: ['enter:Input'], steady: ['produce:Prepared']}
+      count:
+        resource: {Histogram: {space: SMEM, member_slot_shape: [{expert: 256}], dtype: int32, slot_count: 1}}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:8]
+              verb:
+                enter: |-
+                  Wait for preceding stream work, including the counts/fill memset, then let the first warp trigger successor admission. Trigger does not publish computed data.
+                produce: Zero the local histogram, rendezvous, count valid IDs by shared atomic adds, rendezvous, then
+                  add nonzero expert totals to global counts.
+            pipe: {prologue: ['enter:Input'], steady: ['produce:counts_group']}
+      scan:
+        resource: {ScanScratch: {space: SMEM, member_slot_shape: [{word: 386}], dtype: int32, slot_count: 1}}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:32]
+              verb:
+                enter: Wait for the preceding kernel, then trigger admission from the first warp.
+                produce: |-
+                  Jointly scan counts and ceil(counts/Bm) with warp scans and a scan of warp totals, using two CTA rendezvous. Publish offs/toffs, rendezvous after the shared tile prefixes, then traverse tile indices in steps of 1024 and binary-search their expert.
+            pipe: {prologue: ['enter:Input'], steady: ['produce:Tile']}
+      scatter:
+        resource: {Reservations: {space: SMEM, member_slot_shape: [{array: 3}, {expert: 256 if scatter_agg else 0}],
+            dtype: int32, slot_count: 1}}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:8]
+              verb:
+                enter: Wait for the preceding kernel, then trigger admission from the first warp.
+                produce: |-
+                  Aggregated scatter clears local counts/ranks, rendezvouses, histograms IDs, rendezvouses, reserves one global fill range per block/expert, rendezvouses, then assigns shared atomic ranks and writes both maps. Otherwise each warp matches IDs, its leader reserves the group size globally and broadcasts the base; rank counts earlier matching lanes. That form has no CTA barrier. All real slots write route_of; only valid slots write Route.
+            pipe: {prologue: ['enter:Input'], steady: ['produce:route_of']}
+      fc1:
+        domain: {t: worktile, k: [0, H/Bk], g: {flatten: [t, k]}, c: [0, Bn1/32]}
+        resource:
+          Payload:
+            space: SMEM
+            member_slot_shape: [{row: Bm+2*Bn1}, {byte: Bk/2}]
+            dtype: uint8
+            slot_count: Depth1
+            view:
+              ALo(g): {slot_index: g%Depth1, part: {row: [0, Bm/2]}}
+              AHi(g): {slot_index: g%Depth1, part: {row: [Bm/2, Bm]}}
+              BPayload(g): {slot_index: g%Depth1, part: {row: [Bm, Bm+2*Bn1]}}
+          Scale:
+            space: SMEM
+            member_slot_shape: [{image: 3}, {row: Bm}, {block: Bk/G}]
+            dtype: fp8_e4m3fn
+            slot_count: Depth1
+            view:
+              AScale(g): {slot_index: g%Depth1, part: {image: [0, 1]}}
+              BScale(g): {slot_index: g%Depth1, part: {image: [1, 3]}}
+          BScaleRegisters: {space: register, member_slot_shape: [{row: 2*Bn1}, {block: Bk/G}], dtype: fp8_e4m3fn, slot_count: 1}
+          Tensor:
+            space: TMEM
+            member_slot_shape: [{row: Bm}, {column: TALLOC1}]
+            dtype: fp32
+            slot_count: 1
+            view:
+              Acc(t): {part: {column: [(t%2)*AccCols, (t%2+1)*AccCols]}}
+              TScale(g): {part: {column: [2*AccCols+48*(g%Depth1), 2*AccCols+48*(g%Depth1+1)]}, dtype: fp8_e4m3fn}
+          Drain: {space: register, member_slot_shape: [{row: Bm}, {channel: 64}], dtype: fp32, slot_count: 1}
+        role:
+          WeightA:
+            info:
+              execution_mode: async
+              member: warp[0:1]
+              verb:
+                enter:
+                  execution_mode: serial
+                  meaning: |-
+                    All threads wait for the predecessor grid; warp 0 triggers successor
+                    admission. CTAs without work return before allocation. Otherwise
+                    initialize empty/full protocols and allocate Tensor, then all twelve
+                    warps rendezvous. Each stage-full phase needs four arrivals; each
+                    accumulator-empty phase needs 128 arrivals. Initial slots are reusable.
+                load: |-
+                  After slot reuse, one lane arms 2*Bn1*(Bk/2) transaction bytes and
+                  issues two Bn1-row TMA boxes. The arming operation contributes one
+                  arrival. Done means both weight payload transfers have completed.
+                produce:
+                  execution_mode: serial
+                  meaning: |-
+                    Tile and ptok indices are resolved once per worktile and retained
+                    across its stages, with padding clamped to its first route. Load
+                    all Bm rows of activation scales and store AScale(g),
+                    fence to the async proxy, rendezvous this warp and add one arrival.
+                    Done covers this scale contribution, without waiting for B TMA.
+                retire:
+                  execution_mode: serial
+                  meaning: |-
+                    After each role finishes its assigned sequence, all twelve warps
+                    rendezvous; warp 0 deallocates Tensor. No additional async drain
+                    exists. No-op for CTAs that returned before setup.
+            pipe:
+              prologue: ['enter:Pipeline']
+              steady: [{repeat: g, steady: ['load:BPayload(g)', 'produce:AScale(g)']}]
+              epilogue: ['retire:Pipeline']
+            waits_for: {reuse: {'load:BPayload(g+Depth1)': ['MMA/compute:Stage(g)']}}
+          GatherLo:
+            info:
+              execution_mode: serial
+              member: warp[1:2]
+              verb:
+                stage: |-
+                  Resolve ptok and weight-scale addresses once per worktile and keep
+                  them across stages. Rows [0,Bm/2) repeat the first valid route for
+                  padding. After slot reuse, issue 16-byte cp.async input payload copies
+                  into ALo(g) and commit a group. While copies run, fetch both weight
+                  scale halves into BScaleRegisters. Wait for all this warp's copies,
+                  land BScale(g), fence shared stores, rendezvous this warp and add one
+                  stage-full arrival. Each B scale image has Bm-row capacity but only
+                  Bn1 initialized rows; full images later copy to TMEM, and MMA consumes
+                  only Bn1 rows. Registers are overwritten only after their stores.
+            pipe: {repeat: g, steady: ['stage:ALo(g)']}
+            waits_for:
+              sync: {'stage:ALo(g)': ['WeightA/enter:Pipeline']}
+              reuse: {'stage:ALo(g+Depth1)': ['MMA/compute:Stage(g)']}
+          GatherHi:
+            info:
+              execution_mode: serial
+              member: warp[3:4]
+              verb:
+                stage: |-
+                  Like GatherLo for rows [Bm/2,Bm), but without weight-scale work.
+                  Commit and wait for this warp's cp.async copies, rendezvous the warp,
+                  then add one stage-full arrival. Done publishes AHi(g).
+            pipe: {repeat: g, steady: ['stage:AHi(g)']}
+            waits_for:
+              sync: {'stage:AHi(g)': ['WeightA/enter:Pipeline']}
+              reuse: {'stage:AHi(g+Depth1)': ['MMA/compute:Stage(g)']}
+          MMA:
+            info:
+              execution_mode: async_ordered_completion
+              member: warp[2:3]
+              verb:
+                begin:
+                  execution_mode: serial
+                  meaning: |-
+                    Wait for the selected Acc(t) empty phase, then fence. For t<2 the
+                    initial phase needs no prior epilogue; later work waits on t-2.
+                compute: |-
+                  Wait for stage-full readiness: completed B transaction bytes plus
+                  the activation-scale and both gather contributions, four arrivals in
+                  total including TMA arming. One elected lane copies all three scale
+                  images to TScale(g), then issues four ascending 64-channel updates,
+                  each with separate up and gate MMAs. The first update initializes
+                  both Acc halves. Commit cumulative completion to this shared slot's
+                  empty protocol. Done covers all preceding scale copies and MMA input
+                  reads; ordered scale-copy/MMA reads also protect the TMEM scale slot.
+                publish: |-
+                  Commit cumulative completion of the worktile to its accumulator-full
+                  protocol. Done covers the final MMA, making Acc(t) readable.
+            pipe: {repeat: t, steady: ['begin:Acc(t)', {repeat: 'g[t]', steady: ['compute:Stage(g)']}, 'publish:Acc(t)']}
+            waits_for:
+              sync: {'begin:Acc(t)': ['WeightA/enter:Pipeline']}
+              data:
+                compute:Stage(g): ['WeightA/load:BPayload(g)', 'WeightA/produce:AScale(g)', 'GatherLo/stage:ALo(g)', 'GatherHi/stage:AHi(g)']
+              reuse: {'begin:Acc(t+2)': ['Epilogue/release:Acc(t)']}
+          Epilogue:
+            info:
+              execution_mode: serial
+              member: warp[4:8]
+              verb:
+                begin: |-
+                  Resolve expert alpha/beta/reciprocals/limit once per worktile,
+                  then wait for Acc(t). Done observes its accumulator-full phase.
+                load: |-
+                  Each warp owns 32 route rows; read the current 32-channel up and
+                  gate slices into Drain, then wait for both TMEM loads.
+                produce: |-
+                  Apply activate to all rows. Only valid rows issue a 16-byte packed
+                  payload store and a two-byte scale store per chunk. Done covers
+                  calculation and store issue, not grid-wide store visibility.
+                release: |-
+                  After both channel chunks, every epilogue thread arrives once on
+                  Acc(t)'s empty protocol. All 128 arrivals are needed for reuse;
+                  there is no inter-warp rendezvous here. Their TMEM reads have ended
+                  and stores have issued, but stores may remain in flight.
+            pipe: {repeat: t, steady: ['begin:Work(t)', {repeat: c, steady: ['load:Drain(t,c)', 'produce:Aq(t,c)']}, 'release:Acc(t)']}
+            waits_for: {data: {'begin:Work(t)@done': ['MMA/publish:Acc(t)']}}
+      fc2:
+        domain: {t: worktile, k: [0, Nk], c: [0, Bn2/32]}
+        resource:
+          Payload:
+            space: SMEM
+            member_slot_shape: [{row: Bm+Bn2}, {byte: Bk/2}]
+            dtype: uint8
+            slot_count: STAGES
+            view: {'Payload(t,k)': {slot_index: '((t*Nk if TMA else 0)+k)%STAGES'}}
+          Scale:
+            space: SMEM
+            member_slot_shape: [{image: 2}, {row: Bm}, {block: Bk/G}]
+            dtype: fp8_e4m3fn
+            slot_count: SFS
+            view: {'Scale(t,k)': {slot_index: '((t*Nk if TMA else 0)+k)%SFS'}}
+          ScaleRegisters:
+            space: register
+            member_slot_shape: [{row: 'Bm+Bn2 if SFPRE>0 else 0'}, {block: Bk/G}]
+            dtype: fp8_e4m3fn
+            slot_count: '2 if SFPRE>=2 else 1'
+            view: {'ScaleRegisters(t,k)': {slot_index: 'k%2 if SFPRE>=2 else 0'}}
+          Rows: {space: SMEM, member_slot_shape: [{row: Bm}], dtype: int32, slot_count: 1}
+          Tensor:
+            space: TMEM
+            member_slot_shape: [{row: Bm}, {column: TALLOC2}]
+            dtype: fp32
+            slot_count: 1
+            view:
+              Acc(t): {part: {column: [0, Bn2]}}
+              TScale(t,k): {part: {column: ['Bn2+32*(((t*Nk if TMA else 0)+k)%SFS)', 'Bn2+32*(((t*Nk if TMA else 0)+k)%SFS+1)']}, dtype: fp8_e4m3fn}
+          Drain: {space: register, member_slot_shape: [{row: Bm}, {hidden: 32}], dtype: fp32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:4]
+              verb:
+                enter: |-
+                  Wait for the FC1 grid and let warp 0 trigger successor admission. If J=0 return before allocation. Otherwise initialize completion protocols, allocate Tensor and rendezvous. Surplus CTAs with no assigned work still allocate and retire. Initialize counters once per CTA, not once per worktile.
+                begin: |-
+                  Resolve expert, channel and route bases; form Rows with padded entries repeating the first valid route, then rendezvous. Evaluate the unused activation parameters/reciprocals/constants specified in fc2. Keep row and weight addresses through the worktile.
+                prime: |-
+                  If SFPRE>0, fetch and land valid scale stages 0..SFS-2; SFPRE=1 uses one register set sequentially, SFPRE=2 batches the leading fetches before their stores. Prime STAGES-1 payload groups, issuing only stages below Nk but committing empty cp.async groups for short loops. TMA uses one Bm-row A box and one MapBn-row B box while arming bytes using Bn2; cp.async cooperatively copies the same logical rows, with its clamped Aq padding.
+                  For SFCP, scale cp.async copies share these groups; for SFPRE=0 and SFCP=false, direct loads/stores fill the leading scale slots. Then SFPRE=1 fetches stage SFS-1, or SFPRE=2 fetches stages SFS-1 and SFS, when present. ScaleRegisters is live only for SFPRE>0.
+                advance: |-
+                  All operations below are within this cooperative action. Done means the stage has been issued and its listed waits/refills completed; the current MMA may still be in flight. For TMA with MapBn!=Bn2, the first current-payload wait cannot be satisfied by the issued transactions. This action never reaches its MMA or done event; drain, produce, close and assigned-worker retirement remain unreachable, and no fc2.kernel_done is supplied. No extra arrival, geometry correction or fallback exists here.
+                  Without PIPE, k>0 first waits for MMA(k-1) completion and rendezvouses, freeing the slots about to be refilled. Land prefetched scales, or issue SFCP, for k+SFS-1 when present. Issue payload k+STAGES-1 when present; commit a cp.async group even when empty. Wait until only STAGES-1 groups may remain, additionally wait for the current TMA transaction when used, and rendezvous to make the current payload and scales readable.
+                  With PIPE, wait for current TMA bytes and rendezvous first. The elected warp-0 lane issues current scale copies and MMA before the k>0 wait for MMA(k-1); only after that wait and rendezvous may scales k+SFS-1 and TMA payload k+STAGES-1 be refilled. Thus at most two adjacent stage MMA bursts are outstanding.
+                  MMA issue in either order means that lane copies the current A/B scale images to disjoint TScale columns, issues four ascending 64-channel MMAs and commits cumulative completion. The first update initializes Acc. Ordered scale-copy/MMA reads preserve each TMEM scale operand until consumed. With Bn2=64 the B image has 128-row capacity but only 64 initialized/consumed rows; full images are still copied.
+                  For SFPRE=2, the tail fetches scale k+SFS+1 into its parity register set; for SFPRE=1 it fetches k+SFS into the single set. Without SFCP or SFPRE, the non-PIPE tail directly loads/stores scale k+SFS-1. Bound all fetch/refill targets by Nk. Shared scale stores fence to the async proxy and the consumer rendezvous publishes them. Register sets are reused only after their previous values have landed.
+                drain: |-
+                  Wait for the last cumulative MMA commit, which covers all current worktile scale copies and MMA input reads, then fence and rendezvous before reading Acc. Carry completion parity across worktiles; PIPE alternates two commit barriers using its continuous commit count. All real payload/scale copies have already been consumed; non-PIPE may retain only empty cp.async groups. No new drain of nonexistent payload is inserted.
+                produce: |-
+                  Each warp owns 32 route rows. Load the current 32-channel chunk for all its rows and wait for those TMEM reads. Only valid rows convert to BF16 and issue 16-byte vector Rout stores; padded rows are read and discarded. Done covers conversion and store issue, while grid completion publishes Rout to finalize.
+                close: |-
+                  Rendezvous after all four warps finish the worktile's TMEM reads and vector store issues. This permits Rows, Drain and the single Acc to be reused by the next worktile; it is not a separate global-store completion event.
+                retire: |-
+                  Warp 0 deallocates Tensor after the assigned sequence, or after setup for an empty sequence. No-op when J=0. Kernel completion supplies the route-store visibility required by finalize.
+            pipe:
+              prologue: ['enter:Pipeline']
+              steady:
+              - repeat: t
+                steady:
+                - 'begin:Work(t)'
+                - 'prime:Staging(t)'
+                - {repeat: k, steady: ['advance:Stage(t,k)']}
+                - 'drain:Acc(t)'
+                - {repeat: c, steady: ['produce:Rout(t,c)']}
+                - 'close:Work(t)'
+              epilogue: ['retire:Pipeline']
+      finalize:
+        resource: {Sum: {space: register, member_slot_shape: [{hidden: 128*Vfin}], dtype: fp32, slot_count: 1}}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:4]
+              verb:
+                enter: Wait for the preceding FC2 grid, including its route stores, then trigger admission.
+                produce: |-
+                  Each lane owns Vfin adjacent channels. Load all eight positions and weights before the route loop, skip negative positions, apply finalize in fixed slot order, convert to BF16 and store the full valid output slice. Out-of-range channel lanes return. Vfin=16 uses evict-first route loads and output stores; no output read occurs.
+            pipe: {prologue: ['enter:Input'], steady: ['produce:Y']}
+realization:
+  require:
+  - item: ['design.tile_pipeline::fc1.MMA', 'design.tile_pipeline::fc1.Epilogue', 'design.tile_pipeline::fc2.Main']
+    choice: |-
+      Bind the ordered scale-copy/MMA stream to tcgen05.cp, block-scaled tcgen05.mma and cumulative tcgen05.commit completion; bind epilogue reads to tcgen05.ld plus wait::ld.
+    reason: Ordered operand reads and cumulative completion protect shared operand slots and the single FC2 or double FC1 accumulator.
+  - item: ['design.tile_pipeline::fc1.WeightA', 'design.tile_pipeline::fc1.GatherLo', 'design.tile_pipeline::fc1.GatherHi']
+    choice: |-
+      Weight TMA uses two 64-row UINT8 boxes with 128-byte payload swizzle and the
+      prepared weight permutation. The two cp.async gather warps produce matching
+      input halves; generic scale stores fence to the async proxy. Bind joint stage
+      readiness to transaction-counted TMA completion and the three producer release
+      arrivals. Use ws_mbar_wait with its documented diagnostic bypass, without
+      strengthening it into an unconditional readiness or reuse wait.
+    reason: The operands share one ring slot; its successful ready event must cover
+      both payload halves and all scale images, while preserving the source's failure behavior.
+  - item: design.tile_pipeline::fc2.Main
+    choice: |-
+      For TMA retain the actual MapBn-row UINT8 weight box independently of Bn2, with the prepared-row permutation and 128-byte-swizzled shared payload. Successful map encoding does not validate the armed byte count; preserve the mismatch and stalled readiness documented in Main. The cp.async form writes the same operand layout. Bind cp.async group commit/wait to the stage readiness described in Main, including SFCP's four-byte scale copies. PIPE's two cumulative MMA completion notifications protect reuse after issue of the next stage.
+    reason: Map encoding, transaction readiness and completion are separate facts; this binding preserves the source's completion limits as well as its working operand paths.
+  - item: design.work_schedule::flow
+    choice: |-
+      Bind source_pdl to programmatic stream serialization and griddepcontrol wait/launch_dependents; the off case relies on stream order. Model.forward retains scratch/ABI ownership and refreshes the invocation stream on host-cache hits. Native moe_run executes eagerly on the first matching signature, attempts capture on the second, and replays the captured launch set thereafter; source capture failures select eager execution. Return only enqueues work.
+      Maps cache pointers, dimensions, mode, box geometry and L2 promotion, including refusals. FC1 cfg26 encodes only the weight map; its refusal selects a different FC1 implementation outside this node. FC2 follows the map-refusal choices recorded in work_schedule and uses no drain map. Small preparation requests 4*Rcap dynamic shared bytes with a fixed 4*32768-byte opt-in; an oversized forced small threshold is not converted to large preparation. FC1 checks its shared-memory attribute error, but discards launch_pdl's direct return and then checks cudaGetLastError; do not promise every immediate launch error is propagated. Other checked attribute/launch errors propagate to Model.forward. Scratch and process-global graph/map caches have no added lock or cross-stream completion protocol; this extraction supplies none.
+    reason: Early admission does not provide data visibility, and cached storage is reused across invocations rather
+      than implicitly rebuilt.

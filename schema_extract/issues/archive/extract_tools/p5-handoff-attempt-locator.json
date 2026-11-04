@@ -1,0 +1,18 @@
+{
+  "id": "p5-handoff-attempt-locator",
+  "category": "extract_tools",
+  "problem": "并发 P5 节点停止时，monitor 的 engineering_handoff 使用算子级 last_attempt_id 作为该节点的调用证据，可能指向另一个仍在运行的兄弟节点，误导定位。",
+  "evidence": [
+    "b5c8e87:schema_extract/tools/monitor.py::classify 中的 engineering_handoff.read_only_evidence 无条件拼接 run.last_attempt_id，没有按异常 scope 选择调用。",
+    "2026-11-03 的 MoE 巡检中，mono_arrival_mono 与 selfprep_redf 都因 missing bound implementation entry anchor 停止，交接却统一指向 c9ecb138-64c4-4927-a0ee-5823a182c220；该调用属于 w1_split_w1。",
+    "逐个核对已登记 attempt.json 后，两项正确调用分别为 7bbbf374-d1ae-496e-bee1-3b840c53be51 与 f71371d9-aa7e-420a-8470-c5f152db1263。两份回执只把 solution.py 标为 host，implementation 类仅引用 nvfp4_moe.cu；原来源门禁拒绝有据。",
+    "精确节点、调用、绑定入口、终止证据和恢复动作记录在 .schema_extract/trials/six-families/checks/check-7-9.json；未根据错误交接链接修改审阅门禁。",
+    "2.2.4 的提取回归共 29 项通过；修复、原例回放及维护记录见 .schema_extract/trials/six-families/post-batch/fixes-2.2.4.json。"
+  ],
+  "proposal": "按异常节点和阶段定位对应调用；没有可靠定位时仅列出状态文件与节点范围，避免给出算子级最近调用作为该节点证据。为两个并发节点的不同失败调用增加回归。",
+  "necessity": "定位错误会让维护者读取错误回执，甚至把正确的证据门禁误判为框架错误；需要使只读巡检报告与真实节点调用一致。",
+  "decision": {
+    "outcome": "resolved",
+    "reason": "2.2.4 的拒绝记录保存已登记 attempt_id，巡检优先引用该失败调用；旧 P5 记录缺少身份时仅给出状态文件与节点范围，不再误用兄弟节点的最近调用。并发两节点、旧记录回退、顺序阶段及真实 CLI 错 nonce 回归均通过。"
+  }
+}

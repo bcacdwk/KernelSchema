@@ -17,6 +17,10 @@ from .inputs import validate_source_reference
 from .stages import stage_files
 
 
+class IndexLayoutError(ExtractError):
+    """The canonical plan table is intact, but its coverage heading is misplaced."""
+
+
 class UpstreamRequired(ExtractError):
     """The current stage cannot repair an already reviewed root prerequisite."""
 
@@ -272,7 +276,16 @@ def validate_index(directory: Path, plan: list) -> None:
     text = regular_file(directory, "dispatch.md").read_text(encoding="utf-8")
     prefix = index_prefix(plan)
     if not text.startswith(prefix):
-        raise ExtractError("dispatch.md tree, parents, workload, differences and selection must match the canonical approved plan table")
+        table = prefix.removesuffix("## 覆盖缺口\n\n")
+        if text.startswith(table):
+            raise IndexLayoutError("dispatch.md: '## 覆盖缺口' must immediately follow the canonical plan table, "
+                                   "with one blank line before and after the heading; move explanatory paragraphs below it")
+        position = next((i for i, (actual, expected) in enumerate(zip(text, prefix)) if actual != expected),
+                        min(len(text), len(prefix)))
+        line = prefix[:position].count("\n") + 1
+        column = position - prefix.rfind("\n", 0, position)
+        raise ExtractError("dispatch.md tree, parents, workload, differences and selection must match the canonical "
+                           f"approved plan table; first difference at line {line}, column {column}")
     coverage = re.sub(r"<!--.*?-->", "", text[len(prefix):], flags=re.S).strip()
     if not coverage:
         raise ExtractError("dispatch.md requires actual coverage gaps, or an explicit statement that none are known")

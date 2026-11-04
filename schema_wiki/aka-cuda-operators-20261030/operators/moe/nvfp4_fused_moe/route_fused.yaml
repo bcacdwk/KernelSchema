@@ -1,0 +1,352 @@
+meta_data:
+  name: nvfp4_fused_moe
+  describe: Compute a pre-routed expert MLP with prepared NVFP4 weights, blockwise activation quantization, and a weighted expert reduction.
+  source: source@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/nvfp4_moe.cu::k_mega_body
+  version: 1
+  dispatch:
+    id: route_fused
+    parent: root
+    when: |
+      Let a be the effective MoEABI used by Model.forward after configuration validation
+      and content gates, or the cached ABI reused on a host-cache hit or graph replay.
+      Select exactly when a.cfg is 91 or 92. STAGED=1 for a.cfg=91 and 0 for a.cfg=92; a.cfg2 does not
+      select another projection kernel once run_pipeline enters this branch.
+      Explicit cfg overrides pass rung_ok and representation-family correction first.
+      MEGA validity requires K=8, I divisible by 32, H divisible by 256, and
+      4*(H+H/8+96)+64 <= 48*1024; cfg91 additionally requires
+      48*H+4*(H+H/8+96)+64 <= 227*1024.
+      Without either nonnegative cfg override, NVFP4_MOE_MEGA (default "1") enables
+      cfg92 when it is neither "0" nor empty, T*K<=8192, T*K*H<=32000000 and the
+      publication-time valid-route histogram is empty. Otherwise value "2" enables
+      cfg91 when T*K<=64 and min(E,T*K)*3*I*H<=96000000, subject to the validity gate.
+      The histogram is only a selection statistic. Cached execution retains its variant
+      and each launch computes from the current route_ids, including nonempty replay.
+design:
+  math_reshape:
+    thesis: >-
+      Evaluate one route and 32 intermediate channels at a time with SIMT arithmetic,
+      retaining only local up/gate and decoded quantized activation values. Merge FP32
+      FC2 partials per route before BF16 rounding and slot-order weighting; this removes
+      global activation intermediates but adds atomic accumulation and persistent route state.
+    rewrite:
+      - step: route
+        name: Use original route slots and classify empty tokens
+        math: |
+          Rcap=T*K; r=t*K+k; V={r | 0<=route_ids[t,k]<E}; Rv=count(V).
+          n[t]=count({k | t*K+k in V}); S=I/C, with C bound below.
+          For n[t]=0, Y[t,:]=bf16(0). Only r in V performs the following projection work.
+          X is Contract's decoded hidden_states. Let B1 and B2 be the unscaled E2M1
+          values in the logical weight rows, and S1 and S2 their E4M3 block scales,
+          using Contract's prepared-row and scale-swizzle inverses.
+          W1[e,j,h]=B1[e,j,h]*S1[e,j,floor(h/G)] and similarly for W2 along I.
+        symbol:
+          C: {meaning: Intermediate channels per independently assigned unit, binding: "bind:design.work_schedule::C"}
+      - step: fc1
+        name: Factor FC1 weight scales outside each 16-channel inner sum
+        math: |
+          For active r=t*K+k, e=route_ids[t,k], and s=0..S-1, compute channels i=C*s..C*s+C-1.
+          For each logical weight row w in {i,I+i}, group l=0..31 and j=0..H/512-1,
+          b=32*j+l. Start a_0(-1)=a_1(-1)=0. For q=0..7 and d in {0,1},
+          a_d(q)=fma32(X[t,G*b+2*q+d],B1[e,w,G*b+2*q+d],a_d(q-1)).
+          F_l(-1)=0; F_l(j)=fma32(S1[e,w,b],a_0(7)+a_1(7),F_l(j-1)).
+          Start f_l=F_l(H/512-1); for o=16,8,4,2,1 replace all f_l simultaneously
+          by f_l+f_(l xor o). UG[0,i-C*s]=f_0 for w=i;
+          UG[1,i-C*s]=f_0 for w=I+i.
+        symbol:
+          F: {meaning: Per-group FC1 projection state for one logical row, shape: [group: 32], dtype: fp32, retention: "carry_forward (r,s,w); j=-1..H/512-1"}
+          UG: {meaning: Up and gate values consumed by activation, shape: [projection: 2, channel: C], dtype: fp32, retention: "keep_value (r,s)"}
+        arithmetic:
+          accumulate: >-
+            The two eight-term chains use independent packed FP32 FMAs; their rounded
+            sum is multiplied by the weight scale in a further FMA. The 32-group
+            butterfly is FP32 addition. This is not the parent's native block-scaled MMA.
+      - step: activate
+        name: Unfolded approximate activation and decoded NVFP4 quantization
+        math: |
+          For each local channel i=0..C-1 use up=UG[0,i], gate=UG[1,i] and Contract's asymmetric clamp.
+          Set a=gemm1_alpha[e], b=gemm1_beta[e], ia=rcp_rn(a), ib=rcp_rn(b).
+          Define sig(x)=rcp_approx(1+ex2_approx_ftz(x*fp32(-1.44269504)))
+          and th(x)=fma32(sig(x+x),2,-1).
+          For activation_type=3, v=(gate*sig(gate*a))*(up+b).
+          For activation_type=10, v=((a*th(gate*ia))*sig(gate))*(b*th(up*ib)).
+          Both reciprocals are evaluated for either activation, even when unused.
+          For each G-channel block, initialize m_i=abs(v_i); for o=1,2,4,8
+          simultaneously replace m_i by fmax(m_i,m_(i xor o)) within the block.
+          sf=fp32(fp8_e4m3fn(min(m_i*fp32(1/6),448)));
+          inv=rcp_rn(max(sf,fp32(1.17549435e-38)));
+          AQ[i]=Q4(v_i*inv)*sf, where Q4 is Contract's RNE saturating E2M1 value.
+          The multiply by inv is evaluated even for sf=0. No packed activation or
+          activation-scale tensor is stored; retain the C decoded FP32 AQ values.
+        symbol:
+          AQ: {meaning: Decoded quantized activation for the current route chunk, shape: [channel: C], dtype: fp32, retention: "keep_value (r,s)"}
+        arithmetic:
+          approx: >-
+            sig uses ex2.approx.ftz.f32 and rcp.approx.f32; th uses the sigmoid identity.
+            All shown parentheses preserve the unfused multiply/add ordering apart from
+            explicit fma32. fmin/fmax select the numeric operand when the other is NaN. Quantization
+            normalizes by a rounded reciprocal, not division. unknown: no verified
+            composed full-domain error bound is supplied by the fixed source.
+      - step: fc2
+        name: Accumulate independent 32-channel partials into each route
+        math: |
+          For each active (r,s) and h, P(-1,h)=0. For i=0..C-1 in ascending order,
+          P(i,h)=fma32(B2[e,h,C*s+i]*S2[e,h,floor((C*s+i)/G)],AQ[i],P(i-1,h)).
+          Partial[h]=P(C-1,h). Acc[r,h] is initially zero when scratch is allocated.
+          Every (r,s) adds Partial[h] into Acc[r,h] with global FP32 atomic addition.
+          For each (r,h), the S additions form a recurrence in their actual arrival order;
+          this order may differ across h and invocations and is not fixed by the unit order.
+        symbol:
+          P: {meaning: Local FC2 partial recurrence, shape: [hidden: H], dtype: fp32, retention: "carry_forward (r,s); i=-1..C-1"}
+          Partial: {meaning: Current unit's contribution to its route, shape: [hidden: H], dtype: fp32}
+          Acc: {meaning: Persistent FP32 route accumulator, shape: [route: Rcap, hidden: H], dtype: fp32, retention: "carry_forward invocation; each (r,h) receives q=0..S atomic arrivals, then resets"}
+        arithmetic:
+          accumulate: >-
+            Each weight is decoded and multiplied by its scale before the ascending FP32
+            FMA chain. Global FP32 atomicAdd merges the chunk partials; no BF16 conversion
+            occurs until all chunks of the token's active routes have arrived.
+      - step: finalize
+        name: Last-arriving unit rounds, combines and clears one token
+        math: |
+          Count[t] starts at zero when scratch is allocated. Each completed active (r,s)
+          increments Count[t] once. On reaching n[t]*S, finalize token t:
+          Z(-1,h)=0; for k=0..K-1, Z(k,h)=Z(k-1,h) if t*K+k is inactive,
+          otherwise Z(k,h)=fma32(fp32(bf16(Acc[t*K+k,h])),route_weights[t,k],Z(k-1,h)).
+          Y[t,h]=bf16(Z(K-1,h)). Clear each consumed Acc[t*K+k,h] to zero and reset Count[t]=0.
+          Inactive Acc rows and empty-token counters are untouched; sequential completed calls
+          leave them zero from allocation or the previous successful finalization.
+          Overwrite the caller's output view, return [output], and leave other inputs and guards unchanged.
+        symbol:
+          Count: {meaning: Persistent completed-unit count per token, shape: [token: T], dtype: int32, retention: "carry_forward invocation; each t receives q=0..n[t]*S arrivals, then resets"}
+          Z: {meaning: Fixed slot-order output sum, shape: [hidden: H], dtype: fp32, retention: "carry_forward (t); k=-1..K-1"}
+    ledger:
+      baseline: Direct active-route Contract evaluation with full FP32 up/gate, activation and decoded quantized activation, plus BF16 route materialization.
+      footprint:
+        - {item: Projection intermediates, change: "16*Rv*I global bytes -> 12*C local live bytes per active unit for UG and AQ; no full activation tensor is produced", by: [fc1, activate]}
+        - {item: Route state, change: "2*Rv*H BF16 materialized bytes -> 4*Rcap*H FP32 accumulator bytes plus 4*T counter bytes retained across calls", by: [fc2, finalize]}
+      vector:
+        - {item: Chunk merge, change: "+Rv*S*H global FP32 atomic additions and Rv*S token-counter increments per call", by: [fc2, finalize]}
+      error:
+        - {item: Reassociated projections and approximate activation, change: "FC1 scale factoring and butterfly, unordered S-way FC2 sums, and Rv*I approximate activation/normalization evaluations; no established full-domain output bound", by: [fc1, activate, fc2]}
+  work_schedule:
+    thesis: >-
+      One kernel first clears route-less token rows, then assigns contiguous ranges of
+      (original route slot, intermediate chunk) units to CTAs. Every CTA repeats the full
+      valid-route census; active units fuse FC1, activation, FC2 and token completion.
+      Static assignment enables token-input reuse but does not balance masked routes.
+    flow:
+      launch: [{phase: [empty, route], order: per_worker}]
+    phase:
+      empty:
+        describe: Overwrite a token row with zeros only when all its route slots are inactive.
+        decomposition:
+          partition: {token: {size: T, tile: 1}}
+          worktile:
+            invariant:
+              route_ids: {shape: [slot: K], dtype: int32}
+          target:
+            single_tile:
+              Y: {shape: [hidden: H], dtype: bf16}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: Ncta}
+        schedule:
+          worktile_order: [{by: token, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, step: worker_count}, refill: none, exit: assigned_done}
+      route:
+        describe: Produce one route's C-channel FC2 partial and let the token's last completed unit write its output.
+        decomposition:
+          strategy: >-
+            C=32; Ncta=max(1,min(Rcap*S,cap)), where cap is the positive cached
+            mega_grid_cap() value or 296 otherwise. The environment value is clamped
+            to [0,65536] at first native use. L=ceil_div(Rcap*S,Ncta).
+            Each CTA's prologue scans all Rcap current IDs and returns if none is valid.
+            An inactive unit skips all projection and ticket work. Active units perform
+            the full H reduction for 2*C FC1 rows, then two G-wide QDQ blocks and all H
+            FC2 outputs. Units atomically merge Partial into global Acc. Acc and Count
+            are zeroed only at allocation, and are self-cleared by finalization.
+            The unit observing the final Count ticket for its token additionally owns
+            that token's full Y row and the resets; it is not separately queued work.
+            No cross-CTA wait or grid-wide barrier separates the two phases.
+          partition: {route: {size: Rcap, tile: 1}, chunk: {size: S, tile: 1}}
+          worktile:
+            invariant:
+              route_ids: {shape: [slot: K], dtype: int32}
+              route_weights: {shape: [slot: K], dtype: fp32}
+              hidden_states: {shape: [packed_hidden: "H/2"], dtype: uint8}
+              hidden_states_scale: {shape: [hidden_block: "H/G"], dtype: fp8_e4m3fn}
+              gemm1_weights: {shape: [row: "2*C", packed_hidden: "H/2"], dtype: uint8}
+              gemm1_weights_scale: {shape: [row: "2*C", hidden_block: "H/G"], dtype: fp8_e4m3fn}
+              gemm2_weights: {shape: [hidden: H, packed_intermediate: "C/2"], dtype: uint8}
+              gemm2_weights_scale: {shape: [hidden: H, intermediate_block: "C/G"], dtype: fp8_e4m3fn}
+              Parameters: {shape: [value: 3], dtype: fp32}
+          target:
+            single_tile:
+              Partial: {shape: [hidden: H], dtype: fp32}
+              Y: {shape: [hidden: H], dtype: bf16}
+            tile_reduction: {dimension: chunk, input: Partial, output: Acc, method: "design.math_reshape::fc2"}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: Ncta}
+        schedule:
+          strategy: >-
+            Flatten u=r*S+s, chunk fastest. A CTA walks its contiguous range, retaining
+            decoded X and n[t] while the next active unit has the same token. Boundaries
+            may split a token across CTAs, each with its own decode and census. There is
+            no expert sorting, compaction, padded row arithmetic or work stealing.
+            A nonfinal unit continues without waiting for the other units of its token.
+          worktile_order: [{by: route, direction: ascending}, {by: chunk, direction: ascending}]
+          worker_assignment:
+            preassigned: {start: "min(worker_id*L,Rcap*S)", count: "max(0,min(L,Rcap*S-worker_id*L))"}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: >-
+      All 16 warps cooperate serially within a unit. A single decoded-token cache is
+      reused across adjacent units, while one UG/AQ image and, for STAGED, one weight
+      image are recycled after their readers finish. Device fences and per-token tickets
+      publish global partials; the winning CTA finalizes without a grid-wide barrier.
+    phase:
+      empty:
+        domain: {v: worktile}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:16]"
+              verb:
+                produce: >-
+                  Every thread tests the token's route IDs. For a route-less token,
+                  distribute 16-byte zero stores across the full output row, without
+                  reading its incoming contents. Active token rows are untouched here.
+                  A CTA proceeds after its own assigned rows; other CTAs need not finish.
+            pipe: {steady: [{repeat: v, steady: ["produce:Y(v)"]}]}
+      route:
+        domain: {v: worktile}
+        resource:
+          TokenData:
+            space: SMEM
+            member_slot_shape: [element: "H+H/8"]
+            dtype: fp32
+            slot_count: 1
+            view:
+              "X(t)": {}
+          UG: {space: SMEM, member_slot_shape: [element: "2*C"], dtype: fp32, slot_count: 1}
+          AQ: {space: SMEM, member_slot_shape: [channel: C], dtype: fp32, slot_count: 1}
+          Weights:
+            space: SMEM
+            member_slot_shape: [byte: "48*H*STAGED"]
+            dtype: uint8
+            slot_count: 1
+            view:
+              W1Payload: {part: {byte: [0, "32*H*STAGED"]}}
+              W2Payload: {part: {byte: ["32*H*STAGED", "48*H*STAGED"]}}
+          IndexScratch:
+            space: SMEM
+            member_slot_shape: [entry: 16]
+            dtype: int32
+            slot_count: 1
+            view:
+              WarpTotals: {}
+              ActiveSlots: {part: {entry: [0, 8]}}
+          Status:
+            space: SMEM
+            member_slot_shape: [word: 3]
+            dtype: int32
+            slot_count: 1
+            view:
+              ValidCount: {part: {word: [0, 1]}}
+              TokenCount: {part: {word: [1, 2]}}
+              Last: {part: {word: [2, 3]}}
+          ActiveScores: {space: SMEM, member_slot_shape: [slot: K], dtype: fp32, slot_count: 1}
+          F: {space: register, member_slot_shape: [channel: C, projection: 2, group: 32], dtype: fp32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:16]"
+              verb:
+                enter: >-
+                  Each thread counts its strided IDs, warps sum with XOR shuffles,
+                  lane zero publishes WarpTotals, and a CTA rendezvous precedes the
+                  leader's sum into ValidCount. A second rendezvous makes the result
+                  uniform. If zero, all threads return; otherwise initialize cur_t=-1.
+                  This prologue runs even for a CTA with no assigned units.
+                select: >-
+                  Decode the assigned (r,s) and current expert ID. Invalid routes make
+                  all remaining actions of this unit no-ops, including barriers and
+                  counter updates. For a valid route, determine token t and whether
+                  t differs from this CTA's retained cur_t.
+                prepare: >-
+                  On a fresh token decode hidden payload and scales into TokenData,
+                  inserting two unused FP32 padding positions per G values, and let
+                  the leader recount its active slots into TokenCount; retain both
+                  until the next fresh token. For STAGED, all threads asynchronously
+                  copy the 2*C prepared FC1 rows and C/2 bytes from every FC2 row into
+                  Weights. Complete every issuer's copy group before a CTA rendezvous
+                  publishes X, TokenCount and the weight image. In direct mode the
+                  same rendezvous publishes X and TokenCount with no weight copies.
+                  Weight scales are read directly from their prepared global storage.
+                project: >-
+                  Each warp computes two up/gate channel pairs, its lanes owning
+                  different 16-channel hidden blocks in the math fc1 grouping.
+                  Initialize F for this unit, traverse the entire hidden reduction,
+                  finish the butterfly and let lane zero write the interleaved UG
+                  image. A CTA rendezvous publishes all 64 values to warp zero.
+                activate: >-
+                  Warp zero computes the C activations and two independent G-value
+                  maxima, then writes decoded AQ; all warps rendezvous before FC2.
+                  The packed activation helper evaluates duplicate pairs, and the
+                  quantizer packs eight copies of the same quotient; only one result
+                  component and the low E2M1 nibble are retained.
+                accumulate: >-
+                  Each thread processes four consecutive hidden channels at a time,
+                  advancing by 2048 channels until H is covered. Compute the C-term
+                  Partial in registers and issue its global Acc atomic additions.
+                  STAGED reads W2Payload; direct mode reads the same slice from global
+                  memory. This ends all UG/AQ/weight reads for this unit; device-wide
+                  publication of its additions is established by the next action.
+                ticket: >-
+                  Every thread fences its own Acc updates to device scope, then the
+                  CTA rendezvous precedes the leader's Count[t] atomic increment.
+                  The leader sets Last when the old count equals TokenCount*S-1,
+                  fences again on that path, and a CTA rendezvous broadcasts Last.
+                  The winner can consume all token partials; nonwinners do not wait
+                  for more arrivals and never read another unit's Acc values.
+                finalize: >-
+                  Only if Last is true, the leader writes valid route slots in
+                  ascending k order over IndexScratch and gathers ActiveScores.
+                  Rendezvous, then distribute four hidden channels per thread with
+                  stride 2048. Apply math finalize, clear each consumed Acc vector
+                  immediately after its read, and store Y. After all writers
+                  rendezvous, the leader resets Count[t]. The census WarpTotals
+                  are dead before IndexScratch is overwritten by ActiveSlots.
+                advance: >-
+                  A final CTA rendezvous protects Last, TokenCount and shared images
+                  before the next unit. cur_t and TokenData remain available for
+                  same-token reuse. There is no outstanding staged copy at this point,
+                  and no implicit scratch reset on loop exit or on empty routing.
+            pipe:
+              prologue: ["enter:Census"]
+              steady:
+                - repeat: v
+                  steady: ["select:Unit(v)", "prepare:Operands(v)", "project:UG(v)", "activate:AQ(v)", "accumulate:Partial(v)", "ticket:Count(v)", "finalize:Y(v)", "advance:Unit(v)"]
+realization:
+  require:
+    - item: "design.tile_pipeline::route.Main"
+      choice: >-
+        Bind the staged copy completion to aligned cp.async.cg.shared.global 16-byte
+        copies, one commit group and each issuer's wait_group 0, followed by
+        __syncthreads. Bind ticket publication to the source's per-thread
+        __threadfence, CTA rendezvous, leader atomicAdd and final-path fence/rendezvous.
+        This branch launches directly; it has no PDL chain, TMA maps or TMEM allocation.
+      reason: Copy completion and device-visible partial publication are distinct from issuing the corresponding operations.
+    - item: "design.work_schedule::flow"
+      choice: >-
+        Model.forward initializes the decode lookup tables once per device and synchronizes
+        before first use, then retains scratch and ABI ownership. Its workspace cache allocates
+        zeroed Acc and Count once, while the ordinary act, rout and routing-map arrays
+        remain allocated but unused on this branch. Host-cache hits refresh the stream
+        and reuse the ABI without repeating the histogram gate. moe_run submits eagerly
+        or captures this same single kernel on the second matching signature, then
+        replays on the invocation stream; its recorded capture failures fall back to
+        eager execution. A staged shared-memory attribute failure or launch failure
+        instead propagates code 911 or 910, with no tensor-kernel fallback here.
+        Return does not wait for the launched MoE computation. Scratch and the process-global graph cache have
+        no added lock, cross-stream completion or repair-after-failure protocol.
+      reason: Self-clearing scratch and cached launch parameters persist across calls; the source does not establish safe overlapping reuse.

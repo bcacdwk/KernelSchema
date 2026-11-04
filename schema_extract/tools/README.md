@@ -16,7 +16,7 @@ Runner 唯一写运行状态、派发、检查、合入和发布。worker 只修
 
 [agent.py](agent.py)直接启动 `codex exec`，正常续写用 `codex exec resume UUID` 精确指向原角色。禁止用 `--last`、会话名或其他阶段/节点的 UUID。中断后须先确认终止，再以安全 checkpoint 重建上下文；`session_handoffs` 记录旧 UUID、后续尝试和新 UUID，已退休 UUID 不能复用。普通格式修复和已完成调用后的续写保留原角色会话。
 
-审阅围绕源码语义与信息压缩：正确且必要信息齐备就 approve；漏掉覆盖缓冲前的消费者依赖等具体问题才 revise，并给出证据与修改要求。源码已有缺陷如实保留，不补造同步或 fallback；关键任务事实无法确定时 blocked，非关键未知可备注。结构检查不能代替这些判断。
+审阅围绕源码语义与信息压缩，按[统一缺项边界](../../EXTRACT_SCHEMA.md#来源缺项与验收边界)判断：忠实表达固定实现及来源缺口可 approve 并携带 issues；已知事实写错或遗漏则 revise。blocked 须在现有 detail/scope 中说明缺失事实、无法确定的具体计算/数值/设计关系，以及为何现有事实和明确限制不足以继续。仅缺外部验收器定义、但不影响当前提取时记录 source_gap，不要求补齐后才推进；P6 仍复核缺口没有被用作保证。结构检查和精确引文不能代替语义判断。
 
 ## 回执与短交接
 
@@ -24,17 +24,19 @@ Runner 唯一写运行状态、派发、检查、合入和发布。worker 只修
 
 | 模型负责 | 含义 |
 | --- | --- |
-| `decision/summary/conclusions`、`issues` | 语义结论，以及具体问题的范围、影响、来源依据与恢复条件 |
+| `decision/summary/conclusions`、`issues` | 模型填写的语义结论；`summary` 必须简短且非空，问题给出范围、影响、来源依据与恢复条件 |
 | `source_evidence` | category/path/line_start/line_end/quote_offset/note；note 解释所选范围支持的结论 |
 | `artifact_evidence` | 同样的定位字段，无 category；引用实际读取的当前产物 |
 | `checks/checks_note` | 只记亲自执行的命令和退出码；交 Runner 检查时用空列表并说明 |
 | 阶段字段 | comparisons、plan、revision_scope/affected_nodes 等按当前页填写；无框架建议时 framework_candidates=[] |
 
-[receipts.py](receipts.py)的 `normalize_response` 从已登记调用和真实字节生成 `receipt.v2`：身份、文件清单、实际差异、摘要、固定来源及精确引文均由工具填写。模型不得提交这些工具字段。P5 只提交本节点 YAML，root/祖先可作为证据；其他阶段覆盖全部交付文件。
+[receipts.py](receipts.py)的 `normalize_response` 从已登记调用和真实字节生成 `receipt.v2`：身份、文件清单、实际差异、文件 SHA-256、固定来源及精确引文均由工具填写。模型不得提交这些工具字段；语义字段 `summary` 仍由模型填写。P5 只提交本节点 YAML，root/祖先可作为证据；其他阶段覆盖全部交付文件。
 
 原始 `response.json` 与 `result.response` 保持一致，规范化结果另存 `receipt.json`。reviewer 的整个 workspace 必须等于起始依赖字节，裁决结果另记摘要。批准绑定实际审过的内容；合法草稿只用于恢复。
 
 complete/approve 须覆盖 [stages.py](stages.py)定义的 required_evidence 和 required_conclusions，每类至少引用一次绑定入口；调用链文件可补充。reviewer 的 artifact_evidence 须覆盖门禁给出的全部文件，P5 包括 root、直接父和当前节点。conclusions/issues 等的 evidence 从 0 索引本次 source_evidence。
+
+P6 的 `tree` 结论描述当前目录的文件集合、父关系、链接与拓扑时，可以仅依据完整的 `artifact_evidence`，来源 `evidence` 用 `[]`。Runner 先核对实际文件集合与计划相同、全部文件已有有效产物引用，再执行完整树检查；其余结论仍须有效源码索引，全目录 schema 检查与独立语义审阅继续执行。
 
 固定材料的范围读取使用 [reading.py](reading.py)：
 
@@ -53,6 +55,8 @@ P2/P3/P4 reviewer 批准时提供短 handoff：最多 20 个非空行、1200 字
 P3/P5/P6 的完成、批准及退修由 Runner 自动执行冻结检查器，放行须退出 0。输入诊断为 1，工具/环境问题为 2。模型可按需自检，无需两个角色各自重复执行。worker 的 blocked 将合法草稿与缺项交独立 reviewer；reviewer 可对未完成草稿给出计数的 revise，不能把检查失败当作批准。
 
 每阶段、每个 P5 节点独立累计实质退修。达到 revision_limit（默认 5）后，由原 reviewer 一次裁决，只有 approve 或 blocked 两个出口。格式修复不算实质退修；nonce 正确的普通格式错误和普通 CLI 失败各最多重试两次，所有尝试均消耗调用及时间预算。
+
+P4 表格与 plan 逐项一致、仅覆盖缺口标题位置不符时，反馈明确要求把标题紧接表格，并使用同一有限格式修复额度。表格内容、父关系、来源依据、缺口正文和链接仍须通过原门禁；其他索引差异报告首个不同的行列位置。
 
 裁决额外返回 `adjudication: {action, checkpoint, patches}`。action 为 select/patch/blocked：select 只选本范围已有候选；patch 基于当前 checkpoint，条目为 `{path, old, new}`，old 非空且唯一匹配。Runner 在隔离副本应用、核对版本并检查；越权、无法应用、缺关键事实或检查失败即阻塞，裁决不重试。
 
@@ -97,6 +101,8 @@ P6 准入要求当前计划节点集合等于有效已合入集合，且 P1–P4
 Store.save 提交权威 state 后，尽力原子写 summary.json。投影包含状态修订/文件版本戳和 `content_verified: false`，不能用于批准或调度。写投影失败不回滚 state；read_summary 发现陈旧/缺失时显示 stale/unknown，至多回读一次 state，不补写或深验。
 
 inspect 每轮只取一次进程表，读取投影及已登记活跃调用的小记录和日志 stat。scan 另保存最新观察与最多 64 条变化，不读全历史、不自行恢复。冻结能力缺失保持未知。
+
+工程交接优先使用失败原因绑定的 `attempt_id`。旧 P5 记录缺少该身份时只列状态文件与节点范围，不能用算子级最近调用代替失败节点；需要时再按节点读取原调用记录。
 
 ## 多任务控制与维护接续
 

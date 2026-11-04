@@ -1098,7 +1098,7 @@ def _reject(store: Store, state: dict, attempt: dict, result: dict | None, exc: 
     owner["status"] = "invalid_receipt" if confirmed else "termination_unconfirmed"
     _scope_at(state, attempt)["invalid_receipts"] += 1
     _scope_at(state, attempt)["status"] = owner["status"]
-    owner["reason"] = {"code": "proposal_rejected", "summary": str(exc),
+    owner["reason"] = {"code": "proposal_rejected", "summary": str(exc), "attempt_id": attempt["attempt_id"],
                        "recovery_condition": "核对拒绝原因与固定输入；确认旧进程终止后按原计数和预算恢复。"}
     if confirmed and isinstance(exc, UpstreamRequired):
         owner["status"] = _scope_at(state, attempt)["status"] = "blocked"

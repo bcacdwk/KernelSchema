@@ -125,6 +125,27 @@ class CLIRecoveryTests(unittest.TestCase):
         self.assertEqual(report.returncode, 0, report.stderr)
         self.assertEqual(len(json.loads(report.stdout)["time"]["budget_extensions"]), 1)
 
+    def test_rejection_records_the_registered_attempt_not_the_bad_nonce(self):
+        self.stub.write_text(f"#!{sys.executable}\n" + '''import json, sys
+from pathlib import Path
+if '--version' in sys.argv:
+    print('controlled-stub')
+    sys.exit(0)
+sys.stdin.read()
+destination = Path(sys.argv[sys.argv.index('--output-last-message') + 1])
+destination.write_text(json.dumps({'format': 'schema_extract.proposal.v1', 'attempt_id': 'wrong-invocation'}))
+print(json.dumps({'type': 'thread.started', 'thread_id': '00000000-0000-4000-8000-000000000001'}))
+print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'cached_input_tokens': 0, 'output_tokens': 1}}))
+''')
+        result = self.cli("resume", self.run_id)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        state = self.state()
+        attempt_id = state["attempts"][-1]
+        self.assertEqual(state["reason"]["code"], "proposal_rejected")
+        self.assertEqual(state["reason"]["attempt_id"], attempt_id)
+        rejected = read_json(self.store.run_dir(self.run_id) / "attempts" / attempt_id / "rejected.json")
+        self.assertEqual(rejected["attempt_id"], attempt_id)
+
     def test_continuation_inherits_old_counts_and_only_adds_once(self):
         self.assertEqual(self.cli("resume", self.run_id, "--add-seconds", "600", "--add-calls", "2").returncode, 1)
         old = self.state()

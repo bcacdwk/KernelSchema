@@ -1,0 +1,19 @@
+{
+  "id": "p4-index-layout-hard-stop",
+  "category": "extract_tools",
+  "problem": "P4 的 dispatch 表格逐项符合结构化 plan 时，仅在表格与“覆盖缺口”标题之间插入解释段落，也会触发笼统的树/父节点/选择依据不一致错误并立即停止，模型缺少可定位的格式修复反馈。",
+  "evidence": [
+    "b5c8e87:schema_extract/tools/artifacts.py::index_prefix 将表格后紧邻的“## 覆盖缺口”标题作为同一字节前缀；validate_index 用 startswith 核对并对所有差异返回同一句 canonical approved plan table 错误。该代码在 2.2.2 试用中未改变。",
+    "b5c8e87:schema_extract/tools/runner.py::_receive 将 validate_index 的 ExtractError 交给 _reject，直接记录 invalid_receipt；仅 ReceiptFormatError 进入有限 receipt_repair。",
+    "2026-11-03，2.2.2 试用的 fp8_scaled_grouped_gemm 和 dual_cache_latent_bf16 两项 P4 worker 在补齐空 summary 后均被此门禁拒绝。已逐字符核对两份表格，节点、直接父、workload、difference、selection 与各自 plan 完全相同，首差异都是表后解释段落先于覆盖缺口标题。",
+    "对两份原稿的隔离副本只把覆盖缺口标题移到表格后，保留所有说明和缺口，再调用原 validate_index 均通过；没有修改原调用 workspace、checkpoint、回执或固定执行器。",
+    "本轮证据和隔离候选位于 .schema_extract/trials/six-families/checks/check-7-4.json 与 diagnostics/p4-index-layout/。",
+    "2.2.3:schema_extract/tools/tests/test_proposals.py 的 P4 回执测试覆盖标题错位的有限修复分类、修正后放行，以及计划值、父关系、空覆盖正文与额外 YAML 链接继续拒绝；python3 -B -m unittest discover -s schema_extract/tools/tests 共 21 项通过。"
+  ],
+  "proposal": "试用结束后统一评估：让布局诊断明确指出覆盖缺口标题必须紧接表格并报告首差异位置；P4 页明确该要求。评估将可修正的索引格式问题交回有限 worker 修复，继续保留计划语义、链接、只读 root、独立审阅、计数和预算门禁。",
+  "necessity": "同一纯布局问题已经中断两项独立提取，并因等待消耗阶段墙钟；明确诊断可减少重复推理和无效续跑，无需放宽任何来源或设计语义要求。",
+  "decision": {
+    "outcome": "resolved",
+    "reason": "Schema Extract 2.2.3 为完整匹配 plan 的表格后标题错位提供 IndexLayoutError，P4 普通回执将其送入原有的有限 receipt_repair；其他表格差异给出首个行列位置，计划值、父关系、覆盖正文与链接门禁保持有效。P4 页明确标题位置。21 项提取回归通过，两份真实失败稿重放得到准确诊断；当前 GEMM 和 sparse 原任务已补充预算、由 worker 修正索引并进入独立审阅。新修复用于后续冻结，原任务继续使用自身 2.2.2 执行器。"
+  }
+}

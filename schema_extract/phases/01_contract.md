@@ -22,15 +22,17 @@ Runner 提供算子身份、输出位置、固定来源入口、输入构造、r
 
 `contract.algorithm_requirement` 只在 root 保存一份，供所有路径共用。从任务的输入构造、reference 和验收入口写清输入输出、有效域、数学关系、边界、精度转换和副作用。核对实际调用的 shape、布局、可选参数、读写及初始化区域；明确外部输出与内部 workspace 的区别，避免默认值域排除合法输入。
 
-验收判据逐输出核对比较对象、相对误差基准（包括材料中的 `relative_to`）、计算精度、阈值及非有限值处理。阅读数值验收依据不等于执行 GPU 验收；本流程不安排 GPU 测试或实测。
+验收材料逐输出核对比较对象、相对误差基准（包括 `relative_to`）、计算精度、阈值及非有限值处理。来源已给出的内容必须保留，未提供的定义按[验收来源记录](../../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)处理。阅读这些材料不等于执行 GPU 验收；本流程不安排 GPU 测试或实测。
 
 绑定的验收 JSON 若在具名输出的 `tolerance` 中明确写了 `relative_to`，P1 提案用 `comparisons: [{output, source_output, evidence}]` 将它绑定到实际 YAML 的 `golden_reference.tolerance.<output>`。`source_output` 是验收记录的 `name` 或 `outputs` 的键；例如 `out → Y`、`input.state[*] → State`，名称相同则绑定同名输出。仅 `input.state[0]`、`input.state[1]` 这类已知状态族可用 `input.state[*]` 汇总，每种不同的比较基准或阈值仍要有声明行的独立锚点。返回位置（如 `output[0]`、`output[1]`）及其他下标保留各自完整名称，即使基准与阈值相同也不合并，必须分别引用对应的声明行。`evidence` 引用本次 `source_evidence`；所选行范围与 `quote_offset` 生成的引文必须包含该输出的 `"relative_to": "candidate"` 等实际声明，不能只取 JSON 开头。worker 和 reviewer 各自核对映射并选择自己的锚点；没有这类明确声明时用 `comparisons: []`。
 
 对应 YAML 判据明确保留 `relative_to=candidate` 或来源给出的其他值。例如材料已给出 elementwise、`atol=0.01`、`rtol=0.05` 时，可写 `abs(candidate-reference) <= 0.01 + 0.05*abs(candidate); relative_to=candidate`，并在后面说明未声明的比较器精度或 NaN/Inf 行为。Runner 核对这个显式基准、已有标准公式中的比较对象与可直接核对的阈值；自由公式及输出映射的语义仍由独立 reviewer 核实。不因单独一个 `relative_to` 字段推断 elementwise/L2 公式、运算精度或非有限值政策。
 
-材料既未声明 `relative_to`，也未提供外部比较器实现时，不能把“没有 override”、reference 内部算术或 schema 默认值当作相对 reference 的依据。若只有 `atol/rtol` 等阈值，就忠实列出已知项，并明确保留比较基准未知；不补写 `abs(reference)` 等未经支持的公式。是否影响放行仍由独立 reviewer 按缺项边界判断；缺少关键事实则给出 `blocked` 及所需补充材料。
+材料既未声明 `relative_to`，也未提供外部比较器实现时，不能把“没有 override”、reference 内部算术或 schema 默认值当作相对 reference 的依据。只有 `atol/rtol` 等阈值时，在对应 `tolerance` 中明确写成来源声明，同时注明公式和基准未提供、未采用默认简写解释；不补写 `abs(reference)` 等未经支持的公式。外部 relative-L2 归一化、返回别名与写回输出的检查路由未给出时也按此处理，已明确的检查仍完整保留。
 
-材料已明确参考入口、比较对象、误差基准和阈值时，未声明的外部比较器计算精度或 NaN/Inf 行为可保留为未知备注。忠实填写已知判据，在回执说明未获支持的保证及其影响；不得用 reference 内部算术或 schema 默认值替外部比较器补证，也不能仅因这些细节未声明就将明确阈值判为缺失。reviewer 独立判断备注是否影响本阶段提取；真正缺少标准答案、比较对象或必要阈值仍须给出阻塞条件。
+任务数学、IO、副作用和参考入口已可确定时，这类外部验收资料缺口不阻止 P1 完成。worker 可返回 `complete`，reviewer 可返回 `approve` 并携带 `issues`：用 `source_gap` 记录已知内容、未提供的定义、来源及为何不影响当前提取；`recovery_condition` 说明补齐途径，不自动成为当前放行条件。不能仅以“无法复刻外部比较器”或“会改变外部测试通过边界”返回 blocked。
+
+真正缺少参考入口、任务计算、输入输出或副作用定义，或必须猜测精度路径等事实才能描述当前内容时，才按[阻塞边界](../../EXTRACT_SCHEMA.md#来源缺项与验收边界)交回：具体指出哪项计算或设计因此无法确定。来源已明而草稿不符则是退修，不能用 source_gap 代替修正。
 
 写完后，读者应能不依赖 Design 理解标准答案。生成参数、函数签名和候选实现限制不能单独决定任务要求；分块、映射、缓冲、执行顺序和候选数学改写留给 Design。公式、dtype、range、default、symbol 和 tolerance 按算法规范填写，不自行增加字段。
 
@@ -48,10 +50,10 @@ Runner 提供算子身份、输出位置、固定来源入口、输入构造、r
 
 - 元数据身份和来源准确；YAML 可解析，硬件占位保持原样。
 - 输入有效域、全部输出、边界、精度转换与副作用可独立理解；没有把实现限制或 Design 选择转成算法前提。
-- reference 可实际定位，误差依据覆盖全部输出，差异与缺项已按各自用途记录。
-- 实现覆盖不足和已知源码缺陷按事实说明；关键算法要求或验收依据仍未知时，给出具体补充条件。
+- reference 可实际定位，每个输出的已知判据或验收来源记录均已覆盖；已知阈值、基准和检查没有被遗漏、改写或用默认公式替代。
+- 来源缺口及不影响当前提取的理由有证据，未被用来支持数值保证；实现覆盖不足和源码缺陷按事实保留。
 
-P1 按元数据和共享 Contract 验收，Design 可以保留 starter 草稿。Runner 对 complete/approve 复用冻结检查器的算法区字段、输出与 tolerance 对应、符号/属性引用、shape 轴与范围关联规则；这些必填项不能留到无权修改 Contract 的 P3。完整检查器因 Design 未完成产生的失败不能作为 P1 退修理由；不声称完整 YAML 已检查通过。既有实现缺陷不自动否决源码忠实的提取，真正缺少关键外部事实则不能放行。
+P1 审阅元数据、计算契约和验收来源的忠实表达，Design 可以保留 starter 草稿。Runner 对 complete/approve 继续检查算法区字段、输出与 tolerance 对应、符号/属性引用、shape 轴与范围；这些要求不能留到 P3。完整检查器因 Design 未完成产生的失败不能作为 P1 退修理由。blocked 必须指出缺失事实使哪项当前计算、数值或设计关系无法可靠提取，不能仅要求所有外部验收定义先补齐。
 
 ## 回执与下一位
 

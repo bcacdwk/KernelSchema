@@ -1,0 +1,19 @@
+{
+  "id": "p1-external-comparator-gate",
+  "category": "extract_workflow",
+  "problem": "P1 将外部验收器的完整比较定义作为进入 Design 提取的前置条件，即使数学、IO、reference 和已有阈值已能忠实转录，也会因比较公式或相对误差基准未提供而阻塞。",
+  "evidence": [
+    "2026-11-03，基线 b5c8e87、Schema Extract 2.2.1，fp8_scaled_grouped_gemm、nvfp4_fused_moe、fmha_mxfp8_qkv、mla_expanded_fp8、dual_cache_latent_bf16、gdn_prefill_bf16_state_bf16 六项独立 P1 reviewer 均判定 Contract 主体忠实，但因外部验收定义缺口返回 blocked；全部未进入 P2。共 14 次调用，其中 2 次是空 summary 的格式修复，实质退修为 0。",
+    "b5c8e87:schema_extract/phases/01_contract.md 的第 2 段要求不补造比较公式，并由 reviewer 判断验收缺项是否影响放行。此次六项均将相对基准或额外度量缺失判为关键外部事实。",
+    "b5c8e87:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/metadata.json 提供 atol=0.01、rtol=0.05、max_mismatch_fraction=0.0；performance/CERTIFIED_BEST.json 仅声明 comparator/tolerances unchanged，未给出公式和 relative_to。FMHA、Sparse、GDN 的 reviewer 报告同类缺项。",
+    "nvfp4_fused_moe 的 reviewer 指出 mutated_inputs.output 的 max_rel_l2=0.01 缺少归一化定义；mla_expanded_fp8 的 reviewer 另指出 O/LSE 的相对基准、相对 L2 和返回别名/写回阈值映射缺少定义。两者均未将比较器精度或 NaN/Inf 政策单独作为阻塞理由。",
+    "完整逐运行记录和回执定位保存在 .schema_extract/trials/six-families/findings.json，审计结果在同目录 audit/；该目录仅提供详细证据，上述事实摘要与固定源码定位不依赖临时 /tmp 文件。",
+    "六项 2.2.2 P1 独立批准的 audit --attempt --verify 均为 verified，errors/unavailable 为空；可追溯记录在 .schema_extract/trials/six-families/gap-fix/acceptance.json 及同目录 audit/。"
+  ],
+  "proposal": "明确忠实提取与完整复刻外部验收器的边界：数学、IO、reference 已固定时，考虑允许将未提供的验收公式、相对基准或路由定义显式记为 gap，保留已有阈值并继续 Design 提取；不得套用默认公式或补造保证。任务数学、必要输入输出或 reference 不明仍阻塞。规则确定后由新冻结执行器独立重审，不修改旧批准或运行状态。",
+  "necessity": "六类样本被同一前置门槛挡在 P1，尚无法检验 Design 的表达能力及后续提取流程。需先澄清这一边界，单纯重复调用或增加预算不会补齐外部事实。",
+  "decision": {
+    "outcome": "resolved",
+    "reason": "2.2.2 已明确来源缺口与任务计算事实的边界，保留已知阈值和未知比较器定义，既有身份、源码和比较事实检查仍有效。六项使用新冻结规则的独立 P1 审阅均批准并进入 P2，全部批准回执通过深验；随后六项均进入 Design 提取。当前回归套件也通过既有 source_gap 正反例。未修改 kernel 或绕过 reviewer 决定。"
+  }
+}

@@ -1,0 +1,624 @@
+meta_data:
+  name: mxfp8_qkv_attention
+  describe: Dense grouped-query attention on block-scaled FP8 Q/K/V with FP8 probability rounding, BF16 output, and optional FP32 natural-log LSE.
+  source: source@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+  version: 1
+  dispatch:
+    id: split_tc
+    parent: split_tcg
+    when: |
+      Let active mean window_left is neither None nor -1, and wl be
+      window_left when active, otherwise 0. Let HostPlan be the actual Plan
+      returned by fmha_mxfp8::plan_geometry(B,H,KH,Sq,Skv,D,is_causal,wl,active),
+      from source@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/fmha_mxfp8_qkv.cu::fmha_mxfp8::plan_geometry.
+      Its cost/workspace policy and cached runtime probe/capacity results are
+      part of selection. Let SmCount be device_sm_count() from that source.
+      Let split mean HostPlan.use_tc and HostPlan.nsplit>1 and W>0 and
+      W>=HostPlan.workspace, matching the actual forward workspace guard.
+      Select exactly when HostPlan.use_tc and not HostPlan.use_tcg and split.
+      Both D128 and D256 use launch_tc<D,4> with PVMODE=0, a separate scan,
+      FP32 partials and combine with BF16=false and FWGT=false. K/V staging
+      uses cp.async; descriptor success does not select a variant here.
+design:
+  math_reshape:
+    thesis: >-
+      Materialize group maxima and replay the delayed maximum to form weighted
+      key-range partials. QK uses raw FP8 block products with explicit FP32
+      scales; PV uses E4M3-rounded probabilities and decoded BF16 values.
+      A second QK traversal and scratch reduction buy split parallelism.
+      The source's incomplete GM query coverage is retained, not repaired.
+    rewrite:
+      - step: domain
+        name: Grouped rows and useful-key chunks
+        math: |
+          Let G=H/KH, Qph=Br/G, A=ceil_div(Sq,Qph),
+          Ag=ceil_div(Sq,2*Qph), R=B*H*Sq, T=ceil_div(Skv,KeyGroup),
+          NSeg=ceil_div(T,16), Rgm=B*H*min(Sq,Ag*Qph).
+          For (b,kh,a), q0=a*Qph and u in [0,Br) maps to
+          (h,i)=(kh*G+floor(u/Qph),q0+u%Qph). A row is valid iff i<Sq.
+          Its scratch row is r=(b*H+h)*Sq+i; padded rows instead alias i=0
+          in that head for state reads, and never store a logical result.
+          Use Contract scale addressing. Qraw and Kraw are stored E4M3
+          payloads, with zero payloads for padded rows/keys. Their FP32
+          scales sq[u,k] and sk[v,k] are 2^(code-127), except that invalid
+          Q rows and padded K keys use zero scales. No query interleaving applies.
+          Valid rows use the Contract's inclusive masks: lo(u)=max(0,i+Skv-Sq-wl)
+          when active, otherwise 0; hi(u)=min(i+Skv-Sq,Skv-1) when causal,
+          otherwise Skv-1. Padded Q rows use lo=0, hi=Skv-1.
+          gLo=floor((active ? max(0,q0+Skv-Sq-wl) : 0)/KeyGroup),
+          gHi=floor((is_causal ? min(q0+Qph-1,Sq-1)+Skv-Sq : Skv-1)/KeyGroup),
+          Ng=gHi-gLo+1. For n chunks and s in [0,n),
+          per(n)=ceil_div(Ng,n), cLo(n,s)=gLo+s*per(n),
+          cHi(n,s)=min(cLo(n,s)+per(n)-1,gHi).
+          GM uses n=Nm and only a in [0,Ag); split uses n=Ns and a in [0,A).
+          Empty chunks retain their assignment. Every nonempty group evaluates
+          Br rows and KeyGroup keys, including masked and padded positions.
+        symbol:
+          Br: {meaning: Grouped query rows, binding: 'bind:design.work_schedule::Br'}
+          Nm: {meaning: Group-max chunk count, binding: 'bind:design.work_schedule::Nm'}
+          Ns: {meaning: Numerator chunk count, binding: 'bind:design.work_schedule::Ns'}
+          TwoPass: {meaning: Separate segment-max scan variant, binding: 'bind:design.work_schedule::TwoPass'}
+          Wide: {meaning: Four-way combine variant, binding: 'bind:design.work_schedule::Wide'}
+      - step: group_max
+        name: Explicit block scaling and the saved maxima coverage defect
+        math: |
+          For each processed group g, start C[-1]=0. For k=0,...,D/Block-1,
+          U[k]=mm32(Qraw[:,32*k:32*k+32],Kraw[:,32*k:32*k+32]^T),
+          C[k][u,v]=fma32(U[k][u,v]*sq[u,k],sk[v,k],C[k-1][u,v]).
+          The multiply by sq rounds separately before the fused sk multiply/add.
+          Let scale=fp32(D^(-1/2)); Score[u,v]=C[D/Block-1][u,v]*scale
+          for lo(u)<=128*g+v<=hi(u), otherwise -inf.
+          For GM's valid rows, bm[g,r]=fmax_v(Score[u,v]), starting at -inf,
+          and bm[g,r]=-inf outside [gLo,gHi]. fmax uses source fmaxf NaN behavior.
+          For i>=Ag*Qph, no GM instance writes bm[:,r]; those entries keep
+          their incoming unspecified workspace contents. Scan still consumes
+          these rows. Full production holds only when Ag=A; no initialization
+          or correctness fallback fills the missing rows.
+          GM also falls through the zero-numerator epilogue: every GM chunk
+          writes O=bf16(0) and present LSE=-inf for its valid rows. These repeated
+          writes precede the final combine, which overwrites every logical output.
+          Split recomputes Score identically. Its source body also computes a
+          group maximum, but discards it and uses the scanned state instead.
+        symbol:
+          bm: {meaning: Group maxima with unwritten rows retained from incoming scratch, shape: [group: T, row: R], dtype: fp32, retention: 'keep_value invocation'}
+          Score: {meaning: Scaled and masked current-group scores, shape: [row: Br, key: KeyGroup], dtype: fp32}
+        arithmetic:
+          accumulate: >-
+            U uses mma.sync E4M3 operands and FP32 accumulation separately for
+            each 32-channel block. Packed FP32 multiply/FMA preserve the stated
+            roundings. Native product accumulation order is not asserted equal
+            to decoding the full operands and applying the reference matmul.
+      - step: scan
+        name: Materialized delayed maximum with optional segment skipping
+        math: |
+          Set m(-1,r)=-inf. For t=0,...,T-1, m(t,r)=bm[t,r] if
+          bm[t,r]-m(t-1,r)>fp32(2.7725887222397812), otherwise m(t-1,r).
+          A NaN comparison is false, including -inf-(-inf).
+          Write mstate[t,r]=m(t,r) and mtail[r]=m(T-1,r).
+          In TwoPass, first materialize segmax[e,r]=fmax of bm[t,r] for
+          t in [16*e,min(16*(e+1),T)). Walk segment zero unconditionally.
+          Thereafter inspect batches of up to 16 segment maxima against the
+          incoming m. If none exceeds m by the threshold, fill every covered
+          mstate with m; otherwise fill the prefix before the first qualifying
+          segment and replay every group from there through the batch end.
+          This is an ordered comparison recurrence, not an associative scan
+          of segment summaries. All T states are written in both variants;
+          segmax is unused in the flat variant. Missing GM rows use the same
+          algorithm on the scratch bytes actually found, without a defined input maximum.
+        symbol:
+          m: {meaning: Ordered scan state for one row, shape: [], dtype: fp32, retention: 'carry_forward (r); t=-1..T-1'}
+          segmax: {meaning: Auxiliary maxima for two-pass scan, shape: [segment: NSeg, row: R], dtype: fp32, retention: 'keep_value invocation'}
+          mstate: {meaning: Saved delayed maximum after every group, shape: [group: T, row: R], dtype: fp32, retention: 'keep_value invocation'}
+          mtail: {meaning: Final delayed maximum for weighting and LSE, shape: [row: R], dtype: fp32, retention: 'keep_value invocation'}
+      - step: probability
+        name: Scalar exponential and E4M3 to BF16 probability path
+        math: |
+          For split's nonempty chunk, let cLo=cLo(Ns,s), cHi=cHi(Ns,s).
+          For g=cLo,...,cHi, mp=mstate[g-1,r] when g>0, otherwise -inf,
+          mt=mstate[g,r], safe=mt if finite, otherwise 0,
+          alpha(g,u)=expf(mp-safe) if mp is finite, otherwise 0.
+          Let beta=16 for D128, otherwise 1. Compute
+          Prob[u,v]=beta*expf(Score[u,v]+(-safe)), with a separately rounded
+          FP32 shift and bias multiply. Prob8=satfinite_e4m3_rne(Prob),
+          and Pbf=bf16(Prob8); this last widening is exact, with unit scale.
+          For each q in [0,4) and parity p in [0,2), sum
+          Prob[u,8*z+2*q+p] from zero in ascending z=0,...,15, obtaining E[q,p].
+          Set Egroup[q]=E[q,0]+E[q,1]. These are unrounded probabilities,
+          independent of the E4M3 path used by PV.
+          Vbf[v,d]=bf16(bf16(Vraw[v,d])*sv[v,d]), where
+          sv[v,d]=bf16(2^(V_scale_code[v,d]-127)) uses the Contract's key-axis
+          scale addressing. Padded V payloads are zero but stored padding
+          scale bytes are still decoded and multiplied. Keep BF16 product
+          narrowing, including underflow/overflow; do not assume every scaled
+          value is representable merely because its significand is short.
+        symbol:
+          Prob: {meaning: Unrounded biased probabilities, shape: [row: Br, key: KeyGroup], dtype: fp32}
+          Pbf: {meaning: E4M3-rounded probabilities widened for PV, shape: [row: Br, key: KeyGroup], dtype: bf16}
+          Vbf: {meaning: BF16-scaled current V group, shape: [key: KeyGroup, channel: D], dtype: bf16}
+        arithmetic:
+          approx: >-
+            Probability, alpha and weighting use CUDA scalar expf with the
+            source compilation path.
+            unknown: no matched end-to-end bound including quantization
+            boundaries and BF16 range effects is supplied. Shared tolerance
+            records supply no numerical or initialization guarantee.
+      - step: partial
+        name: Register partials and weighting to the final state
+        math: |
+          Start Num(cLo-1,u,d)=0 and Den(cLo-1,u,q)=0 for q in [0,4).
+          For each group, multiply Num and each Den by alpha before adding
+          current contributions. A rescale by one may be skipped.
+          Starting from that scaled Num, apply eight ordered 16-key
+          mma32(Pbf[:,16*k:16*k+16],Vbf[16*k:16*k+16,:],accumulator), k=0,...,7.
+          The final accumulator is Num(g). Set
+          Den(g,u,q)=Den(g-1,u,q)*alpha(g,u)+Egroup[q]. The source scales Den
+          before adding Egroup; scalar updates retain compiler-default contraction.
+          At chunk end reduce the four carried Den values by pairs (0,1) and
+          (2,3), then add the pair sums to den. Weight wgt=expf(mstate[cHi,r]-mtail[r])
+          when both states are finite, otherwise 0.
+          Write part_a[s,r,d]=Num(cHi,u,d)*wgt and part_b[s,r]=den*wgt, FP32.
+          Empty chunks write zeros with wgt=0. Before the loop, the source still
+          loads mstate[cLo-1,r] whenever cLo>0, even for an empty chunk and without
+          a T clamp; empty chunks discard that value. This access may reach
+          following scratch and is not an initialization guarantee.
+          No part_m is produced. Num and Den die after partial stores.
+        symbol:
+          Num: {meaning: Local FP32 value numerator, shape: [row: Br, channel: D], dtype: fp32, retention: 'carry_forward (b,kh,a,s); g=cLo-1..cHi'}
+          Den: {meaning: Four carried key-subset denominators per row, shape: [row: Br, subset: 4], dtype: fp32, retention: 'carry_forward (b,kh,a,s); g=cLo-1..cHi'}
+          part_a: {meaning: Weighted numerator partials, shape: [split: Ns, row: R, channel: D], dtype: fp32, retention: 'keep_value invocation'}
+          part_b: {meaning: Weighted denominator partials, shape: [split: Ns, row: R], dtype: fp32, retention: 'keep_value invocation'}
+      - step: combine
+        name: Reduce partials and overwrite caller outputs
+        math: |
+          Narrow sums part_a[:,r,d] and part_b[:,r] from zero in ascending s,
+          using FP32 adds in batches of eight with zero tail terms.
+          Wide partitions s into four contiguous ranges of ceil_div(Ns,4).
+          Sum each range's part_a from zero in ascending s, then add the four
+          subtotals from zero in range order to total_a[d]. For total_b,
+          zero-pad each range to 128 values, reduce each 32-value subrange
+          by a binary sum tree with distances 16,8,4,2,1, then add its 16 sums
+          from zero in range-major, subrange-major order. Narrow sums directly
+          give total_a and total_b. If total_b>0, inv=1/total_b and
+          O[b,h,i,d]=bf16(total_a[d]*inv), RNE; otherwise O=bf16(0).
+          When LSE is present, write mtail[r]+logf(total_b/beta) if total_b>0
+          and mtail[r] finite, otherwise -inf. No initial output bytes are read.
+          Return Python None. Every partial and scan state is overwritten, but
+          missing bm rows can make final outputs depend on incoming workspace.
+        arithmetic:
+          approx: >-
+            Scalar reciprocal and logf retain the source compilation path.
+            unknown: no reliable final bound for split regrouping is supplied.
+    ledger:
+      baseline: Direct Contract evaluation with full FP32 scores and probabilities and materialized E4M3 probabilities before PV.
+      footprint:
+        - {item: Global intermediates, change: '9*R*Skv -> 4*(Rgm+R)*T+4*R+4*Ns*R*(D+1) produced bytes, plus 4*R*NSeg in TwoPass; bm reserves R*T entries but only Rgm*T are written', by: [group_max, scan, partial]}
+      matmul:
+        - {item: Products per query worktile, change: '2*G*min(Qph,Sq-q0)*Skv*D -> (2+indicator(a<Ag))*Br*KeyGroup*Ng*D MACs across all chunks, including padding and the incomplete GM traversal', by: [domain, group_max, partial]}
+      vector:
+        - {item: Explicit scale folding, change: 'Decoded-operand scaling -> Br*KeyGroup*(D/Block) FP32 multiplies and as many FMAs per QK group, plus KeyGroup*D BF16 multiplies per split group', by: [group_max, probability]}
+      depth:
+        - {item: Partial state chain, change: 'Ng -> at most ceil_div(Ng,Ns) group updates per split followed by Ns-partial reduction; scan retains T ordered decisions per row', by: [scan, partial, combine]}
+      error:
+        - {item: Numerical departures, change: 'Blockwise QK scale folding, BF16 V narrowing, expf and reordered partial sums replace reference evaluation choices; missing bm rows add unspecified scratch dependence, not a bounded approximation', by: [group_max, probability, partial, combine]}
+  work_schedule:
+    thesis: >-
+      GM, ordered scan, split products and row combines use separate kernels.
+      GM and split are ordinary launches; scan and combine retain the PDL
+      wrappers. Model.forward submits this chain directly or through a captured
+      launch graph on the caller stream. The incomplete GM query grid leaves
+      missing maxima despite full scan/partial grids; there is no host wait.
+    flow:
+      launch:
+        - {phase: [gm]}
+        - {phase: [segment], protocol: pdl, start_after: gm.kernel_done}
+        - {phase: [scan], protocol: pdl}
+        - {phase: [split], start_after: scan.kernel_done}
+        - {phase: [combine], protocol: pdl, start_after: split.kernel_done}
+      handoff:
+        bm: {producer: gm, consumer: [segment, scan], storage: global, ready: gm.kernel_done, wait_at: [segment.input_wait, scan.input_wait]}
+        segmax: {producer: segment, consumer: [scan], storage: global, ready: segment.kernel_done, wait_at: scan.input_wait}
+        mstate: {producer: scan, consumer: [split], storage: global, ready: scan.kernel_done}
+        mtail: {producer: scan, consumer: [split, combine], storage: global, ready: scan.kernel_done}
+        part_a: {producer: split, consumer: [combine], storage: global, ready: split.kernel_done, wait_at: combine.input_wait}
+        part_b: {producer: split, consumer: [combine], storage: global, ready: split.kernel_done, wait_at: combine.input_wait}
+    phase:
+      gm:
+        describe: >-
+          Br=64, Nm=HostPlan.gm_nsplit and Ns=HostPlan.nsplit. PASS_GROUP_MAX
+          computes maxima and falls through to the zero-output epilogue.
+          HostPlan allocates 256-byte-aligned scratch offsets without clearing
+          bm. Its full [T,R] allocation is not a promise of full production:
+          only Rgm rows are written; readiness below refers to those writes.
+        decomposition:
+          strategy: >-
+            One worktile (s,kvflat,a) handles cLo(Nm,s)..cHi(Nm,s).
+            Chunk zero additionally fills bm before gLo with -inf; chunk Nm-1
+            fills after gHi, even when its own interval is empty. The physical
+            x grid is Ag=HostPlan.qtiles128, but the kernel maps rows with
+            Qph=HostPlan.qph. Thus only i<min(Sq,Ag*Qph) is covered for every
+            head. No worktile or initialization produces the remaining bm rows.
+          partition:
+            chunk: {size: Nm, tile: 1}
+            kvflat: {size: 'B*KH', tile: 1}
+            query: {size: 'min(Sq,Ag*Qph)', tile: Qph}
+          worktile:
+            invariant:
+              q_tensor: {shape: [head: G, query: Qph, channel: D], dtype: 'ref:contract.algorithm_requirement::q_tensor.dtype'}
+              sf_q: {shape: [row: Br, scale_column: 'D/Block'], dtype: uint8}
+            iteration:
+              k_tensor: {shape: [key: KeyGroup, channel: D], dtype: 'ref:contract.algorithm_requirement::k_tensor.dtype', direction: ascending}
+              sf_k: {shape: [key: KeyGroup, scale_column: 'D/Block'], dtype: uint8, direction: ascending}
+          target:
+            single_tile:
+              bm: {shape: [group: 'max(0,cHi(Nm,s)-cLo(Nm,s)+1)', row: Br], dtype: fp32}
+              O: {shape: [head: G, query: Qph, channel: D], dtype: 'ref:contract.algorithm_requirement::O.dtype'}
+              LSE: {shape: [head: G, query: Qph], dtype: 'ref:contract.algorithm_requirement::LSE.dtype'}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: 'Nm*B*KH*Ag'
+        schedule:
+          strategy: >-
+            Grid=(Ag,B*KH,Nm), worker_id=x+Ag*(y+B*KH*z). Each CTA has
+            128 threads for either D. O/LSE targets are the temporary zeros
+            from math.group_max, repeatedly written by the GM chunks; combine
+            supplies final outputs later. bm targets also include the tail fills.
+          worktile_order: [{by: chunk, direction: ascending}, {by: kvflat, direction: ascending}, {by: query, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      segment:
+        describe: >-
+          TwoPass means T>=128 and R<=512 and not active. This phase, its launch
+          and segmax handoff occur only when TwoPass; otherwise none is submitted
+          and scan depends directly on gm. These entries enumerate conditional
+          source launches, not an extra no-op kernel.
+        decomposition:
+          strategy: One worktile reduces one 16-group segment for up to 256 rows; each row chain belongs to one thread.
+          partition:
+            segment: {size: NSeg, tile: 1}
+            row: {size: R, tile: 256}
+          worktile:
+            iteration:
+              bm: {shape: [group: 16, row: 256], dtype: fp32, direction: ascending}
+          target:
+            single_tile:
+              segmax: {shape: [row: 256], dtype: fp32}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: 'ceil_div(R,256)*NSeg'
+        schedule:
+          strategy: Grid=(ceil_div(R,256),NSeg); worker_id=x+ceil_div(R,256)*y. Bounds suppress padded row and group accesses.
+          worktile_order: [{by: segment, direction: ascending}, {by: row, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      scan:
+        describe: >-
+          One ordered recurrence per valid row writes all mstate and mtail.
+          TwoPass submits fmha_scan_kernel after segment.launch_ready; otherwise
+          fmha_scan_flat_kernel follows gm.kernel_done. Their entry PDL wait
+          obtains the actual predecessor's completion before any input read.
+          Both issue the scan-to-split trigger before recurrence, but launch_tc
+          is an ordinary launch and starts only after scan completion.
+        decomposition:
+          strategy: >-
+            ScanRows=256 in TwoPass or when T<128. Otherwise choose the first
+            C in {32,64,128} for which ceil_div(R,C)<=SmCount, or 256 if none.
+            One CTA handles a ScanRows-row band, with ScanWarps=ScanRows/32, and each thread owns its whole
+            row recurrence. TwoPass consumes segmax and only the replayed bm
+            suffixes; flat consumes all bm. Neither splits a row's recurrence
+            across workers. The scan step defines the skip/fill computation.
+          partition:
+            row: {size: R, tile: ScanRows}
+          worktile:
+            iteration:
+              bm: {shape: [group: 1, row: ScanRows], dtype: fp32, direction: ascending}
+              segmax: {shape: [segment: 1, row: ScanRows], dtype: fp32, direction: ascending}
+          target:
+            single_tile:
+              mstate: {shape: [group: T, row: ScanRows], dtype: fp32}
+              mtail: {shape: [row: ScanRows], dtype: fp32}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: 'ceil_div(R,ScanRows)'
+        schedule:
+          strategy: Grid=(ceil_div(R,ScanRows)); worker_id=blockIdx.x. Each CTA owns one row band and guards row>=R.
+          worktile_order: [{by: row, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      split:
+        describe: Recompute QK and PV for each split chunk, using scan states and writing weighted FP32 partials.
+        decomposition:
+          strategy: >-
+            The same 64-row grouping as gm now covers all A query tiles and
+            uses cLo(Ns,s)..cHi(Ns,s). One 128-thread CTA owns the complete
+            64-row by 128-key score tile and its D-channel numerator for either
+            D; all local products and denominator reductions stay in that CTA.
+          partition:
+            chunk: {size: Ns, tile: 1}
+            kvflat: {size: 'B*KH', tile: 1}
+            query: {size: Sq, tile: Qph}
+          worktile:
+            invariant:
+              q_tensor: {shape: [head: G, query: Qph, channel: D], dtype: 'ref:contract.algorithm_requirement::q_tensor.dtype'}
+              sf_q: {shape: [row: Br, scale_column: 'D/Block'], dtype: uint8}
+              mtail: {shape: [row: Br], dtype: fp32}
+            iteration:
+              k_tensor: {shape: [key: KeyGroup, channel: D], dtype: 'ref:contract.algorithm_requirement::k_tensor.dtype', direction: ascending}
+              v_tensor: {shape: [key: KeyGroup, channel: D], dtype: 'ref:contract.algorithm_requirement::v_tensor.dtype', direction: ascending}
+              sf_k: {shape: [key: KeyGroup, scale_column: 'D/Block'], dtype: uint8, direction: ascending}
+              sf_v: {shape: [channel: D, sequence_block: 4], dtype: uint8, direction: ascending}
+              mstate: {shape: [group: 1, row: Br], dtype: fp32, direction: ascending}
+          target:
+            single_tile:
+              part_a: {shape: [row: Br, channel: D], dtype: fp32}
+              part_b: {shape: [row: Br], dtype: fp32}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: 'Ns*B*KH*A'
+        schedule:
+          strategy: Grid=(A,B*KH,Ns), worker_id=x+A*(y+B*KH*z); valid rows alone store partials, including zero partials from empty chunks.
+          worktile_order: [{by: chunk, direction: ascending}, {by: kvflat, direction: ascending}, {by: query, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      combine:
+        describe: Each row CTA reduces all its partials and owns every O channel and optional LSE for that row.
+        decomposition:
+          strategy: >-
+            Wide means (R<2*SmCount and Ns>=8) or Ns>128. CombineWarps=16 when Wide, otherwise 4. Narrow uses 128
+            threads; Wide uses four 128-thread groups and the combine step's
+            contiguous split ranges. HostPlan caps Ns at 512, so each Wide
+            range has at most 128 partials. The fixed build does not slice D
+            across CTAs. These are local reductions inside one row worktile.
+          partition:
+            row: {size: R, tile: 1}
+          worktile:
+            invariant:
+              mtail: {shape: [], dtype: fp32}
+            iteration:
+              part_a: {shape: [split: 1, channel: D], dtype: fp32, direction: ascending}
+              part_b: {shape: [split: 1], dtype: fp32, direction: ascending}
+          target:
+            single_tile:
+              O: {shape: [channel: D], dtype: 'ref:contract.algorithm_requirement::O.dtype'}
+              LSE: {shape: [], dtype: 'ref:contract.algorithm_requirement::LSE.dtype'}
+            tile_reduction:
+              dimension: chunk
+              input: ['design.math_reshape::part_a', 'design.math_reshape::part_b']
+              output: ['contract.algorithm_requirement::O', 'contract.algorithm_requirement::LSE']
+              method: 'design.math_reshape::combine'
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: R
+        schedule:
+          strategy: Grid=(Sq,H,B); worker_id=x+Sq*(y+H*z) equals logical row r. No refill, atomics or inter-CTA combine.
+          worktile_order: [{by: row, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+  tile_pipeline:
+    thesis: >-
+      Four warps share a retained query tile and double-buffered raw K/V and
+      scale atoms. A committed-copy wait and CTA joins publish each current
+      group while the next group arrives. Single decoded scales and BF16 V
+      are reused only after all QK/PV readers finish; scores and partials stay
+      in registers. There is no TMA, TMEM or separate copy warp on this path.
+    phase:
+      gm:
+        domain:
+          g: [cLo, 'max(cLo,cHi+1)']
+        resource:
+          Query: {space: SMEM, member_slot_shape: [row: Br, channel: D], dtype: fp8_e4m3fn, slot_count: 1}
+          QueryScale: {space: SMEM, member_slot_shape: [scale_column: 'D/Block', row: Br], dtype: fp32, slot_count: 1}
+          KeyRaw: {space: SMEM, member_slot_shape: [key: KeyGroup, channel: D], dtype: fp8_e4m3fn, slot_count: 2, view: {'Kraw(g)': {slot_index: '(g-cLo)%2'}}}
+          KeyAtom: {space: SMEM, member_slot_shape: [element: 'KeyGroup*(D/Block)'], dtype: uint8, slot_count: 2, view: {'Katom(g)': {slot_index: '(g-cLo)%2'}}}
+          KeyScale: {space: SMEM, member_slot_shape: [scale_column: 'D/Block', key: KeyGroup], dtype: fp32, slot_count: 1}
+          Score: {space: register, member_slot_shape: [row: Br, key: KeyGroup], dtype: fp32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: 'warp[0:4]'
+              verb:
+                prepare: >-
+                  Set cLo/cHi from this GM chunk and issue its first/last masked
+                  bm tail fills. When nonempty, enqueue K(cLo) and its scale
+                  atoms into slot zero and commit before synchronous Q loads.
+                  All threads stage Query and decoded QueryScale, zeroing
+                  invalid query rows and scales, then CTA-join. Retain Q/scales
+                  for all groups. Initialize the zero output/denominator state.
+                  Empty chunks still do Q setup and the final zero-output stores.
+                stage: >-
+                  Enqueue K(g+1) and its atoms into the alternate slot only if
+                  g<cHi, then commit even on the last iteration with no payload.
+                  The prior iteration's final CTA join retired the previous
+                  occupant's readers. done is enqueue, not arrival.
+                land: >-
+                  Each thread waits down to one committed cp.async group;
+                  the newest group is next input, or the final empty commit.
+                  CTA-join before reading current bytes, decode current K
+                  scales to KeyScale (zero for padded keys), then CTA-join
+                  before consumers read scales written by other threads.
+                score_max: >-
+                  Each warp owns 16 query rows. Load Q/K fragments with
+                  ldmatrix, run the blockwise QK and explicit scale folding,
+                  scale and mask Score. Four lanes share each row; reduce
+                  their maxima by XOR distances 1 and 2 after local fmax.
+                  One lane per row issues valid bm stores. A CTA join retires
+                  all KeyRaw/KeyScale readers before the next group overwrites
+                  those shared regions; Score then dies in registers.
+                finish: >-
+                  Fall through to the zero-output epilogue: issue BF16 zero O
+                  and optional -inf LSE stores for every valid row in this CTA.
+                  There is no GM PDL trigger, no additional wait_group 0 and
+                  no refill. Every requested payload has been waited and read;
+                  a nonempty chunk's final committed copy group is empty. Kernel completion
+                  orders these writes before subsequent phases, but cannot
+                  fill the bm rows absent from this grid.
+            pipe:
+              prologue: ['prepare:Query']
+              steady:
+                - repeat: g
+                  steady: ['stage:KeyAhead(g)', 'land:Key(g)', 'score_max:bm(g)']
+              epilogue: ['finish:Output']
+      segment:
+        milestone:
+          input_wait: ['Main/acquire:bm']
+        resource:
+          Batch: {space: register, member_slot_shape: [row: 256, group: 16], dtype: fp32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: 'warp[0:8]'
+              verb:
+                acquire: Trigger this grid's dependent at entry, then wait for GM completion/visibility before row guards or bm loads. Launch permission is not data readiness.
+                produce: Each valid thread batch-loads up to 16 bm values, substitutes -inf for a padded group, fmax-reduces them and issues its segmax store. No row-to-row exchange or retained state follows.
+            pipe: {prologue: ['acquire:bm'], steady: ['produce:segmax']}
+      scan:
+        milestone:
+          input_wait: ['Main/acquire:Input']
+        resource:
+          Batch: {space: register, member_slot_shape: [row: ScanRows, element: 'TwoPass ? 16 : 64'], dtype: fp32, slot_count: 1}
+          ScanState: {space: register, member_slot_shape: [row: ScanRows], dtype: fp32, slot_count: 1, view: {m: {}}}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: 'CTA[0]'
+              verb:
+                acquire: >-
+                  Wait for the actual predecessor (segment in TwoPass, GM
+                  otherwise) to complete and publish its writes, then issue the
+                  scan trigger before recurrence; the ordinary split launch
+                  still waits for kernel completion. Threads with row>=R return
+                  after these protocol operations; valid threads initialize m=-inf.
+                scan: >-
+                  Flat loads 64 bm values before their dependent recurrence,
+                  then remaining 16-value batches and a scalar tail.
+                  TwoPass walks segment zero,
+                  batches 16 segmax values, then fills or replays as in math.scan;
+                  replay batches contain 16 bm loads. Consume each register batch
+                  before reuse, carry one maximum per row, and issue every
+                  mstate store. Threads never wait on another row's state.
+                finish: Issue mtail stores after the last state, discard register batches/state, and exit. Scan kernel_done makes all mstate and mtail writes visible before the ordinary split launch; the earlier trigger supplies no early start on this path.
+            pipe: {prologue: ['acquire:Input'], steady: ['scan:mstate'], epilogue: ['finish:mtail']}
+      split:
+        domain:
+          g: [cLo, 'max(cLo,cHi+1)']
+        resource:
+          Query: {space: SMEM, member_slot_shape: [row: Br, channel: D], dtype: fp8_e4m3fn, slot_count: 1}
+          QueryScale: {space: SMEM, member_slot_shape: [scale_column: 'D/Block', row: Br], dtype: fp32, slot_count: 1}
+          KeyRaw: {space: SMEM, member_slot_shape: [key: KeyGroup, channel: D], dtype: fp8_e4m3fn, slot_count: 2, view: {'Kraw(g)': {slot_index: '(g-cLo)%2'}}}
+          ValueRaw: {space: SMEM, member_slot_shape: [key: KeyGroup, channel: D], dtype: fp8_e4m3fn, slot_count: 2, view: {'Vraw(g)': {slot_index: '(g-cLo)%2'}}}
+          KeyAtom: {space: SMEM, member_slot_shape: [element: 'KeyGroup*(D/Block)'], dtype: uint8, slot_count: 2, view: {'Katom(g)': {slot_index: '(g-cLo)%2'}}}
+          ValueAtom: {space: SMEM, member_slot_shape: [element: '4*D'], dtype: uint8, slot_count: 2, view: {'Vatom(g)': {slot_index: '(g-cLo)%2'}}}
+          KeyScale: {space: SMEM, member_slot_shape: [scale_column: 'D/Block', key: KeyGroup], dtype: fp32, slot_count: 1}
+          ValueScale: {space: SMEM, member_slot_shape: [sequence_block: 4, channel: D], dtype: bf16, slot_count: 1}
+          Vbf: {space: SMEM, member_slot_shape: [key: KeyGroup, channel: D], dtype: bf16, slot_count: 1}
+          Score: {space: register, member_slot_shape: [row: Br, key: KeyGroup], dtype: fp32, slot_count: 1}
+          Num: {space: register, member_slot_shape: [row: Br, channel: D], dtype: fp32, slot_count: 1}
+          Den: {space: register, member_slot_shape: [row: Br, subset: 4], dtype: fp32, slot_count: 1}
+          Replay: {space: register, member_slot_shape: [row: Br, element: 4], dtype: fp32, slot_count: 1}
+          ProbabilityFragment: {space: register, member_slot_shape: [row: Br, key: 16], dtype: bf16, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: 'warp[0:4]'
+              verb:
+                prepare: >-
+                  Enter only after scan.kernel_done. Set this chunk's cLo/cHi;
+                  if nonempty enqueue first K/V and their complete scale atoms
+                  into slot zero and commit. Stage Q and its decoded FP32
+                  scales with synchronous loads/stores, then CTA-join. Keep
+                  Query/QueryScale live throughout the chunk; initialize Num
+                  and the four per-row Den subsets to zero. Load mstate[cLo-1]
+                  if cLo>0, with the source's unguarded empty-chunk access and
+                  padded-row alias described in math.partial. No device PDL
+                  wait or launch trigger is present in fmha_tc_kernel.
+                stage: >-
+                  If g<cHi, enqueue K/V(g+1) and atoms in the alternate raw
+                  slots. Always commit, including an empty last copy group.
+                  done means requests issued. The previous tail CTA join
+                  retired all consumers of the slot before this overwrite.
+                land_decode: >-
+                  Wait_group 1 followed by CTA join proves current K/V and
+                  atoms readable. Decode KeyScale and ValueScale cooperatively,
+                  then CTA-join. Decode ValueRaw using BF16 pair multiplication
+                  into the single Vbf tile, then CTA-join before any PV reader.
+                  Raw values and atoms can die after decode, except current
+                  KeyRaw which remains an operand until QK finishes. This
+                  decode runs before QK while next raw input may be in flight.
+                qk: >-
+                  Each warp computes its own 16 rows, all 128 keys and all D
+                  channels. Keep packed FP32 Score in registers across all
+                  D/32 QK steps, apply masks and calculate the group maximum
+                  with four-lane XOR reductions. That maximum is discarded
+                  by PASS_SPLIT; no global Score or maximum is written.
+                replay_pv: >-
+                  Read current and preceding mstate for both rows in each
+                  thread; form safe/alpha and retain current m through weighting.
+                  A warp vote skips Num and Den rescaling only if all its
+                  alpha values equal one. In eight 16-key rounds, use Score
+                  to form scalar expf probabilities, carry two unrounded
+                  denominator sums per row/subset, round probabilities to
+                  E4M3 and widen into ProbabilityFragment. ldmatrix.trans reads
+                  Vbf for BF16 MMA into carried Num. Consume each probability
+                  fragment before replacing it. Add its parity sums into Den
+                  after the eight rounds. A final CTA join retires all shared
+                  readers before the next decoded tiles and raw slots can be
+                  reused. Every PV finishes in this iteration.
+                store_partial: >-
+                  After the last tail join, reduce Den across each four-lane
+                  row group with XOR distances 1 and 2. Read mtail only for a
+                  nonempty chunk, compute wgt and scatter weighted FP32 Num
+                  directly to part_a, two adjacent channels per lane; one
+                  lane per row writes part_b. Invalid rows do not store.
+                  Empty chunks store zeros from initialized registers with
+                  weight zero. No shared partial staging or O/LSE write occurs.
+                finish: >-
+                  Register sources die after their stores; kernel_done supplies
+                  global visibility. Every requested copy has been consumed,
+                  with an empty final commit for nonempty chunks; no final wait_group 0
+                  or scratch reset is added. Each CTA exits after one worktile.
+            pipe:
+              prologue: ['prepare:Query']
+              steady:
+                - repeat: g
+                  steady: ['stage:InputAhead(g)', 'land_decode:Input(g)', 'qk:Score(g)', 'replay_pv:Num(g)']
+              epilogue: ['store_partial:Partials', 'finish:Local']
+      combine:
+        milestone:
+          input_wait: ['Main/acquire:Partials']
+        resource:
+          Reduction:
+            space: SMEM
+            member_slot_shape: [element: 'Wide ? 4*D+16 : 128']
+            dtype: fp32
+            slot_count: 1
+            view:
+              NumeratorSum: {part: {element: [0, 'Wide ? 4*D : 0']}}
+              DenominatorSum: {part: {element: ['Wide ? 4*D : 0', 'Wide ? 4*D+16 : 128']}}
+          Batch: {space: register, member_slot_shape: [group: 'Wide ? 4 : 1', channel: 128, split: 8], dtype: fp32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: 'CTA[0]'
+              verb:
+                acquire: Wait at kernel entry for all split partial writes to be visible before any partial or mtail load.
+                reduce: >-
+                  Narrow cooperatively loads part_b into shared memory, while
+                  each thread accumulates its one or two channels from batched
+                  eight-partial loads in ascending order. Only after the whole
+                  numerator loop does the source CTA barrier publish shared
+                  denominators; all threads then sum them. Wide has four
+                  128-thread groups accumulating disjoint contiguous split
+                  ranges for every channel. Publish their numerator sums and
+                  four warp denominator sums each, CTA-join, then group zero
+                  folds these shared subtotals in the combine step's order.
+                  Register batches die after addition; shared subtotals survive
+                  until all designated output readers finish. There is no FWGT
+                  weight array or part_m read in this node.
+                write: >-
+                  Narrow's threads, or Wide's first group, issue all BF16 O
+                  stores; one thread writes optional LSE. Output register sources
+                  are consumed before return, with no host wait or subsequent
+                  local reuse. All CTAs have independent resources. The caller
+                  stream orders this submission and subsequent reuse; the kernel
+                  neither clears workspace nor makes overlapping calls sharing
+                  it safe. Graph caches retain launch state, not computed results.
+            pipe: {prologue: ['acquire:Partials'], steady: ['reduce:Partials'], epilogue: ['write:Output']}

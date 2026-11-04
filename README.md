@@ -17,7 +17,7 @@
 
 一次任务选择当前工作对应的入口，通过产物与必要说明交接。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
 
-Schema Extract `2.2.1` 自动完成六阶段提取、独立审阅、返工、依赖并发和发布。Supervisor 用 `python3 schema_extract/extract.py extract --id <算子> --output <目录> --background` 发起，以 `status <run-uuid>` 查看进度；只有 `ready` 且 `published: true` 才表示已交付。恢复使用原冻结执行器，预算可显式追加；硬件保留占位，检查使用 `--skip-hardware`。完整真实多分支提取仍待试用验收。[开始试用](schema_extract/README.md#开始一次试用) · [输出目录](schema_wiki/README.md) · [恢复与交付](schema_extract/README.md#恢复与交付) · [验证边界](schema_extract/README.md#验证边界)
+Schema Extract `2.2.4` 自动完成六阶段提取、独立审阅、返工、依赖并发和发布。Supervisor 用 `python3 schema_extract/extract.py extract --id <算子> --output <目录> --background` 发起，以 `status <run-uuid>` 查看进度；只有 `ready` 且 `published: true` 才表示已交付。恢复使用原冻结执行器，预算可显式追加；硬件保留占位，检查使用 `--skip-hardware`。真实提取的验证范围见[验证边界](schema_extract/README.md#验证边界)。[开始试用](schema_extract/README.md#开始一次试用) · [输出目录](schema_wiki/README.md) · [恢复与交付](schema_extract/README.md#恢复与交付)
 
 新建与优化均由 Planner 承担，按数学改写、工作调度、微流水线的顺序逐层推导和写入。先把上层方向收束，再向下投入优化精力；下层发现前提问题时，回到对应上层修正并复查受影响部分。
 
@@ -98,7 +98,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 │                       按批次、功能和稳定算子 ID 组织源码、题目与性能证据
 └── schema_wiki/         按 catalog 镜像的提取输出目录与导航
     └── <batch>/operators/<family>/[<subcategory>/]<task>/
-                        当前以 .gitkeep 占位；发布后为 root.yaml / <id>.yaml + dispatch.md
+                        未提取目录以 .gitkeep 占位；已发布目录含 root.yaml / <id>.yaml + dispatch.md
 ```
 
 - `kernel_wiki` 保存任务与实现，`schema_wiki` 接收提取或撰写的设计；输出路径按 `kernel_wiki/catalog.json` 的 `paths.readme` 父目录镜像，具体操作见[输出目录导航](schema_wiki/README.md)。设计来源仍以 `meta_data.source` 等实际引用为准。

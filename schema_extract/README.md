@@ -1,6 +1,6 @@
 # Schema Extract：Supervisor 手册
 
-版本 `2.2.1`。从固定 kernel 提取可读、可追溯的 schema，自动完成写作、独立审阅、返工与发布。统一入口是 [extract.py](extract.py)，实现位于 `tools/`。
+版本 `2.2.4`。从固定 kernel 提取可读、可追溯的 schema，自动完成写作、独立审阅、返工与发布。统一入口是 [extract.py](extract.py)，实现位于 `tools/`。
 
 ## 开始一次试用
 
@@ -14,6 +14,8 @@ python3 schema_extract/extract.py status RUN_UUID
 第一条返回 run UUID、固定输入身份和后台启动结果；后续以该 UUID 查看和恢复。后台进程自行推进，`status` 只读进度。暂停或处理异常后用 `resume RUN_UUID`，它在前台执行到交付或停止。巡检、同线程提醒和审计按需使用。
 
 **`ready` 表示终审通过，`published: true` 表示已发布到原输出目录。** 交付包含 `root.yaml`、计划内全部派生 YAML、中文 `dispatch.md` 和 `.extraction/receipt.json`。
+
+提取批准表示忠实表达固定实现及其来源缺口。外部验收器未提供的定义可按[统一边界](../EXTRACT_SCHEMA.md#来源缺项与验收边界)记录并继续；计算或设计必须靠猜测才能确定时仍阻塞。交付不宣称已复现原验收器，用于新设计或实现验收前仍需完整判据。
 
 流程见[提取总览](../EXTRACT_SCHEMA.md)，各阶段的方法分别在：
 
@@ -99,7 +101,9 @@ python3 schema_extract/extract.py inspect --run RUN_UUID --json
 
 ## 角色与会话
 
-Supervisor 指定任务并处理外部材料和要求变更；Runner 唯一写状态、派发、检查、合入和发布。worker 修改许可产物，reviewer 独立对照固定源码。P1/P2 分别续用同角色；P3、P4、每个 P5 节点使用新上下文；P6 由全新 reviewer 先审，确需修改才启动 worker。
+Supervisor 的长期职责是主动推进提取：在既定任务语义内，自行决定预算追加、故障恢复、必要修复和合理取舍，处理并归档 issue。只有确实存在明显的漏洞且该漏洞的解决存在二分争议（必须由用户参与）才能继续的情况，才进行暂停。其余情况自行把握，期间的所有决策、改动和验证结果都须忠实记录，供后续审计。
+
+Runner 唯一写状态、派发、检查、合入和发布。worker 修改许可产物，reviewer 独立对照固定源码。P1/P2 分别续用同角色；P3、P4、每个 P5 节点使用新上下文；P6 由全新 reviewer 先审，确需修改才启动 worker。
 
 退修按阶段、P5 按节点累计，默认第五次退修后由原 reviewer 一次裁决；P6 裁决亲自改稿后须全新 reviewer 一次签收。不能完成则明确阻塞。依赖就绪的分支立即派发，子节点从已审直接父 YAML 复制；阻塞只影响后代。会话、回执与重开规则见[工具协议](tools/README.md)。
 
@@ -175,6 +179,6 @@ audit 的 `0` 表示读取或可得证据检查完成，仍须看 unavailable；
 
 P3/P5/P6 完成或批准时，Runner 自动用冻结检查器执行 `--skip-hardware`；退出 0 才放行，1 是产物诊断，2 是工具/环境问题。P1/P2/P4 使用阶段门禁。检查不代替语义审阅；硬件保留 starter 占位，GPU 验收与实测不在提取范围内。
 
-仓库保留回执、预算、依赖和 CLI 恢复的小回归，执行方法见[离线验证](tools/README.md#离线验证)。受控测试不能证明真实模型的提取质量或成功率，完整真实多分支提取仍待正式试用验收。
+仓库保留回执、预算、依赖和 CLI 恢复的小回归，执行方法见[离线验证](tools/README.md#离线验证)。六类固定实现已在冻结 2.2.2 下完成真实提取、77 节点发布与完整证据审计；2.2.4 通过 29 项离线回归及同源码分组 GEMM 的三节点真实验证，见[试用记录](TRIAL_REPORT.md)。受控测试或这些样本不代表其他实现的提取成功率，也不代替 GPU 或外部比较器验收。
 
 框架候选与稳定 ID 决定通过[维护入口](issues/README.md)查看；算子自身缺项留在任务回执。

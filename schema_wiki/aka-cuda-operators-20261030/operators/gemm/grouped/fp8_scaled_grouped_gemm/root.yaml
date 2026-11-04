@@ -1,0 +1,498 @@
+meta_data:
+  name: fp8_scaled_grouped_gemm
+  describe: Multiply row-segmented FP8 activations by group-specific FP8 weights using block scales and write BF16 results into caller storage.
+  source: source@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate/solution.py::Model.forward
+  version: 4
+  dispatch:
+    when: |
+      Let F be the initialized _Engines.engine selected using device 0 properties.
+      F='umma' when props.major==10 and _build(fp8gg_umma.cu) succeeds;
+      otherwise F='sync' if _build(fp8gg.cu) succeeds. Bind-module availability
+      does not change F; initialization failure provides no compute path.
+      For F='umma', let (m_h,n_h,k_h,g_h,p_h,S) be the dimensions, indptr address and nSM
+      actually passed to fp8umma_run, including ABI values reused by the source's identity memo.
+      Define W as membership in the wide family for the normal build without diagnostic force macros.
+      A sched_policy cache hit on (p_h,g_h,m_h,n_h,k_h) reuses W=(cached engine in {1,2});
+      indptr contents and S are not part of this cache key.
+      On a miss, W=false unless g_h<=116, the indptr D2H copy and stream synchronization
+      succeed, and the copied boundaries h satisfy h[0]>=0 and
+      h[g]<=h[g+1]<=m_h for every 0<=g<g_h.
+      For such a valid snapshot, let A count its nonempty groups,
+      T=sum_{g=0}^{g_h-1} ceil_div(h[g+1]-h[g],128), and Q=k_h/128.
+      If n_h is not divisible by 256, A=0, or S<=0, W=false.
+      Otherwise let I=T*(n_h/256) and set W to the following disjunction:
+        (Q>=32 and ((I>=4*S and T>=4*A) or (Q<=48 and 2*I>=5*S and T>=A)))
+        or (Q>=16 and I>=8*S and T>=2*A)
+        or (8<=Q<=12 and I>=10*S and T>=A)
+        or (Q>=16 and I>=8*S and T==A)
+        or (8<=Q<=20 and I>=4*S and T>=2*A).
+      Select exactly when F='umma' and W=false.
+contract:
+  algorithm_requirement:
+    constant:
+      ScaleK: {value: 128, meaning: Reduction-axis elements sharing an activation or weight scale}
+      ScaleN: {value: 128, meaning: Output columns sharing a weight scale}
+    input:
+      a: {meaning: Stored activation payload, shape: [row: M, reduction: K], dtype: fp8_e4m3fn}
+      b: {meaning: Stored group-specific weight payload in output-column by reduction order, shape: [group: G, column: N, reduction: K], dtype: fp8_e4m3fn}
+      a_scale: {meaning: Activation dequantization scales per reduction block and physical row, shape: [k_block: "K/ScaleK", row: M], dtype: fp32}
+      b_scale: {meaning: Weight dequantization scales per group and reduction/output-column block, shape: [group: G, k_block: "K/ScaleK", n_block: "N/ScaleN"], dtype: fp32}
+      m_indptr: {meaning: Prefix boundaries of physical row segments in a and out, shape: [boundary: "G+1"], dtype: int32, range: "0 <= m_indptr[i] <= M; endpoint and segment constraints are defined in compute"}
+      scale_granularity_mnk: {meaning: Python integer tuple specifying scale granularity in M/N/K order, shape: [], dtype: python_tuple, range: "Exactly (1, ScaleN, ScaleK)", default: "(1, ScaleN, ScaleK)"}
+      scale_major_mode: {meaning: Scale indexing convention, shape: [], dtype: python_str, range: "Exactly 'MN'", default: MN}
+      mma_sm: {meaning: Execution selector supplied by the frozen interface, shape: [], dtype: int64, range: [1, 1], default: 1}
+      out_buffer:
+        meaning: Caller-owned out argument whose initial contents are ignored
+        shape: [row: M, column: N]
+        dtype: bf16
+        range: Any BF16 value including NaN and +/-Inf; no initialization is required.
+      out_dtype: {meaning: Python torch.dtype selector supplied as torch.bfloat16, shape: [], dtype: torch_dtype, range: Exactly torch.bfloat16}
+      backend: {meaning: Backend selector supplied by the frozen interface, shape: [], dtype: python_str, range: "Exactly 'trtllm'", default: trtllm}
+      segment_alignment: {meaning: Segment-alignment selector supplied by the frozen interface, shape: [], dtype: int64, range: [1, 1], default: 1}
+    output:
+      out: {meaning: Result written in place to out_buffer and returned as the same tensor object, shape: [row: M, column: N], dtype: bf16}
+    compute:
+      - name: Domain and storage
+        math: |
+          1 <= M <= 65536; G in {8,16,32,64}.
+          (N,K) in {(1536,2048),(3072,4096),(4096,1536),(4096,7168),(7168,2048)}.
+          K is divisible by ScaleK and N by ScaleN.
+          m_indptr[0] = 0 and m_indptr[G] = M. For 0 <= g < G,
+          0 <= m_indptr[g+1] - m_indptr[g] <= 8192, and this difference is divisible by 4.
+          Empty groups are permitted. Every physical row belongs to its unique nonempty segment.
+          Generator logical_group_sizes and mode are descriptive, not forward inputs or masks;
+          all physical rows are computed, including rows beyond each descriptive logical count.
+          Tensor arguments are contiguous on one CUDA device; out_buffer may be an offset view of larger backing storage.
+          out_buffer and out_dtype are supplied. Only the full out_buffer view is overwritten;
+          other tensor storage, including backing-storage guards, is unchanged. No scratch input is exposed.
+      - name: Dequantize stored payloads
+        math: |
+          For 0 <= i < M, 0 <= j < N, 0 <= t < K, and 0 <= g < G:
+          A_dec[i,t] = fp32(a[i,t] * a_scale[floor(t/ScaleK),i]).
+          B_dec[g,j,t] = fp32(b[g,j,t] * b_scale[g,floor(t/ScaleK),floor(j/ScaleN)]).
+          Use the stored FP8 values and FP32 scales, not the pre-quantization generator values.
+        symbol:
+          A_dec: {meaning: Dequantized physical activation matrix, shape: "ref:a.shape", dtype: fp32}
+          B_dec: {meaning: Dequantized group-specific weight matrices, shape: "ref:b.shape", dtype: fp32}
+      - name: Grouped contraction and writeback
+        math: |
+          For each 0 <= g < G, m_indptr[g] <= i < m_indptr[g+1], and 0 <= j < N:
+          out[i,j] = bf16(sum_{t=0}^{K-1} A_dec[i,t] * B_dec[g,j,t]).
+          Products and accumulation use FP32 with TF32 disabled; the final BF16 conversion uses RNE.
+          There is no clipping; overflow follows the floating-point operations and conversion.
+          Groups, rows, and columns are independent; K is the reduction axis. Empty groups write no rows.
+          There is no bias, residual, alpha factor, or dependence on the old out_buffer contents.
+    golden_reference:
+      source: source@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/reference.py::Model.forward
+      tolerance:
+        out: >-
+          Source record for out: problem/metadata.json declares atol=0.01, rtol=0.05,
+          max_mismatch_fraction=0.0; performance/CERTIFIED_BEST.json states that the comparator
+          and tolerances are unchanged. The reference returns and writes the same BF16 out tensor.
+          The supplied materials do not specify the comparison formula, relative-error basis,
+          comparator arithmetic precision, NaN/Inf handling, or whether the returned tensor and
+          observable out view are checked separately. The schema-default atol/rtol interpretation
+          is not adopted by this record.
+      gap: >-
+        The reference sets torch.backends.cuda.matmul.allow_tf32=False without restoring it.
+        Treat this process-wide setting change as reference-only behavior, not a required operator side effect.
+  hardware_specification:
+    device: null
+    arch: null
+    execution: {Unit: null}
+    feature: {Mechanism: null}
+    stack: {language: null, toolchain: null}
+    wiki:
+      hardware: null
+      programming: {language: null}
+      microbench: null
+      sota: {kernel: null, schema: null}
+      profile: null
+design:
+  math_reshape:
+    thesis: >-
+      Contract the stored FP8 payloads in independent scale-sized K blocks, then
+      promote each block with a rounded FP32 scale product and fused FP32 accumulation.
+      This avoids full dequantized matrices at the cost of a different rounding path,
+      per-block promotion and computation on masked rows.
+    rewrite:
+      - step: block_dot
+        name: Unscaled block contractions
+        math: |
+          Q = K/ScaleK; P = Q/2 (Q is even throughout the Contract).
+          L_g = m_indptr[g+1]-m_indptr[g]; T_g = ceil_div(L_g,BM).
+          R = BM*sum_g(T_g).
+          For 0<=g<G, 0<=mt<T_g, 0<=nt<N/BN, let i0=m_indptr[g]+BM*mt, j0=BN*nt,
+          v=min(BM,m_indptr[g+1]-i0). Empty groups have no instances.
+          For each q=0..Q-1 and s=0..3, select length-32 reduction slices
+          A_s[r,t]=a[i0+r,ScaleK*q+32*s+t],
+          B_s[c,t]=b[g,j0+c,ScaleK*q+32*s+t], 0<=r<v, 0<=c<BN, 0<=t<32.
+          D_0=mm32(A_0,B_0^T); D_s=mma32(A_s,B_s^T,D_(s-1)) for s=1..3;
+          D(q)=D_3. Each q starts a fresh contraction, without carrying D from q-1.
+          Contractions also execute for v<=r<BM; their A operands are the loaded
+          padding or retained values specified by work_schedule, and their results
+          have no output consumer. B covers all BN columns without column padding.
+        symbol:
+          BM: {meaning: Output row block length, binding: 'bind:design.work_schedule::BM'}
+          BN: {meaning: Output column block length, binding: 'bind:design.work_schedule::BN'}
+          D: {meaning: Unscaled result for one K block including discarded rows, shape: [row: BM, column: BN], dtype: fp32}
+        arithmetic:
+          accumulate: >-
+            mm32/mma32 here use the source's e4m3 tcgen05 f8f6f4 contractions with
+            FP32 destinations, four ordered K=32 operations per scale block.
+            This specifies the instruction grouping, not a scalar FP32 reduction
+            tree or bitwise equivalence to dequantize-then-matmul.
+      - step: promote
+        name: Ordered scaled accumulation
+        math: |
+          For each (g,mt,nt), F(-1)[r,c]=0 for 0<=r<BM, 0<=c<BN.
+          For q=0..Q-1, SA(q,r)=a_scale[q,i0+r] if i0+r<M, otherwise 0;
+          SB(q)=b_scale[g,q,nt]; S(q,r)=fp32(SA(q,r)*SB(q)).
+          F(q)[r,c]=fma32(S(q,r),D(q)[r,c],F(q-1)[r,c]).
+          Evaluate q=2*j then q=2*j+1 for j=0..P-1, including discarded rows.
+          Scale reads and promotion outside the current segment but inside M
+          still occur; only output writeback is masked to r<v.
+        symbol:
+          F: {meaning: Running promoted output block, shape: [row: BM, column: BN], dtype: fp32, retention: 'carry_forward (g,mt,nt); q=-1..Q-1'}
+      - step: writeback
+        name: Convert and overwrite caller output
+        math: |
+          For 0<=r<v and 0<=c<BN, out[i0+r,j0+c]=bf16(F(Q-1)[r,c]) with RNE.
+          No value is written for r>=v. The returned tensor is out_buffer itself.
+          Release F after this block's conversion; initialize a new F for the next block.
+    ledger:
+      baseline: >-
+        Materialize the Contract's FP32 dequantized a and b, then perform the grouped
+        FP32 contraction. Counts below exclude cache effects; padded execution is
+        included explicitly using R row positions.
+      footprint:
+        - {item: Dequantized matrices, change: '4*(M*K+G*N*K) -> 0 bytes of full dequantized matrices; local D and F replace them', by: [block_dot, promote]}
+      matmul:
+        - {item: Payload contraction, change: 'M*N*K FP32-input MACs -> R*N*K FP8-input MACs with FP32 destinations; (R-M)*N*K MACs are discarded', by: [block_dot]}
+      vector:
+        - {item: Scale application, change: 'M*K+G*N*K dequantization multiplies -> R*(N/BN)*Q FP32 scale multiplies plus R*N*Q FP32 FMAs; both paths convert M*N outputs to BF16', by: [promote, writeback]}
+      error:
+        - {item: Changed rounding path, change: 'Operand-wise FP32 dequantization is replaced by raw block contractions, FP32 scale-product rounding and ordered block FMAs; no quantitative error bound is supplied', by: [block_dot, promote]}
+  work_schedule:
+    thesis: >-
+      One persistent CTA owns each complete 128 by 128 output block and all its K
+      reduction. Static striding amortizes setup, while row blocks run fastest within
+      each group and column block; there is no inter-CTA reduction or work queue.
+    flow:
+      launch: [{phase: [main]}]
+    phase:
+      main:
+        describe: >-
+          Compute block_dot, promote and writeback for every nonempty group in one
+          umma_gemm<0> launch on the stream obtained by Model.forward. A cached single-node
+          graph and its direct-launch fallback submit the same computation; graph API
+          failure disables future graph use. Initialization or launch errors do not
+          select an extra computation fallback.
+        decomposition:
+          strategy: |
+            BM=128; BN=128. The dimensions and pointers used by this execution are
+            the actual launch ABI qualified by meta_data.dispatch.when, including memo hits.
+            Set prefix[0]=0, prefix[g+1]=prefix[g]+T_g, NB=N/BN, W=prefix[G]*NB.
+            Work w selects g with prefix[g]*NB<=w<prefix[g+1]*NB;
+            z=w-prefix[g]*NB, nt=floor(z/T_g), mt=z mod T_g.
+            One worktile traverses j=0..P-1, consuming q=2*j and q=2*j+1,
+            retaining F locally until its single output writeback.
+            Let abox be true only if all three smaller A descriptors were created.
+            The A load height h is 128 if abox is false; otherwise it is the smallest
+            member of {16,32,64,128} at least v. Load h rows per K block: rows past
+            the segment can read subsequent physical rows; rows past M use descriptor
+            OOB fill. Rows h..BM-1 retain the ring's previous or initial contents.
+            All BM rows still participate in contraction and promotion; write only v.
+            A is reused across BN output columns, B across BM rows; each row scale
+            product is reused across BN columns. K remains local, with no split-K.
+          partition:
+            w: {size: W, tile: 1}
+          worktile:
+            invariant:
+              m_indptr: {shape: [boundary: 2], dtype: 'ref:contract.algorithm_requirement::m_indptr.dtype'}
+            iteration:
+              a: {shape: [k_block: 2, row: BM, reduction: ScaleK], dtype: 'ref:contract.algorithm_requirement::a.dtype', direction: ascending}
+              b: {shape: [k_block: 2, column: BN, reduction: ScaleK], dtype: 'ref:contract.algorithm_requirement::b.dtype', direction: ascending}
+              a_scale: {shape: [k_block: 2, row: BM], dtype: 'ref:contract.algorithm_requirement::a_scale.dtype', direction: ascending}
+              b_scale: {shape: [k_block: 2], dtype: 'ref:contract.algorithm_requirement::b_scale.dtype', direction: ascending}
+          target:
+            single_tile:
+              out: {shape: [row: v, column: BN], dtype: 'ref:contract.algorithm_requirement::out.dtype'}
+        mapping:
+          strategy: >-
+            U=(ceil_div(M,BM)+G)*NB is the host work upper bound; S is the nSM
+            launch argument obtained from device 0. Launch 256 threads per CTA.
+            The submission count is not a claim about simultaneous residency.
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: 'max(1,min(U,S))'
+        schedule:
+          strategy: >-
+            Each CTA copies current device boundaries and builds prefix once.
+            Producer and epilogue each scan groups monotonically from their previous
+            group. The upper-bound grid can include CTAs with no work; these still
+            initialize and tear down local resources. Every role uses the same static
+            sequence, but progresses independently subject to tile_pipeline dependencies.
+            Host identity memo hits reuse cached pointers and dimensions without
+            revalidation; no metadata-immutability guarantee is supplied. The host
+            scheduling cache is as defined in dispatch.when, whereas each kernel reads
+            current device indptr contents for its work mapping. Tensor-map caches reuse
+            descriptors by pointer and dimensions. The graph caches Params, including
+            bstream; bstream is absent from its hit key, so a graph hit can retain an
+            older cache hint. On a scheduler miss, pp is 1 exactly when its valid
+            snapshot has T==A (the counts in dispatch.when), otherwise 0; a scheduler
+            hit reuses pp. Direct launch or graph construction sets bstream=pp.
+            None of these caches retains computed output values.
+          worktile_order: [{by: w, direction: ascending}]
+          worker_assignment:
+            preassigned: {start: worker_id, step: worker_count}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: >-
+      A producer feeds a three-slot operand ring, one or two issuers fill two TMEM
+      pair slots, and four epilogue warps drain and promote them. TMEM release precedes
+      the final register FMA batch; scale prefetch and asynchronous output stores
+      overlap later work without resetting the operand or TMEM rings.
+    phase:
+      main:
+        domain:
+          t: worktile
+          j: [0, P]
+          n: {flatten: [t, j]}
+        resource:
+          OperandRing:
+            space: SMEM
+            member_slot_shape: [element: '4*BM*ScaleK']
+            dtype: fp8_e4m3fn
+            slot_count: 3
+            view:
+              'AB(n)': {slot_index: 'n%3'}
+          PartialRing:
+            space: TMEM
+            member_slot_shape: [row: BM, column: '2*BN']
+            dtype: fp32
+            slot_count: 2
+            view:
+              'DPair(n)': {slot_index: 'n%2'}
+          ScaleRing:
+            space: SMEM
+            member_slot_shape: [k_block: 2, row: BM]
+            dtype: fp32
+            slot_count: 2
+            view:
+              'SA(t,j)': {slot_index: 'j%2'}
+          CurrentScales:
+            space: register
+            member_slot_shape: [operand: 2, k_block: 2, row: BM]
+            dtype: fp32
+            slot_count: 1
+          NextBScale:
+            space: register
+            member_slot_shape: [k_block: 2, row: BM]
+            dtype: fp32
+            slot_count: 1
+          DrainRegister:
+            space: register
+            member_slot_shape: [row: BM, column: 32]
+            dtype: fp32
+            slot_count: 2
+            view:
+              'Strip(c)': {slot_index: 'c%2'}
+          F:
+            space: register
+            member_slot_shape: [row: BM, column: BN]
+            dtype: fp32
+            slot_count: 1
+          Staging:
+            space: SMEM
+            member_slot_shape: [row: BM, column: BN]
+            dtype: bf16
+            slot_count: 1
+            view:
+              'Output(t)': {}
+          Schedule:
+            space: SMEM
+            member_slot_shape: [element: '2*(G+1)']
+            dtype: int32
+            slot_count: 1
+        role:
+          Lifecycle:
+            info:
+              execution_mode: serial
+              member: 'warp[0:8]'
+              verb:
+                initialize: >-
+                  This is the shared CTA entry, before warp specialization. All threads
+                  copy m_indptr to Schedule and synchronize; thread 0 constructs prefix
+                  and initializes operand-full, operand-empty and TMEM-reader barriers.
+                  Operand-empty expects two issuer commits if dual, otherwise one;
+                  TMEM-reader release expects 128 arrivals. Warp 1 allocates 512 TMEM
+                  columns and relinquishes its allocation permit. After initialization
+                  publication and the second CTA barrier all specialized roles may start.
+                  Rings are initially free, not zeroed. Setup also runs for CTAs with no work.
+                retire: >-
+                  All threads join at the source's final CTA barrier after the specialized
+                  loops; warp 1 then deallocates 512 TMEM columns. This is a shared exit,
+                  not an independent concurrent warp assignment.
+            pipe:
+              prologue: ['initialize:Local']
+              epilogue: ['retire:Local']
+            waits_for:
+              sync:
+                'retire:Local': ['Producer/finish:Issue', 'MMA/finish:Issue', 'Epilogue/finish:Output']
+          Producer:
+            info:
+              execution_mode: async
+              member: 'warp[0:1]'
+              verb:
+                load: >-
+                  Lane 0 maps the work and loads AB(n)=[A0,B0,A1,B1] for its K pair.
+                  After operand-empty permits reuse, one transaction-counted publication
+                  expects 2*h*ScaleK+2*BN*ScaleK bytes. Four TMA transfers fill the
+                  selected A boxes and full B boxes; done means all expected bytes arrived.
+                  The source's effective bstream argument selects ordinary B loads or
+                  an evict-first cache hint; it does not skip any operand reads.
+                finish: End the producer issue loop without adding a drain or resetting ring phases.
+            pipe:
+              repeat: n
+              steady: ['load:AB(n)']
+              epilogue: ['finish:Issue']
+            waits_for:
+              data:
+                'load:AB(n)': ['Lifecycle/initialize:Local']
+              reuse:
+                'load:AB(n+3)': ['MMA/mma:APair(n)@BPair(n)']
+          MMA:
+            info:
+              execution_mode: async
+              member: 'warp[1:3]'
+              verb:
+                mma: >-
+                  APair=(A0,A1) and BPair=(B0,B1) are the two operand pairs in AB(n).
+                  dual=(U*P>=48*worker_count). Warp 1 lane 0 issues q0 and, if not
+                  dual, q1; warp 2 lane 0 issues only q1 when dual. The other lanes
+                  do not issue. Wait for operand-full and prior readers of physical pair slot n%2,
+                  then apply the tcgen05 after-thread-sync fence. Execute block_dot:
+                  four K=32 operations per q, with the first replacing the accumulator.
+                  A tcgen05 commit from each active issuer targets the same operand-empty
+                  barrier. Its completion is this action's done: both D blocks are readable
+                  and all operand reads have ended, so the SMEM slot is also reusable.
+                  In dual mode the issuers advance independently, with no pairwise
+                  rendezvous: aggregate issue is the first issuer's start and aggregate
+                  done is the shared commit completion, not a wait before issuing n+1.
+                finish: End the issuer loops without an extra completion wait.
+            pipe:
+              repeat: n
+              steady: ['mma:APair(n)@BPair(n)']
+              epilogue: ['finish:Issue']
+            waits_for:
+              data:
+                'mma:APair(n)@BPair(n)': ['Producer/load:AB(n)']
+              reuse:
+                'mma:APair(n+2)@BPair(n+2)': ['Epilogue/release:DPair(n)']
+          Epilogue:
+            info:
+              execution_mode: serial
+              member: 'warp[4:8]'
+              verb:
+                prepare: >-
+                  Each of the 128 threads owns one tile row and all BN columns of F.
+                  Local sequencing is per thread/warp; cross-warp synchronization occurs
+                  only at the explicitly stated barriers and collective release completion.
+                  Map the work and zero F. Issue two row-private cp.async groups for
+                  SA(t,0) and SA(t,1); each copies two floats per thread, with source
+                  size zero if its physical row is outside M. Load both q=0,1 B scales
+                  into NextBScale, redundantly per thread. Completion of prepare only
+                  promises scale-copy issuance, not SA readiness.
+                capture: >-
+                  cp.async.wait_group 1 makes this pair's SA slot readable. Capture its
+                  two row scales and the current NextBScale values, and issue the next
+                  pair's B-scale loads into NextBScale if it exists (otherwise set zero).
+                  CurrentScales holds this pair's A and B scale operands; next B
+                  loads need only be ready at the next capture. Group boundaries do not
+                  predicate these scale loads; the physical-row predicate is i0+row<M.
+                drain: >-
+                  Wait for both D blocks using the issuer-commit completion, then apply
+                  the tcgen05 after-thread-sync fence and form the two FP32 scale products.
+                  For each q, columns are drained
+                  in four 32-column strips, each formed by two x16 loads. Two register
+                  strip buffers rotate: load the next strip before applying the previous
+                  strip's FMAs, and wait for each loaded strip before using it. Preserve
+                  per-element q0 then q1 promotion order. Done follows the final load wait:
+                  all TMEM reads have ended, but q1's last 32-column FMA batch remains
+                  in DrainRegister and is not yet incorporated in F.
+                release:
+                  execution_mode: async
+                  meaning: >-
+                    Each epilogue thread arrives on this TMEM pair's reader-release
+                    barrier after its last load wait. Done denotes all 128 arrivals,
+                    allowing the issuer to reuse the pair slot. Arrival is not a wait
+                    for other epilogue threads; each may immediately perform its tail FMAs.
+                finish_pair: >-
+                  Apply the pending last-strip FMAs from DrainRegister to F. For j+2<P,
+                  refill the now-read SA slot with that pair's two row scales; otherwise
+                  issue no copies. Commit a cp.async group unconditionally, including the
+                  last two empty groups, to maintain the wait_group 1 protocol. There is
+                  no cp.async.wait_group 0 at work boundaries: the last actual SA copies
+                  were already consumed, while empty groups may carry across the boundary.
+                reclaim: >-
+                  For a full current tile only, warp 4 lane 0 waits with bulk.wait_group.read 0
+                  if any preceding full tile issued stores, then all 128 epilogue threads
+                  synchronize. This releases the single Staging buffer's previous source
+                  reads, not necessarily its global writes. For a tail tile this action
+                  is a no-op, preserving any earlier full-tile stores in flight.
+                stage: >-
+                  For a full tile, convert all F to BF16 in Staging as two swizzled
+                  128-row by 64-column boxes. Every epilogue thread applies the async
+                  proxy fence and joins the epilogue barrier before store issuance.
+                  For a tail tile this action is a no-op and leaves Staging unchanged.
+                emit:
+                  execution_mode: async
+                  meaning: >-
+                    For a full tile, warp 4 lane 0 issues two TMA stores of Output(t),
+                    commits them as one bulk group and retains prev_store=true across
+                    worktiles. For a tail tile, valid rows convert F and directly issue
+                    packed 16-byte stores; invalid rows issue no stores. Register F is
+                    no longer read after issuance, but global writes may still be in flight.
+                    Done means the output writes have completed; the next work does not
+                    wait for this event.
+                finish: >-
+                  At the end of all assigned work, the store issuer executes
+                  bulk.wait_group 0 if prev_store is true. No per-work global-store drain
+                  is added. All epilogue threads then reach the final CTA join; ordinary
+                  direct-store visibility is completed by kernel completion.
+            pipe:
+              repeat: t
+              steady:
+                - 'prepare:Scales(t)'
+                - repeat: 'n[t]'
+                  steady: ['capture:Scale(n)', 'drain:DPair(n)', 'release:DPair(n)', 'finish_pair:F(n)']
+                - 'reclaim:Staging(t)'
+                - 'stage:Output(t)'
+                - 'emit:Output(t)'
+              epilogue: ['finish:Output']
+            waits_for:
+              data:
+                'prepare:Scales(t)': ['Lifecycle/initialize:Local']
+                'drain:DPair(n)': ['MMA/mma:APair(n)@BPair(n)']
+realization:
+  require:
+    - item: ['design.tile_pipeline::main.OperandRing', 'design.tile_pipeline::main.Staging']
+      choice: >-
+        Keep tensor-map layout, UMMA shared-memory descriptors and staging addresses
+        mutually consistent. The source transfers payload bits as UINT8 in K-major
+        128-byte-wide boxes with 128B swizzle; output maps use UINT16 with 64 columns
+        and 128 rows per swizzled box. Grouped b is flattened to (G*N,K).
+      reason: >-
+        The asynchronous producer and consumers interpret the same storage through
+        different descriptors; disagreement changes which matrix entries are multiplied
+        or written, including tail A boxes and the two output halves.
+    - item: 'design.work_schedule::main'
+      choice: >-
+        Request the source's 232448 bytes of opt-in dynamic shared memory per CTA:
+        operand ring, output staging, scale ring and a 1024-byte schedule/barrier tail.
+        Required map-encoding or capacity failures are returned as errors; failure of
+        the three optional small A maps instead selects the full-height A map.
+      reason: >-
+        The selected buffers and asynchronous roles coexist. A launch that cannot
+        accommodate them is not an alternative valid execution of this pipeline.

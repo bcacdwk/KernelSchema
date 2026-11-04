@@ -1,0 +1,651 @@
+meta_data:
+  name: Expanded FP8 Multihead Latent Attention
+  describe: Ragged attention over prepared FP8 queries, keys and values with composite scales, optional causal masking and attention sinks, BF16 output and optional log2 LSE.
+  source: source@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py::Model.forward
+  version: 3
+contract:
+  algorithm_requirement:
+    constant:
+      Dqk: {value: 192, meaning: Query and key channel count}
+      Dv: {value: 128, meaning: Value and output channel count}
+    input:
+      query: {meaning: Prepared stored queries, shape: [query_token: Tq, head: H, channel: Dqk], dtype: fp8_e4m3fn}
+      key: {meaning: Prepared stored keys, shape: [kv_token: Tk, head: H, channel: Dqk], dtype: fp8_e4m3fn}
+      value: {meaning: Prepared stored values, shape: [kv_token: Tk, head: H, value_channel: Dv], dtype: fp8_e4m3fn}
+      workspace_buffer: {meaning: Caller-provided scratch with no mathematical output; the input factory initializes it to zero, shape: [byte: "128*1024*1024"], dtype: uint8}
+      seq_lens: {meaning: Per-request KV lengths, shape: [batch: B], dtype: int32, range: [1, 16384]}
+      cum_seq_lens_q: {meaning: Query prefix offsets, shape: [boundary: "B+1"], dtype: int32, range: "0 <= value <= Tq"}
+      cum_seq_lens_kv: {meaning: KV prefix offsets, shape: [boundary: "B+1"], dtype: int32, range: "0 <= value <= Tk"}
+      max_q_len: {meaning: Maximum request query length, shape: [], dtype: python_int, range: [1, 16384]}
+      max_kv_len: {meaning: Maximum request KV length, shape: [], dtype: python_int, range: [1, 16384]}
+      batch_size: {meaning: Number of requests, shape: [], dtype: python_int, range: [1, 32]}
+      bmm1_scale: {meaning: Composite score multiplier including query and key dequantization scales and inverse square-root channel scaling, shape: [], dtype: python_float, range: "finite and positive"}
+      bmm2_scale: {meaning: Value dequantization multiplier, shape: [], dtype: python_float, range: "finite and positive"}
+      is_causal: {meaning: Enable right-aligned causal visibility, shape: [], dtype: bool}
+      window_left: {meaning: Sliding window disabled in this task, shape: [], dtype: python_int, range: [-1, -1]}
+      return_lse: {meaning: Return and populate the log2 normalizer, shape: [], dtype: bool}
+      attention_sinks:
+        meaning: Optional per-head sink logits with zero associated value; shape and dtype describe the tensor when present
+        shape: [head: H]
+        dtype: fp32
+        default: "Python None (no sink)"
+      out: {meaning: Required caller-owned output buffer whose incoming contents are ignored, shape: [query_token: Tq, head: H, value_channel: Dv], dtype: bf16, range: "Any BF16 bit pattern, including nonfinite values"}
+      lse:
+        meaning: Caller-owned normalizer buffer required when return_lse is true; shape and dtype describe the tensor when present
+        shape: [query_token: Tq, head: H]
+        dtype: fp32
+        range: "Any FP32 bit pattern, including nonfinite values; incoming contents are ignored"
+        default: "Python None (only when return_lse is false)"
+      o_sf_scale: {meaning: Disabled output scaling sentinel, shape: [], dtype: python_float, range: [-1.0, -1.0]}
+      enable_pdl: {meaning: Prepared ABI launch flag, shape: [], dtype: bool, range: "false"}
+      backend: {meaning: Prepared ABI backend selector, shape: [], dtype: python_str, range: "'trtllm-gen'"}
+      skip_softmax_threshold_scale_factor: {meaning: Softmax skipping disabled, shape: [], dtype: python_none}
+      sage_attn_sfs: {meaning: "Sage scaling disabled; the Python tuple (None, None, None, None)", shape: [], dtype: python_none_tuple4}
+      num_elts_per_sage_attn_blk: {meaning: "Sage blocks disabled; the Python tuple (0, 0, 0, 0)", shape: [], dtype: python_zero_tuple4}
+      q_seq_lens_cpu: {meaning: No CPU query-length metadata; Python None, shape: [], dtype: python_none}
+      kv_seq_lens_cpu: {meaning: No CPU KV-length metadata; Python None, shape: [], dtype: python_none}
+      use_fp16_softmax: {meaning: No FP16-softmax override; Python None, shape: [], dtype: python_none}
+      uses_spcompress: {meaning: No sparse-compression override; Python None, shape: [], dtype: python_none}
+      skip_all_rows_active_check: {meaning: Prepared ABI activity-check flag, shape: [], dtype: bool, range: "true"}
+    output:
+      O: {meaning: Attention result written into and returned as the identical input out object, shape: [query_token: Tq, head: H, value_channel: Dv], dtype: bf16}
+      LSE: {meaning: Optional log2 normalizer written into input lse and returned as the identical object only when return_lse is true, shape: [query_token: Tq, head: H], dtype: fp32}
+    compute:
+      - name: Domain and prepared interface
+        math: |
+          1 <= B <= 32; H in {12, 24, 32, 96, 128}, with equal query and KV head counts.
+          For each 0 <= b < B, let L_b = seq_lens[b], with 1 <= L_b <= 16384.
+          Both prefix arrays start at zero and have increment L_b at request b;
+          cum_seq_lens_q[B] = Tq and cum_seq_lens_kv[B] = Tk.
+          Thus request query and KV lengths are equal, Tq = Tk, Tq <= 16384 and Tk <= 1048576.
+          batch_size = B; max_q_len = max_kv_len = max_b L_b.
+          Query, key, value and present output/sink tensors are contiguous CUDA tensors;
+          length and prefix tensors are contiguous CUDA int32 tensors. Python integers,
+          floats and strings denote host scalar values; python_none denotes only Python None.
+          Optional tensor shape/dtype declarations apply only when the tensor is present.
+          If return_lse is true, lse must be supplied; otherwise lse is Python None.
+          attention_sinks is either absent (Python None) or a finite per-head tensor.
+          Prepared Q/K/V and supplied composite scales define the answer. Projection,
+          RoPE, cache writing, source page tables and unquantized generator values are outside this interface.
+      - name: Stored-value scaling
+        math: |
+          Floating-point arithmetic and reductions use FP32; stored E4M3 values are widened exactly.
+          Interpret bmm1_scale and bmm2_scale as FP32 arithmetic multipliers.
+          For 0 <= u < Tk, 0 <= h < H and 0 <= c < Dv,
+          Vscaled[u,h,c] = value[u,h,c] * bmm2_scale.
+          No new FP8 quantization is part of the mathematical requirement.
+        symbol:
+          Vscaled: {meaning: Dequantized stored values, shape: "ref:value.shape", dtype: fp32}
+      - name: Masked scores
+        math: |
+          Requests and heads are independent. For query t in request b, let
+          i = t - cum_seq_lens_q[b]. A key u is visible exactly when
+          cum_seq_lens_kv[b] <= u < cum_seq_lens_kv[b+1] and either is_causal is false
+          or u - cum_seq_lens_kv[b] <= i. There is no sliding-window restriction.
+          For 0 <= t < Tq, 0 <= h < H and 0 <= u < Tk,
+          S[t,h,u] = bmm1_scale * sum_{d=0}^{Dqk-1} query[t,h,d] * key[u,h,d]
+          if u is visible, and -inf otherwise. Every query has at least one visible key.
+        symbol:
+          S: {meaning: Scaled scores with invisible keys masked, shape: [query_token: Tq, head: H, kv_token: Tk], dtype: fp32}
+      - name: Normalized attention and log normalizer
+        math: |
+          For each t,h, let s = attention_sinks[h] when present and -inf otherwise.
+          Let m = max(s, max_{u=0}^{Tk-1} S[t,h,u]),
+          w_u = exp(S[t,h,u] - m), and z = sum_{u=0}^{Tk-1} w_u + exp(s - m).
+          The sink adds denominator mass but no value contribution; exp(-inf) = 0.
+          For 0 <= c < Dv, O[t,h,c] = bf16(sum_{u=0}^{Tk-1} w_u * Vscaled[u,h,c] / z).
+          If return_lse is true, LSE[t,h] = (m + ln(z)) / ln(2), in FP32.
+          bf16 denotes round-to-nearest, ties-to-even conversion. Empty requests and
+          all-masked rows are excluded by the domain, so no empty-row output is required.
+      - name: Writes and return identity
+        math: |
+          Overwrite the full logical out tensor with O without reading its old contents.
+          If return_lse is true, overwrite the full logical lse tensor with LSE and return
+          (out, lse); otherwise return out alone. Preserve the supplied tensor object identities.
+          workspace_buffer is writable scratch, not an observable mathematical output.
+          All storage outside out, present lse and permitted workspace, including output guards,
+          must remain unchanged. Initial output-buffer contents do not affect the answer.
+    golden_reference:
+      source: source@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/reference.py::Model.forward
+      tolerance:
+        O: >-
+          Compare the BF16 out mutation and its returned alias with the reference result.
+          Source record (metadata.json): default atol=0.01, rtol=0.05, max_mismatch_fraction=0.0;
+          mutated_inputs.out overrides atol=0.01, rtol=0.05, max_mismatch_fraction=0.005,
+          max_rel_l2=0.01. The candidate's frozen-checker comment states
+          abs(candidate-reference) <= 0.01 + 0.05*abs(candidate), relative_to=candidate,
+          with mismatch fraction <= 0.005 AND relative L2 <= 0.01 for out.
+          The external comparator is not supplied: the default formula and relative-error basis,
+          relative-L2 normalization, comparator precision, NaN/Inf handling and routing of
+          returned aliases to default versus mutation-specific checks are unspecified.
+          This source record adopts no schema-default atol/rtol or rel_rmse interpretation.
+        LSE: >-
+          When present, compare the FP32 log2 lse mutation and its returned alias with the reference result.
+          Source record (metadata.json): default atol=0.01, rtol=0.05, max_mismatch_fraction=0.0;
+          the candidate comment states elementwise 0.01/0.05 with zero mismatches.
+          The formula, relative-error basis, comparator precision, NaN/Inf handling and returned-alias
+          versus mutation-check routing are not supplied by the external comparator materials.
+          This source record adopts no schema-default atol/rtol interpretation.
+          When absent, there is no LSE tensor to compare.
+  hardware_specification:
+    device: null
+    arch: null
+    execution: {Unit: null}
+    feature: {Mechanism: null}
+    stack: {language: null, toolchain: null}
+    wiki:
+      hardware: null
+      programming: {language: null}
+      microbench: null
+      sota: {kernel: null, schema: null}
+      profile: null
+design:
+  math_reshape:
+    thesis: >-
+      Fuse tiled QK, online normalization and PV without global score/probability matrices.
+      MODE=0 uses half-precision exponentials and sums, then scaled E4M3 probabilities;
+      short requests additionally recompute FP32 weights and PV for the selected output.
+    rewrite:
+      - step: scores
+        name: Dense tiles with request-local visibility
+        math: |
+          Bq and Bk are work-schedule tile lengths. For item (b,h,q), qstart=q*Bq,
+          qvalid=min(Bq,L_b-qstart), and N is its scheduled KV tile count.
+          For 0<=r<Bq, 0<=j<Bk and 0<=n<N, read Qb[r,d] at
+          query[cum_seq_lens_q[b]+qstart+r,h,d], Kb(n)[j,d] and Vb(n)[j,v]
+          at key/value[cum_seq_lens_kv[b]+n*Bk+j,h,d/v]. These dense views may
+          cross a request boundary; only coordinates beyond the whole tensor are zero-filled.
+          R(n)[r,j] = dot32(Qb[r,:],Kb(n)[j,:]). The dot accumulates six consecutive
+          32-channel groups, starting from zero, covering Dqk=192 without channel padding.
+          hi(r)=is_causal ? min(L_b-1,qstart+r) : L_b-1.
+          X(n)[r,j]=R(n)[r,j] if n*Bk+j<=hi(r), and sentinel otherwise.
+          sentinel=-3.4028234663852885981e38 in FP32; no request-local query mask is applied.
+          All Bq*Bk scores are evaluated; only rows r<qvalid eventually store outputs.
+        symbol:
+          Bq: {meaning: Query rows per item, binding: 'ref:design.work_schedule::Bq'}
+          Bk: {meaning: Keys per local iteration, binding: 'ref:design.work_schedule::Bk'}
+          N: {meaning: KV iteration count of this item, binding: 'ref:design.work_schedule::N'}
+          Qb: {meaning: Dense query view for one item, shape: [query_token: Bq, channel: Dqk], dtype: fp8_e4m3fn}
+          Kb: {meaning: Dense key view for one iteration, shape: [kv_token: Bk, channel: Dqk], dtype: fp8_e4m3fn}
+          Vb: {meaning: Dense value view for one iteration, shape: [kv_token: Bk, value_channel: Dv], dtype: fp8_e4m3fn}
+          R: {meaning: Unscaled dot products used by softmax and reread by the tiny path, shape: [query_token: Bq, kv_token: Bk], dtype: fp32, retention: 'keep_value (b,h,q,n)'}
+      - step: online
+        name: Frozen-offset online softmax and quantized PV
+        math: |
+          Let c=fp32(bmm1_scale)*1.4426950408889634074f and gain_log2=8.
+          For each row r, m(-1)[r]=sentinel, z(-1)[r]=0 and A(-1)[r,:]=0.
+          For n=0..N-1, candidate=max(m(n-1)[r],max_j X(n)[r,j]);
+          bump=(m(n-1)[r]==sentinel) or ((candidate-m(n-1)[r])*c>0.75f).
+          m(n)[r]=candidate if bump, else m(n-1)[r]; safe=0 if m(n)[r]==sentinel, else m(n)[r].
+          alpha(n)[r]=0 if m(n-1)[r]==sentinel, else exp2f((m(n-1)[r]-safe)*c).
+          off=fma32(-safe,c,gain_log2).
+          E(n)[r,j]=half_exp2(fp16(fma32(X(n)[r,j],c,off))).
+          P8(n)[r,j]=e4m3_rne_satfinite(E(n)[r,j]).
+          For a=0..3, start u_a=fp16(0); for g=0..31 in ascending order,
+          u_a=fp16(u_a+E(n)[r,4*g+a]). Widen u_a and set local=(u_0+u_1)+(u_2+u_3).
+          z(n)[r]=fma32(z(n-1)[r],alpha(n)[r],local).
+          A(n)[r,:]=mma32(P8(n)[r,:],Vb(n),alpha(n)[r]*A(n-1)[r,:]), with four ascending
+          32-key accumulation groups. At n=0 the first group overwrites the accumulator;
+          later groups accumulate. For n>0 the FP32 rescale precedes PV; it may be skipped
+          when all rows of a 32-row group have alpha=1, with identical mathematical effect.
+          z uses half weights before E4M3 rounding, whereas A uses P8. This is not a
+          normalization by sum(P8). The nominal probability gain is 256, despite the
+          source constant name kLog2_448. m,z reset at each item; A is overwritten by its first PV.
+        symbol:
+          m: {meaning: Carried raw score offset, shape: [query_token: Bq], dtype: fp32, retention: 'carry_forward (b,h,q); n=-1..N-1'}
+          z: {meaning: Carried denominator from half-precision tile sums, shape: [query_token: Bq], dtype: fp32, retention: 'carry_forward (b,h,q); n=-1..N-1'}
+          alpha: {meaning: Rescale factor passed to numerator correction, shape: [query_token: Bq], dtype: fp32, retention: 'keep_value (b,h,q,n)'}
+          P8: {meaning: Scaled probability operand of every regular PV including tiny items, shape: [query_token: Bq, kv_token: Bk], dtype: fp8_e4m3fn, retention: 'keep_value (b,h,q,n)'}
+          A: {meaning: Regular FP32 numerator accumulator, shape: [query_token: Bq, value_channel: Dv], dtype: fp32, retention: 'carry_forward (b,h,q); n=-1..N-1'}
+        arithmetic:
+          approx: >-
+            half_exp2 is ex2.approx.f16x2 with FP16 input and output; e4m3_rne_satfinite
+            is round-to-nearest saturation to finite E4M3. exp2f uses the compiled CUDA
+            math path compiled with --use_fast_math. unknown: no matching quantitative approximation bound is supplied;
+            no final acceptance guarantee follows from the freeze threshold or these casts.
+      - step: tiny
+        name: Additional FP32 short-row numerator and denominator
+        math: |
+          A row group is eligible if every row in its consecutive 32-row group satisfies
+          N=1, L_b<=32, r<32 and clamp(hi(r)+1,0,Bk)<=32. In this Contract this selects
+          the first group of requests of length at most 32, including its padded rows.
+          For each eligible row, reread R(0)[r,0:32]; let safe be the offset in online at n=0.
+          For j=0..31, p_j=exp2f(fma32(R(0)[r,j],c,-safe*c)) when j<=hi(r), else 0.
+          d_tiny[r] starts at zero and adds p_j in ascending j order in FP32.
+          A_tiny[r,v] starts at zero and applies fma32(p_j,Vb(0)[j,v],A_tiny[r,v])
+          in ascending j order, skipping p_j==0. E4M3 V is widened exactly through FP16.
+          Save d_tiny and A_tiny for output; m(0) remains the regular offset.
+          Regular E, P8, z and A are still evaluated, including regular PV, although
+          their numerator/denominator are discarded for these rows. No tiny state carries to another item.
+        symbol:
+          d_tiny: {meaning: Selected short-row denominator, shape: [query_token: 32], dtype: fp32, retention: 'keep_value (b,h,q)'}
+          A_tiny: {meaning: Selected short-row FP32 numerator, shape: [query_token: 32, value_channel: Dv], dtype: fp32, retention: 'keep_value (b,h,q)'}
+      - step: finish
+        name: Sink correction and output mutation
+        math: |
+          Select (d,a,g)=(d_tiny[r],A_tiny[r,:],0) for eligible rows,
+          else (z(N-1)[r],A(N-1)[r,:],gain_log2).
+          norm=fp32(bmm2_scale)/d if d>0, else 0.
+          base=fma32(m(N-1)[r],fp32(bmm1_scale),logf(d)-0.6931471805599453f*g).
+          If attention_sinks is present, sk=attention_sinks[h],
+          total=max(base,sk)+log1pf(expf(-abs(base-sk))) and norm=norm*expf(base-total);
+          otherwise total=base. lse2=total*1.4426950408889634074f.
+          For r<qvalid, t=cum_seq_lens_q[b]+qstart+r,
+          out[t,h,:]=bf16(a[:]*norm); when lse is present, lse[t,h]=lse2.
+          The logarithm and sink arithmetic also execute when return_lse is false.
+          Out-of-item rows execute arithmetic but do not store. Return the supplied out,
+          or (out,lse) when return_lse is true, preserving their identities.
+        arithmetic:
+          approx: >-
+            logf, expf, log1pf and division follow the candidate's --use_fast_math CUDA compilation.
+            unknown: function error bounds are not provided; the Contract retains the
+            external-comparator source gap without converting it into a numerical guarantee.
+    ledger:
+      baseline: Dense per-request FP32 scores and probabilities materialized globally, followed by FP32 PV and the Contract output conversion.
+      traffic:
+        - {item: Global score and probability intermediates, change: '16*H*sum_b(L_b^2) -> 0 logical bytes for one write and one read of each FP32 matrix per invocation', by: [scores, online]}
+      matmul:
+        - {item: Dense QK and PV contractions, change: 'H*sum_b(L_b^2)*(Dqk+Dv) -> Bq*Bk*sum_items(N)*(Dqk+Dv) MACs; causal tile omission saves work but retained masked and padded positions still execute', by: [scores, online]}
+      vector:
+        - {item: Additional tiny PV, change: '0 -> at most 32*32*Dv scalar FMAs per eligible item, in addition to regular PV', by: [tiny]}
+      footprint:
+        - {item: Global intermediates, change: '8*H*sum_b(L_b^2) -> 0 bytes; per-item logical carried state is Bq*(Dv+2)*4 bytes, with bounded tile materializations specified below', by: [online]}
+      error:
+        - {item: Mixed probability precision, change: 'Adds FP16 argument/output rounding, approximate exp2, four FP16 sum chains, E4M3 PV input rounding and frozen-offset rounding sensitivity; tiny output removes the half/E4M3 probability path but retains FP32 function and QK errors; bounds unknown', by: [online, tiny, finish]}
+  work_schedule:
+    thesis: >-
+      Each CTA owns a complete query tile and its sequential KV reduction, avoiding
+      cross-CTA merges. A host-built geometry list supports either one item per CTA
+      or persistent queue refill; gated length ordering trades K/V locality for balance.
+    flow:
+      launch: [{phase: [main]}]
+    phase:
+      main:
+        describe: Compute scores, online states, regular PV, optional tiny recomputation and all output mutations for one head/request/query tile.
+        decomposition:
+          strategy: |
+            Bind Bq=128 and Bk=128. Items=H*sum_b(ceil_div(L_b,Bq)). One item decodes
+            to (b,h,q), 0<=q<ceil_div(L_b,Bq); its geometry stores global row bases,
+            qstart=q*Bq, qvalid=min(Bq,L_b-qstart), equal Q/KV head h, and
+            N=max(1,ceil_div(is_causal ? min(L_b,qstart+qvalid) : L_b,Bk)).
+            Iterate n=0..N-1 within the item, retaining Qb and the online states.
+            Each Kb/Vb tile serves all Bq rows. N is not an independently assigned axis;
+            no partial-result merge occurs. Every logical row/head belongs to one item.
+            LSE is a target only when its input buffer is present.
+          partition:
+            item: {size: Items, tile: 1}
+          worktile:
+            invariant:
+              Qb: {shape: [query_token: Bq, channel: Dqk], dtype: 'ref:design.math_reshape::Qb.dtype'}
+            iteration:
+              Kb: {shape: [kv_token: Bk, channel: Dqk], dtype: 'ref:design.math_reshape::Kb.dtype', direction: ascending}
+              Vb: {shape: [kv_token: Bk, value_channel: Dv], dtype: 'ref:design.math_reshape::Vb.dtype', direction: ascending}
+          target:
+            single_tile:
+              O: {shape: [query_token: qvalid, value_channel: Dv], dtype: 'ref:contract.algorithm_requirement::O.dtype'}
+              LSE: {shape: [query_token: qvalid], dtype: 'ref:contract.algorithm_requirement::LSE.dtype'}
+        mapping:
+          strategy: |
+            Let SM_count be cudaDevAttrMultiProcessorCount when positive, else the source's
+            literal 148. G=Items if 2*Items<=3*SM_count, else SM_count. Launch G CTAs of 384 threads.
+            This is the submitted count, not a claim about simultaneous residency.
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: G
+        schedule:
+          strategy: |
+            Before the single compute launch, the host downloads current seq_lens and
+            both prefix arrays into cached pinned storage on a nonblocking side stream,
+            synchronizes that stream, and rebuilds the 48-byte-per-item geometry table.
+            Initial order is ascending head, ascending request, descending q.
+            Let C be runtime L2 bytes and streams=min(H*B,SM_count).
+            scatter=(C>0 and 4*streams*max_b(L_b)*320>3*C).
+            If Items>1, every L_b>=128, and not scatter, a stable counting sort orders
+            items by descending N; equal weights preserve initial order. Otherwise keep
+            initial order. Item indices below refer to this final table.
+            Upload the table on the side stream, record table_event, and make the current
+            compute stream wait on that event before launching. Set KVST=3 if scatter,
+            else 4; S/P storage remains three slots. MODE=0 is fixed by Model.forward.
+            The source supplies no producer-stream wait before metadata download, nor
+            prior-kernel completion wait before reusing the cached device table on the
+            side stream. These are missing ordering guarantees, not implicit prerequisites
+            supplied by this design. Cached host/table/event/queue objects are shared
+            across calls without a reentrancy protocol. MODE=0 does not use workspace_buffer.
+          worktile_order: [{by: item, direction: ascending}]
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill:
+              atomic_queue: |
+                When G=Items there is no refill. Otherwise each CTA requests exactly
+                one successor at the start of its current item's last softmax iteration.
+                Its pop server performs pop=atomicAdd(queue,1), then idx=pop+G.
+                If idx<Items publish that item; otherwise publish a negative-N sentinel
+                and stop. Queue is a cached uint32, zeroed once at allocation. The pop
+                returning Items-1 stores zero for the next launch: there are Items-G
+                successful refills and G terminal pops, hence Items total pops.
+                This reset is not a completion notification for other CTAs or other calls.
+            exit: Finish the sole item when G=Items, or consume the published terminal sentinel when queued; all roles then join at the final CTA barrier before TMEM deallocation.
+  tile_pipeline:
+    thesis: >-
+      Separate asynchronous Q/K/V loading and ordered QK/PV issue from row-wise softmax
+      and numerator correction. Early scale publication overlaps correction with exponentiation;
+      continuous rings and guarded next-query prefetch overlap adjacent items without draining them.
+    phase:
+      main:
+        domain:
+          w: worktile
+          n: [0, N]
+          T: {flatten: [w, n]}
+        resource:
+          q_smem:
+            space: SMEM
+            member_slot_shape: [query_token: Bq, channel: Dqk]
+            dtype: fp8_e4m3fn
+            slot_count: 1
+            view: {'Qb(w)': {}}
+          k_ring:
+            space: SMEM
+            member_slot_shape: [kv_token: Bk, channel: Dqk]
+            dtype: fp8_e4m3fn
+            slot_count: KVST
+            view: {'Kb(T)': {slot_index: 'T%KVST'}}
+          v_ring:
+            space: SMEM
+            member_slot_shape: [kv_token: Bk, value_channel: Dv]
+            dtype: fp8_e4m3fn
+            slot_count: KVST
+            view: {'Vb(T)': {slot_index: 'T%KVST'}}
+          sp_tmem:
+            space: TMEM
+            member_slot_shape: [row: Bq, column: 128]
+            dtype: fp32
+            slot_count: 3
+            view:
+              'R(T)': {slot_index: 'T%3'}
+              'P8(T)': {slot_index: 'T%3', part: {column: [32, 64]}, dtype: fp8_e4m3fn}
+          output_tmem:
+            space: TMEM
+            member_slot_shape: [query_token: Bq, value_channel: Dv]
+            dtype: fp32
+            slot_count: 1
+            view: {'A(w)': {}}
+          score_register:
+            space: register
+            member_slot_shape: [query_token: Bq, kv_token: Bk]
+            dtype: fp32
+            slot_count: 1
+            view: {'ScoreCopy(T)': {}}
+          row_register:
+            space: register
+            member_slot_shape: [query_token: Bq, field: 2]
+            dtype: fp32
+            slot_count: 1
+            view:
+              m: {part: {field: [0, 1]}}
+              z: {part: {field: [1, 2]}}
+          scale_relay:
+            space: SMEM
+            member_slot_shape: [query_token: Bq]
+            dtype: fp32
+            slot_count: 2
+            view: {'alpha(T)': {slot_index: 'T%2'}}
+          final_stats:
+            space: SMEM
+            member_slot_shape: [field: 2, query_token: Bq]
+            dtype: fp32
+            slot_count: 1
+            view:
+              FinalSum: {part: {field: [0, 1]}}
+              d_tiny: {part: {field: [0, 1], query_token: [0, 32]}}
+              FinalMax: {part: {field: [1, 2]}}
+          tiny_smem:
+            space: SMEM
+            member_slot_shape: [query_token: 32, column: 130]
+            dtype: fp32
+            slot_count: 1
+            view: {'A_tiny(w)': {part: {column: [0, 128]}}}
+          geometry:
+            space: SMEM
+            member_slot_shape: [field: 10]
+            dtype: int32
+            slot_count: 2
+            view: {'Geometry(w)': {slot_index: 'w%2'}}
+        role:
+          Softmax:
+            info:
+              execution_mode: serial
+              member: 'warp[0:4]'
+              register: 248
+              verb:
+                setup: >-
+                  Thread zero copies bootstrap geometry. Join the initial CTA barrier
+                  with allocation and barrier initialization, then publish bootstrap item_ready.
+                latch: >-
+                  Latch this item's geometry to registers; for w>0 wait for its published
+                  item_ready phase and test the sentinel before entering the worktile body.
+                  Geometry slots alternate by w, with phase floor(w/2)%2. There is no
+                  separate reader-acknowledgment barrier for geometry-slot reuse.
+                request: >-
+                  Only at n=N-1 and G<Items, thread zero signals the pop server before
+                  waiting for QK. Other instances are no-ops, without queue access.
+                capture: >-
+                  Wait for QK completion, load the first 64 scores per row into ScoreCopy
+                  and wait; issue the second 64, mask and partially reduce the first half
+                  while that read is in flight, then wait and release the S-read credit.
+                  Done means both TMEM halves are in registers; subsequent masking/max
+                  and exponentiation need no further regular S reads.
+                compute: >-
+                  RowInitial resets m and z for the new item. Weights computes E and P8
+                  in registers and the four half-sum chains, updating m and z as defined in online.
+                publish: |
+                  Scale finishes masking/max and the online offset decision, writes alpha,
+                  orders per-row writes with a warp sync and publishes the four-warp relay
+                  before computing probabilities.
+                  Final is a no-op except at n=N-1: wait for the previous output-read credit,
+                  write FinalSum and FinalMax, and, if eligible, reread the first 32 raw
+                  TMEM scores and V into the dedicated tiny computation/scratch. FinalSum
+                  aliases d_tiny on those rows. Its publication becomes visible to output
+                  through P8 publication and PV completion; it has no extra ready barrier.
+                  P8 waits for the prior same-slot PV when T>=3, then overwrites columns
+                  32..63 of the S slot, waits for TMEM stores, and publishes p_ready.
+                  Tiny rereads follow the S-read credit but precede P8 publication: later
+                  same-slot QK cannot pass the intervening PV/P8 issue chain. No tiny
+                  scratch aliases K/V. Alpha of each first tile is published but not read
+                  by correction. Other relay values are consumed before reuse: correction(T)
+                  gates PV(T), which precedes QK(T+2) and hence Scale(T+2).
+                retire: &retire >-
+                  After the sole item, or after observing the final published negative-N
+                  sentinel, stop this role. Join the final CTA barrier, including idle warp 11.
+                  This does not insert a drain at any intermediate item boundary.
+            pipe:
+              prologue: ['setup:Geometry']
+              repeat: w
+              steady:
+                - 'latch:Geometry(w)'
+                - 'compute:RowInitial(w)'
+                - repeat: 'T[w]'
+                  steady: ['request:Successor(T)', 'capture:Scores(T)', 'publish:Scale(T)', 'compute:Weights(T)', 'publish:Final(T)', 'publish:P8(T)']
+              epilogue: ['retire:CTA']
+            waits_for:
+              data:
+                'latch:Geometry(w+1)': ['Pop/publish:Successor(w)']
+                'capture:Scores(T)': ['Issuer/qk:R(T)']
+              reuse:
+                'publish:Final(T[0,N-1])': ['Correction/setup:OutputCredit']
+                'publish:Final(T[w,N-1])': ['Correction/release:A(w-1)']
+                'publish:P8(T+3)': ['Issuer/pv:A(T)']
+          Correction:
+            info:
+              execution_mode: serial
+              member: 'warp[4:8]'
+              register: 160
+              verb:
+                setup: Join initial CTA initialization and contribute the initial four-warp output-read credit for pristine A/final_stats/tiny_smem.
+                latch: Latch item geometry after item_ready for w>0; stop on the terminal sentinel before entering an item.
+                rescale: >-
+                  Wait for the previous PV and current Scale, read alpha, and apply the
+                  online correction. Skip TMEM traffic if the entire warp has alpha=1;
+                  otherwise issue all four accumulator reads, wait, multiply in registers,
+                  write all four blocks and wait for stores. Publish the four-warp
+                  o_rescaled credit even when the multiplication is skipped.
+                compute: >-
+                  Final waits for this item's final regular PV, including for tiny rows,
+                  captures FinalSum/FinalMax in registers and computes normalization,
+                  sink correction and lse2. These register values survive output release.
+                release: >-
+                  For regular rows drain four 32-column blocks in read/wait/pack/store
+                  order. After the fourth read wait, signal this warp's output-read credit
+                  BEFORE packing/storing that final block; its values remain in registers.
+                  Tiny rows instead read and store the dedicated scratch result, then
+                  signal the same credit after all scratch reads. When all four warps
+                  arrive, A, final_stats and tiny_smem may be reused, while regular final
+                  block stores and optional LSE stores can still be pending.
+                store: >-
+                  Tail packs/stores the captured fourth block for regular rows; tiny rows
+                  have no remaining O block. Store LSE if present, only for r<qvalid.
+                  Program-order writeback ends here; global completion is at kernel completion.
+                retire: *retire
+            pipe:
+              prologue: ['setup:OutputCredit']
+              repeat: w
+              steady:
+                - 'latch:Geometry(w)'
+                - repeat: 'T[w,1:]'
+                  steady: ['rescale:A(T)']
+                - 'compute:Final(w)'
+                - 'release:A(w)'
+                - 'store:Tail(w)'
+              epilogue: ['retire:CTA']
+            waits_for:
+              data:
+                'latch:Geometry(w+1)': ['Pop/publish:Successor(w)']
+                'rescale:A(T)': ['Issuer/pv:A(T-1)', 'Softmax/publish:Scale(T)']
+                'compute:Final(w)': ['Issuer/pv:A(T[w,N-1])']
+          Issuer:
+            info:
+              execution_mode: async_ordered_completion
+              member: 'warp[8:9]'
+              register: 32
+              verb:
+                setup: {execution_mode: serial, meaning: Allocate 512 TMEM columns once per CTA and relinquish the allocation permit; join the initial CTA barrier before use.}
+                latch: {execution_mode: serial, meaning: Lane zero reads N after the item publication for w>0 and exits on its sentinel; other lanes have no issue loop.}
+                qk: >-
+                  Lane zero issues the six QK accumulation groups into R, then commits
+                  qk_done. Done includes their completion. The same ordered matrix-issue
+                  stream consumes old P before a later QK overwrites that overlapping slot;
+                  S-read credit alone does not protect old P. Across items the issuer can
+                  start new QK after issuing the old tail PV, while output drains elsewhere.
+                pv: >-
+                  Issue four PV groups from P8 and Vb into A, initializing only the first
+                  group of the item's first PV, then commit pv_done. Later PV waits for
+                  o_rescaled; first PV waits for output-read credit, initially granted by
+                  Correction. Regular PV executes even when its result will be discarded.
+                release: >-
+                  KV done uses pv_done directly when KVST=3, without an additional commit.
+                  When KVST=4, issue a separate completion commit to kv_free for this K/V
+                  slot; its done grants loader reuse. The three-slot PV event and four-slot
+                  release event retain their own periods and cannot substitute for each other.
+                retire: {execution_mode: serial, meaning: Observe the terminal sentinel when queued and join the final CTA barrier after all role loops; Correction has waited through the final PV and output reads.}
+                free: {execution_mode: serial, meaning: Warp 8 collectively deallocates the single 512-column TMEM allocation after the final CTA barrier.}
+            pipe:
+              prologue: ['setup:TMEM']
+              repeat: w
+              steady:
+                - 'latch:Geometry(w)'
+                - 'qk:R(T[w,0])'
+                - repeat: 'T[w,1:]'
+                  steady: ['qk:R(T)', 'pv:A(T-1)', 'release:KV(T-1)']
+                - 'pv:A(T[w,N-1])'
+                - 'release:KV(T[w,N-1])'
+              epilogue: ['retire:CTA', 'free:TMEM']
+            waits_for:
+              data:
+                'latch:Geometry(w+1)': ['Pop/publish:Successor(w)']
+                'qk:R(T)': ['Loader/load:Qb(w)', 'Loader/load:KV(T)']
+                'pv:A(T)': ['Softmax/publish:P8(T)']
+                'pv:A(T[w,n+1])': ['Correction/rescale:A(T[w,n+1])']
+              reuse:
+                'qk:R(T+3)': ['Softmax/capture:Scores(T)']
+                'pv:A(T[0,0])': ['Correction/setup:OutputCredit']
+                'pv:A(T[w+1,0])': ['Correction/release:A(w)']
+          Loader:
+            info:
+              execution_mode: async
+              member: 'warp[9:10]'
+              register: 32
+              verb:
+                prime: >-
+                  Lane zero initializes the query completion barrier and independently
+                  reads bootstrap table geometry to issue the two Q transfers before the
+                  initial CTA barrier, overlapping geometry publication and TMEM allocation.
+                setup: {execution_mode: serial, meaning: Join initial CTA initialization without waiting for the primed Q transfer to finish.}
+                latch: {execution_mode: serial, meaning: For w>0 wait for next item_ready and latch its bases/head/N; stop on the sentinel without issuing Q or K/V.}
+                load: |
+                  Qb(0) denotes completion of the primed transfer, without another copy.
+                  For w>0 issue the next item's Q only after the previous item's last QK
+                  completion; this protects both Q bytes and the single Q barrier phase.
+                  Each Q transfer comprises Dqk's 128- and 64-byte segments, 24576 bytes total.
+                  KV issues the two K segments and one V segment into its ring slot with
+                  a joint 40960-byte transaction expectation. Done requires all bytes ready.
+                  Only the first use of each ring slot has no old-reader wait. All slot
+                  indices and parity counts use T continuously across items, never reset
+                  by a short item. Q uses item parity. KV can fill ahead of score/PV work,
+                  and next Q can overlap the previous item's PV tail and output drain.
+                retire: *retire
+            pipe:
+              prologue: ['prime:Query', 'setup:CTA']
+              repeat: w
+              steady:
+                - 'latch:Geometry(w)'
+                - 'load:Qb(w)'
+                - repeat: 'T[w]'
+                  steady: ['load:KV(T)']
+              epilogue: ['retire:CTA']
+            waits_for:
+              data:
+                'latch:Geometry(w+1)': ['Pop/publish:Successor(w)']
+              reuse:
+                'load:Qb(w+1)': ['Issuer/qk:R(T[w,N-1])']
+                'load:KV(T+KVST)': ['Issuer/release:KV(T)']
+          Pop:
+            info:
+              execution_mode: serial
+              member: 'warp[10:11]'
+              register: 32
+              verb:
+                setup: >-
+                  Lane zero initializes the non-query barriers, with four arrivals for
+                  row-role publications and one for transfer/issuer/queue publications;
+                  issue the initialization fence and join the initial CTA barrier.
+                publish: >-
+                  In queued mode wait for the last-iteration request, perform the atomic
+                  refill/reset rule in work_schedule, and publish geometry of successor
+                  w+1 into slot (w+1)%2 or publish its negative-N sentinel. Arrive item_ready
+                  before exiting on failure. With G=Items this action is a no-op. Metadata
+                  publication can precede current-item QK completion and output drain;
+                  the source has no extra geometry-reader acknowledgment or terminal pop
+                  after this failed pop. Slots and publication phases continue across items.
+                retire: *retire
+            pipe:
+              prologue: ['setup:Barriers']
+              repeat: w
+              steady: ['publish:Successor(w)']
+              epilogue: ['retire:CTA']
+            waits_for:
+              sync:
+                'publish:Successor(w)': ['Softmax/request:Successor(T[w,N-1])']
+realization:
+  require:
+    - item: 'design.tile_pipeline::main.Issuer'
+      choice: >-
+        Bind QK/PV to tcgen05.mma.cta_group::1.kind::f8f6f4 and ordered
+        tcgen05.commit completion notifications; retain tcgen05.wait::ld/st
+        for the row roles' explicit TMEM read/write completion points.
+      reason: The pipeline relies on ordered matrix accesses to overlapping S/P slots and distinguishes completed TMEM reads from issued reads and output stores.
+    - item: ['design.tile_pipeline::main.Loader', 'design.tile_pipeline::main.tiny_smem']
+      choice: >-
+        Use UINT8 TMA tensor maps and matching matrix descriptors: 128-byte swizzle
+        for Q/K channels 0..127 and V, 64-byte swizzle for Q/K channels 128..191.
+        Q/K/V/out base pointers are checked for 16-byte alignment. Preserve the
+        dedicated 32-by-130 FP32 tiny scratch; actual dynamic SMEM, including metadata
+        and padding, is 168960 bytes at KVST=3 and 209920 bytes at KVST=4.
+      reason: The packed loads and tiny V decoding must agree with shared-memory layout; the host rejects misalignment, and logical payload sizes alone undercount the allocation.

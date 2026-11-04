@@ -1,0 +1,18 @@
+{
+  "id": "proposal-summary-ownership",
+  "category": "extract_workflow",
+  "problem": "提示词将“摘要”列为 Runner 生成的字段，但模型同时必须提交非空语义字段 summary；文件哈希与语义总结的责任表述混用，可能诱发空 summary 和重复格式修复。",
+  "evidence": [
+    "schema_extract/tools/prompts.py 的回执提示写着“identity、摘要、文件清单、实际差异由 Runner ... 生成，不手填”；EXTRACT_SCHEMA.md 与 schema_extract/tools/README.md 也使用未区分的“摘要”。",
+    "schema_extract/tools/receipts.py 的 receipt_schema/proposal_schema 保留模型负责的 summary 字符串，validate_receipt 拒绝空白 summary；normalize_response 不会为模型生成语义总结。",
+    "2026-11-03，MoE 已进入 P6 的本次固定 2.2.2 提取中，逐个 repair.json 核得 50 次 receipt requires a summary；抽查对应原始 response.json 均为 summary 空串，涉及 P1/P3/P4/P5 及 worker/reviewer。",
+    "按真实回执统计的原因与样本记录在 .schema_extract/trials/six-families/checks/check-7-10.json。该观察支持澄清责任，但不能证明文案歧义是所有空值的唯一原因。",
+    "2.2.4 的提取回归共 29 项通过；修复、原例回放及维护记录见 .schema_extract/trials/six-families/post-batch/fixes-2.2.4.json。"
+  ],
+  "proposal": "明确 summary 是模型必须填写的简短非空语义结论；工具生成的字段称为文件 SHA-256 或哈希，避免混称“摘要”。保留空值拒绝和原有限修复，不由工具代写模型结论。",
+  "necessity": "频繁的机械格式修复消耗真实调用和阶段时间；澄清两种字段的责任即可消除提示歧义，无需放宽来源、设计或审阅要求。",
+  "decision": {
+    "outcome": "resolved",
+    "reason": "2.2.4 明确 summary 由模型填写简短非空语义结论，Runner 生成的是文件 SHA-256；提示词、回执说明和 schema 字段说明已统一。空值拒绝与有限修复保持，工具不代填结论。职责歧义已修复，实际模型返工是否减少由单独的真实验证记录评估。"
+  }
+}

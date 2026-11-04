@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .common import ExtractError, manifest, regular_file, rules_root, source_root
-from .artifacts import validate_plan, validate_revision_scope
+from .artifacts import IndexLayoutError, validate_plan, validate_revision_scope
 from .comparators import validate_comparisons
 from .reading import read_evidence
 from .stages import STAGES, plan_signature, scope_key
@@ -29,7 +29,7 @@ IDENTITY_FIELDS = ("run_id", "attempt_id", "input_fingerprint", "stage", "role",
 
 
 class ReceiptFormatError(ExtractError):
-    """An otherwise scoped proposal may repair its JSON shape in the same session."""
+    """A scoped proposal may repair JSON shape or an identified artifact layout error."""
 
 
 def call_identity(attempt: dict) -> dict:
@@ -70,7 +70,8 @@ def receipt_schema(attempt: dict) -> dict:
         "format": {"type": "string", "enum": ["schema_extract.receipt.v2"]},
         "identity": obj(identity),
         "decision": {"type": "string", "enum": ["complete", "continue", "approve", "revise", "blocked"]},
-        "summary": TEXT, "changed_files": TEXTS,
+        "summary": {**TEXT, "description": "Write a brief non-empty semantic conclusion for this invocation."},
+        "changed_files": TEXTS,
         "artifacts": {"type": "array", "items": ARTIFACT},
         "source_evidence": {"type": "array", "items": SOURCE_ANCHOR},
         "artifact_evidence": {"type": "array", "items": obj(ANCHOR_FIELDS)},
@@ -289,7 +290,18 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
             if not any(item["category"] == category and item["path"] in {entry["path"] for entry in locators}
                        for item in value["source_evidence"]):
                 raise ExtractError(f"missing bound {category} entry anchor")
-        subjects = {item["subject"] for item in value["conclusions"] if item["text"].strip() and item["evidence"]}
+        artifact_subjects = set()
+        if attempt["stage"] == "P6" and any(item["subject"] == "tree" and not item["evidence"]
+                                             for item in value["conclusions"]):
+            planned_files = {entry["file"] for entry in state["plan"]} | {"dispatch.md"}
+            cited_files = {entry["path"] for entry in value["artifact_evidence"]}
+            if planned_files == set(files) and planned_files <= cited_files:
+                # Topology is a fact about the cited artifacts. Source-dependent
+                # selection and coverage conclusions still need source indices.
+                validate_plan(state["plan"], artifacts, rules_root(lock), require_files=True)
+                artifact_subjects.add("tree")
+        subjects = {item["subject"] for item in value["conclusions"] if item["text"].strip()
+                    and (item["evidence"] or item["subject"] in artifact_subjects)}
         required_subjects = set(STAGES[attempt["stage"]]["conclusions"])
         if not required_subjects <= subjects:
             raise ExtractError("missing supported stage conclusions: " + ", ".join(sorted(required_subjects - subjects)))
@@ -323,7 +335,10 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
             raise ReceiptFormatError("approval needs a short handoff (<=1200 characters, <=20 nonempty lines)")
     if attempt["stage"] == "P4" and final:
         if attempt.get("mode", "normal") == "normal":
-            validate_plan(value["plan"], artifacts, rules_root(lock))
+            try:
+                validate_plan(value["plan"], artifacts, rules_root(lock))
+            except IndexLayoutError as exc:
+                raise ReceiptFormatError(str(exc)) from exc
         for entry in value["plan"]:
             if not entry["evidence"] or any(type(i) is not int or i < 0 or i >= len(value["source_evidence"])
                                              for i in entry["evidence"]):

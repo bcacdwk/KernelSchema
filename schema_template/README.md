@@ -10,11 +10,11 @@
 
 当前已有 kernel 的提取流程例外：`contract.hardware_specification` 只保留 starter 原样占位，不搜索、填写、检查或审阅硬件资料。提取固定使用下述 `--skip-hardware`，不要把硬件缺口作为提取问题。普通设计／检查的默认行为不变。
 
-新建设计接收已经完成的 Contract，在其上填写 Design；提取任务按已确认的要求建立共享 Contract；优化任务使用原有 Contract。三者都不因当前设计选择而改写前提。
+新建设计接收已经完成的 Contract，在其上填写 Design；提取任务按固定材料建立共享 Contract，并可保留[来源未提供的外部验收定义](../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)；优化任务使用原有 Contract。三者都不因当前设计选择而改写前提。
 
 Contract 使用任务给定或经任务方确认的内容；转录已确认的要求不等于获得修改要求的权限。需要改变任务边界、验收判据、设备或实现栈时，先向任务方指出问题，遵守[修改权限](../README.md#2-schema-是什么)。参考入口尚未形成时，按 [golden_reference 规则](../schema_docs/1.contract.algorithm_requirement.md#golden_reference)处理；不能用设计源码冒充参考入口。
 
-必要信息不足时，在任务沟通中说明缺什么、影响哪个字段或设计判断、需要哪些资料或确认；可以继续不受影响的部分，但不能把草稿当成完整设计交付。不要编造参考入口、误差阈值、硬件能力或实验结果，也不要用 `null` 掩盖未完成的设计。只有[硬件资料入口](../schema_docs/2.contract.hardware_specification.md#省略与占位)和[数学区允许的位置](../schema_docs/3.design.math_reshape.md#引用与缺项)可按规定标记缺口；这些标记不表示相应判断已经成立。
+必要信息不足时，说明缺什么以及哪项计算或设计因此无法可靠表达，可以继续不受影响的部分。不要编造参考入口、误差阈值、硬件能力或实验结果，也不要用 `null` 掩盖未完成的设计。缺口分别按[硬件资料](../schema_docs/2.contract.hardware_specification.md#省略与占位)、[数学引用](../schema_docs/3.design.math_reshape.md#引用与缺项)和[提取中的验收记录](../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)处理；不能把未知事实当作设计依据。
 
 ### 2 创建文件或进入已有任务
 
@@ -74,7 +74,7 @@ python3 schema_template/check_yaml.py --skip-hardware path/to/task/root.yaml
 
 上段硬件／编程 wiki 冻结要求不适用于显式 `--skip-hardware` 的当前提取流程；其硬件占位原样保留、该区收尾跳过。仍须核对非硬件的设计来源、参考入口和实际引用的实验记录。
 
-交付时简要说明改动范围、schema 检查结果及仍未解决的资料或设计问题，可以写在任务消息中，无需新增固定报告文件或 YAML 状态字段。若必需信息或设计尚未确定，明确交付的是草稿及其缺口；检查通过不能改变这一状态。
+交付时简要说明改动范围、schema 检查结果及仍未解决的资料或设计问题，无需新增固定报告文件或 YAML 状态字段。计算或设计仍无法确定时交付草稿；固定实现已忠实提取、仅保留上述外部验收来源缺口时，可按提取流程审阅并发布。缺口随产物保留，不宣称相应验收保证，也不能直接作为新任务的完整验收授权。
 
 ## 微流水线图
 

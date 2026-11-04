@@ -150,9 +150,15 @@ def classify(run: dict) -> list[dict]:
                           "recovery_condition": reason.get("recovery_condition", "核对固定证据和原预算后显式控制。"),
                           "suggested_action": "定位工具/协议证据；确需换版时显式 continue" if kind == "framework_or_protocol" else "保留其他任务，核实本范围恢复条件"}
         if kind == "framework_or_protocol":
+            attempt_id = reason.get("attempt_id")
+            if not attempt_id and scope != "P5" and not str(scope).startswith("P5:"):
+                attempt_id = run.get("last_attempt_id")
+            evidence = [anomaly["evidence"]]
+            if attempt_id:
+                evidence.append(run["state_directory"] + "/attempts/" + str(attempt_id))
             anomaly["engineering_handoff"] = {"problem": anomaly["summary"],
                 "scope": "schema_extract/tools 的对应调用、校验或恢复边界", "executor": run.get("executor"),
-                "read_only_evidence": [anomaly["evidence"], run["state_directory"] + "/attempts/" + str(run.get("last_attempt_id") or "")],
+                "read_only_evidence": evidence,
                 "reproduce_entry": [sys.executable, "schema_extract/extract.py", "inspect", "--run", run["run_id"],
                                     "--state-root", str(Path(run["state_directory"]).parent.parent), "--json"],
                 "recovery_condition": anomaly["recovery_condition"]}

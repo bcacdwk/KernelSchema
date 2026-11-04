@@ -1,0 +1,717 @@
+"meta_data":
+  "name": "gated_delta_rule_prefill"
+  "describe": "Packed gated delta-rule attention with grouped query/key heads, BF16\
+    \ Q/K/V and initial state, and optional FP32 final state."
+  "source": "source@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/candidate/solution.py::Model.forward"
+  "version": 1
+  "dispatch":
+    "id": "segmented"
+    "parent": "root"
+    "when": |
+      Let SM be the positive runtime multiProcessorCount used by gdn_forward.
+      Let A=floor((T+63*N)/(64*N)), B16=(ValueDim/16)*HV*N,
+      and B64=(ValueDim/64)*HV*N.
+      Select exactly when B16 <= SM and
+        ((2*B16 <= SM and A >= 32) or (2*B64 <= SM and A >= 192)),
+      equivalently the source's final Gseg > 1.
+      A is a metadata estimate, not a per-request length test.
+design:
+  math_reshape:
+    thesis: >-
+      Prepare 64-token triangular coefficients, then propagate independent segments
+      and replay them from composed FP32 inputs. This shortens the state chain at
+      the cost of a second traversal, saved segment transfers and a scalar-decay
+      approximation; weak decay selects a full-request replay.
+    rewrite:
+      - step: prepare
+        name: Normalize and define the actual padded chunk inputs
+        math: |
+          Use packing from the Contract; B=64, c=0..c_n-1, slot=o_n+c,
+          t0=Boundary[n]+B*c, L=min(B,Length[n]-B*c), m=floor(h/(HV/H)).
+          Qb=q and Kb=k when use_qk_l2norm_in_kernel is false. Otherwise, for
+          each 128-element row x of q or k, form 32 sums of four adjacent
+          squares, combine by the XOR tree with offsets 16,8,4,2,1, and set
+          the corresponding row of Qb or Kb to bf16(x*rsqrtf(sum+NormEpsilon)).
+          For i=0..63, Qc[i,:]=Qb[0,t0+i,m,:], Kc[i,:]=Kb[0,t0+i,m,:],
+          Vc[i,:]=v[0,t0+i,h,:] when t0+i<T; use zero otherwise. Thus rows
+          beyond this request can contain the next request's data.
+          gc[i]=g[0,t0+i,h] and bc[i]=beta[0,t0+i,h] for i<L, zero otherwise.
+          gc/bc are explicitly zero-filled, independently of Qc/Kc/Vc.
+          Qc/Kc are saved across phases; both passes reuse Kc, only replay uses Qc.
+          chunk_indices/chunk_offsets are required by the C++ entry. Python
+          synthesizes all three metadata tensors only when cu_seqlens is None.
+        symbol:
+          B: {meaning: Chunk length of the triangular system, value: 64}
+          VTT: {meaning: Value channels assigned to one chain worktile, binding: "bind:design.work_schedule::VTT"}
+          G: {meaning: Segment count selected by the host, binding: "bind:design.work_schedule::G"}
+          Qb: {meaning: Selected BF16 query tensor, shape: "ref:contract.algorithm_requirement::q.shape", dtype: bf16, retention: "keep_value invocation"}
+          Kb: {meaning: Selected BF16 key tensor, shape: "ref:contract.algorithm_requirement::k.shape", dtype: bf16, retention: "keep_value invocation"}
+          Qc: {meaning: Full query chunk including foreign or zero tail rows, shape: [token: B, key: KeyDim], dtype: bf16, retention: "keep_value (slot,m)"}
+          Kc: {meaning: Full key chunk including foreign or zero tail rows, shape: [token: B, key: KeyDim], dtype: bf16, retention: "keep_value (slot,m)"}
+          Vc: {meaning: Full value chunk including foreign or zero tail rows, shape: [token: B, value: ValueDim], dtype: bf16}
+          Perm: {meaning: Optional materialized request traversal order, shape: [request: N], dtype: int32, retention: "keep_value invocation", binding: "bind:design.work_schedule::Perm"}
+        arithmetic:
+          approx: "rsqrtf is the source operation; unknown: no bound for its contribution to final output error is supplied. Optional normalization narrows to BF16, unlike the reference."
+      - step: coefficients
+        name: Form decay-weighted BF16 triangular coefficients
+        math: |
+          Let ex(x) denote CUDA __expf(x). Obtain b[i] from gc by inclusive
+          scans of each 32-element half: at offsets 1,2,4,8,16 add the previous
+          round's element i-offset when it is in the same half. Then add the
+          first half's total to every element of the second half.
+          rho[0]=1; rho[j]=ex(b[j-1]-b[j]) for j=1..63.
+          For every i and each a in {0,4,...,60}, evaluate E[i,a]=ex(b[i]-b[a]);
+          E[i,a+r]=E[i,a+r-1]*rho[a+r] for r=1,2,3, even above the diagonal.
+          On the ten 16x16 tiles floor(j/16)<=floor(i/16), compute
+          Gm[i,j]=bf16(dot32(Kc[i,:],Kc[j,:])) and
+          F[i,j]=dot32(Qc[i,:],Kc[j,:]); other tiles are not evaluated.
+          Sys[i,j]=bf16((bc[i]*E[i,j])*Gm[i,j]) for i>j,
+          Sys[i,i]=1, Sys[i,j]=0 for i<j.
+          Sys columns 64..71 are zero for discarded column-solve evaluations.
+          For each even a in the ten retained tiles, evaluate D0=ex(b[i]-b[a]);
+          Qd[i,a]=bf16((F[i,a]*0.08838834764831845)*((i>=a)?D0:0)),
+          Qd[i,a+1]=bf16((F[i,a+1]*0.08838834764831845)*
+                        ((i>=a+1)?D0*rho[a+1]:0)).
+          Qd is zero on omitted upper tiles. Define Ai[i]=ex(b[i]),
+          Dl[i]=ex(b[63]-b[i]). Materialize b,bc,Ai,Dl and Qd for every (slot,h),
+          including all padded rows. b is transferred in both passes but is not
+          read by the chunk arithmetic. Materialize Qc/Kc once per (slot,m).
+        symbol:
+          Gm: {meaning: BF16 Gram values on retained tiles, shape: [row: B, column: B], dtype: bf16, retention: "keep_value (slot,m)"}
+          F: {meaning: Unnarrowed query-key products on retained tiles, shape: [row: B, column: B], dtype: fp32, retention: "keep_value (slot,m)"}
+          Sys: {meaning: Rounded unit lower triangular system, shape: [row: B, column: B], dtype: bf16}
+          Qd: {meaning: Rounded decay-weighted readout coefficients, shape: [row: B, column: B], dtype: bf16, retention: "keep_value (slot,h)"}
+          b: {meaning: Computed inclusive log-decay scan, shape: [token: B], dtype: fp32, retention: "keep_value (slot,h)"}
+          bc: {meaning: Zero-padded update gates, shape: [token: B], dtype: fp32, retention: "keep_value (slot,h)"}
+          Ai: {meaning: Chunk-prefix decays, shape: [token: B], dtype: fp32, retention: "keep_value (slot,h)"}
+          Dl: {meaning: Decays from each row to chunk end, shape: [token: B], dtype: fp32, retention: "keep_value (slot,h)"}
+        arithmetic:
+          approx: "ex uses __expf, including positive rho and masked-upper arguments; unknown: no uniform error or overflow bound over the Contract domain. No clamp or fallback is present."
+          accumulate: "Gram and query-key products accumulate eight consecutive 16-key BF16 products in FP32; scan and rho-product grouping are as defined above."
+      - step: inverse
+        name: Hierarchical rounded inverse with different merge order at the final level
+        math: |
+          Initialize Ti to the identity. In each aligned 8x8 diagonal block,
+          for every local column j, z[0]=1 and, for d=1..7,
+          z[d]=-sum32_{q=0..d-1}(Sys[base+min(j+d,7),base+j+q]*z[q]),
+          accumulated in ascending q. Store Ti[base+j+d,base+j]=bf16(z[d])
+          only when j+d<8; the other computed z values are discarded.
+          Merge adjacent diagonal blocks at widths w=16,32,64. Let L21 be
+          Sys's lower-left w/2 square and I1,I2 the already rounded diagonal
+          inverse blocks. At w=16 or 32 use Z=bf16(mm32(I2,L21)),
+          X=bf16(-mm32(Z,I1)); at w=64 use Y=bf16(mm32(L21,I1)),
+          X=bf16(-mm32(I2,Y)). Set Ti's lower-left block to X.
+          Retain the diagonal blocks and zero upper triangle. The width-16
+          products execute padded 16x8x16 products, with unused outputs discarded;
+          finite zero padding is written for the otherwise out-of-plane columns.
+          Publish Ti on the same ten 16x16 tiles as Qd, per (slot,h).
+        symbol:
+          Ti: {meaning: Hierarchically computed BF16 inverse coefficients, shape: [row: B, column: B], dtype: bf16, retention: "keep_value (slot,h)"}
+          Y: {meaning: Rounded 32x32 intermediate of the width-64 merge, shape: [row: 32, column: 32], dtype: bf16}
+      - step: chain
+        name: Carry FP32 state and separately round readout and update operands
+        math: |
+          Define Advance(c,R,Emit) on one VTT-wide value slice, using the corresponding
+          columns of Vc and initial_state. Internal column j is local; input
+          and output value axes use vt*VTT+j. Return Rnext, with the
+          seed supplied by segments below.
+          Rh=bf16(R); KS=mm32(Kc,Rh); QS=mm32(Qc,Rh) only when Emit.
+          If VTT=16, each evaluated projection uses two FP32 accumulators over
+          alternating 16-key blocks (0,2,4,6 and 1,3,5,7), then one FP32 add;
+          VTT=64 uses one accumulator in increasing block order.
+          Hrhs[i,j]=bf16(bc[i]*(Vc[i,j]-Ai[i]*KS[i,j]));
+          U=mm32(Ti,Hrhs), DU[i,j]=bf16(Dl[i]*U[i,j]).
+          Only when Emit, form Uh=bf16(U) and Aout=mm32(Qd,Uh).
+          Uh and DU both originate from U; DU does not use Uh.
+          The evaluated Ti and Qd products visit only the ten retained
+          16x16 tiles, including masked elements inside diagonal tiles.
+          When Emit, store Out[0,t0+i,h,vt*VTT+j]=
+            bf16((Ai[i]*0.08838834764831845)*QS[i,j]+Aout[i,j]) only for i<L.
+          Rnext=Ai[63]*R+mm32(Kc^T,DU).
+          Rebuild bf16(Rnext) even on the final chunk, where it has no consumer.
+          When VTT=64 and L=1, evaluated projections still cover all 64 rows; then
+          U0=bf16(bc[0]*(Vc[0,:]-Ai[0]*KS[0,:])), DU0=bf16(Dl[0]*U0),
+          when Emit, Out[0,t0,h,vt*VTT:(vt+1)*VTT]=
+            bf16((Ai[0]*0.08838834764831845)*QS[0,:]+Qd[0,0]*U0),
+          and Rnext=Ai[63]*R+Kc[0,:]^T*DU0 using elementwise outer products.
+          This branch skips the full rhs/solve/readout/update matrix products.
+          Every valid Out store also writes the same BF16 bytes to the active
+          core buffer prefix if supplied; suffix storage is untouched. Out is
+          fresh and does not alias core. Input views are made contiguous for
+          internal reads. The C++ host writes core.contiguous();
+          it performs no copy-back for a noncontiguous caller buffer.
+        symbol:
+          R: {meaning: Internal key-by-value FP32 state of one segment pass, shape: [key: KeyDim, value: VTT], dtype: fp32, retention: "carry_forward (MODE,n,h,s,vt); cl=0..nseg"}
+          Rh: {meaning: Rounded operand snapshot of the current state, shape: [key: KeyDim, value: VTT], dtype: bf16}
+          Hrhs: {meaning: Rounded chunk residuals, shape: [token: B, value: VTT], dtype: bf16}
+          U: {meaning: FP32 solved updates before two separate narrowings, shape: [token: B, value: VTT], dtype: fp32}
+          Uh: {meaning: BF16 readout update operand, shape: [token: B, value: VTT], dtype: bf16}
+          DU: {meaning: BF16 decay-weighted state update operand, shape: [token: B, value: VTT], dtype: bf16}
+        arithmetic:
+          accumulate: "All mm32 products use BF16 operands and FP32 MMA accumulation, with increasing 16-wide reduction blocks except the explicit KS/QS split. Scalar multiply-add expressions retain the CUDA source evaluation and compiler contraction; they do not imply the reference's tokenwise summation."
+      - step: segments
+        name: Propagate segments, compose their inputs and replay outputs
+        math: |
+          For each (n,h,vt), work on value columns vt*VTT..(vt+1)*VTT-1.
+          For s=0..G-1, lo_s=floor(c_n*s/G), hi_s=floor(c_n*(s+1)/G),
+          d_s=hi_s-lo_s. In MODE=1 set nseg=d_s and seed R(0) from
+          initial_state[n,h,:,:]^T on s=0, and zero on all other segments.
+          Set aprod(0)=1. For cl=0..d_s-1, c=lo_s+cl,
+            R(cl+1)=Advance(c,R(cl),false),
+            aprod(cl+1)=aprod(cl)*Ai_c[63].
+          Save segB[s,:,:]=R(d_s) and segA[s]=aprod(d_s) in FP32.
+          Empty segments save their seed and segA=1; no chunk is evaluated.
+          In MODE=2 set amax=segA[0], then amax=fmaxf(amax,segA[i]) for
+          i=1..G-1; weak=(amax>0.001). If weak, only s=0 continues,
+          seeded from initial_state, with lo=0 and nseg=c_n. Other segments exit.
+          Otherwise lo=lo_s, nseg=d_s; s=0 again uses initial_state.
+          For each continuing nonweak s>0, initialize R(0)=0 and coef=1 in FP32. In descending
+          i=s-1..1, set R(0)=R(0)+coef*segB[i], then coef=coef*segA[i].
+          Finally set R(0)=R(0)+coef*segB[0]. This composition uses scalar
+          decays; it does not include the state-dependent delta transfer matrix.
+          Every continuing segment evaluates R(cl+1)=Advance(lo+cl,R(cl),true)
+          for cl=0..nseg-1. If requested, FinalState[n,h,vt*VTT+j,d]=R(nseg)[d,j]
+          from s=G-1 when not weak, or s=0 when weak; otherwise FinalState=None.
+          Initial-state inputs are readonly in both passes.
+        symbol:
+          segB: {meaning: Saved first-pass segment end states for one value tile, shape: [segment: G, key: KeyDim, value: VTT], dtype: fp32, retention: "keep_value (n,h,vt)"}
+          segA: {meaning: Saved scalar segment decays replicated per value tile, shape: [segment: G], dtype: fp32, retention: "keep_value (n,h,vt)"}
+          aprod: {meaning: First-pass decay product, shape: [], dtype: fp32, retention: "carry_forward (n,h,s,vt); cl=0..d_s"}
+        arithmetic:
+          approx: "Scalar-decay composition approximates the full segment transfer for later segments; unknown: no supplied bound over the Contract domain. The threshold is an implementation choice, not an output-error guarantee."
+          accumulate: "aprod, coef and segment-input accumulation use the explicit FP32 loop orders above and source multiply-add contraction; no BF16 narrowing occurs when saving or composing segB."
+    ledger:
+      baseline: Direct Contract token recurrence with one FP32 state and no saved chunk coefficients or Q/K images.
+      depth:
+        - {item: State propagation, change: "Length[n] -> at most 2*ceil_div(c_n,G) chunk transitions plus O(G) composition per request/head/value tile when not weak; weak replay has ceil_div(c_n,G)+c_n transitions", by: [coefficients, inverse, chain, segments]}
+      pass:
+        - {item: State traversal, change: "1 -> 2 visits to every chunk: propagation without readout, then replay with output; weak decay changes replay ownership, not the visit count", by: [chain, segments]}
+      footprint:
+        - {item: Saved handoffs, change: "0 -> C*HV*11264+C*H*32768 bytes of chunk data plus N*HV*(ValueDim/VTT)*G*(4*KeyDim*VTT+4) bytes of segment data; allocator upper bounds and padding are separate", by: [coefficients, inverse, segments]}
+      matmul:
+        - {item: Block contractions, change: "0 -> (5*B*KeyDim+3*10*16*16)*ValueDim MACs over both passes per full chunk/head, plus Gram/query-key and inverse preprocessing; VTT=64,L=1 replaces triangular/state-update products with the stated scalar and rank-1 work", by: [coefficients, inverse, chain, segments]}
+      vector:
+        - {item: Token contractions, change: "3*Length[n]*KeyDim*ValueDim tokenwise MACs -> chunk matrix contractions, two passes of scalar gating/state scaling, 8x8 substitution and O(G^2*KeyDim*ValueDim) segment composition when not weak; padded rows execute", by: [inverse, chain, segments]}
+      error:
+        - {item: Numerical path, change: "Added BF16 normalization, Gram/system/inverse/intermediate/state-operand rounding, approximate exponentials, regrouped products and scalar segment composition; no supplied combined output-error bound", by: [prepare, coefficients, inverse, chain, segments]}
+  work_schedule:
+    thesis: >-
+      Independent chunk/head preparation feeds two segment grids. Each CTA owns
+      one request, value head, segment and VTT value channels. First-pass states
+      cross global memory; replay CTAs compose their own prefix and rerun locally.
+      Extra CTAs and shorter recurrences cost a second traversal and composition.
+      Internal workspace and optional normalized Q/K buffers are grow-only static
+      allocations reused across calls; same-stream order covers that reuse, but
+      the source has no cross-stream event, lock or reentrancy protocol.
+    flow:
+      launch:
+        - {phase: [normalize]}
+        - {phase: [prep], start_after: normalize.kernel_done}
+        - {phase: [propagate], protocol: pdl, start_after: prep.launch_ready}
+        - {phase: [replay], protocol: pdl, start_after: propagate.launch_ready}
+      handoff:
+        Qb: {producer: normalize, consumer: [prep], storage: global, ready: normalize.kernel_done}
+        Kb: {producer: normalize, consumer: [prep], storage: global, ready: normalize.kernel_done}
+        Ti: {producer: prep, consumer: [propagate, replay], storage: global, ready: prep.kernel_done, wait_at: [propagate.input_ready, replay.input_ready]}
+        Qd: {producer: prep, consumer: [replay], storage: global, ready: prep.kernel_done, wait_at: replay.input_ready}
+        b: {producer: prep, consumer: [propagate, replay], storage: global, ready: prep.kernel_done, wait_at: [propagate.input_ready, replay.input_ready]}
+        bc: {producer: prep, consumer: [propagate, replay], storage: global, ready: prep.kernel_done, wait_at: [propagate.input_ready, replay.input_ready]}
+        Ai: {producer: prep, consumer: [propagate, replay], storage: global, ready: prep.kernel_done, wait_at: [propagate.input_ready, replay.input_ready]}
+        Dl: {producer: prep, consumer: [propagate, replay], storage: global, ready: prep.kernel_done, wait_at: [propagate.input_ready, replay.input_ready]}
+        Qc: {producer: prep, consumer: [replay], storage: global, ready: prep.kernel_done, wait_at: replay.input_ready}
+        Kc: {producer: prep, consumer: [propagate, replay], storage: global, ready: prep.kernel_done, wait_at: [propagate.input_ready, replay.input_ready]}
+        Perm: {producer: prep, consumer: [propagate, replay], storage: global, ready: prep.kernel_done, wait_at: [propagate.input_ready, replay.input_ready]}
+        segB: {producer: propagate, consumer: [replay], storage: global, ready: propagate.kernel_done, wait_at: replay.input_ready}
+        segA: {producer: propagate, consumer: [replay], storage: global, ready: propagate.kernel_done, wait_at: replay.input_ready}
+    phase:
+      normalize:
+        describe: Optional normalization of Q/K; this launch and its handoffs/start dependency are absent when the flag is false, and Qb/Kb then refer to inputs.
+        decomposition:
+          strategy: |
+            Flatten the q rows followed by the k rows into 2*T*H rows.
+            For worktile r with interval [8*r,min(8*r+8,2*T*H)), let nq and nk
+            be its intersection sizes with [0,T*H) and [T*H,2*T*H).
+          partition:
+            row: {size: "2*T*H", tile: 8}
+          worktile:
+            invariant:
+              q: {shape: [row: nq, key: KeyDim], dtype: "ref:contract.algorithm_requirement::q.dtype"}
+              k: {shape: [row: nk, key: KeyDim], dtype: "ref:contract.algorithm_requirement::k.dtype"}
+          target:
+            single_tile:
+              Qb: {shape: [row: nq, key: KeyDim], dtype: "ref:design.math_reshape::Qb.dtype"}
+              Kb: {shape: [row: nk, key: KeyDim], dtype: "ref:design.math_reshape::Kb.dtype"}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: "ceil_div(2*T*H,8)"}
+        schedule:
+          strategy: The source's grid cap of 1048576 blocks never binds in the Contract domain; the row-stride loop has at most one active row per warp.
+          worktile_order: [{by: row, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      prep:
+        describe: Build all chunk coefficients and the shared Q/K image; also construct the optional request permutation.
+        decomposition:
+          strategy: |
+            SU=ceil_div(T,64)+N is the launch/allocation slot upper bound;
+            actual C=chunk_offsets[N]. Slots >= C do metadata setup then exit.
+            Shared=(SU*H>=SM). HeadsPerPrep=HV/H when Shared, otherwise 1.
+            A valid worktile loads one Q/K head and computes Gm/F once, then
+            processes HeadsPerPrep value heads. In Shared mode head groups
+            of at most two traverse the system/inverse levels together;
+            otherwise one value head is processed. Chunk identity comes from
+            chunk_indices[slot], not inferred from the slot bound.
+            Only Shared CTAs or the first value-head CTA of each Q/K group
+            writes the Qc/Kc image.
+            Their target token extent SaveRows is B for that owner and 0 otherwise.
+            Perm is present when N>=8 or (N>=2 and ChainBlocks>SM).
+            It is the stable descending-c_n order, produced by worktile (slot=0,
+            first head) alone; its target extent OrderRows is N there and 0 elsewhere.
+            Without Perm, request traversal uses the original request order.
+          partition:
+            slot: {size: SU, tile: 1}
+            value_head: {size: HV, tile: HeadsPerPrep}
+          worktile:
+            invariant:
+              Qb: {shape: [token: B, key: KeyDim], dtype: "ref:design.math_reshape::Qb.dtype"}
+              Kb: {shape: [token: B, key: KeyDim], dtype: "ref:design.math_reshape::Kb.dtype"}
+              g: {shape: [token: B, value_head: HeadsPerPrep], dtype: "ref:contract.algorithm_requirement::g.dtype"}
+              beta: {shape: [token: B, value_head: HeadsPerPrep], dtype: "ref:contract.algorithm_requirement::beta.dtype"}
+          target:
+            single_tile:
+              Ti: {shape: [value_head: HeadsPerPrep, row: B, column: B], dtype: "ref:design.math_reshape::Ti.dtype"}
+              Qd: {shape: [value_head: HeadsPerPrep, row: B, column: B], dtype: "ref:design.math_reshape::Qd.dtype"}
+              b: {shape: [value_head: HeadsPerPrep, token: B], dtype: "ref:design.math_reshape::b.dtype"}
+              bc: {shape: [value_head: HeadsPerPrep, token: B], dtype: "ref:design.math_reshape::bc.dtype"}
+              Ai: {shape: [value_head: HeadsPerPrep, token: B], dtype: "ref:design.math_reshape::Ai.dtype"}
+              Dl: {shape: [value_head: HeadsPerPrep, token: B], dtype: "ref:design.math_reshape::Dl.dtype"}
+              Qc: {shape: [token: SaveRows, key: KeyDim], dtype: "ref:design.math_reshape::Qc.dtype"}
+              Kc: {shape: [token: SaveRows, key: KeyDim], dtype: "ref:design.math_reshape::Kc.dtype"}
+              Perm: {shape: [request: OrderRows], dtype: "ref:design.math_reshape::Perm.dtype"}
+        mapping:
+          strategy: Grid x is slot; grid y is the Q/K group or independent value head. All computations within a valid worktile remain in its single CTA.
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: "SU*HV/HeadsPerPrep"
+        schedule:
+          worktile_order: [{by: value_head, direction: ascending}, {by: slot, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      propagate:
+        describe: MODE=1 advances independent segments and saves FP32 segB/segA without readout or external output stores.
+        decomposition:
+          strategy: |
+            Use SM,A,B16,B64 from this node's when. Set Gc=0 unless
+            2*B16<=SM and A>=32; then choose the largest integer in
+            2..min(8,floor(SM/B16)) with floor(A/Gc)>=16.
+            Set Gw=0 unless A>=192; otherwise choose the largest integer in
+            2..min(8,floor(SM/B64)) with floor(A/Gw)>=32, or zero if none.
+            Wide=(Gw>=2 and (Gc<2 or 100*Gw>205*Gc)).
+            G=Gw,VTT=64 when Wide; otherwise G=Gc,VTT=16.
+            NSTAGE=3 for VTT=16 and 2 for VTT=64. KQTMA=false and PRE0=false.
+            ChainBlocks=(ValueDim/VTT)*HV*N. SegBytes=
+            ChainBlocks*G*(4*KeyDim*VTT+4)+256; total workspace allocation
+            Need=SU*HV*11264+SU*H*32768+512+SegBytes.
+            For request-order coordinate z, n=Perm[z] when present, otherwise z.
+            The optional Perm handoff/invariant is absent without a permutation.
+            Each worktile (z,h,s,vt) visits cl=0..nseg-1 with nseg=d_s,
+            lo=lo_s and c=lo+cl from segments. Empty segments still save their
+            seed and unit decay. initial_state is read only for s=0.
+            Every segment uses all key channels and its VTT value slice;
+            chunk coefficients/images are reused across ValueDim/VTT value tiles.
+          partition: &segment_partition
+            request_order: {size: N, tile: 1}
+            segment: {size: G, tile: 1}
+            value_head: {size: HV, tile: 1}
+            value: {size: ValueDim, tile: VTT}
+          worktile:
+            invariant:
+              initial_state: {shape: [value: VTT, key: KeyDim], dtype: "ref:contract.algorithm_requirement::initial_state.dtype"}
+              Perm: {shape: [request: N], dtype: "ref:design.math_reshape::Perm.dtype"}
+            iteration:
+              Kc: &k_block {shape: [token: B, key: KeyDim], dtype: "ref:design.math_reshape::Kc.dtype", direction: ascending}
+              Vc: &v_block {shape: [token: B, value: VTT], dtype: "ref:design.math_reshape::Vc.dtype", direction: ascending}
+              Ti: &ti_block {shape: [row: B, column: B], dtype: "ref:design.math_reshape::Ti.dtype", direction: ascending}
+              b: &b_block {shape: [token: B], dtype: "ref:design.math_reshape::b.dtype", direction: ascending}
+              bc: &bc_block {shape: [token: B], dtype: "ref:design.math_reshape::bc.dtype", direction: ascending}
+              Ai: &ai_block {shape: [token: B], dtype: "ref:design.math_reshape::Ai.dtype", direction: ascending}
+              Dl: &dl_block {shape: [token: B], dtype: "ref:design.math_reshape::Dl.dtype", direction: ascending}
+          target:
+            single_tile:
+              segB: {shape: [key: KeyDim, value: VTT], dtype: "ref:design.math_reshape::segB.dtype"}
+              segA: {shape: [], dtype: "ref:design.math_reshape::segA.dtype"}
+        mapping: &segment_mapping
+          strategy: Grid (ValueDim/VTT,HV,N*G) maps x to vt, y to h, z to request_order*G+s. Each launch creates fresh CTA-local resources.
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: "ChainBlocks*G"
+        schedule: &segment_schedule
+          worktile_order: [{by: request_order, direction: ascending}, {by: segment, direction: ascending}, {by: value_head, direction: ascending}, {by: value, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      replay:
+        describe: MODE=2 checks segment decay, composes each continuing segment input and reruns the chunk chain with all external writes.
+        decomposition:
+          strategy: |
+            Reuse G,VTT,NSTAGE,ChainBlocks and request mapping from propagate.
+            Each worktile first scans all G segA entries for its (n,h,vt).
+            If weak, s>0 exits before any chunk load or state composition;
+            s=0 visits the full request. Otherwise s>0 reads segB entries
+            s-1..0 and the intervening segA values in the segments-step order.
+            This prefix merge is local to the replay CTA, before its ascending
+            chunk loop; no separate merge kernel or cross-CTA atomics exist.
+            Set lo,nseg according to segments; continuing work writes the
+            token interval [B*lo,min(Length[n],B*(lo+nseg))). Let OutRows be
+            its length, or zero for exited work. Let FinalRows=VTT only for
+            the designated final-state owner when requested, otherwise zero.
+            CoreWritten has the same token extent as Out when supplied.
+          partition: *segment_partition
+          worktile:
+            invariant:
+              initial_state: {shape: [value: VTT, key: KeyDim], dtype: "ref:contract.algorithm_requirement::initial_state.dtype"}
+              Perm: {shape: [request: N], dtype: "ref:design.math_reshape::Perm.dtype"}
+              segA: {shape: [segment: G], dtype: "ref:design.math_reshape::segA.dtype"}
+            iteration:
+              segB: {shape: [key: KeyDim, value: VTT], dtype: "ref:design.math_reshape::segB.dtype", direction: descending}
+              Qc: {shape: [token: B, key: KeyDim], dtype: "ref:design.math_reshape::Qc.dtype", direction: ascending}
+              Kc: *k_block
+              Vc: *v_block
+              Ti: *ti_block
+              Qd: {shape: [row: B, column: B], dtype: "ref:design.math_reshape::Qd.dtype", direction: ascending}
+              b: *b_block
+              bc: *bc_block
+              Ai: *ai_block
+              Dl: *dl_block
+          target:
+            single_tile:
+              Out: {shape: [token: OutRows, value: VTT], dtype: "ref:contract.algorithm_requirement::Out.dtype"}
+              CoreWritten: {shape: [token: OutRows, value: VTT], dtype: "ref:contract.algorithm_requirement::CoreWritten.dtype"}
+              FinalState: {shape: [value: FinalRows, key: KeyDim], dtype: "ref:contract.algorithm_requirement::FinalState.dtype"}
+            tile_reduction:
+              dimension: segment
+              input: ["ref:design.math_reshape::segB", "ref:design.math_reshape::segA"]
+              output: "ref:design.math_reshape::R"
+              method: "ref:design.math_reshape::segments"
+        mapping: *segment_mapping
+        schedule: *segment_schedule
+  tile_pipeline:
+    thesis: >-
+      Preparation overlaps decay scans with Q/K arrival and keeps Q/K/F alive
+      through the head loop. The two passes each overlap NSTAGE-1 future chunk loads
+      with a dependent state update; each stage is acquired before use and
+      normally reclaimed at the next loop-top CTA join. Output staging reuses
+      the dead rhs plane, and final-state staging reuses stage 0 with the
+      source's exceptional mini-chunk retirement gap preserved.
+    phase:
+      normalize:
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:8]"
+              verb:
+                produce: Each warp loads one active combined Q/K row into registers, performs the prepare-step normalization, and stores its BF16 row. Out-of-range warps perform no load/store. No shared buffer or inter-warp reduction is used.
+            pipe: {steady: ["produce:Qb_Kb"]}
+      prep:
+        domain:
+          r: [0, "ceil_div(HeadsPerPrep,GroupWidth)"]
+        resource:
+          KQImage:
+            space: SMEM
+            member_slot_shape: [element: 16384]
+            dtype: bf16
+            slot_count: 1
+            view:
+              Kc: {part: {element: [0, 8192]}}
+              Qc: {part: {element: [8192, 16384]}}
+          Gm: {space: SMEM, member_slot_shape: [row: B, column: 72], dtype: bf16, slot_count: 1}
+          F: {space: register, member_slot_shape: [element: 2560], dtype: fp32, slot_count: 1}
+          Systems:
+            space: SMEM
+            member_slot_shape: [head: GroupWidth, row: B, column: 72]
+            dtype: bf16
+            slot_count: 1
+            view: {Sys: {}}
+          Inverses:
+            space: SMEM
+            member_slot_shape: [head: GroupWidth, row: B, column: 72]
+            dtype: bf16
+            slot_count: 1
+            view: {Ti: {}}
+          Decays:
+            space: SMEM
+            member_slot_shape: [element: "3*HeadsPerPrep*B"]
+            dtype: fp32
+            slot_count: 1
+            view:
+              b: {part: {element: [0, "HeadsPerPrep*B"]}}
+              bc: {part: {element: ["HeadsPerPrep*B", "2*HeadsPerPrep*B"]}}
+              rho: {part: {element: ["2*HeadsPerPrep*B", "3*HeadsPerPrep*B"]}}
+          MergeScratch:
+            space: SMEM
+            member_slot_shape: [head: GroupWidth, element: 1280]
+            dtype: fp32
+            slot_count: 1
+            view: {Y: {part: {element: [0, 640]}, dtype: bf16}}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:8]"
+              verb:
+                enter: |
+                  In parallel load co[N], cu[0:N+1] and ci[min(slot,ci_rows-1)]
+                  into shared metadata; initialize the Q/K transaction barrier
+                  and publish both at one CTA join. Inactive slots trigger
+                  launch_dependents and return; all subsequent payload actions
+                  are no-ops for them. Only the first active CTA's lane 0
+                  constructs Perm, when present. GroupWidth=2 in Shared mode,
+                  otherwise 1; its two scratch sets are reused across r.
+                stage_inputs: |
+                  One lane issues four Q/K TMA boxes. Threads 0..63 issue
+                  predicated g/beta copies for all HeadsPerPrep heads, committing
+                  one group per head. Warps 0..1 wait for their own copy groups
+                  and join warps 4..5 at a 128-thread subset barrier. Warps 4..5
+                  can then compute b/rho without waiting for Q/K; the other
+                  warps acquire the Q/K transaction. The scan halves use
+                  64-thread joins for the cross-half correction. For ratio 8
+                  the local scans, corrections and rho writes are separate
+                  passes across heads; ratios 1/2/3 finish one head at a time.
+                  A CTA join completes this action before Gram work starts.
+                signal: Issue the active CTA's launch_dependents trigger after the input join. The grid launch_ready event permits propagate dispatch, but none of the coefficient payload is declared ready yet.
+                gram: |
+                  Six warps cover the lower 16x16 tile set. For Shared ratios
+                  2/3, compute Gm and F in one reduction loop sharing K operand
+                  loads; ratio 8 and independent-head preparation run Gram then
+                  query-key loops. Gm is shared BF16, F stays FP32 in registers
+                  until every head in this worktile has published Qd. Entirely
+                  upper tiles are skipped; system construction still loads some
+                  unwritten upper Gm entries but its conditional never selects them.
+                save_image:
+                  execution_mode: async
+                  meaning: The designated image owner issues one committed shared-to-global bulk copy. Done denotes global completion; KQImage remains unchanged through the complete inverse/head loop and the drain action. Nonowners perform no transfer.
+                skeleton: Initialize inverse diagonal/upper triangle and system/inverse pad columns once for all GroupWidth scratch sets, then join the CTA. Every later group overwrites all strict-lower entries; the skeleton is not reset per group.
+                system: Build Sys for the next one or two heads using shared Gm and the precomputed per-head decay data, then join the CTA. Scratch from the prior group is reusable only after its publish join.
+                readout_coeff:
+                  execution_mode: async
+                  meaning: Issue Qd stores directly to global packed tiles from F and b/rho. These stores may remain in flight during the independent column solves; global completion is required at prep.kernel_done, not before solve8.
+                solve8: Independent columns perform the FP32 substitution in registers, narrow/store valid entries of Ti, then join the CTA.
+                merge16: Perform the four width-16 merges per head, keeping the rounded Z intermediate in registers, store Ti and join the CTA.
+                merge32: Perform the two width-32 merges per head using a register Z intermediate, store Ti and join the CTA.
+                merge64_y: Form the final merge's Y in MergeScratch, then join the CTA to publish it to all merge consumers.
+                merge64_x: Read Y and the diagonal Ti blocks, store the lower-left Ti block and join the CTA.
+                publish_group: Copy the packed Ti tiles and b/bc/Ai/Dl to global slots. If another head group follows, a CTA join retires these shared-memory reads before Systems/Inverses/MergeScratch can be reused; the final group omits that extra join.
+                drain_image: The issuer waits for the committed image bulk group to finish globally before kernel exit. This does not add a per-head image wait; KQImage has never been overlaid.
+            pipe:
+              prologue: ["enter:Metadata", "stage_inputs:KQ_Decays", "signal:Launch", "gram:Gm_F", "save_image:KQImage", "skeleton:Ti"]
+              steady:
+                - repeat: r
+                  steady: ["system:Sys(r)", "readout_coeff:Qd(r)", "solve8:Ti(r)", "merge16:Ti(r)", "merge32:Ti(r)", "merge64_y:Y(r)", "merge64_x:Ti(r)", "publish_group:Coefficients(r)"]
+              epilogue: ["drain_image:KQImage"]
+            waits_for:
+              data:
+                "drain_image:KQImage@done": ["save_image:KQImage@done"]
+      propagate:
+        domain: &segment_domain
+          cl: [0, nseg]
+        milestone: &segment_milestone
+          input_ready: ["Main/join_input:Prepared@done"]
+        resource:
+          R: {space: register, member_slot_shape: [key: KeyDim, value: VTT], dtype: fp32, slot_count: 1}
+          Projections:
+            space: register
+            member_slot_shape: [matrix: ProjectionCount, partial: Partials, token: B, value: VTT]
+            dtype: fp32
+            slot_count: 1
+            view: {KS_QS: {}}
+          Rh: {space: SMEM, member_slot_shape: [key: KeyDim, value: Pitch], dtype: bf16, slot_count: 1}
+          Uh: {space: SMEM, member_slot_shape: [token: B, value: Pitch], dtype: bf16, slot_count: 1}
+          DU: {space: SMEM, member_slot_shape: [token: B, value: Pitch], dtype: bf16, slot_count: 1}
+          RhsOutput:
+            space: SMEM
+            member_slot_shape: [token: B, value: Pitch]
+            dtype: bf16
+            slot_count: 1
+            view: {Hrhs: {}, Out: {}, DU0: {part: {token: [0, 1]}}}
+          Stages:
+            space: SMEM
+            member_slot_shape: [element: StageBytes]
+            dtype: uint8
+            slot_count: NSTAGE
+            view:
+              "Kc(cl)": {slot_index: "cl%NSTAGE", part: {element: [0, 16384]}, dtype: bf16}
+              "Qc(cl)": {slot_index: "cl%NSTAGE", part: {element: [16384, 32768]}, dtype: bf16}
+              "Vc(cl)": {slot_index: "cl%NSTAGE", part: {element: [32768, "32768+128*VTT"]}, dtype: bf16}
+              "Ti(cl)": {slot_index: "cl%NSTAGE", part: {element: ["32768+128*VTT", "37888+128*VTT"]}, dtype: bf16}
+              "Qd(cl)": {slot_index: "cl%NSTAGE", part: {element: ["37888+128*VTT", "43008+128*VTT"]}, dtype: bf16}
+              "b(cl)": {slot_index: "cl%NSTAGE", part: {element: ["43008+128*VTT", "43264+128*VTT"]}, dtype: fp32}
+              "bc(cl)": {slot_index: "cl%NSTAGE", part: {element: ["43264+128*VTT", "43520+128*VTT"]}, dtype: fp32}
+              "Ai(cl)": {slot_index: "cl%NSTAGE", part: {element: ["43520+128*VTT", "43776+128*VTT"]}, dtype: fp32}
+              "Dl(cl)": {slot_index: "cl%NSTAGE", part: {element: ["43776+128*VTT", "44032+128*VTT"]}, dtype: fp32}
+              FinalState: {slot_index: 0, part: {element: [0, "4*128*(VTT+1)"]}, dtype: fp32}
+          aprod: {space: register, member_slot_shape: [], dtype: fp32, slot_count: 1}
+        role: &segment_role
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:8]"
+              verb:
+                setup: |
+                  MODE is 1 in propagate and 2 in replay. Pitch=40 for VTT=16
+                  and 72 for VTT=64; Partials=2 and 1 respectively.
+                  ProjectionCount=1 in MODE=1 and 2 in MODE=2.
+                  StageBytes=44032+128*VTT in both passes; MODE=1 keeps the
+                  Qc/Qd holes in this layout but neither fills nor reads them.
+                  Uh and final-state views likewise have no MODE=1 payload.
+                  Initialize NSTAGE transaction barriers, release initialization
+                  and join the CTA. Trigger launch_dependents at entry:
+                  propagate can permit replay dispatch here, before publishing
+                  any segment data; replay has no in-call successor.
+                  Instruction order is per warp; only stated joins synchronize
+                  warps. Each phase has new resources even with identical mapping.
+                early_inputs: |
+                  Without Perm, s=0 loads initial_state into R before the wait;
+                  MODE=1 other segments zero R here. MODE=2 other segments
+                  leave R for post-wait composition. MODE=1 initializes aprod=1.
+                  With Perm, speculatively read cu, co and old Perm[z] only for
+                  cache warming and discard every warmed value. No chunk load
+                  is issued before the wait because PRE0 is disabled.
+                join_input: |
+                  Wait for the previous grid with the PDL dependency wait:
+                  prep for MODE=1, propagate for MODE=2. Replay thereby also
+                  waits transitively for prep. On the Perm path this precedes
+                  the real Perm lookup and request-dependent reads; otherwise
+                  it follows the input-only state work. Prepared coefficients,
+                  images and segment transfers are consumed only after this wait.
+                choose_segment: |
+                  Resolve n, lo and nseg. MODE=2 scans segA and applies the
+                  segments-step weak predicate before priming: s>0 exits if
+                  weak, while s=0 widens to the full request. For exited work
+                  the modeled cl domain is empty and all following actions are
+                  no-ops; it issues no chunk transfers or external stores.
+                prime: |
+                  One issuer primes cl=0..min(NSTAGE-2,nseg-1).
+                  MODE=1 arms each stage for 22528+128*VTT bytes and issues
+                  three bulk copies: Kc (16384), Ti (5120), b/bc/Ai/Dl (1024),
+                  plus one V TMA box (128*VTT bytes).
+                  MODE=2 arms StageBytes and issues the Q/K image (32768),
+                  contiguous Ti/Qd/vectors (11264), and the same V box.
+                  Done means issue completion, not arrival; transfers overlap
+                  state seeding/composition and later computation. Empty segments
+                  issue no load and require no transaction acquire.
+                seed: |
+                  MODE=1 on the Perm path loads initial_state for s=0 and
+                  zeroes R otherwise. MODE=2 loads the s=0 seed here only
+                  with Perm; s>0 composes R in registers from segB/segA using
+                  the segments-step descending loop, after the first chunk
+                  loads have issued. Store Rh and join the CTA, including
+                  empty segments. Each warp owns 16 key channels of R across
+                  all VTT columns for the complete local chain.
+                advance: |
+                  Acquire stage cl%NSTAGE with parity floor(cl/NSTAGE)%2,
+                  then join the CTA. This publishes the current input bytes
+                  and prior Rh rebuild and retires prior stage/RhsOutput reads.
+                  Only then issue cl+NSTAGE-1, if it exists, into its cyclic
+                  slot using prime's pass-specific byte expectation and copies.
+                  No cp.async wait-group is used by either chain pass.
+                project: |
+                  Read Kc/Rh and accumulate KS, and only in MODE=2 Qc/Rh
+                  for QS. Warps partition the 64-by-VTT result as 4-by-2.
+                  At VTT=16 parity accumulators remain separate until rhs
+                  consumes KS and finish_chunk consumes QS. QS stays live
+                  through the solve; transferred b is unused in both passes.
+                rhs: |
+                  On the full path form Hrhs in RhsOutput, preload Ti fragments,
+                  then join the CTA. At VTT=64,L=1, row-0 owners form U0 and
+                  place DU0 in RhsOutput row 0; MODE=2 also directly stores
+                  row-0 Out/core. A CTA join publishes DU0. solve is a no-op
+                  on this mini branch; finish_chunk does its rank-1 update.
+                solve: |
+                  Compute U, store DU and, only in MODE=2, Uh. Preload
+                  transposed Kc and, only in MODE=2, Qd fragments, then join
+                  the CTA. This publishes operands and retires Hrhs reads
+                  before MODE=2 output staging can overwrite RhsOutput.
+                finish_chunk: |
+                  Each warp follows its instruction sequence without a CTA join
+                  between readout, state update, output sweep and final staging.
+                  On the full path MODE=2 stages valid Out rows in RhsOutput.
+                  Both modes update R using preloaded Kc and DU and rebuild Rh;
+                  MODE=1 also updates aprod. MODE=2 then joins its own warp and
+                  sweeps only that warp's Out bytes to Out and optional core.
+                  On the mini branch, read row-0 Kc after the DU0 join, perform
+                  the rank-1 state update, update aprod only in MODE=1 and
+                  rebuild Rh; there is no full-path readout/sweep.
+                  Nonfinal chunks have no trailing CTA join; the next advance
+                  retires their reads. On the last chunk, only the MODE=2
+                  final-state owner, when requested, immediately writes R to
+                  stage 0 in FP32 at pitch VTT+1, then joins the CTA to publish.
+                  Full-path overlapping K/Q/V reads were retired by prior joins
+                  and preloads. For a final mini chunk with
+                  (nseg-1)%NSTAGE=0, these writes can race other warps' row-0
+                  Kc reads: the source has no read-retirement guarantee.
+                  This action grouping adds no such guarantee. Out stores may
+                  remain in flight; there is no separate store-drain wait.
+                publish_segment: |
+                  MODE=1 writes its R directly from registers to the disjoint
+                  global segB slice with float2 stores; thread 0 stores aprod
+                  to segA. Empty segments publish their initialized values.
+                  No stage-0 overlay or extra CTA join is used. These stores
+                  become replay inputs at propagate.kernel_done, not at the
+                  earlier launch trigger. MODE=2 performs no segment store.
+                final_store: |
+                  Only the MODE=2 designated owner, when requested, transposes
+                  its staged state to [value,key]. Per thread prefetch one
+                  float4; each of VTT/8 rounds loads the next float4 before
+                  storing the current one. The last round has no next load;
+                  its subsequent current assignment is unused.
+                  No worktile follows and no speculative chunk remains.
+                  Shared/global retirement follows kernel completion without
+                  an extra store-drain operation.
+            pipe:
+              prologue: ["setup:Resources", "early_inputs:Inputs", "join_input:Prepared", "choose_segment:Range", "prime:Stages", "seed:R"]
+              steady:
+                - repeat: cl
+                  steady: ["advance:Stage(cl)", "project:KS_QS(cl)", "rhs:Hrhs(cl)", "solve:U(cl)", "finish_chunk:Out_R(cl)"]
+              epilogue: ["publish_segment:segB_segA", "final_store:FinalState"]
+      replay:
+        domain: *segment_domain
+        milestone: *segment_milestone
+        resource:
+          R: {space: register, member_slot_shape: [key: KeyDim, value: VTT], dtype: fp32, slot_count: 1}
+          Projections:
+            space: register
+            member_slot_shape: [matrix: ProjectionCount, partial: Partials, token: B, value: VTT]
+            dtype: fp32
+            slot_count: 1
+            view: {KS_QS: {}}
+          Rh: {space: SMEM, member_slot_shape: [key: KeyDim, value: Pitch], dtype: bf16, slot_count: 1}
+          Uh: {space: SMEM, member_slot_shape: [token: B, value: Pitch], dtype: bf16, slot_count: 1}
+          DU: {space: SMEM, member_slot_shape: [token: B, value: Pitch], dtype: bf16, slot_count: 1}
+          RhsOutput:
+            space: SMEM
+            member_slot_shape: [token: B, value: Pitch]
+            dtype: bf16
+            slot_count: 1
+            view: {Hrhs: {}, Out: {}, DU0: {part: {token: [0, 1]}}}
+          Stages:
+            space: SMEM
+            member_slot_shape: [element: StageBytes]
+            dtype: uint8
+            slot_count: NSTAGE
+            view:
+              "Kc(cl)": {slot_index: "cl%NSTAGE", part: {element: [0, 16384]}, dtype: bf16}
+              "Qc(cl)": {slot_index: "cl%NSTAGE", part: {element: [16384, 32768]}, dtype: bf16}
+              "Vc(cl)": {slot_index: "cl%NSTAGE", part: {element: [32768, "32768+128*VTT"]}, dtype: bf16}
+              "Ti(cl)": {slot_index: "cl%NSTAGE", part: {element: ["32768+128*VTT", "37888+128*VTT"]}, dtype: bf16}
+              "Qd(cl)": {slot_index: "cl%NSTAGE", part: {element: ["37888+128*VTT", "43008+128*VTT"]}, dtype: bf16}
+              "b(cl)": {slot_index: "cl%NSTAGE", part: {element: ["43008+128*VTT", "43264+128*VTT"]}, dtype: fp32}
+              "bc(cl)": {slot_index: "cl%NSTAGE", part: {element: ["43264+128*VTT", "43520+128*VTT"]}, dtype: fp32}
+              "Ai(cl)": {slot_index: "cl%NSTAGE", part: {element: ["43520+128*VTT", "43776+128*VTT"]}, dtype: fp32}
+              "Dl(cl)": {slot_index: "cl%NSTAGE", part: {element: ["43776+128*VTT", "44032+128*VTT"]}, dtype: fp32}
+              FinalState: {slot_index: 0, part: {element: [0, "4*128*(VTT+1)"]}, dtype: fp32}
+        role: *segment_role
+realization:
+  require:
+    - item: ["design.tile_pipeline::prep.KQImage", "design.tile_pipeline::propagate.Stages", "design.tile_pipeline::replay.Stages"]
+      choice: Match the four 8192-byte SWIZZLE_128B Q/K subimages and keep prep-image and chain-stage bases congruent modulo 1024. Decode V's 128-byte swizzle at VTT=64 using the actual destination phase; VTT=16 uses packed unswizzled V rows.
+      reason: The bulk path copies an already swizzled image, and MODE=1 consumes only its K half; mismatched phases change the logical operands despite identical transfer sizes.
+    - item: "design.work_schedule::flow"
+      choice: Bind early launch to cudaLaunchAttributeProgrammaticStreamSerialization and griddepcontrol.launch_dependents; bind prepared-data availability to griddepcontrol.wait. Bind bulk/TMA stage completion to one mbarrier byte expectation per stage generation and its parity acquire; bind prep image drain to cp.async.bulk.wait_group 0.
+      reason: These are the source mechanisms separating dispatch, payload availability and asynchronous-store completion; replacing them by launch order alone loses the declared overlap or data dependency.
+  prefer:
+    - item: ["design.math_reshape::Ti", "design.math_reshape::Qd"]
+      choice: Represent each packed 16x16 tile as two 16-by-8 half-column blocks at 16-byte row pitch, with matching ldmatrix addressing.
+      reason: This source layout preserves the ten-tile byte count while reducing the shared-bank conflicts of a plain 32-byte-row tile; it does not change the declared values or add an accuracy guarantee.

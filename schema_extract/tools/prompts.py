@@ -105,7 +105,7 @@ def build_prompt(state: dict, lock: dict, attempt: dict) -> str:
     check_command = f"python3 -B {shlex.quote(str(checker))} --skip-hardware {shlex.quote(str(Path(attempt['workspace']) / target))}"
     mode = attempt.get("mode", "normal")
     mode_instructions = """worker返回complete/continue/blocked；continue保存草稿，blocked将合法草稿和缺项交独立reviewer判断。
-reviewer返回approve/revise/blocked：正确且必要信息齐备就approve；revise只列有证据的语义问题、影响与可执行修改；关键外部事实缺失则blocked并给恢复条件。未完成草稿可退修，非关键未知可如实备注。
+reviewer返回approve/revise/blocked：忠实表达当前提取内容及来源缺口就可approve并保留issues；revise只列有证据的错误、遗漏和修改要求。blocked必须说明缺哪个事实、哪项当前计算/数值/设计关系因此无法确定、为何现有事实和明确限制不足以继续。
 普通退修沿用原角色；达到budget.revision_limit（默认5）后由原reviewer仅裁决一次。格式修复不算实质退修，所有调用与恢复继续原预算。"""
     if attempt["stage"] in REOPEN_TARGETS and mode == "normal":
         locating["reopen_targets"] = sorted(REOPEN_TARGETS[attempt["stage"]]) + ["external"]
@@ -116,7 +116,7 @@ reviewer返回approve/revise/blocked：正确且必要信息齐备就approve；r
     if mode == "adjudicate":
         mode_instructions = """本轮为原reviewer的一次裁决，只有approve或blocked两个出口；不得直接改workspace。
 adjudication的select只能选已列候选；patch基于当前checkpoint，patches为当前阶段/授权字段内的{path,old,new}，old非空且唯一匹配。
-Runner在隔离副本应用、核对版本并检查；关键事实缺失、补丁或检查失败即blocked，不再裁决或重试。证据仍指你实际读取的原workspace，补丁后摘要另存。
+Runner在隔离副本应用、核对版本并检查；关键事实缺失、补丁或检查失败即blocked，不再裁决或重试。证据仍指你实际读取的原workspace，补丁后的文件SHA-256另存。
 P6亲自patch最终稿后，由全新独立reviewer签收一次；选择已有稿不追加签收。"""
     elif mode == "signoff":
         mode_instructions = "本轮为P6裁决补丁后的全新独立reviewer签收。只允许approve或blocked，检查最终改动及全部pending_rechecks；本次不再返工、裁决或重试。"
@@ -126,13 +126,15 @@ P6亲自patch最终稿后，由全新独立reviewer签收一次；选择已有�
     return f"""你是独立的 {attempt['role']}，只执行 {attempt['stage']} / {attempt['node']} / {mode}。
 目标是把固定kernel压缩为忠实、足够简洁的流水线设计。reviewer独立对照源码与checkpoint，按当前阶段核对数学/数值、工作组织、依赖、寿命、复用及适用范围；检查器退出码不代替语义审阅。
 语义正确且必要信息齐备就直接approve，不要求找问题、增加篇幅或重复已有决定。删除细节会使读者读错或漏掉设计时才保留；不扩张schema字段义务。源码既有缺陷忠实记录，不能补造等待、fallback或外部保证。
+P1到P6均按缺口对当前阶段的实际影响判断，不要求P1提前完成Design。当前所需的计算与设计事实有依据时，外部验收器的公式/相对基准/归一化/检查路由未提供，可在tolerance写明确的来源记录并携带source_gap继续；不采用默认简写解释，不省略或改写已知判据。仅影响外部测试通过边界不构成提取阻塞。计算、精度转换、输出副作用或依赖必须靠猜测才能写清时，指出具体关系后blocked。后续审阅核对缺口未被用于设计保证，不把未补齐外部验收器再次当作停止理由。
 Runner唯一写运行状态。worker只改writable_files及当前页授权字段，reviewer只读；不开子代理，不做GPU测试。
 只读固定source_root/rules_root、当前workspace、列明的回执/已审产物/candidates及旧稿线索，不访问原工作树或旧状态。先按嵌入的当前页工作，再沿当前问题读规范与源码；可读页内引用的方法。
 先定位当前问题需要的源码范围；不因文件较长而通读。有next_cursor表示所选范围尚未读完，需要续读该范围时保留起止行并用--cursor：
 {example}
-最后按output-schema仅返回schema_extract.proposal.v1 JSON，原样回传本次attempt_id nonce；缺失或陈旧nonce硬拒绝。identity、摘要、文件清单、实际差异由Runner从已登记调用与真实字节生成，不手填、不另写回执文件。
+最后按output-schema仅返回schema_extract.proposal.v1 JSON，原样回传本次attempt_id nonce；缺失或陈旧nonce硬拒绝。summary由你填写本轮简短、非空的语义结论。identity、文件SHA-256、文件清单、实际差异由Runner从已登记调用与真实字节生成，不手填、不另写回执文件。
 证据由你亲读并选择：相对path、1起始line_start/line_end（最多12行）、quote_offset（范围原文中从0开始的字符偏移，通常0）和说明语义的note；来源另选category。用reader --evidence --end-line N [--quote-offset N]预览该范围生成的最多320字符精确引文，不会替你寻找依据。不要回传sha256/source_id/quote。
 complete/approve覆盖required_evidence、required_conclusions；每类至少选对应绑定入口，调用链可补充。conclusions/issues等的evidence从0索引本次source_evidence。reviewer的artifact_evidence覆盖required_artifact_evidence每个文件，不能用父节点批准代替本节点核对。
+P6的tree仅陈述当前产物的文件集合、父关系、链接和拓扑时，可由完整artifact_evidence和Runner全树检查支持，evidence可为[]；其他结论仍须有效源码索引，不为纯产物事实附上不相干的源码引用。
 {mode_instructions}
 有recovery_handoff时以本页、当前checkpoint和固定来源重建上下文，旧会话已确认中断并退休。imported_draft/continued_draft仅为列明的只读旧稿线索；旧state/批准不授予本次写权限或放行，证据仍指当前source_root/workspace。
 checks仅记亲自执行的命令/退出码；交Runner自动检查时填[]，checks_note说明由Runner执行。issues写范围、证据、影响和恢复条件。framework_candidates无必要建议为[]；有则给跨运行稳定的小写数字及-_短ID、规则/工具scope与最小改动，不写台账，不因可选候选扣住正确产物。
