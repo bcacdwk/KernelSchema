@@ -30,6 +30,9 @@ def _scope(state: dict, task: dict) -> dict:
 
 
 def _complete_candidate(state: dict, task: dict) -> bool:
+    from .stages import needs_authoring
+    if task["stage"] == "P5" and needs_authoring(state["nodes"][task["node"]]):
+        return False
     if "complete_candidate" in task:
         return bool(task["complete_candidate"])
     if "complete_candidate" in task.get("basis", {}):
@@ -58,11 +61,27 @@ def _initialize(state: dict) -> None:
             task["plan_reason"], task["reason"] = task["reason"], None
         task.setdefault("history", [])
         task.setdefault("complete_candidate", _complete_candidate(state, task))
-        if task.get("basis", {}).get("retired"):
+        if task.get("basis", {}).get("retired") or (task["stage"] == "P5" and
+                state["nodes"][task["node"]].get("status") == "removed"):
             task["status"] = "removed"
+            continue
+        from .stages import needs_authoring
+        if task["stage"] == "P5" and needs_authoring(state["nodes"][task["node"]]):
+            task["complete_candidate"] = False
+            if task["action"] not in {"patch", "reextract"}:
+                task.update(status="blocked", reason={"code": "maintenance_patch_scope_missing",
+                    "summary": "待provider修复/身份迁移必须先由worker改稿；当前维护计划未封存patch字段范围，需修订具体scope。"})
+                continue
+            elif task.get("status") in FINISHED:
+                if task.get("history") or task.get("attempts"):
+                    task.update(status="blocked", reason={"code": "maintenance_dependency_changed_after_review",
+                        "summary": "当前generation需要新的修复范围；已消费的维护动作不能由旧task状态重新授予。"})
+                    continue
+                task.update(status="pending", step="patch", role="worker")
         if task.get("status") in FINISHED:
             continue
-        if task["stage"] == "P6" or not task["complete_candidate"]:
+        pending_repair = task["stage"] == "P5" and needs_authoring(state["nodes"][task["node"]])
+        if task["stage"] == "P6" or (not task["complete_candidate"] and not (pending_repair and task["action"] in {"patch", "reextract"})):
             # A partial draft is still ordinary authoring. Its new requirements
             # accompany that author; a maintenance approval cannot complete it.
             task["status"] = "waiting"
@@ -351,11 +370,17 @@ def _patch_fields(task: dict, receipt: dict, state: dict) -> list[dict]:
 
 
 def _reconsider_dependents(state: dict, task: dict, validation: dict) -> None:
-    from .stages import affected_nodes
+    from .stages import affected_nodes, invalidate_final, invalidate_node
     changed = validation.get("maintenance_changed_files", [])
     if not changed and not validation.get("invalidated_nodes"):
         return
     descendants = set(affected_nodes(state, [task["node"]])) if task["stage"] == "P5" else set()
+    if changed and task["stage"] in {"P3", "P5"}:
+        invalidated = (descendants - {task["node"]} if task["stage"] == "P5" else
+                       {entry["id"] for entry in state.get("plan") or []} - {"root"})
+        for node in invalidated:
+            invalidate_node(state["nodes"][node])
+        invalidate_final(state, invalidated)
     candidates = set(validation.get("invalidated_nodes", []))
     planned = {entry["id"] for entry in state.get("plan") or []}
     for other in state["maintenance"]["tasks"].values():
@@ -410,6 +435,9 @@ def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, v
             _scope(result, task)["continues"] += 1
             task.update(status="pending", reason=None, feedback=[receipt["summary"], *receipt["issues"]])
         elif decision == "complete":
+            if identity["stage"] == "P5":
+                result["nodes"][identity["node"]]["authored_generation"] = result["nodes"][identity["node"]]["generation"]
+                task["complete_candidate"] = True
             task.update(step="verify", role="reviewer", status="pending", reason=None,
                         feedback=[receipt["summary"], *receipt["issues"]])
             if identity["stage"] == "P4":

@@ -1,6 +1,8 @@
 # Schema Extract：Supervisor 手册
 
-版本 `2.4.1`。入口 [extract.py](extract.py) 从固定 kernel 提取 schema，Runner 推进写作、独立审阅、返工与发布。本页说明操作；[提取总览](../EXTRACT_SCHEMA.md)定义 P1–P6，[工具协议](tools/README.md)说明回执与执行门禁。
+版本 `2.5.0`。入口 [extract.py](extract.py) 从固定 kernel 提取 schema，Runner 推进写作、独立审阅、返工与发布。本页说明操作；[提取总览](../EXTRACT_SCHEMA.md)定义 P1–P6，[工具协议](tools/README.md)说明回执与执行门禁。
+
+2.5.0 同步引入[Design 显式整区引用](../schema_docs/0.common.md#design-整区引用)、共用 raw/effective 解析与来源身份、有效视图/图/standalone、首稿引用与旧稿保留、换父显式迁移及普通 P5 实际 provider 修复。语言、检查、依赖和审批含义属于正式 rules revision；旧全本地 YAML 仍合法，旧 frozen run 正常恢复继续原规则，不自动获得这些能力。已有未完成 run 采用新语义须经下述 semantic revision/maintenance 和适用性审阅，不能登记为 compatible runtime 修复。旧 checkpoint、receipt、批准历史、预算和产物不自动转换或重写。
 
 ## 开始一次试用
 
@@ -141,9 +143,11 @@ python3 schema_extract/extract.py revise status RUN_UUID
 
 请求登记即拦新派发和发布；在途调用按原上下文和截止时间结算，安全排空后才把计划绑定到实际稿件与批准。无独立评估时返回 `awaiting_evaluation` 与计划路径。Supervisor 评估完整差异及问题，逐范围选择 `keep/review/patch/reextract`；旧批准的真实性与当前适用性分别核验，只有有据采纳才继续有效，依据不足先 review。计划格式与维护动作见[维护协议](tools/README.md#多任务控制与维护接续)。
 
-完整候选可直接交 Reviewer；未完成草稿保留内容并继续原作者工作。P5 优先使用自己的稿件，只刷新只读祖先；父变化产生复核候选，不覆盖孩子的完整 Design。维护后的批准仍覆盖本阶段全文，最终交付仍需当前上下文的 P6。这里的 CLI `continue` 用于修订规则/适用性；worker 回执 `decision=continue` 仅保存本步骤草稿并续写。
+完整候选可直接交 Reviewer；未完成草稿保留内容并继续原作者工作。P5 优先使用自己的 raw，只刷新只读祖先；父变化产生复核候选，不自动转换引用或用父 Design 覆盖孩子。P4 换父另记录 identity_migration，必须由 worker 在合法字段范围内显式迁移 parent/ref 或落地完整区域，再按新来源独立重审；维护缺 scope 时报告并修订范围，不自动扩权。维护后的批准仍覆盖本阶段有效全文，最终交付仍需当前上下文的 P6。这里的 CLI `continue` 用于修订规则/适用性；worker 回执 `decision=continue` 仅保存本步骤草稿并续写。
 
-采纳后仅在原运行意图仍有效且无新控制时接续后台任务；暂停任务只登记，之后由 Supervisor 显式恢复。活动维护结束或安全 paused/cancelled 且调用全部结清后，可通过 `revise request` 追加替代修订。相同目标、范围、问题证据和动作不因换请求 ID 获得新机会，原调用、时间、退修、P6 starts 和单次决定均保留。冻结执行器须支持 `semantic_revision.v1`；旧执行器先在安全边界采用已审兼容运行层。
+采纳后仅在原运行意图仍有效且无新控制时接续后台任务；暂停任务只登记，之后由 Supervisor 显式恢复。活动维护结束或安全 paused/cancelled 且调用全部结清后，可通过 `revise request` 追加替代修订。相同目标、范围、问题证据和动作不因换请求 ID 获得新机会，原调用、时间、退修、P6 starts 和单次决定均保留。
+
+冻结执行器须支持 `semantic_revision.v1`；2.4.1 已具备该能力，可按正式连续修订采用 2.5.0。更旧且缺少此能力的执行器，须先在安全边界采用经独立兼容审阅、保持原 Design 语义并具备 semantic revision 能力的中间执行器，再正式修订到 2.5.0。不能直接把包含新引用语言、依赖与审批含义的 2.5.0 登记为 compatible runtime 修复。
 
 `--full-restart` 是单独的显式选择：创建从 P1 重审的 successor，不继承批准，封存原稿和原账目并继承用量、预算追加与已用决定。同一命令可补全中断构建；返回 0 后使用返回的 successor UUID 启动。
 
@@ -151,16 +155,27 @@ python3 schema_extract/extract.py revise status RUN_UUID
 
 发布原子重命名完整已审目录及回执。目标须不存在，或仅含一个零字节普通 `.gitkeep`；其他目录（包括空目录）、文件及链接均报告冲突。同一完整结果可幂等重放；export 另行交付，不改变原输出位置。v1 兼容导入用 `import-legacy --help`：原任务与调用须确认终止，来源绑定原快照；导入稿留作证据，从 P1 重审，旧用量单列，本次使用新建预算。
 
+普通发布/export 保留原始引用树与完整计划文件集合，standalone 是另行生成的交付。普通 P5 可按当前实际来源图定点重开非 root provider，先保存请求稿，目标取得新独立批准后按父先子后恢复受影响后代；兄弟和 P1–P4 保留进度，P6 当前资格失效但计数和预算不重置。资格、证据及循环约束见[P5](phases/05_branch.md)。
+
 ## 单文件阅读视图
 
-需要把一个节点交给只拿到单份 YAML 的读者时：
+需要把一个节点交给只拿到单份 YAML 的读者时，在当前规则适用的任务上使用：
 
 ```sh
 python3 schema_extract/extract.py standalone path/to/task/branch.yaml --output path/to/views/branch
 python3 schema_template/check_yaml.py --standalone --skip-hardware path/to/views/branch/branch.yaml
 ```
 
-生成器检查创作任务，保留节点元数据、Design 和 Realization，展开当前 root 的共享 Contract；不继承 parent Design。任务外的输出目录保存原文件名 YAML 和 `.source.json` 摘要，相同输入可复用，冲突内容保留。视图保持原选择范围，不产生新的 P6 批准；发现语义问题须修订创作源并重审，再生成视图。
+standalone 仅按 `--repo` 选择规则树，省略时使用当前目录；不会从 run 或发布回执自动识别版本。为旧任务生成视图时，显式指定适用的完整 frozen 工具树，并用同一树的检查器复检：
+
+```sh
+python3 schema_extract/extract.py standalone /path/to/task/node.yaml --output /path/to/views/node --repo /path/to/frozen/rules
+python3 /path/to/frozen/rules/schema_template/check_yaml.py --standalone --skip-hardware /path/to/views/node/node.yaml
+```
+
+当前规则下，生成器先用选定 rules 的公共解析/检查入口完整检查创作任务，取得有效 Design 和 root Contract，再单独检查导出的全部本地单文件。节点自己的 metadata、when、version 和 realization 保留；id/parent 留作原身份与派生出处，移开创作目录后也可独立读取与检查。只读 `check_yaml.py --show-effective` 的未验证输出不能替代该流程。
+
+当前规则在任务外输出目录保存原文件名 YAML 和 `schema_extract.standalone.v2` 的 `.source.json`：raw source、root、全部实际中间引用与 provider 文件 SHA256、三区域 origins、effective_identity 和交付文件摘要。生成前与生成/校验后发布前复核全部来源；即使 child 字节未变，provider 或中间链漂移也拒绝发布。相同内容可复用，已有冲突内容和原始任务树保留。视图保持原选择范围，不产生新的 P6 批准；发现语义问题须修订创作源并重审，再生成视图。`--repo` 选择的旧冻结规则若没有新的公共解析 API，则将整个导出交给该规则树自带的旧 exporter，保留原验证及 `schema_extract.standalone.v1` 来源回执语义，不由当前 resolver 偷换语义；所选规则树须含对应的完整冻结工具。
 
 ## 同线程持久提醒
 
@@ -197,6 +212,6 @@ audit 退出 `0` 表示读取或可得证据检查完成，仍须看 unavailable
 
 P3/P5/P6 的完成、批准与退修由 Runner 自动执行冻结检查器，放行须 `--skip-hardware` 退出 0；1 是产物诊断，2 是工具/环境问题。P1/P2/P4 使用阶段门禁。结构通过仍须独立语义审阅。
 
-实际检查证据在 `attempts/ATTEMPT_UUID/check.json` 和 `validated.json`，P5 合入另有 `merge_check.json`。回执 `checks` 只记录模型亲自执行的命令，空列表不代表 Runner 漏检。最终 P6 与交付回执绑定同一完整文件集合。
+实际检查证据在 `attempts/ATTEMPT_UUID/check.json` 和 `validated.json`，P5 合入另有 `merge_check.json`。合入检查按[工具协议](tools/README.md#并行合入与计划修订)在受控目录取有效节点、候选及祖先闭包；维护父候选的 raw SHA 变化时，先排除后代再取闭包，即使其状态尚未失效。完整 merged raw 树保留，待迁移或重审的旧稿不计有效。回执 `checks` 只记录模型亲自执行的命令，空列表不代表 Runner 漏检。最终 P6、ready 和发布仍要求整树完整有效，交付回执绑定同一完整文件集合。
 
 维护验证方法见[离线验证](tools/README.md#离线验证)。历史结果分别保留在[试用记录](TRIAL_REPORT.md)、[算子审阅](OPERATOR_REVIEW.md)、[Reviewer 验证](review_cases/RESULTS.md)、[问题与决定](issues/TRIAGE.md)及[已完成连续修订设计](IMPROVEMENT_PLAN.md)，不作为当前 run 已通过的证据。

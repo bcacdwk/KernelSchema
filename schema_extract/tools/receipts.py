@@ -6,7 +6,8 @@ import re
 from pathlib import Path
 
 from .common import ExtractError, manifest, regular_file, rules_root, source_root
-from .artifacts import validate_plan, validate_revision_scope
+from .artifacts import (design_context, region_evidence_lines, resolve_workspace,
+                        validate_plan, validate_revision_scope)
 from .comparators import validate_comparisons
 from .reading import read_evidence
 from .stages import DOCUMENT_CONCLUSIONS, STAGES, plan_signature, required_conclusions, scope_key
@@ -49,13 +50,20 @@ def evidence_identity(anchor: dict) -> dict:
     return {key: anchor[key] for key in ("source_id", "path", "sha256", "line_start", "line_end")}
 
 
-def required_artifact_evidence(state: dict, attempt: dict, files) -> set[str]:
+def required_artifact_evidence(state: dict, attempt: dict, files, *, resolution: dict | None = None) -> set[str]:
     """One source of truth for the reviewer's required file-level citations."""
     if attempt["role"] != "reviewer":
         return set()
     if attempt["stage"] == "P5":
         entry = state["nodes"][attempt["node"]]
-        return {"root.yaml", entry["file"], state["nodes"][entry["parent"]]["file"]}
+        result = {"root.yaml", entry["file"], state["nodes"][entry["parent"]]["file"]}
+        graph = resolution if resolution is not None else attempt.get("design_resolution", {})
+        if graph.get("diagnostic"):
+            # A malformed migration/draft must still reach its ordinary author.
+            return result | set(files)
+        for node in (attempt["node"], entry["parent"]):
+            result.update(graph.get("nodes", {}).get(node, {}).get("source_manifest", {}))
+        return result
     if attempt["stage"] == "P6":
         return set(files)
     return {"root.yaml"} if attempt["stage"] == "P1" else {"root.yaml", "dispatch.md"}
@@ -110,7 +118,10 @@ def receipt_schema(attempt: dict) -> dict:
     reopen = attempt["stage"] in REOPEN_TARGETS and attempt.get("mode", "normal") == "normal"
     if reopen:
         fields["decision"]["enum"].append("reopen")
-        fields["reopen"] = obj({"issue_id": TEXT, "target": {"type": "string", "enum": ["P1", "P2", "P3", "P4", "external"]},
+        targets = set(REOPEN_TARGETS[attempt["stage"]]) | {"external"}
+        if attempt["stage"] == "P5" and attempt.get("purpose") != "maintenance":
+            targets.update(attempt.get("provider_reopen_targets", {}))
+        fields["reopen"] = obj({"issue_id": TEXT, "target": {"type": "string", "enum": sorted(targets)},
                                 "reason": TEXT, "evidence": INDICES})
         fields["reopen"]["type"] = ["object", "null"]
     return obj(fields)
@@ -241,6 +252,51 @@ def _artifact_issue_supported(issue: dict, anchors: list[dict]) -> bool:
                          r"(?![A-Za-z0-9_./\\-])", issue["scope"]) for anchor in anchors)
 
 
+def _region_anchored(resolved, node: str, region: str, anchors: list[dict]) -> bool:
+    filename = resolved.source_files[node].name
+    lines = region_evidence_lines(resolved, node, region)
+    return any(anchor["path"] == filename and anchor["sha256"] == resolved.source_hashes[node] and
+               any(anchor["line_start"] <= line <= anchor["line_end"] for line in lines)
+               for anchor in anchors)
+
+
+def provider_request_details(value: dict, state: dict, attempt: dict, artifacts: Path, *, parser_root: Path) -> dict:
+    """Recompute eligibility from submitted raw bytes; invocation enums grant no authority."""
+    request = value["reopen"]
+    if (attempt["stage"] != "P5" or attempt.get("purpose") == "maintenance" or
+            attempt.get("mode", "normal") != "normal"):
+        raise ExtractError("provider reopen is only available to ordinary P5 worker/reviewer calls")
+    context = design_context(state, attempt, artifacts, parser_root=parser_root)
+    target = context["provider_reopen_targets"].get(request["target"])
+    if not target:
+        raise ExtractError("provider reopen requires a current approved strict ancestor that locally defines an inherited region")
+    resolved = resolve_workspace(artifacts, parser_root=parser_root)
+    provider = target["provider"]
+    filename = resolved.source_files[provider].name
+    regions = {}
+    for region, chain in target["regions"].items():
+        field = "design." + region
+        issues = [issue for issue in value["issues"] if filename in issue["scope"] and
+                  re.search(r"(?<![A-Za-z0-9_])" + re.escape(field) + r"(?![A-Za-z0-9_])", issue["scope"]) and
+                  set(issue["evidence"]) & set(request["evidence"])]
+        if issues and _region_anchored(resolved, provider, region, value["artifact_evidence"]):
+            regions[region] = chain
+    if not regions:
+        raise ExtractError("provider reopen needs a current raw definition-region anchor and source-supported issue scoped to that region; child applicability is repaired locally")
+    return {**target, "regions": regions,
+            "consumer_identity": resolved.effective_identity(attempt["node"])}
+
+
+def _validate_derivation_anchors(resolved, nodes: list[str], anchors: list[dict]) -> None:
+    for consumer in nodes:
+        for region, origin in resolved.origins[consumer].items():
+            if len(origin.chain) < 2:
+                continue
+            for node in origin.chain:
+                if not _region_anchored(resolved, node, region, anchors):
+                    raise ExtractError(f"reviewer must cite actual raw reference/provider lines: {resolved.source_files[node].name}:design.{region}")
+
+
 def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
                      artifacts: Path, changed_files: list[str], *, rules_lock: dict | None = None) -> dict:
     if attempt.get("semantic_revision") and rules_lock is None:
@@ -276,6 +332,9 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
     if value["changed_files"] != changed_files:
         raise ExtractError("receipt changed_files differs from actual permitted diff")
     files = manifest(artifacts)
+    resolution = None
+    if attempt["stage"] == "P5":
+        resolution = design_context(state, attempt, artifacts, parser_root=rules_root(semantic))["design_resolution"]
     declared = {item["path"]: item["sha256"] for item in value["artifacts"]}
     submitted_files = ({state["nodes"][attempt["node"]]["file"]: files[state["nodes"][attempt["node"]]["file"]]}
                        if attempt["stage"] == "P5" else files)
@@ -308,7 +367,7 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
                 raise ExtractError(f"missing bound {category} entry anchor")
         artifact_subjects = set()
         if attempt["role"] == "reviewer":
-            required_files = required_artifact_evidence(state, attempt, files)
+            required_files = required_artifact_evidence(state, attempt, files, resolution=resolution)
             if required_files <= {entry["path"] for entry in value["artifact_evidence"]}:
                 # These conclusions concern the current documents, not source
                 # implementation facts. Their anchors are artifact_evidence.
@@ -330,11 +389,15 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
         if attempt["stage"] == "P1" and attempt.get("mode", "normal") != "adjudicate":
             validate_comparisons(value, lock, artifacts, parser_root=rules_root(semantic))
     if attempt["role"] == "reviewer":
-        required_artifacts = required_artifact_evidence(state, attempt, files)
+        required_artifacts = required_artifact_evidence(state, attempt, files, resolution=resolution)
         if not required_artifacts <= {item["path"] for item in value["artifact_evidence"]}:
             raise ExtractError("reviewer must cite all stage artifacts")
         if not value["source_evidence"]:
             raise ExtractError("reviewer needs actual source evidence")
+        if final and attempt["stage"] == "P5" and not resolution.get("diagnostic"):
+            resolved = resolve_workspace(artifacts, parser_root=rules_root(semantic))
+            _validate_derivation_anchors(resolved, [attempt["node"], state["nodes"][attempt["node"]]["parent"]],
+                                         value["artifact_evidence"])
     if value["decision"] in {"revise", "blocked", "reopen"}:
         if not any(item["detail"].strip() and item["scope"].strip() and
                    (item["evidence"] or
@@ -348,10 +411,13 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
         request = value.get("reopen")
         if not request or not request["issue_id"].strip() or not request["reason"].strip():
             raise ReceiptFormatError("reopen requires a stable issue_id, target, reason and source evidence")
-        if request["target"] not in REOPEN_TARGETS[attempt["stage"]] | {"external"}:
+        provider_target = request["target"].startswith("P5:")
+        if not provider_target and request["target"] not in REOPEN_TARGETS[attempt["stage"]] | {"external"}:
             raise ExtractError("reopen must use the permitted upstream route for this stage")
         if not request["evidence"] or any(index < 0 or index >= len(value["source_evidence"]) for index in request["evidence"]):
             raise ExtractError("reopen requires valid fixed-source evidence indices")
+        if provider_target:
+            provider_request_details(value, state, attempt, artifacts, parser_root=rules_root(semantic))
     elif value.get("reopen") is not None:
         raise ExtractError("only a reopen decision may carry an upstream request")
     if not value["checks"] and not value["checks_note"].strip():

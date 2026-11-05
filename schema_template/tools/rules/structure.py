@@ -199,7 +199,18 @@ realization = record({}, {"require": sequence(choice), "prefer": sequence(prefer
 
 
 # Task and plan identity: schema_docs/0.
-def validate_task(task, *, allow_missing_hardware=False):
+def design_region(local_rule):
+    def check(value, path, errors):
+        if isinstance(value, dict) and "from_parent" in value:
+            if set(value) != {"from_parent"}:
+                reject(errors, path, "from_parent must be the only field; references and local fields cannot be mixed")
+            node_id(value["from_parent"], path + ".from_parent", errors)
+        else:
+            local_rule(value, path, errors)
+    return check
+
+
+def validate_task(task, *, allow_missing_hardware=False, allow_parent_regions=False):
     errors = []
     for name, plan in task.items():
         node_id(name, name, errors)
@@ -208,8 +219,10 @@ def validate_task(task, *, allow_missing_hardware=False):
         metadata = record({"name": text, "describe": text, "version": integer(1, expression=False),
                            **({"dispatch": dispatch} if name != "root" else {})},
                           {"source": source, **({"dispatch": dispatch} if name == "root" else {})})
-        required = {"meta_data": metadata, "design": record({"math_reshape": math_reshape,
-                                                             "work_schedule": work_schedule, "tile_pipeline": tile_pipeline})}
+        regions = {"math_reshape": math_reshape, "work_schedule": work_schedule, "tile_pipeline": tile_pipeline}
+        if allow_parent_regions:
+            regions = {name: design_region(rule) for name, rule in regions.items()}
+        required = {"meta_data": metadata, "design": record(regions)}
         if name == "root":
             required["contract"] = (
                 record({"algorithm_requirement": algorithm}, {"hardware_specification": incomplete_hardware})

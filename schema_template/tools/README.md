@@ -11,6 +11,7 @@
 ```text
 tools/
 ├── schema.py              任务文件发现、检查编排、失败状态
+├── design_resolution.py   Design 整区解析、来源链与有效身份
 ├── check_policy.py        可选目录策略的兼容读取；当前仓库未启用
 ├── yaml_source.py         YAML 解析、精确数值与源位置
 ├── diagnostics.py         统一诊断、字段路径、值显示
@@ -44,11 +45,23 @@ tools/
     └── fixtures/minimal/  最小合成测试底稿
 ```
 
-依赖方向是 `check_yaml.py → schema.py → check_policy / yaml_source / rules → diagnostics`。解析器和诊断不导入规则；规则只检查已解析的数据，不读写 plan、不打印、不决定进程退出。字段结构通过后，先检查声明是否完整，再按符号、工作调度、微流水线的顺序检查关联。
+依赖方向是 `check_yaml.py → schema.py → design_resolution / check_policy / yaml_source / rules → diagnostics`。YAML 解析器和诊断不导入规则；规则只检查已解析的数据，不读写 plan、不打印、不决定进程退出。完整检查依次验证 raw 字段结构、父链与引用，随后对 effective 节点检查声明、符号、工作调度和微流水线关联。
 
-输入文件名决定节点 ID，所在目录决定任务范围；文件符号链接不使检查切换到目标文件的任务目录。无论传入 root 还是派生节点，都会检查同目录直属的全部 `.yaml / .yml`。共享 Contract 只用于解析引用，不写进派生节点，也不继承父节点 Design。
+输入文件名决定节点 ID，所在目录决定任务范围；文件符号链接不使检查切换到目标文件的任务目录。无论传入 root 还是派生节点，都会检查同目录直属的全部 `.yaml / .yml`。共享 Contract 和显式同名整区引用只构造内存有效视图，不写回 raw。引入名称在使用节点的跨区上下文中解析，metadata/when/version/realization 保持节点本地。
 
 上述为普通创作模式。显式 `--standalone` 调用 `schema.validate_standalone_file`，只读取一个正式生成的阅读视图：文件自带 Contract，原 `dispatch.id/parent` 保留为身份与出处，不作为外部依赖读取。字段结构先照常验证，再在检查副本中使用本地根身份解析关系；原始数据和文件不改写。生成规则见[单文件阅读视图](../../schema_docs/0.common.md#单文件阅读视图)。
+
+### 共用解析与有效视图
+
+`schema.resolve_directory(directory)` 返回 `ResolvedTask`，只验证可展开的包络、文件/节点身份、父链及引用；允许未完成的 when 和本地区域。`validate_resolved_file(filename, *, notices=None, source_hashes=None, skip_hardware=False)` 完整检查并返回 `(directory, ResolvedTask)`。旧 `validate_file` 和 `validate_directory` 返回形状不变，task 为 effective；`source_hashes` 仍以节点 ID 返回 raw 文件摘要。
+
+`ResolvedTask` 提供 `raw_task/effective_task`、以节点 ID 为键的 `source_files/source_hashes/documents`、`origins[node][region]` 和 `dependency_nodes[node]`。`RegionOrigin(provider, chain)` 的 chain 从使用节点到实际本地定义节点，包含两端；本地区域为单节点链。`source_manifest(node)` 返回 root、自身及实际引用链闭包的“真实相对文件名 → SHA256”；全部本地区域的孩子不会把未引用的中间祖先误列为内容来源。
+
+`effective_identity(node)` 散列规范化的 `kernel_schema.design_resolution.v1`、节点 ID、排序来源 manifest 和三区域 provider/chain；不含绝对路径，不承诺语义等价。`origins_dict(node)` 提供来源 JSON，`effective_document(node)` 给出带 root Contract 的独立内容副本。raw/effective 及不同节点之间不共享可变对象；缓存仅限一次调用。
+
+父链和引用遍历使用迭代实现；总展开预算 `design_resolution.MAX_RESOLVED_UNITS = 10_000_000` 累计复制的数据值、来源 chain 条目和依赖闭包记录，在分配前检查。单文件 `yaml_source.MAX_EXPANDED_NODES = 100000` 保持不变，工具容量耗尽使用 `CapacityError`/退出 2，不当作非法 schema。
+
+`check_yaml.py --show-effective FILE` 只输出 `kernel_schema.effective_view.v1` JSON，明确 `validation: not_run`。其中 effective_yaml 使用精确标量输出并回读核对；来源 manifest、origins 和身份来自同一 ResolvedTask。它不写文件、不打印 Valid，不代替 standalone 的两次完整检查。extract 通过冻结 parser 包加载本模块，不各自实现 resolver，也不越过 run 的 rules root 导入当前仓库规则。
 
 ## 回归与修改
 
@@ -87,7 +100,7 @@ Contract 输入输出按[nullable 与 None](../../schema_docs/1.contract.algorit
 
 解析只接受普通 YAML 数据，不执行自定义标签；拒绝重复显式键和递归 alias。anchor、alias 和本地 merge 仅复用字段值。`on / off / yes` 和日期保持字符串；小数直接从原文构造 Decimal，不经过 binary64。
 
-错误报告文件、字段路径和真实源位置，列表下标从 0 开始；alias 子字段可能定位到锚点定义。缺失字段只报告文件和字段，不编造行号。退出状态为 `0` 通过、`1` 输入存在问题、`2` 参数或工具环境使检查未完成。检查不下载依赖，不修改文件内容、权限或修改时间。
+错误报告文件、字段路径和真实源位置，列表下标从 0 开始；alias 子字段可能定位到锚点定义。继承区域的关联错误保留 consumer 字段路径及组合上下文，使用 provider 的原始 Document 定位真实定义，同时报告 consumer 引用位置与完整 chain；不改写 Document.positions。缺失字段不编造 consumer 行号。非法引用直接定位 raw。退出状态为 `0` 通过、`1` 输入存在问题、`2` 参数、容量或工具环境使检查未完成。检查不下载依赖，不修改文件内容、权限或修改时间。
 
 作者需要了解的检查能力及人工审阅边界见[校验边界](../README.md#校验边界)。
 
@@ -102,6 +115,8 @@ Contract 输入输出按[nullable 与 None](../../schema_docs/1.contract.algorit
 用法见[微流水线图](../README.md#微流水线图)。`pipeline_graph.py` 复用 `schema.py`。规则与图工具共用 `pipeline_syntax` 的成员路径、动作记法和词法域声明；`actions` 实例化动作，`expressions` 求有限整数与域，`coordinates` 恢复目标坐标，`windows` 判断声明窗口，`graph/model` 绑定事件并构建依赖，`render` 把内存中的 DOT 交给 Graphviz 生成 PNG，`output` 管理图片来源与原子写入。规模只由命令行显式给出；[示例总览](../examples/README.md#生成-png)保存复现命令，生成器不读取它，也不按算子名称分支。
 
 默认运行只写 YAML 同目录的同名 PNG。图片内保存来源文件名、内容指纹、展示取值和检查状态；指纹来自实际解析的字节，不记录本机绝对路径，也不把旧图片当作输入配置。生成前确认同名图片归属，并使旧图失效；无法确认归属的同名 PNG 会保留并报告冲突。`--all` 同时清理已确认由工具生成、但 YAML 已删除的孤立图片。图片完整生成后原子替换目标文件，失败不留下旧成功图或半张图；校验后或渲染期间源文件改变时，停止发布该图并提示重新运行。`--check-only` 完全只读，不需要 Graphviz，不清理或写入图片。两条路径共用相同的展开和依赖检查。
+
+`pipeline_graph.analyze` 消费 effective 节点；`GraphOutput` 保留原 `source/source_sha256` 所有权字段，并记录完整 source manifest、effective identity 和 origins。生成前和原子发布前均复核 manifest 的全部 raw 文件，包括中间引用和 provider。child 字节未变不能证明图仍对应当前来源；历史 PNG 不批量重写。
 
 能直接确定的错误由日常检查器尽早报告，例如引用未实例化的 role 成员、同一成员上的事件等待自身或自身稍后的完成。索引展开后才能判断的重复动作、悬空引用和环由图工具检查。跨成员依赖、`done` 等待自身的 `issue` 等合理写法应当保留。
 

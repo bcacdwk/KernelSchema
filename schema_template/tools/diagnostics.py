@@ -44,7 +44,7 @@ def encode_value(value: Any) -> str:
     raise TypeError(f"not a JSON value: {type(value).__name__}")
 
 
-def format_diagnostics(errors, files, documents):
+def format_diagnostics(errors, files, documents, *, resolved=None):
     sections = {"meta_data": "0.common.md", "contract.algorithm_requirement": "1.contract.algorithm_requirement.md",
                 "contract.hardware_specification": "2.contract.hardware_specification.md",
                 "design.math_reshape": "3.design.math_reshape.md", "design.work_schedule": "4.design.work_schedule.md",
@@ -53,13 +53,23 @@ def format_diagnostics(errors, files, documents):
     for error in errors:
         node = next(name for name in sorted(files, key=len, reverse=True)
                     if error.path == name or error.path.startswith(name + ".") or error.path.startswith(name + "["))
-        document = documents[node]
+        provider, source_path, origin = (resolved.diagnostic_source(node, error.path) if resolved else
+                                         (node, error.path, None))
+        document = documents[provider]
         field = error.path[len(node):].lstrip(".") or "<file>"
-        position = document.positions.get(error.path) if not error.missing else None
-        location = str(files[node]) + (f":{position[0]}:{position[1]}" if position else "")
+        position = document.positions.get(source_path) if not error.missing else None
+        location = str(files[provider]) + (f":{position[0]}:{position[1]}" if position else "")
         lines = [location, f"  {field}: {error.message}"]
-        if not error.missing and error.path in document.values:
-            actual = encode_value(document.values[error.path])
+        if provider != node:
+            region = error.path[len(node) + len(".design."):].split(".", 1)[0].split("[", 1)[0]
+            use_path = f"{node}.design.{region}.from_parent"
+            use_position = documents[node].positions.get(use_path)
+            use_location = str(files[node]) + (f":{use_position[0]}:{use_position[1]}" if use_position else "")
+            lines.append(f"  Consumer: {error.path}")
+            lines.append(f"  Inherited at: {use_location} ({use_path})")
+            lines.append("  Source chain: " + " -> ".join(origin.chain))
+        if not error.missing and source_path in document.values:
+            actual = encode_value(document.values[source_path])
             lines.append("  Actual: " + (actual if len(actual) <= 160 else actual[:157] + "..."))
         if error.hint:
             lines.append("  Fix: " + error.hint)

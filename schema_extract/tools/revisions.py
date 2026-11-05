@@ -180,6 +180,10 @@ def approval_is_current(state, approval):
     """Cheap eligibility only; Store's effective verification is the IO gate."""
     if not isinstance(approval, dict):
         return False
+    if approval.get("stage") == "P5":
+        node = state["nodes"].get(approval.get("node"), {})
+        if approval.get("generation") != node.get("generation"):
+            return False
     current = state.get("semantic_revision")
     if approval.get("semantic_revision") == current:
         return True
@@ -228,7 +232,7 @@ def _premises(store, state, stage, node, checkpoint, lock):
 
 
 def _scope_basis(store, state, stage, node, lock):
-    from .stages import node_signature, scope_key
+    from .stages import needs_authoring, node_signature, scope_key
     owner = _scope_owner(state, stage, node)
     approval = _scope_approval(state, stage, node)
     node_data = state["nodes"][node]
@@ -246,6 +250,10 @@ def _scope_basis(store, state, stage, node, lock):
     _, info = store.verify_checkpoint(state, checkpoint)
     role = node_data.get("role") if stage == "P5" else state.get("role") if state["stage"] == stage else None
     complete = bool(approval or role == "reviewer" or owner.get("status") in {"reviewing", "revision", "adjudicating"})
+    if stage == "P5" and needs_authoring(node_data):
+        complete = False
+        approval = None
+        role = "worker"
     exists = bool(approval or owner.get("calls") or owner.get("started_at") or
                   (node_data.get("authored") if stage == "P5" else stage == state["stage"]))
     files = ({node_data["file"]} if stage == "P5" else {"root.yaml"} if stage in {"P1", "P3"}
@@ -369,6 +377,10 @@ def normalize_plan(store, state, target_lock, proposal=None, report=None):
         if basis["retired"]:
             item["action"] = "keep"
             item["reason"] = "Retain this removed node and its historical accounting; no current approval is adopted."
+        if stage == "P5" and (state["nodes"][node].get("identity_migration") or state["nodes"][node].get("provider_reopen")) and not basis["retired"]:
+            if item["action"] == "keep":
+                item["action"] = "review"
+                item["reason"] += " Pending provider repair/identity migration still requires its current-generation independent approval."
         if item["action"] == "keep" and basis["approval"] and not basis["retired"] and not _adoptable(item, proposal, actual_report):
             item["action"] = "review"
             item["reason"] += " Approval adoption lacks a complete independent applicability assessment."

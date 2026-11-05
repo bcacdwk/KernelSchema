@@ -42,6 +42,87 @@ def parser_for(root: str):
         sys.dont_write_bytecode = previous
 
 
+def schema_for(parser_root: Path):
+    """Load the public schema API from the same frozen package as raw parsing."""
+    parser = parser_for(str(parser_root))
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        return importlib.import_module(parser.__package__ + ".schema")
+    finally:
+        sys.dont_write_bytecode = previous
+
+
+def resolve_workspace(directory: Path, *, parser_root: Path):
+    """Resolve Design sources using this invocation's rules, never installed rules."""
+    schema = schema_for(parser_root)
+    try:
+        return schema.resolve_directory(directory)
+    except (OSError, schema.SchemaError, schema.ToolError) as exc:
+        raise ExtractError(f"cannot resolve Design sources in {directory}: {exc}") from exc
+
+
+DESIGN_REGIONS = ("math_reshape", "work_schedule", "tile_pipeline")
+
+
+def region_evidence_lines(resolved, node: str, region: str) -> set[int]:
+    """Real raw marks belonging to a region, including a from_parent reference."""
+    prefix = f"{node}.design.{region}"
+    return {position[0] for field, position in resolved.documents[node].positions.items()
+            if field == prefix or field.startswith(prefix + ".") or field.startswith(prefix + "[")}
+
+
+def design_context(state: dict, attempt: dict, directory: Path, *, parser_root: Path) -> dict:
+    """Current source graph metadata. Broken drafts retain diagnostic authoring access."""
+    from .stages import effective_nodes
+    result = {"design_resolution": {"validation": "not_run", "nodes": {}}, "provider_reopen_targets": {}}
+    try:
+        resolved = resolve_workspace(directory, parser_root=parser_root)
+        entries = {entry["id"]: entry for entry in state.get("plan") or []}
+        for node in resolved.raw_task:
+            result["design_resolution"]["nodes"][node] = {
+                "origins": {region: {"provider": origin.provider, "chain": list(origin.chain)}
+                            for region, origin in resolved.origins[node].items()},
+                "source_manifest": resolved.source_manifest(node),
+                "effective_identity": resolved.effective_identity(node)}
+        if attempt["stage"] != "P5" or attempt.get("purpose") == "maintenance" or attempt.get("mode", "normal") != "normal":
+            return result
+        if state.get("reopening") or not all(state["stages"][stage]["status"] == "approved"
+                                             for stage in ("P1", "P2", "P3", "P4")):
+            return result
+        node = attempt["node"]
+        parents, parent = set(), entries[node]["parent"]
+        while parent:
+            parents.add(parent)
+            parent = entries[parent]["parent"]
+        for identity in parents | {node}:
+            entry = entries[identity]
+            dispatch = resolved.raw_task[identity]["meta_data"].get("dispatch", {})
+            if (dispatch.get("id", "root") != identity or
+                    dispatch.get("parent", "" if identity == "root" else "root") != entry["parent"] or
+                    resolved.source_files[identity].name != entry["file"]):
+                raise ExtractError("raw node identity/parent differs from the current plan: " + identity)
+        approved = effective_nodes(state)
+        for region, origin in resolved.origins[node].items():
+            provider = origin.provider
+            if provider == "root" or provider not in parents or not set(origin.chain[1:]) <= approved:
+                continue
+            if any(resolved.source_hashes[ancestor] != state["nodes"][ancestor].get("approved_sha256") or
+                   attempt["dependency_digests"].get(entries[ancestor]["file"]) != resolved.source_hashes[ancestor]
+                   for ancestor in parents):
+                continue
+            target = result["provider_reopen_targets"].setdefault("P5:" + provider, {
+                "provider": provider, "regions": {}, "effective_identity": resolved.effective_identity(provider),
+                "source_manifest": resolved.source_manifest(provider)})
+            target["regions"][region] = list(origin.chain)
+        return result
+    except (ExtractError, KeyError, TypeError) as exc:
+        result["design_resolution"]["diagnostic"] = str(exc)
+        result["design_resolution"]["conservative_files"] = sorted(attempt.get("dependency_digests", {}))
+        result["provider_reopen_targets"] = {}
+        return result
+
+
 def load_yaml(directory: Path, filename: str, *, parser_root: Path | None = None) -> dict:
     parser = parser_for(str(parser_root or rules_root()))
     try:
@@ -352,7 +433,8 @@ def _erase_fields(value: dict, fields: list[str]) -> dict:
 def validate_artifacts(stage: str, role: str, before: Path, after: Path, starter: Path,
                        *, decision: str, node_entry: dict | None = None, revision_scope: list | None = None,
                        first_draft: bool = False, root_revision: bool = False,
-                       maintenance_fields: list | None = None, candidate_review: bool = False) -> dict:
+                       maintenance_fields: list | None = None, candidate_review: bool = False,
+                       identity_migration: dict | None = None) -> dict:
     old_files, new_files = manifest(before), manifest(after)
     changed = sorted(name for name in old_files.keys() | new_files.keys() if old_files.get(name) != new_files.get(name))
     allowed = set(stage_files(stage, node_entry=node_entry, revision_scope=revision_scope))
@@ -398,7 +480,9 @@ def validate_artifacts(stage: str, role: str, before: Path, after: Path, starter
         inspect_incomplete = candidate_review and role == "reviewer" and decision in {"revise", "blocked"}
         if "contract" in right and not inspect_incomplete:
             raise ExtractError("derived nodes must omit the whole Contract")
-        if not inspect_incomplete and (not isinstance(dispatch, dict) or dispatch.get("id") != node_entry["id"] or dispatch.get("parent") != node_entry["parent"]):
+        migrating_draft = bool(identity_migration) and decision in {"continue", "blocked"}
+        if not inspect_incomplete and (not isinstance(dispatch, dict) or dispatch.get("id") != node_entry["id"] or
+                (dispatch.get("parent") != node_entry["parent"] and not migrating_draft)):
             raise ExtractError("derived ID/parent must match the approved direct-parent plan")
         if not inspect_incomplete and any(not _same(metadata.get(key), new["meta_data"].get(key)) for key in ("name", "describe")):
             raise ExtractError("derived name/describe must equal root")

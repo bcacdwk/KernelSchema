@@ -273,19 +273,25 @@ class ProposalTests(unittest.TestCase):
         script = """
 import json
 from types import SimpleNamespace
-from schema_extract.tools import audit
+from schema_extract.tools import audit, revisions
 state = {"run_id": "run", "status": "ready", "checkpoint": "a" * 64, "merged_checkpoint": "b" * 64}
 audit._inputs = lambda *args: {}
 audit._checkpoint = lambda store, state, identity, files: {"id": identity, "files": {}}
 audit._state = lambda *args: state
+revisions.verify_revisions = lambda *args, **kwargs: []
 store = SimpleNamespace(writer_status=lambda _: "available")
-print(json.dumps(audit._verify(store, state, [], None, whole_run=True), sort_keys=True))
+files = SimpleNamespace(file=lambda *args, **kwargs: None)
+print(json.dumps(audit._verify(store, state, [], files, whole_run=True), sort_keys=True))
 """
         outputs = [subprocess.check_output([sys.executable, "-B", "-c", script],
                     cwd=Path(__file__).resolve().parents[3], env={**os.environ, "PYTHONHASHSEED": seed})
                    for seed in ("1", "2", "3")]
         self.assertEqual(outputs[0], outputs[1])
         self.assertEqual(outputs[0], outputs[2])
+        verified = json.loads(outputs[0])
+        self.assertEqual(verified["status"], "verified")
+        self.assertEqual(verified["checkpoint_ids"], [
+            {"origin_run_id": "run", "checkpoint": letter * 64} for letter in ("a", "b")])
 
 
 if __name__ == "__main__":

@@ -34,9 +34,11 @@ Reviewer 初始输入保留当前规范、产物、计划和固定源码入口�
 
 worker 的 `decision=continue` 保存合法稿件，在原阶段/节点继续写作，消耗原调用和时间预算，不表示完成或批准。它与 CLI `continue RUN_UUID` 的连续修订请求无关；维护 patch 中也适用，见[维护协议](#多任务控制与维护接续)。
 
-complete/approve 须覆盖 [stages.py](stages.py)中的 required_evidence 和 required_conclusions，每类至少引用一次绑定入口，调用链文件可补充。conclusions/issues 的 evidence 从 0 索引本次 source_evidence。reviewer 的 artifact_evidence 覆盖门禁列出的全部文件，P5 包括 root、直接父和当前节点。
+complete/approve 须覆盖 [stages.py](stages.py)中的 required_evidence 和 required_conclusions，每类至少引用一次绑定入口，调用链文件可补充。conclusions/issues 的 evidence 从 0 索引本次 source_evidence。reviewer 的 artifact_evidence 覆盖门禁列出的全部文件；P5 使用 `source_manifest(child) ∪ source_manifest(direct_parent)` 并入 root、直接父和当前节点文件。
 
-revise/blocked 至少有一条具体且有依据的 issue。仅提交格式 `submission_format` 和规范表达 `schema_conformance` 可用有效 artifact_evidence 代替该 issue 的源码索引，`scope` 须独立写全相对文件名，可附字段/行号。例如结构化 plan 漏掉当前索引节点，可引用 `dispatch.md` 中的对应表格。其他源码、计算、数值、转录与路径问题仍给有效源码索引；blocked 写明缺失事实、不能确定的具体关系及恢复条件。类别与引文门禁不代替语义判断，也不豁免 Reviewer 的阶段源码证据及完整文件引用。
+P5 reviewer approve 还逐区域核对 child 和直接父的每条引用 chain：其全部节点均须有该区域的 raw 锚点，包括该 consumer 自己的 `from_parent` 行、所有中间引用行，以及实际 provider 的本地定义行。每文件一个任意锚点不足以满足此门禁；同一真实范围可满足多项要求，无需重复列相同锚点。有效视图的虚拟行号不能作为证据。`differences` 比较有效 Design，`inherited_design` 覆盖子节点绑定/适用性，`walkthrough` 覆盖完整有效输入到输出路径。
+
+revise/blocked/reopen 至少有一条具体且有依据的 issue；blocked/reopen 至少一条有效 issue 的 `recovery_condition` 须非空。仅 revise/blocked 的提交格式 `submission_format` 和规范表达 `schema_conformance` 问题可用有效 artifact_evidence 代替该 issue 的源码索引，`scope` 须独立写全相对文件名，可附字段/行号。例如结构化 plan 漏掉当前索引节点，可引用 `dispatch.md` 中的对应表格。其他源码、计算、数值、转录与路径问题，以及 reopen，仍给有效源码索引；blocked 写明缺失事实、不能确定的具体关系及恢复条件。类别与引文门禁不代替语义判断，也不豁免 Reviewer 的阶段源码证据及完整文件引用。
 
 Reviewer approve 另需 `document_self_contained/document_layering/document_consistency/document_relevance` 四项非空结论，由当前产物锚点支持，来源 evidence 可为 `[]`；worker 无此填写义务。P6 的 `tree` 若只描述文件集合、父关系、链接及拓扑，也可仅依据全部产物引用；选择与覆盖等源码语义结论仍需来源索引。
 
@@ -64,15 +66,60 @@ P2/P3/P4 reviewer 批准时提供最多 20 个非空行、1200 字符的 handoff
 
 ## 并行、合入与计划修订
 
-Runner 派发所有依赖就绪节点，不设固定槽位，每节点同时一个调用。节点私有目录只放已审 root、所需祖先和本节点。首次创作从已审直接父复制；续写、恢复和维护优先保留本节点自己的稿件，只刷新只读祖先。
+Runner 派发所有依赖就绪节点，不设固定槽位，每节点同时一个调用。节点私有目录只放已审 root、所需祖先和本节点。首次确无自己稿件时，从已审直接父元数据模板建立本地身份/版本 1/空 when，移除 Contract 与父 realization，三区域均显式 `{from_parent: <直接父ID>}`；续写、恢复和维护保留本节点全部 raw，只刷新只读祖先，不自动转 ref 或 local。raw 版本仅随本地内容变化，有效来源变化不伪造版本增长。
 
 合入核对调用、输入、阶段/节点代际、计划和真实父依赖，将许可差异合入最新已审目录，复查并保存不可变 checkpoint 后才更新状态。兄弟先完成不使结果过期；父、Contract 或选择条件变化时重核依赖，迟到失效结果写入 `stale_results`。节点有效合入后解锁子节点，阻塞仅传给后代。
 
-常规 P2–P6 的 `reopen` 默认 null，请求为 `{issue_id, target, reason, evidence}`。树/选父回 P4，root Design/when 回 P3，代表路径回 P2，共享 Contract 回 P1；只能回到当前阶段上游。`external` 表示任务要求变更，须外部确认。
+来源闭包和审批依赖分别记录：`design_resolution` 的来源图/manifest/有效身份来自当前 workspace；调用、审批和失效仍保守核对全部祖先文件 SHA。坏草稿解析失败可返回诊断及保守祖先集合支持修稿，无法确定的 provider 不进入 `provider_reopen_targets`，最终门禁不降级。解析通过也不等于完整检查。
+
+P5 只合入候选自己的 raw，完整 merged 树保留全部计划稿件；完整 schema 检查在 workspace 外独立受控目录执行。集合从当前有效节点与本次候选开始：候选 raw SHA 与登记的 `approved_sha256` 不同时，先保守排除候选的全部后代，再按当前 plan 补齐所余节点的全部祖先。检查记录保存 `checked_nodes`、`checked_files` 及被排除的 `superseded_dependents`。待换父/重审的旧 raw 不阻塞无关候选，也不因此计为有效。
+
+普通与 maintenance 共用此闭包，仍核对候选固定依赖和最新祖先。维护父候选时，即使后代状态尚未失效，也先按上述顺序排除；候选批准后再正常使依赖后代失效并重新排队。完整 raw 树始终保留，P6/ready/publication 必须整树完整有效。
+
+常规 P2–P6 的 `reopen` 默认 null，请求为 `{issue_id, target, reason, evidence}`。树/选父回 P4，root Design/when 回 P3，代表路径回 P2，共享 Contract 回 P1；这些入口只回到当前阶段上游。普通 normal P5 另允许当前可信 `provider_reopen_targets` 中的非 root `P5:<id>`，资格与转换见下文。`external` 表示任务要求变更，须外部确认。
 
 重开依据固定来源新发现；来源明确的转录错误或当前产物的规范表达错误可用已读源码，issues.kind 分别为 transcription/schema_conformance，scope 与 artifact_evidence 定位错误，规范错误另指明条款。同一问题和固定证据只重开一次。上游重开时旧 P5 调用可结束并暂存，P4 批准后按依赖判定保留或失效；删除后再加同 ID 仍沿用原计数、版本与已用裁决，历史记录保存在 `plan_history`。
 
 P4 门禁核对表格与结构化 plan、父关系、来源、覆盖缺口和链接；必要说明可放表格与唯一覆盖缺口节之间。P6 准入要求当前计划集合等于有效已合入集合，且 P1–P4 批准仍有效，草稿不计完成数。
+
+P4 的 plan 保持 `id/file/parent/workload/difference/selection/evidence` 七字段；difference 比较有效 Design，先保留真实差异再选择共享，不自动换父追求压缩。`install_plan` 对换父节点记录 `identity_migration`（old/new parent、old checkpoint、plan revision、reason），保留 raw、版本和审批历史，并使旧新相关后代失效。换父节点必须交 worker，start_node 刷新新祖先而不 retarget；旧 checkpoint 在 workspace 外只读供恢复。worker 显式改 parent/ref 或落地完整区，在新依赖下独立批准后清迁移标记。maintenance 沿封存字段权限，不自动扩大 scope；所有计数和已用决定保留。
+
+### 普通 P5 的 provider 修复
+
+提案/回执 schema 动态枚举可信 targets，但 `validate_receipt` 必须从提交 workspace 重算：目标是当前 plan/依赖下的非 root 严格祖先，且确为本节点至少一个引用区域的本地 provider。已落地区域不再提供旧 provider 资格。请求含 provider 定义区的当前 raw 产物锚点及固定源码新发现或具体转录/规范纠错依据；无关区域或仅在子上下文不适用不足以重开，后者由 child 修改整个本地区域。P6、maintenance、adjudicate/signoff 不增加该入口。
+
+关联 `issues` 条目的 `scope` 须同时含 provider 真实文件名与 `design.<区域>`，且该条 `evidence` 与 `reopen.evidence` 至少相交一项；两者均从 0 索引本次 `source_evidence`。`artifact_evidence` 另须锚定该 provider 当前 raw 中的同一区域。reopen 至少有一条有效 issue 带非空恢复条件。以下仅为提案字段片段，不是完整回执；目标、证据索引及其余字段按本次 `response.schema.json` 和实际读取内容填写，示例 `[0]` 必须对应本次真实源码证据：
+
+```json
+{
+  "decision": "reopen",
+  "reopen": {
+    "issue_id": "provider-work-ownership",
+    "target": "P5:provider",
+    "reason": "provider 的工作归属转录与固定源码不符。",
+    "evidence": [0]
+  },
+  "issues": [{
+    "kind": "transcription",
+    "scope": "provider.yaml design.work_schedule",
+    "detail": "该区域的工作归属定义与所引固定源码不符。",
+    "recovery_condition": "provider 修正该定义并取得当前 generation 新独立批准后恢复本节点审阅",
+    "evidence": [0]
+  }]
+}
+```
+
+Runner 先保存请求者通过身份、权限和证据门禁的合法 raw，再由独立 `_begin_provider_reopen` 建立 `reopen_requests` 扩展记录及目标 `node.provider_reopen`。记录请求者、provider、区域/chain、来源身份、旧 generation/批准/草稿和原因锚点，送给目标 worker。provider 推进 generation、清当前批准和 merged，保留历史/草稿/last approval，必须 worker 修复并取得新的独立批准；即使字节相同也不得 restore 旧批准。新批准关闭记录后按父先子后恢复后代。
+
+后代保守推进 generation 并清有效批准，完整稿进 reviewer、未完成稿进 worker，换父等必须改稿条件优先，均等待当前父批准。在途依赖通过 generation/fence 退休；不设置全局 reopening，不改兄弟和 P1–P4。P6 当前资格/批准失效，但 P6 starts、预算、重试、裁决和签收计数不重置。循环键绑定 provider、稳定 issue_id 与固定 source ID/path/SHA/行区间，不含 note/quote 或 provider 新版本；已用、失败和关闭记录保留，P4 后续删除目标时退休记录。
+
+### 冻结解析与派生产物
+
+`artifacts.schema_for(parser_root)` 通过 `parser_for(str(parser_root)).__package__ + '.schema'` 加载同一冻结包；`resolve_workspace(directory, *, parser_root)` 调用其公共 `resolve_directory` 并包装 ExtractError。standalone、receipts、prompts 共用适配，不另写 resolver。parser_root 必须来自本次 resolve_context/rules lock，不能导入当前仓库规则替代旧 run。
+
+严格 standalone 使用 `validate_resolved_file` 完整检查，复用有效文档与 origins，再独立完整检查本地单文件。`.source.json` 为 `schema_extract.standalone.v2`，记录 root/child/实际引用链完整 manifest、origins、effective_identity 和 view 摘要，生成前及生成/校验后发布前复查所有来源。原始树不变，输出在任务外，相同内容可复用；普通发布仍保留 raw 树。有效 stdout 视图明确 validation:not_run，不代替导出检查。选择不具备新 API 的旧 rules 时，整个导出路由到同一规则树内的旧 frozen exporter，使用独立进程与该树的 PYTHONPATH，保留原完整检查和回执；不实现另一套 resolver 或用当前规则解释旧输入。
+
+2.5.0 的引用语言、依赖及审批含义是正式 semantic revision，规范、阶段页、检查/解析器及执行器一同冻结。旧 frozen run 正常恢复沿原规则和执行语义；旧 inline 继续合法，历史 checkpoint/receipt/预算不改写。采用新语义须经过正式修订与适用性审阅，不能伪装为 compatible runtime 修复。[条件拓扑 issue](../issues/archive/extract_workflow/conditional-flow-topology.json)已按 `partially_adopted` / `2.5.0` 归档，产物问题后续另行研究；整区引用不修复或隐藏真实提交、生产消费与事件差异。
 
 ## 写入与完整性
 

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import shlex
 
-from .artifacts import _same, load_root
+from .artifacts import _same, design_context, load_root
 from .budget import call_limit
 from .receipts import REOPEN_TARGETS, required_artifact_evidence
 from .stages import STAGES, owner_for, read_specs, required_conclusions, scope_for
@@ -57,6 +57,8 @@ def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | N
             relevant_nodes.add(parent)
             ancestors.append(next(entry for entry in state["plan"] if entry["id"] == parent))
             parent = state["nodes"][parent]["parent"]
+    source_context = (design_context(state, attempt, Path(attempt["workspace"]), parser_root=rules)
+                      if attempt["stage"] in {"P5", "P6"} else {})
     def approval_reference(value):
         return {"checkpoint": value["checkpoint"], "receipt_sha256": value["receipt_sha256"],
                 "receipt": str(run_dir / "attempts" / value["attempt_id"] / "receipt.json")}
@@ -80,7 +82,8 @@ def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | N
                 "writable_files": attempt["writable_files"], "revision_scope": state["revision_scope"],
                 "read_specs": read_specs(attempt), "feedback": owner_for(state, attempt)["feedback"], "handoff": handoff,
                 "required_conclusions": required_conclusions(attempt), "required_evidence": definition["evidence"],
-                "required_artifact_evidence": sorted(required_artifact_evidence(state, attempt, attempt["dependency_digests"])),
+                "required_artifact_evidence": sorted(required_artifact_evidence(state, attempt, attempt["dependency_digests"],
+                                                       resolution=source_context.get("design_resolution"))),
                 "node_entry": node_entry, "plan": plan,
                 "plan_receipt": str(plan_receipt) if plan_receipt else None, "node_evidence": node_evidence,
                 "reopening": state.get("reopening"),
@@ -97,6 +100,7 @@ def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | N
                 "budget": {**{key: scope[key] for key in ("revisions", "continues", "receipt_repairs", "cli_failures", "calls", "deadline")},
                            "call_seconds": attempt.get("timeout_seconds"), "max_calls": call_limit(state),
                            "revision_limit": state["config"]["revision_limit"]}}
+    locating.update(source_context)
     if maintaining:
         task = state["maintenance"]["tasks"][attempt["maintenance_task_id"]]
         locating["maintenance"] = {key: task.get(key) for key in
@@ -113,6 +117,23 @@ def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | N
         # whole-tree history and an imported legacy tree are not branch input.
         locating.pop("reopening", None)
         locating.pop("imported_draft")
+        node = state["nodes"][attempt["node"]]
+        if node.get("identity_migration"):
+            locating["identity_migration"] = {key: value for key, value in node["identity_migration"].items()
+                                               if key != "old_checkpoint"}
+            if attempt["role"] == "worker" and node["identity_migration"].get("old_checkpoint"):
+                locating["identity_migration"]["old_artifacts"] = str(run_dir / "checkpoints" /
+                    node["identity_migration"]["old_checkpoint"] / "artifacts")
+        if attempt["role"] == "worker":
+            key = node.get("provider_reopen")
+            if key:
+                record = state["reopen_requests"][key]
+                locating["provider_repair"] = {name: record.get(name) for name in
+                    ("key", "issue_id", "reason", "regions", "source_evidence", "artifact_evidence", "issues", "from_node")}
+            stale = [item for item in state.get("stale_results", {}).values() if item["node"] == attempt["node"]]
+            if stale:
+                locating["retired_workspaces"] = [{key: item.get(key) for key in
+                    ("attempt_id", "generation", "workspace", "base_checkpoint", "reason")} for item in stale]
     continuation = state.get("continuation")
     if continuation and attempt["role"] == "worker" and attempt["stage"] != "P6":
         old = Path(continuation["evidence"]) / "artifacts"
@@ -166,15 +187,30 @@ Runner在隔离副本应用、核对版本并检查；关键事实缺失、补�
                              if attempt["role"] == "worker" else "返回approve/revise/blocked，按共用方法给出当前阶段结论。")
         mode_instructions += "\n普通退修沿用原角色；达到budget.revision_limit后由原reviewer仅裁决一次。格式修复不算实质退修，恢复沿用原预算。"
     if attempt["stage"] in REOPEN_TARGETS and mode == "normal" and not maintaining:
-        locating["reopen_targets"] = sorted(REOPEN_TARGETS[attempt["stage"]]) + ["external"]
+        locating["reopen_targets"] = sorted(set(REOPEN_TARGETS[attempt["stage"]]) |
+                                               set(source_context.get("provider_reopen_targets", {}))) + ["external"]
         mode_instructions += """
 固定来源推翻上游时可reopen，填写稳定issue_id、target、reason和本次来源证据索引；普通提案reopen=null。
-树/选父回P4，代表路径回P2，现有root Design/when回P3，共享Contract回P1；仅能使用reopen_targets。
+选父/计划回P4，代表路径回P2，现有root Design/when回P3，共享Contract回P1；仅能使用reopen_targets。
 外部任务要求改变用external，等待任务方明确确认。已读源行的转录错误用issues.kind=transcription；当前产物的规范表达错误用schema_conformance。两者均由scope定位错误产物，以artifact_evidence引用该字段；规范错误还须在detail指出对应条款。其他重开需新源码发现。同一issue_id与固定源码范围只重开一次，换note/引文不重计。"""
+        if attempt["stage"] == "P5":
+            mode_instructions += """
+provider_reopen_targets仅列当前已批准严格祖先中实际保存本地区域的非root provider。定义本身错误时仅可用其中列出的P5:<provider>；对应issues.scope必须包含provider真实文件名和design.<区域>，artifact_evidence锚定该区域本地定义的raw行，issues.evidence与reopen.evidence至少共用一个本次source_evidence索引，依据为固定源码新发现或具体转录/规范纠错。recovery_condition可写“provider修正该定义并取得当前generation的新独立批准后恢复当前节点审阅”。仅在当前子选择域、参数绑定或跨区接口下不适用时，由本节点落地整个local区域修复；子节点when错误也在本节点修订。不可改祖先或引用effective视图虚拟行。"""
     checking = ("本阶段使用阶段产物门禁；未完成或未生成的Design不要求完整检查。"
                 if attempt["stage"] in {"P1", "P2", "P4"} else
                 f"Runner接收complete/approve/revise时自动运行冻结检查器；complete/approve须退出0，revise可附退出1的产物诊断交回作者，退出2报工具/环境问题。\n需要提前自检或定位诊断时可运行：{check_command}；不要求worker/reviewer各自重复执行。")
     context_instructions = []
+    if attempt["stage"] == "P5":
+        view_command = f"python3 -B {shlex.quote(str(checker))} --show-effective {shlex.quote(str(Path(attempt['workspace']) / target))}"
+        context_instructions.append(f"design_resolution记录当前来源；只读展开视图可用：{view_command}。输出validation=not_run，不是通过检查的证明，也不是行证据。改变继承区时取完整有效区域落地后再改。")
+        context_instructions.append("differences比较与直接父的有效Design及真实实现/选择差异；inherited_design审本次独立选择域、参数/名称绑定、跨区接口与realization适用性；walkthrough用完整有效Design覆盖输入输出、launch/producer/事件、handoff与资源闭合。历史批准不能作当前证据，也不能证明子适用。")
+        context_instructions.append("reviewer approve时，对本节点及直接父各自的每个引用区域，沿chain用artifact_evidence覆盖consumer自身from_parent、所有中间from_parent及实际provider本地定义的raw行；每文件一个无关锚点不足，同一真实行范围可覆盖多项要求，effective视图虚拟行不可作证据。")
+        if locating.get("identity_migration"):
+            context_instructions.append("identity_migration要求worker显式修改本节点parent并逐区改为新直接父引用，或从old_artifacts有效视图落地完整local区。当前旧raw保持原义；旧checkpoint仅只读恢复线索，不可把旧祖先复制为额外任务YAML。maintenance.fields仍是精确上限，缺字段范围时报告所需scope。迁移后独立批准才清标记。")
+        if locating.get("retired_workspaces"):
+            context_instructions.append("retired_workspaces保留旧generation的原稿；只能由当前worker在新依赖与合法范围下显式采用，旧正文和批准不会自动恢复。")
+    elif attempt["stage"] == "P6":
+        context_instructions.append("共有本地定义按真实文件读一次；逐节点覆盖有效绑定、独立选择域、局部差异和全部pending_rechecks。P6不开放P5 provider重开目标。")
     if locating.get("recovery_handoff"):
         context_instructions.append("有recovery_handoff：旧会话已确认中断并退休，以本页、当前checkpoint和固定来源重建上下文。")
     if locating.get("imported_draft") or locating.get("continued_draft"):
@@ -192,6 +228,7 @@ Runner唯一写运行状态。worker/reviewer不开子代理，不改kernel，�
 最后按output-schema仅返回schema_extract.proposal.v1 JSON，原样回传本次attempt_id nonce；缺失或陈旧nonce硬拒绝。summary由你填写本轮简短、非空的语义结论。identity、文件SHA-256、文件清单、实际差异由Runner从已登记调用与真实字节生成，不手填、不另写回执文件。
 证据由你亲读并选择：相对path、1起始line_start/line_end（最多12行）、quote_offset（范围原文中从0开始的字符偏移，通常0）和说明语义的note；来源另选category。用reader --evidence --end-line N [--quote-offset N]预览该范围生成的最多320字符精确引文，不会替你寻找依据。不要回传sha256/source_id/quote。
 complete/approve覆盖required_evidence、required_conclusions；每类至少选对应绑定入口，调用链可补充。conclusions/issues等的evidence从0索引本次source_evidence。reviewer各种决策均须提供实际源码证据，artifact_evidence覆盖required_artifact_evidence每个文件。文档判断、问题分流按共用方法；P6的tree证据例外见当前阶段页。
+blocked以及本轮允许的reopen，均须至少一条有具体detail、scope与有效依据的issue同时填写非空recovery_condition；reopen的依据须为本次source_evidence索引。
 {mode_instructions}
 {chr(10).join(context_instructions)}
 checks仅记亲自执行的命令/退出码；交Runner自动检查时填[]，checks_note说明由Runner执行。

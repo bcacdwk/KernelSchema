@@ -12,10 +12,10 @@
 | [P2 dispatch 草案](schema_extract/phases/02_dispatch_draft.md) | 核对 host 路由，选代表主要 workload 的真实路径作 root，写 dispatch.md 草案和必要的 root when | 审定代表路径、设计划分与覆盖缺口，进入 P3 |
 | [P3 root 设计](schema_extract/phases/03_root.md) | 逐段完成数学改写、工作调度、微流水线和必要实现交接 | 完整 root 通过 `--skip-hardware` 检查及独立审阅，进入 P4 |
 | [P4 dispatch 定稿](schema_extract/phases/04_dispatch_plan.md) | 据已审 root 定稿 ID、直接父、设计差异和选择依据 | reviewer 批准整树计划，Runner 核验结构化清单，按依赖派发 P5 |
-| [P5 派生节点](schema_extract/phases/05_branch.md) | 首次从已审直接父复制，写本节点完整 Design 和适用 Realization；续写保留自己的稿件 | 各节点检查、独立审阅并有效合入后解锁子节点；无分支则跳过 |
+| [P5 派生节点](schema_extract/phases/05_branch.md) | 首次无稿以三区域显式引用已审直接父，形成完整有效 Design 和本地适用 Realization；已有稿保留 raw | 各节点检查、独立审阅并有效合入后解锁子节点；无分支则跳过 |
 | [P6 全算子终审](schema_extract/phases/06_final.md) | 全新 reviewer 核对全树、条件、链接、引用和未决项，必要时交 worker 修改 | 当前计划全部节点有效合入，全目录检查及终审通过才达到 ready，再交付指定目录 |
 
-交付含 root.yaml、全部计划节点 YAML 和中文 dispatch.md；只有 root 时也保留索引。共享 Contract 只在 root 定义，每个节点的 Design 完整，精确条件以各 YAML 为准，parent 表示设计派生关系。[节点与索引规则](schema_docs/0.common.md#派生节点与-dispatch)
+交付含原始 root.yaml、全部计划节点 YAML 和中文 dispatch.md；只有 root 时也保留索引。共享 Contract 只在 root 定义，root Design 全部本地，派生各区完整本地定义或显式引用直接父同名整区，每个节点形成完整有效 Design。精确条件以各 YAML 为准，在全契约域独立求值，parent 表示设计来源而非条件包含。[节点与索引规则](schema_docs/0.common.md#派生节点与-dispatch)
 
 Supervisor 决定来源、输出、预算、恢复与工程维护；Runner 唯一写运行状态、管理依赖、调用、checkpoint 和发布。worker 只写许可产物，reviewer 独立审阅，两者不启动子代理。Supervisor 可委派工程维护，并按[角色与会话](schema_extract/README.md#角色与会话)验收和归档。常规 P1–P6 与连续修订的有限维护分别调度，维护完成后继续实际剩余工作，最终仍由当前 P6 交付。
 
@@ -37,7 +37,7 @@ Supervisor 决定来源、输出、预算、恢复与工程维护；Runner 唯�
 
 写作和审阅均使用本次冻结规则，按既有字段及合法扩展表达；规范不适配时提供具体条款、反例和影响，经 Supervisor 正式处理后采用。合法扩展与规范一致性的判断集中在 [REVIEW.md](schema_extract/REVIEW.md)，旧稿及检查通过不能替代规则依据。
 
-reviewer 独立阅读本阶段已完成的全文，包括复制和未改内容，再核对固定源码；初始提示不提供前序批准、旧稿或交接，维护另给本轮问题与范围。批准覆盖独立理解、分层、全文一致和内容必要性，P6 覆盖全树。身份、摘要与精确锚点由工具归一化，模型负责简短非空 summary 和有据的语义判断，见[回执协议](schema_extract/tools/README.md#回执与短交接)。单份 YAML 阅读需要完整 Contract 时生成[正式视图](schema_extract/README.md#单文件阅读视图)，创作侧仍保留唯一 Contract。
+reviewer 独立阅读本阶段已完成的有效全文，包括共享和未改内容，再核对固定源码；同一当前 provider 定义可读一次，各节点的选择域、参数绑定、跨区接口、realization 与 walkthrough 仍全覆盖。初始提示不提供前序批准、旧稿或交接，维护另给本轮问题与范围；父批准不能证明子节点适用。批准覆盖独立理解、分层、全文一致和内容必要性，P6 覆盖全树。来源链、身份、摘要与真实 raw 锚点由工具归一化，模型负责简短非空 summary 和有据的语义判断，见[回执协议](schema_extract/tools/README.md#回执与短交接)。单份 YAML 独立阅读时生成展开全部 Design 引用与 Contract 的[正式视图](schema_extract/README.md#单文件阅读视图)，普通创作与发布保留 raw 树。
 
 ## 来源、缺项与验收边界
 

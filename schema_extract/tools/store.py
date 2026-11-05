@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 from . import __version__
 from .common import (STATE_GUARD, ExtractError, RunnerBusy, StaleResult, copy_artifacts, digest, json_bytes,
                      fsync_directory, manifest, read_json, seal, sync_tree, verify_manifest, write_json, write_text, rules_root)
-from .artifacts import _same, load_yaml, validate_artifact_sources, write_yaml
+from .artifacts import DESIGN_REGIONS, _same, design_context, load_yaml, validate_artifact_sources, write_yaml
 from .budget import call_limit, review_seconds
 from .runtime import (EXECUTOR_CAPABILITIES, STATE_FORMAT as RUNTIME_STATE_FORMAT,
                       execution_boundary, verify_execution)
@@ -595,6 +595,9 @@ class Store:
             invocation["timeout_seconds"] = timeout_seconds
         if state.get("execution_binding"):
             invocation["execution_binding"] = state["execution_binding"]
+        if call["stage"] in {"P5", "P6"}:
+            invocation.update(design_context(state, invocation, directory / "workspace",
+                parser_root=rules_root(resolve_context(self, state)["rules_lock"])))
         handoff = next((item for item in reversed(state.get("session_handoffs", []))
                         if item["session_group"] == group and item["role"] == call["role"] and
                         not item.get("next_attempt_id")), None)
@@ -645,6 +648,8 @@ class Store:
             else:
                 derived = load_yaml(merged, parent_file, parser_root=parser_root)
                 derived.pop("contract", None)
+                derived.pop("realization", None)
+                derived["design"] = {region: {"from_parent": node["parent"]} for region in DESIGN_REGIONS}
                 derived["meta_data"]["version"] = 1
                 derived["meta_data"]["dispatch"] = {"id": node_id, "parent": node["parent"], "when": ""}
                 write_yaml(temporary / node["file"], derived, source=merged / parent_file, parser_root=parser_root)
@@ -719,7 +724,8 @@ def summary(store: Store, state: dict) -> dict:
         details[node_id] = {"parent": node["parent"], "status": node["status"], "role": node.get("role"),
                             "mode": node.get("mode", "normal"), "attempt_id": attempt_id,
                             "reason": node.get("reason"), "generation": node["generation"],
-                            "planned": node_id in planned}
+                            "planned": node_id in planned, "identity_migration": node.get("identity_migration"),
+                            "provider_reopen": node.get("provider_reopen")}
     scopes = {**state["stages"], **{"P5:" + node: state["nodes"][node]["stage"]
                                    for node in observed if "stage" in state["nodes"][node]}}
     budget_fields = ("status", "calls", "revisions", "elapsed_seconds", "started_at", "deadline",

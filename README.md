@@ -17,7 +17,9 @@
 
 一次任务选择当前工作对应的入口，通过产物与必要说明交接。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
 
-Schema Extract `2.2.10` 自动完成六阶段提取、独立审阅、返工、依赖并发和发布。Supervisor 用 `python3 schema_extract/extract.py extract --id <算子> --output <目录> --background` 发起，以 `status <run-uuid>` 查看进度；只有 `ready` 且 `published: true` 才表示已交付。恢复使用原冻结执行器，预算可显式追加；硬件保留占位，检查使用 `--skip-hardware`。真实提取的验证范围见[验证边界](schema_extract/README.md#验证边界)。[开始试用](schema_extract/README.md#开始一次试用) · [输出目录](schema_wiki/README.md) · [恢复与交付](schema_extract/README.md#恢复与交付)
+Schema Extract `2.5.0` 自动完成六阶段提取、独立审阅、返工、依赖并发和发布，并支持 Design 显式整区引用、完整来源身份和有效视图。旧全本地 YAML 仍合法；旧 frozen run 按原规则恢复，采用新语义须经正式 semantic revision/maintenance 及适用性审阅，不能作为 compatible runtime 修复，历史产物不自动转换。操作与验证范围见[现行提取指南](schema_extract/README.md)。
+
+交付需核对具体目标与版本：`ready` 表示终审通过，`published: true` 表示已发布到原输出目录；另行 `export` 以对应的 `exports[].status=published` 记录和目标 `.extraction/receipt.json` 为准。记录与回执中的 checkpoint、规则、批准及文件摘要须对应本次交付，旧 export 不证明当前修订已交付。[开始试用](schema_extract/README.md#开始一次试用) · [输出目录](schema_wiki/README.md) · [恢复与交付](schema_extract/README.md#恢复与交付)
 
 新建与优化均由 Planner 承担，按数学改写、工作调度、微流水线的顺序逐层推导和写入。先把上层方向收束，再向下投入优化精力；下层发现前提问题时，回到对应上层修正并复查受影响部分。
 

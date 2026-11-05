@@ -8,7 +8,11 @@
 
 后续 2.2.8 仅澄清现有 plan 的实际执行绑定和跨 role 等待表达，[capture-invocation-boundary](archive/schema_docs/capture-invocation-boundary.json) 归档的是绑定说明，该澄清本身不表示条件流程产物已修订。冻结 2.2.7 下合法的 GDN/FMHA 任务无需因此统一重跑；MoE 采用新冻结须正式 `continue` 并独立重审，原批准不继承。
 
-2026-11-04，GDN 的 [2.2.7 六节点修订版](../../schema_wiki/revisions/2.2.7/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/dispatch.md)已完成 P6、正式 export 和 Supervisor 验收，该侧表达问题已收口。FMHA、MoE 和 Sparse 的实际产物仍待各自收口，`conditional-flow-topology` 整体仍为待决；Sparse 源布局缺陷现按 2.2.9 边界记录归档，不再作为提取阻塞，symbolic 及两个旧 kernel issue 的决定不变。
+2026-11-04，GDN 的 [2.2.7 六节点修订版](../../schema_wiki/revisions/2.2.7/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/dispatch.md)已完成 P6、正式 export 和 Supervisor 验收，该侧表达问题已收口。FMHA、MoE 和 Sparse 的实际产物仍待各自收口，`conditional-flow-topology` 在该交付时点仍为待决；Sparse 源布局缺陷现按 2.2.9 边界记录归档，不再作为提取阻塞，symbolic 及两个旧 kernel issue 的决定不变。
+
+2026-11-05，[design-region-derivation](archive/extract_workflow/design-region-derivation.json)已随 **2.5.0 解决**：采用显式直接父同名整区引用，统一 raw/effective 与完整来源身份，贯通子上下文检查、审阅分工、保稿迁移、普通 P5 provider 修复及冻结规则边界。[问题底稿](DESIGN_REGION_DERIVATION.md)保留 2.4.1 调查与 DRD-01 至 DRD-10 编号，[实施设计](../DESIGN_REGION_DERIVATION.md)记录最终契约和验证；模板 171 项、extract 90 项完整回归通过，真实旧规则的隔离正式采用路径通过。局部 patch、兄弟共享、自动转换/换父和通用条件求解有意后置；真实旧 run 与产物未自动升级。
+
+同日依用户决定，[conditional-flow-topology](archive/extract_workflow/conditional-flow-topology.json)按 **部分采纳（partially_adopted）归档**：本轮提取侧方案已确定，实际拓扑不同按独立 dispatch 表达，确实相同的整区可用 2.5.0 `from_parent` 共享；产物问题另行研究。未收口的 FMHA、MoE、Sparse 清单及出处集中保留在该 issue 的 `remaining`，不表示所有旧产物已修复或已实现单节点条件拓扑。本次只整理台账与入口，不升级版本或启动产物迁移。
 
 ## 分类口径
 
@@ -23,7 +27,7 @@
 | [budget-and-usage-accounting](archive/extract_workflow/budget-and-usage-accounting.json) | 部分采纳；2.4.1 已收口本轮统计契约及委派证据缺口 | 历史缺采样、子会话 token 与实付未知是外部边界；墙钟预算保留 |
 | [pipeline-graph-skip-hardware](archive/schema_template/pipeline-graph-skip-hardware.json) | 已解决：图入口显式透传硬件豁免 | 默认完整检查；旧冻结版本不自动获得能力 |
 
-[conditional-flow-topology](extract_workflow/conditional-flow-topology.json) 继续待决；[sparse-tc-control-layout-overlap](archive/kernel_wiki/sparse-tc-control-layout-overlap.json) 已按部分采纳归档，提取侧证据记录与分流完成，剩余仅为上游未修事实，不是 Schema 待办。已有来源支持同一完整抽象 Design，实际 Design/P6 仍须补齐并独立审阅；上述工具验证与本次台账整理均不改变真实产物或源 kernel 的验收状态。
+[conditional-flow-topology](archive/extract_workflow/conditional-flow-topology.json) 已按部分采纳归档，产物研究另行开展；[sparse-tc-control-layout-overlap](archive/kernel_wiki/sparse-tc-control-layout-overlap.json) 已按部分采纳归档，提取侧证据记录与分流完成，剩余仅为上游未修事实，不是 Schema 待办。已有来源支持同一完整抽象 Design，实际 Design/P6 仍须补齐并独立审阅；上述工具验证与本次台账整理均不改变真实产物或源 kernel 的验收状态。
 
 第一类是核心结果、表达和 Review；第二类是既有功能的局部质量修复；第三类是可选新增能力。类别、是否需要用户讨论与解决状态分别判断，第二类多数已修，无需重构。本次索引文案勘误属于第二类。
 
@@ -31,7 +35,7 @@
 
 | Issue（登记状态） | 实际影响与根因 | 长期方案与是否返工 | 本轮及剩余工作 |
 | --- | --- | --- | --- |
-| [conditional-flow-topology](extract_workflow/conditional-flow-topology.json)（待决） | GDN、sparse、FMHA、MoE 的原产物用正文取消实际提交或交接，读者需要自行改图。 | **优先处理。** 先依现有 `dispatch` 拆分不能合法参数化的实际结构，不增加逐条 guard 或隐式删边。 | GDN 2.2.7 的 6/6、P6 与独立 export 已验收，原两节点保留；FMHA、MoE、Sparse 的实际产物继续独立修订，整体仍待决，Sparse 已登记的低层槽位偏差不阻塞提取。 |
+| [conditional-flow-topology](archive/extract_workflow/conditional-flow-topology.json)（部分采纳） | GDN、sparse、FMHA、MoE 的原产物用正文取消实际提交或交接，读者需要自行改图。 | **提取侧方案已确定。** 依现有 `dispatch` 拆分不同实际结构，相同整区可按 2.5.0 `from_parent` 共享，不增加逐条 guard 或隐式删边。 | GDN 2.2.7 的 6/6、P6 与独立 export 已验收，原两节点保留；FMHA、MoE、Sparse 的未收口产物保留在归档 `remaining`，按用户决定另行研究，Sparse 已登记的低层槽位偏差不阻塞提取。 |
 | [symbolic-member-bounds](archive/schema_template/symbolic-member-bounds.json)（部分采纳） | MoE 的真实成员随 EPI、Nt 改变；三处数字解析限制诱发最大成员范围加正文修正。 | **优先处理。** 既有成员路径允许已定义整数端点表达式；共用 `parse_members`，普通检查与有限展开各守边界。只改变成员数量时保留参数化。 | 工具修复已验收，模板正式入口 152 项测试通过；普通检查不证明未绑定表达式，有限图拒绝缺参、非法整数/区间及 worker 越界。旧 MoE 的虚构成员仍需独立产物修订。 |
 | [reviewer-document-integrity](archive/extract_workflow/reviewer-document-integrity.json)（已解决） | 原审阅沿用历史批准、只看差异，漏掉正文与结构冲突。 | **重点保留，无需返工架构。** 共用 REVIEW.md、累计内容范围和四项结论，复用现有回执与重开通道；不堆叠额外报告字段。 | 机制已有回归与真实样例证据；本轮补充分组规则引用。它不能代替旧产物修复，也不能由文件锚点机械证明模型确已通读。 |
 | [p4-index-layout-hard-stop](archive/extract_tools/p4-index-layout-hard-stop.json)（已解决） | 准确计划表后的说明段曾触发停止；旧补丁改为诊断后再花调用修复排版。 | **已返工简化。** 保留固定表格投影及 plan、父关系、链接、覆盖事实检查，仅放开覆盖节与说明段的位置；移除 `IndexLayoutError` 及特殊修复分支。 | 已验收：最终 47 项提取回归及两份历史失败稿的只读重放通过；不自动改写模型文稿。 |
@@ -90,7 +94,7 @@ hidden 的 caller stream 最后通过 join 覆盖 prefix 和 remainder；不能�
 
 ### 代价与验收边界
 
-MoE 的低 fill 跨 role 等待可用[现有条件等待示例](../../schema_docs/5.design.tile_pipeline.md#条件等待示例)表达：`Hoist=0` 的非首 worktile 以 0/1 repeat 生成带 q 身份的 serial wait，四个 epilogue release 约束 wait.done，随后才 prepare；wait 可以先 issue，完成仍须等齐 release。`Hoist=1` 仅保留 release→首个 MMA，允许 prepare 提前。`nvfp4_moe.cu:4843–4915` 与已验证的默认 97/81 选择提供来源，隔离 fc1/fc2 在 `R=3200/4800,E=256`、每 worker 两个 worktile 的图通过依赖断言且无环。此例没有新增 guards，也未改真实 root；跨 role 前驱不能藏在 prepare 契约中，本 role 内部计算及原语固有保证仍可封装。证据和剩余产物验收沿用 [conditional-flow-topology](extract_workflow/conditional-flow-topology.json)。
+MoE 的低 fill 跨 role 等待可用[现有条件等待示例](../../schema_docs/5.design.tile_pipeline.md#条件等待示例)表达：`Hoist=0` 的非首 worktile 以 0/1 repeat 生成带 q 身份的 serial wait，四个 epilogue release 约束 wait.done，随后才 prepare；wait 可以先 issue，完成仍须等齐 release。`Hoist=1` 仅保留 release→首个 MMA，允许 prepare 提前。`nvfp4_moe.cu:4843–4915` 与已验证的默认 97/81 选择提供来源，隔离 fc1/fc2 在 `R=3200/4800,E=256`、每 worker 两个 worktile 的图通过依赖断言且无环。此例没有新增 guards，也未改真实 root；跨 role 前驱不能藏在 prepare 契约中，本 role 内部计算及原语固有保证仍可封装。证据和剩余产物验收沿用 [conditional-flow-topology](archive/extract_workflow/conditional-flow-topology.json)。
 
 沿用 dispatch 会增加完整 Design 的重复和审阅节点，但复用了现有字段、检查器、独立审阅与发布路径。先对真实可达组合去重，只保留结构上的必要拆分；不要把较少节点当成正确性的优先条件。只有独立修订证明确实出现难以维护的重复，才凭具体案例重新评估 flow 内部分支；本轮没有新增该语法，也没有新增 guard 的条件蕴含、事件存在性或替代生产者求解器。
 

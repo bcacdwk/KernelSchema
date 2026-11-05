@@ -1,0 +1,29 @@
+{
+  "id": "design-region-derivation",
+  "category": "extract_workflow",
+  "problem": "派生节点当前必须复制并维护三个完整 Design 区域，parent 只记设计来源；相同定义缺少显式共享方式。用户提出允许引用父级完整 math_reshape/work_schedule/tile_pipeline 的候选，但现行语言、检查和产物工具、P5 审阅证据、换父及 provider 修复通道尚未定义这种内容依赖。只增加引用语法会造成子参数/跨区适用性不清、来源身份不完整或有效设计变化未受正确审阅。问题底稿见 schema_extract/issues/DESIGN_REGION_DERIVATION.md（DRD-01 至 DRD-10）；本项待决。",
+  "evidence": [
+    "核对基线 KernelSchema@26a7947c8257401c95582a8a43676c5651c9a2ef；完整事实、待决定项和约束见 schema_extract/issues/DESIGN_REGION_DERIVATION.md。",
+    "schema_docs/0.common.md:104、121；schema_template/tools/rules/__init__.py:31：parent 不提供 Design 继承，Contract 通过 root 统一符号环境解析。schema_docs/3.design.math_reshape.md:164、4.design.work_schedule.md:327、5.design.tile_pipeline.md:443 显示三区域存在参数、资源、里程碑和 worker 身份依赖；6.realization.md:7、57 要求本节点适用的实现选择。",
+    "schema_template/examples/fa4_decode/q1_cluster.yaml 与 q4_cluster.yaml 的完整 math_reshape 由现有 yaml_source 解析器只读比较为相同；两者 parent 分别 q1_global/root，work_schedule 的 QueryTile 分别 1/2。这是完整区域共享的具体候选，不证明可直接沿现有 parent 复用。",
+    "schema_template/tools/rules/structure.py:211、schema.py:38、diagnostics.py:53、pipeline_graph.py:40、80 直接消费完整 Design 及原始文档定位；schema_extract/tools/standalone.py:25 只复制共享 Contract，来源身份和生成防漂移只覆盖 root 与指定节点。",
+    "schema_extract/tools/store.py:458、617：P5 已有全祖先依赖核验和只读上下文，首次无稿复制父文件，旧稿优先保留；stages.py:168、282 沿树失效并保留旧稿、更新计划父关系。换父不会自动更新旧子 YAML 的原始 parent 或未来引用。",
+    "schema_extract/tools/receipts.py:52 的 P5 必要文件证据只有 root、本节点、直接父；prompts.py:127 隐藏历史批准；REVIEW.md、phases/05_branch.md、06_final.md 要求当前完整产物及复制内容适用性审阅。receipts.py:42、runner.py:419 的普通 reopen 无指定 P5 provider 入口，P4/P5 现有写权限不能代替该修复。",
+    "schema_extract/phases/04_dispatch_plan.md 与 tools/artifacts.py:208、352、401 约束七字段 plan、索引/文件/父关系和写入范围；schema_docs/0.common.md:135 要求 when 独立互斥全覆盖。区域引用不改变 conditional-flow-topology 的待决状态。",
+    "schema_extract/tools/compatibility.py:219、revisions.py:198、254、snapshots.py:24 规定兼容执行器、语义修订与冻结规则的边界；新增内容依赖语义不能作为仅兼容运行时变更回填旧 run。",
+    "2.5.0 的最终决定与 DRD-01 至 DRD-10 对应见 schema_extract/DESIGN_REGION_DERIVATION.md；上述原问题、proposal 和行号保留调查时点含义，基线为 26a7947c8257401c95582a8a43676c5651c9a2ef（2.4.1）。",
+    "schema_template/tools/design_resolution.py、schema.py、diagnostics.py 与 pipeline/output.py 统一展开、子上下文校验和 provider/chain/source manifest/effective identity；check_yaml.py --show-effective 明示 validation=not_run，严格 standalone 另完整检查并生成 v2 来源回执。",
+    "schema_extract/tools/artifacts.py、receipts.py、stages.py、runner.py、maintenance.py、revisions.py 与 runtime.py 贯通冻结适配、真实来源证据、显式换父、普通 P5 provider 重开、新 generation 独立批准、受影响后代失效与完整 raw 树保存；P5 临时检查排除依赖已变的旧子稿，P6/发布仍要求整树有效。",
+    "Python 3.13.12 / PyYAML 6.0.3 下，模板完整 discover 171 项、extract 完整 discover 90 项全部通过；含 13 项 schema 派生回归、7 项工作流贯通回归及 10 项 standalone 回归。",
+    "使用真实 26a7947c8257401c95582a8a43676c5651c9a2ef 规则树隔离验证：旧 inline 导出仍走旧 exporter/检查器及 v1 回执，旧规则拒绝引用；同一未完成测试 run 经过正式 semantic revision 采用 2.5.0，受限 worker 改稿、真实 checker 与独立 reviewer 回执批准及 v2 standalone 均通过。原 checkpoint 文件、5 份回执和 5 条旧用量记录保留；没有执行真实模型、硬件或历史 run 迁移。"
+  ],
+  "proposal": "进入独立方案阶段，评估完整区域显式引用父级的候选，明确子节点上下文绑定、来源及传递规则、原始/有效视图、工具来源身份、审阅分工、换父与指定 provider 修复、规则修订边界。DRD-01 至 DRD-10 保留待决定项，不预先定语法或最终实现；优先用少量贯通场景检验设计是否闭合，暂不扩展为局部 patch、兄弟共享、自动去重/换父或通用条件语言。",
+  "necessity": "相同区域的复制会增加维护与重复审阅负担，但真实不同的 dispatch、参数、物化及依赖不能为去重而抹平。需要明确共享的是哪些事实以及子节点仍须独立证明什么，而不是以减少节点数为目标。沿用现有祖先上下文、保稿和保守失效机制可控制改动范围；记录本项不表示规则、工具或历史产物已修复。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.5.0",
+    "reason": "首版设计与实现已完成：共享完整定义与子节点适用性分开，原始内容、有效来源、审批 generation 和规则 revision 各保留独立身份；语言、检查、派生产物、证据与修复生命周期形成闭环。完整回归及真实旧冻结规则的隔离正式采用验证通过。",
+    "adopted": "显式直接父同名整区 from_parent，可传递；root 全本地，when 与 realization 本地，引用在当前节点环境中完整检查。\n共用 raw/effective API、真实 provider/chain 诊断、完整来源 manifest/effective identity、只读有效视图、图和严格 standalone 的全部来源防漂移。\nP5 首次无稿生成引用，已有稿保留；provider 审本地定义，consumer 审绑定、选择域、跨区组合及输入输出，证据回到实际 raw。\nP4 换父由有权限 worker 显式迁移；普通 P5 可修复实际非 root provider，新 generation 必须新批准，保守后代失效、兄弟继续、旧结果 stale，预算与历史保留。\n完整 raw merged 树与 P5 当前有效检查闭包分开；maintenance 候选父变更先排除旧后代，P6/发布仍要求整树有效。\n2.5.0 冻结语言与执行语义；旧 inline 与旧 exporter 保持原规则，正式 semantic revision 采用能力已实现和验证，compatible runtime 不跨此语义边界。",
+    "remaining": "有意后置的语言扩展：局部 patch、兄弟/跨目录共享、自动换父/去重、区域级审批缓存、通用条件求解、自动晚到稿采纳与审阅 IR。\n现存真实历史 run 的实际升级、已发布产物迁移和批量引用转换未执行；这与已经实现并验证的正式 semantic revision 采用能力分别记录。\nconditional-flow-topology 已按用户决定归档保留，产物研究另行开展，剩余清单见 schema_extract/issues/archive/extract_workflow/conditional-flow-topology.json；不能由整区引用或测试通过代替其真实算子产物修订，不承诺节点数、文本压缩比或实际审阅用量下降。"
+  }
+}

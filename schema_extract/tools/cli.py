@@ -180,7 +180,7 @@ def parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--target-repo", type=Path)
     upgrade.add_argument("--repo", type=Path, default=Path.cwd())
     upgrade.add_argument("--state-root", type=Path)
-    standalone = sub.add_parser("standalone", help="materialize one node with its shared Contract as an independent reading view")
+    standalone = sub.add_parser("standalone", help="materialize one node with effective Design and its shared Contract as an independent reading view")
     standalone.add_argument("source", type=Path)
     standalone.add_argument("--output", type=Path, required=True)
     standalone.add_argument("--repo", type=Path, default=Path.cwd())

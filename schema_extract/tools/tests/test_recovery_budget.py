@@ -108,7 +108,7 @@ class BudgetTests(unittest.TestCase):
                      checkpoint="merged", merged_checkpoint="merged", reopening=None)
         state["nodes"] = {entry["id"]: new_node(entry) for entry in state["plan"]}
         for key in ("P1", "P2", "P3", "P4"):
-            state["stages"][key]["status"] = "approved"
+            state["stages"][key].update(status="approved", approval={"saved": True})
         state["nodes"]["root"].update(status="approved", merged=True, approval={"saved": True}, approved_generation=0)
         self.assertEqual({call["node"] for call in next_calls(state)}, {"a", "b"})
         state["nodes"]["b"].update(status="budget_exhausted", reason={"code": "budget_exhausted"})

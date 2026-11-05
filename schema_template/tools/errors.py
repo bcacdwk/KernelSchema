@@ -2,6 +2,10 @@
 from functools import wraps
 
 
+class SchemaError(Exception):
+    """Invalid YAML or task relations (exit 1)."""
+
+
 class ToolError(Exception):
     """The check could not be completed (exit 2)."""
 

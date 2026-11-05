@@ -29,9 +29,9 @@ cp -n schema_template/starter.yaml path/to/task/root.yaml
 
 不能只替换占位值就认为完成：按各篇“填写条件”补齐适用字段，没有内容的可选字段直接省略。例如提取设计需要登记真实的 `meta_data.source`；选择 `refill: none` 时还需补上骨架未列出的 `preassigned`。`Dimension` 表示待确定的独立工作维度；整个任务只有一份工作时，使用 `partition: {}` 并省略 `worktile_order`，见[工作分解](../schema_docs/4.design.work_schedule.md#工作分解)与[工作分配](../schema_docs/4.design.work_schedule.md#工作排列与分配)。
 
-已有任务先读 root 的共享 Contract、目标节点和其他节点的选择条件，再确定影响范围。同一路径的设计改进在原文件修订，不重新复制 starter。遇到新的 workload，先考虑能否完善已有设计；能由同一份 Design 的参数或公式表达的变化留在原节点，例如同一套公式覆盖 cluster 成员数 4、8、16 时，不按成员数拆分。
+已有任务先读 root 的共享 Contract、目标节点的完整有效 Design 和本地 realization，以及各节点独立的选择条件，再确定影响范围。按下节固定规则和全部来源后读取有效视图，不把不同来源时点的原文与展开片段混作设计输入。同一路径的设计改进在原文件修订，不重新复制 starter。遇到新的 workload，先考虑能否完善已有设计；能由同一份 Design 的参数或公式表达的变化留在原节点，例如同一套公式覆盖 cluster 成员数 4、8、16 时，不按成员数拆分。
 
-确实需要并存的不同设计时，从最相关节点复制为新的 `<id>.yaml`，按[节点规则](../schema_docs/0.common.md#派生节点与-dispatch)设置身份、父节点和起始版本，删除复制来的 `contract`，完整填写自己的 Design，重新核对复制来的 `realization` 及反馈是否适用。同步核对设计出处、各节点的选择条件，并维护 `dispatch.md` 的派生树和链接。拆分应有设计理由，每多一条路径都增加维护和验收工作。
+确实需要并存路径时，为新的 `<id>.yaml` 按[节点规则](../schema_docs/0.common.md#派生节点与-dispatch)设置本地元数据、直接父、起始版本和独立选择条件，不保存 `contract`。三个 Design 区域分别选择完整本地定义或 `{from_parent: <直接父ID>}`；不继承父 realization 和反馈。提取 Runner 对首次无稿节点从父元数据模板建立三区域引用，已有草稿、重试和曾批准稿始终保留自己的 raw，不自动转换。同步核对实际设计出处与选择依据，维护 `dispatch.md`。先识别真实差异再选择共享表达，不为压缩文本增加节点或自动换父。
 
 ### 3 填写与修订
 
@@ -39,8 +39,11 @@ cp -n schema_template/starter.yaml path/to/task/root.yaml
 
 修改时先改决定的唯一定义，再沿引用检查受影响的下游：数学值、shape、dtype 或寿命的变化可能影响分块、资源和实现约束；phase、role、动作或资源改名时核对 flow、handoff、milestone、waits_for 与 realization 的引用。共享 Contract 经任务方确认发生变化后，要审阅所有节点是否仍符合它，不能只修当前节点。Coder 追加替代反馈时按[反馈规则](../schema_docs/6.realization.md#有证据的替代反馈)保留原选择与理由；涉及 Design 的变化交给 Planner。
 
+只改变引用区域的一部分时，先用下面的有效视图读取本节点展开内容，把整个区域落为本地定义后再改；不能在 `from_parent` 旁追加字段。共享定义变化后，使用节点重新核对独立选择域、当前参数绑定和跨区组合；不能自动拿父正文覆盖，子原文未改时不增加其版本。改变直接父时，由有权限的 worker 显式迁移 parent 和每个区域，选择引用新父或从旧 checkpoint 落地整个旧区域，再按新依赖独立重审。
 
-按[版本规则](../schema_docs/0.common.md#单份-plan-与元数据)更新实际改动文件的修订号，结合 diff 核对历史递增；检查器只检查它是否为正整数。改动内容由 diff 给出，设计意图仍写在所属 `thesis` 或实现选择的 `reason` 中。实验记录用 `repository@ref:path` 固定它验证的 plan，同一 ref 同时固定该节点与 root；改过设计后不能把旧实验自动视为新版本的证据。
+按[版本规则](../schema_docs/0.common.md#单份-plan-与元数据)更新实际改动文件的修订号，结合 diff 核对历史递增；检查器只检查它是否为正整数。改动内容由 diff 给出，设计意图仍写在所属 `thesis` 或实现选择的 `reason` 中。
+
+实现、优化与实验记录须固定所用规则、各 raw 文件的原始版本和完整来源身份：来源 manifest 覆盖 root、自身及三个区域的所有实际引用链，包括中间转发者与最终本地 provider，记录真实文件名与 raw SHA256；effective identity 同时绑定该 manifest 和区域来源链。下节有效视图提供这两项。同一仓库的 `repository@ref:path` 固定引用可以覆盖整个来源闭包，不能只固定节点与 root。节点与 root 的字节、版本不变时，中间来源变化仍可改变有效设计；版本号相同不证明设计未变，effective identity 也不承诺语义等价。沿用任务沟通和已有实验记录保存这些信息及实际实现、输入、环境和参数，不增加 schema 字段；父节点反馈或旧实验不能自动作为当前有效设计的证据。
 
 ### 4 检查与处理反馈
 
@@ -56,27 +59,35 @@ python3 schema_template/check_yaml.py path/to/task/root.yaml
 python3 schema_template/check_yaml.py --skip-hardware path/to/task/root.yaml
 ```
 
-对正式生成、已展开共享 Contract 的[单文件阅读视图](../schema_docs/0.common.md#单文件阅读视图)，显式使用下面的入口；此模式只读取该文件，保留元数据中的原节点身份，父节点只作出处记录。普通创作节点仍使用上面的全目录检查。
+`--skip-hardware` 只影响内存中的检查视图，不改写文件，返回的任务仍保留原始硬件占位；YAML 文件本身仍须可解析，非硬件结构和关联照常检查。Python API 对应 `schema.validate_file(..., skip_hardware=True)` 或 `validate_directory(..., skip_hardware=True)`。当前仓库不启用目录硬件豁免，不传参数时执行完整检查。
+
+只想查看引用展开结果、辅助阅读或落地整区时，使用只读入口；它允许尚未完成的本地正文和 when，但拒绝非法身份、引用或环：
+
+```sh
+python3 -B schema_template/check_yaml.py --show-effective path/to/task/node.yaml
+```
+
+stdout 返回 `kernel_schema.effective_view.v1` JSON，包括 `validation: not_run`、保留精确数值的 `effective_yaml`、来源 provider/chain、实际来源文件 SHA256 和 `effective_identity`。有效 YAML 含 root Contract、本节点元数据/Realization 和展开的三个 Design 区域；成功只表示可以解析，不表示完整检查或批准。证据须回到真实 raw 文件，不能引用该视图的虚拟行号。
+
+对正式生成、已展开共享 Contract 和 Design 引用的[单文件阅读视图](../schema_docs/0.common.md#单文件阅读视图)，显式使用下面的入口；此模式只读取该文件，保留元数据中的原节点身份，父节点只作出处记录。普通创作节点仍使用上面的全目录检查。
 
 ```sh
 python3 schema_template/check_yaml.py --standalone --skip-hardware path/to/view/node.yaml
 ```
 
-Python API 为 `schema.validate_standalone_file(...)`。文件必须自带完整 Contract 和 Design；该选项不会从目录或历史补齐缺项，硬件豁免仍须单独显式指定。
-
-该选项只影响内存中的检查视图，不改写文件，返回的任务仍保留原始硬件占位；YAML 文件本身仍须可解析，非硬件结构和关联照常检查。Python API 对应 `schema.validate_file(..., skip_hardware=True)` 或 `validate_directory(..., skip_hardware=True)`。当前仓库不启用目录硬件豁免，不传参数时执行完整检查。
+Python API 为 `schema.validate_standalone_file(...)`。文件必须自带完整 Contract 和全部本地 Design 区域；`--standalone` 不会从目录或历史补齐缺项，硬件豁免仍须单独显式指定。严格 standalone 导出须先通过创作任务完整检查，再单独验证生成文件，不能用 `--show-effective` 的解析成功替代。
 
 普通模式也可传入派生节点，检查范围是该文件所在目录直属的全部 `.yaml / .yml`，不递归子目录；因此错误可能来自其他节点，目录内的备份 YAML 也会被当作任务节点。显式 `--standalone` 模式只读指定视图。输入路径相对当前目录解析，在其他目录调用时使用检查脚本的绝对路径。
 
 缺少 PyYAML 时，检查器会给出一条安装命令；安装后重跑同一检查命令。检查本身不下载或安装依赖。
 
-成功时输出任务目录和节点数；失败时按文件、字段路径和修改提示处理，已有字段同时显示 YAML 行列位置，缺字段可能没有行号。先修结构问题，再处理具名关系；修改后重跑同一命令，前一轮错误可能阻止了后续检查。退出状态为：`0` 通过，`1` 输入未通过检查，`2` 参数或工具环境问题导致检查未完成。
+完整检查成功时输出任务目录和节点数；失败时按文件、字段路径和修改提示处理，已有字段同时显示真实 YAML 行列位置，缺字段可能没有行号。继承字段的错误保留使用节点的组合上下文，并定位 provider 原文、当前引用位置及完整来源链。先修 raw 结构与引用，再处理有效 Design 的具名关系；修改后重跑同一命令，前一轮错误可能阻止了后续检查。退出状态为：`0` 通过，`1` 输入未通过检查，`2` 参数、工具环境或容量问题导致检查未完成。
 
 检查不补字段、不重排、不改写 YAML，也不改变文件权限或修改时间。若诊断与文档允许的表达冲突，核对具体规则并报告冲突，不为通过检查删除必要设计信息。人工审阅或实现反馈指出问题时，回到上一步确定修改范围，再检查整个任务。
 
 ### 5 交付
 
-交付任务目录中的 `root.yaml`、存在的派生节点，以及按[索引规则](../schema_docs/0.common.md#选择条件与索引)维护的 `dispatch.md`。派生文件依赖共享 Contract，不作为脱离 root 的完整 plan 交付。源码、硬件资料和实验记录保留在各自实际位置，通过规定的引用定位，不复制进 YAML。
+交付任务目录中的原始 `root.yaml`、存在的派生节点，以及按[索引规则](../schema_docs/0.common.md#选择条件与索引)维护的 `dispatch.md`。派生文件依赖共享 Contract 和实际 Design 引用链，普通发布保留 raw 树，不自动展开或去重；需脱离原树时另外生成 standalone。源码、硬件资料和实验记录保留在各自实际位置，通过规定的引用定位，不复制进 YAML。
 
 任务冻结时，将准备阶段用 tag 或 branch 定位的硬件与编程等 wiki 资料解析到 commit，按 Contract 修改权限确认后填回原 `ref`；引用更新也按版本规则修订 root，并重跑同一检查命令。核对设计出处、参考入口及实验记录均指向实际对象和所声明的版本，而不只是字符串格式合法。
 
@@ -101,6 +112,8 @@ python3 schema_template/tools/pipeline_graph.py path/to/task/root.yaml --skip-ha
 ```
 
 图的编辑以 YAML 为源：修改角色、动作或依赖后重跑同一命令，PNG 随之更新。需要程序化审计或统计时，可使用[只读分析接口](tools/README.md#供-agent-审计与统计)。
+
+绘图使用与完整检查相同的有效 Design，图片来源包含本节点、root 及所有实际中间引用和 provider 的摘要、来源链与有效身份。生成前和发布前复核全部来源，任一依赖漂移都停止发布。旧图片与历史来源记录不自动重写。
 
 采用代表性规模展开起始、若干重复和收尾，不表示实测时间线。按实际 YAML 中的符号使用 `--set NAME=INT` 明确给出取值，`--worktiles` 指定展示的工作序列长度，默认 1；上面的 `N` 仅是命令示例。全部维护示例的可复现命令见[生成 PNG](examples/README.md#生成-png)。取值只用于绘图，不改写 plan，也不从外部配置或旧图片自动补齐。缺少取值、表达式尚不支持或展开超过工具上限时，返回 `2`，不据此判定 YAML 非法。
 

@@ -15,6 +15,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import schema
+from tools.diagnostics import Diagnostic, format_diagnostics
 from tools.pipeline import GraphError, build_phase
 from tools.pipeline.model import ExpansionError
 from tools.pipeline.output import GraphOutput
@@ -63,9 +64,9 @@ def main(argv=None) -> int:
         if not args.check_only:
             output.begin(source, all_nodes=args.all)
         source_hashes = {}
-        directory, task = schema.validate_file(source, notices=notices, source_hashes=source_hashes,
-                                               skip_hardware=args.skip_hardware)
-        files = schema.task_files(directory)
+        directory, resolved = schema.validate_resolved_file(source, notices=notices, source_hashes=source_hashes,
+                                                            skip_hardware=args.skip_hardware)
+        task, files = resolved.effective_task, resolved.source_files
         parameters = {}
         for item in args.set:
             name, value = item.split("=", 1)
@@ -95,14 +96,23 @@ def main(argv=None) -> int:
                 if not args.check_only:
                     samples = {graph.phase: config for graph in graphs}
                     destination = " -> " + str(output.write(files[node], graphs, samples, notes,
-                                                            source_sha256=source_hashes[node]))
+                                                            source_sha256=source_hashes[node],
+                                                            source_manifest=resolved.source_manifest(node),
+                                                            effective_identity=resolved.effective_identity(node),
+                                                            origins=resolved.origins_dict(node)))
                 print(f"{status}: {node} ({len(graphs)} phases, {count} actions){destination}")
             except RenderError as error:
                 print(f"Render not completed: {files[node]}: {error}", file=sys.stderr)
                 result = 2
             except GraphError as error:
                 incomplete = isinstance(error, ExpansionError)
-                print(f"{'Graph not completed: ' if incomplete else ''}{files[node]}: {error}", file=sys.stderr)
+                path, separator, detail = str(error).partition(": ")
+                if separator and path.startswith("design."):
+                    diagnostic = format_diagnostics([Diagnostic(node + "." + path, detail)], files,
+                                                    resolved.documents, resolved=resolved)
+                else:
+                    diagnostic = f"{files[node]}: {error}"
+                print(("Graph not completed: " if incomplete else "") + diagnostic, file=sys.stderr)
                 result = max(result, 2 if incomplete else 1)
         return result
     except schema.SchemaError as error:

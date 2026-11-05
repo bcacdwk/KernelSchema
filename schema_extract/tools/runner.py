@@ -16,7 +16,7 @@ import threading
 import time
 
 from .agent import CodexCLI
-from .artifacts import (UpstreamRequired, _same, check_complete, load_yaml, validate_artifact_sources, validate_artifacts,
+from .artifacts import (UpstreamRequired, _same, check_complete, design_context, load_yaml, validate_artifact_sources, validate_artifacts,
                         validate_plan, write_yaml)
 from .comparators import validate_comparisons
 from .budget import (BUDGET_STOPS, RECOVERY as BUDGET_RECOVERY, call_budget as _budget,
@@ -26,7 +26,7 @@ from .common import (STATE_GUARD, ExtractError, StaleResult, copy_artifacts, dig
 from .inputs import resolve_request
 from .prompts import build_prompt
 from .receipts import (ReceiptFormatError, check_proposal_identity, evidence_identity,
-                       normalize_response, proposal_schema, validate_receipt)
+                       normalize_response, proposal_schema, provider_request_details, validate_receipt)
 from .recovery import (HARD_RECOVERY_STOPS, account, confirm_termination, consume_controls, elapsed_on_disk,
                        handoff_session, retry_classification, retry_delay, termination_observed)
 from .snapshots import freeze_inputs, verify_run_inputs
@@ -35,7 +35,7 @@ from .revisions import resolve_context
 from . import maintenance
 from .revision_control import consume_revision_requests, mark_revision_drained, revision_barrier
 from .stages import (NODE_STOPS, advance, affected_nodes, call_view, effective_nodes, final_eligible,
-                     next_calls, node_signature, owner_for, plan_impact, plan_signature, scope_for, scope_key,
+                     invalidate_final, invalidate_node, next_calls, node_signature, owner_for, plan_impact, plan_signature, scope_for, scope_key,
                      session_group, settle)
 from .store import Store, summary
 
@@ -188,7 +188,8 @@ def _artifact_gate(store: Store, state: dict, lock: dict, attempt: dict, before:
         first_draft=attempt["stage"] == "P5" and not state["nodes"][attempt["node"]].get("authored", False),
         root_revision=attempt["stage"] == "P3" and bool(state.get("reopening") or attempt.get("purpose") == "maintenance"),
         maintenance_fields=maintenance.task_for(state, attempt).get("fields", []) if attempt.get("purpose") == "maintenance" else None,
-        candidate_review=attempt["role"] == "reviewer")
+        candidate_review=attempt["role"] == "reviewer",
+        identity_migration=state["nodes"][attempt["node"]].get("identity_migration"))
     validate_artifact_sources(after, context["source_lock"], decision=decision, parser_root=parser_root)
     validation.update({key: attempt[key] for key in ("semantic_revision", "maintenance_task_id", "purpose", "maintenance_step") if key in attempt})
     return validation
@@ -478,6 +479,91 @@ def _begin_reopen(store: Store, state: dict, attempt: dict, receipt: dict) -> di
     return state
 
 
+def _begin_provider_reopen(store: Store, state: dict, attempt: dict, receipt: dict, details: dict) -> dict:
+    """Repair one actual provider inside P5; unrelated branches remain schedulable."""
+    request = receipt["reopen"]
+    provider = details["provider"]
+    evidence = sorted({digest(evidence_identity(receipt["source_evidence"][index])):
+                       evidence_identity(receipt["source_evidence"][index]) for index in request["evidence"]}.values(), key=digest)
+    key = digest({"provider": provider, "issue_id": request["issue_id"].strip(), "evidence": evidence})
+    owner = state["nodes"][attempt["node"]]
+    def blocked(code, summary):
+        owner.update(status="blocked", reason={"code": code, "summary": summary, "issues": receipt["issues"]})
+        owner["stage"]["status"] = "blocked"
+        settle(state)
+        return state
+    if key in state["reopen_requests"]:
+        return blocked("reopen_already_used", "同一provider问题与固定源码范围已请求过修复；改文案或provider版本不会新增机会。")
+    node = state["nodes"][provider]
+    prior = node.get("approval")
+    if not prior or provider not in effective_nodes(state):
+        raise ExtractError("provider approval is no longer current")
+    store.verify_node(state, provider)
+    prior_receipt, _ = store.verify_approval(state, prior)
+    old_evidence = {digest(evidence_identity(item)) for item in prior_receipt["source_evidence"]}
+    relevant_issues = [issue for issue in receipt["issues"] if node["file"] in issue["scope"] and
+                       any("design." + region in issue["scope"] for region in details["regions"]) and
+                       set(issue["evidence"]) & set(request["evidence"])]
+    correction = any(issue["kind"] in {"transcription", "source_transcription", "schema_conformance"}
+                     for issue in relevant_issues)
+    record = {"key": key, "kind": "provider", "status": "open", "issue_id": request["issue_id"].strip(),
+              "target": request["target"], "provider": provider, "reason": request["reason"],
+              "source_evidence": evidence, "artifact_evidence": deepcopy(receipt["artifact_evidence"]),
+              "issues": deepcopy(relevant_issues), "regions": deepcopy(details["regions"]),
+              "source_manifest": deepcopy(details["source_manifest"]), "effective_identity": details["effective_identity"],
+              "consumer_identity": details["consumer_identity"], "attempt_id": attempt["attempt_id"],
+              "from_stage": "P5", "from_node": attempt["node"], "request_checkpoint": owner.get("draft_checkpoint"),
+              "previous_generation": node["generation"], "previous_approval": deepcopy(prior),
+              "previous_draft_checkpoint": node.get("draft_checkpoint"),
+              "previous_merged_checkpoint": state.get("merged_checkpoint"), "plan_revision": state["plan_revision"]}
+    state["reopen_requests"][key] = record
+    if all(digest(item) in old_evidence for item in evidence) and not correction:
+        record.update(status="rejected", rejection="reopen_requires_new_evidence")
+        return blocked("reopen_requires_new_evidence", "provider请求需固定源码新发现，或有当前定义锚点的具体转录/规范纠错。")
+    descendants = affected_nodes(state, [provider])
+    node["provider_reopen"] = key
+    for identity in descendants:
+        invalidate_node(state["nodes"][identity], require_worker=identity == provider)
+    node["feedback"] = [{"code": "provider_repair", "reopen_key": key, "reason": request["reason"],
+                         "regions": deepcopy(details["regions"]), "source_evidence": evidence,
+                         "artifact_evidence": deepcopy(receipt["artifact_evidence"]), "issues": deepcopy(relevant_issues)}]
+    record["repair_generation"] = node["generation"]
+    record["affected_nodes"] = descendants
+    invalidate_final(state, descendants)
+    state.update(stage="P5", node="root", role=None, mode="normal", status="running", reason=None)
+    settle(state)
+    return state
+
+
+def _merge_check(store: Store, state: dict, merged: Path, *, node_id: str, parser_root: Path, timeout: float) -> dict:
+    """Check a private current-valid closure while retaining the complete raw merge."""
+    import tempfile
+    entries = {entry["id"]: entry for entry in state["plan"]}
+    nodes = effective_nodes(state) | {node_id}
+    filename = entries[node_id]["file"]
+    changed = sha256((merged / filename).read_bytes()) != state["nodes"][node_id].get("approved_sha256")
+    superseded = set(affected_nodes(state, [node_id])) - {node_id} if changed else set()
+    # Maintenance invalidates dependent approvals when this candidate commits.
+    # They already depend on different bytes for this check and cannot block it.
+    nodes -= superseded
+    for identity in list(nodes):
+        parent = entries[identity]["parent"]
+        while parent:
+            nodes.add(parent)
+            parent = entries[parent]["parent"]
+    files = {entries[identity]["file"] for identity in nodes}
+    with tempfile.TemporaryDirectory(prefix=".merge-check-", dir=store.run_dir(state["run_id"])) as temporary:
+        directory = Path(temporary)
+        for name in sorted(files):
+            shutil.copyfile(merged / name, directory / name)
+        hashes = manifest(directory)
+        result = check_complete(directory, parser_root, filename=entries[node_id]["file"], timeout=timeout)
+        if manifest(directory) != hashes or any(sha256((merged / name).read_bytes()) != value for name, value in hashes.items()):
+            raise ExtractError("serial merge check source changed")
+    return {**result, "checked_nodes": sorted(nodes), "checked_files": hashes,
+            "superseded_dependents": sorted(superseded)}
+
+
 def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: dict) -> dict:
     """Validate a result and commit once; late/repeated proposals never move pointers."""
     state = store.load(state["run_id"])
@@ -502,11 +588,21 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
     validation = _artifact_gate(store, state, lock, attempt, before, workspace, gate_decision)
     receipt = normalize_response(proposal, lock, attempt, workspace)
     receipt = validate_receipt(receipt, state, lock, attempt, workspace, validation["changed_files"], rules_lock=semantic)
+    if attempt["stage"] == "P5":
+        validation["design_resolution"] = design_context(state, attempt, workspace,
+            parser_root=rules_root(semantic))["design_resolution"]
+    provider_details = (provider_request_details(receipt, state, attempt, workspace, parser_root=rules_root(semantic))
+                        if receipt["decision"] == "reopen" and receipt["reopen"]["target"].startswith("P5:") else None)
+    if provider_details:
+        validation["provider_reopen"] = provider_details
     receipt_hash = digest(receipt)
     directory = Path(attempt["directory"])
     write_json(directory / "receipt.json", receipt)
     if attempt.get("mode") == "adjudicate" and receipt["decision"] == "approve":
         workspace, validation = _adjudicated_workspace(store, state, lock, attempt, receipt)
+        if attempt["stage"] == "P5":
+            validation["design_resolution"] = design_context(state, attempt, workspace,
+                parser_root=rules_root(semantic))["design_resolution"]
     if attempt["stage"] == "P6":
         _final_inputs(store, state, workspace)
     validation["node_signature"] = attempt["node_signature"]
@@ -543,7 +639,7 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
         check_timeout = _check_timeout(call_view(state, attempt))
         if check_timeout <= 0:
             return _record_check_budget(store, state, attempt, receipt, receipt_hash, workspace, validation, session_id)
-        merge_check = check_complete(merged, rules_root(semantic), timeout=check_timeout)
+        merge_check = _merge_check(store, state, merged, node_id=attempt["node"], parser_root=rules_root(semantic), timeout=check_timeout)
         write_json(directory / "merge_check.json", merge_check)
         validation["merge_check"] = merge_check
         if merge_check["exit_code"]:
@@ -572,7 +668,8 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
         updated["attempt_usage"][attempt["attempt_id"]]["result_checkpoint"] = checkpoint_id
     updated = advance(updated, receipt, checkpoint_id, receipt_hash, validation=validation)
     if receipt["decision"] == "reopen" and attempt.get("purpose") != "maintenance":
-        updated = _begin_reopen(store, updated, attempt, receipt)
+        updated = (_begin_provider_reopen(store, updated, attempt, receipt, provider_details) if provider_details else
+                   _begin_reopen(store, updated, attempt, receipt))
     if attempt["stage"] in {"P2", "P3", "P4"} and receipt["decision"] == "approve":
         store.handoff(updated, attempt, receipt["handoff"], semantic)
     if store.load(state["run_id"]) != state:
@@ -638,7 +735,9 @@ def _recover_call(store: Store, state: dict, lock: dict, attempt: dict, result: 
 def _retire_stale(store: Store, state: dict, attempt: dict, result: dict | None, reason: str) -> dict:
     confirmed = bool(result and result.get("termination", {}).get("confirmed"))
     record = {"attempt_id": attempt["attempt_id"], "node": attempt["node"], "reason": reason,
-              "generation": attempt["generation"], "termination_confirmed": confirmed}
+              "generation": attempt["generation"], "termination_confirmed": confirmed,
+              "workspace": attempt["workspace"], "base_checkpoint": attempt["base_checkpoint"],
+              "recovery_condition": "旧依赖正文仅作只读线索；当前worker在新依赖和合法范围内显式采用后重新检查审阅。"}
     state["stale_results"][attempt["attempt_id"]] = record
     if confirmed:
         _release(state, attempt)

@@ -17,7 +17,7 @@
 
 ## 需要解决的表达问题
 
-1. [条件流程绕过现行规范](issues/extract_workflow/conditional-flow-topology.json)。GDN 的 `normalize`、FMHA 的 `segment`、MoE 的大小准备链，以及 sparse 的 `packed/mma` 都是实际提交集合的变化。现行 flow 规则给出固定提交和依赖，产物另外在正文中要求删去条目或改变前驱。这是未经定义的语义，不能按已提交动作的 no-op 解释。优先以 GDN 的开关和 sparse 的 probe 后选择核对现行 dispatch/phase/launch/handoff 规则能否合法表达；确有不适配、缺失或冲突时，再给出具体条款和反例提报维护。
+1. [条件流程绕过现行规范](issues/archive/extract_workflow/conditional-flow-topology.json)。GDN 的 `normalize`、FMHA 的 `segment`、MoE 的大小准备链，以及 sparse 的 `packed/mma` 都是实际提交集合的变化。现行 flow 规则给出固定提交和依赖，产物另外在正文中要求删去条目或改变前驱。这是未经定义的语义，不能按已提交动作的 no-op 解释。优先以 GDN 的开关和 sparse 的 probe 后选择核对现行 dispatch/phase/launch/handoff 规则能否合法表达；确有不适配、缺失或冲突时，再给出具体条款和反例提报维护。
 2. [角色成员范围的工具限制与绕行写法](issues/archive/schema_template/symbolic-member-bounds.json)。MoE `ws_fused_ws` 将 Epilogue 登记为 `warp[3:11]`，正文却说实际只实例化 `warp[3:3+EPI]`；gather 同样需要 `Nt/32`。这违反 member 表达真实参与集合的要求。原 P5 worker 已提报数字端点限制，初验沿用其稳定 ID 登记；提报本身并不授权采用最大范围加正文取消的办法。后续 2.2.6 已统一成员端点的规范、关联检查和有限展开，旧产物尚待修订，当前为部分采纳。
 
 初验时两项均保持待决；后续处理见文末。没有把产物中的绕行写法追加为既成规范，也没有把未修订的旧产物记录为已解决。
@@ -103,3 +103,5 @@ MoE 的 60 个节点包含独立 FC1/FC2 执行族组合、融合与 split-K/las
 源码与输入角色绑定不变，非连续 core 缺少 copyback、mini-chunk 读取退休、跨 stream/重入及外部比较器缺口继续披露；本次没有修 kernel 或进行 GPU 验证。FMHA、MoE 的表达修订继续推进，Sparse 保留上游源缺陷阻塞，因此 `conditional-flow-topology` 整体仍待决，其他旧产物的保留意见不变。
 
 以上保留该验收时点；后续 2.2.9 已澄清源缺陷抽象边界，Sparse 的低层槽位问题现已[记录归档](issues/archive/kernel_wiki/sparse-tc-control-layout-overlap.json)，不再作为提取阻塞，实际 Design/P6 仍须独立完成和审阅。
+
+2026-11-05，依用户决定将 [conditional-flow-topology](issues/archive/extract_workflow/conditional-flow-topology.json)按部分采纳归档，提取侧方案已确定，schema 产物研究另行开展。前文待决状态保留各验收时点含义；FMHA、MoE、Sparse 的未收口产物及出处见归档 `remaining`，初验保留意见不因本次归档撤销。

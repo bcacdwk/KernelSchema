@@ -2,6 +2,8 @@
 
 本页完成 root 的 Design 和适用的 Realization；其中“节点逐段方法”也供 P5 使用。
 
+root 的 math_reshape、work_schedule、tile_pipeline 必须全部本地完整定义，不使用 `from_parent`。P5 复用逐段方法时，按其阶段规则审定本地或显式引用后的完整有效 Design；名称、参数与跨区接口在使用节点中绑定，realization 始终本地。
+
 以下准入、推进与重开用于普通提取；`maintenance` 只执行本次任务，写入还受调用的文件/字段授权限制，不能据本页扩大范围。
 
 ## 准入与应读材料

@@ -26,7 +26,8 @@ from .snapshots import freeze_inputs, frozen_invocation, verify_executor, verify
 CAPABILITY = "runtime_binding.v1"
 EXECUTOR_CAPABILITIES = ("summary.v1", "state_guard.v1", "hold.v1", "scoped_restart.v1",
                          "scoped_recovery.v2", "continuation.v1", "audit.v1", "proposal.v1",
-                         "budget_extension.v1", "runtime_binding.v1", "semantic_revision.v1")
+                         "budget_extension.v1", "runtime_binding.v1", "semantic_revision.v1",
+                         "design_region_derivation.v1")
 STATE_FORMAT = "schema_extract.run.v2.runtime.v1"
 BINDING_FORMAT = "schema_extract.execution_binding.v1"
 INPUT_POLICY = "source_lock_for_source_config_semantic_lock_for_specs_checks_and_prompt_materials"
@@ -128,6 +129,7 @@ def _record(store, state, binding_id, prefix, lock, evidence=None):
     if verify_review(report, review)["outcome"] != "compatible_runtime":
         raise ExtractError("execution binding does not have compatible independent review")
     expected = _executor(target)
+    _same_execution_semantics(semantic, target)
     if record["executor"] != expected:
         raise ExtractError("execution binding executor identity changed")
     if evidence:
@@ -305,6 +307,14 @@ def _retained_approvals(store, state):
         store.verify_node(state, node_id)
 
 
+def _same_execution_semantics(semantic: dict, executor: dict) -> None:
+    """2.5 authoring and approval semantics require a formal semantic revision."""
+    capability = "design_region_derivation.v1"
+    if ((capability in _executor(semantic)["capabilities"]) !=
+            (capability in _executor(executor)["capabilities"])):
+        raise ExtractError("Design region derivation and provider reopening require semantic revision; compatible runtime cannot change these semantics")
+
+
 def upgrade_runtime(store, run_id: str, report: dict, review: dict, *, target_repo: Path | None = None) -> dict:
     """Register only. Never dispatch, clear controls, reset budgets or reapprove."""
     with store.writer(run_id):
@@ -337,6 +347,7 @@ def upgrade_runtime(store, run_id: str, report: dict, review: dict, *, target_re
         verify_report(store, report, target_lock=target)
         from .revisions import semantic_rules_lock, STATE_FORMAT as SEMANTIC_STATE_FORMAT
         semantic = semantic_rules_lock(store, state)
+        _same_execution_semantics(semantic, target)
         record = {"format": BINDING_FORMAT, "run_id": run_id, "input_fingerprint": state["input_fingerprint"],
                   "inputs_lock_sha256": digest(lock), "predecessor": history[-1] if history else None,
                   "before_sha256": digest(state), "report_id": report["id"], "review_sha256": digest(review),

@@ -151,6 +151,7 @@ def effective_nodes(state: dict) -> set[str]:
     planned = {entry["id"] for entry in state.get("plan") or []}
     return {node_id for node_id in planned if (node := state["nodes"].get(node_id))
             and node.get("status") == "approved" and node.get("merged") and node.get("approval")
+            and not node.get("identity_migration") and not node.get("provider_reopen")
             and approval_is_current(state, node["approval"])
             and node.get("approved_generation") == node.get("generation")}
 
@@ -265,6 +266,33 @@ def new_node(entry: dict) -> dict:
             "role": "worker", "mode": "normal", "feedback": [], "reason": None, "authored": False}
 
 
+def needs_authoring(node: dict) -> bool:
+    return bool(node.get("identity_migration") or node.get("provider_reopen")) and (
+        node.get("authored_generation") != node.get("generation"))
+
+
+def invalidate_node(node: dict, *, require_worker=False) -> None:
+    """Retain content, approval history and accounting while fencing old decisions."""
+    complete = bool(node.get("approval") or node.get("role") == "reviewer")
+    node["generation"] += 1
+    node["last_draft_checkpoint"] = node.get("draft_checkpoint") or node.get("last_draft_checkpoint")
+    node["last_approval"] = node.get("approval") or node.get("last_approval")
+    worker = require_worker or needs_authoring(node) or not complete
+    node.update(approval=None, approved_generation=None, approved_sha256=None, merged=False,
+                approval_required_generation=node["generation"], status="pending" if worker else "reviewing",
+                role="worker" if worker else "reviewer", mode="normal", reason=None)
+    node["stage"]["last_approval"] = node["stage"].get("approval") or node["stage"].get("last_approval")
+    node["stage"].update(status=node["status"], approval=None)
+
+
+def invalidate_final(state: dict, nodes=()) -> None:
+    scope = state["stages"]["P6"]
+    scope["last_approval"] = scope.get("approval") or scope.get("last_approval")
+    scope.update(status="pending", approval=None, generation=scope["generation"] + 1)
+    state["final_review_started"] = False
+    state["pending_rechecks"] = sorted(set(state.get("pending_rechecks", [])) | set(nodes))
+
+
 def plan_impact(state: dict, plan: list, *, root_changed=False) -> set[str]:
     old = {entry["id"]: entry for entry in state.get("plan") or []}
     new = {entry["id"]: entry for entry in plan}
@@ -279,35 +307,52 @@ def plan_impact(state: dict, plan: list, *, root_changed=False) -> set[str]:
         changed = expanded
 
 
-def install_plan(state: dict, plan: list, invalidated: set[str]) -> None:
+def install_plan(state: dict, plan: list, invalidated: set[str], *, plan_revision: int | None = None) -> None:
     """Retire identities without deleting their budgets, drafts or used decisions."""
     planned = {entry["id"]: entry for entry in plan}
+    old_plan = {entry["id"]: entry for entry in state.get("plan") or []}
     for node_id, node in state["nodes"].items():
         if node_id == "root":
             continue
-        if node_id in invalidated:
-            node["generation"] += 1
-            node["last_draft_checkpoint"] = node["draft_checkpoint"] or node.get("last_draft_checkpoint")
-            node["last_approval"] = node["approval"] or node.get("last_approval")
-            complete_candidate = bool(node.get("approval") or node.get("role") == "reviewer")
-            node.update(approval=None, approved_generation=None, approved_sha256=None,
-                        merged=False, status="reviewing" if complete_candidate else "pending",
-                        role="reviewer" if complete_candidate else node.get("role", "worker"), reason=None)
-            node["stage"]["status"], node["stage"]["approval"] = node["status"], None
+        reparented = node_id in old_plan and node_id in planned and old_plan[node_id]["parent"] != planned[node_id]["parent"]
+        if reparented:
+            previous = node.get("identity_migration")
+            if previous:
+                node.setdefault("identity_migration_history", []).append(deepcopy(previous))
+            node["identity_migration"] = {
+                "old_parent": previous["old_parent"] if previous else old_plan[node_id]["parent"],
+                "new_parent": planned[node_id]["parent"],
+                "old_checkpoint": previous["old_checkpoint"] if previous else node.get("draft_checkpoint") or state.get("merged_checkpoint"),
+                "plan_revision": state.get("plan_revision", 0) if plan_revision is None else plan_revision,
+                "reason": "P4 changed the direct parent; worker must explicitly migrate raw parent and Design references."}
+        if node_id in invalidated or reparented:
+            invalidate_node(node, require_worker=reparented)
         if node_id not in planned:
             node["status"] = "removed"
+            key = node.pop("provider_reopen", None)
+            if key:
+                state["reopen_requests"][key].update(status="retired", retired_reason="provider removed by P4",
+                                                     retired_plan_revision=state.get("plan_revision", 0))
     for node_id, entry in planned.items():
         if node_id == "root":
             continue
         node = state["nodes"].setdefault(node_id, new_node(entry))
         node.update(file=entry["file"], parent=entry["parent"])
     state["plan"] = deepcopy(plan)
+    if old_plan and invalidated:
+        invalidate_final(state, invalidated & planned.keys())
     state["pending_rechecks"] = [node for node in state["pending_rechecks"] if node in planned]
 
 
 def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, validation: dict) -> None:
     identity = receipt["identity"]
     stage, node_id = identity["stage"], identity["node"]
+    if stage == "P5":
+        node = result["nodes"][node_id]
+        if needs_authoring(node):
+            raise ExtractError("provider repair/identity migration requires a current-generation worker draft before independent approval")
+        if identity.get("generation", node["generation"]) != node["generation"]:
+            raise ExtractError("approval belongs to an obsolete node generation")
     scope = scope_for(result, identity)
     approval = {"attempt_id": identity["attempt_id"], "receipt_sha256": receipt_hash,
                 "checkpoint": checkpoint_id, "input_fingerprint": identity["input_fingerprint"],
@@ -320,6 +365,10 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
                 "conclusions": receipt["conclusions"], "issues": receipt["issues"]}
     approval.update({key: identity[key] for key in ("semantic_revision", "maintenance_task_id", "purpose", "maintenance_step")
                      if key in identity})
+    resolution = validation.get("design_resolution", {}).get("nodes", {}).get(node_id)
+    if stage == "P5" and resolution:
+        approval.update(effective_identity=resolution["effective_identity"], source_manifest=resolution["source_manifest"],
+                        design_origins=resolution["origins"])
     scope["status"], scope["approval"] = "approved", approval
     result["nodes"][node_id]["approved_checkpoints"][stage] = checkpoint_id
     owner = owner_for(result, identity)
@@ -336,7 +385,8 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
         if not maintaining:
             result["stage"], result["role"] = "P4", "worker"
     elif stage == "P4":
-        install_plan(result, receipt["plan"], set(validation.get("invalidated_nodes", [])))
+        revision = result["plan_revision"] + int(maintaining and plan_signature(result.get("plan")) != plan_signature(receipt["plan"]))
+        install_plan(result, receipt["plan"], set(validation.get("invalidated_nodes", [])), plan_revision=revision)
         result["merged_checkpoint"] = checkpoint_id
         result["nodes"]["root"]["merged"] = True
         if result.get("reopening"):
@@ -353,6 +403,13 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
                     approved_sha256=approval["artifact_digests"][node["file"]],
                     approved_generation=node["generation"], reason=None)
         result["merged_checkpoint"] = checkpoint_id
+        migration = node.pop("identity_migration", None)
+        if migration:
+            node.setdefault("identity_migration_history", []).append({**migration, "status": "complete", "approval": deepcopy(approval)})
+        key = node.pop("provider_reopen", None)
+        if key:
+            result["reopen_requests"][key].update(status="closed", closing_approval=deepcopy(approval),
+                                                closed_generation=node["generation"])
     elif stage == "P6":
         for node_id in result["pending_rechecks"]:
             node = result["nodes"][node_id]
@@ -413,6 +470,8 @@ def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, *
         scope["status"] = "draft"
         owner["feedback"] = [receipt["summary"]]
     elif role == "worker" and decision in {"complete", "blocked"}:
+        if stage == "P5" and decision == "complete":
+            owner["authored_generation"] = owner["generation"]
         owner["role"] = "reviewer"
         scope["status"] = "reviewing"
         owner["feedback"] = [receipt["summary"], *receipt["issues"]] if decision == "blocked" else []

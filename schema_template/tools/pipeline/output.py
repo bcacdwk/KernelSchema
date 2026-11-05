@@ -82,15 +82,30 @@ class GraphOutput:
         for path in sorted(sources):
             path.with_suffix(".png").unlink(missing_ok=True)
 
-    def write(self, source: Path, graphs: list, samples: dict, notes: list[str], *, source_sha256: str) -> Path:
+    def write(self, source: Path, graphs: list, samples: dict, notes: list[str], *, source_sha256: str,
+              source_manifest: dict[str, str] | None = None, effective_identity: str | None = None,
+              origins: dict | None = None) -> Path:
+        manifest = dict(source_manifest) if source_manifest is not None else {source.name: source_sha256}
+        if manifest.get(source.name) != source_sha256:
+            raise RenderError(f"{source}: source manifest does not match the checked source")
+
         def unchanged():
-            if hashlib.sha256(source.read_bytes()).hexdigest() != source_sha256:
-                raise RenderError(f"{source}: source changed after checking; rerun checking and rendering")
+            for name, digest in manifest.items():
+                if Path(name).name != name or Path(name).suffix not in {".yaml", ".yml"}:
+                    raise RenderError(f"{source}: invalid source manifest filename {name!r}")
+                dependency = source.parent / name
+                try:
+                    current = hashlib.sha256(dependency.read_bytes()).hexdigest()
+                except OSError as error:
+                    raise RenderError(f"{dependency}: source changed after checking; rerun checking and rendering") from error
+                if current != digest:
+                    raise RenderError(f"{dependency}: source changed after checking; rerun checking and rendering")
 
         unchanged()
         title = source.parent.name + " / " + source.stem
         image = graphviz(dot_text(title, graphs, samples, notes))
         information = {"kind": "pipeline_graph", "source": source.name, "source_sha256": source_sha256,
+                       "source_manifest": manifest, "effective_identity": effective_identity, "origins": origins or {},
                        "samples": samples, "notes": notes, "acyclic": all(not graph.cycle for graph in graphs)}
         try:
             image = stamp(image, information)
