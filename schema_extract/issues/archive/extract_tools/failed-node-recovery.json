@@ -1,0 +1,17 @@
+{
+  "id": "failed-node-recovery",
+  "category": "extract_tools",
+  "problem": "有些调用的进程已经退出，记录仍停在“未确认终止”。恢复单个失败节点时，又往往要等整个算子的其他调用结束。退出后的收尾和失败节点的重试不够方便，拖慢了后续工作。",
+  "evidence": [
+    "基线 58a4d92 的 restart_evidence 要求整个 run 无在途调用，活跃 Runner 的普通 resume 只返回 already_running。",
+    "schema_extract/tools/runner.py::_consume_scope_retries/_reconcile_orphans 由唯一写者结算目标范围，保留健康兄弟；失去原 Runner 的调用仍受原 attempt、阶段和算子截止约束。",
+    "schema_extract/tools/tests/test_scoped_recovery.py 的五个集中用例通过，覆盖兄弟进展、父变更/控制优先级、无 ack 消费、stop 撤销和原超时接管；本地进程场景覆盖 gate 登记失败及 leader 退出后代收尾。"
+  ],
+  "proposal": "沿用 Runner 和 retries 账本提供 resume --scope；严格绑定失败身份与依赖，结算后有限恢复，未知终止保持 fence，重试不增加额度。",
+  "necessity": "即使没有升级基础设施，普通调用失败也会遇到这个问题。已有可恢复的分支长时间等待，影响整个算子的完成时间。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.3.0",
+    "reason": "单范围请求、唯一 Runner 消费、退出后的对账及原超时接管已实现并通过集中验证。自动恢复仅接受已授权、确认终止的 EX_TEMPFAIL 75，普通修复继续受分类、次数和原预算约束；此工具决定不表示历史任务已经恢复。"
+  }
+}

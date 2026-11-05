@@ -12,6 +12,19 @@
 
 ## 分类口径
 
+2.3.0 完成以下稳定性工具改进，最终 10 个选定场景通过；全部使用隔离状态、固定计数与本地替身，真实旧 run 未升级。
+
+| Issue | 本次决定 | 保留边界 |
+| --- | --- | --- |
+| [progress-preserving-continuation](archive/extract_workflow/progress-preserving-continuation.json) | 2.4.0 采纳：未完成 run 的连续语义修订、保稿维护与同 run 执行器登记 | 仅隔离验证，真实旧 run 和已完成产物未迁移 |
+| [failed-node-recovery](archive/extract_tools/failed-node-recovery.json) | 已解决：单范围结算、恢复及原超时接管 | 未知终止保留 fence，预算和控制优先级不变 |
+| [reminder-ack-delay](archive/extract_tools/reminder-ack-delay.json) | 部分采纳：后台观察及已授权恢复独立于 ack | 历史约 11 小时 queue→ack 延迟根因仍未知 |
+| [core-dump-in-snapshot](archive/extract_tools/core-dump-in-snapshot.json) | 部分采纳：运行和诊断 cwd 移到 run/attempt | 未证明宿主 core handler 的历史原因或落盘行为 |
+| [budget-and-usage-accounting](archive/extract_workflow/budget-and-usage-accounting.json) | 部分采纳：根会话有据增量、去重和等待观察 | 子会话、完整费用及历史缺采样仍未知 |
+| [pipeline-graph-skip-hardware](archive/schema_template/pipeline-graph-skip-hardware.json) | 已解决：图入口显式透传硬件豁免 | 默认完整检查；旧冻结版本不自动获得能力 |
+
+[conditional-flow-topology](extract_workflow/conditional-flow-topology.json) 与 [sparse-tc-control-layout-overlap](kernel_wiki/sparse-tc-control-layout-overlap.json) 继续独立待决；上述工具验证不改变真实产物或源 kernel 的验收状态。
+
 第一类是核心结果、表达和 Review；第二类是既有功能的局部质量修复；第三类是可选新增能力。类别、是否需要用户讨论与解决状态分别判断，第二类多数已修，无需重构。本次索引文案勘误属于第二类。
 
 ## 逐项判断

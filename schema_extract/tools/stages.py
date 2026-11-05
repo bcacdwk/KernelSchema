@@ -77,11 +77,16 @@ def scope_for(state: dict, call: dict | None = None) -> dict:
 
 
 def owner_for(state: dict, call: dict) -> dict:
+    if call.get("purpose") == "maintenance":
+        from .maintenance import task_for
+        return task_for(state, call)
     return state["nodes"][call["node"]] if call["stage"] == "P5" else state
 
 
 def session_group(state: dict, call: dict | None = None) -> str:
     call = call or state
+    if call.get("purpose") == "maintenance":
+        return "maintenance:" + call["maintenance_task_id"]
     if call.get("mode") == "signoff":
         return "P6_signoff"
     if call["stage"] == "P5":
@@ -104,8 +109,13 @@ def writable_files(state: dict, call: dict | None = None) -> list[str]:
     call = call or state
     if call["role"] != "worker" or call.get("mode", "normal") != "normal":
         return []
-    return stage_files(call["stage"], node_entry=state["nodes"].get(call["node"]),
-                       revision_scope=state["revision_scope"])
+    allowed = stage_files(call["stage"], node_entry=state["nodes"].get(call["node"]),
+                          revision_scope=state["revision_scope"])
+    if call.get("purpose") == "maintenance":
+        from .maintenance import task_for
+        paths = {item["path"] for item in task_for(state, call).get("fields", [])}
+        return [name for name in allowed if name in paths]
+    return allowed
 
 
 def call_view(state: dict, call: dict) -> dict:
@@ -116,6 +126,12 @@ def call_view(state: dict, call: dict) -> dict:
         node = state["nodes"][call["node"]]
         value["checkpoint"] = node["draft_checkpoint"] or state["merged_checkpoint"]
         value["feedback"] = node["feedback"]
+    if call.get("purpose") == "maintenance":
+        from .maintenance import task_for
+        task = task_for(state, call)
+        value.update(purpose="maintenance", maintenance_task_id=task["task_id"],
+                     maintenance_step=task["step"], checkpoint=task["draft_checkpoint"],
+                     feedback=task.get("feedback", []))
     value["active_attempt"] = state["active_attempts"].get(scope_key(call["stage"], call["node"]))
     return value
 
@@ -131,14 +147,18 @@ def plan_signature(plan: list | None) -> str:
 
 
 def effective_nodes(state: dict) -> set[str]:
+    from .revisions import approval_is_current
     planned = {entry["id"] for entry in state.get("plan") or []}
     return {node_id for node_id in planned if (node := state["nodes"].get(node_id))
             and node.get("status") == "approved" and node.get("merged") and node.get("approval")
+            and approval_is_current(state, node["approval"])
             and node.get("approved_generation") == node.get("generation")}
 
 
 def final_eligible(state: dict) -> bool:
+    from .revisions import approval_is_current
     if not state.get("plan") or not all(state["stages"][stage]["status"] == "approved"
+                                       and approval_is_current(state, state["stages"][stage].get("approval"))
                                        for stage in ("P1", "P2", "P3", "P4")):
         return False
     planned = {item["id"] for item in state["plan"]}
@@ -159,6 +179,9 @@ NODE_STOPS = {"blocked", "budget_exhausted", "tool_error", "invalid_receipt", "c
 
 
 def next_calls(state: dict) -> list[dict]:
+    from .maintenance import active, next_calls as maintenance_calls
+    if active(state):
+        return maintenance_calls(state)
     if state["status"] != "running":
         return []
     if state["stage"] not in STAGES:
@@ -206,6 +229,11 @@ def _blocked(result: dict, receipt: dict, code="missing_input") -> None:
 
 def settle(result: dict) -> None:
     """Settle P5 only after considering *all* runnable nodes and active fences."""
+    from .maintenance import active, resume_deferred, settle as settle_maintenance
+    resume_deferred(result)
+    if active(result):
+        settle_maintenance(result)
+        return
     if result["stage"] != "P5":
         return
     result["checkpoint"] = result["merged_checkpoint"]
@@ -261,10 +289,11 @@ def install_plan(state: dict, plan: list, invalidated: set[str]) -> None:
             node["generation"] += 1
             node["last_draft_checkpoint"] = node["draft_checkpoint"] or node.get("last_draft_checkpoint")
             node["last_approval"] = node["approval"] or node.get("last_approval")
+            complete_candidate = bool(node.get("approval") or node.get("role") == "reviewer")
             node.update(approval=None, approved_generation=None, approved_sha256=None,
-                        draft_checkpoint=None, merged=False, status="pending",
-                        role="worker", mode="normal", feedback=[], reason=None)
-            node["stage"]["status"], node["stage"]["approval"] = "pending", None
+                        merged=False, status="reviewing" if complete_candidate else "pending",
+                        role="reviewer" if complete_candidate else node.get("role", "worker"), reason=None)
+            node["stage"]["status"], node["stage"]["approval"] = node["status"], None
         if node_id not in planned:
             node["status"] = "removed"
     for node_id, entry in planned.items():
@@ -289,17 +318,23 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
                 "artifact_digests": validation.get("artifact_digests") or
                                     {item["path"]: item["sha256"] for item in receipt["artifacts"]},
                 "conclusions": receipt["conclusions"], "issues": receipt["issues"]}
+    approval.update({key: identity[key] for key in ("semantic_revision", "maintenance_task_id", "purpose", "maintenance_step")
+                     if key in identity})
     scope["status"], scope["approval"] = "approved", approval
     result["nodes"][node_id]["approved_checkpoints"][stage] = checkpoint_id
     owner = owner_for(result, identity)
     owner["feedback"], owner["mode"] = [], "normal"
-    if stage in {"P1", "P2"}:
+    maintaining = identity.get("purpose") == "maintenance"
+    if maintaining and stage in {"P1", "P2", "P3", "P4"}:
+        result["merged_checkpoint"] = checkpoint_id
+    if stage in {"P1", "P2"} and not maintaining:
         result["stage"], result["role"] = ("P2" if stage == "P1" else "P3"), "worker"
     elif stage == "P3":
         root = result["nodes"]["root"]
         root.update(status="approved", approval=approval, approved_sha256=approval["artifact_digests"]["root.yaml"],
                     approved_generation=root["generation"])
-        result["stage"], result["role"] = "P4", "worker"
+        if not maintaining:
+            result["stage"], result["role"] = "P4", "worker"
     elif stage == "P4":
         install_plan(result, receipt["plan"], set(validation.get("invalidated_nodes", [])))
         result["merged_checkpoint"] = checkpoint_id
@@ -310,7 +345,8 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
             result["reopening"]["invalidated_nodes"] = validation.get("invalidated_nodes", [])
             result["plan_history"].append(deepcopy(result["reopening"]))
         result["reopening"] = None
-        result.update(stage="P5", node="root", role=None, status="running")
+        if not maintaining:
+            result.update(stage="P5", node="root", role=None, status="running")
     elif stage == "P5":
         node = result["nodes"][node_id]
         node.update(status="approved", merged=True, approval=approval,
@@ -330,6 +366,9 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
 
 def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, *, validation: dict | None = None) -> dict:
     """No IO or model calls; identical saved inputs yield identical decisions."""
+    if receipt["identity"].get("purpose") == "maintenance":
+        from .maintenance import advance as advance_maintenance
+        return advance_maintenance(state, receipt, checkpoint_id, receipt_hash, validation or {})
     result = deepcopy(state)
     attempt_id = receipt["identity"]["attempt_id"]
     if attempt_id in state["accepted_receipts"]:

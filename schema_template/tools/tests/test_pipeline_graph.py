@@ -544,6 +544,27 @@ class GraphCliTests(TaskCase):
                                str(self.directory / "root.yaml"), "--check-only", *options],
                               cwd="/tmp", capture_output=True, text=True, env=env)
 
+    def test_skip_hardware_is_explicit_and_preserves_other_checks(self):
+        task = deepcopy(self.base)
+        put(task, ("root", "contract", "hardware_specification"), "<hardware placeholder>")
+        self.write_task(task)
+        before = self.snapshot()
+        result = self.run_graph()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("hardware_specification", result.stderr)
+        result = self.run_graph("--skip-hardware")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Acyclic sample", result.stdout)
+        self.assertIn("Hardware skipped explicitly", result.stderr)
+        self.assertEqual(before, self.snapshot())
+
+        put(task, ROLE + ("info", "execution_mode"), "sync")
+        self.write_task(task)
+        result = self.run_graph("--skip-hardware")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("execution_mode", result.stderr)
+        self.assertNotIn("Acyclic sample", result.stdout)
+
     def test_missing_parameters_are_not_reported_as_invalid_yaml(self):
         task = deepcopy(self.base)
         put(task, PIPE + ("domain",), {"i": [0, "N"]})

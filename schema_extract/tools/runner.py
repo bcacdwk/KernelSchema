@@ -8,6 +8,7 @@ from pathlib import Path
 import os
 import inspect
 import json
+import math
 import queue
 import shutil
 import stat
@@ -26,8 +27,13 @@ from .inputs import resolve_request
 from .prompts import build_prompt
 from .receipts import (ReceiptFormatError, check_proposal_identity, evidence_identity,
                        normalize_response, proposal_schema, validate_receipt)
-from .recovery import account, confirm_termination, consume_controls, elapsed_on_disk, handoff_session
-from .snapshots import freeze_inputs, verify_executor, verify_run_inputs
+from .recovery import (HARD_RECOVERY_STOPS, account, confirm_termination, consume_controls, elapsed_on_disk,
+                       handoff_session, retry_classification, retry_delay, termination_observed)
+from .snapshots import freeze_inputs, verify_run_inputs
+from .runtime import execution_boundary, verify_execution
+from .revisions import resolve_context
+from . import maintenance
+from .revision_control import consume_revision_requests, mark_revision_drained, revision_barrier
 from .stages import (NODE_STOPS, advance, affected_nodes, call_view, effective_nodes, final_eligible,
                      next_calls, node_signature, owner_for, plan_impact, plan_signature, scope_for, scope_key,
                      session_group, settle)
@@ -171,22 +177,29 @@ def _rebuild_directory(directory: Path) -> None:
         shutil.rmtree(directory)
 
 
-def _artifact_gate(state: dict, lock: dict, attempt: dict, before: Path, after: Path,
+def _artifact_gate(store: Store, state: dict, lock: dict, attempt: dict, before: Path, after: Path,
                    decision: str | None, *, role: str | None = None) -> dict:
+    context = resolve_context(store, state, attempt)
+    parser_root = rules_root(context["rules_lock"])
     entry = next((item for item in state.get("plan") or [] if item["id"] == attempt["node"]), None)
     validation = validate_artifacts(attempt["stage"], role or attempt["role"], before, after,
-        rules_root(lock) / "schema_template/starter.yaml", decision=decision,
+        parser_root / "schema_template/starter.yaml", decision=decision,
         node_entry=entry, revision_scope=state["revision_scope"],
         first_draft=attempt["stage"] == "P5" and not state["nodes"][attempt["node"]].get("authored", False),
-        root_revision=attempt["stage"] == "P3" and bool(state.get("reopening")))
-    validate_artifact_sources(after, lock, decision=decision)
+        root_revision=attempt["stage"] == "P3" and bool(state.get("reopening") or attempt.get("purpose") == "maintenance"),
+        maintenance_fields=maintenance.task_for(state, attempt).get("fields", []) if attempt.get("purpose") == "maintenance" else None,
+        candidate_review=attempt["role"] == "reviewer")
+    validate_artifact_sources(after, context["source_lock"], decision=decision, parser_root=parser_root)
+    validation.update({key: attempt[key] for key in ("semantic_revision", "maintenance_task_id", "purpose", "maintenance_step") if key in attempt})
     return validation
 
 
 def _draft(store: Store, state: dict, attempt: dict, workspace: Path, *, plan=None) -> str:
     checkpoint_id = store.checkpoint(state, workspace, attempt_id=attempt["attempt_id"],
                                      stage=attempt["stage"], node=attempt["node"], parent=attempt["base_checkpoint"])
-    if attempt["stage"] != "P5":
+    if attempt.get("purpose") == "maintenance":
+        maintenance.task_for(state, attempt)["draft_checkpoint"] = checkpoint_id
+    elif attempt["stage"] != "P5":
         state["checkpoint"] = checkpoint_id
     state["recoverable_checkpoint"] = checkpoint_id
     if attempt["attempt_id"] in state.get("attempt_usage", {}):
@@ -213,6 +226,11 @@ def _record_check_budget(store: Store, state: dict, attempt: dict, receipt: dict
                        "checkpoint": call_view(updated, attempt)["checkpoint"], "recovery_condition": BUDGET_RECOVERY.format(run_id=state["run_id"])}
     validation["check"] = {"kind": "budget", "exit_code": None, "not_run": True}
     write_json(Path(attempt["directory"]) / "validated.json", {"receipt_sha256": receipt_hash, **validation})
+    if attempt.get("purpose") == "maintenance":
+        task = maintenance.task_for(updated, attempt)
+        if task["step"] != "verify" and receipt["decision"] in {"complete", "approve"}:
+            task.update(step="verify", role="reviewer")
+        maintenance.block(updated, attempt, owner["reason"], status="budget_exhausted")
     if attempt.get("mode") in {"adjudicate", "signoff"}:
         return _stop_once(store, updated, attempt, owner["reason"])
     settle(updated)
@@ -235,6 +253,11 @@ def _record_check_failure(store: Store, state: dict, attempt: dict, receipt: dic
                          "summary": "检查器退出1；诊断已交当前修改者。" if code == 1 else "检查器退出2；需要修复工具/环境后按原预算恢复。",
                          "check": validation["check"], "recovery_condition": "修复记录中的检查诊断并重新核对本阶段。"}
     write_json(Path(attempt["directory"]) / "validated.json", {"receipt_sha256": receipt_hash, **validation})
+    if attempt.get("purpose") == "maintenance":
+        maintenance.block(updated, attempt, owner["reason"], status="tool_error" if code == 2 else "blocked")
+        settle(updated)
+        store.save(updated)
+        return updated
     if attempt.get("mode") in {"adjudicate", "signoff"}:
         return _stop_once(store, updated, attempt, owner["reason"])
     if code == 2:
@@ -269,10 +292,12 @@ def _stop_once(store: Store, state: dict, attempt: dict, reason: dict) -> dict:
     return state
 
 
+@execution_boundary
 def _final_inputs(store: Store, state: dict, workspace: Path) -> None:
+    from .revisions import effective_dependency_digests
     if not final_eligible(state):
         raise ExtractError("P6 prerequisites are not all current and approved")
-    validate_plan(state["plan"], workspace, rules_root(state), require_files=True)
+    validate_plan(state["plan"], workspace, rules_root(resolve_context(store, state)["rules_lock"]), require_files=True)
     files = manifest(workspace)
     for stage in ("P1", "P2", "P3", "P4"):
         approval = state["stages"][stage]["approval"]
@@ -290,10 +315,11 @@ def _final_inputs(store: Store, state: dict, workspace: Path) -> None:
         if node_id not in state["pending_rechecks"] and files.get(node["file"]) != node["approved_sha256"]:
             raise ExtractError("a node changed without an effective review or explicit P6 recheck")
         if node_id not in state["pending_rechecks"]:
+            dependencies = effective_dependency_digests(store, state, node["approval"], approved_checkpoint)
             parent = node["parent"]
             while parent:
                 ancestor = state["nodes"][parent]
-                if approved_checkpoint["files"].get(ancestor["file"]) != files.get(ancestor["file"]):
+                if dependencies.get(ancestor["file"]) != files.get(ancestor["file"]):
                     raise ExtractError("a node's approved ancestor dependency changed without P6 recheck")
                 parent = ancestor["parent"]
     root_approval = state["stages"]["P3"]["approval"]
@@ -302,6 +328,7 @@ def _final_inputs(store: Store, state: dict, workspace: Path) -> None:
 
 
 def _adjudicated_workspace(store: Store, state: dict, lock: dict, attempt: dict, receipt: dict) -> tuple[Path, dict]:
+    semantic = resolve_context(store, state, attempt)["rules_lock"]
     adjudication = receipt["adjudication"]
     source = Path(attempt["workspace"])
     choice = adjudication["checkpoint"]
@@ -334,25 +361,25 @@ def _adjudicated_workspace(store: Store, state: dict, lock: dict, attempt: dict,
         for name in manifest(destination):
             if not name.endswith(".yaml"):
                 continue
-            current = load_yaml(before, name, parser_root=rules_root(lock))
-            selected = load_yaml(destination, name, parser_root=rules_root(lock))
+            current = load_yaml(before, name, parser_root=rules_root(semantic))
+            selected = load_yaml(destination, name, parser_root=rules_root(semantic))
             left, right = deepcopy(current), deepcopy(selected)
             left["meta_data"].pop("version", None)
             right["meta_data"].pop("version", None)
             if not _same(left, right):
                 selected["meta_data"]["version"] = current["meta_data"]["version"] + 1
                 write_yaml(destination / name, selected, source=destination / name,
-                           parser_root=rules_root(lock))
+                           parser_root=rules_root(semantic))
             elif selected["meta_data"]["version"] < current["meta_data"]["version"]:
                 selected["meta_data"]["version"] = current["meta_data"]["version"]
                 write_yaml(destination / name, selected, source=destination / name,
-                           parser_root=rules_root(lock))
-    validation = _artifact_gate(state, lock, attempt, before, destination, "approve", role="worker")
+                           parser_root=rules_root(semantic))
+    validation = _artifact_gate(store, state, lock, attempt, before, destination, "approve", role="worker")
     if attempt["stage"] == "P1":
-        validate_comparisons(receipt, lock, destination)
+        validate_comparisons(receipt, lock, destination, parser_root=rules_root(semantic))
     validation["adjudication_changed"] = adjudication["action"] == "patch" and bool(validation["changed_files"])
     if attempt["stage"] == "P4":
-        validate_plan(receipt["plan"], destination, rules_root(lock))
+        validate_plan(receipt["plan"], destination, rules_root(semantic))
     if attempt["stage"] == "P6":
         changed_nodes = {Path(name).stem for name in validation["changed_files"] if name.endswith(".yaml")}
         if not changed_nodes <= set(receipt["affected_nodes"]):
@@ -360,8 +387,9 @@ def _adjudicated_workspace(store: Store, state: dict, lock: dict, attempt: dict,
     return destination, validation
 
 
+@execution_boundary
 def _plan_workspace(store: Store, state: dict, attempt: dict, receipt: dict, workspace: Path, validation: dict) -> Path:
-    """Install a reviewed index onto only those previous merges still proved valid."""
+    """Keep all planned node bodies; impact is a review set, not a rewrite set."""
     old_plan = {entry["id"]: entry for entry in state.get("plan") or []}
     root_entry = next(entry for entry in receipt["plan"] if entry["id"] == "root")
     reopening = state.get("reopening")
@@ -374,16 +402,15 @@ def _plan_workspace(store: Store, state: dict, attempt: dict, receipt: dict, wor
                               old_info["files"].get("root.yaml") != files["root.yaml"])
     destination = Path(attempt["directory"]) / "planned"
     _rebuild_directory(destination)
-    copy_artifacts(workspace, destination)
+    maintenance.merge_upstream(store, state, attempt, workspace, destination)
     for path in destination.rglob("*"):
         path.chmod(0o755 if path.is_dir() else 0o644)
     destination.chmod(0o755)
-    for entry in receipt["plan"]:
-        node_id = entry["id"]
-        if node_id != "root" and node_id not in invalidated and node_id in effective_nodes(state):
-            store.verify_node(state, node_id, merged_info=old_info)
-            copy_artifacts(previous / entry["file"], destination / entry["file"])
-    validate_plan(receipt["plan"], destination, rules_root(state))
+    planned_files = {entry["file"] for entry in receipt["plan"]} | {"dispatch.md"}
+    for name in manifest(destination):
+        if name not in planned_files:
+            (destination / name).unlink()
+    validate_plan(receipt["plan"], destination, rules_root(resolve_context(store, state, attempt)["rules_lock"]))
     validation["invalidated_nodes"] = sorted(invalidated)
     validation["artifact_digests"] = manifest(destination)
     return destination
@@ -457,6 +484,8 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
     if attempt["attempt_id"] in state["accepted_receipts"]:
         raise ExtractError("duplicate receipt: this attempt was already accepted")
     store.validate_attempt(state, attempt)
+    context = resolve_context(store, state, attempt)
+    lock, semantic = context["source_lock"], context["rules_lock"]
     if result.get("outcome") != "completed" or not result.get("termination", {}).get("confirmed"):
         raise ExtractError("agent call did not complete with confirmed termination")
     session_id = _session(state, attempt, result)
@@ -470,9 +499,9 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
     # An adjudicator reads the current draft but may select/patch a different
     # final artifact. Enforce read-only scope now and completion on that result.
     gate_decision = "continue" if attempt.get("mode") == "adjudicate" else proposal.get("decision")
-    validation = _artifact_gate(state, lock, attempt, before, workspace, gate_decision)
+    validation = _artifact_gate(store, state, lock, attempt, before, workspace, gate_decision)
     receipt = normalize_response(proposal, lock, attempt, workspace)
-    receipt = validate_receipt(receipt, state, lock, attempt, workspace, validation["changed_files"])
+    receipt = validate_receipt(receipt, state, lock, attempt, workspace, validation["changed_files"], rules_lock=semantic)
     receipt_hash = digest(receipt)
     directory = Path(attempt["directory"])
     write_json(directory / "receipt.json", receipt)
@@ -487,7 +516,7 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
         check_timeout = _check_timeout(call_view(state, attempt))
         if check_timeout <= 0:
             return _record_check_budget(store, state, attempt, receipt, receipt_hash, workspace, validation, session_id)
-        validation["check"] = check_complete(workspace, rules_root(lock),
+        validation["check"] = check_complete(workspace, rules_root(semantic),
             filename=state["nodes"][attempt["node"]]["file"], timeout=check_timeout)
         write_json(directory / "check.json", validation["check"])
         # A review can send an unfinished draft back to its author. Its real
@@ -514,7 +543,7 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
         check_timeout = _check_timeout(call_view(state, attempt))
         if check_timeout <= 0:
             return _record_check_budget(store, state, attempt, receipt, receipt_hash, workspace, validation, session_id)
-        merge_check = check_complete(merged, rules_root(lock), timeout=check_timeout)
+        merge_check = check_complete(merged, rules_root(semantic), timeout=check_timeout)
         write_json(directory / "merge_check.json", merge_check)
         validation["merge_check"] = merge_check
         if merge_check["exit_code"]:
@@ -526,14 +555,26 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
     if attempt["stage"] == "P4" and receipt["decision"] == "approve":
         planned = _plan_workspace(store, state, attempt, receipt, workspace, validation)
         checkpoint_id = store.checkpoint(state, planned, attempt_id=attempt["attempt_id"], parent=state["merged_checkpoint"])
+    elif attempt["stage"] in {"P1", "P2", "P3"} and receipt["decision"] == "approve" and (
+            state["merged_checkpoint"] or attempt.get("purpose") == "maintenance"):
+        _rebuild_directory(directory / "merged")
+        merged = maintenance.merge_upstream(store, state, attempt, workspace, directory / "merged")
+        checkpoint_id = store.checkpoint(state, merged, attempt_id=attempt["attempt_id"],
+                                         stage=attempt["stage"], node=attempt["node"], parent=state["merged_checkpoint"])
+        validation["artifact_digests"] = manifest(merged)
+    if attempt.get("purpose") == "maintenance" and receipt["decision"] == "approve":
+        previous_id = state["maintenance"].get("working_checkpoint") or state["merged_checkpoint"] or attempt["base_checkpoint"]
+        _, previous = store.verify_checkpoint(state, previous_id)
+        validation["maintenance_changed_files"] = sorted(name for name in previous["files"].keys() | validation["artifact_digests"].keys()
+                                                          if previous["files"].get(name) != validation["artifact_digests"].get(name))
     write_json(directory / "validated.json", {"receipt_sha256": receipt_hash, **validation})
     if attempt["attempt_id"] in updated.get("attempt_usage", {}):
         updated["attempt_usage"][attempt["attempt_id"]]["result_checkpoint"] = checkpoint_id
     updated = advance(updated, receipt, checkpoint_id, receipt_hash, validation=validation)
-    if receipt["decision"] == "reopen":
+    if receipt["decision"] == "reopen" and attempt.get("purpose") != "maintenance":
         updated = _begin_reopen(store, updated, attempt, receipt)
     if attempt["stage"] in {"P2", "P3", "P4"} and receipt["decision"] == "approve":
-        store.handoff(updated, attempt, receipt["handoff"], lock)
+        store.handoff(updated, attempt, receipt["handoff"], semantic)
     if store.load(state["run_id"]) != state:
         raise ExtractError("agent modified the authoritative state during result validation")
     store.save(updated)
@@ -550,7 +591,7 @@ def _recover_call(store: Store, state: dict, lock: dict, attempt: dict, result: 
     verify_run_inputs(state, lock)
     before, _ = store.verify_checkpoint(state, attempt["base_checkpoint"])
     workspace = Path(attempt["workspace"])
-    validation = _artifact_gate(state, lock, attempt, before, workspace, "continue")
+    validation = _artifact_gate(store, state, lock, attempt, before, workspace, "continue")
     _remember_session(updated, attempt, session_id)
     if attempt["role"] == "worker" and validation["changed_files"]:
         _draft(store, updated, attempt, workspace)
@@ -565,14 +606,13 @@ def _recover_call(store: Store, state: dict, lock: dict, attempt: dict, result: 
     scope[key] += 1
     if kind == "receipt_repair":
         scope["invalid_receipts"] += 1
-    owner["reason"] = {"code": kind, "summary": reason, "checkpoint": call_view(updated, attempt)["checkpoint"]}
-    if kind == "cli_retry" and result.get("outcome") == "cli_error" and result.get("exit_code") == 75:
-        # EX_TEMPFAIL is an explicit process-level temporary-failure signal.
-        # Missing responses, timeouts and generic nonzero exits are not one.
-        recorded = Path(attempt["directory"]) / "result.json"
-        owner["reason"].update(classification="transient_execution", attempt_id=attempt["attempt_id"],
-                               scope=scope_key(attempt["stage"], attempt["node"]),
-                               result_sha256=digest(read_json(recorded) if recorded.is_file() else result))
+    recorded = Path(attempt["directory"]) / "result.json"
+    observed = time.time()
+    owner["reason"] = {"code": kind, "summary": reason, "checkpoint": call_view(updated, attempt)["checkpoint"],
+                       "classification": retry_classification(kind, result), "attempt_id": attempt["attempt_id"],
+                       "scope": scope_key(attempt["stage"], attempt["node"]), "observed_at": observed,
+                       "next_due_at": observed + retry_delay(scope[key]),
+                       "result_sha256": digest(read_json(recorded) if recorded.is_file() else result)}
     owner["feedback"] = [*owner["feedback"], owner["reason"]]
     limit = updated["config"]["retry_limit"]
     if scope[key] > limit:
@@ -588,6 +628,8 @@ def _recover_call(store: Store, state: dict, lock: dict, attempt: dict, result: 
     else:
         owner["status"] = "draft" if attempt["stage"] == "P5" else "running"
     write_json(Path(attempt["directory"]) / "repair.json", {**owner["reason"], "validation": validation})
+    if attempt.get("purpose") == "maintenance":
+        maintenance.block(updated, attempt, owner["reason"], status="invalid_receipt" if kind == "receipt_repair" else "cli_error")
     settle(updated)
     store.save(updated)
     return updated
@@ -645,7 +687,7 @@ def _receive(store: Store, state: dict, lock: dict, attempt: dict, result: dict 
 
 
 def _interrupted(store: Store, state: dict, lock: dict, attempt: dict,
-                 result: dict | None, termination: dict, reason: str) -> dict:
+                 result: dict | None, termination: dict, reason: str, *, recovery_request_id=None, resume_scope=True) -> dict:
     """Save only a valid draft; an interrupted decision cannot approve anything."""
     if not termination["confirmed"]:
         owner, scope = owner_for(state, attempt), _scope_at(state, attempt)
@@ -666,7 +708,7 @@ def _interrupted(store: Store, state: dict, lock: dict, attempt: dict,
         try:
             before, _ = store.verify_checkpoint(state, attempt["base_checkpoint"])
             workspace = Path(attempt["workspace"])
-            validation = _artifact_gate(state, lock, attempt, before, workspace, "continue")
+            validation = _artifact_gate(store, state, lock, attempt, before, workspace, "continue")
             if validation["changed_files"]:
                 _draft(store, state, attempt, workspace)
                 if attempt["stage"] == "P6":
@@ -679,21 +721,35 @@ def _interrupted(store: Store, state: dict, lock: dict, attempt: dict,
     record = {"attempt_id": attempt["attempt_id"], "reason": reason, "termination": termination,
               "validation": validation, "discarded_draft": discarded,
               "checkpoint": call_view(state, attempt)["checkpoint"]}
+    if recovery_request_id:
+        record["recovery_request_id"] = recovery_request_id
     state["recovered_attempts"][attempt["attempt_id"]] = record
     write_json(Path(attempt["directory"]) / "recovery.json", record)
     if attempt["mode"] in {"adjudicate", "signoff"}:
         return _stop_once(store, state, attempt, {"code": "interrupted_single_decision", "summary": reason,
                           "recovery_condition": "本范围的一次裁决/签收已经使用；保留原决定和预算，不能重新授予。"})
     owner = owner_for(state, attempt)
-    owner["status"] = "draft" if attempt["stage"] == "P5" else "running"
-    _scope_at(state, attempt)["status"] = "reviewing" if attempt["role"] == "reviewer" else "draft"
-    owner["reason"] = None
+    if attempt.get("purpose") == "maintenance":
+        maintenance.block(state, attempt, {"code": "maintenance_interrupted", "summary": reason,
+                                          "checkpoint": record["checkpoint"], "discarded_draft": discarded})
+        settle(state)
+        store.save(state)
+        return state
+    if resume_scope:
+        owner["status"] = "draft" if attempt["stage"] == "P5" else "running"
+        _scope_at(state, attempt)["status"] = "reviewing" if attempt["role"] == "reviewer" else "draft"
+        owner["reason"] = None
+    else:
+        owner["status"] = _scope_at(state, attempt)["status"] = "cli_error"
+        owner["reason"] = {"code": "scope_recovery_pending", "summary": reason, "attempt_id": attempt["attempt_id"],
+                           "recovery_request_id": recovery_request_id}
     settle(state)
     store.save(state)
     return state
 
 
-def _reconcile(store: Store, state: dict, lock: dict, *, terminate_only=False) -> tuple[dict, list]:
+def _reconcile(store: Store, state: dict, lock: dict, *, terminate_only=False, scopes=None,
+               attempt_ids=None) -> tuple[dict, list]:
     """Reconcile only state-registered fences and unfinished accounting commits."""
     pending = []
     unsettled = state.setdefault("unsettled_attempts", {})
@@ -701,8 +757,12 @@ def _reconcile(store: Store, state: dict, lock: dict, *, terminate_only=False) -
     if not terminate_only:
         registered.update(dict.fromkeys(unsettled))
     for attempt_id in registered:
+        if attempt_ids is not None and attempt_id not in attempt_ids:
+            continue
         directory = store.run_dir(state["run_id"]) / "attempts" / attempt_id
         attempt = read_json(directory / "attempt.json")
+        if scopes is not None and scope_key(attempt["stage"], attempt["node"]) not in scopes:
+            continue
         if attempt["attempt_id"] != attempt_id or attempt["run_id"] != state["run_id"]:
             raise ExtractError("saved attempt identity differs from the run ledger")
         if Path(attempt["directory"]) != directory or Path(attempt["workspace"]) != directory / "workspace":
@@ -798,6 +858,9 @@ def _reconcile(store: Store, state: dict, lock: dict, *, terminate_only=False) -
 def _resume_stopped(state: dict) -> None:
     control = state["control"]
     if state["status"] in {"paused", "cancelled"}:
+        request = control["requests"].get(control.get("last_request_id"), {})
+        if request.get("stopped_at") is not None:
+            request.setdefault("resumed_at", time.time())
         state["status"] = control["resume_status"] or "running"
     if state["status"] == "queued":
         state["status"] = "running"
@@ -811,8 +874,21 @@ def _resume_stopped(state: dict) -> None:
 
 def _resume_failed_scopes(state: dict) -> None:
     """Manual retry keeps counters and hard decisions; budget stops need available credit."""
-    hard = {"external_confirmation", "adjudication_already_used", "interrupted_single_decision",
-            "reopen_already_used"}
+    if maintenance.active(state):
+        for task in state["maintenance"]["tasks"].values():
+            if task["status"] != "budget_exhausted":
+                continue
+            continued = {item["attempt_id"] for item in task.get("history", [])
+                         if item.get("step") == task["step"] and item.get("decision") == "continue"}
+            if any(item.get("step") == task["step"] and item["attempt_id"] not in continued
+                   for item in task.get("attempts", [])):
+                continue
+            call = {**task, "purpose": "maintenance", "maintenance_task_id": task["task_id"],
+                    "maintenance_step": task["step"], "mode": "normal"}
+            if not _budget(call_view(state, call))[1]:
+                task["status"], task["reason"] = "pending", None
+        settle(state)
+        return
     calls = [{"stage": "P5", "node": entry["id"], **{key: state["nodes"][entry["id"]][key] for key in ("role", "mode")}}
              for entry in state.get("plan") or [] if entry["id"] != "root"] if state["stage"] == "P5" else [state]
     for call in calls:
@@ -822,8 +898,8 @@ def _resume_failed_scopes(state: dict) -> None:
             if (any(item.endswith(":single_decision_used") for item in reason.get("scopes", [])) or
                     _budget(call_view(state, call))[1]):
                 continue
-        if (owner["status"] in NODE_STOPS and owner.get("mode", "normal") == "normal" and
-                reason.get("code") not in hard):
+        if (owner["status"] in NODE_STOPS - {"blocked", "termination_unconfirmed"} and
+                owner.get("mode", "normal") == "normal" and reason.get("code") not in HARD_RECOVERY_STOPS):
             owner["status"] = "draft" if owner is not state else "running"
             scope["status"] = "reviewing" if owner.get("role") == "reviewer" else "draft"
             if reason and (not owner["feedback"] or owner["feedback"][-1] != reason):
@@ -831,6 +907,101 @@ def _resume_failed_scopes(state: dict) -> None:
             owner["reason"] = None
     if state["stage"] == "P5":
         settle(state)
+
+
+def _settle_scope_retry(store, state, lock, request):
+    """Close one exited fence without accepting an old failed proposal."""
+    attempt_id = request["attempt_id"]
+    directory = store.run_dir(state["run_id"]) / "attempts" / attempt_id
+    attempt = read_json(directory / "attempt.json")
+    result = read_json(directory / "result.json") if (directory / "result.json").is_file() else None
+    termination = confirm_termination(attempt, result,
+                                      launch_state=state.get("unsettled_attempts", {}).get(attempt_id))
+    if not termination["confirmed"]:
+        raise ExtractError("target termination could not be confirmed at recovery consumption")
+    processing_path = directory / "processing.json"
+    processing = read_json(processing_path) if processing_path.is_file() else None
+    if processing and processing.get("started_at") is not None:
+        elapsed = max(0.0, time.time() - processing["started_at"])
+        processing["elapsed_seconds"] += elapsed
+        processing["estimated_seconds"] = processing.get("estimated_seconds", 0.0) + elapsed
+        processing["started_at"] = None
+        write_json(processing_path, processing)
+    elapsed = elapsed_on_disk(attempt, result)
+    account(state, attempt, elapsed, result=result, processing=processing)
+    if state["active_attempts"].get(request["scope"]) == attempt_id:
+        state = _interrupted(store, state, lock, attempt, result, termination,
+                             "单范围恢复已确认旧调用退出；从安全checkpoint重建上下文。",
+                             recovery_request_id=request["id"], resume_scope=False)
+    write_json(directory / "finished.json", {"elapsed_seconds": elapsed, "status": state["status"], "recovered": True})
+    state["unsettled_attempts"].pop(attempt_id, None)
+    state["unconfirmed_attempts"].pop(attempt_id, None)
+    account(state, attempt, elapsed, result=result, processing=processing, final=True)
+    store.save(state)
+    return state
+
+
+def _consume_scope_retries(store, state, lock, running) -> tuple[dict, float | None]:
+    """The sole run writer consumes the existing ledger, including after replay."""
+    from .monitor import check_restart_authority, restart_evidence
+    requests = [value for value in store.read_supervisor()["retries"].values()
+                if value["run_id"] == state["run_id"] and value["status"] == "authorized"]
+    next_due = None
+    for request in requests[:8]:
+        if request["attempt_id"] in running:
+            continue
+        stage, _, node = request["scope"].partition(":")
+        call = {"stage": stage, "node": node or "root"}
+        try:
+            scope = scope_for(state, call)
+            replayed = scope.get("last_recovery", {}).get("request_id") == request["id"]
+            recovered = state.get("recovered_attempts", {}).get(request["attempt_id"], {})
+            settled = recovered.get("recovery_request_id") == request["id"]
+            if not replayed:
+                consume_controls(store, state)
+                check_restart_authority(store.read_supervisor(), request, state)
+                if request.get("target", {}).get("execution_binding") != state.get("execution_binding"):
+                    raise ExtractError("scope recovery execution binding changed")
+                if not settled:
+                    due = request.get("next_due_at", 0)
+                    if time.time() < due:
+                        next_due = min(next_due, due) if next_due is not None else due
+                        continue
+                    evidence = restart_evidence(store, state, request["scope"], automatic=request.get("automatic", True))
+                    if any(evidence.get(key) != request.get(key) for key in ("failure_id", "run_id", "scope", "attempt_id")):
+                        raise ExtractError("scope recovery target changed after authorization")
+                    if evidence["settlement_required"]:
+                        state = _settle_scope_retry(store, state, lock, request)
+                elif request["attempt_id"] in state.get("unsettled_attempts", {}):
+                    state = _settle_scope_retry(store, state, lock, request)
+            with store.supervisor() as ledger:
+                current = ledger["retries"][request["id"]]
+                if current["status"] != "authorized":
+                    continue
+                if not replayed:
+                    check_restart_authority(ledger, current, state)
+                    owner, scope = owner_for(state, call), scope_for(state, call)
+                    owner["status"] = "draft" if stage == "P5" else "running"
+                    scope["status"] = "reviewing" if owner.get("role") == "reviewer" else "draft"
+                    owner["reason"] = None
+                    scope["last_recovery"] = {"request_id": request["id"], "attempt_id": request["attempt_id"], "at": time.time()}
+                    if stage == "P5":
+                        state["status"] = "running"
+                        settle(state)
+                    # State commits first. The scope reference makes a crash
+                    # before the control-ledger commit an idempotent replay.
+                    store.save(state)
+                consumed = scope["last_recovery"]["at"]
+                current.update(status="consumed", consumed_at=consumed,
+                               recovery_wait_seconds=max(0.0, consumed - current["created_at"]))
+        except _AuthorityChanged:
+            raise
+        except (ExtractError, OSError, KeyError, TypeError, ValueError) as exc:
+            with store.supervisor() as ledger:
+                current = ledger["retries"].get(request["id"], {})
+                if current.get("status") == "authorized":
+                    current.update(status="superseded", completed_at=time.time(), reason=str(exc))
+    return state, next_due
 
 
 def _authority_failure(store: Store, guard: _StateGuard, exc: Exception) -> dict:
@@ -847,6 +1018,29 @@ def _authority_failure(store: Store, guard: _StateGuard, exc: Exception) -> dict
     finally:
         STATE_GUARD.reset(token)
     return state
+
+
+def _reconcile_orphans(store, state, lock, running, waiting):
+    """Keep healthy siblings alive; take over their original timeout after writer loss."""
+    pending, now = [], time.time()
+    for scope, attempt_id in list(state["active_attempts"].items()):
+        if attempt_id in running or attempt_id in waiting:
+            continue
+        directory = store.run_dir(state["run_id"]) / "attempts" / attempt_id
+        attempt = read_json(directory / "attempt.json")
+        result = read_json(directory / "result.json") if (directory / "result.json").is_file() else None
+        deadlines = [state.get("deadline"), scope_for(state, attempt).get("deadline")]
+        seconds = attempt.get("timeout_seconds", state["config"][
+            "adjudication_seconds" if attempt.get("mode") in {"adjudicate", "signoff"} else "call_seconds"])
+        started = attempt.get("created_at")
+        if all(type(value) in {int, float} and math.isfinite(value) for value in (started, seconds)):
+            deadlines.append(started + seconds)
+        expired = any(type(value) in {int, float} and math.isfinite(value) and now >= value for value in deadlines)
+        if (state["control"]["action"] == "cancel" or expired or
+                termination_observed(attempt, result, launch_state=state.get("unsettled_attempts", {}).get(attempt_id))):
+            state, recovered = _reconcile(store, state, lock, scopes={scope})
+            pending.extend(recovered)
+    return state, pending
 
 
 def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=False,
@@ -887,19 +1081,14 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                 raise ExtractError("queued work changed before startup; inspect cannot resume paused or interrupted work")
             lock = read_json(store.run_dir(run_id) / "inputs.lock.json")
             verify_run_inputs(state, lock)
-            verify_executor(lock)
+            verify_execution(store, state, executor=True)
             consume_controls(store, state)
+            state = consume_revision_requests(store, state)
             initial_ledger = store.read_supervisor()
             initial_entry = initial_ledger["starts"].get(run_id, {}).get("launch", {})
-            retry_evidence = None
-            if launch_id and initial_entry.get("mode") == "retry":
-                from .monitor import restart_evidence
-                retry = initial_ledger["retries"].get(initial_entry.get("retry_id"))
-                if not retry:
-                    raise ExtractError("automatic restart has no failure-bound authorization")
-                retry_evidence = restart_evidence(store, state, retry["scope"])
-                if any(retry_evidence.get(key) != retry.get(key) for key in ("failure_id", "run_id", "scope", "attempt_id", "state_revision")):
-                    raise ExtractError("automatic restart target changed after authorization")
+            scope_entry = bool(launch_id and initial_entry.get("mode") == "retry")
+            if scope_entry and initial_entry.get("retry_id") not in initial_ledger["retries"]:
+                raise ExtractError("scope recovery has no failure-bound authorization")
             with store.supervisor() as ledger:
                 entry = ledger["starts"].get(run_id, {}).get("launch", {})
                 if launch_id and (entry.get("id") != launch_id or entry.get("status") != "claimed"):
@@ -918,20 +1107,6 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                                 member.get("request_id") != latest.get("id") or state["active_attempts"] or
                                 state.get("unconfirmed_attempts") or state.get("unsettled_attempts")):
                             raise ExtractError("hold no longer owns a confirmed pause")
-                    if retry_evidence:
-                        request = ledger["retries"][entry["retry_id"]]
-                        if (not resume or request["status"] != "authorized" or
-                                request["control_revision"] != ledger["controls"].get(run_id, {}).get("revision", 0)):
-                            raise ExtractError("automatic restart was consumed or superseded by manual control")
-                        request.update(status="consumed", consumed_at=time.time())
-                        stage, _, node = request["scope"].partition(":")
-                        target = {"stage": stage, "node": node or "root"}
-                        owner = owner_for(state, target)
-                        owner["status"] = "draft" if stage == "P5" else "running"
-                        scope_for(state, target)["status"] = "reviewing" if owner.get("role") == "reviewer" else "draft"
-                        if stage == "P5":
-                            state["status"] = "running"
-                            settle(state)
                 elif ledger["active_hold"]:
                     store.hold_member(ledger, state)
                 if run_id in ledger["continuations"] and not state["control"]["action"]:
@@ -946,6 +1121,7 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                     _resume_failed_scopes(state)
                 store.save(state)
             consume_controls(store, state)
+            state = consume_revision_requests(store, state)
             from .monitor import _identity
             state["runner"] = {"identity": _identity(), "observed_at": time.time()}
             store.save(state)
@@ -957,25 +1133,58 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                 store.save(state)
                 return state
             held_status = state["status"] if state["status"] in {"paused", "cancelled"} else None
-            state, pending = _reconcile(store, state, lock)
+            draining = revision_barrier(store, state)
+            if scope_entry and not draining:
+                state, _ = _consume_scope_retries(store, state, lock, running)
+            if draining:
+                state, pending = _reconcile_orphans(store, state, lock, running, set())
+                inactive = set(state.get("unsettled_attempts", {})) - set(state["active_attempts"].values())
+                state, recovered = _reconcile(store, state, lock, attempt_ids=inactive)
+                pending.extend(recovered)
+            else:
+                state, pending = _reconcile(store, state, lock, scopes=set() if scope_entry else None)
             if held_status and not resume:
                 state["status"] = "cancelled" if state["control"]["action"] == "cancel" else held_status
                 store.save(state)
-                return state
+                if not pending:
+                    if draining and not any(state.get(key) for key in ("active_attempts", "unconfirmed_attempts", "unsettled_attempts")):
+                        state = mark_revision_drained(store, state)
+                    return state
             cli = transport or CodexCLI(state["config"]["codex_binary"], state["config"]["model"])
             accepts_cancel = "cancel_event" in inspect.signature(cli.run).parameters
+            next_orphan_observation = 0.0
             while True:
                 consume_controls(store, state)
+                state = consume_revision_requests(store, state)
+                draining = revision_barrier(store, state)
+                retry_due = None
+                if not draining:
+                    state, retry_due = _consume_scope_retries(store, state, lock, running)
+                if time.monotonic() >= next_orphan_observation:
+                    waiting = {item[0]["attempt_id"] for item in [*pending, *deferred]}
+                    state, recovered = _reconcile_orphans(store, state, lock, running, waiting)
+                    pending.extend(recovered)
+                    next_orphan_observation = time.monotonic() + 1.0
                 if state["control"]["action"] == "cancel":
                     cancel_event.set()
+                if draining and not running and not pending and not deferred and not any(
+                        state.get(key) for key in ("active_attempts", "unconfirmed_attempts", "unsettled_attempts")):
+                    state = mark_revision_drained(store, state)
+                    break
                 # Every ready sibling is launched before waiting. Control is
                 # checked at each call boundary, including between siblings.
-                for call in next_calls(state) if not state["control"]["action"] else []:
+                for call in next_calls(state) if not state["control"]["action"] and not draining else []:
+                    reason = owner_for(state, call).get("reason") or {}
+                    due = reason.get("next_due_at", 0)
+                    if reason.get("code") in {"cli_retry", "receipt_repair"} and time.time() < due:
+                        retry_due = min(retry_due, due) if retry_due is not None else due
+                        continue
                     with store.supervisor() as ledger:
                         if ledger["active_hold"]:
                             store.hold_member(ledger, state)
                     consume_controls(store, state)
-                    if state["control"]["action"]:
+                    state = consume_revision_requests(store, state)
+                    if state["control"]["action"] or revision_barrier(store, state):
                         break
                     if call["stage"] == "P6":
                         try:
@@ -998,13 +1207,17 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                         store.save(state)
                         continue
                     guard.verify(state)
+                    final_started = state["final_review_started"]
                     attempt = store.prepare_attempt(state, call["session_id"], call=call, timeout_seconds=timeout)
-                    prompt = build_prompt(state, lock, attempt)
+                    context = resolve_context(store, state, attempt)
+                    prompt = build_prompt(state, context["source_lock"], attempt,
+                                          rules_lock=context["rules_lock"], executor_lock=context["executor_lock"])
                     schema = proposal_schema(attempt, source_files=lock["source"]["files"])
                     thread = threading.Thread(target=invoke, args=(attempt, prompt, schema,
                         state["config"][f"{attempt['role']}_effort"], timeout), daemon=True)
                     with store.supervisor() as ledger:
-                        denied = bool(ledger["active_hold"] or run_id in ledger["continuations"])
+                        denied = bool(ledger["active_hold"] or run_id in ledger["continuations"] or
+                                      revision_barrier(store, state, ledger=ledger))
                         if ledger["active_hold"]:
                             store.hold_member(ledger, state)
                         if not denied:
@@ -1016,13 +1229,25 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                     if denied:
                         _release(state, attempt)
                         state["unsettled_attempts"].pop(attempt["attempt_id"], None)
+                        # Preparation is durable evidence, but a gate-denied
+                        # invocation used no model call or one-shot decision.
+                        scope = scope_for(state, attempt)
+                        scope["calls"] -= 1
+                        if attempt["mode"] in {"adjudicate", "signoff"}:
+                            scope["adjudications" if attempt["mode"] == "adjudicate" else "signoffs"] -= 1
+                        if attempt["stage"] == "P6" and not final_started:
+                            state["final_review_started"] = False
+                            state["p6_starts"] -= 1
+                        if attempt.get("purpose") == "maintenance":
+                            task = maintenance.task_for(state, attempt)
+                            task["attempts"] = [item for item in task.get("attempts", []) if item["attempt_id"] != attempt["attempt_id"]]
                         write_json(Path(attempt["directory"]) / "termination.json", {
                             "confirmed": True, "actions": [], "survivors": [], "reason": "control gate denied dispatch"})
                         write_json(Path(attempt["directory"]) / "finished.json", {"elapsed_seconds": 0.0, "status": "not_dispatched"})
                         consume_controls(store, state)
                         store.save(state)
                         break
-                if deferred and (not state.get("reopening") or state["status"] != "running"):
+                if deferred and (draining or not state.get("reopening") or state["status"] != "running"):
                     event = deferred.pop(0)
                 elif pending:
                     event = pending.pop(0)
@@ -1032,11 +1257,15 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                     except queue.Empty:
                         continue
                     running.pop(event[0]["attempt_id"]).join()
+                elif not state["control"]["action"] and (retry_due is not None or
+                        any(item not in state.get("unconfirmed_attempts", {}) for item in state["active_attempts"].values())):
+                    cancel_event.wait(min(0.25, max(0.01, retry_due - time.time())) if retry_due is not None else 0.25)
+                    continue
                 else:
                     break
                 attempt, result, error, elapsed, recovering = event
                 guard.verify(state)
-                if attempt["stage"] == "P5" and state.get("reopening") and state["status"] == "running" and not error:
+                if attempt["stage"] == "P5" and state.get("reopening") and state["status"] == "running" and not error and not draining:
                     deferred.append(event)
                     continue
                 account(state, attempt, elapsed, result=result)
@@ -1069,8 +1298,11 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                 state["control"]["resume_status"] = state["status"]
                 state["status"] = "cancelled" if action == "cancel" else "paused"
                 state["control"]["stopped_at"] = time.time()
+                request = state["control"]["requests"].get(state["control"].get("last_request_id"))
+                if request is not None:
+                    request.setdefault("stopped_at", state["control"]["stopped_at"])
                 store.save(state)
-            elif state["status"] == "ready":
+            elif state["status"] == "ready" and not revision_barrier(store, state):
                 from .publication import publish
                 state = publish(store, state, Path(state["output"]))
             return state
@@ -1126,7 +1358,7 @@ def export_checkpoint(store: Store, run_id: str, output: Path) -> dict:
         token = STATE_GUARD.set(guard)
         try:
             guard.verify()
-            verify_executor(read_json(store.run_dir(run_id) / "inputs.lock.json"))
+            verify_execution(store, state, executor=True)
             return publish(store, state, output, export=True)["exports"][-1]
         except _AuthorityChanged as exc:
             _authority_failure(store, guard, exc)

@@ -1,0 +1,17 @@
+{
+  "id": "pipeline-graph-skip-hardware",
+  "category": "schema_template",
+  "problem": "提取产物按规范保留硬件占位，普通检查通过显式 --skip-hardware 验证其余内容；有限流水线图的命令行入口没有对应参数，且调用 validate_file 时未透传 skip_hardware，因而无法直接对这些产物展开依赖图。",
+  "evidence": [
+    "基线 58a4d92 的 schema_template/tools/pipeline_graph.py CLI 未声明或透传 --skip-hardware，底层 validate_file 已有该能力。",
+    "2.3.0 的 pipeline_graph.py::main 显式透传 skip_hardware 并保留 notices/图提示；默认完整检查。",
+    "schema_template/tools/tests/test_pipeline_graph.py::GraphCliTests.test_skip_hardware_is_explicit_and_preserves_other_checks 通过：默认拒绝占位，显式豁免可展开，错误非硬件依赖仍拒绝。"
+  ],
+  "proposal": "图入口显式透传 --skip-hardware，沿用底层 notices 与全部非硬件门禁；旧冻结版本不自动获得新能力。",
+  "necessity": "同一硬件占位规则已适用于所有提取产物，图命令行缺少透传会造成重复的人工或 Python API 操作。这是共用入口的局部缺项，不需要修改 schema 语义，也不能将图工具不可用解释为产物已通过依赖检查。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.3.0",
+    "reason": "显式参数、透传和用法已实现，单个集中图入口回归通过；不改变 Schema 语义，也不代表历史 FMHA 依赖图已验收。"
+  }
+}

@@ -94,6 +94,12 @@ python3 schema_template/tools/pipeline_graph.py path/to/task/root.yaml --set N=4
 
 绘图命令会自动完成同目录的 YAML 检查，通过后按 phase 分区、role 分列生成一张 PNG，无需事先另跑检查命令。`name.yaml` 的图片直接写为同目录的 `name.png`；加 `--all` 处理同目录全部节点。生成图片需要 Graphviz 的 `dot`。只检查有限展开的依赖、不写文件时加 `--check-only`，此时不需要 Graphviz。
 
+提取产物保留硬件占位时，图工具同样须显式加 `--skip-hardware`；默认执行完整检查。该选项沿用[硬件占位检查](#4-检查与处理反馈)的范围，保留终端及图中的硬件豁免提示，非硬件结构、引用和有限依赖展开照常检查。例如，只读检查提取产物：
+
+```sh
+python3 schema_template/tools/pipeline_graph.py path/to/task/root.yaml --skip-hardware --check-only --set N=4 --worktiles 2
+```
+
 图的编辑以 YAML 为源：修改角色、动作或依赖后重跑同一命令，PNG 随之更新。需要程序化审计或统计时，可使用[只读分析接口](tools/README.md#供-agent-审计与统计)。
 
 采用代表性规模展开起始、若干重复和收尾，不表示实测时间线。按实际 YAML 中的符号使用 `--set NAME=INT` 明确给出取值，`--worktiles` 指定展示的工作序列长度，默认 1；上面的 `N` 仅是命令示例。全部维护示例的可复现命令见[生成 PNG](examples/README.md#生成-png)。取值只用于绘图，不改写 plan，也不从外部配置或旧图片自动补齐。缺少取值、表达式尚不支持或展开超过工具上限时，返回 `2`，不据此判定 YAML 非法。

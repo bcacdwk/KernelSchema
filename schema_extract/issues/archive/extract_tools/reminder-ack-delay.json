@@ -1,0 +1,24 @@
+{
+  "id": "reminder-ack-delay",
+  "category": "extract_tools",
+  "problem": "提醒按时入队，却过了约 11 小时 27 分钟才签收。期间，因调用错误停下的提取任务没有恢复。这段延迟的原因还没查清。",
+  "evidence": [
+    "提醒在 2026-11-04 17:50:38 UTC 成功入队，2026-11-05 05:17:28 UTC 才签收；已有 queue/ack 时间不能证明客户端延迟根因。",
+    "schema_extract/tools/wakeup.py 的后台观察及已授权恢复独立于 ack；generation、hold、pause/cancel 和 clock stop 继续约束请求。",
+    "schema_extract/tools/tests/test_scoped_recovery.py 验证未 ack 时仍可观察并消费已授权恢复，以及 stop 撤销待消费请求。"
+  ],
+  "proposal": "将有界后台观察与已授权恢复从提醒签收中分离，提醒保留同线程队列及真实送达边界。",
+  "necessity": "任务能否无人值守地推进，取决于异常发生后是否有人或程序及时处理。需要弄清现有提醒能保证到哪一步。",
+  "decision": {
+    "outcome": "partially_adopted",
+    "version": "2.3.0",
+    "reason": "已授权的程序恢复不再等待提醒签收；隔离时钟回放通过。",
+    "adopted": [
+      "后台观察与恢复独立于 ack，保留稳定提醒身份、有界重送及控制优先级。"
+    ],
+    "remaining": [
+      "约 11 小时 27 分钟的历史 queue→ack 延迟根因仍未知，缺少客户端处理证据。",
+      "入队成功不保证实际送达或主管处理；本轮没有真实投递验证，也未增加外部渠道。"
+    ]
+  }
+}

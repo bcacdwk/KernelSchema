@@ -32,7 +32,7 @@ Runner 唯一写运行状态、派发、检查、合入和发布。worker 只修
 | `checks/checks_note` | 只记亲自执行的命令和退出码；交 Runner 检查时用空列表并说明 |
 | 阶段字段 | comparisons、plan、revision_scope/affected_nodes 等按当前页填写；无框架建议时 framework_candidates=[] |
 
-[receipts.py](receipts.py)的 `normalize_response` 从已登记调用和真实字节生成 `receipt.v2`：身份、文件清单、实际差异、文件 SHA-256、固定来源及精确引文均由工具填写。模型不得提交这些工具字段；语义字段 `summary` 仍由模型填写。P5 只提交本节点 YAML，root/祖先可作为证据；其他阶段覆盖全部交付文件。
+[receipts.py](receipts.py)的 `normalize_response` 从已登记调用和真实字节生成 `receipt.v2`：身份、文件清单、实际差异、文件 SHA-256、固定来源及精确引文均由工具填写。模型不得提交这些工具字段；语义字段 `summary` 仍由模型填写。P5 只提交本节点 YAML，root/祖先可作为证据；其他阶段覆盖该次工作目录。P1–P4 局部目录合回完整树时，批准仍按阶段职责解释，audit 按 Reviewer 实际读取的 checkpoint 重建原回执。
 
 原始 `response.json` 与 `result.response` 保持一致，规范化结果另存 `receipt.json`。reviewer 的整个 workspace 必须等于起始依赖字节，裁决结果另记摘要。批准绑定实际审过的内容；合法草稿只用于恢复。
 
@@ -72,7 +72,7 @@ P6 裁决亲自改稿后，另开全新 reviewer 一次签收，覆盖最后改�
 
 [budget.py](budget.py)统一计算调用与检查余额。未使用的裁决和 P6 签收各预留一个调用及 `A = min(call_seconds, stage_seconds/4, operator_seconds/12)` 秒。每次普通 worker 派发另为后续 reviewer 留一个调用及 `R = min(call_seconds, (min(stage_seconds, operator_seconds)-A)/2)` 秒。模型与检查不能动用后续预留。
 
-显式预算追加要求 `budget_extension.v1`：resume 请求绑定持久 launch ID，由冻结 Runner 在写锁内应用；同一 ID 只记账一次，每次新 resume --add-* 是新授权。continue 先复制原账目，再按唯一 successor 应用追加。budget_extensions 保存来源、额度和前后截止时间，不改初始 config、已用时间或单次决定；普通恢复、hold 和自动重试不增加额度。具体参数见[手册](../README.md#命令与参数)。
+显式预算追加要求 `budget_extension.v1`：resume 请求绑定持久 launch ID，由冻结 Runner 在写锁内应用；同一 ID 只记账一次，每次新 resume --add-* 是新授权。默认 continue 保留原余额；显式 full-restart 先复制原账目，再按唯一 successor 应用追加。budget_extensions 保存来源、额度和前后截止时间，不改初始 config、已用时间或单次决定；普通恢复、hold 和自动重试不增加额度。具体参数见[手册](../README.md#命令与参数)。
 
 ## 并行、合入与计划修订
 
@@ -104,6 +104,8 @@ P6 准入要求当前计划节点集合等于有效已合入集合，且 P1–P4
 
 恢复只对账 state 登记的 active/unconfirmed/unsettled 调用。unsettled 在准备时为 prepared，派发前持久化 dispatched，处理与计时都完成后才清除。只有 prepared 且无相反发射证据可认定未启动；发射后缺进程身份不能认定已终止。
 
+Codex 调用通过 pipe gate 先持久登记启动与进程身份，再放行 payload；登记失败时关闭 gate。进程身份绑定 PID 与系统启动/进程启动 token，收尾保留 leader 身份以核对后代，未知归属继续保留 fence。执行器、检查器与诊断子进程的 cwd 位于 run/attempt，冻结 rules 仅供读取；不忽略 manifest 额外文件，也未修改宿主 core handler。
+
 ## 轻量观察投影
 
 Store.save 提交权威 state 后，尽力原子写 summary.json。投影包含状态修订/文件版本戳和 `content_verified: false`，不能用于批准或调度。写投影失败不回滚 state；read_summary 发现陈旧/缺失时显示 stale/unknown，至多回读一次 state，不补写或深验。
@@ -116,15 +118,74 @@ inspect 每轮只取一次进程表，读取投影及已登记活跃调用的小
 
 supervisor.json 是唯一控制账本，保存启动、控制修订、hold、接续、观察、时钟和重试授权。Store.supervisor 的短事务不包含冻结、深验、等待或 exec；需要 run 写锁时先在控制锁外取得。
 
-后台先持久登记目的地、run UUID、创建时间和启动令牌，再由 wrapper 认领进程身份并进入冻结执行器。continue 须同时核对旧写锁及启动窗口，半成品 successor 也禁止启动或再次接续。
+后台先持久登记目的地、run UUID、创建时间和启动令牌，再由 wrapper 认领进程身份并进入冻结执行器。语义切换须同时核对旧写锁及启动窗口，full-restart 的半成品 successor 也禁止启动或再次接续。
 
 hold 先提交 active_hold，再追加暂停请求；派发授权和发布 rename 共用控制锁。释放与启动核对实际请求、控制修订和已消费 ID，以后续手动 pause/cancel 为准。只有 mode=resume 授权全任务普通失败恢复，hold/queued/retry 不解封其他范围；预算和已用决定继续生效。
 
-continue 校验相同源码和原 config，复制全部 scope（含 removed 节点）、用量、预留及决定；重新建立批准、候选/基线、会话与调用列表。原 state/lock/稿件保存于 continued，原 run 不改写；attempt_usage 保留 origin_run_id。v1 兼容导入由 [legacy.py](legacy.py)核对原冻结执行器、源码、checkpoint 和终止证据。
+`resume RUN_UUID --scope P5:NODE_ID` 使用既有 retries 账本，绑定失败 attempt/result、scope 代际、父依赖、执行绑定和控制修订；兄弟的状态修订不使请求过期。唯一 Runner 先结算再消费，失败范围之外的健康调用继续；失去原 Runner 的调用按原 created_at + timeout_seconds、阶段及算子截止时间收尾。旧记录缺少单次 timeout 时沿用原 config 上限，接管不重置时间或次数。
+
+默认 continue 使用 [revision_control.py](revision_control.py) 的 request/prepare/apply：控制事务登记即建立派发与发布屏障；原 Runner 结算在途调用后准备计划，同一写锁内先封存 revisions/ID，再提交 semantic_revision 指针。重复请求和 apply 幂等，登记/排空/待评估计划返回 0 与 `delivered:false`。旧 successor 仅显式 `--full-restart --reason ... --checkpoint ...` 可用；它保存原 state/lock/稿件和账目，从 P1 重审。v1 兼容导入由 [legacy.py](legacy.py)核对原冻结执行器、源码、checkpoint 和终止证据。
+
+[revisions.py](revisions.py) 的 `normalize_plan` 将独立 proposal 绑定完整目标 diff、issue/evidence 和 drain 后所有已有 scope/原稿/批准；未列清的已存在结论默认 review。每项 `scope/action/reason/issues/evidence/fields` 分开记录产物动作，keep 的批准采纳另需 `assessment` 声明内容未变、要求已覆盖、依赖相容，并完整覆盖变化路径和 issue。未完成草稿没有可采纳批准。`resolve_context(store, state, attempt=None)` 分别返回 source/config lock、semantic rules lock、executor lock 与身份；缺 semantic_revision 的历史对象继续按原锁解释，不能把新 rules 填进旧 fingerprint 的伪锁。
+
+`Store.verify_approval_origin` 验原调用/receipt/Runner gate/不可变内容；`verify_effective_approval` 再验当前原生批准或封存的 adoption、阶段职责投影及实际依赖。默认 `verify_approval` 使用有效性门禁。P1 Contract、P2 选择、P3 Design/when、P4 计划分别投影，合法的后阶段增补不会反向改写旧批准；旧证据可 audit 不代表可以解锁新工作。
+
+[maintenance.py](maintenance.py) 复用 Store.prepare_attempt、receipt、Checker 和原阶段 Reviewer。state.maintenance 保存真实 normal_cursor、完整 working_checkpoint 及有限 task；调用/回执/检查/批准绑定 semantic_revision、maintenance_task_id、purpose、maintenance_step。完整 review 候选先 Reviewer；patch/reextract 只开放明确文件/字段，再独立 verify。未完成 P1/P2 返回原 worker，P1–P4 局部工作目录合回完整树，P5 优先自己的稿件，只刷新只读祖先。依赖影响闭包产生复核候选，不等于重克隆后代。维护沿原 scope 计调用和时间，保留单次决定；相同 target/scope/issue/evidence/action 不因换 ID 获得新一轮。只有 paused/cancelled 且无未结调用可追加替代，封存旧维护并继承真实正常游标。
+
+同一个 patch 步骤允许 Worker 提交合法 continue，保存稿件并沿原调用/时间余额续写；后续 verify 仍预留，实际失败或已结束步骤不能重新获得一次动作。只接受请求时未完成、无 export/已提交发布的 run；当前 P6 仍负责最终交付。新旧语义调用不并行，pause/cancel/hold 和原截止时间继续有效。能力 `semantic_revision.v1` 及新 state format 使旧冻结执行器拒绝接管；当前真实旧 run 未运行本轮迁移。
+
+## 兼容差异与审阅记录
+
+[compatibility.py](compatibility.py) 的 `build_report(store, run_id, checkpoint_id, target_repo=None)` 只读生成确定性报告。报告绑定原 state、inputs.lock、checkpoint、完整源码集合/绑定、原 config 和目标规则 manifest；目标文件集合与字节在读取前后复核，包含未提交修改。报告中的 `id` 是去掉自身后对象的规范 JSON SHA-256。`compatibility-report RUN_UUID --checkpoint DIGEST` 输出 `report`，可用 `--target-repo PATH` 选择目标工作树。
+
+独立 Supervisor 阅读完整差异后单独保存审阅 JSON，不能把它加入冻结规则集合。下面是只有一项执行器修复时的形态；实际 `changes` 必须覆盖报告的全部差异，包含相同的 before/after SHA：
+
+```json
+{
+  "format": "schema_extract.compatibility_review.v1",
+  "report_id": "报告的完整 id",
+  "supervisor": {
+    "role": "Supervisor",
+    "identity": "实际审阅者标识",
+    "independent_review": true,
+    "record": "独立审阅会话或保存记录的引用"
+  },
+  "decision": "compatible_runtime",
+  "reason": "完整差异仅修复执行器行为，保留已批准结论的含义。",
+  "preserves": {
+    "field_meanings": true, "acceptance": true, "source_and_task": true,
+    "approval_meanings": true, "dependency_meanings": true,
+    "receipt_meanings": true, "budget_policy": true
+  },
+  "changes": [{
+    "path": "schema_extract/tools/agent.py",
+    "before_sha256": "报告中的原 SHA", "after_sha256": "报告中的目标 SHA",
+    "classification": "runtime_fix",
+    "reason": "具体说明修复影响及为何不会改变任何已有批准结论。",
+    "evidence": ["具体代码位置、审阅推理和相应检查证据"]
+  }]
+}
+```
+
+每个文件按实际影响分类：`runtime_fix`、`usage_documentation` 可提供运行兼容依据；`paths/design/parent_selection` 分别提示 P2/P3/P4 及依赖范围；`contract/acceptance/source_or_task/policy/checker` 从共享前提考虑，`unknown` 保持信息不足。这些兼容报告建议供连续修订计划评估，不直接触发全量重写；具体保留、复核、修补或局部重提取由独立计划绑定证据。同一文件含多类变化时在理由中说明全部影响。README 须逐段区分命令说明和政策变化；文件名、扩展名、相邻版本或测试通过不能代替语义理由。真实来源/任务变化不能借维护放行。
+
+`verify_review(report, review)` 返回分别列出的产物、批准和执行器影响及 `review_sha256`，拒绝遗漏、额外变更、摘要不符和以 compatible 覆盖语义重审；CLI 的 `--review FILE.json` 调用同一接口。身份和独立声明只是审阅来源记录，API 不认证人或把两个不同名字当成独立性的证明；采用方必须取得实际独立 Supervisor 的明确审阅。核验记录本身不检查旧批准是否有效，也不授予执行权限，原批准仍走既有统一 verifier。
+
+接入方在冻结前调用 `verify_report(store, report, target_repo)`，冻结后调用 `verify_report(store, report, target_lock=frozen_lock)` 再调用 `verify_review`；两次都要求原 state/checkpoint 仍匹配。冻结目标须严格匹配报告的完整 manifest，并保留源码字节/绑定、原 config 和检查政策。报告和审阅记录应随执行器绑定保存；本接口不改原 run、inputs.lock 或批准身份，也不复制跨 run 批准。任何额外变化都需重新报告和审阅。
+
+[runtime.py](runtime.py) 的 `upgrade_runtime(store, run_id, report, review, target_repo=...)` 在原 run 写锁内冻结目标并重新核对报告，最后以短控制事务提交唯一状态指针；不启动模型、不接收旧失败结果、不追加额度。`state.execution_bindings` 按顺序保存历史 ID，`execution_binding` 指向最新记录。升级状态采用 `schema_extract.run.v2.runtime.v1`，使不认识绑定的旧冻结入口拒绝写入；新 Store 同时读取旧 v2。原 `inputs.lock.json`、receipt、checkpoint 和批准均不重写。
+
+每个 `runs/RUN/runtime/BINDING/` 封存 `binding.json`、`before.json`、`report.json`、`review.json`、`inputs.lock.json` 和 `target.lock.json`。绑定记录包含前驱、输入/目标/报告/审阅摘要及登记前各 attempt 摘要；未被 state 指针引用的中断准备目录没有执行权限。连续升级以当时有效语义锁为基准，历史报告按封存的 before-state 核验，完整保留各次修订和实际执行代码。已用会话通过 `session_handoffs` 退休，后续角色从原安全 checkpoint 新建上下文，不撤销已有有效批准。
+
+`verify_execution(store, state, executor=False, attempt=None, attempts=None, evidence=None)` 是启动、调用、批准/P6、发布和深审计的共用校验入口，返回精确执行 lock；`executor=True` 另验证当前 Python 来源。封存报告始终对照封存的 before-state 核验，不对比后来推进的 state 摘要。一次调用边界内复用校验结果，祖先遍历不重复扫描快照。新 attempt 写入实际 `execution_binding`，历史 attempt 由封存摘要关联；领域规范、检查器、提示材料和来源分别由 resolve_context 选择。目标中所有运行代码及依赖仍需完整独立审阅，不能用文件路径自动豁免语义变化。
+
+目标版本、状态格式和 `EXECUTOR_CAPABILITIES` 从目标冻结 Python 的字面量声明读取，不执行目标代码来获取元数据，也不沿用旧 executor 的能力表。新建与兼容升级使用同一能力来源；目标缺少所需能力时相应恢复入口仍拒绝。
+
+`frozen_run_invocation(store, state, arguments)` 返回绑定执行器的绝对入口、冻结 PYTHONPATH 和 run 目录 cwd；后台启动也使用该入口，并在控制锁内拒绝过时的绑定观察。新发布/export 的交付回执写明执行历史和 P6 批准所属绑定；已发布的同一 checkpoint 保留原交付回执。`audit --verify/--archive` 复用绑定校验，并封存迁移证据、各目标快照及报告选定 checkpoint。普通 summary/audit 观察只展示已记录身份，不冒充深验证。
 
 ## 时钟与单轮提交
 
-[wakeup.py](wakeup.py)在控制账本保存 clock，后台只做 tick/queue。单实例进程锁的 fd 传给子进程，父进程只关闭 fd；不能用 LOCK_UN 释放子进程仍需持有的锁。进程身份观察和 queue 等待均在控制锁外，存活证据不足时显示 unknown。
+[wakeup.py](wakeup.py)在控制账本保存 clock，后台 tick 做有界观察、已授权范围恢复及 queue 投递，观察不等待 ack。单实例进程锁的 fd 传给子进程，父进程只关闭 fd；不能用 LOCK_UN 释放子进程仍需持有的锁。进程身份观察和 queue 等待均在控制锁外，存活证据不足时显示 unknown。
 
 reminder 绑定 generation/thread/number/due 的稳定 ID。ack 在锁内校验身份、启用和到期条件；scan 在锁外观察，再于同一短事务提交观察、完成号和下一次时间。提交前退出可续做，提交后重放同 ID 不再推进。晚到 queue 响应只补消息身份，不能回退已接受/完成状态。
 
@@ -139,13 +200,18 @@ reminder 绑定 generation/thread/number/due 的稳定 ID。ack 在锁内校验�
 | 记录 | 口径 |
 | --- | --- |
 | result.usage / trace | reported/partial/unknown；事件存在不代表调用成功或终止确认 |
+| usage-observation.json | 独立的根会话增量证据；root exact/partial/unavailable，整体最多 partial |
 | attempt_usage | 按 origin_run_id/attempt_id 记录角色、会话、证据及 elapsed_seconds 高水位 |
 | processing / finished | Runner 检查与处理时间；崩溃开放区间单记 estimated_seconds |
 | session_handoffs | 会话退休及后续尝试，按原 run 定位 |
 
 account 只计新增耗时差额；恢复不重复累加或把缺值改为零。首次绑定的不可变证据摘要不能覆盖，active/unconfirmed/unsettled 都结清才标 settled。result 关闭后不再写入后续检查时间。
 
-cached input 已含于 input；提供者计数范围未确认时 additive_tokens 为 null。并发调用耗时之和不称墙钟；最终墙钟只用可核实的创建/发布锚点。继承账目不再叠加 predecessor 总数，时钟观察单独记账。
+旧 result.usage v1 不变。[observation.py](observation.py)只按本次 UUID 有界读取 native ledger，记录 CLI 版本、文件/事件身份及 resume 前基线；新会话的零基线也须由首个累计与本次计数一致证明。单 turn 的 native 增量必须与最终输出累计一致，重复 counter 不重复计；缺基线、截断、回退和来源冲突使 cursor 无效，观察失败不改变模型结果。下一次调用重新取基线，避免重放用量。
+
+`observation_totals` 按 origin_run_id/attempt_id 去重，再拒绝同会话的重叠计数区间；只汇总有据根会话增量，展示未知 attempt 数。cached input 已含于 input；子会话覆盖、完整调用 token 与费用均保持未知。旧 result/receipt 不补写观察值，继承账目不再叠加 predecessor 总数。
+
+audit 分列 wall/CLI/check-processing 与 lifecycle 等待；pause/hold/排队/退避按已知区间并集计算，缺边界保持未知。范围等待可能与兄弟工作并行，不能相减推算纯模型时间；usage observation 耗时是 CLI 时间的子集。原墙钟截止、预算预留及追加语义不变。
 
 verify 复用快照、checkpoint 和引文门禁：提案按原始输入/产物重新规范化后与 receipt 比对，reviewer 绑定实际读过的起始 checkpoint，裁决结果另验。核对 response.json 与 result.response 一致，不启动模型或检查器。
 

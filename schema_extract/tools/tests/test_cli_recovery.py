@@ -3,14 +3,18 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 
-from schema_extract.tools.common import read_json
+from schema_extract.tools.common import ExtractError, read_json, rules_root, source_root
+from schema_extract.tools.compatibility import PRESERVED, build_report, verify_report, verify_review
+from schema_extract.tools.inputs import SourceTree
 from schema_extract.tools.monitor import reserve_launch
+from schema_extract.tools.snapshots import freeze_inputs
 from schema_extract.tools.stages import new_node
 from schema_extract.tools.store import Store
 
@@ -51,6 +55,77 @@ class CLIRecoveryTests(unittest.TestCase):
 
     def state(self):
         return self.store.load(self.run_id)
+
+    def test_compatibility_report_binds_complete_target_and_independent_review(self):
+        old = self.state()
+        lock = read_json(self.store.run_dir(self.run_id) / "inputs.lock.json")
+        target = self.root / "target-rules"
+        shutil.copytree(rules_root(lock), target)
+        runtime = target / "schema_extract/tools/agent.py"
+        runtime.chmod(0o644)
+        runtime.write_text(runtime.read_text() + "\n# Isolated runtime maintenance fixture.\n")
+        report = build_report(self.store, self.run_id, old["checkpoint"], target)
+        self.assertEqual(report, build_report(self.store, self.run_id, old["checkpoint"], target))
+        self.assertEqual(report["assessment"]["outcome"], "insufficient_information")
+        change = report["changes"][0]
+        self.assertEqual([item["path"] for item in report["changes"]], ["schema_extract/tools/agent.py"])
+        review = {"format": "schema_extract.compatibility_review.v1", "report_id": report["id"],
+                  "supervisor": {"role": "Supervisor", "identity": "synthetic-reviewer",
+                                 "independent_review": True, "record": "isolated review fixture"},
+                  "decision": "compatible_runtime", "reason": "Comment-only fixture retains all meanings.",
+                  "preserves": dict.fromkeys(PRESERVED, True),
+                  "changes": [{key: change[key] for key in ("path", "before_sha256", "after_sha256")} |
+                              {"classification": "runtime_fix", "reason": "Only a Python comment was added.",
+                               "evidence": ["Full unified diff has one comment addition."]}]}
+        self.assertEqual(verify_review(report, review)["outcome"], "compatible_runtime")
+        verify_report(self.store, report, target)
+        frozen = freeze_inputs(self.root / "candidate-snapshots", SourceTree(source_root(lock)),
+                               lock["source"]["bindings"], sorted(lock["source"]["files"]), old["config"],
+                               rules_repo=target)
+        verify_report(self.store, report, target_lock=frozen)
+        command = self.cli("compatibility-report", self.run_id, "--checkpoint", old["checkpoint"],
+                           "--target-repo", str(target))
+        self.assertEqual(command.returncode, 0, command.stderr)
+        self.assertEqual(json.loads(command.stdout)["report"], report)
+        bad = deepcopy(review)
+        bad["changes"][0]["after_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ExtractError, "digest mismatch"):
+            verify_review(report, bad)
+        bad = deepcopy(review)
+        bad["changes"] = []
+        with self.assertRaisesRegex(ExtractError, "missing, duplicate or extra"):
+            verify_review(report, bad)
+        bad = deepcopy(report)
+        bad["target"]["files"][change["path"]] = "0" * 64
+        with self.assertRaisesRegex(ExtractError, "digest or format"):
+            verify_report(self.store, bad, target)
+        # Simultaneous policy, normative and undeclared runtime changes cannot
+        # reuse the report for the single comment change.
+        readme = target / "schema_extract/README.md"
+        readme.chmod(0o644)
+        readme.write_text(readme.read_text() + "\nFixture policy changes acceptance requirements.\n")
+        spec = target / "schema_docs/0.common.md"
+        spec.chmod(0o644)
+        spec.write_text(spec.read_text() + "\nFixture changes a field meaning.\n")
+        extra = target / "schema_extract/tools/additional_fixture.py"
+        extra.parent.chmod(0o755)
+        extra.write_text("# Additional actual target file.\n")
+        with self.assertRaisesRegex(ExtractError, "no longer matches"):
+            verify_report(self.store, report, target)
+        expanded = build_report(self.store, self.run_id, old["checkpoint"], target)
+        bad = deepcopy(review)
+        bad["report_id"] = expanded["id"]
+        with self.assertRaisesRegex(ExtractError, "missing, duplicate or extra"):
+            verify_review(expanded, bad)
+        bad["changes"] = [{key: item[key] for key in ("path", "before_sha256", "after_sha256")} |
+                          {"classification": "policy", "reason": "Changes acceptance policy.",
+                           "evidence": ["Complete fixture diff."]} for item in expanded["changes"]]
+        with self.assertRaisesRegex(ExtractError, "cannot override"):
+            verify_review(expanded, bad)
+        bad["decision"] = "full_re_review"
+        self.assertEqual(verify_review(expanded, bad)["semantic_review"]["suggested_start"], "P1")
+        self.assertEqual(self.state(), old)
+        self.assertEqual(read_json(self.store.run_dir(self.run_id) / "inputs.lock.json"), lock)
 
     def test_repeated_commands_report_saved_state_and_frozen_source(self):
         original = self.state()
@@ -156,7 +231,8 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'cached
         old["nodes"]["retired"]["stage"].update(calls=5, revisions=5, adjudications=1, elapsed_seconds=42)
         self.store.save(old)
         before = (self.store.run_dir(self.run_id) / "state.json").read_bytes()
-        command = ["continue", self.run_id, "--checkpoint", old["checkpoint"], "--add-seconds", "600", "--add-calls", "2"]
+        command = ["continue", self.run_id, "--full-restart", "--reason", "Explicit full re-extraction fixture",
+                   "--checkpoint", old["checkpoint"], "--add-seconds", "600", "--add-calls", "2"]
         result = self.cli(*command)
         self.assertEqual(result.returncode, 0, result.stderr)
         successor = json.loads(result.stdout)["run_id"]

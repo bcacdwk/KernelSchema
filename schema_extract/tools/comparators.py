@@ -103,9 +103,9 @@ def _criterion(text: str, declaration: dict, output: str) -> None:
                 raise ExtractError(f"{location} changes the declared {key}={declaration[key]}")
 
 
-def validate_comparisons(receipt: dict, lock: dict, artifacts: Path) -> None:
+def validate_comparisons(receipt: dict, lock: dict, artifacts: Path, *, parser_root: Path | None = None) -> None:
     expected = declarations(lock)
-    root = load_root(artifacts, parser_root=rules_root(lock))
+    root = load_root(artifacts, parser_root=parser_root or rules_root(lock))
     algorithm = root["contract"]["algorithm_requirement"]
     criteria = algorithm["golden_reference"]["tolerance"]
     covered, seen = set(), set()

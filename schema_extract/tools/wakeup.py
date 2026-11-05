@@ -28,6 +28,8 @@ RETRY_SECONDS = 120
 MAX_QUEUE_ATTEMPTS = 3
 QUEUE_TIMEOUT_SECONDS = 30
 HEARTBEAT_SECONDS = 15
+OBSERVATION_SECONDS = 30
+MAX_OBSERVED_RUNS = 16
 ATTENTION_SECONDS = 1800
 PROC_IDENTITIES = Path("/proc/sys/kernel/random/boot_id").is_file()
 
@@ -140,6 +142,12 @@ class Clock:
     def lock_path(self) -> Path:
         return self.store.root / "monitor-clock.lock"
 
+    @property
+    def runtime_directory(self) -> Path:
+        directory = self.store.root / "runtime" / "clock"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
     def _lock_status(self) -> str:
         try:
             with self.lock_path.open("r") as stream:
@@ -246,7 +254,7 @@ class Clock:
             try:
                 log_path = self.store.root / "monitor-clock.log"
                 with log_path.open("ab") as log:
-                    process = subprocess.Popen(command, cwd=self.repo, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                    process = subprocess.Popen(command, cwd=self.runtime_directory, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                                close_fds=True, pass_fds=(lock.fileno(),), start_new_session=True)
                 child_identity = process_identity(process.pid)
                 with self.store.supervisor() as ledger:
@@ -283,12 +291,14 @@ class Clock:
             now = self.now()
             result = monitor.record_scan(ledger, rows, now)
             check = self._complete(clock, result, 0, f"initial-{clock['generation']}", started, now)
+            clock["next_observation_at"] = now + OBSERVATION_SECONDS
         monitor.authorized_restarts(self.store, rows, self.repo, clock_binding={**binding, "check_id": check["id"]})
 
     @staticmethod
     def _complete(clock, result, number, wake_id, started, now) -> dict:
         item = clock.pop("reminder", None)
         check = {"id": wake_id, "number": number, **_binding(clock), "started_at": started,
+                 "due_at": (item or {}).get("due_at"), "ack_at": (item or {}).get("ack", {}).get("at") if (item or {}).get("ack") else None,
                  "observed_at": result["observed_at"], "completed_at": now, "elapsed_seconds": max(0, now - started),
                  "run_count": len(result["runs"]), "change_count": len(result["changes"]),
                  "anomaly_count": len(result["anomalies"]),
@@ -372,6 +382,60 @@ class Clock:
             self.store, result["runs"], self.repo, clock_binding={**binding, "check_id": check["id"]})
         return result
 
+    def observe(self) -> dict:
+        """Use this daemon's bounded observation pass independently of delivery."""
+        now = self.now()
+        current = _clock(self.store.read_supervisor())
+        if not current.get("enabled") or now < current.get("next_observation_at", 0):
+            return {"status": "waiting"}
+        run_ids = current.get("run_ids")
+        run_ids = sorted(run_ids if run_ids is not None else self.store.run_ids())
+        table = _control_processes()
+        identity = process_identity(table=table)
+        if identity is None:
+            raise ExtractError("cannot establish observation process identity")
+        with self.store.supervisor() as ledger:
+            clock = _clock(ledger)
+            if (not _matches(clock, _binding(current)) or now < clock.get("next_observation_at", 0) or
+                    (self.launch_id and clock.get("daemon", {}).get("id") != self.launch_id)):
+                return {"status": "invalidated"}
+            previous = clock.get("observation_claim")
+            if previous and process_alive(previous.get("owner"), table=table) is not False:
+                return {"status": "busy"}
+            offset = clock.get("observation_cursor", 0) % max(1, len(run_ids))
+            selected = (run_ids[offset:] + run_ids[:offset])[:MAX_OBSERVED_RUNS]
+            claim = {"id": str(uuid4()), "owner": identity, "started_at": now,
+                     "due_at": clock.get("next_observation_at", now), **_binding(clock)}
+            clock["observation_claim"] = claim
+        try:
+            rows = monitor.inspect_runs(self.store, selected)
+            with self.store.supervisor() as ledger:
+                clock = _clock(ledger)
+                if (not _matches(clock, _binding(claim)) or clock.get("observation_claim", {}).get("id") != claim["id"]):
+                    return {"status": "invalidated"}
+                now = self.now()
+                result = monitor.record_scan(ledger, rows, now)
+                clock["last_observation"] = {**claim, "completed_at": now, "run_count": len(rows),
+                                             "anomaly_count": len(result["anomalies"])}
+                clock.update(next_observation_at=now + OBSERVATION_SECONDS,
+                             observation_cursor=(offset + len(selected)) % max(1, len(run_ids)))
+                clock.pop("observation_claim", None)
+                clock.pop("observation_error", None)
+            restarts = monitor.authorized_restarts(self.store, rows, self.repo,
+                clock_binding={**_binding(claim), "check_id": claim["id"]})
+            with self.store.supervisor() as ledger:
+                clock = _clock(ledger)
+                if clock.get("last_observation", {}).get("id") == claim["id"]:
+                    clock["last_observation"].update(recovery_completed_at=self.now(), automatic_restarts=restarts)
+            return {"status": "observed", "id": claim["id"], "automatic_restarts": restarts}
+        except Exception as exc:
+            with self.store.supervisor() as ledger:
+                clock = _clock(ledger)
+                if clock.get("observation_claim", {}).get("id") == claim["id"]:
+                    clock.pop("observation_claim", None)
+                    clock.update(observation_error=str(exc), next_observation_at=self.now() + OBSERVATION_SECONDS)
+            raise
+
     def message(self, clock: dict, item: dict) -> str:
         entry = [clock["python"], "-B", clock["entrypoint"], "monitor"]
         where = ["--repo", clock["repo"], "--state-root", str(self.store.root)]
@@ -388,12 +452,13 @@ class Clock:
                 "需框架修复时按手册先 hold 并核清范围，再按已有授权交工程处理。"
                 "巡检完成并登记 next_due_at 后结束本次提醒；尊重用户最新暂停或讨论，继续处理其尚未结束的已授权事项。"
                 "ack 后若中断，同线程显式执行这条 scan 续完，不重复 ack。"
-                "后台只负责下一次提醒；不要另建线程、闹钟或在对话中 sleep，已有提取授权和预算保持原边界。")
+                "后台持续观察并推进已有授权的有限恢复，不等待提醒 ack；提醒供核对需人处理的事项。"
+                "不要另建线程、闹钟或在对话中 sleep，已有提取授权和预算保持原边界。")
 
     def _send(self, thread: str, message: str, binary: str) -> str:
         command = [binary, "queue", "--thread", thread, "--message", message, "--resume"]
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   text=True, start_new_session=True)
+                                   text=True, start_new_session=True, cwd=self.runtime_directory)
         try:
             deadline = time.monotonic() + QUEUE_TIMEOUT_SECONDS
             while True:
@@ -431,7 +496,8 @@ class Clock:
         return _uuid(match[1], "queue message")
 
     def tick(self) -> dict:
-        """Reserve one send, release the control lock, then call codex queue."""
+        """Observe first, then reserve one reminder send outside the control lock."""
+        observation = self.observe()
         now = self.now()
         with self.store.supervisor() as ledger:
             clock = _clock(ledger)
@@ -460,7 +526,7 @@ class Clock:
                 if self.launch_id:
                     clock["daemon"]["status"] = "running"
                     clock["daemon"].pop("error", None)
-                return {"status": "waiting"}
+                return {"status": "waiting", "observation": observation}
         key, item, sent_clock = selected
         try:
             # Stop may win after reservation; never manufacture another ID.
@@ -500,7 +566,7 @@ class Clock:
             if self.launch_id and clock.get("daemon", {}).get("id") == self.launch_id:
                 clock["daemon"].update(heartbeat_at=self.now(), status="running")
                 clock["daemon"].pop("error", None)
-        return {"id": item["id"], **outcome}
+        return {"id": item["id"], **outcome, "observation": observation}
 
     def run(self, launch_id: str, lock_fd=None) -> int:
         self.store.initialize()
@@ -536,7 +602,7 @@ class Clock:
                             if daemon.get("id") == launch_id:
                                 daemon.update(status="clock_error", error=str(exc))
                     clock = _clock(self.store.read_supervisor())
-                    deadlines = []
+                    deadlines = [clock.get("next_observation_at", self.now() + OBSERVATION_SECONDS)]
                     for item in (clock.get("probe"), clock.get("reminder")):
                         if not item or item.get("ack") or len(item["attempts"]) >= MAX_QUEUE_ATTEMPTS:
                             continue
@@ -559,6 +625,7 @@ class Clock:
             clock = _clock(ledger)
             if clock.get("enabled"):
                 clock.update(enabled=False, generation=clock["generation"] + 1, verified=False, stopped_at=self.now())
+                clock.pop("observation_claim", None)
                 _archive(clock, clock.pop("reminder", None))
                 _archive(clock, clock.pop("probe", None))
                 ledger["clock"] = clock

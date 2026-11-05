@@ -51,6 +51,7 @@ def main(argv=None) -> int:
     parser.add_argument("--worktiles", type=int, default=1, help="representative works per worker (default: 1)")
     parser.add_argument("--all", action="store_true", help="process every sibling YAML")
     parser.add_argument("--check-only", action="store_true", help="check dependencies without rendering or changing files")
+    parser.add_argument("--skip-hardware", action="store_true", help="skip hardware specifications and hardware-dependent checks")
     args = parser.parse_args(argv)
     entry = args.yaml.expanduser()
     source = entry.parent.resolve() / entry.name
@@ -62,7 +63,8 @@ def main(argv=None) -> int:
         if not args.check_only:
             output.begin(source, all_nodes=args.all)
         source_hashes = {}
-        directory, task = schema.validate_file(source, notices=notices, source_hashes=source_hashes)
+        directory, task = schema.validate_file(source, notices=notices, source_hashes=source_hashes,
+                                               skip_hardware=args.skip_hardware)
         files = schema.task_files(directory)
         parameters = {}
         for item in args.set:

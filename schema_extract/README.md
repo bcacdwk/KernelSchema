@@ -1,6 +1,6 @@
 # Schema Extract：Supervisor 手册
 
-版本 `2.2.10`。从固定 kernel 提取可读、可追溯的 schema，自动完成写作、独立审阅、返工与发布。统一入口是 [extract.py](extract.py)，实现位于 `tools/`。
+版本 `2.4.0`。从固定 kernel 提取可读、可追溯的 schema，自动完成写作、独立审阅、返工与发布。统一入口是 [extract.py](extract.py)，实现位于 `tools/`。
 
 ## 开始一次试用
 
@@ -52,7 +52,7 @@ Supervisor 提供 catalog ID 或明确来源、输出目录及适用范围。来
 
 省略 `revision` 使用本地实际字节，填写时读取解析后的 Git commit。也支持 `--source 'git:<ref>:<directory>' --bindings source.json`，Git 仓库由 `--repo` 指定。文件名和函数签名不能代替输入角色与任务材料。
 
-Runner 冻结源码及本次规范、starter、检查器、阶段页和执行器，分别保存逐文件摘要与整体身份；规范和工具包含当时未提交的改动。catalog 提供可选的 `paths.annotated_entrypoint` 时，新快照同时收集该校注文件作为阅读辅助，原实现与其他输入角色绑定保持不变；不追改旧快照，也不自动证明校注与原件等价。脏本地源码使用快照内的独立 `source.git` 固定引用，不修改用户仓库。所有阶段读取同一快照。
+Runner 冻结源码及本次规范、starter、检查器、阶段页和执行器，分别保存逐文件摘要与整体身份；规范和工具包含当时未提交的改动。catalog 提供可选的 `paths.annotated_entrypoint` 时，新快照同时收集该校注文件作为阅读辅助，原实现与其他输入角色绑定保持不变；不追改旧快照，也不自动证明校注与原件等价。脏本地源码使用快照内的独立 `source.git` 固定引用，不修改用户仓库。初始阶段读取同一快照；连续修订追加语义规则快照，每个调用固定自己的上下文，来源始终沿用原锁。
 
 运行资料默认位于 `.schema_extract/v2/`：`snapshots/` 保存固定输入，`runs/RUN_UUID/` 保存状态、调用证据和 checkpoint，`supervisor.json` 保存控制记录。草稿与有效合入分别记录；草稿不能解锁子节点或作为正式交付。批量输出按 catalog 路径映射到 `--output-root`，见[输出目录导航](../schema_wiki/README.md)。
 
@@ -81,21 +81,24 @@ python3 schema_extract/extract.py inspect --run RUN_UUID --json
 
 排队、暂停和维护等待不自动停表。派发时为随后审阅、一次裁决及 P6 签收预留时间和调用；余额不足即停止，预留计算见[预算协议](tools/README.md#退修与裁决)。
 
-`resume/continue --add-seconds N` 将算子及所有已开始阶段/节点的截止时间分别延至 `max(当前时间, 原截止) + N`；未开始的阶段仍用原 `stage_seconds`。`--add-calls N` 为每阶段/节点（含后来建立的节点）增加 N 次调用上限。追加保存在 `budget_extensions`，不改输入锁、初始配置和已用计数，也不重新授予裁决/签收。
+`resume --add-seconds N` 将算子及所有已开始阶段/节点的截止时间分别延至 `max(当前时间, 原截止) + N`；未开始的阶段仍用原 `stage_seconds`。`--add-calls N` 为每阶段/节点（含后来建立的节点）增加 N 次调用上限。追加保存在 `budget_extensions`，不改输入锁、初始配置和已用计数，也不重新授予裁决/签收。显式 `continue --full-restart` 也可使用预算追加参数；默认连续修订沿用原余额。
 
 相同接续命令只创建一个 successor、追加一次；每次新的 `resume --add-*` 是新的追加授权。不确定上次是否生效时先读 `status --full`。普通恢复、重开、重复 extract、hold 释放和自动重试均不增加预算。
 
 ### 重复命令与退出码
 
-重复 extract 沿用登记时的固定源码、规则和参数，不重新读取工作树。结果分别给出 `result`、保存的 `run_status`、`published`、`next_step` 和 `frozen` 身份。修改请求参数会报告原目的地占用；需要新来源或参数时换输出目录重新 extract，采用工具修复则用 continue。
+重复 extract 沿用登记时的固定源码、规则和参数，不重新读取工作树。结果分别给出 `result`、保存的 `run_status`、`published`、`next_step` 和 `frozen` 身份。修改请求参数会报告原目的地占用；需要新来源或参数时换输出目录重新 extract。兼容执行器修复经独立审阅后用 upgrade-runtime 登记；语义变化用 continue 重审。
 
 | 命令 | 退出 0 的含义 |
 | --- | --- |
-| 前台 extract / resume | 已终审并发布 |
-| extract --queue / continue | 已排队；重复 extract 也可返回已发布结果 |
+| 前台 extract / 普通 resume | 已终审并发布 |
+| resume --scope | 恢复请求已登记或消费；不表示已终审或发布 |
+| extract --queue | 已排队；重复 extract 也可返回已发布结果 |
+| continue / revise | 请求已登记、正在排空、待评估计划已生成或修订已采纳；`delivered:false` 表示尚未交付 |
 | extract --background | 启动请求成功、已有任务运行中、被 hold 保留或已发布 |
 | pause / cancel | 控制请求已提交，仍须核实在途调用与终止证据 |
 | status / inspect | 只读查询完成 |
+| compatibility-report / upgrade-runtime | 报告核验或执行绑定登记完成；未启动任务 |
 
 前台复用运行中任务返回 `1 / already_running`。旧任务暂停、取消、阻塞，或后台命令没有原排队任务的启动授权时，也返回 `1` 和下一步；不会创建新任务绕过停止。其他执行停止、预算耗尽及发布冲突返回 `1`，入口错误返回 `2`。各查询/审计命令的成功不等于提取完成。
 
@@ -127,14 +130,29 @@ Reviewer 按[当前文档验收方法](REVIEW.md)通读本阶段已完成的全�
 | --- | --- |
 | 在调用边界暂停 | `pause RUN_UUID`；已启动调用可完成并保存结果 |
 | 请求终止在途调用 | `cancel RUN_UUID`；检查 result/termination 的确认记录 |
-| 恢复排队、暂停或已处理的普通异常 | `resume RUN_UUID`，使用原冻结执行器 |
+| 恢复排队、暂停或已处理的普通异常 | `resume RUN_UUID`，使用已登记的精确冻结执行器 |
+| 只恢复一个已结算的普通失败范围 | `resume RUN_UUID --scope P5:NODE_ID`；活跃 Runner 消费同一请求 |
 | 时间或调用余额不足 | `resume RUN_UUID --add-seconds 7200` 或 `--add-calls N` |
-| 采用当前工具/规则修复 | `continue OLD_UUID --checkpoint DIGEST`，随后 `resume NEW_UUID` |
+| 采用经独立审阅的兼容执行器修复 | `upgrade-runtime RUN_UUID --report REPORT.json --review REVIEW.json`，只登记 |
+| 未完成任务采用新规则或修复语义问题 | `continue RUN_UUID` 生成计划；独立评估后 `continue RUN_UUID --plan PLAN.json` |
+| 明确要求从 P1 完整重提取 | `continue RUN_UUID --full-restart --checkpoint DIGEST --reason '具体理由'` |
 | 原输出目录存在冲突 | `export RUN_UUID --output /path/to/new/delivery` |
 
 恢复先确认已登记调用及其子进程终止，再采用合法草稿或上一个安全 checkpoint。发射后进程身份缺失时保留 fence，不能凭文件缺失判断退出。结算按 attempt 高水位去重；检查中断的开放时段保守计时。外部确认和已用单次决定不能靠 resume 或追加预算解封。
 
-continue 要求原 run 静止、写锁空闲、调用和计时全部结算。它固定相同源码与当前规则，从 P1 新会话独立重审；旧批准不继承，原用量、预算追加、删除节点账目与单次决定都保留。可同时使用 `--add-seconds/--add-calls`。接续关系唯一，构建中断后用相同命令补全；接续建立后原 run 不再派发或发布。冻结执行器不支持某项能力时，入口会给出明确提示，不由新代码直接接管。
+`resume --scope` 绑定失败 attempt、结果、节点代际、父依赖及控制修订，由唯一 Runner 结算和消费；未到期的兄弟调用继续运行。无 Runner 时使用同一写锁接管，遗留调用仍受原单次超时、阶段及算子截止时间约束。pause/cancel/hold 阻止重发；普通格式修复和有据临时错误只在原次数、预算和持久化退避内恢复，未知终止或永久错误不盲重试。
+
+默认 `continue` 在同一个未完成 run 中准备或采用连续修订，保留现有稿件、原正常阶段/角色及预算。也可分别使用 `revise request RUN_UUID --reason '具体理由'`、`revise prepare RUN_UUID --plan PLAN.json`、`revise apply RUN_UUID` 和 `revise status RUN_UUID`。`--target-repo PATH` 指定目标规则；请求立即拦新派发和发布，在途调用仍按原上下文与截止时间结算，排空后才绑定具体计划。没有独立评估时返回 `awaiting_evaluation`、计划路径和退出 0，不会自动退回 P1。
+
+计划逐范围选择 `keep/review/patch/reextract`，并绑定完整规则差异、问题依据及原稿身份。旧批准只有独立适用性判断充分才可采纳；未知先 review，完整候选直接由 Reviewer 复核，未完成草稿继续原作者工作，不能借维护获批。patch/reextract 保留旧稿并限制文件/字段，修改后仍由独立 Reviewer 审阅阶段全文。父 Design 改变时更新子节点的只读祖先，保留子节点自己的完整 Design，并复核适用性；无关兄弟保留。有限维护结束后继续实际剩余工作，最终交付仍须当前上下文的 P6。
+
+修订只接受请求时尚未 ready、published、export 或提交发布 rename 的任务。原来源字节、角色绑定、任务目标、config/check_policy 和旧证据不变。调用、时间、退修、P6 starts 与单次决定均不重置，pause/cancel/hold 优先；安全暂停且所有调用已结算时可追加替代修订，不能换请求 ID 重获已使用的维护动作。冻结执行器须支持 `semantic_revision.v1`，旧执行器先在安全边界经独立兼容审阅采用支持能力的运行层。真实来源或任务目标改变须新建提取。
+
+旧 successor 方式仅通过 `--full-restart`、非空 `--reason` 和 `--checkpoint` 显式调用，并只接受未完成任务。它从 P1 独立重审，不继承批准，保留全部原用量、预算追加及单次决定；相同命令可补全中断构建。
+
+采用修复前可运行 `compatibility-report RUN_UUID --checkpoint DIGEST`，只读比较原冻结规则和当前工具树的完整实际字节；`--target-repo PATH` 可选择目标树，`--review FILE.json` 可核对独立 Supervisor 的审阅记录。输出包含全部新增、删除、修改文件的 SHA、统一差异，以及分别列出的产物保留、批准兼容性和执行器/会话建议。报告默认信息不足，不更新状态或授予运行权限。记录必须覆盖每个差异；README 的理由须说明各段属于命令用法还是政策变化，不能整体豁免。字段、验收、来源/任务或既有批准含义变化需要重审，检查器修复可能揭露历史误通过。记录格式和冻结后核验接口见[工具说明](tools/README.md#兼容差异与审阅记录)。
+
+`upgrade-runtime` 只接受上述完整报告和原始独立 Supervisor 审阅 JSON；`--report` 可直接读取 compatibility-report 的完整输出，`--target-repo` 须与报告目标相同。旧写者和启动窗口须已退出，active/unconfirmed/unsettled 均须结清。登记保留原 run UUID、输入锁、checkpoint、有效批准和全部预算/决定计数，追加不可变执行绑定并退休旧角色会话；不会启动任务或解除 pause/cancel/hold。随后显式 resume 使用该绑定的冻结代码；来源/config 读取原锁，规范、检查器和提示材料读取当前有效语义锁。运行层升级以该语义上下文评估，旧报告仍按封存时的状态解释。未知或语义变化走 continue；重复提交同一报告和审阅只返回原登记。
 
 补充或更换源码材料需换输出目录重新 extract。不要改快照来补材料，也不要删除运行账目来获得新预算。
 
@@ -170,13 +188,13 @@ python3 schema_extract/extract.py monitor status
 python3 schema_extract/extract.py monitor stop
 ```
 
-start 绑定 Supervisor 的真实线程，可用 `--run UUID...` 限定范围。首次完成检查 #0，随后间隔为 300/300/300 秒，再每 1800 秒检查；从成功扫描提交时计算下一次时间，逾期只处理一轮。后台时钟只计时和投递 `codex queue --resume` 消息。
+start 绑定 Supervisor 的真实线程，可用 `--run UUID...` 限定范围。首次完成检查 #0，随后提醒间隔为 300/300/300 秒，再每 1800 秒检查；从成功扫描提交时计算下一次时间，逾期只处理一轮。后台时钟另做有界观察和已授权的单范围恢复，独立于提醒签收，并通过 `codex queue --resume` 投递需主管处理的消息。
 
 收到提醒后执行消息中的 `monitor ack ID --thread THREAD_UUID`；仅 accepted=true 才执行一次 `monitor scan --wake ID --thread THREAD_UUID` 并结束该轮。accepted=false 时结束该提醒。ack 后中断可用同一 scan 命令续完；普通 scan 不消耗周期。不要用对话内 sleep 或另建闹钟维持此周期。
 
-发送失败或不确定送达沿用同 ID，最多 3 次、至少间隔 120 秒；成功入队后等待 ack。耗尽重送次数，或 1800 秒仍无 ack/完成时显示 needs_attention。队列确认不代表线程实际收到，状态文件不代表时钟进程仍存活。
+发送失败或不确定送达沿用同 ID，最多 3 次、至少间隔 120 秒；成功入队后等待 ack，后台观察及已授权恢复继续。耗尽重送次数，或 1800 秒仍无 ack/完成时显示 needs_attention。队列确认不代表线程实际收到，状态文件不代表时钟进程仍存活。
 
-进程退出后显式 start 恢复进度；换线程或范围用 stop/start。stop 使旧提醒失效并停止时钟，不控制提取任务。状态显示真实进程身份、锁、心跳与提醒进度；可选 `--probe-delay 1..300` 验证线程唤醒，不改变正式周期。
+进程退出后显式 start 恢复进度；换线程或范围用 stop/start。stop 使旧提醒和未消费的恢复授权失效并停止时钟，不终止已经启动的提取调用。状态显示真实进程身份、锁、心跳与提醒进度；可选 `--probe-delay 1..300` 验证线程唤醒，不改变正式周期。
 
 自动恢复默认关闭。`monitor start --auto-restart-limit N` 只授权当次选定的 run；不指定范围时仅覆盖当时已登记的任务。当前只对确认终止、明确返回 EX_TEMPFAIL 75 且仍有预算的普通调用生效；按 lineage 累计上限，重启时钟不退款。其他错误按恢复条件显式处理。
 
@@ -189,7 +207,9 @@ python3 schema_extract/extract.py audit RUN_UUID --attempt ATTEMPT_UUID --verify
 
 audit 默认读已记账摘要，按阶段、角色、节点和来源展示用量；`--attempt` 与 `--session` 互斥，`--json` 给出详细定位。`--verify` 深验选定调用、checkpoint、来源和引文，不授予批准或推进阶段。
 
-usage 保留提供者原值。cached input 已包含于 input，不能再相加；失败或截断为 partial，缺字段为 unknown，不补作零。新会话与 resume 的计数范围仍未确认，`additive_tokens` 保持未知，不据此估算总 token 或账单。CLI/检查累计时间也不等于并发任务的墙钟；暂停等待和纯模型时间未单独可靠采样。
+历史 `result.usage` 保留提供者原值及原口径。新调用另存 `usage-observation.json`：只有当前根会话的 native 累计计数、调用前基线、单次 turn 边界和输出事件一致时，才给出可加增量；按来源/attempt 和会话区间去重。cached input 是 input 子集，不重复相加；缺基线、截断、回退或来源冲突保留未知。根会话可为 exact，整体仍为 partial，子会话覆盖和费用未知，不能把已知小计称为完整账单。
+
+审计分列墙钟、CLI 累计、检查处理及已知 pause/hold/排队/退避区间；等待重叠只算一次，也可能与兄弟调用并行，不能从墙钟相减推断纯模型时间。历史缺采样保持 partial/unavailable。观察不改变原截止、预留或追加记录，旧结果和回执不回写。
 
 archive 同时深验，生成含 `manifest.json` 和按摘要去重的 `objects/` 的 tar.gz。目标须在 runtime 外、父目录已存在，路径不含 `..` 或链接；同一有效清单可复用，冲突目标保留。对象缺失或选中范围仍活动/未结算时不写包。封存包用于审计，不能直接恢复执行，也不删除运行记录。
 
@@ -212,6 +232,10 @@ P3/P5/P6 完成或批准时，Runner 自动用冻结检查器执行 `--skip-hard
 2.2.9 将[源实现缺陷与设计分流](REVIEW.md#源实现缺陷与设计分流)统一到共用 Reviewer 方法和真实调用提示：有来源依据的完整设计可携带源问题继续，必须猜测或改变设计决定时仍阻塞，残稿仍须补齐并独立审阅。[流程改进已由 Supervisor 验收](issues/archive/extract_workflow/source-defect-abstraction-boundary.json)；未修的 Sparse 源布局问题由 [sparse-tc-control-layout-overlap](issues/kernel_wiki/sparse-tc-control-layout-overlap.json) 独立跟踪，实际 Design/P6 尚未完成。采用新规则须正式接续，不改旧回执或继承批准。
 
 2.2.10 修复[当前产物问题的证据门禁](issues/archive/extract_workflow/artifact-only-issue-evidence.json)：仅 `revise/blocked` 的 `submission_format`、`schema_conformance` 可使用与问题 scope 中完整相对文件名绑定的有效 `artifact_evidence`；源码类问题、批准和上游重开保留原要求。最终 62 项提取回归通过，两份真实 MoE 退修提案只读重放及错误路径、源码类问题的负例通过，原状态与输入字节未改变。Supervisor 已验收这项协议修复；MoE 的失败接续设计和 P4 计划仍须独立审阅，采用新门禁须正式接续。
+
+2.3.0 增加完整兼容报告与同 run 执行器登记、单范围恢复、登记后放行的进程 gate、独立后台观察、根会话用量增量及图入口显式硬件豁免。最终 10 个选定场景通过，使用隔离状态、固定计数和本地替身；未运行真实旧 run 升级、模型或 GPU。语义局部迁移、旧提醒约 11 小时延迟根因、宿主 core handler 行为及完整费用仍有边界，见[改进计划](IMPROVEMENT_PLAN.md)和[问题索引](issues/TRIAGE.md)。历史产物和批准保持原身份。
+
+2.4.0 为未完成任务增加同 run 连续语义修订：请求排空、冻结规则上下文、独立批准采纳、保稿的有限维护与正常游标接续。默认 continue 不再清批准回 P1，完整重提取须显式说明理由。最终集中验证覆盖 5 个组合场景，使用隔离状态、合成历史证据和本地检查替身；新规则 prompt/checker、原始与有效批准、P4/P5 接续和 runtime 交错审计均纳入验证。未启动真实旧 run、模型、提醒或 GPU，未迁移已完成产物；详见[计划记录](IMPROVEMENT_PLAN.md)及[接续问题](issues/archive/extract_workflow/progress-preserving-continuation.json)。
 
 六类固定实现曾在冻结 2.2.2 下完成 77 节点发布与证据审计；2.2.4 另完成分组 GEMM 的三节点真实验证，见[试用记录](TRIAL_REPORT.md)。样本结果不代表其他实现的提取成功率，也不代替 GPU 或外部比较器验收。
 

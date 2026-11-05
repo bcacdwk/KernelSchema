@@ -10,13 +10,17 @@ from .artifacts import _same, load_root
 from .budget import call_limit
 from .receipts import REOPEN_TARGETS, required_artifact_evidence
 from .stages import STAGES, owner_for, read_specs, required_conclusions, scope_for
-from .common import read_json, rules_root, source_root
+from .common import ExtractError, read_json, rules_root, source_root
 from .snapshots import frozen_reader
 
 
-def build_prompt(state: dict, lock: dict, attempt: dict) -> str:
+def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | None = None,
+                 executor_lock: dict | None = None) -> str:
     definition = STAGES[attempt["stage"]]
-    rules, source = rules_root(lock), source_root(lock)
+    if attempt.get("semantic_revision") and rules_lock is None:
+        raise ExtractError("semantic prompt requires its explicit rules lock")
+    semantic = rules_lock or lock
+    rules, source = rules_root(semantic), source_root(lock)
     page_path = rules / "schema_extract/phases" / definition["page"]
     bindings = lock["source"]["bindings"]
     def source_reference(key):
@@ -57,7 +61,8 @@ def build_prompt(state: dict, lock: dict, attempt: dict) -> str:
                 "node": attempt["node"], "mode": attempt.get("mode", "normal"),
                 "base_checkpoint": attempt["base_checkpoint"],
                 "source_id": lock["source"]["id"], "source_ref": lock["source"]["ref"],
-                "source_root": str(source), "rules_id": lock["rules"]["id"],
+                "source_root": str(source), "rules_id": semantic["rules"]["id"],
+                "semantic_revision": attempt.get("semantic_revision"),
                 "rules_root": str(rules), "phase_page": str(page_path), "workspace": attempt["workspace"],
                 "inputs": {key: bindings[key] for key in ("entrypoint", "host", "io", "input", "reference", "acceptance", "scope")},
                 "implementation_source": source_reference("entrypoint"), "reference_source": source_reference("reference"),
@@ -81,6 +86,10 @@ def build_prompt(state: dict, lock: dict, attempt: dict) -> str:
                 "budget": {**{key: scope[key] for key in ("revisions", "continues", "receipt_repairs", "cli_failures", "calls", "deadline")},
                            "call_seconds": attempt.get("timeout_seconds"), "max_calls": call_limit(state),
                            "revision_limit": state["config"]["revision_limit"]}}
+    if attempt.get("purpose") == "maintenance":
+        task = state["maintenance"]["tasks"][attempt["maintenance_task_id"]]
+        locating["maintenance"] = {key: task.get(key) for key in ("task_id", "action", "step", "reason", "issues", "fields")}
+        locating["feedback"] = task.get("feedback", [])
     if attempt["stage"] == "P5":
         locating.pop("plan")
         locating["ancestor_entries"] = ancestors
@@ -114,7 +123,7 @@ def build_prompt(state: dict, lock: dict, attempt: dict) -> str:
             "order": ["current_specs", "current_artifacts", "fixed_source"],
         }
         review_instructions = (rules / "schema_extract/REVIEW.md").read_text(encoding="utf-8")
-    reader = frozen_reader(lock)
+    reader = frozen_reader(executor_lock or semantic)
     example = f"python3 -B {shlex.quote(str(reader))} --root {shlex.quote(str(source))} --path {shlex.quote(bindings['host']['path'])} --start-line 1 --end-line 80"
     checker = rules / "schema_template/check_yaml.py"
     target = node_entry["file"] if attempt["stage"] == "P5" else "root.yaml"
@@ -136,6 +145,10 @@ Runner在隔离副本应用、核对版本并检查；关键事实缺失、补�
 P6亲自patch最终稿后，由全新独立reviewer签收一次；选择已有稿不追加签收。"""
     elif mode == "signoff":
         mode_instructions = "本轮为P6裁决补丁后的全新独立reviewer签收。只允许approve或blocked，检查最终改动及全部pending_rechecks；本次不再返工、裁决或重试。"
+    if attempt.get("purpose") == "maintenance":
+        mode_instructions = """本轮为同一进行中任务的有限维护。维护不消耗或重新授予领域裁决/签收。review/verify由独立reviewer审阅当前阶段完整相关内容；fields只限制Worker写入，不缩小Reviewer的全文职责。
+reviewer仅返回approve/revise/blocked；worker返回complete/continue/blocked。发现需patch的问题时，revision_scope必须逐项列出明确的{path,fields}授权字段，不能只在issues写自由文本；无法可靠确定字段则revision_scope=[]并blocked，保留稿件和具体反馈。review发现有证据的问题才按已明确的文件/字段安排一次patch，再独立verify；本轮不发reopen或自动扩大到上游/全树。需扩大修改范围时列出具体问题、字段和恢复条件，交Supervisor追加有依据的计划。
+当前子节点正文是自己的完整设计。祖先仅提供新的只读前提，祖先变化不授权用父Design覆盖本节点；保留本节点正确内容，仅修补授权范围。"""
     checking = ("本阶段使用阶段产物门禁；未完成或未生成的Design不要求完整检查。"
                 if attempt["stage"] in {"P1", "P2", "P4"} else
                 f"Runner接收完成/批准时自动运行冻结检查器，退出0才放行；1的诊断交当前修改者，2报工具/环境问题。\n需要提前自检或定位诊断时可运行：{check_command}；不要求worker/reviewer各自重复执行。")

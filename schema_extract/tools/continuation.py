@@ -126,7 +126,10 @@ def _inherit(store, state: dict, old: dict, old_lock: dict, new_lock: dict,
     return state
 
 
-def continue_run(repo: Path, store, old_id: str, checkpoint_id: str, *, add_seconds=0, add_calls=0) -> dict:
+def continue_run(repo: Path, store, old_id: str, checkpoint_id: str, *, full_restart=False, reason=None,
+                 add_seconds=0, add_calls=0) -> dict:
+    if not full_restart or not isinstance(reason, str) or not reason.strip():
+        raise ExtractError("full-run successors require explicit full_restart=True and a nonempty reason; use revise for continuous progress")
     budget_addition = addition(add_seconds, add_calls)
     with store.writer(old_id):
         store.assert_constructed(old_id)
@@ -138,14 +141,24 @@ def continue_run(repo: Path, store, old_id: str, checkpoint_id: str, *, add_seco
         # Read process evidence outside the control lock, then reserve against
         # concurrent unified launch intents while already owning the old writer.
         observed_ledger = store.read_supervisor()
+        from .revision_control import publication_barrier
+        if (old["status"] == "ready" or old.get("published") or old.get("exports") or
+                observed_ledger.get("commits", {}).get(old_id)):
+            raise ExtractError("full restart accepts only unfinished runs without export or committed publication")
+        if publication_barrier(store, old, observed_ledger):
+            raise ExtractError("a pending semantic request or maintenance prevents full restart")
         _quiescent(store, old, observed_ledger)
         with store.supervisor() as ledger:
+            if publication_barrier(store, old, ledger) or ledger.get("commits", {}).get(old_id):
+                raise ExtractError("semantic revision or publication committed before full-restart reservation")
             existing = ledger["continuations"].get(old_id)
             if existing:
                 if existing["checkpoint"] != checkpoint_id:
                     raise ExtractError("old run already has a successor for another checkpoint")
                 if existing.get("budget_addition", addition()) != budget_addition:
                     raise ExtractError("successor already has a different budget request; use resume " + existing["run_id"] + " --add-seconds N / --add-calls N")
+                if existing.get("reason") != reason.strip():
+                    raise ExtractError("successor is already registered with a different full-restart reason")
                 relation = deepcopy(existing)
             else:
                 # A new launch could have been reserved after the observation.
@@ -155,7 +168,7 @@ def continue_run(repo: Path, store, old_id: str, checkpoint_id: str, *, add_seco
                     raise ExtractError("old launch changed before continuation reservation")
                 relation = {"run_id": str(uuid4()), "predecessor": old_id, "checkpoint": checkpoint_id,
                             "state_sha256": state_digest, "status": "preparing", "created_at": time.time(),
-                            "budget_addition": budget_addition}
+                            "budget_addition": budget_addition, "full_restart": True, "reason": reason.strip()}
                 ledger["continuations"][old_id] = relation
                 relation = deepcopy(relation)
         if relation["status"] == "ready":

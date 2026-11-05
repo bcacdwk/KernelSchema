@@ -174,8 +174,9 @@ def _versions(old: dict, new: dict, *, first_draft: bool = False) -> None:
         raise ExtractError("node content changed without increasing version")
 
 
-def validate_artifact_sources(directory: Path, lock: dict, *, decision: str) -> None:
-    parser_root = rules_root(lock)
+def validate_artifact_sources(directory: Path, lock: dict, *, decision: str,
+                              parser_root: Path | None = None) -> None:
+    parser_root = parser_root or rules_root(lock)
     root = load_root(directory, parser_root=parser_root)
     algorithm = root["contract"].get("algorithm_requirement")
     golden = algorithm.get("golden_reference") if isinstance(algorithm, dict) else None
@@ -350,7 +351,8 @@ def _erase_fields(value: dict, fields: list[str]) -> dict:
 
 def validate_artifacts(stage: str, role: str, before: Path, after: Path, starter: Path,
                        *, decision: str, node_entry: dict | None = None, revision_scope: list | None = None,
-                       first_draft: bool = False, root_revision: bool = False) -> dict:
+                       first_draft: bool = False, root_revision: bool = False,
+                       maintenance_fields: list | None = None, candidate_review: bool = False) -> dict:
     old_files, new_files = manifest(before), manifest(after)
     changed = sorted(name for name in old_files.keys() | new_files.keys() if old_files.get(name) != new_files.get(name))
     allowed = set(stage_files(stage, node_entry=node_entry, revision_scope=revision_scope))
@@ -363,6 +365,17 @@ def validate_artifacts(stage: str, role: str, before: Path, after: Path, starter
     if stage in {"P3", "P4", "P5", "P6"} and set(new_files) != set(old_files):
         raise ExtractError("this stage cannot add or delete artifacts")
     parser_root = starter.parent.parent
+    if maintenance_fields is not None and role == "worker":
+        boundaries = {item["path"]: item["fields"] for item in maintenance_fields}
+        for name in changed:
+            if name not in boundaries:
+                raise ExtractError("maintenance changed a file outside its evidence-bound scope: " + name)
+            fields = boundaries[name]
+            if name.endswith((".yaml", ".yml")) and fields != ["*"]:
+                left = load_yaml(before, name, parser_root=parser_root)
+                right = load_yaml(after, name, parser_root=parser_root)
+                if not _same(_erase_fields(left, fields), _erase_fields(right, fields)):
+                    raise ExtractError("maintenance changed fields outside its evidence-bound scope: " + name)
     old, new = load_root(before, parser_root=parser_root), load_root(after, parser_root=parser_root)
     template = load_root(starter.parent, starter.name, parser_root=parser_root)
     if not _same(new.get("contract", {}).get("hardware_specification"), template["contract"]["hardware_specification"]):
@@ -382,11 +395,12 @@ def validate_artifacts(stage: str, role: str, before: Path, after: Path, starter
         left, right = load_yaml(before, name, parser_root=parser_root), load_yaml(after, name, parser_root=parser_root)
         metadata = right["meta_data"]
         dispatch = metadata.get("dispatch", {})
-        if "contract" in right:
+        inspect_incomplete = candidate_review and role == "reviewer" and decision in {"revise", "blocked"}
+        if "contract" in right and not inspect_incomplete:
             raise ExtractError("derived nodes must omit the whole Contract")
-        if not isinstance(dispatch, dict) or dispatch.get("id") != node_entry["id"] or dispatch.get("parent") != node_entry["parent"]:
+        if not inspect_incomplete and (not isinstance(dispatch, dict) or dispatch.get("id") != node_entry["id"] or dispatch.get("parent") != node_entry["parent"]):
             raise ExtractError("derived ID/parent must match the approved direct-parent plan")
-        if any(not _same(metadata.get(key), new["meta_data"].get(key)) for key in ("name", "describe")):
+        if not inspect_incomplete and any(not _same(metadata.get(key), new["meta_data"].get(key)) for key in ("name", "describe")):
             raise ExtractError("derived name/describe must equal root")
         _versions(left, right, first_draft=first_draft)
         if decision in {"complete", "approve"} and (not isinstance(dispatch.get("when"), str) or not dispatch["when"].strip()):
@@ -429,10 +443,11 @@ def validate_artifacts(stage: str, role: str, before: Path, after: Path, starter
 
 def check_complete(directory: Path, rules_root: Path, *, filename="root.yaml", timeout=120.0) -> dict:
     """Run the frozen executable; never replace schema checks with local rules."""
+    directory, rules_root = directory.resolve(), rules_root.resolve()
     command = [sys.executable, "-B", str(rules_root / "schema_template/check_yaml.py"),
                "--skip-hardware", str(directory / filename)]
     try:
-        result = subprocess.run(command, cwd=rules_root, capture_output=True, text=True, timeout=max(0.01, timeout))
+        result = subprocess.run(command, cwd=directory, capture_output=True, text=True, timeout=max(0.01, timeout))
         code = result.returncode if result.returncode in {0, 1, 2} else 2
         return {"kind": "frozen_checker", "command": command, "exit_code": code,
                 "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}

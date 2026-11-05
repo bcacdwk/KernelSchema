@@ -16,7 +16,11 @@ from . import __version__
 from .common import (STATE_GUARD, ExtractError, RunnerBusy, StaleResult, copy_artifacts, digest, json_bytes,
                      fsync_directory, manifest, read_json, seal, sync_tree, verify_manifest, write_json, write_text, rules_root)
 from .artifacts import _same, load_yaml, validate_artifact_sources, write_yaml
-from .budget import CAPABILITY as BUDGET_CAPABILITY, call_limit, review_seconds
+from .budget import call_limit, review_seconds
+from .runtime import (EXECUTOR_CAPABILITIES, STATE_FORMAT as RUNTIME_STATE_FORMAT,
+                      execution_boundary, verify_execution)
+from .revisions import (STATE_FORMAT as SEMANTIC_STATE_FORMAT, CONTEXT_FIELDS, resolve_context,
+                        verify_effective_approval as verify_effective_context_approval)
 from .stages import (NODE_STOPS, call_view, effective_nodes, new_scope, next_call, next_calls, node_signature,
                      scope_for, scope_key, session_group, writable_files)
 
@@ -190,14 +194,14 @@ class Store:
         path = self.run_dir(run_id) / "state.json"
         guard = STATE_GUARD.get()
         value = guard.read_state() if guard and path.parent == guard.directory else read_json(path)
-        if not isinstance(value, dict) or value.get("format") != STATE_FORMAT or value.get("run_id") != run_id:
+        if not isinstance(value, dict) or value.get("format") not in {STATE_FORMAT, RUNTIME_STATE_FORMAT, SEMANTIC_STATE_FORMAT} or value.get("run_id") != run_id:
             raise ExtractError("unsupported or mismatched state; v1 runs must use their frozen executor")
         if "active_attempts" not in value or "reopen_requests" not in value:
             raise ExtractError("this older serial run must use its frozen executor; import its checkpoint into a new run")
         return value
 
     def save(self, state: dict) -> None:
-        if state.get("format") != STATE_FORMAT:
+        if state.get("format") not in {STATE_FORMAT, RUNTIME_STATE_FORMAT, SEMANTIC_STATE_FORMAT}:
             raise ExtractError("cannot save another state format")
         directory = self.run_dir(state["run_id"])
         guard = STATE_GUARD.get()
@@ -300,7 +304,7 @@ class Store:
                  "executor": {"version": __version__, "rules_id": lock["rules"]["id"],
                               "digest": digest({name: value for name, value in lock["rules"]["files"].items()
                                                 if name.startswith("schema_extract/") and name.endswith(".py")}),
-                              "capabilities": ["summary.v1", "state_guard.v1", "hold.v1", "scoped_restart.v1", "continuation.v1", "audit.v1", "proposal.v1", BUDGET_CAPABILITY]},
+                              "capabilities": list(EXECUTOR_CAPABILITIES)},
                  "reopening": None, "reopen_requests": {}, "plan_history": [],
                  "stale_results": {}, "unconfirmed_attempts": {}, "p6_starts": 0, "final_review_started": False,
                  "config": lock["config"], "deadline": now + lock["config"]["operator_seconds"],
@@ -358,12 +362,20 @@ class Store:
         return state
 
     def checkpoint(self, state: dict, artifacts: Path, *, attempt_id: str | None,
-                   stage: str | None = None, node: str | None = None, parent: str | None = None) -> str:
+                   stage: str | None = None, node: str | None = None, parent: str | None = None,
+                   call: dict | None = None) -> str:
         files = manifest(artifacts)
         identity = {"format": "schema_extract.checkpoint.v2", "run_id": state["run_id"],
                     "stage": stage or state["stage"], "node": node or state["node"], "attempt_id": attempt_id,
                     "plan_revision": state["plan_revision"], "parent": parent or state["checkpoint"],
                     "input_fingerprint": state["input_fingerprint"], "files": files}
+        if state.get("semantic_revision"):
+            identity["semantic_revision"] = state["semantic_revision"]
+        if call is not None:
+            identity.update({key: call[key] for key in CONTEXT_FIELDS if key in call})
+        if state.get("semantic_revision") and attempt_id:
+            invocation = read_json(self.run_dir(state["run_id"]) / "attempts" / attempt_id / "attempt.json")
+            identity.update({key: invocation[key] for key in CONTEXT_FIELDS if key in invocation})
         checkpoint_id = digest(identity)
         base = self.run_dir(state["run_id"]) / "checkpoints"
         destination = base / checkpoint_id
@@ -395,7 +407,8 @@ class Store:
         verify_manifest(directory / "artifacts", info["files"])
         return directory / "artifacts", info
 
-    def verify_approval(self, state: dict, approval: dict | None) -> tuple[dict, dict]:
+    @execution_boundary
+    def verify_approval_origin(self, state: dict, approval: dict | None) -> tuple[dict, dict]:
         """Resolve an approval to its accepted receipt, Runner gate, and immutable bytes."""
         if not isinstance(approval, dict):
             raise ExtractError("missing effective approval")
@@ -408,19 +421,39 @@ class Store:
         receipt = read_json(directory / "receipt.json")
         validation = read_json(directory / "validated.json")
         invocation = read_json(directory / "attempt.json")
+        if state.get("execution_binding") or state.get("semantic_revision"):
+            resolve_context(self, state, invocation)
         if any(approval[key] != invocation[key] for key in ("stage", "node", "attempt_id", "input_fingerprint")):
             raise ExtractError("approval scope differs from its invocation")
         if approval["generation"] != invocation["generation"] or approval["plan_revision"] != invocation["plan_revision"]:
             raise ExtractError("approval invocation generation/revision identity changed")
+        if invocation.get("semantic_revision"):
+            from .receipts import call_identity
+            if receipt.get("identity") != call_identity(invocation):
+                raise ExtractError("approval receipt semantic context differs from its invocation")
+            for key in CONTEXT_FIELDS:
+                if approval.get(key) != invocation.get(key) or validation.get(key) != invocation.get(key):
+                    raise ExtractError("approval or gate semantic context changed: " + key)
         if digest(receipt) != approval["receipt_sha256"] or receipt["decision"] != "approve":
             raise ExtractError("approval receipt was changed or did not approve")
         if validation["receipt_sha256"] != approval["receipt_sha256"] or validation["check"]["exit_code"] != 0:
             raise ExtractError("approval has no matching successful Runner gate")
         _, checkpoint = self.verify_checkpoint(state, approval["checkpoint"])
+        if invocation.get("semantic_revision") and any(checkpoint.get(key) != invocation.get(key) for key in CONTEXT_FIELDS):
+            raise ExtractError("approval checkpoint semantic context changed")
         if checkpoint["files"] != approval["artifact_digests"] or checkpoint["files"] != validation["artifact_digests"]:
             raise ExtractError("approval content differs from its checked immutable checkpoint")
         return receipt, checkpoint
 
+    @execution_boundary
+    def verify_effective_approval(self, state: dict, approval: dict | None) -> tuple[dict, dict]:
+        return verify_effective_context_approval(self, state, approval)
+
+    def verify_approval(self, state: dict, approval: dict | None) -> tuple[dict, dict]:
+        """Execution admission uses current applicability, not just old evidence."""
+        return self.verify_effective_approval(state, approval)
+
+    @execution_boundary
     def verify_node(self, state: dict, node_id: str, *, merged_info: dict | None = None) -> dict:
         """Current validity depends on this node and its ancestors, never siblings."""
         if node_id not in effective_nodes(state):
@@ -443,18 +476,29 @@ class Store:
         if (approval_checkpoint["files"].get(node["file"]) != node["approved_sha256"] or
                 merged_info["files"].get(node["file"]) != node["approved_sha256"]):
             raise ExtractError("node approval does not match its current merged bytes: " + node_id)
+        from .revisions import effective_dependency_digests
+        dependencies = effective_dependency_digests(self, state, approval, approval_checkpoint)
         parent = node["parent"]
         while parent:
             ancestor = state["nodes"][parent]
-            if parent not in effective_nodes(state) or approval_checkpoint["files"].get(ancestor["file"]) != merged_info["files"].get(ancestor["file"]):
+            if parent not in effective_nodes(state) or dependencies.get(ancestor["file"]) != merged_info["files"].get(ancestor["file"]):
                 raise ExtractError("approved node ancestor dependency changed: " + node_id)
             parent = ancestor["parent"]
         return approval_checkpoint
 
+    @execution_boundary
     def validate_attempt(self, state: dict, attempt: dict) -> None:
         directory = self.run_dir(state["run_id"]) / "attempts" / attempt["attempt_id"]
         if read_json(directory / "attempt.json") != attempt:
             raise ExtractError("agent modified invocation identity")
+        if state.get("execution_binding") or state.get("semantic_revision"):
+            resolve_context(self, state, attempt)
+        if attempt.get("semantic_revision") != state.get("semantic_revision"):
+            raise StaleResult("invocation semantic context was superseded")
+        maintenance_call = attempt.get("purpose") == "maintenance"
+        if maintenance_call:
+            from .maintenance import validate_attempt as validate_maintenance_attempt
+            validate_maintenance_attempt(state, attempt)
         if attempt["run_id"] != state["run_id"] or attempt["input_fingerprint"] != state["input_fingerprint"]:
             raise ExtractError("invocation fixed input identity changed")
         key = scope_key(attempt["stage"], attempt["node"])
@@ -467,9 +511,9 @@ class Store:
                 raise StaleResult("node membership, parent or selection changed while the invocation ran")
             if state.get("reopening") or not all(state["stages"][stage]["status"] == "approved" for stage in ("P1", "P2", "P3", "P4")):
                 raise StaleResult("upstream review is not currently valid")
-            if attempt["base_checkpoint"] != node["draft_checkpoint"]:
+            if not maintenance_call and attempt["base_checkpoint"] != node["draft_checkpoint"]:
                 raise StaleResult("this node's draft checkpoint changed")
-            if (attempt["role"], attempt["mode"]) != (node["role"], node["mode"]):
+            if not maintenance_call and (attempt["role"], attempt["mode"]) != (node["role"], node["mode"]):
                 raise StaleResult("this node's role or review mode changed")
             _, merged = self.verify_checkpoint(state, state["merged_checkpoint"])
             parent = node["parent"]
@@ -479,14 +523,17 @@ class Store:
                 if attempt["dependency_digests"].get(ancestor["file"]) != merged["files"].get(ancestor["file"]):
                     raise StaleResult("approved parent or Contract changed while the invocation ran")
                 parent = ancestor["parent"]
-        else:
+        elif not maintenance_call:
             if any(attempt[key] != state[key] for key in ("stage", "node", "role", "mode", "plan_revision")):
                 raise StaleResult("upstream stage invocation no longer matches its current scope")
             if attempt["generation"] != scope_for(state, attempt)["generation"] or attempt["base_checkpoint"] != state["checkpoint"]:
                 raise StaleResult("stage generation or checkpoint changed")
 
+    @execution_boundary
     def prepare_attempt(self, state: dict, session_id: str | None, *, call: dict | None = None,
                         timeout_seconds: float | None = None) -> dict:
+        if state.get("execution_binding") or state.get("semantic_revision"):
+            verify_execution(self, state, executor=True)
         call = call or next_call(state)
         if call is None:
             raise ExtractError("no dependency-ready call can be prepared")
@@ -494,9 +541,13 @@ class Store:
         if key in state["active_attempts"]:
             raise ExtractError("cannot prepare a second attempt before confirmed termination")
         from .stages import next_calls
-        if not any(all(call[field] == ready[field] for field in ("stage", "node", "role", "mode")) for ready in next_calls(state)):
+        if not any(all(call.get(field) == ready.get(field) for field in
+                       ("stage", "node", "role", "mode", "purpose", "maintenance_task_id", "maintenance_step"))
+                   for ready in next_calls(state)):
             raise ExtractError("cannot prepare a call outside the current dependency-ready set")
-        if call["stage"] == "P5" and state["nodes"][call["node"]]["draft_checkpoint"] is None:
+        from .maintenance import prepare_workspace
+        prepare_workspace(self, state, call)
+        if call.get("purpose") != "maintenance" and call["stage"] == "P5":
             self.start_node(state, call["node"])
         view = call_view(state, call)
         scope = scope_for(state, call)
@@ -537,8 +588,13 @@ class Store:
                            "revision_scope": state["revision_scope"],
                            "workspace": str(directory / "workspace"), "directory": str(directory),
                            "created_at": time.time()})
+        if state.get("semantic_revision"):
+            invocation["semantic_revision"] = state["semantic_revision"]
+        invocation.update({key: call[key] for key in CONTEXT_FIELDS if key in call})
         if timeout_seconds is not None:
             invocation["timeout_seconds"] = timeout_seconds
+        if state.get("execution_binding"):
+            invocation["execution_binding"] = state["execution_binding"]
         handoff = next((item for item in reversed(state.get("session_handoffs", []))
                         if item["session_group"] == group and item["role"] == call["role"] and
                         not item.get("next_attempt_id")), None)
@@ -546,6 +602,9 @@ class Store:
             handoff["next_attempt_id"] = attempt_id
             invocation["recovery_handoff"] = deepcopy(handoff)
         write_json(directory / "attempt.json", invocation)
+        if call.get("purpose") == "maintenance":
+            from .maintenance import task_for
+            task_for(state, call).setdefault("attempts", []).append({"attempt_id": attempt_id, "step": call["maintenance_step"]})
         state["attempts"].append(attempt_id)
         state["active_attempts"][key] = attempt_id
         state.setdefault("unsettled_attempts", {})[attempt_id] = "prepared"
@@ -555,9 +614,10 @@ class Store:
         self.save(state)
         return invocation
 
-    def start_node(self, state: dict, node_id: str) -> None:
-        """Copy only the approved root/ancestors and this node's direct parent."""
+    def start_node(self, state: dict, node_id: str, *, call: dict | None = None) -> None:
+        """Refresh read-only ancestors; an authored node always keeps its own body."""
         node = state["nodes"][node_id]
+        parser_root = rules_root(resolve_context(self, state)["rules_lock"])
         merged, checkpoint = self.verify_checkpoint(state, state["merged_checkpoint"])
         ancestors, parent = [], node["parent"]
         while parent:
@@ -571,20 +631,30 @@ class Store:
             for name in ancestors:
                 shutil.copyfile(merged / name, temporary / name)
             parent_file = state["nodes"][node["parent"]]["file"]
-            derived = load_yaml(merged, parent_file, parser_root=rules_root(state))
-            derived.pop("contract", None)
-            version = 1
-            previous = node.get("last_draft_checkpoint")
-            if previous:
+            own = None
+            candidates = [node.get("draft_checkpoint"), node.get("last_draft_checkpoint"),
+                          (node.get("approval") or {}).get("checkpoint"),
+                          (node.get("last_approval") or {}).get("checkpoint"), state["merged_checkpoint"]]
+            for previous in dict.fromkeys(item for item in candidates if item):
                 old, old_info = self.verify_checkpoint(state, previous)
                 if node["file"] in old_info["files"]:
-                    version = load_yaml(old, node["file"], parser_root=rules_root(state))["meta_data"]["version"]
-            derived["meta_data"]["version"] = version
-            derived["meta_data"]["dispatch"] = {"id": node_id, "parent": node["parent"], "when": ""}
-            write_yaml(temporary / node["file"], derived, source=merged / parent_file,
-                       parser_root=rules_root(state))
+                    own = old / node["file"]
+                    break
+            if own:
+                shutil.copyfile(own, temporary / node["file"])
+            else:
+                derived = load_yaml(merged, parent_file, parser_root=parser_root)
+                derived.pop("contract", None)
+                derived["meta_data"]["version"] = 1
+                derived["meta_data"]["dispatch"] = {"id": node_id, "parent": node["parent"], "when": ""}
+                write_yaml(temporary / node["file"], derived, source=merged / parent_file, parser_root=parser_root)
+            if node.get("draft_checkpoint"):
+                _, old_info = self.verify_checkpoint(state, node["draft_checkpoint"])
+                if old_info["files"] == manifest(temporary):
+                    node["parent_sha256"] = checkpoint["files"][parent_file]
+                    return
             node["draft_checkpoint"] = self.checkpoint(state, temporary, attempt_id=None, stage="P5", node=node_id,
-                                                       parent=state["merged_checkpoint"])
+                                                       parent=node.get("draft_checkpoint") or state["merged_checkpoint"], call=call)
             node["parent_sha256"] = checkpoint["files"][parent_file]
             # The initial clone is a saved checkpoint too. A request to reopen
             # before writing anything must not turn that clone into a first draft.
@@ -610,8 +680,9 @@ class Store:
     def handoff(self, state: dict, attempt: dict, text: str, lock: dict) -> None:
         directory = self.run_dir(state["run_id"]) / "stages" / attempt["stage"]
         directory.mkdir(parents=True, exist_ok=True)
-        body = (f"Checkpoint: {state['checkpoint']}\nSource: {lock['source']['id']}\n"
-                f"Rules: {lock['rules']['id']}\n\n{text.rstrip()}\n")
+        context = resolve_context(self, state, attempt)
+        body = (f"Checkpoint: {state['checkpoint']}\nSource: {context['source_lock']['source']['id']}\n"
+                f"Rules: {context['rules_lock']['rules']['id']}\n\n{text.rstrip()}\n")
         write_text(directory / "handoff.md", body)
         sync_tree(directory)
         fsync_directory(directory.parent)
@@ -668,6 +739,8 @@ def summary(store: Store, state: dict) -> dict:
         "approved_nodes": sorted(approved), "nodes_by_status": groups, "node_details": details,
         "active_attempts": dict(active), "unsettled_attempts": dict(state.get("unsettled_attempts", {})),
         "runner": state.get("runner"), "continuation": state.get("continuation"),
+        "execution_binding": state.get("execution_binding"),
+        "execution_bindings": list(state.get("execution_bindings", [])),
         "unconfirmed_attempts": dict(state.get("unconfirmed_attempts", {})),
         "control": state.get("control"), "publication": state.get("publication"),
         "exports": state.get("exports", []),

@@ -35,7 +35,8 @@ class ReceiptFormatError(ExtractError):
 
 def call_identity(attempt: dict) -> dict:
     return {key: attempt[key] for key in (*IDENTITY_FIELDS,
-            *(key for key in ("mode", "generation", "node_signature") if key in attempt))}
+            *(key for key in ("mode", "generation", "node_signature", "semantic_revision",
+                              "maintenance_task_id", "purpose", "maintenance_step") if key in attempt))}
 
 
 REOPEN_TARGETS = {"P2": {"P1"}, "P3": {"P1", "P2"}, "P4": {"P1", "P2", "P3"},
@@ -96,9 +97,10 @@ def receipt_schema(attempt: dict) -> dict:
     if attempt["stage"] == "P4":
         fields["plan"] = {"type": "array", "items": obj({"id": TEXT, "file": TEXT, "parent": TEXT,
             "workload": TEXT, "difference": TEXT, "selection": TEXT, "evidence": INDICES})}
-    if attempt["stage"] == "P6":
+    if attempt["stage"] == "P6" or attempt.get("purpose") == "maintenance":
         fields["revision_scope"] = {"type": "array", "items": obj({"path": TEXT, "fields": TEXTS})}
-        fields["affected_nodes"] = TEXTS
+        if attempt["stage"] == "P6":
+            fields["affected_nodes"] = TEXTS
     if attempt.get("mode") == "adjudicate":
         fields["adjudication"] = obj({"action": {"type": "string", "enum": ["select", "patch", "blocked"]},
             "checkpoint": TEXT, "patches": {"type": "array", "items": obj({"path": TEXT, "old": TEXT, "new": TEXT})}})
@@ -240,7 +242,12 @@ def _artifact_issue_supported(issue: dict, anchors: list[dict]) -> bool:
 
 
 def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
-                     artifacts: Path, changed_files: list[str]) -> dict:
+                     artifacts: Path, changed_files: list[str], *, rules_lock: dict | None = None) -> dict:
+    if attempt.get("semantic_revision") and rules_lock is None:
+        raise ExtractError("semantic receipt validation requires its explicit rules lock")
+    semantic = rules_lock or lock
+    if attempt.get("semantic_revision") != state.get("semantic_revision"):
+        raise ExtractError("receipt belongs to an obsolete semantic context")
     if attempt["attempt_id"] in state["accepted_receipts"]:
         raise ExtractError("duplicate receipt: this attempt was already accepted")
     if state["active_attempts"].get(scope_key(attempt["stage"], attempt["node"])) != attempt["attempt_id"]:
@@ -260,7 +267,7 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
     if value["identity"] != call_identity(attempt):
         raise ExtractError("receipt invocation identity mismatch")
     allowed = {"complete", "continue", "blocked"} if attempt["role"] == "worker" else {"approve", "revise", "blocked"}
-    if attempt["stage"] in REOPEN_TARGETS and attempt.get("mode", "normal") == "normal":
+    if attempt["stage"] in REOPEN_TARGETS and attempt.get("mode", "normal") == "normal" and attempt.get("purpose") != "maintenance":
         allowed.add("reopen")
     if value["decision"] not in allowed:
         raise ExtractError("receipt decision does not match role")
@@ -313,7 +320,7 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
             if planned_files == set(files) and planned_files <= cited_files:
                 # Topology is a fact about the cited artifacts. Source-dependent
                 # selection and coverage conclusions still need source indices.
-                validate_plan(state["plan"], artifacts, rules_root(lock), require_files=True)
+                validate_plan(state["plan"], artifacts, rules_root(semantic), require_files=True)
                 artifact_subjects.add("tree")
         subjects = {item["subject"] for item in value["conclusions"] if item["text"].strip()
                     and (item["evidence"] or item["subject"] in artifact_subjects)}
@@ -321,7 +328,7 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
         if not required_subjects <= subjects:
             raise ExtractError("missing supported stage conclusions: " + ", ".join(sorted(required_subjects - subjects)))
         if attempt["stage"] == "P1" and attempt.get("mode", "normal") != "adjudicate":
-            validate_comparisons(value, lock, artifacts)
+            validate_comparisons(value, lock, artifacts, parser_root=rules_root(semantic))
     if attempt["role"] == "reviewer":
         required_artifacts = required_artifact_evidence(state, attempt, files)
         if not required_artifacts <= {item["path"] for item in value["artifact_evidence"]}:
@@ -355,7 +362,7 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
             raise ReceiptFormatError("approval needs a short handoff (<=1200 characters, <=20 nonempty lines)")
     if attempt["stage"] == "P4" and final:
         if attempt.get("mode", "normal") == "normal":
-            validate_plan(value["plan"], artifacts, rules_root(lock))
+            validate_plan(value["plan"], artifacts, rules_root(semantic))
         for entry in value["plan"]:
             if not entry["evidence"] or any(type(i) is not int or i < 0 or i >= len(value["source_evidence"])
                                              for i in entry["evidence"]):

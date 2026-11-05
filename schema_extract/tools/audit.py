@@ -17,6 +17,7 @@ import time
 from uuid import UUID, uuid4
 
 from .common import ExtractError, digest, json_bytes, manifest, relative_name, source_root
+from .observation import FORMAT as OBSERVATION_FORMAT, interval_observation, observation_summary, observation_totals
 
 
 TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens")
@@ -168,9 +169,11 @@ def _json(path):
 
 
 def _state(store, run_id, files=None):
+    from .runtime import STATE_FORMAT as RUNTIME_STATE_FORMAT
+    from .revisions import STATE_FORMAT as SEMANTIC_STATE_FORMAT
     path = store.run_dir(_uuid(run_id, "run")) / "state.json"
     value = files.file(path, as_json=True) if files else _json(path)
-    if (not isinstance(value, dict) or value.get("format") != "schema_extract.run.v2" or
+    if (not isinstance(value, dict) or value.get("format") not in {"schema_extract.run.v2", RUNTIME_STATE_FORMAT, SEMANTIC_STATE_FORMAT} or
             value.get("run_id") != run_id or "active_attempts" not in value or "reopen_requests" not in value):
         raise ExtractError("audit requires a matching v2 run record; older fields remain unavailable")
     return value
@@ -187,6 +190,7 @@ def _sum_time(rows, field):
 def _totals(rows):
     return {"attempt_count": len(rows), "usage_status": dict(Counter(row["usage"]["status"] for row in rows)),
             "additive_tokens": {field: None for field in TOKEN_FIELDS},
+            "root_usage": observation_totals(rows),
             "accounted_seconds": _sum_time(rows, "elapsed_seconds"),
             "cli_seconds": _sum_time(rows, "cli_seconds"),
             "processing_seconds": _sum_time(rows, "processing_seconds")}
@@ -205,9 +209,63 @@ def _checks(ledger):
     if clock.get("last_scan"):
         check = deepcopy(clock["last_scan"])
         records[check["id"]] = {**records.get(check["id"], {}), **check}
+    reminders = {}
+    for item in [*clock.get("history", []), clock.get("last_reminder", {}), clock.get("reminder", {}), clock.get("probe", {})]:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        reminders[item["id"]] = {key: deepcopy(item.get(key)) for key in ("id", "due_at", "ack")}
+        reminders[item["id"]]["attempts"] = [{key: attempt.get(key) for key in ("started_at", "finished_at", "status")}
+                                              for attempt in item.get("attempts", [])]
     return {"allocation": "shared_state_root_checks_not_charged_to_this_run",
             "retention": "bounded_history_not_all_checks", "records": list(records.values()),
+            "reminder_timing": list(reminders.values()),
+            "latest_observation": {key: clock.get("last_observation", {}).get(key) for key in
+                                   ("id", "due_at", "started_at", "completed_at", "recovery_completed_at")},
+            "latency_scope": "recorded due/queue/ack boundaries; client-side cause remains unknown",
             "known_seconds": sum(item.get("elapsed_seconds", 0) for item in records.values()) if records else None}
+
+
+def _waits(state, ledger, now):
+    """Read S3 lifecycle anchors; scopes may wait while sibling calls work."""
+    run_id, control = state["run_id"], state.get("control", {})
+    groups = {key: [] for key in ("pause", "hold", "start_queue", "retry_backoff", "recovery_queue")}
+    sources = []
+    for request_id, request in control.get("requests", {}).items():
+        if request.get("action") != "pause":
+            continue
+        start, end = request.get("stopped_at"), request.get("resumed_at")
+        current = request_id == control.get("last_request_id")
+        if start is None and current:
+            start = control.get("stopped_at")
+        active = current and state.get("status") == "paused" and control.get("action") == "pause"
+        kind = "hold" if request.get("hold_id") else "pause"
+        if kind == "hold" and end is None:
+            end = ledger.get("holds", {}).get(request["hold_id"], {}).get("released_at")
+        groups[kind].append((start, end, active))
+        sources.append({"source": "control.requests", "id": request_id, "kind": kind,
+                        "requested_at": request.get("created_at"), "started_at": start, "ended_at": end})
+    launch = ledger.get("starts", {}).get(run_id, {}).get("launch", {})
+    if state.get("status") == "queued" or launch.get("mode") == "queued":
+        groups["start_queue"].append((state.get("created_at"), launch.get("created_at"), state.get("status") == "queued"))
+        sources.append({"source": "supervisor.starts.launch", "id": launch.get("id"), "kind": "start_queue",
+                        "started_at": state.get("created_at"), "ended_at": launch.get("created_at"),
+                        "scope": "initial queue to launch reservation; launch/initialization time excluded"})
+    for identity, request in ledger.get("retries", {}).items():
+        if request.get("run_id") != run_id:
+            continue
+        consumed, active = request.get("consumed_at"), request.get("status") == "authorized"
+        due = request.get("next_due_at")
+        stop = consumed or request.get("completed_at") or (now if active else None)
+        end = min(due, stop) if type(due) in {int, float} and type(stop) in {int, float} else None
+        if type(due) in {int, float} and due > 0:
+            groups["retry_backoff"].append((request.get("failure_observed_at"), end, active))
+        groups["recovery_queue"].append((request.get("created_at"), consumed, active))
+        sources.append({"source": "supervisor.retries", "id": identity,
+                        **{key: request.get(key) for key in ("scope", "failure_observed_at", "created_at", "next_due_at", "consumed_at")}})
+    return {"by_kind": {key: interval_observation(value, now=now) for key, value in groups.items()},
+            "known_union": interval_observation([interval for values in groups.values() for interval in values], now=now),
+            "sources": sources, "retention": "partial lifecycle history; missing boundaries remain unknown",
+            "scope": "union of observed scope waits, possibly concurrent with sibling CLI work; do not subtract from wall time"}
 
 
 def _rows(store, state):
@@ -256,7 +314,9 @@ class _Evidence:
             raise ExtractError("evidence leaves this runtime store: " + str(path))
         name = path.relative_to(self.root).as_posix()
         relative_name(name)
-        if name not in self.cache:
+        # Runtime/revision evidence may first register a JSON file by its raw
+        # hash. A later checkpoint/receipt read still needs the parsed value.
+        if name not in self.cache or ((as_json or events) and self.cache[name] is None):
             spool = tempfile.TemporaryFile() if self.portable else None
             try:
                 if events:
@@ -280,6 +340,8 @@ class _Evidence:
                             raise ExtractError("evidence changed while reading: " + str(path))
                     value = json.loads(b"".join(chunks)) if as_json else None
                     checksum = checksum.hexdigest()
+                if name in self.entries and self.entries[name]["sha256"] != checksum:
+                    raise ExtractError("evidence changed between selected reads: " + str(path))
                 self.entries[name] = {"name": name, "sha256": checksum, "bytes": size, "source": str(path)}
                 self.cache[name] = value
                 if spool:
@@ -360,6 +422,11 @@ def _verify_attempt(store, state, row, files, notes):
     directory = Path(row["directory"])
     hashes = row.get("evidence", {})
     attempt = files.file(directory / "attempt.json", as_json=True, json_digest=hashes.get("attempt.json"))
+    row["execution_binding"] = attempt.get("execution_binding")
+    for key in ("semantic_revision", "maintenance_task_id", "purpose", "maintenance_step"):
+        if key in row and row[key] != attempt.get(key):
+            raise ExtractError("attempt ledger context differs: " + key)
+        row[key] = attempt.get(key)
     for key, expected in (("run_id", row["origin_run_id"]), ("attempt_id", row["attempt_id"]),
                            ("input_fingerprint", state["input_fingerprint"]), ("directory", str(directory)),
                            ("workspace", str(directory / "workspace"))):
@@ -374,7 +441,7 @@ def _verify_attempt(store, state, row, files, notes):
     for name in ("invocation.json", "result.json", "response.schema.json", "receipt.json", "validated.json",
                  "check.json", "merge_check.json", "event.json", "processing.json", "finished.json",
                  "repair.json", "recovery.json", "rejected.json", "stale.json", "handoff.json",
-                 "termination.json", "launch.json", "process.json"):
+                 "termination.json", "launch.json", "process.json", "usage-observation.json"):
         path = directory / name
         if name in hashes or os.path.lexists(path):
             records[name] = files.file(path, as_json=True, json_digest=hashes.get(name))
@@ -399,6 +466,20 @@ def _verify_attempt(store, state, row, files, notes):
             raise ExtractError("usage differs from selected events or attempt ledger")
     else:
         notes.append({"attempt_id": row["attempt_id"], "reason": "usage_not_recorded; inspected events do not rewrite history"})
+    if result.get("usage_observation_sha256"):
+        observed = records.get("usage-observation.json", {})
+        if (observed.get("format") != OBSERVATION_FORMAT or digest(observed) != result["usage_observation_sha256"] or
+                observed.get("identity") != {key: result.get(key) for key in ("run_id", "attempt_id", "launch_id", "attempt_sha256")} or
+                observed.get("identity", {}).get("attempt_sha256") != digest(attempt) or
+                observed.get("session_id") != result.get("session_id") or
+                observed.get("stream_reports") != parsed["usage"]["reports"] or
+                observed.get("stream_trace_sha256") != parsed["trace"]["sha256"] or
+                row.get("usage_observation") != observation_summary(observed)):
+            raise ExtractError("usage observation differs from its bound invocation, stream or ledger")
+        notes.append({"attempt_id": row["attempt_id"],
+                      "reason": "native usage is a bound counter projection; native transcript and child coverage are unavailable"})
+    elif row.get("usage_observation"):
+        raise ExtractError("attempt ledger has an unbound usage observation")
     actual, requested = result.get("session_id"), attempt.get("session_id")
     if requested and actual and requested != actual:
         raise ExtractError("actual session differs from exact requested UUID")
@@ -431,6 +512,10 @@ def _verify_attempt(store, state, row, files, notes):
             raise ExtractError("accepted receipt differs from the recorded digest")
         if records.get("validated.json", {}).get("receipt_sha256") != accepted:
             raise ExtractError("validation is not bound to the accepted receipt")
+        if attempt.get("semantic_revision"):
+            for key in ("semantic_revision", "maintenance_task_id", "purpose", "maintenance_step"):
+                if records.get("validated.json", {}).get(key) != attempt.get(key):
+                    raise ExtractError("validation context differs from its original attempt: " + key)
     if row.get("receipt_sha256") is not None and row["receipt_sha256"] != accepted:
         raise ExtractError("attempt accounting refers to a different accepted receipt")
     if row.get("elapsed_seconds") is not None and records.get("finished.json", {}).get("elapsed_seconds", 0) > row["elapsed_seconds"]:
@@ -447,6 +532,7 @@ def _verify_attempt(store, state, row, files, notes):
 
 def _verify(store, state, rows, files, *, whole_run):
     from .receipts import _anchor
+    from .revisions import resolve_context, verify_revisions
     errors, notes, selected, origins, checkpoints = [], [], [], {state["run_id"]: state}, {}
     def failure(scope, exc):
         errors.append({"scope": scope, "reason": str(exc)})
@@ -468,6 +554,16 @@ def _verify(store, state, rows, files, *, whole_run):
     for origin, original in origins.items():
         try:
             locks[origin] = _inputs(store, original, files)
+            revision_records = verify_revisions(store, original, evidence=files.file)
+            for entry in revision_records:
+                snapshot = Path(entry["target_lock"]["snapshot"])
+                if entry["target_lock"]["source"].get("ref_kind") == "private_snapshot_commit":
+                    for name, checksum in manifest(snapshot / "source.git").items():
+                        files.file(snapshot / "source.git" / name, sha256=checksum)
+            if original.get("execution_binding") or original.get("execution_bindings") or original.get("format") == "schema_extract.run.v2.runtime.v1":
+                from .runtime import verify_execution
+                verify_execution(store, original, attempts=[attempt for row, attempt, _, _ in selected
+                                                            if row["origin_run_id"] == origin], evidence=files.file)
         except (ExtractError, OSError, ValueError, KeyError, TypeError) as exc:
             failure(origin, exc)
     for (origin, checkpoint_id) in checkpoints:
@@ -487,7 +583,12 @@ def _verify(store, state, rows, files, *, whole_run):
                 for handoff in origins[row["origin_run_id"]].get("session_handoffs", []):
                     if (actual == handoff.get("previous_session_id") and attempt.get("created_at", 0) > handoff.get("at", float("inf"))):
                         raise ExtractError("selected attempt reused a retired session")
-            lock = locks.get(row["origin_run_id"])
+            context = resolve_context(store, origins[row["origin_run_id"]], attempt)
+            row["context"] = context["identity"]
+            # This checks raw response provenance against its original source
+            # and checkpoint. It does not run current semantic acceptance rules
+            # or turn a historical receipt into an effective current approval.
+            lock = context["source_lock"]
             if receipt and lock:
                 if attempt["attempt_id"] in origins[row["origin_run_id"]].get("accepted_receipts", {}):
                     if attempt.get("response_format") == "schema_extract.proposal.v1":
@@ -669,8 +770,21 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
         created = state.get("continuation", {}).get("original_created_at", state.get("created_at"))
         commit = ledger.get("commits", {}).get(run_id, {})
         completed = commit.get("at") if state.get("published") and commit.get("checkpoint") == state.get("checkpoint") and commit.get("target") == state.get("output") else None
+        waits = _waits(state, ledger, now)
         report = {"format": "schema_extract.audit.v1", "scope": scope, "observed_at": now,
                   "operator_id": state.get("operator_id"), "status": state["status"], "executor": state.get("executor"),
+                  "execution_binding": state.get("execution_binding"),
+                  "execution_bindings": list(state.get("execution_bindings", [])),
+                  "semantic_revision": state.get("semantic_revision"),
+                  "semantic_revisions": list(state.get("semantic_revisions", [])),
+                  "semantic_context_sources": [{"revision": identity,
+                      "record": str(store.run_dir(run_id) / "revisions" / identity / "revision.json"),
+                      "plan": str(store.run_dir(run_id) / "revisions" / identity / "plan.json"),
+                      "target_lock": str(store.run_dir(run_id) / "revisions" / identity / "target.lock.json")}
+                      for identity in state.get("semantic_revisions", [])],
+                  "approval_adoptions": deepcopy(state.get("approval_adoptions", {})),
+                  "semantic_request": deepcopy(ledger.get("semantic_requests", {}).get(run_id)),
+                  "maintenance": deepcopy(state.get("maintenance")),
                   "state": str(store.run_dir(run_id) / "state.json"), "totals": _totals(rows),
                   "segments": {"current": _totals([row for row in rows if not row["inherited"]]),
                                "inherited": _totals([row for row in rows if row["inherited"]])},
@@ -678,14 +792,18 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
                   "attempts": rows, "session_handoffs": handoffs, "inherited_handoff_sources": inherited_handoffs,
                   "supervisor_checks": checks,
                   "time": {"operator_created_at": created, "publication_committed_at": completed,
+                           "run_created_at": state.get("created_at"),
+                           "run_wall_seconds": (completed or now) - state["created_at"] if state.get("created_at") is not None else None,
+                           "run_wall_end": "publication" if completed is not None else "observation",
                            "operator_wall_seconds": completed - created if completed is not None and created is not None else None,
                            "creation_to_observation_seconds": now - created if created is not None else None,
                            "wall_includes": "queue, pause and waiting; never a sum of concurrent calls",
                            "pause_wait_seconds": None, "model_execution_seconds": None,
-                           "unavailable": "pause intervals and model-only time are not recorded reliably",
+                           "observed_waits": waits,
+                           "unavailable": "historical missing wait boundaries, child-session usage, and model-only time",
                            "budget_deadline": state.get("deadline"),
                            "budget_extensions": deepcopy(state.get("budget_extensions", [])),
-                           "cli_scope": "monotonic transport including setup, termination and event parsing",
+                           "cli_scope": "cumulative monotonic transport including setup, termination, parsing and usage observation; parallel calls overlap",
                            "processing_scope": "Runner checks/processing; estimated crash intervals are separately marked"},
                   "verification": {"status": "not_requested"}, "archive": None}
         if files:
@@ -700,6 +818,7 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
                     report["archive"] = {"status": "not_written", "reason": "selected evidence is incomplete; runtime retained"}
                 else:
                     files.projection("observations/supervisor-checks.json", checks)
+                    files.projection("observations/wait-intervals.json", waits)
                     try:
                         report["archive"] = _archive(Path(archive), files, scope, checked)
                     except (ExtractError, OSError, ValueError, KeyError, TypeError, tarfile.TarError) as exc:
@@ -716,9 +835,16 @@ def format_audit(report):
         return "unknown" if value["seconds"] is None else f"{value['seconds']:.3f}s ({value['unknown_attempts']} unknown calls)"
     lines = [f"{report['scope']['run_id']} {report['status']} attempts={total['attempt_count']} "
              f"current={segments['current']['attempt_count']} inherited={segments['inherited']['attempt_count']}",
-             "tokens=unknown additive scope; provider counters remain per attempt; cached input is part of input",
+             "whole-invocation tokens=unknown; cached input is part of input",
              f"CLI={seconds(total['cli_seconds'])} processing={seconds(total['processing_seconds'])} "
              f"budget-accounted={seconds(total['accounted_seconds'])}"]
+    root = total["root_usage"]
+    tokens = root["additive_tokens"]
+    lines.append(f"root known input/cached/output={tokens['input_tokens']}/{tokens['cached_input_tokens']}/{tokens['output_tokens']} "
+                 f"({root['known_attempts']} known, {root['unknown_attempts']} unknown calls; child coverage unknown)")
+    waits = report["time"]["observed_waits"]["known_union"]
+    lines.append(f"run wall={report['time']['run_wall_seconds']}s; observed scope-wait union={waits['seconds']}s "
+                 f"({waits['unknown_intervals']} unknown boundaries; may overlap CLI work)")
     for item in report["by_scope"][:20]:
         lines.append(f"{item['stage']}/{item['role']}/{item['node']} calls={item['attempt_count']} "
                      f"CLI={seconds(item['cli_seconds'])} usage={item['usage_status']}")

@@ -1,0 +1,24 @@
+{
+  "id": "core-dump-in-snapshot",
+  "category": "extract_tools",
+  "problem": "系统把崩溃转储文件写进了冻结的规则目录。虽然原有源码和规则没有变化，目录多出的文件仍使六个 FMHA 节点无法通过完整性检查。",
+  "evidence": [
+    "历史 core-codex-linux-san 进入冻结 rules 后触发额外文件检查；移至诊断目录后清单恢复一致。",
+    "已知宿主 core_pattern 为 |/opt/coredump/coreWriter %P %e %t；管道 handler 的落盘行为不能由只读目录或 ulimit 推断。",
+    "schema_extract/tools/runtime.py::frozen_run_invocation、agent.py、processes.py 及 artifacts.py 将执行/诊断 cwd 放在 run/attempt；集中场景核验冻结调用 cwd 与 payload workspace。"
+  ],
+  "proposal": "将运行 cwd 与诊断文件放到 run/attempt，冻结目录仅供读取；保留严格 manifest，不修改宿主全局配置。",
+  "necessity": "一次系统崩溃不应连带打断其他提取任务。现场清理只是临时处理，还需要防止复发。",
+  "decision": {
+    "outcome": "partially_adopted",
+    "version": "2.3.0",
+    "reason": "已移出执行和诊断 cwd，并通过隔离进程场景；完整性检查仍拒绝额外文件。",
+    "adopted": [
+      "执行器、检查器和进程诊断使用 run/attempt 工作目录，冻结代码通过绝对入口与 PYTHONPATH 读取。"
+    ],
+    "remaining": [
+      "未诱发真实 core，也未证明宿主 handler 在历史事件中的落盘原因或当前行为。",
+      "旧快照与历史诊断文件未在本轮改写。"
+    ]
+  }
+}

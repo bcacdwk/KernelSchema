@@ -21,7 +21,7 @@ def executor_files(repo: Path) -> set[Path]:
         path for path in (repo / "schema_extract/tools").rglob("*.py") if "tests" not in path.relative_to(repo).parts}
 
 
-def rule_files(repo: Path) -> list[str]:
+def rule_files(repo: Path, *, require_specs: bool = True) -> list[str]:
     paths = {repo / "README.md", repo / "EXTRACT_SCHEMA.md", repo / "schema_template/README.md",
              repo / "schema_template/starter.yaml", repo / "schema_template/check_yaml.py",
              repo / "schema_extract/README.md", repo / "schema_extract/REVIEW.md",
@@ -30,7 +30,8 @@ def rule_files(repo: Path) -> list[str]:
     paths.update(repo / "schema_extract/phases" / stage["page"] for stage in STAGES.values())
     paths.update(executor_files(repo))
     paths.update(p for p in (repo / "schema_template/tools").rglob("*.py") if "tests" not in p.parts)
-    if not (repo / "schema_docs/0.common.md").is_file() or not (repo / "schema_docs/1.contract.algorithm_requirement.md").is_file():
+    if require_specs and (not (repo / "schema_docs/0.common.md").is_file() or
+                          not (repo / "schema_docs/1.contract.algorithm_requirement.md").is_file()):
         raise ExtractError("missing current schema specifications")
     return sorted(p.relative_to(repo).as_posix() for p in paths)
 

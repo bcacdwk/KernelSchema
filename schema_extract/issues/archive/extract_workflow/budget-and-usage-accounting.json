@@ -1,0 +1,25 @@
+{
+  "id": "budget-and-usage-accounting",
+  "category": "extract_workflow",
+  "problem": "排队、暂停和维护等待都会消耗时间额度，但 token 用量又不能可靠汇总。我们能看到调用次数，却还难说清实际工作、等待和费用各占多少。",
+  "evidence": [
+    "原 operator/stage 墙钟预算包含排队和暂停；2.3.0 保留原 config、deadline、预留与 budget_extensions 语义。",
+    "schema_extract/tools/observation.py 独立记录有界 native ledger 与输出事件的根会话增量，audit.py 分列已知用量小计及重叠等待，recovery.account 保留高水位与原 usage v1。",
+    "固定格式回放验证 resume 差分、重复 counter/attempt 去重、缓存输入子集、缺 baseline 未知和等待并集；同 run 升级场景验证原预算/用量保留。"
+  ],
+  "proposal": "保持原预算规则，独立观察可信根会话增量和有据等待；明确已知小计、未覆盖范围与未知费用。",
+  "necessity": "这些规则会影响预算追加，以及我们对重试、重跑成本的判断。需要先讨论清楚，不预先认定现有计时方式就是错误的。",
+  "decision": {
+    "outcome": "partially_adopted",
+    "version": "2.3.0",
+    "reason": "根会话有据增量、来源去重及等待观察已实现并通过固定格式回放；观察失败不改变模型结果，不回写旧 receipt/result。",
+    "adopted": [
+      "原 usage v1 保留，另存 usage-observation，记录 CLI 版本、调用前基线与事件身份。",
+      "按来源/attempt 和会话计数区间去重；墙钟、CLI 累计、检查和已知等待分列。"
+    ],
+    "remaining": [
+      "仅有基线与事件一致的根会话增量可加；子会话覆盖、完整调用 token 及费用未知。",
+      "历史缺采样保持 partial/unavailable，不能相减推出纯模型时间；未引入 active-time 预算或真实付费校准。"
+    ]
+  }
+}

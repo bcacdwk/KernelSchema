@@ -15,6 +15,7 @@ from uuid import uuid4
 from .common import (ExtractError, digest, fsync_directory, json_bytes, manifest, read_json, sha256,
                      sync_tree, verify_manifest, write_json)
 from .snapshots import verify_run_inputs
+from .runtime import execution_boundary, verify_execution
 
 
 def rename_new(source: Path, target: Path) -> None:
@@ -142,13 +143,24 @@ def _prepare_scaffold(output: Path, backup: Path, intent: dict, intent_path: Pat
             raise
 
 
+@execution_boundary
 def publish(store, state: dict, output: Path, *, export=False) -> dict:
-    if state["status"] != "ready" or state["active_attempts"]:
+    from .revision_control import publication_barrier
+    from .revisions import resolve_context
+    from .runner import _final_inputs
+    if state["status"] != "ready" or any(state.get(name) for name in
+            ("active_attempts", "unconfirmed_attempts", "unsettled_attempts")):
         raise ExtractError("only the final independently reviewed ready checkpoint can be published")
-    lock = read_json(store.run_dir(state["run_id"]) / "inputs.lock.json")
+    if publication_barrier(store, state):
+        raise ExtractError("semantic request, drain or maintenance prevents publication and export")
+    context = resolve_context(store, state)
+    lock, semantic_lock = context["source_lock"], context["rules_lock"]
     verify_run_inputs(state, lock)
+    if state.get("execution_binding"):
+        verify_execution(store, state, executor=True)
     receipt, reviewed = store.verify_approval(state, state["stages"]["P6"]["approval"])
     artifacts, checkpoint = store.verify_checkpoint(state)
+    _final_inputs(store, state, artifacts)
     if checkpoint["id"] != reviewed["id"] or checkpoint["id"] != state["merged_checkpoint"]:
         raise ExtractError("final checkpoint differs from its effective independent P6 approval")
     output = output.absolute()
@@ -162,14 +174,36 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
     proof = {"format": "schema_extract.delivery.v2", "run_id": state["run_id"],
              "checkpoint": checkpoint["id"], "input_fingerprint": state["input_fingerprint"],
              "source": {key: lock["source"][key] for key in ("id", "ref", "repository_id", "bindings")},
-             "rules_id": lock["rules"]["id"], "files": checkpoint["files"],
+             "rules_id": semantic_lock["rules"]["id"], "files": checkpoint["files"],
              "approval": {"attempt_id": receipt["identity"]["attempt_id"], "receipt_sha256": digest(receipt)},
              "check_policy": "skip-hardware"}
+    if state.get("execution_binding"):
+        proof["execution"] = {"binding": state["execution_binding"],
+                              "history": list(state["execution_bindings"]),
+                              "executor": state["executor"],
+                              "approval_binding": read_json(store.run_dir(state["run_id"]) / "attempts" /
+                                                            receipt["identity"]["attempt_id"] / "attempt.json").get("execution_binding"),
+                              "semantic_rules_id": semantic_lock["rules"]["id"]}
+    if state.get("semantic_revision"):
+        proof["semantic_context"] = {"revision": state["semantic_revision"],
+                                     "history": list(state.get("semantic_revisions", [])),
+                                     "identity": context["identity"],
+                                     "rules_snapshot": semantic_lock["snapshot"],
+                                     "approval_revision": receipt["identity"].get("semantic_revision")}
     if lock["source"].get("aliases"):
         proof["source"]["aliases"] = lock["source"]["aliases"]
     if state.get("imported_draft"):
         proof["imported_from"] = {key: state["imported_draft"][key]
                                   for key in ("task_key", "checkpoint", "fingerprint", "files", "usage")}
+    previous = state.get("publication") or {}
+    previous_proof = previous.get("proof", {})
+    if (not export and state["published"] and previous.get("status") == "published" and
+            previous.get("target") == str(output) and
+            {key: value for key, value in previous_proof.items() if key != "execution"} ==
+            {key: value for key, value in proof.items() if key != "execution"}):
+        # A runtime upgrade never replaces an already delivered receipt. The
+        # run's migration history and any new export carry the added provenance.
+        proof = previous_proof
     publication_id = digest({"proof": proof, "target": str(output)})
     directory = store.run_dir(state["run_id"]) / "publications"
     directory.mkdir(exist_ok=True)
@@ -198,6 +232,13 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
         if store.load(state["run_id"]) != state:
             raise ExtractError("Runner state changed before publication")
         with store.supervisor() as ledger:
+            if store.load(state["run_id"]) != state:
+                raise ExtractError("Runner context changed before the publication rename")
+            if publication_barrier(store, state, ledger):
+                raise ExtractError("semantic request, drain or maintenance fenced the publication rename")
+            # Full P6/effective-approval checks ran under the run writer above.
+            # This short transaction rechecks their exact state/context and
+            # checkpoint identities, then linearizes rename against requests.
             denied = ledger["active_hold"]
             if state["run_id"] in ledger["continuations"]:
                 raise ExtractError("a superseded run cannot publish")
