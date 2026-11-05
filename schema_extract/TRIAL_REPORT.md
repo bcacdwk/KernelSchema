@@ -68,3 +68,5 @@ P4 直接接受正确表格后的说明段与覆盖标题空行，仍检查唯�
 正式 `audit --attempt 1283b632-a802-4625-b666-a0eb3dce449d --verify` 的现存[报告](../.schema_extract/trials/six-families/post-batch/artifact-repairs-2.2.7/gdn-quota-restored-final-audit-20261104T125856480549Z.json)仅覆盖最终这一次 P6 调用：`verified`，`errors=[]`、`unavailable=[]`。[恢复与交付记录](../.schema_extract/trials/six-families/post-batch/artifact-repairs-2.2.7/quota-restored-recovery.jsonl)在 `2026-11-04T12:59:43.792755+00:00` 的 `gdn_export_delivery_verified` 事件确认 6 个 YAML、dispatch 及交付回执共 8 文件与目标一致，原目录 4 文件 SHA 不变。
 
 Run 为 `ready/P6`；原目标已有历史产物，故顶层 `published=false`、`publication.status=conflict` 保留，独立修订目录对应 `exports[].status=published` 已构成交付，不再恢复该 run。旧两节点并未原地修复或重新批准。核验沿用 `skip-hardware`；core copyback、mini-chunk 读取退休、跨 stream/重入和外部比较器缺口保留，没有 kernel 修改或 GPU 验证。FMHA、MoE 仍在修订，Sparse 保留来源阻塞，整体条件流程 issue 继续待决。
+
+以上保留该交付时点；后续 2.2.9 已澄清源缺陷抽象边界，Sparse 的低层槽位问题现已[记录归档](issues/archive/kernel_wiki/sparse-tc-control-layout-overlap.json)，不再作为提取阻塞，实际 Design/P6 仍须独立完成和审阅。

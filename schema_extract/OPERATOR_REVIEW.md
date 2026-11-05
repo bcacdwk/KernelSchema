@@ -101,3 +101,5 @@ MoE 的 60 个节点包含独立 FC1/FC2 执行族组合、融合与 split-K/las
 交付 run 为 `45f9bb51-77f3-4285-b7a7-251cf2744fa1`，最终 checkpoint 为 `349f0fdbad54effd79e2557888dffcc88de418c142438fd2989db2b4937d0a2d`，P6 reviewer 为 `1283b632-a802-4625-b666-a0eb3dce449d`；[发布回执](../schema_wiki/revisions/2.2.7/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/.extraction/receipt.json)绑定该身份。现存[最终一次 P6 调用审计](../.schema_extract/trials/six-families/post-batch/artifact-repairs-2.2.7/gdn-quota-restored-final-audit-20261104T125856480549Z.json)为 `verified`，`errors`、`unavailable` 均为空；[交付核验事件](../.schema_extract/trials/six-families/post-batch/artifact-repairs-2.2.7/quota-restored-recovery.jsonl)中的 `gdn_export_delivery_verified` 确认新目录 8 个文件一致、原目录 4 个文件 SHA 未变。审计范围是最终这一次调用，完整身份及 export 状态见[试用记录](TRIAL_REPORT.md)。
 
 源码与输入角色绑定不变，非连续 core 缺少 copyback、mini-chunk 读取退休、跨 stream/重入及外部比较器缺口继续披露；本次没有修 kernel 或进行 GPU 验证。FMHA、MoE 的表达修订继续推进，Sparse 保留上游源缺陷阻塞，因此 `conditional-flow-topology` 整体仍待决，其他旧产物的保留意见不变。
+
+以上保留该验收时点；后续 2.2.9 已澄清源缺陷抽象边界，Sparse 的低层槽位问题现已[记录归档](issues/archive/kernel_wiki/sparse-tc-control-layout-overlap.json)，不再作为提取阻塞，实际 Design/P6 仍须独立完成和审阅。

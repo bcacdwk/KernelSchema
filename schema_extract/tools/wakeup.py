@@ -126,6 +126,17 @@ def _current(clock: dict, item: dict | None, now: float) -> bool:
     return item["kind"] == "probe" and item["id"] == _item(clock, "probe", 0, item["due_at"])["id"]
 
 
+def _next_send_at(item: dict | None) -> float | None:
+    """Every outcome spends the same budget; only the latest attempt sets the delay."""
+    if not item or item.get("ack") or len(item["attempts"]) >= MAX_QUEUE_ATTEMPTS:
+        return None
+    if not item["attempts"]:
+        return item["due_at"]
+    attempt = item["attempts"][-1]
+    delay = ATTENTION_SECONDS if attempt.get("status") == "queued" else RETRY_SECONDS
+    return max(attempt["started_at"], attempt.get("finished_at", 0)) + delay
+
+
 class QueueError(ExtractError):
     pass
 
@@ -509,13 +520,12 @@ class Clock:
             selected = None
             for key in ("probe", "reminder"):
                 item = clock.get(key)
-                if not _current(clock, item, now) or item.get("ack"):
+                if not _current(clock, item, now):
+                    continue
+                next_send_at = _next_send_at(item)
+                if next_send_at is None or now < next_send_at:
                     continue
                 attempts = item["attempts"]
-                if any(attempt.get("status") == "queued" for attempt in attempts) or len(attempts) >= MAX_QUEUE_ATTEMPTS:
-                    continue
-                if attempts and now < max(attempts[-1]["started_at"], attempts[-1].get("finished_at", 0)) + RETRY_SECONDS:
-                    continue
                 attempt = {"number": len(attempts) + 1, "started_at": now, "status": "sending"}
                 attempts.append(attempt)
                 item["status"] = "sending"
@@ -529,9 +539,11 @@ class Clock:
                 return {"status": "waiting", "observation": observation}
         key, item, sent_clock = selected
         try:
-            # Stop may win after reservation; never manufacture another ID.
+            # Ack, scan or stop may win after reservation.
             current = _clock(self.store.read_supervisor())
-            if not _matches(current, _binding(sent_clock)):
+            current_item = current.get(key)
+            if (not _matches(current, _binding(sent_clock)) or not _current(current, current_item, self.now()) or
+                    current_item["id"] != item["id"] or current_item.get("ack")):
                 return {"status": "invalidated", "id": item["id"]}
             message = self.message(sent_clock, item)
             message_id = _uuid(self.sender(sent_clock["thread_id"], message) if self.sender else
@@ -553,7 +565,8 @@ class Clock:
                                 if attempt["number"] == len(item["attempts"])), None)
                 if attempt is not None:
                     attempt.update(outcome)
-                if not record.get("ack") and record["status"] == "sending":
+                if (record is current and _matches(clock, _binding(sent_clock)) and not record.get("ack") and
+                        record["status"] == "sending" and record["attempts"][-1]["number"] == len(item["attempts"])):
                     record["status"] = "queued" if outcome["status"] == "queued" else "retry_pending"
                 if outcome.get("message_id") and record.get("scan", {}).get("completed_at") is not None:
                     ids = record["scan"].setdefault("message_ids", [])
@@ -563,7 +576,8 @@ class Clock:
             if last.get("id") == item["id"] and outcome.get("message_id") not in last.get("message_ids", []):
                 if outcome.get("message_id"):
                     last.setdefault("message_ids", []).append(outcome["message_id"])
-            if self.launch_id and clock.get("daemon", {}).get("id") == self.launch_id:
+            if (self.launch_id and _matches(clock, _binding(sent_clock)) and
+                    clock.get("daemon", {}).get("id") == self.launch_id):
                 clock["daemon"].update(heartbeat_at=self.now(), status="running")
                 clock["daemon"].pop("error", None)
         return {"id": item["id"], **outcome, "observation": observation}
@@ -604,13 +618,9 @@ class Clock:
                     clock = _clock(self.store.read_supervisor())
                     deadlines = [clock.get("next_observation_at", self.now() + OBSERVATION_SECONDS)]
                     for item in (clock.get("probe"), clock.get("reminder")):
-                        if not item or item.get("ack") or len(item["attempts"]) >= MAX_QUEUE_ATTEMPTS:
-                            continue
-                        attempts = item["attempts"]
-                        if any(attempt.get("status") == "queued" for attempt in attempts):
-                            continue
-                        deadlines.append(max(attempts[-1]["started_at"], attempts[-1].get("finished_at", 0)) + RETRY_SECONDS
-                                         if attempts else item["due_at"])
+                        next_send_at = _next_send_at(item)
+                        if next_send_at is not None:
+                            deadlines.append(next_send_at)
                     delay = min([HEARTBEAT_SECONDS, *(max(0.05, due - self.now()) for due in deadlines)])
                     self.stopping.wait(delay)
             finally:
@@ -671,22 +681,27 @@ class Clock:
             if not item:
                 continue
             attempts = item["attempts"]
-            queued = next((attempt for attempt in attempts if attempt.get("status") == "queued"), None)
+            queued_at = [attempt["finished_at"] for attempt in attempts if attempt.get("status") == "queued"]
             item["attempt_count"] = len(attempts)
+            item["attempts_remaining"] = max(0, MAX_QUEUE_ATTEMPTS - len(attempts))
+            item["next_attempt_at"] = _next_send_at(item)
+            item["first_queued_at"] = min(queued_at) if queued_at else None
+            item["last_queued_at"] = max(queued_at) if queued_at else None
+            item["ack_age_seconds"] = max(0, now - item["ack"]["at"]) if item.get("ack") else None
             item["overdue_seconds"] = max(0, now - item["due_at"])
             if item.get("ack"):
                 item["delivery"] = "acknowledged"
                 item["status"] = "acknowledged_unfinished" if key == "reminder" else "verified"
                 if key == "reminder" and now - item["ack"]["at"] >= ATTENTION_SECONDS:
                     reasons.append("acknowledged_unfinished")
-            elif queued:
+            elif queued_at:
                 item["delivery"] = "queued_unacknowledged"
-                if now - queued["finished_at"] >= ATTENTION_SECONDS:
+                if now - item["first_queued_at"] >= ATTENTION_SECONDS:
                     reasons.append("queued_without_ack")
             else:
                 item["delivery"] = "uncertain" if attempts else "not_sent"
-                if len(attempts) >= MAX_QUEUE_ATTEMPTS:
-                    reasons.append("queue_attempts_exhausted")
+            if not item.get("ack") and len(attempts) >= MAX_QUEUE_ATTEMPTS:
+                reasons.append("queue_attempts_exhausted")
         if clock.get("enabled") and process_status not in {"running", "starting"}:
             reasons.append(process_status)
         clock["history_count"] = len(clock.pop("history", []))

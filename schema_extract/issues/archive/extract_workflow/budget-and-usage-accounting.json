@@ -5,21 +5,27 @@
   "evidence": [
     "原 operator/stage 墙钟预算包含排队和暂停；2.3.0 保留原 config、deadline、预留与 budget_extensions 语义。",
     "schema_extract/tools/observation.py 独立记录有界 native ledger 与输出事件的根会话增量，audit.py 分列已知用量小计及重叠等待，recovery.account 保留高水位与原 usage v1。",
-    "固定格式回放验证 resume 差分、重复 counter/attempt 去重、缓存输入子集、缺 baseline 未知和等待并集；同 run 升级场景验证原预算/用量保留。"
+    "固定格式回放验证 resume 差分、重复 counter/attempt 去重、缓存输入子集、缺 baseline 未知和等待并集；同 run 升级场景验证原预算/用量保留。",
+    "2.4.1 分列本 run 已登记 CLI attempts（含来源去重）的 root exact/partial/unknown；known_attempts 保留有据小计含义，全部 exact 才表示根范围完整。",
+    "同一有界 native 调用读取投影已识别委派工具/活动类型、事件锚点和关联 UUID；绑定调用的 forbidden/unknown 策略，observed/not_observed_in_range/unavailable 不代表子会话 token 完整。",
+    "2.4.1 的 tools/tests/test_usage_observation.py 两项集中离线固定回放通过：native resume 差分与重复计数、委派隐私投影及失败隔离、新旧审计摘要绑定、root 三类与继承来源去重、重叠区间拒绝；未运行真实模型、提醒时钟或旧任务。"
   ],
   "proposal": "保持原预算规则，独立观察可信根会话增量和有据等待；明确已知小计、未覆盖范围与未知费用。",
   "necessity": "这些规则会影响预算追加，以及我们对重试、重跑成本的判断。需要先讨论清楚，不预先认定现有计时方式就是错误的。",
   "decision": {
     "outcome": "partially_adopted",
-    "version": "2.3.0",
-    "reason": "根会话有据增量、来源去重及等待观察已实现并通过固定格式回放；观察失败不改变模型结果，不回写旧 receipt/result。",
+    "version": "2.4.1",
+    "reason": "本轮统计契约与工具可观察证据缺口已收口：根范围完整性分列，委派身份仅作范围证据，audit 明示墙钟预算与费用缺失原因。观察失败不改变模型结果或抹掉已证明根增量，不回写旧 receipt/result；外部未知不构成待建计费系统。",
     "adopted": [
       "原 usage v1 保留，另存 usage-observation，记录 CLI 版本、调用前基线与事件身份。",
-      "按来源/attempt 和会话计数区间去重；墙钟、CLI 累计、检查和已知等待分列。"
+      "按来源/attempt 和会话计数区间去重；墙钟、CLI 累计、检查和已知等待分列。",
+      "root exact/partial/unknown 和委派范围证据进入审计；可选新字段保持旧 observation v1/summary 的字节及摘要兼容。",
+      "保留 wall_clock_deadline、原 config/deadline/预留及追加规则；排队、暂停和维护等待继续耗预算，不退款或赠额。"
     ],
     "remaining": [
-      "仅有基线与事件一致的根会话增量可加；子会话覆盖、完整调用 token 及费用未知。",
-      "历史缺采样保持 partial/unavailable，不能相减推出纯模型时间；未引入 active-time 预算或真实付费校准。"
+      "历史缺基线或缺采样保持 partial/unavailable；旧冻结执行器不会自动补采样，原显式运行层升级仅影响未来调用，不重跑旧任务或反写原结果。",
+      "本范围未观察到委派或提示禁止委派均不证明 child=0；不扫描子会话或 provider 历史，子会话 token、完整调用用量及实付仍是外部未知。",
+      "缺少可靠计价/账单来源，cost 保持 null；有据等待可能与兄弟工作并行，不能相减推出纯模型时间。这些边界不新增未来计费系统待办。"
     ]
   }
 }

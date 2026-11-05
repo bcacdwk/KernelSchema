@@ -28,6 +28,8 @@ FORMAT = "schema_extract.usage_observation.v1"
 TAIL_BYTES = 1024 * 1024
 INVOCATION_BYTES = 8 * 1024 * 1024
 MAX_RECORDS = 4096
+DELEGATION_TOOLS = {"spawn_agent"}
+COLLAB_TOOLS = {"wait"}
 
 
 class ObservationError(ValueError):
@@ -48,6 +50,12 @@ def _tokens(raw):
 
 def _stamp(info):
     return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+def _session_uuid(value):
+    if not isinstance(value, str) or str(UUID(value)) != value:
+        raise ObservationError("native_delegation_invalid_uuid")
+    return value
 
 
 def _open(path):
@@ -110,10 +118,40 @@ def _metadata(stream, session_id):
     if event.get("type") != "session_meta" or body.get("id") != session_id:
         raise ObservationError("native_session_identity_conflict")
     # No prompts, transcript content or arbitrary metadata leave this reader.
-    return {key: body.get(key) for key in ("id", "cwd", "cli_version", "source")}
+    metadata = {key: body.get(key) for key in ("id", "cwd", "cli_version")}
+    source = body.get("source")
+    metadata["source"] = source if source in ("cli", "exec", "vscode", "unknown") else "unknown"
+    if body.get("parent_thread_id") is not None:
+        try:
+            metadata["parent_thread_id"] = _session_uuid(body["parent_thread_id"])
+        except (ObservationError, ValueError):
+            pass  # Optional ancestry metadata must not invalidate root counters.
+    return metadata
 
 
-def _records(payload, offset):
+def _delegation_record(event):
+    """Project recognized markers only; never read arguments or activity text."""
+    body = event.get("payload") or {}
+    if event.get("type") == "response_item" and body.get("type") == "function_call":
+        if body.get("name") in DELEGATION_TOOLS:
+            return {"type": "function_call", "tool": body["name"]}
+    if event.get("type") != "event_msg" or body.get("type") != "item_completed":
+        return None
+    item = body["item"]
+    kind = item["type"]
+    if kind == "SubAgentActivity":
+        return {"type": kind, "agent_thread_id": _session_uuid(item["agent_thread_id"])}
+    if kind == "CollabAgentToolCall":
+        if item.get("tool") not in COLLAB_TOOLS or not isinstance(item.get("receiver_thread_ids"), list):
+            raise ObservationError("native_delegation_format_unrecognized")
+        return {"type": kind, "tool": item["tool"], "sender_thread_id": _session_uuid(item["sender_thread_id"]),
+                "receiver_thread_ids": [_session_uuid(identity) for identity in item["receiver_thread_ids"]]}
+    if not isinstance(kind, str) or "SubAgent" in kind or "Collab" in kind:
+        raise ObservationError("native_delegation_format_unrecognized")
+    return None
+
+
+def _records(payload, offset, *, delegation=None):
     if payload and not payload.endswith(b"\n"):
         raise ObservationError("native_truncated_line")
     records = []
@@ -121,6 +159,17 @@ def _records(payload, offset):
         event = json.loads(line)
         body = event.get("payload") or {}
         kind = body.get("type") if isinstance(body, dict) else None
+        if delegation is not None:
+            try:
+                marker = _delegation_record(event)
+                if marker:
+                    if len(delegation["records"]) >= MAX_RECORDS:
+                        raise ObservationError("native_delegation_record_limit")
+                    delegation["records"].append({"offset": offset, "end_offset": offset + len(line),
+                        "event_sha256": hashlib.sha256(line).hexdigest(), **marker})
+            except Exception as exc:
+                # Marker diagnostics cannot reject otherwise proved root usage.
+                delegation["issues"].append(str(exc) if isinstance(exc, ObservationError) else "native_delegation_format_unrecognized")
         if event.get("type") == "event_msg" and kind in {"token_count", "task_started", "task_complete"}:
             record = {"offset": offset, "end_offset": offset + len(line),
                       "event_sha256": hashlib.sha256(line).hexdigest(), "type": kind}
@@ -171,6 +220,9 @@ def begin_usage_observation(attempt, invocation, *, home=None):
              "requested_session_id": attempt.get("session_id"), "workspace": attempt["workspace"],
              "started_at": invocation["started_at"], "cli_version": invocation.get("cli_version"),
              "baseline": None, "issues": []}
+    value["delegation"] = {"policy": "forbidden" if invocation.get("delegation_policy") == "forbidden" else "unknown",
+                           "status": "unavailable", "records": [], "issues": [],
+                           "child_usage_reason": "child_session_tokens_and_complete_source_set_not_observed"}
     try:
         value["home"] = str((home or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))).expanduser().absolute())
         if attempt.get("session_id"):
@@ -203,8 +255,24 @@ def _invocation_records(start, session_id):
         payload = stream.read(INVOCATION_BYTES + 1)
         if len(payload) != before[2] - offset or before != _stamp(os.fstat(stream.fileno())):
             raise ObservationError("native_changed_during_read")
+    delegation = {"records": [], "issues": []}
+    records = _records(payload, offset, delegation=delegation)
     return {"path": str(path), "file_stamp": before, "metadata": metadata, "offset": offset,
-            "end_offset": before[2], "range_sha256": hashlib.sha256(payload).hexdigest()}, _records(payload, offset)
+            "end_offset": before[2], "range_sha256": hashlib.sha256(payload).hexdigest()}, records, delegation
+
+
+def _finish_delegation(value, records, result):
+    starts = [record for record in records if record["type"] == "task_started"]
+    ends = [record for record in records if record["type"] == "task_complete"]
+    complete = (len(starts) == len(ends) == 1 and starts[0].get("turn_id") and
+                starts[0]["turn_id"] == ends[0]["turn_id"] and starts[0]["end_offset"] <= ends[0]["offset"] and
+                result.get("outcome") == "completed" and result.get("termination", {}).get("confirmed"))
+    if not complete or any(record["offset"] < starts[0]["end_offset"] or record["end_offset"] > ends[0]["offset"]
+                           for record in value["records"]):
+        value["issues"].append("native_delegation_range_incomplete")
+    if not value["issues"]:
+        value["status"] = "observed" if value["records"] else "not_observed_in_range"
+    value["issues"] = sorted(set(value["issues"]))
 
 
 def finish_usage_observation(start, parsed, result):
@@ -224,9 +292,14 @@ def finish_usage_observation(start, parsed, result):
             raise ObservationError("stream_session_identity_unavailable")
         if start["requested_session_id"] and (start["requested_session_id"] != session_id or not start["baseline"]):
             raise ObservationError("resume_baseline_identity_conflict")
-        native, records = _invocation_records(start, session_id)
+        native, records, delegation = _invocation_records(start, session_id)
         value["native"] = native
         value["records"] = records
+        value["delegation"].update(delegation)
+        try:
+            _finish_delegation(value["delegation"], records, result)
+        except Exception:
+            value["delegation"].update(status="unavailable", issues=["native_delegation_observation_failed"])
         counters = [record for record in records if record["type"] == "token_count"]
         if not counters:
             raise ObservationError("native_invocation_usage_unavailable")
@@ -281,6 +354,8 @@ def finish_usage_observation(start, parsed, result):
         value["issues"].append("child_session_coverage_unobserved")
     except Exception as exc:
         value["issues"].append(str(exc) if isinstance(exc, ObservationError) else "native_observation_" + type(exc).__name__)
+    if value["delegation"]["status"] == "unavailable" and not value["delegation"]["issues"]:
+        value["delegation"]["issues"].append("native_delegation_range_unavailable")
     value["issues"] = sorted(set(value["issues"]))
     value["observed_at"] = time.time()
     return value
@@ -290,7 +365,17 @@ def observation_summary(value):
     """The existing attempt ledger retains a small immutable observation binding."""
     keys = ("format", "identity", "session_id", "turn_id", "status", "root_status", "scope",
             "source", "cursor_valid", "additive_tokens", "baseline_tokens", "final_tokens", "issues")
-    return {key: deepcopy(value[key]) for key in keys if key in value} | {"sha256": digest(value)}
+    summary = {key: deepcopy(value[key]) for key in keys if key in value}
+    if "delegation" in value:
+        delegation = value["delegation"]
+        records = delegation.get("records", [])
+        related = {identity for record in records for identity in
+                   [record.get("agent_thread_id"), record.get("sender_thread_id"), *record.get("receiver_thread_ids", [])]
+                   if identity and identity != value.get("session_id")}
+        summary["delegation"] = {key: deepcopy(delegation[key]) for key in
+                                  ("policy", "status", "issues", "child_usage_reason") if key in delegation}
+        summary["delegation"].update(record_count=len(records), related_thread_count=len(related))
+    return summary | {"sha256": digest(value)}
 
 
 def observation_totals(rows):
@@ -324,13 +409,28 @@ def observation_totals(rows):
             spans[identity], usable[identity] = span, tokens
         except (ObservationError, KeyError, TypeError):
             continue
-    known = [tokens for identity, tokens in usable.items() if identity not in conflicts]
+    known = {identity: tokens for identity, tokens in usable.items() if identity not in conflicts}
+    exact = sum(selected[identity]["usage_observation"].get("root_status") == "exact" for identity in known)
+    delegation_counts = {key: 0 for key in ("observed", "not_observed_in_range", "unavailable")}
+    policy_counts = {key: 0 for key in ("forbidden", "unknown")}
+    for identity, row in selected.items():
+        observed = row.get("usage_observation") or {}
+        delegation = observed.get("delegation", {}) if observed.get("format") == FORMAT and identity not in conflicts else {}
+        state = delegation.get("status", "unavailable")
+        delegation_counts[state if state in delegation_counts else "unavailable"] += 1
+        policy_counts["forbidden" if delegation.get("policy") == "forbidden" else "unknown"] += 1
     return {"status": "partial" if known else "unavailable", "scope": "root_session_known_subtotal",
-            "additive_tokens": {key: sum(tokens[key] for tokens in known) if known else None for key in TOKEN_FIELDS},
+            "attempt_scope": "registered_cli_attempts_in_this_run_including_deduplicated_origins",
+            "root_status": "exact" if selected and exact == len(selected) else "partial" if known else "unavailable",
+            "additive_tokens": {key: sum(tokens[key] for tokens in known.values()) if known else None for key in TOKEN_FIELDS},
+            "exact_attempts": exact, "partial_attempts": len(known) - exact,
             "known_attempts": len(known), "unknown_attempts": len(selected) - len(known),
             "duplicate_attempts": duplicates, "conflicting_attempts": len(conflicts),
+            "delegation": {"attempt_status": delegation_counts, "policy_counts": policy_counts},
             "child_session_coverage": "unavailable", "whole_invocation_tokens": None,
-            "cached_input_is_input_subset": True, "cost": None}
+            "whole_invocation_reason": "root_deltas_and_delegation_markers_do_not_prove_complete_child_session_usage",
+            "cached_input_is_input_subset": True, "cost": None,
+            "cost_reason": "no_reliable_pricing_or_billing_source"}
 
 
 def interval_observation(intervals, *, now):

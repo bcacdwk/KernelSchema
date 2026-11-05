@@ -472,12 +472,15 @@ def _verify_attempt(store, state, row, files, notes):
                 observed.get("identity") != {key: result.get(key) for key in ("run_id", "attempt_id", "launch_id", "attempt_sha256")} or
                 observed.get("identity", {}).get("attempt_sha256") != digest(attempt) or
                 observed.get("session_id") != result.get("session_id") or
+                ("delegation" in observed and (observed["delegation"].get("policy") != result.get("delegation_policy", "unknown") or
+                 result.get("delegation_policy") != records.get("invocation.json", {}).get("delegation_policy"))) or
                 observed.get("stream_reports") != parsed["usage"]["reports"] or
                 observed.get("stream_trace_sha256") != parsed["trace"]["sha256"] or
                 row.get("usage_observation") != observation_summary(observed)):
             raise ExtractError("usage observation differs from its bound invocation, stream or ledger")
         notes.append({"attempt_id": row["attempt_id"],
-                      "reason": "native usage is a bound counter projection; native transcript and child coverage are unavailable"})
+                      "delegation_status": observed.get("delegation", {}).get("status", "unavailable"),
+                      "reason": "bound native root counters and optional delegation identities; child-session tokens and whole-invocation coverage remain unknown"})
     elif row.get("usage_observation"):
         raise ExtractError("attempt ledger has an unbound usage observation")
     actual, requested = result.get("session_id"), attempt.get("session_id")
@@ -754,6 +757,7 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
         ledger = _json(supervisor) if os.path.lexists(supervisor) else {}
         checks = _checks(ledger)
         scope = {"run_id": run_id, "attempt_id": attempt_id, "session_id": session_id,
+                 "usage_scope": "this run's registered CLI attempts, including deduplicated inherited origins; excludes Supervisor and external billing",
                  "attempts": [{"origin_run_id": row["origin_run_id"], "attempt_id": row["attempt_id"]} for row in rows],
                  "unindexed_session_attempts": unindexed,
                  "checkpoint_policy": "selected call input/result checkpoints" if attempt_id or session_id else "call input/result and current/final checkpoints"}
@@ -798,6 +802,7 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
                            "operator_wall_seconds": completed - created if completed is not None and created is not None else None,
                            "creation_to_observation_seconds": now - created if created is not None else None,
                            "wall_includes": "queue, pause and waiting; never a sum of concurrent calls",
+                           "budget_policy": "wall_clock_deadline", "waiting_consumes_budget": True,
                            "pause_wait_seconds": None, "model_execution_seconds": None,
                            "observed_waits": waits,
                            "unavailable": "historical missing wait boundaries, child-session usage, and model-only time",
@@ -836,12 +841,19 @@ def format_audit(report):
     lines = [f"{report['scope']['run_id']} {report['status']} attempts={total['attempt_count']} "
              f"current={segments['current']['attempt_count']} inherited={segments['inherited']['attempt_count']}",
              "whole-invocation tokens=unknown; cached input is part of input",
+             "usage scope=this run's registered CLI attempts, including deduplicated inherited origins",
+             "budget policy=wall_clock_deadline; queue, pause and waiting consume budget",
              f"CLI={seconds(total['cli_seconds'])} processing={seconds(total['processing_seconds'])} "
              f"budget-accounted={seconds(total['accounted_seconds'])}"]
     root = total["root_usage"]
     tokens = root["additive_tokens"]
-    lines.append(f"root known input/cached/output={tokens['input_tokens']}/{tokens['cached_input_tokens']}/{tokens['output_tokens']} "
-                 f"({root['known_attempts']} known, {root['unknown_attempts']} unknown calls; child coverage unknown)")
+    lines.append(f"root {root['root_status']} input/cached/output={tokens['input_tokens']}/{tokens['cached_input_tokens']}/{tokens['output_tokens']} "
+                 f"({root['exact_attempts']} exact, {root['partial_attempts']} partial, {root['unknown_attempts']} unknown calls; "
+                 f"known={root['known_attempts']})")
+    delegation = root["delegation"]["attempt_status"]
+    lines.append(f"delegation evidence: {delegation['observed']} observed, {delegation['not_observed_in_range']} not observed in range, "
+                 f"{delegation['unavailable']} unavailable calls; child-session tokens and full coverage unknown")
+    lines.append("cost=unknown; no reliable pricing or billing source")
     waits = report["time"]["observed_waits"]["known_union"]
     lines.append(f"run wall={report['time']['run_wall_seconds']}s; observed scope-wait union={waits['seconds']}s "
                  f"({waits['unknown_intervals']} unknown boundaries; may overlap CLI work)")

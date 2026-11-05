@@ -8,7 +8,7 @@
 
 后续 2.2.8 仅澄清现有 plan 的实际执行绑定和跨 role 等待表达，[capture-invocation-boundary](archive/schema_docs/capture-invocation-boundary.json) 归档的是绑定说明，该澄清本身不表示条件流程产物已修订。冻结 2.2.7 下合法的 GDN/FMHA 任务无需因此统一重跑；MoE 采用新冻结须正式 `continue` 并独立重审，原批准不继承。
 
-2026-11-04，GDN 的 [2.2.7 六节点修订版](../../schema_wiki/revisions/2.2.7/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/dispatch.md)已完成 P6、正式 export 和 Supervisor 验收，该侧表达问题已收口。FMHA、MoE 继续独立修订，Sparse 保留上游源缺陷阻塞，`conditional-flow-topology` 整体仍为待决；symbolic 及两个旧 kernel issue 的决定不变。
+2026-11-04，GDN 的 [2.2.7 六节点修订版](../../schema_wiki/revisions/2.2.7/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/dispatch.md)已完成 P6、正式 export 和 Supervisor 验收，该侧表达问题已收口。FMHA、MoE 和 Sparse 的实际产物仍待各自收口，`conditional-flow-topology` 整体仍为待决；Sparse 源布局缺陷现按 2.2.9 边界记录归档，不再作为提取阻塞，symbolic 及两个旧 kernel issue 的决定不变。
 
 ## 分类口径
 
@@ -18,12 +18,12 @@
 | --- | --- | --- |
 | [progress-preserving-continuation](archive/extract_workflow/progress-preserving-continuation.json) | 2.4.0 采纳：未完成 run 的连续语义修订、保稿维护与同 run 执行器登记 | 仅隔离验证，真实旧 run 和已完成产物未迁移 |
 | [failed-node-recovery](archive/extract_tools/failed-node-recovery.json) | 已解决：单范围结算、恢复及原超时接管 | 未知终止保留 fence，预算和控制优先级不变 |
-| [reminder-ack-delay](archive/extract_tools/reminder-ack-delay.json) | 部分采纳：后台观察及已授权恢复独立于 ack | 历史约 11 小时 queue→ack 延迟根因仍未知 |
+| [reminder-ack-delay](archive/extract_tools/reminder-ack-delay.json) | 2.4.1 已解决：配置原因已修，入队无 ack 时同 ID 有界补送，后台观察及已授权恢复独立继续 | 用户确认历史 HTTP 403 因主/子 Agent key 不同步，后续已同步修正；有限补送作通用兜底，不保证绝对投递或处理完成 |
 | [core-dump-in-snapshot](archive/extract_tools/core-dump-in-snapshot.json) | 部分采纳：运行和诊断 cwd 移到 run/attempt | 未证明宿主 core handler 的历史原因或落盘行为 |
-| [budget-and-usage-accounting](archive/extract_workflow/budget-and-usage-accounting.json) | 部分采纳：根会话有据增量、去重和等待观察 | 子会话、完整费用及历史缺采样仍未知 |
+| [budget-and-usage-accounting](archive/extract_workflow/budget-and-usage-accounting.json) | 部分采纳；2.4.1 已收口本轮统计契约及委派证据缺口 | 历史缺采样、子会话 token 与实付未知是外部边界；墙钟预算保留 |
 | [pipeline-graph-skip-hardware](archive/schema_template/pipeline-graph-skip-hardware.json) | 已解决：图入口显式透传硬件豁免 | 默认完整检查；旧冻结版本不自动获得能力 |
 
-[conditional-flow-topology](extract_workflow/conditional-flow-topology.json) 与 [sparse-tc-control-layout-overlap](kernel_wiki/sparse-tc-control-layout-overlap.json) 继续独立待决；上述工具验证不改变真实产物或源 kernel 的验收状态。
+[conditional-flow-topology](extract_workflow/conditional-flow-topology.json) 继续待决；[sparse-tc-control-layout-overlap](archive/kernel_wiki/sparse-tc-control-layout-overlap.json) 已按部分采纳归档，提取侧证据记录与分流完成，剩余仅为上游未修事实，不是 Schema 待办。已有来源支持同一完整抽象 Design，实际 Design/P6 仍须补齐并独立审阅；上述工具验证与本次台账整理均不改变真实产物或源 kernel 的验收状态。
 
 第一类是核心结果、表达和 Review；第二类是既有功能的局部质量修复；第三类是可选新增能力。类别、是否需要用户讨论与解决状态分别判断，第二类多数已修，无需重构。本次索引文案勘误属于第二类。
 
@@ -31,7 +31,7 @@
 
 | Issue（登记状态） | 实际影响与根因 | 长期方案与是否返工 | 本轮及剩余工作 |
 | --- | --- | --- | --- |
-| [conditional-flow-topology](extract_workflow/conditional-flow-topology.json)（待决） | GDN、sparse、FMHA、MoE 的原产物用正文取消实际提交或交接，读者需要自行改图。 | **优先处理。** 先依现有 `dispatch` 拆分不能合法参数化的实际结构，不增加逐条 guard 或隐式删边。 | GDN 2.2.7 的 6/6、P6 与独立 export 已验收，原两节点保留；FMHA、MoE 继续修订，Sparse 受上游源缺陷阻塞，整体仍待决。 |
+| [conditional-flow-topology](extract_workflow/conditional-flow-topology.json)（待决） | GDN、sparse、FMHA、MoE 的原产物用正文取消实际提交或交接，读者需要自行改图。 | **优先处理。** 先依现有 `dispatch` 拆分不能合法参数化的实际结构，不增加逐条 guard 或隐式删边。 | GDN 2.2.7 的 6/6、P6 与独立 export 已验收，原两节点保留；FMHA、MoE、Sparse 的实际产物继续独立修订，整体仍待决，Sparse 已登记的低层槽位偏差不阻塞提取。 |
 | [symbolic-member-bounds](archive/schema_template/symbolic-member-bounds.json)（部分采纳） | MoE 的真实成员随 EPI、Nt 改变；三处数字解析限制诱发最大成员范围加正文修正。 | **优先处理。** 既有成员路径允许已定义整数端点表达式；共用 `parse_members`，普通检查与有限展开各守边界。只改变成员数量时保留参数化。 | 工具修复已验收，模板正式入口 152 项测试通过；普通检查不证明未绑定表达式，有限图拒绝缺参、非法整数/区间及 worker 越界。旧 MoE 的虚构成员仍需独立产物修订。 |
 | [reviewer-document-integrity](archive/extract_workflow/reviewer-document-integrity.json)（已解决） | 原审阅沿用历史批准、只看差异，漏掉正文与结构冲突。 | **重点保留，无需返工架构。** 共用 REVIEW.md、累计内容范围和四项结论，复用现有回执与重开通道；不堆叠额外报告字段。 | 机制已有回归与真实样例证据；本轮补充分组规则引用。它不能代替旧产物修复，也不能由文件锚点机械证明模型确已通读。 |
 | [p4-index-layout-hard-stop](archive/extract_tools/p4-index-layout-hard-stop.json)（已解决） | 准确计划表后的说明段曾触发停止；旧补丁改为诊断后再花调用修复排版。 | **已返工简化。** 保留固定表格投影及 plan、父关系、链接、覆盖事实检查，仅放开覆盖节与说明段的位置；移除 `IndexLayoutError` 及特殊修复分支。 | 已验收：最终 47 项提取回归及两份历史失败稿的只读重放通过；不自动改写模型文稿。 |

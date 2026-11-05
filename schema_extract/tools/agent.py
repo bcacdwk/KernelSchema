@@ -56,7 +56,8 @@ class CodexCLI:
         command = self.command(cwd=cwd, schema=schema_path, output=response_path,
                                role=attempt["role"], effort=effort, session_id=attempt["session_id"])
         invocation = {"argv": command, "role": attempt["role"], "effort": effort, "model": self.model,
-                      "resume_session_id": attempt["session_id"], "started_at": time.time(), "cli_version": None}
+                      "resume_session_id": attempt["session_id"], "started_at": time.time(), "cli_version": None,
+                      "delegation_policy": "forbidden"}
         invocation.update({key: attempt.get(key) for key in ("run_id", "attempt_id", "stage", "node", "session_group")})
         invocation.update(prompt_sha256=sha256(prompt.encode("utf-8")), response_schema_digest=digest(schema))
         invocation.update(launch_id=str(uuid4()), attempt_sha256=digest(attempt))

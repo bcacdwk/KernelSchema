@@ -1,6 +1,6 @@
 # Schema Extract：Supervisor 手册
 
-版本 `2.4.0`。从固定 kernel 提取可读、可追溯的 schema，自动完成写作、独立审阅、返工与发布。统一入口是 [extract.py](extract.py)，实现位于 `tools/`。
+版本 `2.4.1`。从固定 kernel 提取可读、可追溯的 schema，自动完成写作、独立审阅、返工与发布。统一入口是 [extract.py](extract.py)，实现位于 `tools/`。
 
 ## 开始一次试用
 
@@ -192,7 +192,9 @@ start 绑定 Supervisor 的真实线程，可用 `--run UUID...` 限定范围。
 
 收到提醒后执行消息中的 `monitor ack ID --thread THREAD_UUID`；仅 accepted=true 才执行一次 `monitor scan --wake ID --thread THREAD_UUID` 并结束该轮。accepted=false 时结束该提醒。ack 后中断可用同一 scan 命令续完；普通 scan 不消耗周期。不要用对话内 sleep 或另建闹钟维持此周期。
 
-发送失败或不确定送达沿用同 ID，最多 3 次、至少间隔 120 秒；成功入队后等待 ack，后台观察及已授权恢复继续。耗尽重送次数，或 1800 秒仍无 ack/完成时显示 needs_attention。队列确认不代表线程实际收到，状态文件不代表时钟进程仍存活。
+发送失败或不确定送达，距最后一次尝试至少 120 秒后沿用同 ID 重送；成功入队后 1800 秒仍无 ack，也补送同 ID。间隔从最后一次尝试结束（未结束则从开始）计算，全部发送共用总上限 3 次，重启时钟不退款。ack 后停止补送；耗尽次数仍等待显式 ack/scan，不自动完成或推进周期。后台观察及已授权恢复继续。
+
+状态显示首次/最近入队时间、ack 等待时长、下一次尝试时间和剩余次数；耗尽发送次数，或 1800 秒仍无 ack/完成时显示 needs_attention。ack 后中断仍须用原 scan 命令续完。历史提醒首次处理的 HTTP 403，用户已确认由主/子 Agent API key 不同步导致，后续同步已修正该配置原因；本次有限补送是通用兜底。队列确认不保证线程已收到或处理完成，状态文件也不代表时钟进程仍存活。
 
 进程退出后显式 start 恢复进度；换线程或范围用 stop/start。stop 使旧提醒和未消费的恢复授权失效并停止时钟，不终止已经启动的提取调用。状态显示真实进程身份、锁、心跳与提醒进度；可选 `--probe-delay 1..300` 验证线程唤醒，不改变正式周期。
 
@@ -207,7 +209,9 @@ python3 schema_extract/extract.py audit RUN_UUID --attempt ATTEMPT_UUID --verify
 
 audit 默认读已记账摘要，按阶段、角色、节点和来源展示用量；`--attempt` 与 `--session` 互斥，`--json` 给出详细定位。`--verify` 深验选定调用、checkpoint、来源和引文，不授予批准或推进阶段。
 
-历史 `result.usage` 保留提供者原值及原口径。新调用另存 `usage-observation.json`：只有当前根会话的 native 累计计数、调用前基线、单次 turn 边界和输出事件一致时，才给出可加增量；按来源/attempt 和会话区间去重。cached input 是 input 子集，不重复相加；缺基线、截断、回退或来源冲突保留未知。根会话可为 exact，整体仍为 partial，子会话覆盖和费用未知，不能把已知小计称为完整账单。
+历史 `result.usage` 保留提供者原值及原口径。新调用另存 `usage-observation.json`：只有当前根会话的 native 累计计数、调用前基线、单次 turn 边界和输出事件一致时，才给出可加增量；按来源/attempt 和会话区间去重。audit 统计本 run 已登记的 CLI attempts（含去重的继承来源），分列 root exact/partial/unknown；兼容字段 known 为 exact 与 partial 之和，全部调用 exact 才表示根范围完整。cached input 是 input 子集，不重复相加；缺基线、截断、回退或来源冲突保留未知。
+
+2.4.1 在同一有界读取内另存委派工具/活动类型、事件锚点及关联 UUID；调用记录绑定禁止委派的提示策略，未记录的旧调用为 unknown。observed、not_observed_in_range、unavailable 仅描述本范围证据，禁止委派或未发现标记均不证明子会话为零；不读取子会话正文或 token。完整调用 token 仍未知，费用缺少可靠计价/账单来源，不能把根会话小计称为完整账单。旧冻结执行器和历史缺采样不会自动补齐，显式运行层升级只影响未来调用。
 
 审计分列墙钟、CLI 累计、检查处理及已知 pause/hold/排队/退避区间；等待重叠只算一次，也可能与兄弟调用并行，不能从墙钟相减推断纯模型时间。历史缺采样保持 partial/unavailable。观察不改变原截止、预留或追加记录，旧结果和回执不回写。
 
@@ -229,13 +233,15 @@ P3/P5/P6 完成或批准时，Runner 自动用冻结检查器执行 `--skip-hard
 
 2.2.8 澄清静态 plan 与[一次算子请求实际执行](../schema_docs/0.common.md#plan-与计算执行实例)的绑定，以及[条件等待](../schema_docs/5.design.tile_pipeline.md#条件等待示例)的显式跨 role 前驱；沿用现有字段、重复和索引规则，不增加执行系统。规范绑定问题见 [capture-invocation-boundary](issues/archive/schema_docs/capture-invocation-boundary.json)，实际产物表达仍由 [conditional-flow-topology](issues/extract_workflow/conditional-flow-topology.json) 跟踪。检查限于文档链接、示例和维护记录；隔离 MoE 示例通过既有检查器及有限事件图检查，不代表真实 root 已修复。现有 GDN/FMHA 在冻结 2.2.7 下的合法任务无需因本次澄清统一重跑；MoE 应通过正式 `continue` 采用新冻结并独立重审，原批准不继承。
 
-2.2.9 将[源实现缺陷与设计分流](REVIEW.md#源实现缺陷与设计分流)统一到共用 Reviewer 方法和真实调用提示：有来源依据的完整设计可携带源问题继续，必须猜测或改变设计决定时仍阻塞，残稿仍须补齐并独立审阅。[流程改进已由 Supervisor 验收](issues/archive/extract_workflow/source-defect-abstraction-boundary.json)；未修的 Sparse 源布局问题由 [sparse-tc-control-layout-overlap](issues/kernel_wiki/sparse-tc-control-layout-overlap.json) 独立跟踪，实际 Design/P6 尚未完成。采用新规则须正式接续，不改旧回执或继承批准。
+2.2.9 将[源实现缺陷与设计分流](REVIEW.md#源实现缺陷与设计分流)统一到共用 Reviewer 方法和真实调用提示：有来源依据的完整设计可携带源问题继续，必须猜测或改变设计决定时仍阻塞，残稿仍须补齐并独立审阅。[流程改进已由 Supervisor 验收](issues/archive/extract_workflow/source-defect-abstraction-boundary.json)，当时 Sparse 实际 Design/P6 尚未完成。其未修源布局问题 [sparse-tc-control-layout-overlap](issues/archive/kernel_wiki/sparse-tc-control-layout-overlap.json) 现依用户确认按该边界归档：已有来源支持同一完整抽象 Design，低层槽位偏差不作为提取前置条件，实际 Design/P6 仍须独立完成和审阅，源 kernel 未修且未做 GPU 验证。该次台账整理依据已有 2.2.9 修复，未改变当时的 2.4.0 版本；采用规则须正式接续，不改旧回执或继承批准。
 
 2.2.10 修复[当前产物问题的证据门禁](issues/archive/extract_workflow/artifact-only-issue-evidence.json)：仅 `revise/blocked` 的 `submission_format`、`schema_conformance` 可使用与问题 scope 中完整相对文件名绑定的有效 `artifact_evidence`；源码类问题、批准和上游重开保留原要求。最终 62 项提取回归通过，两份真实 MoE 退修提案只读重放及错误路径、源码类问题的负例通过，原状态与输入字节未改变。Supervisor 已验收这项协议修复；MoE 的失败接续设计和 P4 计划仍须独立审阅，采用新门禁须正式接续。
 
-2.3.0 增加完整兼容报告与同 run 执行器登记、单范围恢复、登记后放行的进程 gate、独立后台观察、根会话用量增量及图入口显式硬件豁免。最终 10 个选定场景通过，使用隔离状态、固定计数和本地替身；未运行真实旧 run 升级、模型或 GPU。语义局部迁移、旧提醒约 11 小时延迟根因、宿主 core handler 行为及完整费用仍有边界，见[改进计划](IMPROVEMENT_PLAN.md)和[问题索引](issues/TRIAGE.md)。历史产物和批准保持原身份。
+2.3.0 增加完整兼容报告与同 run 执行器登记、单范围恢复、登记后放行的进程 gate、独立后台观察、根会话用量增量及图入口显式硬件豁免。最终 10 个选定场景通过，使用隔离状态、固定计数和本地替身；未运行真实旧 run 升级、模型或 GPU。该版本时，语义局部迁移、旧提醒等待与恢复触发、宿主 core handler 行为及完整费用尚有未明边界；后续提醒配置原因已由用户确认并修正，见下文 2.4.1、[改进计划](IMPROVEMENT_PLAN.md)和[问题索引](issues/TRIAGE.md)。历史产物和批准保持原身份。
 
 2.4.0 为未完成任务增加同 run 连续语义修订：请求排空、冻结规则上下文、独立批准采纳、保稿的有限维护与正常游标接续。默认 continue 不再清批准回 P1，完整重提取须显式说明理由。最终集中验证覆盖 5 个组合场景，使用隔离状态、合成历史证据和本地检查替身；新规则 prompt/checker、原始与有效批准、P4/P5 接续和 runtime 交错审计均纳入验证。未启动真实旧 run、模型、提醒或 GPU，未迁移已完成产物；详见[计划记录](IMPROVEMENT_PLAN.md)及[接续问题](issues/archive/extract_workflow/progress-preserving-continuation.json)。
+
+2.4.1 补齐成功入队后未 ack 的同 ID 有界补送，共用原 3 次发送上限，并显示下一次尝试和耗尽诊断。[提醒延迟归档](issues/archive/extract_tools/reminder-ack-delay.json)已解决：用户确认历史 HTTP 403 由主/子 Agent API key 不同步导致，后续已同步修正；本次有限补送作通用兜底，不保证绝对投递或处理完成。同版补齐[根会话完整性与委派证据](issues/archive/extract_workflow/budget-and-usage-accounting.json)；提醒与用量各两个集中场景通过。墙钟预算保留，历史缺采样、子会话 token 与实付未知作为外部边界，不新增计费系统待办。
 
 六类固定实现曾在冻结 2.2.2 下完成 77 节点发布与证据审计；2.2.4 另完成分组 GEMM 的三节点真实验证，见[试用记录](TRIAL_REPORT.md)。样本结果不代表其他实现的提取成功率，也不代替 GPU 或外部比较器验收。
 

@@ -1,24 +1,31 @@
 {
   "id": "reminder-ack-delay",
   "category": "extract_tools",
-  "problem": "提醒按时入队，却过了约 11 小时 27 分钟才签收。期间，因调用错误停下的提取任务没有恢复。这段延迟的原因还没查清。",
+  "problem": "历史提醒已按时进入线程，首次处理因 HTTP 403 结束且没有输出，约 11 小时 27 分钟后才签收。用户确认当时子代理 API key 未与主 Agent 同步，后续已同步修正。工具此前成功入队后只等 ack，缺少入队成功但未完成签收时的有限补送。",
   "evidence": [
-    "提醒在 2026-11-04 17:50:38 UTC 成功入队，2026-11-05 05:17:28 UTC 才签收；已有 queue/ack 时间不能证明客户端延迟根因。",
+    "历史 wake ID 为 check-19-32-7f69e904841a8d280897e1be，thread ID 为 01a1a720-26b8-7730-8358-60036c5c854d。2026-11-04 17:50:38.142 UTC 到期并开始发送，17:50:40.557 UTC 取得 queued 回执，message ID 为 01a1a7af-3548-78c2-a4b3-9a66ac3234c4。",
+    "该线程在 2026-11-04 17:50:40.616 UTC 已记录此提醒；turn ID 为 01a1a7af-3579-7f23-83fe-d94e67e5f84e。17:50:47.680 UTC 该 turn 以 HTTP 403 结束，错误报告模型配额限制，last_agent_message 为空；不能把全部等待时间称为队列未送达。",
+    "下一次 task_started 为 2026-11-05 05:17:13.325 UTC；ack 为 05:17:28.930 UTC，scan 完成为 05:18:11.307 UTC。queued→ack 约 11 小时 26 分 48 秒。",
+    "用户于 2026-11-05 确认：当时子代理的 API key 未更新，之后已将子代理与主 Agent 的 key 同步。该配置修正由用户完成；仓库仅记录确认事实，不读取、修改或保存 key 值。",
     "schema_extract/tools/wakeup.py 的后台观察及已授权恢复独立于 ack；generation、hold、pause/cancel 和 clock stop 继续约束请求。",
-    "schema_extract/tools/tests/test_scoped_recovery.py 验证未 ack 时仍可观察并消费已授权恢复，以及 stop 撤销待消费请求。"
+    "2.4.1 的 _next_send_at 供 tick、run 等待与 status 共用：最近 queued 后 1800 秒未 ack 则补送同 ID，uncertain/sending 后至少 120 秒；全部发送共用原总上限 3 次。",
+    "schema_extract/tools/tests/test_wakeup_retry.py 的 2 个集中隔离场景通过：1799/1800 秒补送边界、uncertain 的 120 秒间隔、最后尝试调度、重建不退款、耗尽仍观察、ack 阻止发送、scan 单次提交及重放、快速 ack/scan 或 stop 后晚回执只补事实、旧代际失效。验证使用临时 Store、假时间与队列，以及一次进程内假等待；未启动真实模型、后台 clock 或 queue。"
   ],
-  "proposal": "将有界后台观察与已授权恢复从提醒签收中分离，提醒保留同线程队列及真实送达边界。",
+  "proposal": "保留与 ack 独立的有界后台观察及已授权恢复；成功入队但未 ack 时沿用同线程、同 wake ID 有限补送，所有结果共用发送次数，并保留显式 ack/scan 与控制优先级。",
   "necessity": "任务能否无人值守地推进，取决于异常发生后是否有人或程序及时处理。需要弄清现有提醒能保证到哪一步。",
   "decision": {
-    "outcome": "partially_adopted",
-    "version": "2.3.0",
-    "reason": "已授权的程序恢复不再等待提醒签收；隔离时钟回放通过。",
+    "outcome": "resolved",
+    "version": "2.4.1",
+    "reason": "用户已完成历史 key 不同步的配置修正；本次工具侧补齐同 ID 有限补送及诊断，两个集中隔离场景通过，作为通用兜底收口。两者分别记录，不把历史配置问题或恢复原因继续列作待办，也不宣称绝对投递或主管处理保证。",
     "adopted": [
-      "后台观察与恢复独立于 ack，保留稳定提醒身份、有界重送及控制优先级。"
+      "沿用 2.3.0 的后台观察与已授权恢复，不等待提醒 ack；恢复授权、语义修订和控制屏障保持原边界。",
+      "最近 queued 后 1800 秒仍未 ack 时补送同 ID；最近 uncertain/sending 后仍等 120 秒，从该尝试结束或开始计算。全部发送共用总上限 3 次，重建时钟不退款。",
+      "status 显示首次/最近 queued 时间、ack 后时长、下一次尝试和剩余次数；ack 前耗尽即报 queue_attempts_exhausted，即使已有 queued 回执。",
+      "ack、scan 完成及 stop/新代际优先；晚回执只补发送和消息事实。ack 后不补送，耗尽也不完成或推进周期，显式 scan 可续完且重放不重复推进。"
     ],
     "remaining": [
-      "约 11 小时 27 分钟的历史 queue→ack 延迟根因仍未知，缺少客户端处理证据。",
-      "入队成功不保证实际送达或主管处理；本轮没有真实投递验证，也未增加外部渠道。"
+      "通用运行边界：同线程补送不保证实际送达或主管完成，不能解除服务端配额或认证限制；本次未增加外部渠道。",
+      "验证边界：本轮没有真实端到端投递或主管处理验证，真实 .schema_extract/v2 状态保持不变。"
     ]
   }
 }

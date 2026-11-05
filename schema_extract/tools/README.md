@@ -189,7 +189,9 @@ hold 先提交 active_hold，再追加暂停请求；派发授权和发布 renam
 
 reminder 绑定 generation/thread/number/due 的稳定 ID。ack 在锁内校验身份、启用和到期条件；scan 在锁外观察，再于同一短事务提交观察、完成号和下一次时间。提交前退出可续做，提交后重放同 ID 不再推进。晚到 queue 响应只补消息身份，不能回退已接受/完成状态。
 
-发送前记次数，送达不确定时按同 ID 有界重送；成功入队等 ack。stop 先停用并推进代际，再于锁外终止时钟，旧提醒及未提交扫描失效。间隔、重送上限及操作见[提醒手册](../README.md#同线程持久提醒)。
+发送前记次数；最后一次尝试为 uncertain/sending 时至少等 120 秒，为 queued 且未 ack 时等 1800 秒，同线程沿用同 ID 补送。tick、后台等待与 status 共用下一次发送时间计算，保留首次入队事实；所有发送共用总上限 3 次，重建时钟不退款。ack 或耗尽后不再发送，耗尽也不推进周期；status 显示下一次尝试、剩余次数和 ack 后未完成诊断。发送前重核当前提醒及 ack，晚响应只补事实。stop 先停用并推进代际，再于锁外终止时钟，旧提醒及未提交扫描失效。操作与实际投递边界见[提醒手册](../README.md#同线程持久提醒)。
+
+历史 HTTP 403 的配置原因已由用户确认：主/子 Agent API key 曾不同步，后续已同步修正。本次有界补送作通用兜底，不将该配置故障继续列为待办，也不保证绝对投递或处理完成。
 
 自动重试只接受已终止的 EX_TEMPFAIL 75，并重核 failure/scope/attempt/result 摘要、控制修订和剩余预算。授权绑定时钟代际，按 lineage 累计；stop、手动控制或新代际不能延续旧扫描授权，已用次数不退款。
 
@@ -209,9 +211,11 @@ account 只计新增耗时差额；恢复不重复累加或把缺值改为零。
 
 旧 result.usage v1 不变。[observation.py](observation.py)只按本次 UUID 有界读取 native ledger，记录 CLI 版本、文件/事件身份及 resume 前基线；新会话的零基线也须由首个累计与本次计数一致证明。单 turn 的 native 增量必须与最终输出累计一致，重复 counter 不重复计；缺基线、截断、回退和来源冲突使 cursor 无效，观察失败不改变模型结果。下一次调用重新取基线，避免重放用量。
 
-`observation_totals` 按 origin_run_id/attempt_id 去重，再拒绝同会话的重叠计数区间；只汇总有据根会话增量，展示未知 attempt 数。cached input 已含于 input；子会话覆盖、完整调用 token 与费用均保持未知。旧 result/receipt 不补写观察值，继承账目不再叠加 predecessor 总数。
+`observation_totals` 统计本 run 已登记的 CLI attempts（含继承来源），按 origin_run_id/attempt_id 去重，再拒绝同会话的重叠计数区间。只加有据根会话增量，分列 exact/partial/unknown；`known_attempts=exact_attempts+partial_attempts` 保持兼容。非空范围全部 exact 才给出 root_status=exact，有据小计但不完整为 partial，无可加增量为 unavailable。cached input 已含于 input；旧 result/receipt 不补写观察值，继承账目不再叠加 predecessor 总数。
 
-audit 分列 wall/CLI/check-processing 与 lifecycle 等待；pause/hold/排队/退避按已知区间并集计算，缺边界保持未知。范围等待可能与兄弟工作并行，不能相减推算纯模型时间；usage observation 耗时是 CLI 时间的子集。原墙钟截止、预算预留及追加语义不变。
+2.4.1 的可选 delegation 投影随 observation 摘要绑定，invocation/result 显式记录 `delegation_policy=forbidden`，旧字段缺失为 unknown。已有 native 调用范围仅提取已识别 response_item.function_call 和 item_completed SubAgentActivity/CollabAgentToolCall 的工具/活动类型、事件锚点及关联 UUID；不保留参数或正文，不读取子会话和用户历史。summary 只保留策略、状态、短原因及标记/关联线程数量，完整 UUID 锚点留在由 SHA-256 绑定的 usage-observation.json，不把事件列表复制进账本。observed/not_observed_in_range/unavailable 分列委派证据；格式不识别或范围不完整保持 unavailable，委派观察失败不抹掉已证明的根增量。禁止委派、未观察到标记、关联线程数量及 parent_thread_id 均不证明完整子会话集合。子会话 token 与完整调用用量仍未知；`cost=null` 的原因为无可靠计价/账单来源，不以现价反推实付。旧 observation v1 与 summary 原字节/摘要语义不变，旧冻结执行器须经显式运行层升级才会采集未来调用的新字段。
+
+audit 分列 wall/CLI/check-processing 与 lifecycle 等待，文本及 JSON 明示 `budget_policy=wall_clock_deadline` 和等待计入预算；pause/hold/排队/退避按已知区间并集计算，缺边界保持未知。范围等待可能与兄弟工作并行，不能相减推算纯模型时间；usage observation 耗时是 CLI 时间的子集。原 config、墙钟截止、预算预留及追加语义不变，观察不赠送或退还额度。
 
 verify 复用快照、checkpoint 和引文门禁：提案按原始输入/产物重新规范化后与 receipt 比对，reviewer 绑定实际读过的起始 checkpoint，裁决结果另验。核对 response.json 与 result.response 一致，不启动模型或检查器。
 
