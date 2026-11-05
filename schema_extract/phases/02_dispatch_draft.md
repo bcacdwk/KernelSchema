@@ -2,11 +2,13 @@
 
 本页先确定代表路径和拆分依据，再让 root 进入 Design。阶段调用与检查约定见[手册](../README.md)。
 
+以下准入、推进与重开用于普通提取；`maintenance` 只执行本次任务，写入还受调用的文件/字段授权限制，不能据本页扩大范围。
+
 ## 准入与应读材料
 
 P1 的元数据和共享 Contract 已通过，Runner 提供对应 root checkpoint、固定 host 入口、适用 workload、调用身份和可写范围。worker 续用 P1 会话，reviewer 使用新的阶段会话，明确读取本页；P2 独立验收和计退修。
 
-worker 可沿 P1 交接定位；reviewer 先按[当前文档验收](../REVIEW.md)读当前 root 的已完成内容和 dispatch 草案，再沿固定 host 选择条件、参数归一和实际调用关系核对路径。两角色均依[派生与索引规则](../../schema_docs/0.common.md#派生节点与-dispatch)工作，只深入到足以区分设计，不先完成整棵树的 Design。需要任务边界依据时回查固定材料。
+worker 从当前 root 草稿接续；reviewer 按[当前文档验收](../REVIEW.md)先读当前产物，再沿固定 host 选择条件、参数归一和实际调用关系核对路径。两角色均依[派生与索引规则](../../schema_docs/0.common.md#派生节点与-dispatch)工作，只深入到足以区分设计，不先完成整棵树的 Design。需要任务边界依据时回查固定材料。
 
 ## worker：可写范围与操作
 
@@ -21,12 +23,12 @@ worker 可沿 P1 交接定位；reviewer 先按[当前文档验收](../REVIEW.md
 
 ## reviewer：放行门槛
 
-重新审阅 P1 已完成内容及新增选择条件和索引草案，按[当前文档验收](../REVIEW.md)给出四项文档判断；不以 P1 批准代替当前核对。再独立追到真实 host 路由，判断 root 是否代表主要 workload，划分是否用最少必要节点保留数学、工作组织或局部执行的实质差异。核对主要路径及 root `when`、全契约域内的选择依据和覆盖缺口；同一套参数能表达的变化保留在一个节点。
+按[当前文档验收](../REVIEW.md)覆盖 P1 已完成内容、当前选择条件及索引草案。独立追到真实 host 路由，判断 root 是否代表主要 workload，划分是否用最少必要节点保留数学、工作组织或局部执行的实质差异。核对主要路径及 root `when`、全契约域内的选择依据和覆盖缺口。
 
-本阶段批准 root 选择和划分草案，允许只有拟议分支、尚无分支 YAML。检查草案可读、root 链接有效、改动未越界；不因 Design 仍未完成要求完整 YAML 检查退出 `0`。若新证据推翻 P1 的外部要求，交 Runner 回 P1 核实。
+本阶段批准 root 选择和划分草案，允许只有拟议分支、尚无分支 YAML。检查草案可读、root 链接有效、改动未越界；不因 Design 未完成要求完整 YAML 检查退出 `0`，也不能把本阶段尚未完成的 partial 草案通过维护复核当作完成。普通调用若有证据推翻 P1，按本轮 `reopen_targets` 交 Runner 回 P1 核实。
 
 ## 回执与下一位
 
 按[回执约定](../tools/README.md#回执与短交接)提交 root 选择、主要路径与实质差异、host 依据及覆盖缺口。reviewer 的 P2→P3 短交接只保留已定理由和待核实入口，由 Runner 保存。
 
-本阶段放行后，Runner 启动 [P3](03_root.md) 的全新 worker/reviewer。接手者读取已审 root 草稿、dispatch 草案、短交接和选定路径源码，开始逐段设计。
+本阶段放行后，Runner 启动 [P3](03_root.md) 的全新 worker/reviewer。worker 读取已审 root 草稿、dispatch 草案、短交接和选定路径源码，开始逐段设计；reviewer 从当前产物独立审阅。

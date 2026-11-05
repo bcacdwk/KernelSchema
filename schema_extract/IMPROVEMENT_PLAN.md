@@ -1,6 +1,6 @@
 # 进行中 Schema 的连续修订计划
 
-本计划覆盖上一轮 IMPROVEMENT_PLAN.md。实施基线是当前未提交的 Schema Extract 2.3.0；已完成的执行器升级、进程恢复、用量观测和图入口保持。其历史说明见 schema_extract/README.md 与 issues/TRIAGE.md。本文件仅作工程交接，不加入 snapshots.rule_files。
+本文件是已在 2.4.0 完成的设计与历史工程交接，原实施基线为当时未提交的 2.3.0。当前操作以 [Supervisor 手册](README.md)和[工具协议](tools/README.md)为准，问题决定见 [TRIAGE](issues/TRIAGE.md)。下文的代理分工、暂停真实运行、“不提交 Git”等均为当轮实施约束，不构成后续任务授权限制；具体完成证据保留原记录。本文件不加入 snapshots.rule_files。
 
 ## 目标与已定边界
 

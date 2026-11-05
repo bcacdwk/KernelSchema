@@ -451,17 +451,20 @@ class Clock:
         entry = [clock["python"], "-B", clock["entrypoint"], "monitor"]
         where = ["--repo", clock["repo"], "--state-root", str(self.store.root)]
         ack = shlex.join([*entry, "ack", item["id"], "--thread", clock["thread_id"], *where])
+        status = shlex.join([*entry, "status", *where])
         due = datetime.fromtimestamp(item["due_at"], timezone.utc).isoformat()
         prefix = f"Schema Extract 同线程提醒 {item['id']}，线程 {clock['thread_id']}，到期 {due}。先执行：{ack}。"
         if item["kind"] == "probe":
-            return (prefix + "accepted=false 时结束此提醒；accepted=true 时用 monitor status 核对该线程确认，简短报告后结束本轮。"
+            return (prefix + f"accepted=false 时结束此提醒；accepted=true 时执行 {status} 核对该线程确认，简短报告后结束本轮。"
                     "这是一次唤醒验证，不执行巡检或控制提取，不改变正式 300/1800 秒周期。不要另建线程、闹钟或在对话中 sleep。")
         scan = shlex.join([*entry, "scan", "--wake", item["id"], "--thread", clock["thread_id"], *where])
         manual = Path(clock["entrypoint"]).with_name("README.md")
-        return (prefix + f"accepted=false 时结束此提醒；accepted=true 时执行一次：{scan}。"
+        return (prefix + f"accepted=true 且 scan_required=true 时执行一次：{scan}。"
+                "accepted=false 若为 already_acknowledged 且 unfinished=true，也用这条 scan 续完；其他拒绝原因结束此提醒。"
                 f"按[巡检手册]({manual})查看各算子的阶段、在途调用和异常；正常简报即可。"
-                "需框架修复时按手册先 hold 并核清范围，再按已有授权交工程处理。"
-                "巡检完成并登记 next_due_at 后结束本次提醒；尊重用户最新暂停或讨论，继续处理其尚未结束的已授权事项。"
+                "需修复时按已有授权及影响范围选择普通/单范围恢复、兼容升级或连续修订；需要统一暂停派发与发布时才建立 hold。"
+                f"以 scan 返回的 clock.committed=true 或 reused=true 及 next_due_at 确认本轮已登记；scan_busy/scan_invalidated 时执行 {status} 核对。"
+                "本轮巡检完成后结束此提醒；尊重用户最新暂停或讨论，继续处理其尚未结束的已授权事项。"
                 "ack 后若中断，同线程显式执行这条 scan 续完，不重复 ack。"
                 "后台持续观察并推进已有授权的有限恢复，不等待提醒 ack；提醒供核对需人处理的事项。"
                 "不要另建线程、闹钟或在对话中 sleep，已有提取授权和预算保持原边界。")

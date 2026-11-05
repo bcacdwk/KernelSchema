@@ -97,10 +97,15 @@ class ReviewProtocolTests(unittest.TestCase):
         self.assertTrue(set(DOCUMENT_CONCLUSIONS) <= set(value["required_conclusions"]))
 
     def test_reopened_plan_can_read_current_nodes_without_their_old_verdicts(self):
+        self.state["plan_draft"] = deepcopy(self.state["plan"][:1])
         prompt, value = self.invocation({**self.attempt, "stage": "P4"})
         self.assertNotIn("HISTORY_", prompt)
+        self.assertEqual(value["plan"], self.state["plan_draft"])
         self.assertEqual(set(value["current_node_artifacts"]), {"root", "branch"})
         self.assertNotIn("prior_approvals", value)
+        self.state["plan_draft"] = []
+        _, value = self.invocation({**self.attempt, "stage": "P4"})
+        self.assertEqual(value["plan"], [])
 
     def test_stage_reads_are_cumulative_and_p2_reviewer_is_independent(self):
         for stage in STAGES:

@@ -2,6 +2,8 @@
 
 本页完成七段内容中的第 1–3 段，为整个算子建立共同前提。检查器的适用范围见[手册](../README.md#验证边界)。
 
+以下准入与推进用于普通提取；`maintenance` 只执行本次任务，写入还受调用的文件/字段授权限制，不能据本页扩大范围。
+
 ## 准入与应读材料
 
 Runner 提供算子身份、输出位置、固定来源入口、输入构造、reference、数值验收材料、适用范围和本次可写路径；续修时还提供当前 root 草稿、checkpoint 与退修意见。缺少必需材料时，先定位缺项及影响，可以继续不受影响的内容，不能假定来源已核实。
@@ -10,7 +12,7 @@ Runner 提供算子身份、输出位置、固定来源入口、输入构造、r
 
 ## worker：可写范围与操作
 
-仅可写本次任务的 `root.yaml`：新建时复制 starter，完成 `meta_data` 与 `contract.algorithm_requirement`，硬件区原样保留，Design 暂留草稿。续修读取现有草稿，不覆盖为新 starter。不得写 dispatch 索引、派生 YAML、源码、规范、检查器或 Runner 状态。
+仅可写本次任务的 `root.yaml`。Runner 用 starter 准备首次稿件，worker 核对后完成 `meta_data` 与 `contract.algorithm_requirement`；硬件区原样保留，Design 可暂留草稿。已有稿件继续使用，不能覆盖为新 starter。不得写 dispatch 索引、派生 YAML、源码、规范、检查器或 Runner 状态。
 
 ### 第 1 段：元数据
 
@@ -30,11 +32,7 @@ Runner 提供算子身份、输出位置、固定来源入口、输入构造、r
 
 对应 YAML 判据明确保留 `relative_to=candidate` 或来源给出的其他值。例如材料已给出 elementwise、`atol=0.01`、`rtol=0.05` 时，可写 `abs(candidate-reference) <= 0.01 + 0.05*abs(candidate); relative_to=candidate`，并在后面说明未声明的比较器精度或 NaN/Inf 行为。Runner 核对这个显式基准、已有标准公式中的比较对象与可直接核对的阈值；自由公式及输出映射的语义仍由独立 reviewer 核实。不因单独一个 `relative_to` 字段推断 elementwise/L2 公式、运算精度或非有限值政策。
 
-材料既未声明 `relative_to`，也未提供外部比较器实现时，不能把“没有 override”、reference 内部算术或 schema 默认值当作相对 reference 的依据。只有 `atol/rtol` 等阈值时，在对应 `tolerance` 中明确写成来源声明，同时注明公式和基准未提供、未采用默认简写解释；不补写 `abs(reference)` 等未经支持的公式。外部 relative-L2 归一化、返回别名与写回输出的检查路由未给出时也按此处理，已明确的检查仍完整保留。
-
-任务数学、IO、副作用和参考入口已可确定时，这类外部验收资料缺口不阻止 P1 完成。worker 可返回 `complete`，reviewer 可返回 `approve` 并携带 `issues`：用 `source_gap` 记录已知内容、未提供的定义、来源及为何不影响当前提取；`recovery_condition` 说明补齐途径，不自动成为当前放行条件。不能仅以“无法复刻外部比较器”或“会改变外部测试通过边界”返回 blocked。
-
-真正缺少参考入口、任务计算、输入输出或副作用定义，或必须猜测精度路径等事实才能描述当前内容时，才按[阻塞边界](../../EXTRACT_SCHEMA.md#来源缺项与验收边界)交回：具体指出哪项计算或设计因此无法确定。来源已明而草稿不符则是退修，不能用 source_gap 代替修正。
+材料未声明 `relative_to` 或比较器实现时，不能把“没有 override”、reference 内部算术或 schema 默认值当作依据。按[来源缺项](../REVIEW.md#来源缺项)保留 `tolerance` 来源记录和 `source_gap`：已知判据完整保留，未知公式、基准、归一化或检查路由不自行补齐；当前计算与设计有据时可完成并批准。真正阻碍当前提取的缺项须指出具体关系，来源已明而草稿不符则退修。
 
 写完后，读者应能不依赖 Design 理解标准答案。生成参数、函数签名和候选实现限制不能单独决定任务要求；分块、映射、缓冲、执行顺序和候选数学改写留给 Design。公式、dtype、range、default、symbol 和 tolerance 按算法规范填写，不自行增加字段。
 
@@ -57,7 +55,7 @@ Runner 提供算子身份、输出位置、固定来源入口、输入构造、r
 - reference 可实际定位，每个输出的已知判据或验收来源记录均已覆盖；已知阈值、基准和检查没有被遗漏、改写或用默认公式替代。
 - 来源缺口及不影响当前提取的理由有证据，未被用来支持数值保证；实现覆盖不足和源码缺陷按事实保留。
 
-P1 审阅元数据、计算契约和验收来源的忠实表达，Design 可以保留 starter 草稿。Runner 对 complete/approve 继续检查算法区字段、输出与 tolerance 对应、符号/属性引用、shape 轴与范围；这些要求不能留到 P3。完整检查器因 Design 未完成产生的失败不能作为 P1 退修理由。blocked 必须指出缺失事实使哪项当前计算、数值或设计关系无法可靠提取，不能仅要求所有外部验收定义先补齐。
+Runner 对 complete/approve 检查算法区字段、输出与 tolerance 对应、符号/属性引用、shape 轴与范围，这些要求不能留到 P3。完整检查器因 Design 未完成产生的失败不作为 P1 退修理由；但元数据或算法 Contract 尚未完成的 partial 草稿仍须继续原作者工作，不能借维护复核获批。
 
 ## 回执与下一位
 

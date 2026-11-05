@@ -532,9 +532,9 @@ def main(argv=None) -> int:
                 budget_addition = addition(args.add_seconds, args.add_calls) if args.command == "resume" else addition()
                 if any(budget_addition.values()):
                     if BUDGET_CAPABILITY not in state.get("executor", {}).get("capabilities", []):
-                        raise ExtractError("this frozen executor cannot add budget; use continue " + args.run_id +
-                                           " --checkpoint " + state["checkpoint"] + " --add-seconds " + str(args.add_seconds) +
-                                           " --add-calls " + str(args.add_calls))
+                        raise ExtractError("this frozen executor cannot add budget; adopt a reviewed compatible "
+                                           "runtime with upgrade-runtime, then resume with --add-*; or explicitly use "
+                                           "continue --full-restart with --checkpoint, --reason and --add-*")
                     command.extend(["--add-seconds", str(args.add_seconds), "--add-calls", str(args.add_calls)])
                 store.assert_startable(args.run_id)
                 entry = _launch_context(store, state, mode=args.command, budget_addition=budget_addition)
