@@ -88,3 +88,48 @@ def validate_file(filename: str | Path, *, notices: list[str] | None = None,
         raise ToolError(f"{entry}: pass one existing .yaml or .yml file (root or a derived node).")
     return directory, validate_directory(directory, notices=notices, source_hashes=source_hashes,
                                          skip_hardware=skip_hardware)
+
+
+@bounded
+def validate_standalone_file(filename: str | Path, *, notices: list[str] | None = None,
+                             source_hashes: dict[str, str] | None = None,
+                             skip_hardware: bool = False) -> tuple[Path, dict]:
+    """Check one explicit delivery view with its own Contract; read no siblings."""
+    entry = Path(filename).expanduser().absolute()
+    if entry.suffix not in {".yaml", ".yml"} or not entry.is_file():
+        raise ToolError(f"{entry}: pass one existing standalone .yaml or .yml file.")
+    try:
+        document = yaml_source.load(entry, "root")
+        policy = (check_policy.CheckPolicy(allow_missing_hardware=True) if skip_hardware
+                  else check_policy.for_directory(entry.parent))
+    except yaml_source.ReadError as error:
+        raise SchemaError(str(error)) from error
+    except (yaml_source.DependencyError, check_policy.PolicyError) as error:
+        raise ToolError(str(error)) from error
+    if skip_hardware and notices is not None:
+        notices.append("Hardware skipped explicitly: hardware_specification and hardware-dependent checks were not validated.")
+    original = document.value
+    checked = deepcopy(original)
+    if skip_hardware and isinstance(checked.get("contract"), dict):
+        checked["contract"].pop("hardware_specification", None)
+    files, documents = {"root": entry}, {"root": document}
+    errors = rules.validate_structure({"root": checked},
+                                      allow_missing_hardware=policy.allow_missing_hardware)
+    if errors:
+        raise SchemaError(format_diagnostics(errors, files, documents))
+    dispatch = checked["meta_data"].get("dispatch", {})
+    identity = dispatch.get("id", "root")
+    if "parent" in dispatch and (identity == "root" or dispatch["parent"] == identity):
+        raise SchemaError(f"{entry}: standalone root has no parent; a derived node cannot parent itself.")
+    # Identity and parent remain in the returned view as provenance. Relations
+    # are local to this document: neither imports another node's Design.
+    dispatch.pop("id", None)
+    dispatch.pop("parent", None)
+    errors = rules.validate_relations({"root": checked},
+                                      allow_missing_hardware=policy.allow_missing_hardware)
+    if errors:
+        raise SchemaError(format_diagnostics(errors, files, documents))
+    if source_hashes is not None:
+        source_hashes.clear()
+        source_hashes[identity] = document.source_sha256
+    return entry.parent, {identity: original}

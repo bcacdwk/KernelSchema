@@ -1,0 +1,13 @@
+{
+  "id": "pipeline-graph-skip-hardware",
+  "category": "schema_template",
+  "problem": "提取产物按规范保留硬件占位，普通检查通过显式 --skip-hardware 验证其余内容；有限流水线图的命令行入口没有对应参数，且调用 validate_file 时未透传 skip_hardware，因而无法直接对这些产物展开依赖图。",
+  "evidence": [
+    "schema_template/README.md 的硬件占位检查说明要求显式 --skip-hardware，并列出 schema.validate_file(..., skip_hardware=True) 与 validate_directory 的 Python API；当前仓库不启用目录硬件豁免。",
+    "schema_template/tools/pipeline_graph.py::main 只声明 --set、--worktiles、--all、--check-only；随后调用 schema.validate_file(source, notices=notices, source_hashes=source_hashes)，没有传入 skip_hardware。2026-11-04 只读执行该入口的 --help 也确认未提供此选项。",
+    "schema_template/tools/schema.py::validate_file 的 skip_hardware 默认 False，并将该值传给 validate_directory；底层已有显式豁免能力，无需另建校验策略。",
+    "FMHA 的 fused_d128_group 提取候选沿用本 ID：kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/fmha_tcg.cuh（SHA-256 0eb68d429d53e60416de80ed8f4627b5545505b8ed576b7c346a5a723c392806）3656–3660 按 cLo+w 及步长 2 分配 K/V 组，3849–3851 仅有组的成员等待末次 PV；Ng=1 时需要核对 Odd 的零次循环。图入口因硬件占位无法直接检查该示例，但候选明确不阻塞人工审阅。"
+  ],
+  "proposal": "为 pipeline_graph.py 增加显式 --skip-hardware，并传递给现有 schema.validate_file；沿用现有 notices 和图中的硬件豁免提示。保持默认完整检查，以及非硬件结构、引用和有限依赖展开的全部门禁。该项作为不阻塞当前提取的工具改进待处理，旧冻结执行器不会自动获得该能力。",
+  "necessity": "同一硬件占位规则已适用于所有提取产物，图命令行缺少透传会造成重复的人工或 Python API 操作。这是共用入口的局部缺项，不需要修改 schema 语义，也不能将图工具不可用解释为产物已通过依赖检查。"
+}

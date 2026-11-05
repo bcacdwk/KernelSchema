@@ -22,6 +22,8 @@ Runner 提供算子身份、输出位置、固定来源入口、输入构造、r
 
 `contract.algorithm_requirement` 只在 root 保存一份，供所有路径共用。从任务的输入构造、reference 和验收入口写清输入输出、有效域、数学关系、边界、精度转换和副作用。核对实际调用的 shape、布局、可选参数、读写及初始化区域；明确外部输出与内部 workspace 的区别，避免默认值域排除合法输入。
 
+外部对象可为张量或 `None` 时，按[nullable 与 None](../../schema_docs/1.contract.algorithm_requirement.md#nullable-与-none)填写并审阅共享 Contract；依据实际来源核对缺席与省略参数的条件。
+
 验收材料逐输出核对比较对象、相对误差基准（包括 `relative_to`）、计算精度、阈值及非有限值处理。来源已给出的内容必须保留，未提供的定义按[验收来源记录](../../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)处理。阅读这些材料不等于执行 GPU 验收；本流程不安排 GPU 测试或实测。
 
 绑定的验收 JSON 若在具名输出的 `tolerance` 中明确写了 `relative_to`，P1 提案用 `comparisons: [{output, source_output, evidence}]` 将它绑定到实际 YAML 的 `golden_reference.tolerance.<output>`。`source_output` 是验收记录的 `name` 或 `outputs` 的键；例如 `out → Y`、`input.state[*] → State`，名称相同则绑定同名输出。仅 `input.state[0]`、`input.state[1]` 这类已知状态族可用 `input.state[*]` 汇总，每种不同的比较基准或阈值仍要有声明行的独立锚点。返回位置（如 `output[0]`、`output[1]`）及其他下标保留各自完整名称，即使基准与阈值相同也不合并，必须分别引用对应的声明行。`evidence` 引用本次 `source_evidence`；所选行范围与 `quote_offset` 生成的引文必须包含该输出的 `"relative_to": "candidate"` 等实际声明，不能只取 JSON 开头。worker 和 reviewer 各自核对映射并选择自己的锚点；没有这类明确声明时用 `comparisons: []`。
@@ -46,6 +48,8 @@ Runner 提供算子身份、输出位置、固定来源入口、输入构造、r
 
 ## reviewer：放行门槛
 
+先按[当前文档验收](../REVIEW.md)通读当前 root 的元数据与算法 Contract，再核对来源，给出四项文档判断。只审本阶段已完成内容，Design 草稿不在本阶段批准范围；后续阶段仍须复核这份 Contract 与新内容是否一致。
+
 从独立 checkpoint 和固定材料确认：这份紧凑的 Contract 已说清外部任务的数学含义、有效域及全部输出，读者无需展开 Design 才能理解标准答案。重点核对：
 
 - 元数据身份和来源准确；YAML 可解析，硬件占位保持原样。
@@ -59,4 +63,4 @@ P1 审阅元数据、计算契约和验收来源的忠实表达，Design 可以�
 
 按[回执约定](../tools/README.md#回执与短交接)提交语义提案：共享 Contract 结论、IO/reference/验收依据、实现覆盖范围和未决项。
 
-Runner 验证并保存本阶段放行后进入 [P2](02_dispatch_draft.md)。P1 的 worker 与 reviewer 各自独立，P2 分别续用这两个会话并加载新任务页；本页不生成额外短交接文件。
+Runner 验证并保存本阶段放行后进入 [P2](02_dispatch_draft.md)。P2 worker 续用本角色会话，reviewer 使用新的阶段会话，从当前文档独立建立理解；本页不生成额外短交接文件。

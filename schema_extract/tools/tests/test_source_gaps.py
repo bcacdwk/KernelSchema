@@ -7,10 +7,11 @@ import tempfile
 import unittest
 from uuid import uuid4
 
-from schema_extract.tools.artifacts import (load_yaml, validate_artifact_sources,
+from schema_extract.tools.artifacts import (load_yaml, parser_for, validate_artifact_sources,
                                            validate_artifacts, write_yaml)
 from schema_extract.tools.common import ExtractError, manifest
 from schema_extract.tools.receipts import normalize_response, validate_receipt
+from schema_extract.tools.stages import DOCUMENT_CONCLUSIONS
 
 
 REPO = Path(__file__).resolve().parents[3]
@@ -80,6 +81,9 @@ class SourceGapTests(unittest.TestCase):
                                 "evidence": [4], "recovery_condition": "Obtain the comparator before using this record for implementation acceptance."}],
                     "comparisons": [{"output": "Y", "source_output": "Y", "evidence": [4]}] if declared else [],
                     "framework_candidates": [], "handoff": ""}
+        proposal["conclusions"].extend(
+            {"subject": subject, "text": "The current Contract is clear and records its explicit source limitation.",
+             "evidence": []} for subject in DOCUMENT_CONCLUSIONS)
         receipt = normalize_response(proposal, self.lock, attempt, self.after)
         state = {"run_id": attempt["run_id"], "input_fingerprint": attempt["input_fingerprint"],
                  "accepted_receipts": {}, "active_attempts": {"P1": attempt["attempt_id"]}}
@@ -111,6 +115,29 @@ class SourceGapTests(unittest.TestCase):
             with self.subTest(criterion=invalid), self.assertRaises(ExtractError):
                 self.artifact(invalid)
                 self.approve(declared=True)
+
+    def test_p1_gate_accepts_nullable_io_excerpts(self):
+        excerpts = parser_for(str(REPO)).load(
+            REPO / "schema_template/tools/tests/fixtures/nullable_io.yaml", "nullable_io").value
+        for family, excerpt in excerpts.items():
+            with self.subTest(family=family):
+                def update(algorithm):
+                    algorithm.update(deepcopy(excerpt))
+                    algorithm["golden_reference"]["tolerance"] = {name: "exact" for name in excerpt["output"]}
+                # Only the current P1 artifact gate is exercised. These are I/O
+                # excerpts in a synthetic task, not operator Reviewer approvals.
+                self.artifact(change=update)
+                actual = load_yaml(self.after, "root.yaml")["contract"]["algorithm_requirement"]
+                self.assertEqual(actual["input"], excerpt["input"])
+                self.assertEqual(actual["output"], excerpt["output"])
+
+    def test_p1_gate_rejects_nullable_type_and_singleton_shape_conflicts(self):
+        cases = (({"nullable": "true"}, "expected a boolean"),
+                 ({"nullable": True, "default": None}, "expected a known scalar"),
+                 ({"dtype": "python_none", "shape": [{"element": 0}]}, "python_none is a singleton scalar"))
+        for fields, message in cases:
+            with self.subTest(fields=fields), self.assertRaisesRegex(ExtractError, message):
+                self.artifact(change=lambda a: a["input"]["X"].update(fields))
 
 
 if __name__ == "__main__":

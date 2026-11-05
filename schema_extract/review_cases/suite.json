@@ -1,0 +1,87 @@
+{
+  "format": "schema_extract.review_suite.v1",
+  "base": "base.yaml",
+  "cases": [
+    {
+      "id": "valid_copy",
+      "patches": [],
+      "expected": {"decision": "approve", "criteria": [], "path": ""}
+    },
+    {
+      "id": "valid_custom_action",
+      "patches": [
+        {"path": ["design", "tile_pipeline", "phase", "copy", "role", "Main", "info", "verb"], "value": {"transfer": "Perform the copy defined by math_reshape.copy and write Y; completion covers that write."}},
+        {"path": ["design", "tile_pipeline", "phase", "copy", "role", "Main", "pipe", "steady"], "value": ["transfer:Y"]}
+      ],
+      "expected": {"decision": "approve", "criteria": [], "path": ""}
+    },
+    {
+      "id": "valid_optional_noop",
+      "patches": [
+        {"path": ["meta_data", "describe"], "value": "Copy one FP32 scalar when a result is requested."},
+        {"path": ["contract", "algorithm_requirement", "input", "write_output"], "value": {"meaning": "Whether a scalar result is requested", "shape": [], "dtype": "bool"}},
+        {"path": ["contract", "algorithm_requirement", "output", "Y"], "value": {"meaning": "Copied scalar when requested, otherwise the Python None singleton", "shape": [], "dtype": "fp32_or_python_none"}},
+        {"path": ["contract", "algorithm_requirement", "compute", 0, "math"], "value": "Y = X when write_output is true; otherwise Y is Python None. fp32_or_python_none denotes exactly this union. No arithmetic or conversion occurs."},
+        {"path": ["contract", "algorithm_requirement", "golden_reference", "tolerance", "Y"], "value": "When a scalar is requested: exact. Otherwise both the result and reference must be the Python None singleton."},
+        {"path": ["design", "math_reshape", "rewrite", 0, "math"], "value": "Y = X when write_output is true; otherwise Y is Python None, as defined by Contract Copy."},
+        {"path": ["design", "work_schedule", "thesis"], "value": "Submit one worker for the optional copy result."},
+        {"path": ["design", "work_schedule", "phase", "copy", "describe"], "value": "The worker is submitted for every input and produces the requested optional result."},
+        {"path": ["design", "work_schedule", "phase", "copy", "decomposition", "target", "single_tile", "Y", "dtype"], "value": "ref:contract.algorithm_requirement::Y.dtype"},
+        {"path": ["design", "tile_pipeline", "thesis"], "value": "One synchronous role handles both cases; the requested copy or an executed no-op retains the same action events."},
+        {"path": ["design", "tile_pipeline", "phase", "copy", "role", "Main", "info", "verb"], "value": {"produce": "For write_output=true perform the defined copy. For write_output=false produce:Y is an executed no-op: it reads or writes no tensor storage and the result is None. The action has issue/done events in both cases; no phase, launch or event is deleted."}}
+      ],
+      "expected": {"decision": "approve", "criteria": [], "path": ""}
+    },
+    {
+      "id": "valid_source_gap",
+      "patches": [
+        {"path": ["contract", "algorithm_requirement", "golden_reference", "tolerance", "Y"], "value": "Source record: atol=0.01, rtol=0.05. The external comparison formula and relative-error basis are not supplied; the schema default atol/rtol criterion is not adopted. The copy computation and reference are known. This record does not claim reproduction of that external comparator."}
+      ],
+      "expected": {"decision": "approve", "criteria": [], "path": ""}
+    },
+    {
+      "id": "history_definition",
+      "patches": [
+        {"path": ["design", "math_reshape", "rewrite", 0, "math"], "value": "Evaluate Y using the alternative expression approved in the previous review. Its definition remains in the P3 handoff."}
+      ],
+      "expected": {"decision": "revise", "criteria": ["document_self_contained"], "path": "design.math_reshape.rewrite"}
+    },
+    {
+      "id": "missing_definition",
+      "patches": [
+        {"path": ["design", "math_reshape", "rewrite", 0, "math"], "value": "Y = PriorValue."}
+      ],
+      "expected": {"decision": "revise", "criteria": ["document_self_contained", "document_consistency"], "path": "design.math_reshape.rewrite"}
+    },
+    {
+      "id": "phantom_phase",
+      "extends": "valid_optional_noop",
+      "patches": [
+        {"path": ["design", "work_schedule", "phase", "copy", "describe"], "value": "When write_output is false, this phase, its launch and its completion event do not exist. The listed flow is only an enumeration of possible submissions; the reader removes absent entries."}
+      ],
+      "expected": {"decision": "revise", "criteria": ["document_consistency"], "path": "design.work_schedule"}
+    },
+    {
+      "id": "phantom_members",
+      "patches": [
+        {"path": ["design", "tile_pipeline", "phase", "copy", "role", "Main", "info", "member"], "value": "warp[0:4]"},
+        {"path": ["design", "tile_pipeline", "thesis"], "value": "Member ranges enumerate maximum possible members. Only warp 0 is instantiated; warps 1 through 3 have no actions or events and are not launched."}
+      ],
+      "expected": {"decision": "revise", "criteria": ["document_consistency"], "path": "design.tile_pipeline"}
+    },
+    {
+      "id": "lower_layer_override",
+      "patches": [
+        {"path": ["realization"], "value": {"require": [{"item": "contract.algorithm_requirement::Y", "choice": "Write X+1 instead of X whenever X is negative.", "reason": "This implementation choice supplies the negative-input branch that the upper layers leave implicit."}]}}
+      ],
+      "expected": {"decision": "revise", "criteria": ["document_layering", "document_consistency"], "path": "realization"}
+    },
+    {
+      "id": "review_history_in_thesis",
+      "patches": [
+        {"path": ["design", "math_reshape", "thesis"], "value": "Retain the Contract copy. P3 approved the second draft yesterday. The previous reviewer asked for fewer paragraphs, and this revision addresses that feedback. The next agent should archive the discussion after publication."}
+      ],
+      "expected": {"decision": "revise", "criteria": ["document_relevance"], "path": "design.math_reshape.thesis"}
+    }
+  ]
+}

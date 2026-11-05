@@ -1,0 +1,20 @@
+{
+  "id": "source-defect-abstraction-boundary",
+  "category": "extract_workflow",
+  "problem": "提取指引中的“源码缺陷保持原样”和不区分层级的“不能补加等待”，容易把源码的低层地址或同步实现偏差当成必须复制的设计，或要求先还原损坏值、修复源 kernel 才能完成 Schema。应保留缺陷事实与证据，并按 schema_docs 的抽象边界判断同一完整设计是否已有来源依据；这不豁免残缺 Design 或需要新算法、数据版本、依赖、容量和复用策略的修复。",
+  "evidence": [
+    "schema_docs/5.design.tile_pipeline.md“资源”只登记存放上游值或局部状态的设计存储，明确 barrier 存储、对齐余量和编译器临时量不登记；schema_docs/6.realization.md“核心思想”将不影响既定语义的地址计算和 barrier 编号留给 Coder，且禁止 realization 重定角色、缓冲或依赖。",
+    "2.2.8 的 schema_extract/tools/prompts.py 共用指令写“源码既有缺陷忠实记录，不能补造等待、fallback或外部保证”，schema_extract/phases/03_root.md 写“事实、代价和源码缺陷保持原样”。前者没有区分既有逻辑依赖的指令落实与新增逻辑依赖，后者容易被读成要在 YAML 固化坏布局。",
+    "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu，SHA-256 c9389387d35bd26954754a5ae13e2d202df06fc9799a77fddfb0654306909eb2：1879–1881 已为 5*STG*8 字节 barrier 区及返回槽、union 留出容量；2111–2115 却让 bar_land 与 tmem_base_s 共址，且 ukey 紧随其后。独立对象、整个 kernel 的 union 寿命、2753–2761 的 gather 使用点及 2514 的已有交接共同支持分开低层槽位，不仅是作者意图猜测。源问题独立登记为 sparse-tc-control-layout-overlap。",
+    "Sparse run 2d252bf9-d9a3-4fa4-96d2-90a98e25eb34 的固定 checkpoint f55a0eb8369967ef18bc01fa51f6926815714e0ff88991d51bb695cf2eda8c7e 中，tc_direct.yaml:130–138 将 TmemBase 与 UnionKey 合入 union_tail，189–199 又把共址写入 realization.require；59–63 只定义空路径，182–188 的非空 pipe 仅到 setup。前者把实现偏差升为约束，后者仍是必须补齐的独立文档缺陷。",
+    "同 run 的 P5 reviewer b0877632-8c5e-4ec0-99f4-a54269aa891a 在 issues/detail 中要求确定重叠后的有效 TMEM 地址、landing 状态及键值，认为搬移存储或补写等待都会改变固定实现；recovery_condition 要求先提供这些损坏值或更新源码/范围。这说明分流过严；拒绝缺少非空计算及输出链的当前稿仍然正确，不能由规则修订直接改判批准。",
+    "2.2.9 验证：28 项相关协议、提示、证据和来源缺口回归通过；P3/P5/P6 的六种审阅 mode 均嵌入同一共用方法并保留原结论与文件要求。三个小型 CUDA 语义样例使用真实 build_prompt、同一冻结规则 cbb9985a24ef3346244f9517e27e108fac2e6cdc5074a390f1c38ce3edeb9d00、原配置模型及现有 proposal/receipt 校验：完整预算内 offset 偏差 approve，缺计算和输出链的残稿 revise，双 stream 共用单槽却要求双槽的修复 blocked。原始提示、固定输入、合法输出、usage 和逐例语义判断保存在 .schema_extract/review-eval/source-defect-2.2.9-20261104T145114Z/report.json 及其 attempts；未做 GPU 测试，也未更改或批准 Sparse 产物。"
+  ],
+  "proposal": "在 schema_extract/REVIEW.md 统一源缺陷分流，并使 build_prompt 的共用及 mode 指令、P3/P5/P6 和入口说明引用同一标准。固定源码足以支持同一完整设计、且不需重定算法、精度、数据版本、逻辑依赖、角色、提交、容量、寿命或复用策略时，记录源问题并继续提取；需要猜测或改变这些决定才阻塞。缺陷详情使用既有 issues/source_evidence/summary，由 Supervisor 登记 kernel issue；YAML 不要求坏地址或错误复用。保留完整 Design、四项文档结论、全部文件与源码锚点及检查门禁，不增加字段、状态机或缺陷白名单。维护版本为 2.2.9；通用规则修复与 Sparse 实际 Design/P6 的验收分开。",
+  "necessity": "Sparse 的现有预算、对象寿命和使用点已给出可复核的抽象边界反例。澄清后可以完成有据设计，同时继续独立追踪源 kernel 正确性；也必须以残缺设计和无依据增加缓冲/依赖的反例验证拒绝边界，避免将任意 kernel 修复或算法重写伪装为实现自由。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.2.9",
+    "reason": "Supervisor 已验收共用源缺陷分流及其在真实 prompt、P3/P5/P6 和入口说明中的落实；此次解决通用提取规则，不要求 YAML 复现坏布局，也不允许借修复重定设计。28 项相关离线回归通过，三个真实 P3 语义样例分别 approve/revise/blocked，合法回执确认有据完整设计可继续、残稿须补齐、新容量/复用或逻辑依赖不能豁免。四项文档判断、完整文件与源码锚点及现有门禁保留，已测 prompt 与 Reviewer 方法字节不变。Sparse 实际 Design/P6 尚未完成，源 kernel 未修；sparse-tc-control-layout-overlap 和 conditional-flow-topology 继续独立待决，本决定不继承或改写旧批准。"
+  }
+}

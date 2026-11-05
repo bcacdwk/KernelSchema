@@ -17,10 +17,6 @@ from .inputs import validate_source_reference
 from .stages import stage_files
 
 
-class IndexLayoutError(ExtractError):
-    """The canonical plan table is intact, but its coverage heading is misplaced."""
-
-
 class UpstreamRequired(ExtractError):
     """The current stage cannot repair an already reviewed root prerequisite."""
 
@@ -272,21 +268,40 @@ def index_prefix(plan: list) -> str:
     return "\n".join([*rows, "", "## 覆盖缺口", "", ""])
 
 
+def _index_prose(text: str) -> str:
+    """Do not count commented or fenced examples as coverage sections."""
+    text = re.sub(r"<!--.*?(?:-->|$)", "", text, flags=re.S)
+    lines, fence = [], ""
+    for line in text.splitlines():
+        marker = re.match(r" {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not marker[2].strip():
+                fence = ""
+        elif marker:
+            fence = marker[1]
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def validate_index(directory: Path, plan: list) -> None:
     text = regular_file(directory, "dispatch.md").read_text(encoding="utf-8")
-    prefix = index_prefix(plan)
-    if not text.startswith(prefix):
-        table = prefix.removesuffix("## 覆盖缺口\n\n")
-        if text.startswith(table):
-            raise IndexLayoutError("dispatch.md: '## 覆盖缺口' must immediately follow the canonical plan table, "
-                                   "with one blank line before and after the heading; move explanatory paragraphs below it")
-        position = next((i for i, (actual, expected) in enumerate(zip(text, prefix)) if actual != expected),
-                        min(len(text), len(prefix)))
-        line = prefix[:position].count("\n") + 1
-        column = position - prefix.rfind("\n", 0, position)
+    table = index_prefix(plan).removesuffix("## 覆盖缺口\n\n")
+    if not text.startswith(table):
+        position = next((i for i, (actual, expected) in enumerate(zip(text, table)) if actual != expected),
+                        min(len(text), len(table)))
+        line = table[:position].count("\n") + 1
+        column = position - table.rfind("\n", 0, position)
         raise ExtractError("dispatch.md tree, parents, workload, differences and selection must match the canonical "
                            f"approved plan table; first difference at line {line}, column {column}")
-    coverage = re.sub(r"<!--.*?-->", "", text[len(prefix):], flags=re.S).strip()
+    # The table carries plan identity; explanatory paragraph placement does not.
+    # Require the coverage section itself, rather than treating preceding prose
+    # or the next section as evidence that its body was completed.
+    body = _index_prose(text[len(table):])
+    sections = re.split(r"(?m)^## 覆盖缺口[ \t]*$", body)
+    if len(sections) != 2:
+        raise ExtractError("dispatch.md requires one '## 覆盖缺口' section after the plan table")
+    coverage = re.split(r"(?m)^#{1,2}(?:[ \t]|$)", sections[1], maxsplit=1)[0].strip()
     if not coverage:
         raise ExtractError("dispatch.md requires actual coverage gaps, or an explicit statement that none are known")
     links = {target.removeprefix("./").split("#", 1)[0]

@@ -1,0 +1,24 @@
+{
+  "id": "symbolic-member-bounds",
+  "category": "schema_template",
+  "problem": "role.info.member 的成员区间只接受数字端点，不能直接写已定义的 Nt/32 或 3+EPI。MoE 因此登记最大 warp 范围，再在 thesis 中说明部分成员未实例化、没有动作和事件；结构声明与真实参与集合需要两处共同解释。",
+  "evidence": [
+    "schema_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/ws_fused_ws.yaml:357：明确写最大成员范围，实际 gather 是 warp[0:Nt/32]、Epilogue 是 warp[3:3+EPI]，范围外成员未启动且没有事件。",
+    "同一 ws_fused_ws.yaml:503、592：两个 Epilogue 的结构字段均为 member: warp[3:11]。该可复查产物基线为 KernelSchema@6e4ca91bd91d998cac99e8dadd83838e153c679d。",
+    "schema_docs/5.design.tile_pipeline.md:53、186：member 给出实际执行角色的成员集合，不承担动作的 warp 不登记；成员使用半开区间。",
+    "2.2.5 及此前的 schema_template/tools/rules/structure.py::member、rules/pipeline.py::validate 和 pipeline/graph.py::members 分别通过数字正则和 int 转换读取成员区间。只放宽第一处正则不能完成支持。",
+    "KernelSchema@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/nvfp4_moe.cu:4208-4217、8117-8128：WS 模板有 EPI 参数，cfg69/70 的实际实例取 EPI=8。原 P5 worker 已以 symbolic-member-bounds 提报此根因，本次沿用原 ID。",
+    "原初验时（早于 2.2.6 成员支持）隔离复制 MoE 的 root.yaml 与 ws_fused_ws.yaml，运行 python3 -B schema_template/check_yaml.py --skip-hardware <副本>/root.yaml：原成员写法返回 0；只将首个 member: warp[3:11] 改成 member: warp[3:3+EPI] 返回 1（expected unit[index] or unit[start:end] member path）。这是当时成员语法的对照；原文件未改写。",
+    "2.2.6：schema_docs/5.design.tile_pipeline.md 的“成员与名称”明确已定义整数端点、执行前绑定、非负与非空约束；pipeline_syntax.py::parse_members 为字段、关联检查和有限图提供共用解析，图复用 Domains.integer 检查每段端点。",
+    "2.2.6：python3 -B -m unittest discover -s schema_template/tools/tests -t schema_template 的 152 项测试通过；新增 4 项覆盖实际参数化成员、已知越界、内层非整数/空/负区间与缺参数；限定修改文件的 git diff --check 通过。"
+  ],
+  "proposal": "沿用 unit[index]/unit[lower:upper]，允许已经定义且在该 worker 的 phase 执行前确定的整数表达式；共用成员路径解析，普通检查只核对记法和已知数值，有限展开复用现有整数求值。成员数量变化保留参数化设计；role 存在性、执行或事件关系改变时依既有 dispatch 划分。旧 MoE 另做独立产物修订，移除最大范围与正文删成员的绕行写法。",
+  "necessity": "实际 Agent 候选和 MoE 产物反例说明数字端点限制会诱发重复节点或虚构成员。共享表达式解析可补足能力而无需增加 YAML 字段、条件 role 或符号求解器；工具能力与旧产物修订分别验收。",
+  "decision": {
+    "outcome": "partially_adopted",
+    "version": "2.2.6",
+    "reason": "2.2.6 的规范、字段识别、关联检查与有限展开已统一支持参数化成员端点，152 项模板回归通过。历史 MoE 的最大范围及正文覆盖仍存在，不能以工具更新代替产物修复。",
+    "adopted": "已定义整数端点沿用既有成员路径；共享解析代替三处数字正则，保留非负、整数、非空和已知 worker 越界检查，缺参数不猜最大范围。参数全域约束及内层硬件容量继续由独立审阅核对。",
+    "remaining": "旧 MoE YAML 须在独立、经审阅的产物修订中改用真实成员范围并删除正文取消规则。本轮未重新提取、未改变历史发布或原批准。"
+  }
+}

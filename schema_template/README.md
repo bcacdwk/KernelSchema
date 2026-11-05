@@ -56,9 +56,17 @@ python3 schema_template/check_yaml.py path/to/task/root.yaml
 python3 schema_template/check_yaml.py --skip-hardware path/to/task/root.yaml
 ```
 
+对正式生成、已展开共享 Contract 的[单文件阅读视图](../schema_docs/0.common.md#单文件阅读视图)，显式使用下面的入口；此模式只读取该文件，保留元数据中的原节点身份，父节点只作出处记录。普通创作节点仍使用上面的全目录检查。
+
+```sh
+python3 schema_template/check_yaml.py --standalone --skip-hardware path/to/view/node.yaml
+```
+
+Python API 为 `schema.validate_standalone_file(...)`。文件必须自带完整 Contract 和 Design；该选项不会从目录或历史补齐缺项，硬件豁免仍须单独显式指定。
+
 该选项只影响内存中的检查视图，不改写文件，返回的任务仍保留原始硬件占位；YAML 文件本身仍须可解析，非硬件结构和关联照常检查。Python API 对应 `schema.validate_file(..., skip_hardware=True)` 或 `validate_directory(..., skip_hardware=True)`。当前仓库不启用目录硬件豁免，不传参数时执行完整检查。
 
-也可传入派生节点。检查范围始终是该文件所在目录直属的全部 `.yaml / .yml`，不递归子目录；因此错误可能来自其他节点，目录内的备份 YAML 也会被当作任务节点。输入路径相对当前目录解析，在其他目录调用时使用检查脚本的绝对路径。
+普通模式也可传入派生节点，检查范围是该文件所在目录直属的全部 `.yaml / .yml`，不递归子目录；因此错误可能来自其他节点，目录内的备份 YAML 也会被当作任务节点。显式 `--standalone` 模式只读指定视图。输入路径相对当前目录解析，在其他目录调用时使用检查脚本的绝对路径。
 
 缺少 PyYAML 时，检查器会给出一条安装命令；安装后重跑同一检查命令。检查本身不下载或安装依赖。
 
@@ -97,6 +105,8 @@ python3 schema_template/tools/pipeline_graph.py path/to/task/root.yaml --set N=4
 ## 校验边界
 
 当前关联检查包括节点与 phase 身份、显式 Contract 属性引用、launch/handoff 的 phase、事件及局部资源引用，以及动作族匹配。`realization.item`、数学区的其他语义绑定，以及公式、strategy 和动作契约中的引用仍需人工解析；改名后应沿这些位置核对。
+
+固定结构的未知字段会被拒绝，但 `thesis / describe / strategy / math` 等正文通常只检查其值为非空文本，不解释其中的条件，也不核对它是否与结构声明矛盾。例如，结构列出某个 launch，正文却说该提交或完成事件不存在，不能指望字段检查自动拦截；这种未经规范定义的解释仍须在语义审阅中指出并修正，检查通过不授予用正文改写结构的权限。
 
 通过 `check_yaml.py` 表示结构及已实现的关联检查通过，不证明数学等价、表达式正确、数值正确、资源可行、存储复用安全、活性或性能。该入口不展开完整动作实例，动作引用通过也不证明每个索引处的动作存在；有限展开使用上面的[微流水线图工具](#微流水线图)。任务索引、dispatch 条件的互斥与覆盖、外部资料、修改权限、修订历史和实验依据仍需审阅；实际实现是否满足数值、执行约束及性能目标，需要相应运行证据。
 

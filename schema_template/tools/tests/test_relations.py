@@ -86,6 +86,16 @@ class RelationsTests(TaskCase):
             self.assert_invalid(lambda d: setup(d, count, 1), "role Main has no member 1")
         self.assert_valid(lambda d: setup(d, 2, 0))
 
+    def test_symbolic_member_bounds_keep_known_worker_limits(self):
+        for value in ("CTA[2:End].warp[0:4]", "CTA[Start:3].warp[0:4]"):
+            with self.subTest(value=value):
+                self.assert_invalid(lambda d: (
+                    put(d, PHASE + ("mapping", "worker", "unit_count"), 2),
+                    put(d, ROLE + ("info", "member"), value)), "member index exceeds")
+        # Unknown endpoints remain an explicit review/finite-expansion obligation.
+        self.assert_valid(lambda d: put(d, ROLE + ("info", "member"), "CTA[Start:End].warp[0:Nt/32]"))
+        self.assert_invalid(lambda d: put(d, ROLE + ("info", "member"), "CTA[Start:End].warp[3:3]"), "nonempty")
+
     def test_obvious_self_waits_and_valid_same_action_references(self):
         for target, source in (("produce:Y", "produce:Y"), ("produce:Y@issue", "Main/produce:Y@issue"),
                                ("produce:Y@done", "produce:Y@done")):

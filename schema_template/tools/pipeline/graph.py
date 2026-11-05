@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
-from ..pipeline_syntax import IndexScope, ScopedPipe, domain_choices, parse_action, parse_event, same_domain
+from ..pipeline_syntax import IndexScope, ScopedPipe, domain_choices, parse_action, parse_event, parse_members, same_domain
 from ..rules.common import EXECUTION_MODES
 from .actions import action_variables, instantiate, operands
 from .expressions import Boundary, Domains, LIMIT, referenced_domains, tree
@@ -22,15 +22,20 @@ def members(info: dict, worker: dict, domains: Domains) -> tuple[int, ...]:
         raise GraphError("worker member count must be positive")
     if count > 64:
         raise ExpansionError(f"worker member count {count} exceeds the graph tool limit (64)")
-    match = re.match(r"([^\[\]]+)\[(\d+)(?::(\d+))?\]", info["member"])
-    if not match:
+    pieces = parse_members(info["member"])
+    if pieces is None:
         raise GraphError(f"invalid member path: {info['member']}")
-    if match[1] != worker["unit"]:
-        return tuple(range(count))
-    lo, hi = int(match[2]), int(match[3]) if match[3] else int(match[2]) + 1
-    if not 0 <= lo < hi <= count:
-        raise GraphError(f"role member selection exceeds worker count: {info['member']}")
-    return tuple(range(lo, hi))
+    selected = tuple(range(count))
+    for index, (unit, lower, upper) in enumerate(pieces):
+        lo = domains.integer(lower, {})
+        hi = domains.integer(upper, {}) if upper is not None else lo + 1
+        if not 0 <= lo < hi:
+            raise GraphError(f"role member interval must be nonnegative and nonempty: {info['member']}")
+        if index == 0 and unit == worker["unit"]:
+            if hi > count:
+                raise GraphError(f"role member selection exceeds worker count: {info['member']}")
+            selected = tuple(range(lo, hi))
+    return selected
 
 
 class Builder:

@@ -15,6 +15,7 @@ from schema_extract.tools.audit import _receipt_response
 from schema_extract.tools.common import ExtractError, manifest
 from schema_extract.tools.reading import read_evidence, read_range
 from schema_extract.tools.receipts import ReceiptFormatError, normalize_response, validate_receipt
+from schema_extract.tools.stages import DOCUMENT_CONCLUSIONS
 
 
 class ProposalTests(unittest.TestCase):
@@ -47,6 +48,9 @@ class ProposalTests(unittest.TestCase):
                                          for subject in ("root_choice", "paths", "coverage")],
                          "checks": [], "checks_note": "P2 uses its stage gate.", "issues": [],
                          "framework_candidates": [], "handoff": "Follow route for the root design.", "reopen": None}
+        self.proposal["conclusions"].extend(
+            {"subject": subject, "text": "The current document meets this criterion.", "evidence": []}
+            for subject in DOCUMENT_CONCLUSIONS)
 
     def normalize(self, proposal=None):
         return normalize_response(self.proposal if proposal is None else proposal,
@@ -72,13 +76,14 @@ class ProposalTests(unittest.TestCase):
         state.update(accepted_receipts={}, active_attempts={"P4": self.attempt["attempt_id"]})
         return validate_receipt(receipt, state, self.lock, self.attempt, self.artifacts, ["dispatch.md"])
 
-    def test_p4_heading_layout_can_use_existing_receipt_repair(self):
+    def test_p4_explanation_before_coverage_passes_without_receipt_repair(self):
         prefix = index_prefix(self.p4_plan())
-        misplaced = prefix.replace("## 覆盖缺口", "Parent links describe copying.\n\n## 覆盖缺口")
-        with self.assertRaisesRegex(ReceiptFormatError, "must immediately follow"):
-            self.validate_p4(misplaced + "No known gaps.\n")
-        receipt = self.validate_p4(prefix + "Parent links describe copying.\n\nNo known gaps.\n")
-        self.assertEqual(receipt["decision"], "complete")
+        for index in (prefix, prefix.replace("## 覆盖缺口", "Parent links describe copying.\n\n## 覆盖缺口"),
+                      prefix.replace("## 覆盖缺口", "\n\nParent links describe copying.\n\n\n## 覆盖缺口"),
+                      prefix.replace("## 覆盖缺口", "~~~markdown\n## 覆盖缺口\n~~~\n\n## 覆盖缺口")):
+            with self.subTest(index=index):
+                receipt = self.validate_p4(index + "No known gaps.\n")
+                self.assertEqual(receipt["decision"], "complete")
 
     def test_p4_table_changes_remain_hard_errors_with_a_location(self):
         prefix = index_prefix(self.p4_plan())
@@ -88,7 +93,7 @@ class ProposalTests(unittest.TestCase):
         self.assertNotIsInstance(caught.exception, ReceiptFormatError)
         self.assertIn("first difference at line 5, column", str(caught.exception))
 
-    def test_p4_layout_repair_does_not_relax_gaps_links_or_parents(self):
+    def test_p4_layout_tolerance_does_not_relax_gaps_links_or_parents(self):
         plan = self.p4_plan()
         prefix = index_prefix(plan)
         for body, message in (("<!-- not a coverage statement -->", "requires actual coverage gaps"),
@@ -102,6 +107,20 @@ class ProposalTests(unittest.TestCase):
             self.validate_p4(index_prefix(plan) + "No known gaps.\n")
         self.assertNotIsInstance(caught.exception, ReceiptFormatError)
         self.assertIn("parent does not exist", str(caught.exception))
+
+    def test_p4_coverage_needs_its_own_unique_section(self):
+        prefix = index_prefix(self.p4_plan())
+        table = prefix.removesuffix("## 覆盖缺口\n\n")
+        for text, message in (
+                (table + "No known gaps.\n", "requires one '## 覆盖缺口' section"),
+                (table + "<!--\n## 覆盖缺口\n-->\nNo known gaps.\n", "requires one '## 覆盖缺口' section"),
+                (table + "```markdown\n## 覆盖缺口\nNo known gaps.\n```\n", "requires one '## 覆盖缺口' section"),
+                (table + "No known gaps.\n\n## 覆盖缺口\n\n<!-- incomplete -->\n", "requires actual coverage gaps"),
+                (prefix + "```\nNo known gaps.\n```\n", "requires actual coverage gaps"),
+                (prefix + "## Other notes\n\nNo known gaps.\n", "requires actual coverage gaps"),
+                (prefix + "No known gaps.\n\n## 覆盖缺口\n\nConflicting coverage.\n", "requires one '## 覆盖缺口' section")):
+            with self.subTest(text=text), self.assertRaisesRegex(ExtractError, message):
+                self.validate_p4(text)
 
     def p6_plan(self):
         # This fixture exercises receipt and topology gates; the Runner also
@@ -120,6 +139,9 @@ class ProposalTests(unittest.TestCase):
         self.proposal["artifact_evidence"].append(
             {"path": "branch.yaml", "line_start": 1, "line_end": 1, "quote_offset": 0,
              "note": "Checked this node in the final tree."})
+        self.proposal["conclusions"].extend(
+            {"subject": subject, "text": "Reviewed this criterion across both current nodes.", "evidence": []}
+            for subject in DOCUMENT_CONCLUSIONS)
         state = {key: self.attempt[key] for key in ("run_id", "input_fingerprint")}
         state.update(accepted_receipts={}, active_attempts={"P6": self.attempt["attempt_id"]}, plan=plan,
                      pending_rechecks=["root", "branch"], revision_scope=[])
@@ -131,11 +153,37 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual(validate_receipt(receipt, state, self.lock, self.attempt, self.artifacts, []), receipt)
         self.assertEqual(receipt["conclusions"][0]["evidence"], [])
 
+    def test_p6_requires_each_document_judgment_and_current_file_coverage(self):
+        state = self.p6_plan()
+        original = deepcopy(self.proposal)
+        for subject in DOCUMENT_CONCLUSIONS:
+            with self.subTest(subject=subject):
+                self.proposal = deepcopy(original)
+                self.proposal["conclusions"] = [
+                    item for item in self.proposal["conclusions"] if item["subject"] != subject]
+                with self.assertRaisesRegex(ExtractError, "missing supported stage conclusions"):
+                    validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
+        self.proposal = deepcopy(original)
+        self.proposal["artifact_evidence"] = [
+            item for item in self.proposal["artifact_evidence"] if item["path"] != "branch.yaml"]
+        with self.assertRaises(ExtractError):
+            validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
+
+    def test_p2_cumulative_review_is_required_before_design_is_complete(self):
+        state = {"run_id": self.attempt["run_id"], "input_fingerprint": self.attempt["input_fingerprint"],
+                 "accepted_receipts": {}, "active_attempts": {"P2": self.attempt["attempt_id"]}}
+        self.assertEqual(validate_receipt(self.normalize(), state, self.lock, self.attempt,
+                                         self.artifacts, [])["decision"], "approve")
+        self.proposal["conclusions"] = [
+            item for item in self.proposal["conclusions"] if item["subject"] not in DOCUMENT_CONCLUSIONS]
+        with self.assertRaisesRegex(ExtractError, "document_self_contained"):
+            validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
+
     def test_p6_artifact_tree_still_requires_every_file_and_source_conclusion(self):
         state = self.p6_plan()
         original = deepcopy(self.proposal)
         self.proposal["artifact_evidence"].pop()
-        with self.assertRaisesRegex(ExtractError, "missing supported stage conclusions: tree"):
+        with self.assertRaisesRegex(ExtractError, "missing supported stage conclusions: .*tree"):
             validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
         self.proposal = original
         self.proposal["conclusions"][1]["evidence"] = []

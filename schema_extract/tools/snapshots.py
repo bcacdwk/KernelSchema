@@ -24,7 +24,8 @@ def executor_files(repo: Path) -> set[Path]:
 def rule_files(repo: Path) -> list[str]:
     paths = {repo / "README.md", repo / "EXTRACT_SCHEMA.md", repo / "schema_template/README.md",
              repo / "schema_template/starter.yaml", repo / "schema_template/check_yaml.py",
-             repo / "schema_extract/README.md", repo / "schema_extract/tools/README.md", repo / "schema_extract/issues/README.md"}
+             repo / "schema_extract/README.md", repo / "schema_extract/REVIEW.md",
+             repo / "schema_extract/tools/README.md", repo / "schema_extract/issues/README.md"}
     paths.update((repo / "schema_docs").glob("*.md"))
     paths.update(repo / "schema_extract/phases" / stage["page"] for stage in STAGES.values())
     paths.update(executor_files(repo))

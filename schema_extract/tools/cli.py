@@ -145,6 +145,11 @@ def parser() -> argparse.ArgumentParser:
     continued.add_argument("--repo", type=Path, default=Path.cwd())
     continued.add_argument("--state-root", type=Path)
     _budget_options(continued)
+    standalone = sub.add_parser("standalone", help="materialize one node with its shared Contract as an independent reading view")
+    standalone.add_argument("source", type=Path)
+    standalone.add_argument("--output", type=Path, required=True)
+    standalone.add_argument("--repo", type=Path, default=Path.cwd())
+    standalone.add_argument("--state-root", type=Path)
     audit = sub.add_parser("audit", help="read recorded usage/session evidence; explicitly verify or archive selected evidence")
     audit.add_argument("run_id")
     selection = audit.add_mutually_exclusive_group()
@@ -304,6 +309,10 @@ def main(argv=None) -> int:
     try:
         args.repo = args.repo.resolve()
         state_root = (args.state_root or args.repo / ".schema_extract/v2").resolve()
+        if args.command == "standalone":
+            from .standalone import create_view
+            print(json.dumps(create_view(args.source, args.output, args.repo), ensure_ascii=False, indent=2))
+            return 0
         if args.command == "audit":
             from .audit import _parent_fd, audit_run, format_audit
             with _parent_fd((args.state_root or args.repo / ".schema_extract/v2").absolute() / "state-root-check"):

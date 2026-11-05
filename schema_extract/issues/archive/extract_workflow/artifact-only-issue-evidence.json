@@ -1,0 +1,18 @@
+{
+  "id": "artifact-only-issue-evidence",
+  "category": "extract_workflow",
+  "problem": "退修或阻塞的问题可能仅陈述当前产物的提交格式、规范表达事实，但 2.2.8/2.2.9 的回执门禁一律要求 issues.evidence 含源码索引。已精确引用当前产物的有效问题因此被拒绝，或诱使 reviewer 添加与问题无关的源码引文。",
+  "evidence": [
+    "schema_extract/tools/receipts.py::receipt_schema 将 issues.evidence 定义为 source_evidence 的索引，同时已有独立的 artifact_evidence；normalize_response 和 _anchor 已验证后者的当前文件身份、范围及精确引文。",
+    "2.2.10 修订前的 receipts.py::validate_receipt 对 revise/blocked/reopen 统一要求至少一条 issue.evidence 非空，没有当前产物证据的分支；reviewer 另须提供真实 source_evidence 并引用本阶段全部必需产物。",
+    "MoE 两份真实 P4 reviewer 提案分别以 submission_format 描述空 proposal.plan 与 dispatch.md 非空节点表的提交缺项，scope 明确指向 dispatch.md，artifact_evidence 覆盖该表和 root.yaml，issues.evidence=[]；两次均被同一 evidence 门禁拒绝。这一事实不依赖判断其中的覆盖或源实现缺陷意见是否正确。",
+    "schema_extract/tools/tests/test_issue_evidence.py 用合法的当前文件与来源锚点复现该 P4 拒绝，并区分完整文件名、误匹配路径、缺失锚点、源码类问题、混合 issues、恢复条件和批准/重开门禁。"
+  ],
+  "proposal": "沿用现有回执字段，仅让 revise/blocked 中 submission_format、schema_conformance 的问题使用与 scope 完整相对文件名绑定的有效 artifact_evidence，issues.evidence 可为空。源码类问题不获得此例外，所有提供的源码索引继续校验；保留至少一条完整有据问题的原规则，以及 reviewer 的全部文件和真实源码要求。complete/approve、P4 计划校验和 reopen 的既有源码与单次重开规则不变。版本为 2.2.10，须经 Supervisor 验收并正式接续后用于新运行。",
+  "necessity": "有当前产物证据的文档类意见已连续被拒绝，重复消耗调用却没有推进实际 P4 审阅。应让证据指向其能证明的事实，同时继续拒绝无依据的源码意见；这项协议修复不批准 MoE 的语义结论，也不解决其尚未收口的失败接续设计。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.2.10",
+    "reason": "Supervisor 已验收限定的当前产物证据分支：仅 revise/blocked 的 submission_format、schema_conformance 可使用与 scope 完整相对文件名绑定且已验证的 artifact_evidence；保留原至少一条有据问题规则。源码索引、全部文件审阅、approve/P4 计划及 reopen 门禁保持。最终 39 项相关回归、62 项完整提取回归通过；两份真实拒绝提案只读重放及 Supervisor 的错误路径/源码类负例通过，原状态及输入字节未改变。本决定仅解决证据门禁，不批准 MoE 的语义意见、P4 计划或失败接续设计；采用须正式 continue 并独立重审。"
+  }
+}

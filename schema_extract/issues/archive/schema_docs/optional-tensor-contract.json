@@ -1,0 +1,23 @@
+{
+  "id": "optional-tensor-contract",
+  "category": "schema_docs",
+  "problem": "共享 Contract 中的一个外部对象实际可为数值张量或 Python None。2.2.6 只定义数值 dtype、非数值标量和只含 None 的 python_none，未说明对象缺席时 shape/dtype/range 的适用边界；default 仅授权省略参数，不能取消这些约束。旧稿以 dtype: fp32 or python_none 或正文声明属性仅在 present 时成立，缺少规范依据。dispatch 节点共用 root Contract，不能靠拆 Design 解决同一接口的对象类型问题。",
+  "evidence": [
+    "修订前规范可从 KernelSchema@6e4ca91bd91d998cac99e8dadd83838e153c679d:schema_docs/1.contract.algorithm_requirement.md 复查：dtype 允许数值格式或有定义的非数值标量，range/shape/dtype/compute 同时成立；python_none 只含 Python None，要求 shape: []，不表示张量或零值。冻结 2.2.6 沿用这些规则。",
+    "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/reference.py:35-42：cu_seqlens=None 选择单请求，core_attn_out 非 None 才写前缀，返回 final 或 None。problem/input.py:242-246 实际构造 core_buffer 与 output_only 分支；这不是仅由可选签名推测的接口。cu_seqlens、chunk_indices、chunk_offsets、core_attn_out、FinalState、CoreWritten 的最小字段片段收录于 schema_template/tools/tests/fixtures/nullable_io.yaml。",
+    "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/problem/input.py:177-179 按 return_lse 提供 FP32[B,H,Sq] 或 None；problem/reference.py:100-103,120-127 只写存在的 lse_tensor，调用本身返回 None。schema_template/tools/tests/fixtures/nullable_io.yaml 保留张量目标及 python_none 单值返回的区别。",
+    "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/problem/reference.py:20,48-50,73-82 定义 sinks 为 None 或 FP32[H]；存在时加入零 value 的额外 logit，因此数值零张量也不同于 None。candidate/solution.py:173-176,236 把缺席转为内部空张量，不改变外部接口，不能用 shape: [head: 0] 替代。以上源码均可在 KernelSchema@6e4ca91bd91d998cac99e8dadd83838e153c679d 复查。",
+    "提报来源：GDN 的旧 P1 worker 提出了 optional-tensor-contract，但该提案因另有越权删除 dispatch 的改动被拒，未获 Reviewer 批准，不作为已接受回执或算子批准证据。Sparse 独立 P1 Reviewer 已被正式接收的 revise 回执另提 optional-tensor-none-default；两者同根因，合并至当前 ID。上述规范与源码反例可独立复查，不依赖旧 worker 提案被接受。",
+    "2.2.7 当前改动：schema_docs/1.contract.algorithm_requirement.md 的 nullable 与 None 节给出正式语义，schema_extract/phases/01_contract.md 引用它；rules/structure.py 只校验 I/O nullable 的布尔类型，rules/symbols.py 复用 Contract 关联检查拒绝 python_none 加非空 shape。分支条件、默认值表达式和来源有效域仍由 Reviewer 核实。",
+    "schema_template/tools/tests/test_nullable.py 与 schema_extract/tools/tests/test_source_gaps.py 覆盖 tensor/None 字段、required 但 nullable 与 default 的独立性、布尔类型误用、数值零/空张量/YAML null 的区别，以及 GDN/FMHA/Sparse I/O 片段通过当前 Contract/P1 门禁。片段故意省略其他计算，只是结构与门禁回归，不代表三个算子已重新提取、通过 Reviewer 或获得数值保证。",
+    "2.2.7 修改后使用 /opt/venv/python3.13.12/bin/python3 -B 运行 unittest discover：schema_template/tools/tests（-t schema_template）157 项通过，schema_extract/tools/tests 49 项通过。2.2.6 的 152/47 项是修改前基线；未运行 GPU、外部模型评估或算子重提取。",
+    "GDN 证据范围澄清：nullable_io.yaml 中 cu_seqlens/chunk_indices/chunk_offsets 的 metadata-None 片段是 reference API 的表达示例，不代表本次实际任务域。冻结 2.2.7 的独立 P1 reviewer d9dcd45f-eaf0-4033-8dd6-c640f8321459 在 .schema_extract/v2/runs/45f9bb51-77f3-4285-b7a7-251cf2744fa1/attempts/d9dcd45f-eaf0-4033-8dd6-c640f8321459/receipt.json 的 source_evidence[3] 依据 problem/input.py:243 明确元数据必有、norm=false；实际 nullable 仅 core_attn_out、FinalState、CoreWritten。本条仅澄清证据，不改 fixture、原 2.2.7 规范决定或原测试记录；GDN 后续六节点交付另见 schema_extract/TRIAL_REPORT.md。"
+  ],
+  "proposal": "在 Contract input/output 条目增加可选布尔 nullable。省略或 false 不在既有 dtype 的值之外增加 None；true 允许整个对象为 None，shape/dtype/range 完整描述非 None 对象，compute 明确含义、条件、各分支的计算和副作用，输出比较先核对对象是否缺席。default 仍只控制调用者能否省略输入；None 默认使用已定义的表达式字符串，不改用 YAML null。保留 python_none 的单值标量语义，不增加泛型 union、类型解释器或自然语言过滤。旧冻结规则、旧产物与算子审批不随框架修复改写。",
+  "necessity": "GDN 的可达返回与缓冲分支、FMHA 的生成调用和 Sparse 的源代码提供了真正的共享规范反例。一个正交布尔字段即可区分 payload 与对象缺席，避免把 None 伪装成 dtype、全零或空张量，也不以缩小外部接口迁就实现覆盖。框架能力、历史产物修订和各算子独立审阅必须分别验收。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.2.7",
+    "reason": "Supervisor 已依据代码、正式规范与 157 项模板/49 项提取回归证据验收。2.2.7 解决共享 Contract I/O 的张量或 None 表达及字段/结构检查能力，明确 default、nullable、非 None 属性与 python_none 单值类型的边界；Sparse 的 optional-tensor-none-default 同根候选并入本项。此决定不表示旧 GDN、FMHA、Sparse 已重提取或获得新批准；历史产物仍须在正式接续的新冻结规则下独立修订与审阅，符号条件及来源有效域继续由 Reviewer 核实。"
+  }
+}

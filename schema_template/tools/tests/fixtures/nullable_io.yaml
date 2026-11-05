@@ -1,0 +1,100 @@
+# I/O excerpts for field/Contract-gate tests, not complete operator Contracts.
+# Unrelated operands and payload calculations are intentionally omitted.
+# Paths below are relative to kernel_wiki/aka-cuda-operators-20261030/operators/.
+gdn:
+  # linear_attention/gdn_prefill_bf16_state_bf16/problem/reference.py:35-42
+  # Its input.py:242-246 exercises a core buffer and an output_only return.
+  input:
+    output_final_state: {meaning: Request the outgoing state., shape: [], dtype: bool}
+    cu_seqlens:
+      meaning: Packed request boundaries.
+      shape: [boundary: "N+1"]
+      dtype: int32
+      nullable: true
+      default: "None"
+    chunk_indices:
+      meaning: Request and local chunk indices.
+      shape: [chunk: C, coordinate: 2]
+      dtype: int32
+      nullable: true
+      default: "None"
+    chunk_offsets:
+      meaning: Prefix chunk counts by request.
+      shape: [boundary: "N+1"]
+      dtype: int32
+      nullable: true
+      default: "None"
+    core_attn_out:
+      meaning: Caller buffer with an observable active prefix.
+      shape: [element: CoreElements]
+      dtype: bf16
+      nullable: true
+      default: "None"
+  output:
+    FinalState:
+      meaning: Outgoing state at tuple position 1.
+      shape: [request: N, value_head: HV, value: 128, key: 128]
+      dtype: fp32
+      nullable: true
+    CoreWritten:
+      meaning: In-place active prefix of core_attn_out; not a tuple element.
+      shape: [element: "T*HV*128"]
+      dtype: bf16
+      nullable: true
+  compute:
+    - name: Optional interfaces
+      math: |
+        None denotes Python None. If cu_seqlens is None, N=1 and the single
+        request spans all T tokens; otherwise use the supplied packed boundaries.
+        The reference ignores chunk_indices and chunk_offsets, whether None or
+        supplied; these inputs do not change the recurrence.
+        If output_final_state is true, FinalState is the final FP32 recurrence
+        state; otherwise FinalState=None. If core_attn_out is None,
+        CoreWritten=None and no caller buffer is written. Otherwise CoreWritten
+        is the flattened attention output written into its active prefix;
+        the inactive suffix is unchanged.
+fmha:
+  # fmha/fmha_mxfp8_qkv/problem/input.py:177-179: return_lse selects tensor/None.
+  # Its reference.py:100-103,120-127 writes present LSE and returns None.
+  input:
+    lse_tensor:
+      meaning: Caller-owned LSE destination.
+      shape: [batch: B, head: H, query: Sq]
+      dtype: fp32
+      nullable: true
+      range: Any initial bit pattern; all logical elements are overwritten.
+      default: "None"
+  output:
+    LSE:
+      meaning: In-place natural-log softmax normalizers in lse_tensor.
+      shape: [batch: B, head: H, query: Sq]
+      dtype: fp32
+      nullable: true
+    Return: {meaning: Python None returned by the callable., shape: [], dtype: python_none}
+  compute:
+    - name: Optional LSE writeback
+      math: |
+        None denotes Python None. If lse_tensor is None, LSE=None and there is
+        no LSE writeback. Otherwise LSE contains the natural-log softmax
+        normalizers written into every logical element of lse_tensor.
+        Return=None in both cases.
+sparse:
+  # sparse_attention/dual_cache_latent_bf16/problem/reference.py:20,48-50,73-82.
+  # candidate/solution.py:173-176,236 converts absence to an internal empty tensor.
+  input:
+    sinks:
+      meaning: Per-head extra softmax logit with zero value.
+      shape: [head: H]
+      dtype: fp32
+      nullable: true
+      default: "None"
+  output:
+    Out: {meaning: Sparse-attention output., shape: [token: T, head: H, latent: 512], dtype: bf16}
+  compute:
+    - name: Optional sink
+      math: |
+        None denotes Python None. If sinks is None, add no sink logit.
+        Otherwise include sinks[h] as an extra softmax logit with zero value
+        for every query at head h. A zero-valued sink tensor therefore still
+        adds a logit and differs from None. An internal empty-tensor sentinel
+        does not change the caller-visible value or shape of sinks.

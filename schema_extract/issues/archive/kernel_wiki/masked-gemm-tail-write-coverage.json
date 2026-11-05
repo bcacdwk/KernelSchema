@@ -4,12 +4,14 @@
   "problem": "BF16 masked GEMM 的目录容易让读者把合同中的尾行保护当作候选实现的行为。",
   "evidence": [
     "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/problem/metadata.json:17–22 要求非活动行及其余 backing storage 保持原值。",
-    "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/candidate/solution.py:208–215、647–652、1572–1578 按块写回。"
+    "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/candidate/solution.py:208–215、647–652、1572–1578 按块写回。",
+    "历史版本依据：5fb0fde 同步校订 kernel_wiki/catalog.json、kernel_wiki/tools/catalog.py 与 kernel_wiki/GUIDE.md 的合同保护区及候选尾块写区，并归档本项已采纳部分；当时 Schema Extract 没有产品版本号，以该实际修复提交的完整 Git SHA 定位。"
   ],
   "proposal": "注明合同与候选的实际写区。若需实现完全符合合同，应修正尾块写回。",
   "necessity": "依赖非活动行保留原值的调用方会受到影响。",
   "decision": {
     "outcome": "partially_adopted",
+    "version": "git:5fb0fde8d287a546430ef49aa7fbc732850ad603",
     "reason": "Contract 的保护区域与候选实际写区分别保留，不把数值比较的有效前缀当成写掩码。",
     "adopted": "区分数值比较的有效前缀、合同保护的其余行和候选可能修改的尾行。",
     "remaining": "候选尾块写回的修正属于上游算子改动，提取保留该实现差异。"

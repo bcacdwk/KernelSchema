@@ -209,6 +209,11 @@ def resolve_request(repo: Path, *, operator_id: str | None = None,
         normalized["directory"] = spec["directory"]
         names = tree.files(spec["directory"])
         names += [catalog_path]
+        if "annotated_entrypoint" in entries[0]["paths"]:
+            # Catalog annotations are reading aids, not replacement role bindings.
+            annotation = _locator({"path": entries[0]["paths"]["annotated_entrypoint"]},
+                                  "annotated_entrypoint", "kernel_wiki", tree)
+            names.append(annotation["path"])
         # Batch-wide conventions are part of the task evidence when present.
         batch = Path(spec["directory"]).parts[:2]
         for directory in ("kernel_wiki", "/".join(batch)):

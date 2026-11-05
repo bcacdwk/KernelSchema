@@ -65,6 +65,23 @@ class StructureTests(TaskCase):
             with self.subTest(path=path):
                 self.assert_invalid(lambda d: put(d, path, value), "literal")
 
+    def test_member_endpoints_share_open_integer_expression_notation(self):
+        def selected(data, value):
+            put(data, MATH + ("rewrite", 0, "symbol"), {
+                "EPI": {"meaning": "Epilogue warp count.", "value": 4},
+                "Nt": {"meaning": "CTA thread count, divisible by 32.", "value": 128}})
+            put(data, ROLE + ("info", "member"), value)
+        for value in ("warp[3:3+EPI]", "warp[0:Nt/32]", "CTA[0].warp[0:ceil_div(Nt,32)]"):
+            with self.subTest(value=value):
+                self.assert_valid(lambda d: selected(d, value))
+        for value in ("warp[]", "warp[:4]", "warp[0:]", "warp[0:1:4]", "warp[0:4].",
+                      "warp[0:4]extra", "warp[0:ceil_div(Nt,32)]oops]", "warp[0:(Nt/32]]"):
+            with self.subTest(value=value):
+                self.assert_invalid(lambda d: selected(d, value), "member path")
+        for value in ("warp[-1:4]", "CTA[-1].warp[0:4]", "warp[0:-1]"):
+            with self.subTest(value=value):
+                self.assert_invalid(lambda d: selected(d, value), "literal must be >= 0")
+
     def test_closed_structures_required_fields_and_types(self):
         cases = [
             (("root", "extra"), 1), (("root", "meta_data", "version"), 0),

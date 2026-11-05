@@ -48,6 +48,8 @@ tools/
 
 输入文件名决定节点 ID，所在目录决定任务范围；文件符号链接不使检查切换到目标文件的任务目录。无论传入 root 还是派生节点，都会检查同目录直属的全部 `.yaml / .yml`。共享 Contract 只用于解析引用，不写进派生节点，也不继承父节点 Design。
 
+上述为普通创作模式。显式 `--standalone` 调用 `schema.validate_standalone_file`，只读取一个正式生成的阅读视图：文件自带 Contract，原 `dispatch.id/parent` 保留为身份与出处，不作为外部依赖读取。字段结构先照常验证，再在检查副本中使用本地根身份解析关系；原始数据和文件不改写。生成规则见[单文件阅读视图](../../schema_docs/0.common.md#单文件阅读视图)。
+
 ## 回归与修改
 
 需要 Python 3.10+ 和 PyYAML；生成 PNG 另需 Graphviz 的 `dot`。在所用 Python 环境中安装解析依赖，从仓库根目录运行：
@@ -81,6 +83,8 @@ python3 -B -m unittest discover -s schema_template/tools/tests -t schema_templat
 
 dtype、外部入口名称和数学表达式保持开放；日常入口 `check_yaml.py` 不编译或执行表达式，不限定函数白名单。能直接识别的整数（包括带引号的整数字面量）接受相同的数值关系检查，简单索引检查已声明变量的作用域；其他数学写法交给审阅。自然语言不按固定句式判定，`repeat` 不强制创建 `steady`，但 role 必须有实际动作。
 
+Contract 输入输出按[nullable 与 None](../../schema_docs/1.contract.algorithm_requirement.md#nullable-与-none)描述对象缺席。检查器要求 `nullable` 为布尔值，并拒绝已知单值 `python_none` 搭配非标量 shape；不会从 dtype、range 或正文猜测 None 分支，也不解释默认值或符号条件。
+
 解析只接受普通 YAML 数据，不执行自定义标签；拒绝重复显式键和递归 alias。anchor、alias 和本地 merge 仅复用字段值。`on / off / yes` 和日期保持字符串；小数直接从原文构造 Decimal，不经过 binary64。
 
 错误报告文件、字段路径和真实源位置，列表下标从 0 开始；alias 子字段可能定位到锚点定义。缺失字段只报告文件和字段，不编造行号。退出状态为 `0` 通过、`1` 输入存在问题、`2` 参数或工具环境使检查未完成。检查不下载依赖，不修改文件内容、权限或修改时间。
@@ -95,11 +99,13 @@ dtype、外部入口名称和数学表达式保持开放；日常入口 `check_y
 
 ## 微流水线图的维护边界
 
-用法见[微流水线图](../README.md#微流水线图)。`pipeline_graph.py` 复用 `schema.py`。规则与图工具共用 `pipeline_syntax` 的动作记法和词法域声明；`actions` 实例化动作，`expressions` 求有限整数与域，`coordinates` 恢复目标坐标，`windows` 判断声明窗口，`graph/model` 绑定事件并构建依赖，`render` 把内存中的 DOT 交给 Graphviz 生成 PNG，`output` 管理图片来源与原子写入。规模只由命令行显式给出；[示例总览](../examples/README.md#生成-png)保存复现命令，生成器不读取它，也不按算子名称分支。
+用法见[微流水线图](../README.md#微流水线图)。`pipeline_graph.py` 复用 `schema.py`。规则与图工具共用 `pipeline_syntax` 的成员路径、动作记法和词法域声明；`actions` 实例化动作，`expressions` 求有限整数与域，`coordinates` 恢复目标坐标，`windows` 判断声明窗口，`graph/model` 绑定事件并构建依赖，`render` 把内存中的 DOT 交给 Graphviz 生成 PNG，`output` 管理图片来源与原子写入。规模只由命令行显式给出；[示例总览](../examples/README.md#生成-png)保存复现命令，生成器不读取它，也不按算子名称分支。
 
 默认运行只写 YAML 同目录的同名 PNG。图片内保存来源文件名、内容指纹、展示取值和检查状态；指纹来自实际解析的字节，不记录本机绝对路径，也不把旧图片当作输入配置。生成前确认同名图片归属，并使旧图失效；无法确认归属的同名 PNG 会保留并报告冲突。`--all` 同时清理已确认由工具生成、但 YAML 已删除的孤立图片。图片完整生成后原子替换目标文件，失败不留下旧成功图或半张图；校验后或渲染期间源文件改变时，停止发布该图并提示重新运行。`--check-only` 完全只读，不需要 Graphviz，不清理或写入图片。两条路径共用相同的展开和依赖检查。
 
 能直接确定的错误由日常检查器尽早报告，例如引用未实例化的 role 成员、同一成员上的事件等待自身或自身稍后的完成。索引展开后才能判断的重复动作、悬空引用和环由图工具检查。跨成员依赖、`done` 等待自身的 `issue` 等合理写法应当保留。
+
+成员端点的表达式复用现有整数求值，缺少参数时报告无法展开；每一段选择都检查非负、整数和非空，即使图以整个 worker 成员聚合内部 warp。首段明确选择 worker 成员时还检查 `worker.unit_count`，内层硬件容量及跨参数取值的正确性仍需设计审阅，不从数量上界猜出实际成员。
 
 `GraphError` 表示具体展开存在问题；`ExpansionError` 表示样例取值不足或工具不能完成展开，不能把绘图器支持的表达式子集变成新的 schema 语法限制。修改这些行为时，在 `test_pipeline_graph.py` 中同时保留错误用例、合理边界和只读性回归。
 

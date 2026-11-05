@@ -1,0 +1,19 @@
+{
+  "id": "capture-invocation-boundary",
+  "category": "schema_docs",
+  "problem": "2.2.7 已定义一次提交的 phase 身份与 kernel_done，却未直接说明静态 plan 绑定哪一次算子请求的实际执行。纯 record/instantiate 不执行所记录的 kernel，内层录图后又可立即 replay；把录制和执行合计会虚增计算，假定外层必定 replay 会补造保证，将失败前实际提交另算逻辑调用则会抹去同一请求的重复工作和副作用。",
+  "evidence": [
+    "正式候选来自 MoE run 53d4bebe-882d-4a66-98b1-287d132dd6f3 的 P4 worker blocked 回执，attempt 5d888d90-c3af-462c-be61-97db802e707c，candidates 命令可按本稳定 ID 查到。后续 Reviewer 因路径覆盖退修，尚未确认需要扩展语言；本决定依据下面可独立复查的规范和源码事实，不把 worker blocked 当成扩语言结论或算子批准。",
+    "kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/nvfp4_moe.cu:9471-9489：外层 capture 记录 clean 与 full 并返回，不在本次等待设备 verdict；9506-9512 使用录制的参数，1723-1787 的验证仍读取执行时数据。host 选择、按值标量和张量绑定与设备当次读取的内容不能混为同一绑定时点。",
+    "同一 nvfp4_moe.cu:9533-9542、9569-9577：内层 record/instantiate 后可立即 replay；BeginCapture 失败仍调用 private stream 的 run_pipeline，随后可能 eager fallback。实际提交的前缀必须保留，不能据失败补造完成事件或跨 stream 顺序。schema_extract/inputs/nvfp4_fused_moe_default_scope.md:5-11 保持默认实现可达的 capture、graph、fallback 和错误出口范围。",
+    "2.2.8 的 schema_docs/0.common.md“plan 与计算执行实例”、schema_docs/4.design.work_schedule.md“提交身份与字段”“事件与启动”直接说明执行绑定和三个录图例子；schema_extract/phases/02_dispatch_draft.md、04_dispatch_plan.md 与 REVIEW.md 引用同一边界。没有增加字段、capture-only 计算 plan 或执行系统。",
+    "已审方案及来源哈希保存在 .schema_extract/trials/six-families/post-batch/plan-semantics-2.2.8/prepared/PROPOSAL.md、source-evidence.json；六份文档与原隔离补丁逐字一致，文档链接、示例语法及维护记录的落地检查记入同目录上级的 maintenance-validation.json。原始源码哈希为 cf0b42e2e4809cf71b2442f1b64285da4cc0a69214f43eb82efbdac938978f6f。"
+  ],
+  "proposal": "沿用现有 plan/phase/事件结构，将工作和事件实例绑定一次算子请求的实际执行。纯 record/instantiate 不产生所录计算的 kernel_done，也不保证外部 replay；record 后立即 replay 只计真实执行。录制固化的 host 选择、标量和张量绑定按录制或显式更新后的值，设备读取内容按当次读取。失败前的 private-stream 实际提交与 fallback 重复工作保留在同一请求中；P2/P4 与 Reviewer 在完整 host 路径覆盖中依同一边界核对，不靠删路径或收窄 Contract 解决。",
+  "necessity": "MoE 的范围内 capture 路径提供了静态设计与执行身份绑定不明的具体反例。补清现有语义即可避免漏计、重复计数和虚构回放保证；无需新结构。规范绑定说明的验收与 MoE 路径覆盖、实际 Design 修订及独立审阅分别处理。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.2.8",
+    "reason": "已审规范方案及现有表达示例验收后，2.2.8 补清静态 plan 对一次算子请求实际执行的绑定，并由 P2/P4/Reviewer 共用：纯 record/instantiate 不产生计算完成事件或保证外部 replay，立即回放只计真实执行，同一请求失败前的 private-stream 提交与 fallback 重复工作全部保留，录制绑定与设备当次读取内容分别处理。本项解决的是绑定说明，无需新增字段或执行系统；不表示旧 MoE 的路径覆盖、root 或派生产物已修复，也不继承旧批准。MoE 仍须正式 continue 采用新冻结并独立重审，跨 role 条件等待的实际产物修订沿用 pending 的 conditional-flow-topology。"
+  }
+}

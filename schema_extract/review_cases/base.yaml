@@ -1,0 +1,62 @@
+meta_data:
+  name: scalar_copy
+  describe: Copy one FP32 scalar to the result.
+  source: ReviewFixture@SOURCE:reference.py::kernel
+  version: 1
+contract:
+  algorithm_requirement:
+    input:
+      X: {meaning: Input scalar, shape: [], dtype: fp32}
+    output:
+      Y: {meaning: Copied scalar, shape: [], dtype: fp32}
+    compute:
+      - name: Copy
+        math: Y = X, preserving its FP32 value and representation.
+    golden_reference:
+      source: ReviewFixture@SOURCE:reference.py::reference
+      tolerance: {Y: exact}
+  hardware_specification:
+    device: null
+    arch: null
+    execution: {Unit: null}
+    feature: {Mechanism: null}
+    stack: {language: null, toolchain: null}
+    wiki:
+      hardware: null
+      programming: {language: null}
+      microbench: null
+      sota: {kernel: null, schema: null}
+      profile: null
+design:
+  math_reshape:
+    thesis: Retain the Contract copy without intermediate values or additional arithmetic.
+    rewrite:
+      - step: copy
+        name: Copy the scalar
+        math: Y = X, with no conversion or arithmetic.
+  work_schedule:
+    thesis: Assign the single scalar output to one worker.
+    flow:
+      launch: [{phase: [copy]}]
+    phase:
+      copy:
+        describe: Produce the scalar result Y.
+        decomposition:
+          partition: {}
+          target:
+            single_tile:
+              Y: {shape: [], dtype: fp32}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: 1}
+        schedule:
+          worker_assignment:
+            preassigned: {start: 0, count: 1}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: A synchronous role performs the copy with no local buffering or cross-role handoff.
+    phase:
+      copy:
+        role:
+          Main:
+            info: {execution_mode: serial, member: "warp[0:1]"}
+            pipe: {steady: ["produce:Y"]}

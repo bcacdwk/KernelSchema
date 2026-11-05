@@ -6,7 +6,7 @@ from typing import Any
 
 from ..diagnostics import field_path
 from ..pipeline_syntax import (IndexScope, ScopedPipe, common_domains,
-                               free_action_indices, parse_action, parse_event)
+                               free_action_indices, parse_action, parse_event, parse_members)
 from .common import CheckContext, indexed_values
 from .values import literal_integer
 
@@ -27,20 +27,20 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
         families, role_members = {}, {}
         for role, body in phase["role"].items():
             lp = p + ".role." + role
-            pieces = re.findall(r"([^\[\]]+)\[(\d+)(?::(\d+))?\]", body["info"]["member"])
-            unit, lo, hi = pieces[0]
-            if unit == work[pid]["mapping"]["worker"]["unit"]:
-                role_members[role] = range(int(lo), int(hi) if hi else int(lo) + 1)
-            else:
-                role_members[role] = range(unit_count) if unit_count is not None else None
-            for i, (unit, lo, hi) in enumerate(pieces):
-                unit = unit.removeprefix(".")
+            pieces = parse_members(body["info"]["member"])
+            role_members[role] = range(unit_count) if unit_count is not None else None
+            for i, (unit, lower, upper) in enumerate(pieces):
+                lo = literal_integer(lower)
+                hi = literal_integer(upper) if upper is not None else (lo + 1 if lo is not None else None)
                 if hardware is not None:
                     check.require(unit in hardware["execution"], lp + ".info.member", f"unregistered execution unit {unit}")
-                check.require(not hi or int(hi) > int(lo), lp + ".info.member", "member interval must be nonempty")
-                if i == 0 and unit == work[pid]["mapping"]["worker"]["unit"] and unit_count is not None:
-                    check.require(int(hi) <= unit_count if hi else int(lo) < unit_count,
-                                 lp + ".info.member", "member index exceeds worker.unit_count")
+                if lo is not None and hi is not None:
+                    check.require(hi > lo, lp + ".info.member", "member interval must be nonempty")
+                if i == 0 and unit == work[pid]["mapping"]["worker"]["unit"]:
+                    role_members[role] = range(lo, hi) if lo is not None and hi is not None else None
+                    if unit_count is not None:
+                        check.require((lo is None or lo < unit_count) and (hi is None or hi <= unit_count),
+                                      lp + ".info.member", "member index exceeds worker.unit_count")
             actions = _check_pipe(check, body["pipe"], domains, set(), lp + ".pipe", dynamic=dynamic)
             families[role] = {}
             for action in actions:

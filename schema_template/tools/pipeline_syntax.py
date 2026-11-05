@@ -131,6 +131,38 @@ def split_top(text: str, delimiter: str) -> list[str] | None:
     return None if stack else result + [text[start:]]
 
 
+def parse_members(value: Any) -> tuple[tuple[str, str, str | None], ...] | None:
+    """Read member paths without imposing the finite evaluator's expression grammar.
+
+    Each result is (unit, lower, upper); upper=None selects one member.
+    Bracketed expressions may themselves contain indices or function calls.
+    """
+    if not isinstance(value, str) or not value.strip() or any(c in value for c in "\r\n"):
+        return None
+    result, remaining = [], value.strip()
+    while remaining:
+        unit, opening, rest = remaining.partition("[")
+        if not opening or not unit.strip() or "]" in unit:
+            return None
+        depth = 1
+        for end, char in enumerate(rest):
+            depth += (char == "[") - (char == "]")
+            if depth == 0:
+                break
+        else:
+            return None
+        bounds = split_top(rest[:end], ":")
+        if bounds is None or len(bounds) not in (1, 2) or not all(v.strip() for v in bounds):
+            return None
+        result.append((unit.strip(), bounds[0].strip(), bounds[1].strip() if len(bounds) == 2 else None))
+        remaining = rest[end + 1:].strip()
+        if remaining:
+            if not remaining.startswith(".") or not remaining[1:].strip():
+                return None
+            remaining = remaining[1:]
+    return tuple(result)
+
+
 def action_parts(text: str) -> tuple[str, list[str]] | None:
     verb, colon, rest = text.partition(":")
     if not colon or not IDENTIFIER.fullmatch(verb):

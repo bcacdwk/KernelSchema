@@ -410,11 +410,11 @@ def _begin_reopen(store: Store, state: dict, attempt: dict, receipt: dict) -> di
     if prior:
         prior_receipt, _ = store.verify_approval(state, prior)
         old_evidence = {digest(evidence_identity(item)) for item in prior_receipt["source_evidence"]}
-        transcription = any(issue["kind"] in {"transcription", "source_transcription"} and
-                            any(anchor["path"] in issue["scope"] for anchor in receipt["artifact_evidence"])
-                            for issue in receipt["issues"])
-        if all(digest(item) in old_evidence for item in evidence) and not transcription:
-            return blocked("reopen_requires_new_evidence", "请求没有提供新的固定源码发现，或带当前产物锚点的具体转录差异。")
+        artifact_correction = any(issue["kind"] in {"transcription", "source_transcription", "schema_conformance"} and
+                                  any(anchor["path"] in issue["scope"] for anchor in receipt["artifact_evidence"])
+                                  for issue in receipt["issues"])
+        if all(digest(item) in old_evidence for item in evidence) and not artifact_correction:
+            return blocked("reopen_requires_new_evidence", "请求没有提供新的固定源码发现，或带当前产物锚点的具体转录/规范表达差异。")
     source_checkpoint = state["merged_checkpoint"] or state["checkpoint"]
     source, _ = store.verify_checkpoint(state, source_checkpoint)
     record = {"key": key, "issue_id": request["issue_id"].strip(), "target": target, "reason": request["reason"],

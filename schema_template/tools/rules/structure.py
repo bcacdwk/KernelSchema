@@ -4,6 +4,7 @@ from __future__ import annotations
 from functools import partial
 import re
 
+from ..pipeline_syntax import parse_members
 from .common import EXECUTION_MODES
 from .hardware import hardware_rule
 from .values import (
@@ -14,10 +15,12 @@ from .values import (
 )
 
 # Contract: schema_docs/1 and 2.
-output = record({"meaning": text, "shape": shape, "dtype": attribute("dtype", context="io")})
+nullable = predicate(lambda value: type(value) is bool, "a boolean")
+output = record({"meaning": text, "shape": shape, "dtype": attribute("dtype", context="io")},
+                {"nullable": nullable})
 input_value = record(
     {"meaning": text, "shape": shape, "dtype": attribute("dtype", context="io")},
-    {"range": input_range, "default": scalar},
+    {"nullable": nullable, "range": input_range, "default": scalar},
 )
 contract_symbol = record({
     "meaning": text,
@@ -148,11 +151,19 @@ def pipe(value, path, errors):
 
 
 execution_mode = enum(*EXECUTION_MODES)
-member = predicate(
-    lambda value: isinstance(value, str) and re.fullmatch(
-        r"[^\[\]\r\n]+\[\d+(?::\d+)?\](?:\.[^\[\]\r\n]+\[\d+(?::\d+)?\])*", value),
-    "unit[index] or unit[start:end] member path",
-)
+
+
+def member(value, path, errors):
+    parts = parse_members(value)
+    if parts is None:
+        reject(errors, path, "expected unit[index] or unit[start:end] member path")
+        return
+    for _, lower, upper in parts:
+        integer(0)(lower, path, errors)
+        if upper is not None:
+            integer(0)(upper, path, errors)
+
+
 value_pattern = predicate(
     lambda value: isinstance(value, str) and re.fullmatch(
         r"[A-Za-z_][A-Za-z0-9_]*(?:\([^\r\n]+\))?", value),

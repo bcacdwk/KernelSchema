@@ -75,6 +75,9 @@ def contract(check: CheckContext, contract: dict[str, Any], path: str) -> dict[s
             names.add(name)
             objects[name], order[name] = obj, index
             locations[name] = f"{path}.{label}.{name}"
+            if label in ("input", "output") and obj["dtype"] == "python_none":
+                check.require(obj["shape"] == [], locations[name] + ".shape",
+                              "python_none is a singleton scalar; use shape: []")
     for attr in ("shape", "dtype"):
         graph = {}
         for name, obj in objects.items():

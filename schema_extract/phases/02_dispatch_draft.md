@@ -4,15 +4,15 @@
 
 ## 准入与应读材料
 
-P1 的元数据和共享 Contract 已通过，Runner 提供对应 root checkpoint、固定 host 入口、适用 workload、调用身份和可写范围。worker/reviewer 分别续用 P1 的原角色会话，明确读取本页；P2 独立验收和计退修。
+P1 的元数据和共享 Contract 已通过，Runner 提供对应 root checkpoint、固定 host 入口、适用 workload、调用身份和可写范围。worker 续用 P1 会话，reviewer 使用新的阶段会话，明确读取本页；P2 独立验收和计退修。
 
-先读已审 `root.yaml`、P1 的范围结论，再读[派生与索引规则](../../schema_docs/0.common.md#派生节点与-dispatch)。沿固定 host 选择条件、参数归一和实际调用关系找到各路径入口；只深入到足以区分设计，不先完成整棵树的 Design。需要任务边界依据时回查 P1 材料。
+worker 可沿 P1 交接定位；reviewer 先按[当前文档验收](../REVIEW.md)读当前 root 的已完成内容和 dispatch 草案，再沿固定 host 选择条件、参数归一和实际调用关系核对路径。两角色均依[派生与索引规则](../../schema_docs/0.common.md#派生节点与-dispatch)工作，只深入到足以区分设计，不先完成整棵树的 Design。需要任务边界依据时回查固定材料。
 
 ## worker：可写范围与操作
 
 可写 `dispatch.md` 草案及 root 的 `meta_data.dispatch`，内容修订时按规则更新 root 版本。root 的共享 Contract、来源事实和 Design 保持已知内容；发现需要改变它们时经 Runner 转回对应阶段。不得创建派生 YAML、改源码或运行状态。
 
-1. 在共享 Contract 的完整有效域内列出真实 host 路径及选择依据。区分数学改写、工作拆分、中间结果物化和局部执行组织的变化；同一套参数或公式能表达的变化留在一个节点。函数、文件、kernel 或 shape 的数量均不等于节点数。
+1. 在共享 Contract 的完整有效域内列出真实 host 路径及选择依据，按[计算执行实例](../../schema_docs/0.common.md#plan-与计算执行实例)区分仅录制的结构与实际执行。区分数学改写、工作拆分、中间结果物化和局部执行组织的变化；合并路径前，先依[参数与结构的分组规则](../../schema_docs/0.common.md#参数变化与结构变化)核实实际提交集合、跨 phase 生产者和完成关系。同一套合法参数或公式能表达的变化留在一个节点，不把需要正文删改结构的路径提前合并。函数、文件、kernel 或 shape 的数量均不等于节点数。
 2. 从真实路径中选择覆盖主要 workload、较通用且便于派生的 root。root 保留全任务 Contract，自身 Design 只负责选中范围；不另造覆盖全域的 baseline。
 3. 用中文 `dispatch.md` 简述 root 的 workload、选择理由和预计需要的其他设计及差异。链接 root；尚未生成的派生节点明确标为拟议，不假装已有 YAML。选择证据、覆盖缺口和后续需要核实的问题写进回执，精确条件不在索引中重复维护。
 4. 有多路径时，按公共约定填写 root 的独立 `when`。单 root 通常省略 dispatch；显式保留时说明覆盖全契约域。`parent` 只表示设计派生来源，各节点条件在全域独立求值，不从祖先叠加。派生节点的精确条件待其 YAML 创建时写入。
@@ -21,7 +21,7 @@ P1 的元数据和共享 Contract 已通过，Runner 提供对应 root checkpoin
 
 ## reviewer：放行门槛
 
-从 P1 结论独立追到真实 host 路由，判断 root 是否代表主要 workload，划分是否用最少必要节点保留数学、工作组织或局部执行的实质差异。核对主要路径及 root `when`、全契约域内的选择依据和覆盖缺口；同一套参数能表达的变化保留在一个节点。
+重新审阅 P1 已完成内容及新增选择条件和索引草案，按[当前文档验收](../REVIEW.md)给出四项文档判断；不以 P1 批准代替当前核对。再独立追到真实 host 路由，判断 root 是否代表主要 workload，划分是否用最少必要节点保留数学、工作组织或局部执行的实质差异。核对主要路径及 root `when`、全契约域内的选择依据和覆盖缺口；同一套参数能表达的变化保留在一个节点。
 
 本阶段批准 root 选择和划分草案，允许只有拟议分支、尚无分支 YAML。检查草案可读、root 链接有效、改动未越界；不因 Design 仍未完成要求完整 YAML 检查退出 `0`。若新证据推翻 P1 的外部要求，交 Runner 回 P1 核实。
 

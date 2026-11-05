@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .common import ExtractError, manifest, regular_file, rules_root, source_root
-from .artifacts import IndexLayoutError, validate_plan, validate_revision_scope
+from .artifacts import validate_plan, validate_revision_scope
 from .comparators import validate_comparisons
 from .reading import read_evidence
-from .stages import STAGES, plan_signature, scope_key
+from .stages import DOCUMENT_CONCLUSIONS, STAGES, plan_signature, required_conclusions, scope_key
 
 
 def obj(properties):
@@ -230,6 +231,14 @@ def _anchor(evidence: dict, directory: Path, hashes: dict) -> None:
         raise ExtractError(f"quote text does not match {name}:{first}-{last}")
 
 
+def _artifact_issue_supported(issue: dict, anchors: list[dict]) -> bool:
+    """Document-only issues must name a file whose current anchor was validated."""
+    if issue["kind"] not in {"submission_format", "schema_conformance"}:
+        return False
+    return any(re.search(r"(?<![A-Za-z0-9_./\\-])" + re.escape(anchor["path"]) +
+                         r"(?![A-Za-z0-9_./\\-])", issue["scope"]) for anchor in anchors)
+
+
 def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
                      artifacts: Path, changed_files: list[str]) -> dict:
     if attempt["attempt_id"] in state["accepted_receipts"]:
@@ -291,6 +300,12 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
                        for item in value["source_evidence"]):
                 raise ExtractError(f"missing bound {category} entry anchor")
         artifact_subjects = set()
+        if attempt["role"] == "reviewer":
+            required_files = required_artifact_evidence(state, attempt, files)
+            if required_files <= {entry["path"] for entry in value["artifact_evidence"]}:
+                # These conclusions concern the current documents, not source
+                # implementation facts. Their anchors are artifact_evidence.
+                artifact_subjects.update(DOCUMENT_CONCLUSIONS)
         if attempt["stage"] == "P6" and any(item["subject"] == "tree" and not item["evidence"]
                                              for item in value["conclusions"]):
             planned_files = {entry["file"] for entry in state["plan"]} | {"dispatch.md"}
@@ -302,7 +317,7 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
                 artifact_subjects.add("tree")
         subjects = {item["subject"] for item in value["conclusions"] if item["text"].strip()
                     and (item["evidence"] or item["subject"] in artifact_subjects)}
-        required_subjects = set(STAGES[attempt["stage"]]["conclusions"])
+        required_subjects = set(required_conclusions(attempt))
         if not required_subjects <= subjects:
             raise ExtractError("missing supported stage conclusions: " + ", ".join(sorted(required_subjects - subjects)))
         if attempt["stage"] == "P1" and attempt.get("mode", "normal") != "adjudicate":
@@ -314,9 +329,14 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
         if not value["source_evidence"]:
             raise ExtractError("reviewer needs actual source evidence")
     if value["decision"] in {"revise", "blocked", "reopen"}:
-        if not any(item["detail"].strip() and item["scope"].strip() and item["evidence"] and
+        if not any(item["detail"].strip() and item["scope"].strip() and
+                   (item["evidence"] or
+                    (value["decision"] in {"revise", "blocked"} and
+                     _artifact_issue_supported(item, value["artifact_evidence"]))) and
                    (value["decision"] == "revise" or item["recovery_condition"].strip()) for item in value["issues"]):
-            raise ExtractError("revision/blocking requires a concrete issue, evidence and recovery condition")
+            raise ExtractError("revision/blocking requires a concrete issue, source evidence or "
+                               "(for revise/blocked) a submission_format/schema_conformance issue scoped to "
+                               "cited artifact evidence, and recovery condition")
     if value["decision"] == "reopen":
         request = value.get("reopen")
         if not request or not request["issue_id"].strip() or not request["reason"].strip():
@@ -335,10 +355,7 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
             raise ReceiptFormatError("approval needs a short handoff (<=1200 characters, <=20 nonempty lines)")
     if attempt["stage"] == "P4" and final:
         if attempt.get("mode", "normal") == "normal":
-            try:
-                validate_plan(value["plan"], artifacts, rules_root(lock))
-            except IndexLayoutError as exc:
-                raise ReceiptFormatError(str(exc)) from exc
+            validate_plan(value["plan"], artifacts, rules_root(lock))
         for entry in value["plan"]:
             if not entry["evidence"] or any(type(i) is not int or i < 0 or i >= len(value["source_evidence"])
                                              for i in entry["evidence"]):

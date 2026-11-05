@@ -4,12 +4,14 @@
   "problem": "GDN 的 FP32 状态槽填充域比当前候选所接受的布局更宽。",
   "evidence": [
     "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/problem/shape_range.json:55–59 允许 state_slot_padding=0..65536。",
-    "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/candidate/launch.cu:194–198 要求槽首地址和步长保持 16 字节对齐。"
+    "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/candidate/launch.cu:194–198 要求槽首地址和步长保持 16 字节对齐。",
+    "历史版本依据：5fb0fde 同步校订 kernel_wiki/catalog.json、kernel_wiki/tools/catalog.py 与 kernel_wiki/GUIDE.md 的槽填充域及候选对齐限制，并归档本项已采纳部分；当时 Schema Extract 没有产品版本号，以该实际修复提交的完整 Git SHA 定位。"
   ],
   "proposal": "区分题目域和候选可接受的对齐布局。要覆盖全部合法填充量需在上游支持未对齐槽。",
   "necessity": "调用方对合法的 padding=1 会遇到入口拒绝。",
   "decision": {
     "outcome": "partially_adopted",
+    "version": "git:5fb0fde8d287a546430ef49aa7fbc732850ad603",
     "reason": "保留完整任务域，并将候选的对齐限制作为实现覆盖缺口。",
     "adopted": "明确 FP32 槽步长必须为 4 个元素的倍数，并保留任务原有的填充域。",
     "remaining": "其余填充量需要上游候选支持未对齐槽，提取不修改实现。"

@@ -345,6 +345,34 @@ class EventGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(GraphError, "no role instance"):
             build({"Load": role(["load:X"], member="CTA[0].warp[0:1]"), "Compute": consumer}, count=2)
 
+    def test_parameterized_member_selection_binds_real_instances(self):
+        body = role(["compute:X"], member="CTA[First:First+Width].warp[3:3+EPI]")
+        for epi in (4, 8):
+            with self.subTest(EPI=epi):
+                graph = build({"Main": body}, count=4, parameters={"First": 1, "Width": 2, "EPI": epi})
+                self.assertEqual({op.member for op in graph.operations.values()}, {1, 2})
+        graph = build({"Main": role(["compute:X"], member="CTA[First].warp[0:Nt/32]")},
+                      count=4, parameters={"First": 2, "Nt": 128})
+        self.assertEqual({op.member for op in graph.operations.values()}, {2})
+        consumer = role(["compute:Y"], waits_for={"data": {"compute:Y": ["Load[0]/load:X"]}})
+        with self.assertRaisesRegex(GraphError, "no role instance"):
+            build({"Load": role(["load:X"], member="CTA[First:Last].warp[0:4]"), "Compute": consumer},
+                  count=4, parameters={"First": 1, "Last": 3})
+
+    def test_member_expansion_checks_inner_bounds_and_missing_parameters(self):
+        for path, parameters, message in (
+            ("warp[3:3+EPI]", {"EPI": 0}, "nonnegative and nonempty"),
+            ("CTA[0].warp[3:3+EPI]", {"EPI": -1}, "nonnegative and nonempty"),
+            ("warp[Start:4]", {"Start": -1}, "nonnegative and nonempty"),
+            ("warp[0:Nt/32]", {"Nt": 100}, "noninteger index/bound"),
+            ("CTA[First:Last].warp[0:4]", {"First": 0, "Last": 3}, "exceeds worker count"),
+        ):
+            with self.subTest(path=path, parameters=parameters), self.assertRaisesRegex(GraphError, message):
+                build({"Main": role(["compute:X"], member=path)}, count=2, parameters=parameters)
+        for path in ("warp[3:3+EPI]", "CTA[0].warp[3:3+EPI]", "CTA[First].warp[0:4]"):
+            with self.subTest(path=path), self.assertRaises(ExpansionError):
+                build({"Main": role(["compute:X"], member=path)}, count=2)
+
     def test_cycles_include_issue_done_and_source_identity(self):
         graph = build({"A": role(["compute:X"], waits_for={"sync": {"compute:X": ["B/compute:Y"]}}),
                        "B": role(["compute:Y"], waits_for={"sync": {"compute:Y": ["A/compute:X"]}})})

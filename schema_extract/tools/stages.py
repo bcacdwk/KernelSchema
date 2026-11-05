@@ -34,6 +34,29 @@ STAGES = {
            "reads": ["schema_docs/0.common.md", "schema_template/README.md"]},
 }
 
+DOCUMENT_CONCLUSIONS = (
+    "document_self_contained", "document_layering",
+    "document_consistency", "document_relevance",
+)
+
+
+def required_conclusions(attempt: dict) -> list[str]:
+    result = list(STAGES[attempt["stage"]]["conclusions"])
+    if attempt["role"] == "reviewer":
+        result.extend(DOCUMENT_CONCLUSIONS)
+    return result
+
+
+def read_specs(attempt: dict) -> list[str]:
+    result = list(STAGES[attempt["stage"]]["reads"])
+    if attempt["role"] == "reviewer":
+        result.extend(["schema_extract/REVIEW.md", "schema_docs/0.common.md",
+                       "schema_docs/1.contract.algorithm_requirement.md",
+                       "schema_template/README.md"])
+        if attempt["stage"] not in {"P1", "P2"}:
+            result.extend(DESIGN_READS)
+    return list(dict.fromkeys(result))
+
 
 def new_scope() -> dict:
     return {"status": "pending", "revisions": 0, "continues": 0, "invalid_receipts": 0,
@@ -63,6 +86,8 @@ def session_group(state: dict, call: dict | None = None) -> str:
         return "P6_signoff"
     if call["stage"] == "P5":
         return "P5:" + call["node"]
+    if call.get("role") == "reviewer" and call["stage"] in {"P1", "P2"}:
+        return call["stage"]
     return STAGES[call["stage"]]["session_group"]
 
 

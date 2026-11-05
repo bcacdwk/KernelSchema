@@ -1,6 +1,6 @@
 # Schema Extract：Supervisor 手册
 
-版本 `2.2.4`。从固定 kernel 提取可读、可追溯的 schema，自动完成写作、独立审阅、返工与发布。统一入口是 [extract.py](extract.py)，实现位于 `tools/`。
+版本 `2.2.10`。从固定 kernel 提取可读、可追溯的 schema，自动完成写作、独立审阅、返工与发布。统一入口是 [extract.py](extract.py)，实现位于 `tools/`。
 
 ## 开始一次试用
 
@@ -52,7 +52,7 @@ Supervisor 提供 catalog ID 或明确来源、输出目录及适用范围。来
 
 省略 `revision` 使用本地实际字节，填写时读取解析后的 Git commit。也支持 `--source 'git:<ref>:<directory>' --bindings source.json`，Git 仓库由 `--repo` 指定。文件名和函数签名不能代替输入角色与任务材料。
 
-Runner 冻结源码及本次规范、starter、检查器、阶段页和执行器，分别保存逐文件摘要与整体身份；规范和工具包含当时未提交的改动。脏本地源码使用快照内的独立 `source.git` 固定引用，不修改用户仓库。所有阶段读取同一快照。
+Runner 冻结源码及本次规范、starter、检查器、阶段页和执行器，分别保存逐文件摘要与整体身份；规范和工具包含当时未提交的改动。catalog 提供可选的 `paths.annotated_entrypoint` 时，新快照同时收集该校注文件作为阅读辅助，原实现与其他输入角色绑定保持不变；不追改旧快照，也不自动证明校注与原件等价。脏本地源码使用快照内的独立 `source.git` 固定引用，不修改用户仓库。所有阶段读取同一快照。
 
 运行资料默认位于 `.schema_extract/v2/`：`snapshots/` 保存固定输入，`runs/RUN_UUID/` 保存状态、调用证据和 checkpoint，`supervisor.json` 保存控制记录。草稿与有效合入分别记录；草稿不能解锁子节点或作为正式交付。批量输出按 catalog 路径映射到 `--output-root`，见[输出目录导航](../schema_wiki/README.md)。
 
@@ -103,7 +103,13 @@ python3 schema_extract/extract.py inspect --run RUN_UUID --json
 
 Supervisor 的长期职责是主动推进提取：在既定任务语义内，自行决定预算追加、故障恢复、必要修复和合理取舍，处理并归档 issue。只有确实存在明显的漏洞且该漏洞的解决存在二分争议（必须由用户参与）才能继续的情况，才进行暂停。其余情况自行把握，期间的所有决策、改动和验证结果都须忠实记录，供后续审计。
 
-Runner 唯一写状态、派发、检查、合入和发布。worker 修改许可产物，reviewer 独立对照固定源码。P1/P2 分别续用同角色；P3、P4、每个 P5 节点使用新上下文；P6 由全新 reviewer 先审，确需修改才启动 worker。
+需要工程修改时，Supervisor 确定方案与范围，交 subagent 实现并运行必要测试，再依据实际差异和验证结果验收；保持主线程集中于判断与监督。
+
+Runner 唯一写状态、派发、检查、合入和发布。worker 修改许可产物，reviewer 独立对照当前文档和固定源码。P1/P2 的 worker 续用本角色；reviewer 按阶段使用独立会话。P3、P4、每个 P5 节点使用新上下文；P6 由全新 reviewer 先审，确需修改才启动 worker。
+
+worker/reviewer 的共用提示始终要求对齐本次冻结的 `schema_docs`，不得自创字段、记法或用正文覆盖结构语义；确有不适配、缺失或冲突时，先指出具体条款和反例，由 Supervisor 按[问题分流](../EXTRACT_SCHEMA.md#框架问题分流)处理。Supervisor 先判断能否按既有规则改正产物，不因 Agent 写不顺就直接修改语言；reviewer 的批准须同时满足源码忠实性与规范一致性。
+
+Reviewer 按[当前文档验收方法](REVIEW.md)通读本阶段已完成的全部内容，包含复制和未改段落，先形成自己的理解再核对固定源码。初始提示不提供前序批准、交接或旧稿；批准必须有独立理解、分层、全文一致和内容必要性四项文档结论及本阶段文件锚点。只读上游的规范表达错误可用 `schema_conformance` 及当前产物锚点请求正式重开，原预算和一次重开限制不变。
 
 退修按阶段、P5 按节点累计，默认第五次退修后由原 reviewer 一次裁决；P6 裁决亲自改稿后须全新 reviewer 一次签收。不能完成则明确阻塞。依赖就绪的分支立即派发，子节点从已审直接父 YAML 复制；阻塞只影响后代。会话、回执与重开规则见[工具协议](tools/README.md)。
 
@@ -142,7 +148,21 @@ continue 要求原 run 静止、写锁空闲、调用和计时全部结算。它
 python3 schema_extract/extract.py import-legacy --from-task /old/runtime/tasks/TASK_KEY --checkpoint CHECKPOINT_ID --source /path/to/source.json --output /path/to/new/delivery --queue
 ```
 
+## 单文件阅读视图
+
+需要把某个节点交给只拿到一份 YAML 的读者时，生成包含完整共享 Contract 的独立视图：
+
+```sh
+python3 schema_extract/extract.py standalone path/to/task/branch.yaml --output path/to/views/branch
+python3 schema_template/check_yaml.py --standalone --skip-hardware path/to/views/branch/branch.yaml
+```
+
+生成器先检查创作任务，保留节点自身的元数据、Design 和 Realization，展开当前 root 的 Contract；不继承 parent 的 Design。输出目录在原任务之外，保存原文件名的 YAML 和 `.source.json` 来源摘要。相同输入可幂等复用，冲突内容保留；原节点和运行状态不变。
+
+视图保留原节点的选择范围，不作为整个算子所有路径的替代，也不产生新的 P6 批准。其语义仍接受 [Reviewer 方法](REVIEW.md)约束；原文件若含隐含依赖或规范问题，生成视图不会消除它。需要改动时修订创作源并重新审阅，随后生成新的视图目录。
+
 ## 同线程持久提醒
+
 
 ```sh
 python3 schema_extract/extract.py monitor start --thread THREAD_UUID
@@ -179,6 +199,20 @@ audit 的 `0` 表示读取或可得证据检查完成，仍须看 unavailable；
 
 P3/P5/P6 完成或批准时，Runner 自动用冻结检查器执行 `--skip-hardware`；退出 0 才放行，1 是产物诊断，2 是工具/环境问题。P1/P2/P4 使用阶段门禁。检查不代替语义审阅；硬件保留 starter 占位，GPU 验收与实测不在提取范围内。
 
-仓库保留回执、预算、依赖和 CLI 恢复的小回归，执行方法见[离线验证](tools/README.md#离线验证)。六类固定实现已在冻结 2.2.2 下完成真实提取、77 节点发布与完整证据审计；2.2.4 通过 29 项离线回归及同源码分组 GEMM 的三节点真实验证，见[试用记录](TRIAL_REPORT.md)。受控测试或这些样本不代表其他实现的提取成功率，也不代替 GPU 或外部比较器验收。
+核对是否实际检查时，查看对应调用的 `attempts/<attempt_id>/check.json` 及 `validated.json` 中的命令、退出码和产物绑定；P5 合入另有 `merge_check.json`。Agent 回执的 `checks` 只记录它亲自执行的命令，`checks: []` 不能据此判断 Runner 漏跑；最终还应核对 P6 所查文件与发布回执绑定的文件一致。
+
+仓库保留回执、预算、依赖和 CLI 恢复回归，执行方法见[离线验证](tools/README.md#离线验证)。2.2.5 当时通过 42 项提取测试、148 项模板测试，以及 10 个真实 Reviewer 语义样例；对原 GDN 的隔离 P6 复核要求重开 P3，见[Reviewer 验证记录](review_cases/RESULTS.md)。这些结果验证审阅机制，历史产物的具体表达问题继续单独跟踪。
+
+2.2.6 按[长期分类与处理方案](issues/TRIAGE.md)简化 P4 索引布局检查，统一参数化成员路径的规范、校验与有限展开，并补齐 catalog 校注文件的输入收集；最终 47 项提取回归、两份历史失败稿只读重放，以及 152 项模板回归通过。条件流程继续用既有 dispatch 表达不同实际执行关系，四类历史产物仍待独立修订；本轮未重复模型评估或重新提取六项算子。
+
+2.2.7 为共享 Contract 输入输出增加 [nullable 与 None](../schema_docs/1.contract.algorithm_requirement.md#nullable-与-none) 的正式写法，区分对象缺席、参数省略和非 `None` 属性；[框架修复已验收](issues/archive/schema_docs/optional-tensor-contract.json)。157 项模板回归、49 项提取回归通过，包含 GDN/FMHA/Sparse 的最小 I/O 片段；这些结果只验证规范字段与门禁，不代表算子复审通过，也未运行 GPU 或外部模型评估。已有冻结 2.2.6 的调用与历史产物保持原状，使用新规则须正式接续。
+
+2.2.8 澄清静态 plan 与[一次算子请求实际执行](../schema_docs/0.common.md#plan-与计算执行实例)的绑定，以及[条件等待](../schema_docs/5.design.tile_pipeline.md#条件等待示例)的显式跨 role 前驱；沿用现有字段、重复和索引规则，不增加执行系统。规范绑定问题见 [capture-invocation-boundary](issues/archive/schema_docs/capture-invocation-boundary.json)，实际产物表达仍由 [conditional-flow-topology](issues/extract_workflow/conditional-flow-topology.json) 跟踪。检查限于文档链接、示例和维护记录；隔离 MoE 示例通过既有检查器及有限事件图检查，不代表真实 root 已修复。现有 GDN/FMHA 在冻结 2.2.7 下的合法任务无需因本次澄清统一重跑；MoE 应通过正式 `continue` 采用新冻结并独立重审，原批准不继承。
+
+2.2.9 将[源实现缺陷与设计分流](REVIEW.md#源实现缺陷与设计分流)统一到共用 Reviewer 方法和真实调用提示：有来源依据的完整设计可携带源问题继续，必须猜测或改变设计决定时仍阻塞，残稿仍须补齐并独立审阅。[流程改进已由 Supervisor 验收](issues/archive/extract_workflow/source-defect-abstraction-boundary.json)；未修的 Sparse 源布局问题由 [sparse-tc-control-layout-overlap](issues/kernel_wiki/sparse-tc-control-layout-overlap.json) 独立跟踪，实际 Design/P6 尚未完成。采用新规则须正式接续，不改旧回执或继承批准。
+
+2.2.10 修复[当前产物问题的证据门禁](issues/archive/extract_workflow/artifact-only-issue-evidence.json)：仅 `revise/blocked` 的 `submission_format`、`schema_conformance` 可使用与问题 scope 中完整相对文件名绑定的有效 `artifact_evidence`；源码类问题、批准和上游重开保留原要求。最终 62 项提取回归通过，两份真实 MoE 退修提案只读重放及错误路径、源码类问题的负例通过，原状态与输入字节未改变。Supervisor 已验收这项协议修复；MoE 的失败接续设计和 P4 计划仍须独立审阅，采用新门禁须正式接续。
+
+六类固定实现曾在冻结 2.2.2 下完成 77 节点发布与证据审计；2.2.4 另完成分组 GEMM 的三节点真实验证，见[试用记录](TRIAL_REPORT.md)。样本结果不代表其他实现的提取成功率，也不代替 GPU 或外部比较器验收。
 
 框架候选与稳定 ID 决定通过[维护入口](issues/README.md)查看；算子自身缺项留在任务回执。

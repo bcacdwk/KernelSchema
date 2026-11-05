@@ -12,6 +12,8 @@ def main(argv=None):
     parser.add_argument("yaml", help="root.yaml or a derived node in a complete task directory")
     parser.add_argument("--skip-hardware", action="store_true",
                         help="explicitly exclude hardware_specification and hardware-dependent checks")
+    parser.add_argument("--standalone", action="store_true",
+                        help="check one explicit delivery view containing its own Contract, without reading siblings")
     args = parser.parse_args(argv)
     if sys.version_info < (3, 10):
         print("Check not completed: Python 3.10 or newer is required.", file=sys.stderr)
@@ -23,7 +25,8 @@ def main(argv=None):
         return 2
     notices = []
     try:
-        directory, task = schema.validate_file(args.yaml, notices=notices, skip_hardware=args.skip_hardware)
+        check = schema.validate_standalone_file if args.standalone else schema.validate_file
+        directory, task = check(args.yaml, notices=notices, skip_hardware=args.skip_hardware)
     except schema.SchemaError as error:
         print(error, file=sys.stderr)
         return 1
@@ -33,7 +36,8 @@ def main(argv=None):
     finally:
         for notice in notices:
             print(notice, file=sys.stderr)
-    print(f"Valid: {directory} ({len(task)} YAML node(s); whole task checked)")
+    scope = "standalone view checked" if args.standalone else "whole task checked"
+    print(f"Valid: {directory} ({len(task)} YAML node(s); {scope})")
     return 0
 
 
