@@ -18,6 +18,10 @@ Runner 唯一写运行状态、派发、检查、合入和发布。worker 修改
 
 Reviewer 初始输入保留当前规范、产物、计划和固定源码入口，移除前序批准、旧稿及历史 feedback/handoff；维护另提供本轮问题和字段边界。先独立理解本阶段已完成的全文，再核对源码。完整且忠实表达限制的内容可以携带 issues 获批；未完成草稿和已知转录错误按[共同审阅方法](../REVIEW.md)处理。
 
+[prompts.py](prompts.py) 为 P1/P3 只附 root 计划与节点索引，重开提示保留问题和证据，完整调度历史留在 Runner。P1 覆盖全算子的共享 Contract 与完整来源材料；P3 读取当前 root、dispatch、P2 已定路径与固定来源，计划条目不替代产物和来源依据。
+
+`provided_documents` 列出当前语义规则下已嵌入的冻结全文，无需再次打开；其余材料见 `read_specs`。Reviewer 已收到完整 REVIEW.md，worker 须自行读取；P5 仍需读取 03_root.md 的逐段方法。
+
 ## 回执与短交接
 
 模型通过 CLI 最后输出返回 `schema_extract.proposal.v1` JSON，以本次 `response.schema.json` 为准。`attempt_id` 是须原样返回的本次随机 nonce，续会话也会更换；无需另写回执文件。
@@ -119,7 +123,7 @@ Runner 先保存请求者通过身份、权限和证据门禁的合法 raw，再
 
 严格 standalone 使用 `validate_resolved_file` 完整检查，复用有效文档与 origins，再独立完整检查本地单文件。`.source.json` 为 `schema_extract.standalone.v2`，记录 root/child/实际引用链完整 manifest、origins、effective_identity 和 view 摘要，生成前及生成/校验后发布前复查所有来源。原始树不变，输出在任务外，相同内容可复用；普通发布仍保留 raw 树。有效 stdout 视图明确 validation:not_run，不代替导出检查。选择不具备新 API 的旧 rules 时，整个导出路由到同一规则树内的旧 frozen exporter，使用独立进程与该树的 PYTHONPATH，保留原完整检查和回执；不实现另一套 resolver 或用当前规则解释旧输入。
 
-2.5.0 的引用语言、依赖及审批含义是正式 semantic revision，规范、阶段页、检查/解析器及执行器一同冻结。旧 frozen run 正常恢复沿原规则和执行语义；旧 inline 继续合法，历史 checkpoint/receipt/预算不改写。采用新语义须经过正式修订与适用性审阅，不能伪装为 compatible runtime 修复。[条件拓扑 issue](../issues/archive/extract_workflow/conditional-flow-topology.json)已按 `partially_adopted` / `2.5.0` 归档，产物问题后续另行研究；整区引用不修复或隐藏真实提交、生产消费与事件差异。
+规范、阶段页、解析/检查器及执行器一同冻结，恢复沿用登记的规则和执行语义。引用语言、依赖或审批含义改变须经正式语义修订和适用性审阅，不能作为兼容执行器修复；历史 checkpoint、receipt 和预算不改写。全本地 YAML 仍合法，整区引用不能隐藏真实提交、生产消费或事件差异。
 
 ## 写入与完整性
 
@@ -243,7 +247,7 @@ account 只计新增耗时差额，首次绑定的不可变证据不覆盖；act
 
 `observation_totals` 覆盖本 run 登记的 CLI attempts（含继承来源），按 origin_run_id/attempt_id 去重，并拒绝同会话重叠计数区间。仅累加有据根增量，exact/partial/unknown 分列，`known_attempts=exact_attempts+partial_attempts`。非空范围全部 exact 才有 `root_status=exact`；有据小计但不完整为 partial，无可加增量为 unavailable。cached input 是 input 子集；继承账目不再叠加 predecessor 总数，旧 result/receipt 不补写观测值。
 
-2.4.1 invocation/result 记录 `delegation_policy=forbidden`，旧字段缺失为 unknown。可选 delegation 投影只从已读 native 范围提取可识别工具/活动类型、事件锚点及关联 UUID；不保留参数/正文，不读取子会话与用户历史。summary 只含短状态与数量，完整锚点留在 SHA-256 绑定的 observation 文件。
+invocation/result 记录 `delegation_policy=forbidden`，字段缺失为 unknown。可选 delegation 投影只从已读 native 范围提取可识别工具/活动类型、事件锚点及关联 UUID；不保留参数/正文，不读取子会话与用户历史。summary 只含短状态与数量，完整锚点留在 SHA-256 绑定的 observation 文件。
 
 observed/not_observed_in_range/unavailable 描述委派证据；格式未知或范围不完整为 unavailable，委派观察失败不抹去已证明的根增量。禁止委派、未见标记、关联数量及 parent_thread_id 都不能证明子会话集合完整。子会话 token 与完整调用用量仍未知；`cost=null` 表示缺少可靠计价/账单来源，不用现价反推实付。旧 observation v1 和摘要字节保持原义，新字段只由采用该能力的执行器采集未来调用。
 
@@ -264,4 +268,4 @@ python3 -B -m unittest discover -s schema_template/tools/tests -t schema_templat
 
 测试使用本地合成输入和可执行替身，不调用真实模型，`tools/tests` 不进入冻结清单。已有 YAML 用 `schema_template/check_yaml.py --skip-hardware` 检查；质量仍须独立语义审阅。
 
-[六算子试用的 Reviewer 验证材料](../archive/six-operators/20261104-review-cases/README.md)已整体归档；`review_eval` 的默认 suite 同步指向该目录，也可用 `--suite` 显式选择其他材料。该评测入口使用真实 CLI 独立调用，记录规范/提示身份、输入、结果和用量。它与离线测试分别报告，模拟回执通过不能作为模型已识别语义问题的证据。历史验收与当前操作分开，索引见[Supervisor 手册](../README.md#验证边界)。
+`review_eval` 默认使用[六算子 Reviewer 验证材料](../archive/six-operators/20261104-review-cases/README.md)，可用 `--suite` 选择其他材料。评测会调用真实 CLI，记录规范/提示身份、输入、结果和用量；与离线测试分别报告，模拟回执通过不能证明模型已识别语义问题。

@@ -1,10 +1,8 @@
 # Schema Extract：Supervisor 手册
 
-版本 `2.5.0`。入口 [extract.py](extract.py) 从固定 kernel 提取 schema，Runner 推进写作、独立审阅、返工与发布。本页说明操作；[提取总览](../EXTRACT_SCHEMA.md)定义 P1–P6，[工具协议](tools/README.md)说明回执与执行门禁。
+入口 [extract.py](extract.py) 从固定 kernel 提取 schema，Runner 推进写作、独立审阅、返工与发布。本页说明操作；[提取总览](../EXTRACT_SCHEMA.md)定义 P1–P6，[工具协议](tools/README.md)说明回执与执行门禁。
 
 本目录顶层保留现行操作、审阅、阶段和工具说明。已完成的设计、六算子试用/恢复/暂停记录统一从[历史归档](archive/README.md)进入；查看六项成果与过程时直接打开[六算子档案](archive/six-operators/README.md)。来源限定材料继续放在 `inputs/`，复用问题与决定按 `issues/` 维护，正式结果由 [Schema Wiki](../schema_wiki/README.md)导航。
-
-2.5.0 同步引入[Design 显式整区引用](../schema_docs/0.common.md#design-整区引用)、共用 raw/effective 解析与来源身份、有效视图/图/standalone、首稿引用与旧稿保留、换父显式迁移及普通 P5 实际 provider 修复。语言、检查、依赖和审批含义属于正式 rules revision；旧全本地 YAML 仍合法，旧 frozen run 正常恢复继续原规则，不自动获得这些能力。已有未完成 run 采用新语义须经下述 semantic revision/maintenance 和适用性审阅，不能登记为 compatible runtime 修复。旧 checkpoint、receipt、批准历史、预算和产物不自动转换或重写。
 
 ## 开始一次试用
 
@@ -149,7 +147,7 @@ python3 schema_extract/extract.py revise status RUN_UUID
 
 采纳后仅在原运行意图仍有效且无新控制时接续后台任务；暂停任务只登记，之后由 Supervisor 显式恢复。活动维护结束或安全 paused/cancelled 且调用全部结清后，可通过 `revise request` 追加替代修订。相同目标、范围、问题证据和动作不因换请求 ID 获得新机会，原调用、时间、退修、P6 starts 和单次决定均保留。
 
-冻结执行器须支持 `semantic_revision.v1`；2.4.1 已具备该能力，可按正式连续修订采用 2.5.0。更旧且缺少此能力的执行器，须先在安全边界采用经独立兼容审阅、保持原 Design 语义并具备 semantic revision 能力的中间执行器，再正式修订到 2.5.0。不能直接把包含新引用语言、依赖与审批含义的 2.5.0 登记为 compatible runtime 修复。
+连续修订要求冻结执行器支持 `semantic_revision.v1`；不具备时，先在安全边界经独立兼容审阅采用保持原语义的中间执行器，再修订规则。引用语言、依赖或审批含义的变化不能作为兼容执行器修复。
 
 `--full-restart` 是单独的显式选择：创建从 P1 重审的 successor，不继承批准，封存原稿和原账目并继承用量、预算追加与已用决定。同一命令可补全中断构建；返回 0 后使用返回的 successor UUID 启动。
 

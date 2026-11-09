@@ -24,7 +24,11 @@ def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | N
     mode = attempt.get("mode", "normal")
     maintaining = attempt.get("purpose") == "maintenance"
     rules, source = rules_root(semantic), source_root(lock)
-    page_path = rules / "schema_extract/phases" / definition["page"]
+    page_spec = "schema_extract/phases/" + definition["page"]
+    page_path = rules / page_spec
+    provided_documents = [page_spec]
+    if attempt["role"] == "reviewer":
+        provided_documents.append("schema_extract/REVIEW.md")
     bindings = lock["source"]["bindings"]
     def source_reference(key):
         entry = bindings[key]
@@ -36,6 +40,13 @@ def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | N
         # A replan reviewer must assess the current worker proposal, including
         # an empty incomplete draft, rather than the previously approved tree.
         plan = state["plan_draft"]
+    if attempt["stage"] in {"P1", "P3"} and plan:
+        plan = [entry for entry in plan if entry["id"] == "root"]
+    reopening = state.get("reopening")
+    if attempt["stage"] in {"P1", "P3"} and attempt["role"] == "worker" and reopening is not None:
+        # Project the model input without mutating the Runner's reopening record.
+        reopening = {key: value for key, value in reopening.items()
+                     if key not in {"previous_plan", "previous_merged_checkpoint", "previous_plan_revision"}}
     run_dir = Path(attempt["directory"]).parent.parent
     prior_stage = {"P3": "P2", "P4": "P3", "P5": "P4"}.get(attempt["stage"])
     handoff_path = run_dir / "stages" / (prior_stage or "") / "handoff.md"
@@ -43,7 +54,7 @@ def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | N
                if attempt["role"] == "worker" and prior_stage and handoff_path.is_file() else "")
     scope = scope_for(state, attempt)
     plan_receipt, node_evidence = None, []
-    relevant_nodes = set(state["nodes"])
+    relevant_nodes = {"root"} if attempt["stage"] in {"P1", "P3"} else set(state["nodes"])
     ancestors = []
     if attempt["stage"] == "P5":
         if attempt["role"] == "worker":
@@ -80,13 +91,15 @@ def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | N
                 "inputs": {key: bindings[key] for key in ("entrypoint", "host", "io", "input", "reference", "acceptance", "scope")},
                 "implementation_source": source_reference("entrypoint"), "reference_source": source_reference("reference"),
                 "writable_files": attempt["writable_files"], "revision_scope": state["revision_scope"],
-                "read_specs": read_specs(attempt), "feedback": owner_for(state, attempt)["feedback"], "handoff": handoff,
+                "provided_documents": provided_documents,
+                "read_specs": [name for name in read_specs(attempt) if name not in provided_documents],
+                "feedback": owner_for(state, attempt)["feedback"], "handoff": handoff,
                 "required_conclusions": required_conclusions(attempt), "required_evidence": definition["evidence"],
                 "required_artifact_evidence": sorted(required_artifact_evidence(state, attempt, attempt["dependency_digests"],
                                                        resolution=source_context.get("design_resolution"))),
                 "node_entry": node_entry, "plan": plan,
                 "plan_receipt": str(plan_receipt) if plan_receipt else None, "node_evidence": node_evidence,
-                "reopening": state.get("reopening"),
+                "reopening": reopening,
                 "recovery_handoff": attempt.get("recovery_handoff"),
                 "imported_draft": state.get("imported_draft"),
                 "first_draft": first_draft,
@@ -223,6 +236,7 @@ provider_reopen_targets仅列当前已批准严格祖先中实际保存本地区
 {role_instructions}
 Runner唯一写运行状态。worker/reviewer不开子代理，不改kernel，不做GPU测试；有据的源低层缺陷不要求先修kernel，按共用方法保留事实与必要设计。
 按嵌入阶段页及本轮模式工作，只读列明的冻结来源/规则/执行工具、当前workspace、回执、已审产物、候选与旧稿线索；沿当前问题读取规范和页内方法。
+provided_documents列出的文档已在本次提示提供冻结全文，直接阅读无需再次打开；其余材料按read_specs读取。
 先定位当前问题需要的源码范围；不因文件较长而通读。有next_cursor表示所选范围尚未读完，需要续读该范围时保留起止行并用--cursor：
 {example}
 最后按output-schema仅返回schema_extract.proposal.v1 JSON，原样回传本次attempt_id nonce；缺失或陈旧nonce硬拒绝。summary由你填写本轮简短、非空的语义结论。identity、文件SHA-256、文件清单、实际差异由Runner从已登记调用与真实字节生成，不手填、不另写回执文件。

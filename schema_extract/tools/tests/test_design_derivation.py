@@ -1,6 +1,7 @@
 """Provider repair and reparenting preserve real raw drafts and independent approval."""
 
 from copy import deepcopy
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -99,6 +100,48 @@ class DerivationWorkflowTests(unittest.TestCase):
             "detail": "schema_docs/3.design.math_reshape.md requires the local thesis to agree with fixed scalar source.",
             "evidence": [0], "recovery_condition": "Provider worker checks the definition and an independent reviewer approves."}]
         return proposal
+
+    def test_p5_prompt_keeps_current_ancestors_and_full_design_source_chains(self):
+        f = self.f
+        invalidate_node(f.state["nodes"]["child"])
+        f.save()
+        current = self.prepare("child")
+        f.state["pending_rechecks"] = ["child", "sibling"]
+        for role in ("worker", "reviewer"):
+            with self.subTest(role=role):
+                attempt = {**current, "role": role, "writable_files": ["child.yaml"] if role == "worker" else []}
+                before = deepcopy((f.state, f.lock, attempt))
+                prompt = build_prompt(f.state, f.lock, attempt)
+                self.assertEqual((f.state, f.lock, attempt), before)
+                value = json.loads(prompt.split("<invocation>\n", 1)[1].split("\n</invocation>", 1)[0])
+                self.assertNotIn("plan", value)
+                self.assertNotIn("reopening", value)
+                self.assertEqual(value["node_entry"], next(entry for entry in f.state["plan"] if entry["id"] == "child"))
+                self.assertEqual([entry["id"] for entry in value["ancestor_entries"]], ["middle", "provider", "root"])
+                self.assertEqual(value["pending_rechecks"], ["child"])
+                self.assertEqual(value["dependency_digests"], attempt["dependency_digests"])
+                self.assertEqual(set(value["dependency_digests"]), {"root.yaml", "provider.yaml", "middle.yaml", "child.yaml"})
+                self.assertEqual(value["writable_files"], attempt["writable_files"])
+                graph = value["design_resolution"]["nodes"]
+                self.assertEqual(set(graph), {"root", "provider", "middle", "child"})
+                for region in DESIGN_REGIONS:
+                    self.assertEqual(graph["child"]["origins"][region],
+                                     {"provider": "provider", "chain": ["child", "middle", "provider"]})
+                    self.assertEqual(graph["middle"]["origins"][region],
+                                     {"provider": "provider", "chain": ["middle", "provider"]})
+                self.assertEqual(set(graph["child"]["source_manifest"]),
+                                 {"root.yaml", "child.yaml", "middle.yaml", "provider.yaml"})
+                self.assertIn("schema_extract/phases/03_root.md", value["read_specs"])
+                if role == "worker":
+                    self.assertEqual(set(value["prior_approvals"]), {"P4"})
+                    self.assertEqual(set(value["node_approvals"]), {"root", "provider", "middle"})
+                    self.assertEqual(set(value["reviewed_artifacts"]), {"root", "provider", "middle"})
+                    receipt = json.loads(Path(value["plan_receipt"]).read_text())
+                    self.assertEqual(value["node_evidence"], [receipt["source_evidence"][0]])
+                else:
+                    self.assertEqual(set(value["required_artifact_evidence"]), set(attempt["dependency_digests"]))
+                    for key in ("prior_approvals", "node_approvals", "reviewed_artifacts", "plan_receipt", "node_evidence"):
+                        self.assertNotIn(key, value)
 
     def test_provider_repair_fences_descendants_and_closes_only_after_new_approval(self):
         f = self.f
@@ -295,8 +338,9 @@ class DerivationWorkflowTests(unittest.TestCase):
             resolved = resolve_workspace(self.f.work, parser_root=self.rules)
             self.assertEqual(resolved.effective_identity("child"), original.effective_identity("child"))
         with patch("schema_extract.tools.runtime._executor", side_effect=lambda lock: lock):
-            old = {"capabilities": ["semantic_revision.v1"]}
-            new = {"capabilities": ["semantic_revision.v1", "design_region_derivation.v1"]}
+            rules = {"files": {"schema_extract/tools/runtime.py": "a" * 64}}
+            old = {"rules": rules, "capabilities": ["semantic_revision.v1"]}
+            new = {"rules": rules, "capabilities": ["semantic_revision.v1", "design_region_derivation.v1"]}
             _same_execution_semantics(old, old)
             _same_execution_semantics(new, new)
             with self.assertRaisesRegex(ExtractError, "require semantic revision"):
