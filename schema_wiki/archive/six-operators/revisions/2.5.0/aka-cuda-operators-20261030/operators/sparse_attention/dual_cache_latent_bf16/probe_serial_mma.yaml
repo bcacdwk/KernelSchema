@@ -1,0 +1,411 @@
+meta_data:
+  name: dual_cache_latent_bf16
+  describe: Joint sparse attention over prepared sliding-window and compressed shared key/value latents, with a per-head zero-value softmax sink.
+  source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/solution.py::Model.forward
+  version: 2
+  dispatch:
+    id: probe_serial_mma
+    parent: mma_direct
+    when: |
+      Let W be the actual workspace byte capacity after Model.forward's identity
+      cache or private scratch selection, and N be dsv4::nsm_cached(). Let P be
+      dsv4::make_plan(H,T,IndexWidth,W,0,0,N,true) in candidate/dsv4_kernel.cu,
+      including its compile-time fallback when tcgen05 is not built.
+      P.dual denotes probe-gated packing; P.gt is its candidate query grouping,
+      and P.alt_* is the unsplit mma alternative resolved with allow_tc=false.
+      Select exactly when the shipped automatic policy is active (force_cfg=0,
+      force_s=0, Model.fast is false, normal non-diagnostic build and unchanged
+      default extension switches), P.dual=1, dual_dispatch_hidden returns false
+      before submitting any probe or packed attention, the subsequent caller-stream
+      probe_begin returns true and submits a probe, and the actual probe_end result
+      R does not satisfy 0<R<=fp32(2.6). R is defined by probe_select below, including
+      partial or unavailable observations after bounded polling.
+      The whole batch then uses P.alt_cfg/alt_hb/alt_nb/alt_splits/alt_kc,
+      with gt=1, dual=0 and ws_bytes=0. These resolve to cfg8 in this scope.
+      For execution of an externally recorded graph, use the recorded host choice,
+      scalars and bindings; device reads use current tensor contents. Pure capture
+      records the two kernels and does not itself execute them or complete a probe.
+design:
+  math_reshape:
+    thesis: >-
+      Sample index overlap before running unsplit online attention. The rejected probe
+      adds index processing and eight published statistics; attention shares each
+      gathered latent across padded heads and QK/PV, rounds probabilities to BF16,
+      and normalizes directly into the output without split materialization.
+    rewrite:
+      - step: gather
+        name: Compact reserved slots and retain masked gather work
+        math: |
+          HB and KC are bound below. For token t use the Contract's request lookup
+          b(t) and visible length.
+          A(t)=min(max(visible,0),SW);
+          Klen(t)=A(t)+max(min(sparse_topk_lens[t],IndexWidth)-SW,0).
+          C(t)=ceil_div(Klen(t),KC), with Klen(t)>=1 in the Contract domain.
+          For chunk c and u in [0,KC), let k=c*KC+u and
+          j=k if k<A(t), otherwise SW+k-A(t).
+          id=sparse_indices[t,j] if k<Klen(t), otherwise -1;
+          valid(c)[u]=uint8(1 if id>=0 else 0).
+          Gather(c)[u,:] is row max(id,0) of swa_kv_cache if k<A(t),
+          otherwise compressed_kv_cache. Invalid and padded positions still gather row zero.
+          For r in [0,HB), Q[r,:]=query[t,r,:] if r<H, otherwise bf16(0).
+          a1=fp32(bmm1_scale); a2=fp32(bmm2_scale); L2=fp32(1.4426950408889634);
+          neg=fp32(-3.0e38); scale=a1*L2.
+        symbol:
+          HB: {meaning: Heads per attention worktile., binding: 'bind:design.work_schedule::HB'}
+          KC: {meaning: Slots per attention chunk., binding: 'bind:design.work_schedule::KC'}
+          Gather: {meaning: BF16 cache rows including row-zero substitutes., shape: [slot: KC, latent: D], dtype: bf16}
+          valid: {meaning: Validity of gathered slots before score masking., shape: [slot: KC], dtype: uint8}
+          Q: {meaning: Query head block with zero padded heads., shape: [head: HB, latent: D], dtype: bf16}
+      - step: probe_count
+        name: Sample the encoded key union and repeated memberships
+        math: |
+          GT is bound below; NG=ceil_div(T,GT). For sample s in [0,8),
+          g(s)=s if NG<=8, otherwise floor(s*NG/8), and t0(s)=g(s)*GT.
+          For a in [0,GT), t=t0(s)+a; n_a=Klen(t) and request_a=b(t) when t<T,
+          otherwise n_a=0 and request_a=-2. Let Items(s)=sum_a n_a.
+          Usable(s) means s<NG, all request_a equal, and 0<Items(s)<=2560.
+          If not Usable(s), ProbeRatio[s]=fp32(-1) without processing indices.
+          Otherwise enumerate occurrences x=(a,k), a in [0,GT), k in [0,n_a).
+          Use gather's compact-slot mapping to read id; discard id<0 from the set build,
+          but retain its position in Items(s). For each retained occurrence define
+          e(x)=uint32(id) bitwise-OR (0 for SWA, 16777216 for compressed).
+          For each distinct encoded key e, let Creator(e) be its first entry-creating
+          occurrence; for each (e,a), let First(e,a) be its first membership-marking
+          occurrence in the actual concurrent update order.
+          Count(s)=sum_{retained x} (1 if x=Creator(e(x)) else
+                         (0 if x=First(e(x),a(x)) else 1)).
+          The entry-creation and membership-marking orders need not agree.
+          ProbeRatio[s]=fp32(fp32(Count(s))*fp32(GT)/fp32(Items(s))).
+          All eight ProbeRatio elements are eventually written, including unusable samples.
+        symbol:
+          GT: {meaning: Candidate packing group size sampled before rejecting packing., binding: 'bind:design.work_schedule::GT'}
+          Count: {meaning: Actual integer numerator accumulated by one sampled group., shape: [], dtype: int32}
+          ProbeRatio: {meaning: Final per-sample statistics consumed by host plan selection., shape: [sample: 8], dtype: fp32, retention: 'keep_value invocation'}
+        arithmetic:
+          approx: 'The device quotient uses the --use_fast_math build; unknown: no source-provided error bound.'
+      - step: probe_select
+        name: Select from the actually observed positive statistics
+        math: |
+          During eager host selection or external graph recording, set Gate[s]=fp32(-2)
+          for s in [0,8) before submitting or recording the probe. The executed probe
+          writes ProbeRatio[s] to Gate[s]. After bounded polling, let v_s
+          be the actual FP32 value read for slot s during the final ascending scan.
+          These reads need not observe every completed probe result or one common snapshot.
+          Starting Sum=fp64(0) and n=0, for s=0..7 add fp64(v_s) to Sum and
+          increment n only when v_s>0. R=fp32(Sum/fp64(n)) if n>0, otherwise fp32(-1).
+          This node executes attention for every token when not (0<R<=fp32(2.6)).
+          The eight device writes still occur even if none contributed to R.
+          Execution of a recorded graph uses its recorded R and attention choice;
+          it repeats the device writes but not host reset, polling or selection.
+        symbol:
+          Gate: {meaning: Reused mapped statistics storage observed by host selection., shape: [sample: 8], dtype: fp32, retention: 'keep_value invocation'}
+          R: {meaning: Actual positive-value mean used once to choose the full-batch plan., shape: [], dtype: fp32}
+      - step: online
+        name: FP32 recurrence with BF16 probability operands
+        math: |
+          Define E2(x) as the compiled fast exp2f(x), with E2(-inf)=0.
+          Independently for each token t, initialize m(-1)[r]=sink2[r];
+          sink2[r]=sinks[r]*L2 for r<H, otherwise neg for a padded head.
+          Initialize l(-1)[r]=0 and Acc(-1)[r,:]=0.
+          At c=0..C(t)-1:
+            Z=mm32(Q,Gather(c)^T), accumulating D as 32 successive 16-wide products.
+            Scores(c)[r,u]=Z[r,u]*scale, replaced by -inf where valid(c)[u]=0.
+            zmax=maxnum(m(c-1)[r],maxnum_u Scores(c)[r,u]);
+            m(c)[r]=zmax if zmax>neg*0.5, otherwise neg.
+            alpha[r]=E2(m(c-1)[r]-m(c)[r]);
+            E[r,u]=E2(Scores(c)[r,u]-m(c)[r]); Prob(c)[r,u]=bf16(E[r,u]).
+          maxnum is FP32 fmaxf (a single NaN loses to the numeric operand).
+          Sum E in KC/U consecutive groups, with U bound below. For each group v,
+          form four sums GroupSum[a], a=0..3, each starting at zero and successively adding
+          E[r,v*U+8*n+2*a]+E[r,v*U+8*n+2*a+1] for n=0..U/8-1.
+          Starting rs at zero, add ((GroupSum[0]+GroupSum[1])+(GroupSum[2]+GroupSum[3])) in ascending v order.
+          l(c)[r]=l(c-1)[r]*alpha[r]+rs;
+          Acc(c)=mma32(Prob(c),Gather(c),alpha[:,None] ⊙ Acc(c-1)).
+          The PV contraction advances through KC/16 consecutive 16-wide products.
+        symbol:
+          U: {meaning: Key group width used by the score and probability reductions., binding: 'bind:design.tile_pipeline::U'}
+          Scores: {meaning: Scaled and masked FP32 scores., shape: [head: HB, slot: KC], dtype: fp32}
+          alpha: {meaning: Row rescaling factors for normalizers and value accumulators., shape: [head: HB], dtype: fp32}
+          sink2: {meaning: Base-2 sink logits with the defined padded-head sentinel., shape: [head: HB], dtype: fp32}
+          m: {meaning: Running base-2 row maximum., shape: [head: HB], dtype: fp32, retention: 'carry_forward (t); c=-1..C(t)-1'}
+          l: {meaning: Running sum of unrounded exponentials excluding the sink., shape: [head: HB], dtype: fp32, retention: 'carry_forward (t); c=-1..C(t)-1'}
+          Acc: {meaning: Unnormalized weighted value accumulator., shape: [head: HB, latent: D], dtype: fp32, retention: 'carry_forward (t); c=-1..C(t)-1'}
+          Prob: {meaning: Rounded probabilities used only by PV., shape: [head: HB, slot: KC], dtype: bf16}
+        arithmetic:
+          approx: 'E2 and FP32 division use the --use_fast_math build; unknown: no source-provided error bound. The finite maximum sentinel and clamp have no additional input-magnitude guarantee.'
+          accumulate: 'Scalar multiply/add expressions may contract under fast-math compilation; no bitwise equivalence to the FP32 reference is asserted.'
+      - step: finalize
+        name: Add the sink and normalize directly to output
+        math: |
+          For r in [0,HB), let last=C(t)-1,
+          z[r]=l(last)[r]+E2(sink2[r]-m(last)[r]),
+          inv[r]=a2/z[r] if r<H and z[r]>0, otherwise 0.
+          Result[r,d]=bf16(Acc(last)[r,d]*inv[r]) for d in [0,D), including padded heads.
+          For real heads only, overwrite out[t,r,d]=Result[r,d].
+          Evaluate these formulas even when J(t) is empty.
+          E2, division and contracted scalar arithmetic follow online's arithmetic exception.
+        symbol:
+          Result: {meaning: Normalized BF16 output including locally computed padded heads., shape: [head: HB, latent: D], dtype: bf16}
+    ledger:
+      baseline: Direct FP32 evaluation of the Contract over valid slots, materializing full FP32 logits and probabilities before PV, without a probe. Counts include the padded work explicitly evaluated by gather and online.
+      footprint:
+        - {item: Score and probability materialization, change: '8*H*count(J(t)) bytes per token -> no full-row materialization; each active attention worktile holds HB*KC FP32 scores, HB*KC BF16 probabilities and 4*HB*(D+2) bytes of recurrence state.', by: [online]}
+      matmul:
+        - {item: Padded contractions, change: '2*H*count(J(t))*D -> 2*HB*C(t)*KC*D MACs per token, including invalid slots and padded heads.', by: [gather, online]}
+      vector:
+        - {item: Rejected overlap probe, change: 'Add sum_s Items(s) index positions over usable samples, bounded by 8*2560 per execution, plus eight ratio writes. Host selection adds up to 2000000 scans of at most eight flags during eager submission or graph recording, not graph replay; no attention work is removed.', by: [probe_count, probe_select]}
+      error:
+        - {item: Numerical changes, change: 'HB*KC probabilities per chunk narrow FP32 -> BF16 for PV while the denominator retains FP32; base-2 fast exponentials, sentinel clamp, reduction grouping and FP32 scale casts add unbounded-in-source differences.', by: [online, finalize]}
+  work_schedule:
+    thesis: >-
+      Eight CTAs sample candidate query groups, then host polling chooses one full-batch
+      attention launch on the same caller stream. Each attention CTA owns one token;
+      probe latency precedes all attention work in this path.
+    flow:
+      launch:
+        - {phase: [probe]}
+        - {phase: [attention], start_after: probe.kernel_done}
+    phase:
+      probe:
+        describe: Compute and publish one overlap statistic per sampled group for host plan selection.
+        decomposition:
+          strategy: |
+            GT=P.gt is 4 or 8 in this node; pack_gt starts at 64/H and halves
+            until GT*IndexWidth<=2560 and ceil_div(T,GT)>=N. The threshold eliminates
+            GT=2 from probe-gated plans. This implies H in {8,16} and T>N.
+            Worktile s uses probe_count's sampled GT-token group. Every one of the
+            eight submitted worktiles writes a ratio; absent, partial or cross-request
+            groups publish -1. Index slots are visited only for Usable(s).
+            During eager submission or external graph recording, host initializes Gate,
+            then after submitting or recording the probe polls at most
+            2000000 times. Each ascending scan stops at its first -2; polling ends
+            when a scan finds none across all eight volatile reads.
+            It performs probe_select's final scan and chooses the MMA alternative.
+            Host polling does not establish device completion and may end with pending slots.
+            Graph replay executes both recorded kernels without repeating host selection.
+            Gate is process-cached mapped host storage; only its first eight FP32 words
+            are used. ProbeRatio is written directly there, with no extra device copy.
+            The source permits an outstanding probe to race a later invocation's reset.
+            Attention reads none of these statistics; there is no device data handoff.
+          partition:
+            sample: {size: 8, tile: 1}
+          worktile:
+            invariant:
+              sparse_indices: {shape: [token: GT, slot: IndexWidth], dtype: int32}
+              sparse_topk_lens: {shape: [token: GT], dtype: int32}
+              cum_seq_lens_q: {shape: [boundary: 'B+1'], dtype: int32}
+              seq_lens: {shape: [request: B], dtype: int32}
+          target:
+            single_tile:
+              ProbeRatio: {shape: [], dtype: fp32}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: 8
+        schedule:
+          worktile_order: [{by: sample, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      attention:
+        describe: Compute all heads and output columns for one token through an unsplit online recurrence.
+        decomposition:
+          strategy: |
+            HB=16 and KC=128: P.alt_cfg=8, alt_hb=16, alt_nb=1, alt_splits=1,
+            alt_kc=128. T>N prevents the narrow-ring and DQ rewrites of this MMA plan.
+            There is one head block with base head zero; r is the actual head for r<H.
+            Worktile t traverses c=0..C(t)-1, computes padded HB by KC scores and
+            accumulates HB by D values. Read sinks[0:H]; padded heads use online's sentinel.
+            Every real output element has one producer. Neither kernel uses workspace scratch.
+          partition:
+            token: {size: T, tile: 1}
+          worktile:
+            invariant:
+              Q: {shape: [head: HB, latent: D], dtype: bf16}
+              sparse_indices: {shape: [slot: IndexWidth], dtype: int32}
+              sparse_topk_lens: {shape: [], dtype: int32}
+              cum_seq_lens_q: {shape: [boundary: 'B+1'], dtype: int32}
+              seq_lens: {shape: [request: B], dtype: int32}
+              sinks: {shape: [head: HB], dtype: fp32}
+            iteration:
+              Gather: {shape: [slot: KC, latent: D], dtype: bf16, direction: ascending}
+          target:
+            single_tile:
+              out: {shape: [head: HB, latent: D], dtype: bf16}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: T
+        schedule:
+          strategy: Each block index is its token index; each CTA traverses the whole selected key range independently.
+          worktile_order: [{by: token, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+  tile_pipeline:
+    thesis: >-
+      Probe workers overlap a one-item index prefetch with shared hash updates and
+      publish once. Attention workers cache Q, then serialize each KV gather with
+      QK/softmax/PV; CTA publication and reader-retirement barriers protect single-slot reuse.
+    phase:
+      probe:
+        resource:
+          Hash: {space: SMEM, member_slot_shape: [entry: 4096], dtype: uint64, slot_count: 1}
+          Membership: {space: SMEM, member_slot_shape: [word: 1024], dtype: uint32, slot_count: 1}
+          GroupMeta: {space: SMEM, member_slot_shape: [element: 24], dtype: int32, slot_count: 1}
+          Count: {space: SMEM, member_slot_shape: [], dtype: int32, slot_count: 1}
+          LocalCount: {space: register, member_slot_shape: [element: 1024], dtype: int32, slot_count: 1}
+          NextIndex: {space: register, member_slot_shape: [element: 1024], dtype: int32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: 'warp[0:32]'
+              verb:
+                inspect: |
+                  Work is sample s. One lane per candidate token resolves n_a, its SWA
+                  count and request id into GroupMeta; a CTA barrier publishes these.
+                  All lanes determine Usable(s). An absent sample needs no metadata reads.
+                build: |
+                  For Usable(s), zero Hash, Membership and Count, then barrier.
+                  Hash holds a nonzero encoding of e+1 per occupied slot, zero for empty; insertion
+                  publishes the complete key with an atomic compare-and-swap.
+                  Collisions advance by linear probing until an empty or matching slot.
+                  Each slot has eight membership bits, four slots per Membership word.
+                  Enumerate occurrences in token-major compact-slot order, divided into
+                  1024 strided lane sequences. A lane loads its first index, then in each
+                  iteration retains the current index and issues its next index into
+                  NextIndex before processing the current one. Consuming a prefetched
+                  index waits for that load result; the next load may overlap hash work.
+                  Negative IDs do no hash work. Each insertion adds one to LocalCount
+                  and sets its query bit; an existing key adds one only if the atomic
+                  bit-set returns that bit already set. Insertion does not inspect the
+                  previous membership bit and does not block other updaters until it is set.
+                  Initialize each lane's LocalCount to zero, accumulate across its sequence,
+                  then flush a nonzero count once to Count with an atomic add.
+                  A CTA barrier joins all flushes before Count is used for ProbeRatio.
+                  Hash and Membership have no consumers after this build; no next index
+                  is loaded beyond the lane's last occurrence. For an unusable sample,
+                  build completes without accessing these resources.
+                publish: |
+                  One lane writes the final ProbeRatio[s] directly to Gate[s], including
+                  -1 for unusable groups. No provisional ratio is published. The write may
+                  reach host polling before probe.kernel_done; host selection does not
+                  wait on this action's event. The kernel completion still precedes attention.
+                  Each CTA handles one sample and has no state carried to another call.
+            pipe:
+              steady: ['inspect:Work', 'build:Work', 'publish:ProbeRatio']
+      attention:
+        domain:
+          c: [0, 'C(t)']
+        resource:
+          KVStage:
+            space: SMEM
+            member_slot_shape: [byte: '2*KC*D']
+            dtype: uint8
+            slot_count: 1
+            view:
+              'Gather(c)': {dtype: bf16}
+              OutputStage: {part: {byte: [0, '2*HB*D']}, dtype: bf16}
+          Q_shared: {space: SMEM, member_slot_shape: [head: HB, latent: D], dtype: bf16, slot_count: 1}
+          Q_cached: {space: register, member_slot_shape: [copy: 8, head: HB, latent: D], dtype: bf16, slot_count: 1}
+          Scores: {space: register, member_slot_shape: [head: HB, slot: KC], dtype: fp32, slot_count: 1}
+          Prob: {space: SMEM, member_slot_shape: [head: HB, slot: KC], dtype: bf16, slot_count: 1}
+          Acc: {space: register, member_slot_shape: [head: HB, latent: D], dtype: fp32, slot_count: 1}
+          control:
+            space: SMEM
+            member_slot_shape: [element: '20*HB']
+            dtype: fp32
+            slot_count: 1
+            view:
+              m: {part: {element: [0, HB]}}
+              l: {part: {element: [HB, '2*HB']}}
+              alpha: {part: {element: ['2*HB', '3*HB']}}
+              sink2: {part: {element: ['3*HB', '4*HB']}}
+              RowMax: {part: {element: ['4*HB', '12*HB']}}
+              RowSum: {part: {element: ['12*HB', '20*HB']}}
+              RequestBounds: {part: {element: ['4*HB', '12*HB']}, dtype: int32}
+              RequestLengths: {part: {element: ['12*HB', '20*HB']}, dtype: int32}
+          valid: {space: SMEM, member_slot_shape: [slot: KC], dtype: uint8, slot_count: 1}
+          IndexPrefetch: {space: register, member_slot_shape: [element: 1280], dtype: int32, slot_count: 1}
+          IndexShared: {space: SMEM, member_slot_shape: [element: 1152], dtype: int32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: 'warp[0:8]'
+              verb:
+                metadata: |
+                  Work is token t. Issue the entire index row into IndexPrefetch before
+                  staging request boundaries, lengths and topk in the future RowMax/RowSum
+                  slabs. A CTA barrier publishes metadata; every lane then resolves the
+                  request and C(t). B<=32 and IndexWidth<=640 here, so both caching paths
+                  are active. Index loads may remain in flight at metadata completion.
+                prepare: |
+                  Stage Q, including zero padded heads, into Q_shared and commit one copy
+                  group. Initialize m, l and sink2; publish IndexPrefetch into IndexShared,
+                  each store depending on its own load result. Wait for Q and barrier to
+                  publish Q, indices and control, also ending the metadata slab reads.
+                  Now enqueue chunk zero into KVStage, recording valid and committing
+                  once. Cache all 32 query slices in Q_cached, one copy per key group,
+                  while that gather can remain in flight. Zero Acc.
+                  Enqueueing resolves slot IDs in batches before issuing 16-byte latent
+                  copies; invalid and padded slots still read row zero of their pool.
+                  Prepare completes after Q caching and gather issuance, before KV readiness.
+                await: |
+                  Enqueue Gather(c) unless c=0, whose copy group was issued in prepare.
+                  Wait for all copy groups and use a CTA barrier to publish Gather(c)
+                  and valid(c). Later chunks reuse storage released by the previous retire.
+                score: |
+                  U=16. Each of eight warps forms HB by U scores from Q_cached and its
+                  distinct key group in Gather(c), using 32 synchronous 16-wide QK products.
+                  Scale, mask and publish per-warp row maxima into RowMax. Barrier before
+                  row-owner lanes fold groups and update m and alpha; barrier again to
+                  publish the new control values to every warp.
+                softmax: |
+                  Compute online's E, retain unrounded sums and store BF16 Prob.
+                  Four-lane reductions publish RowSum; barrier makes Prob and RowSum visible.
+                  Row-owner lanes update l; another CTA barrier publishes it. Discard Scores.
+                value: |
+                  Rescale Acc, then read Prob and Gather(c) for synchronous PV.
+                  Each warp owns every HB row and D/8 distinct output columns.
+                  Acc stays in registers across chunks; all probability and KV reads
+                  by this warp finish before it reaches retire.
+                retire: |
+                  A CTA barrier joins all PV readers before KVStage, valid, Prob and control
+                  may be overwritten. Q_cached and IndexShared remain unchanged.
+                finish: |
+                  The last retire ends all reads of Gather; all copy groups have been waited.
+                  Form finalize's inverse, scale Acc and convert to BF16 Result, including
+                  padded heads. Reuse the KVStage prefix as OutputStage and barrier before
+                  cooperatively writing all columns of real heads to out.
+                  Stores may remain pending when individual lanes finish; attention.kernel_done
+                  provides output visibility. There are no scratch statistics, and the CTA
+                  takes no second worktile or numerical state into another invocation.
+            pipe:
+              prologue: ['metadata:Work', 'prepare:Work']
+              steady:
+                - repeat: c
+                  steady: ['await:Gather(c)', 'score:Scores(c)', 'softmax:Prob(c)', 'value:Acc(c)', 'retire:Gather(c)']
+              epilogue: ['finish:Work']
+realization:
+  require:
+    - item: design.tile_pipeline::attention.Main
+      choice: >-
+        Bind copies to cp.async.cg.shared.global 16-byte transfers, commit_group,
+        wait_group 0 and CTA __syncthreads at the stated publication/reuse boundaries;
+        use mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 for QK/PV.
+      reason: >-
+        Copy completion and CTA visibility make gathered operands readable; synchronous
+        matrix consumption lets the retirement barrier release the single KV slot.
+    - item: design.work_schedule::flow
+      choice: |
+        Model.forward caches workspace selection by argument identity; a non-CUDA or
+        smaller-than-32-MiB buffer selects cached private scratch. Initial P.ws_bytes=0,
+        so no larger extension allocation is needed.
+        Gate is the first eight words of process-cached cudaHostAllocMapped storage,
+        with a cudaHostGetDevicePointer device alias. Reset uses volatile host stores,
+        the readiness loop uses volatile host loads, and the final scan uses ordinary
+        float loads. There is no cudaStreamSynchronize in this serial probe path.
+        Submit both kernels on the current CUDA stream. Hidden setup may have attempted
+        a fork event or side-stream wait before returning false, but submitted no side
+        computation in this node. The internal graph cache requires initial P.dual=0;
+        this node dispatches directly even after clearing the chosen plan's dual flag.
+      reason: >-
+        The workspace binding feeds selection; mapped publication permits bounded host
+        polling without a completion wait. Caller-stream ordering supplies the probe-to-
+        attention dependency independently of which statistics host observed.

@@ -1,0 +1,575 @@
+meta_data:
+  name: dual_cache_latent_bf16
+  describe: Joint sparse attention over prepared sliding-window and compressed shared key/value latents, with a per-head zero-value softmax sink.
+  source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/solution.py::Model.forward
+  version: 13
+  dispatch:
+    when: |
+      Let W be the byte capacity of the actual workspace passed by Model.forward
+      to the extension, including its workspace identity cache or private scratch
+      selection. Let N be the actual value returned by dsv4::nsm_cached().
+      Let P be dsv4::make_plan(H, T, IndexWidth, W, 0, 0, N, true) in the
+      fixed candidate/dsv4_kernel.cu, including its compile-time fallback when
+      tcgen05 is not built. P is the initial plan, before overlap probing,
+      graph replay, or token-range launches.
+      P.dual denotes probe-gated packing, P.cfg selects the kernel configuration,
+      and P.splits is the number of independent KV splits.
+      Select exactly when the shipped automatic policy is active (force_cfg = 0,
+      force_s = 0, Model.fast is false, normal non-diagnostic build and unchanged
+      default extension switches), P.dual = 0, P.cfg != 90 (TC_CFG_QIS2), and
+      P.splits > 1. This is mma.sync attention followed by a separate FP32 combine.
+      Direct execution and execution of the corresponding recorded graph use
+      this same selection; pure capture only records the plan. For replay, use
+      the recorded plan and bindings, with tensor contents read at execution.
+contract:
+  algorithm_requirement:
+    constant:
+      D: {value: 512, meaning: Shared key and value latent dimension.}
+      SW: {value: 128, meaning: Reserved sliding-window slots per query.}
+    input:
+      query: {meaning: Query latents for concatenated ragged requests., shape: [token: T, head: H, latent: D], dtype: bf16}
+      swa_kv_cache: {meaning: Prepared sliding-window shared key/value pool., shape: [page: SwaPages, entry: SwaPageSize, latent: D], dtype: bf16}
+      workspace_buffer: {meaning: Writable scratch with no logical output value or required final contents., shape: [byte: WorkspaceSize], dtype: uint8}
+      sparse_indices:
+        meaning: Physical row IDs in two separate pools; the first SW columns address SWA and the remaining columns address the compressed pool.
+        shape: [token: T, slot: IndexWidth]
+        dtype: int32
+        range: Consumed IDs are -1 (invalid) or nonnegative in-bounds rows of the corresponding flattened pool; unconsumed slots are ignored.
+      compressed_kv_cache: {meaning: Prepared compressed shared key/value pool; supplied even in the single-pool case., shape: [page: CompPages, entry: CompPageSize, latent: D], dtype: bf16}
+      sparse_topk_lens: {meaning: "Per-query exclusive end of the compressed slot interval, including the SW reserved slots.", shape: [token: T], dtype: int32, range: "SW <= sparse_topk_lens[t] <= IndexWidth"}
+      seq_lens: {meaning: "Final context lengths of the requests, including their current query tokens.", shape: [request: B], dtype: int32, range: "1 <= seq_lens[b] <= 1048576"}
+      output_buffer:
+        meaning: Caller argument out; required destination whose previous contents are ignored and whose object identity is preserved on return.
+        shape: [token: T, head: H, latent: D]
+        dtype: bf16
+        range: Any BF16 bit pattern, including NaN and infinities.
+      bmm1_scale: {meaning: Python scalar multiplier on query-key dot products., shape: [], dtype: python_float, range: "bmm1_scale = D^(-0.5)"}
+      bmm2_scale: {meaning: Python scalar multiplier on the normalized weighted value sum., shape: [], dtype: python_float, range: [1.0, 1.0]}
+      sinks:
+        meaning: Per-head extra softmax logit with zero value, shared by all queries.
+        shape: [head: H]
+        dtype: fp32
+      kv_layout: {meaning: Cache layout selector for this callable., shape: [], dtype: python_str, range: "Only 'HND'.", default: HND}
+      cum_seq_lens_q: {meaning: Prefix offsets delimiting each request in the query token axis., shape: [boundary: "B+1"], dtype: int32, range: "Strictly increasing, starting at 0 and ending at T."}
+      max_q_len: {meaning: Maximum query length across requests., shape: [], dtype: python_int, range: "1 <= max_q_len <= 4096"}
+      enable_pdl: {meaning: "Unspecified launch preference in the selected caller, with no mathematical effect.", shape: [], dtype: python_none, default: None}
+      swa_topk_lens: {meaning: Disabled separate SWA length override., shape: [], dtype: python_none, default: None}
+      extra_sparse_indices: {meaning: Disabled extra sparse index pool., shape: [], dtype: python_none, default: None}
+      extra_sparse_topk_lens: {meaning: Disabled extra sparse length override., shape: [], dtype: python_none, default: None}
+    output:
+      out: {meaning: Attention result overwriting every element of output_buffer; the returned tensor is that same object., shape: [token: T, head: H, latent: D], dtype: bf16}
+    compute:
+      - name: Domain and prepared cache interface
+        math: |
+          1 <= B <= 32; H in {8,16,32,64,128}; 1 <= T <= 16384.
+          For 0 <= b < B, let q_b = cum_seq_lens_q[b+1] - cum_seq_lens_q[b].
+          1 <= q_b <= min(4096, seq_lens[b]); sum_b q_b = T;
+          sum_b seq_lens[b] <= 1048576; max_q_len = max_b q_b.
+          Both caches are contiguous HND tensors with one shared latent KV head,
+          physically stored as [page, entry, latent]. Flatten the first two axes
+          to address row i as [floor(i/page_size), i mod page_size, :], where
+          page_size is SwaPageSize for SWA and CompPageSize for the compressed pool.
+          Query, output and index/length tensors in the supplied caller are contiguous;
+          tensor arguments reside on the same CUDA device. Physical page placement
+          may be contiguous or scattered, independently of logical selection.
+
+          A prepared call has a caller-side compression ratio r in {0,1,2,4,128}
+          and sparse selection budget k in {512,1024}; these are not forward arguments.
+          SwaPageSize in {128,256}; SwaPageSize is divisible by max(1,r);
+          CompPageSize = SwaPageSize / max(1,r).
+          If r = 0, compressed_kv_cache aliases swa_kv_cache and IndexWidth = SW.
+          If r in {1,2,4}, IndexWidth = SW + k.
+          If r = 128, IndexWidth = SW + max(SW, pow2ceil(max(1,floor(max_b(seq_lens[b])/r)))),
+          where pow2ceil(x) is the smallest power of two at least x.
+          Thus SW <= IndexWidth <= 8320 and IndexWidth is divisible by 4.
+          The first SW slots encode the causal sliding window; compressed slots
+          encode an already selected causal subset (all compressed positions for r=128).
+          Score-related, local, strided, shared-prefix and random selections are supported;
+          this core consumes the supplied IDs without reranking or reconstructing history.
+          RoPE, selection, cache publication and output projection are outside this task.
+
+          All numeric data inputs are finite; the old output_buffer contents are unrestricted.
+          The valid task domain requires bmm1_scale = D^(-0.5) and bmm2_scale = 1.0;
+          D^(-0.5) denotes the Python result of D ** (-0.5).
+          Both scales and sinks must be explicitly supplied; sinks cannot be None.
+          Scales are Python floats, not tensor scales. None denotes Python None.
+          The supplied constructor uses a NaN-filled output_buffer and
+          WorkspaceSize = 134217728 zero-initialized bytes.
+          The bound caller requires output_buffer even though the reference also
+          supports allocating an output.
+      - name: Visible selected latents
+        math: |
+          Independently for each token t, find b with
+          cum_seq_lens_q[b] <= t < cum_seq_lens_q[b+1].
+          Let visible = seq_lens[b] - (cum_seq_lens_q[b+1] - cum_seq_lens_q[b])
+                        + t - cum_seq_lens_q[b] + 1.
+          J(t) contains the slot indices j satisfying sparse_indices[t,j] >= 0 and
+          either 0 <= j < min(visible, SW) or SW <= j < sparse_topk_lens[t].
+          In particular, unused SWA slots before column SW do not shift the start
+          of the compressed segment; -1 invalidates a slot independently of lengths.
+          For j in J(t), V[t,j,:] is the row sparse_indices[t,j] of swa_kv_cache
+          when j < SW, otherwise the row of compressed_kv_cache. Set V[t,j,:] = 0
+          for other slots. Each slot contributes independently: repeated IDs retain
+          their multiplicity, and SWA/compressed states are never deduplicated by
+          logical token position. The same row supplies both K and V for every head.
+        symbol:
+          J: {meaning: Function giving the valid selected slot set for a query token., shape: not_applicable, dtype: not_applicable}
+          V: {meaning: "Selected shared key/value latents indexed by query and physical slot, zero outside the valid slot set.", shape: [token: T, slot: IndexWidth, latent: D], dtype: fp32}
+      - name: Joint softmax and output
+        math: |
+          Token t and head h are independent, with 0 <= t < T and 0 <= h < H.
+          Reference dot products, exponentials, reductions and normalization use FP32
+          tensors. Arithmetic and the final BF16 conversion are unclamped;
+          overflow and invalid operations may produce infinities or NaNs.
+          If J(t) is empty, out[t,h,d] = bf16(0) for all 0 <= d < D,
+          without evaluating a softmax.
+          Otherwise, for j in J(t),
+            L[t,h,j] = bmm1_scale * sum_{d=0}^{D-1} query[t,h,d] * V[t,j,d].
+          Let m = max(max_{j in J(t)} L[t,h,j], sinks[h]).
+          Let p_j = exp(L[t,h,j] - m) for j in J(t), and
+            z = sum_{j in J(t)} p_j + exp(sinks[h]-m).
+          For 0 <= d < D,
+            out[t,h,d] = bf16((sum_{j in J(t)} p_j * V[t,j,d]) * (bmm2_scale / z)).
+          There is one denominator over both caches. A sink contributes no value term.
+          L is used only on J(t); its other slots are defined as -inf.
+          Only output_buffer and workspace_buffer may be written.
+          The entire output is overwritten on every call; all other inputs and their
+          storage are preserved. Scratch contents are not returned or compared.
+        symbol:
+          L: {meaning: "Scaled FP32 attention logits, with inactive slots masked by negative infinity.", shape: [token: T, head: H, slot: IndexWidth], dtype: fp32}
+    golden_reference:
+      source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/problem/reference.py::Model.forward
+      tolerance:
+        out: >-
+          Source record for out compared with Model.forward: metadata.json declares
+          default atol=0.01, rtol=0.05 and max_mismatch_fraction=0.0.
+          CERTIFIED_BEST.json states that comparator/tolerances are unchanged but
+          provides no comparator definition. The formula, relative-error basis,
+          comparator arithmetic precision and NaN/Inf handling are unspecified.
+          input.py declares out as the observable writeback; external comparator
+          routing between that writeback and the return value is not provided.
+          No relative_to value is inferred and the schema's default atol/rtol
+          interpretation is not adopted. The returned tensor must be the supplied
+          output_buffer object; return and writeback denote the same BF16 result,
+          with input storage preserved.
+  hardware_specification:
+    device: null
+    arch: null
+    execution: {Unit: null}
+    feature: {Mechanism: null}
+    stack: {language: null, toolchain: null}
+    wiki:
+      hardware: null
+      programming: {language: null}
+      microbench: null
+      sota: {kernel: null, schema: null}
+      profile: null
+design:
+  math_reshape:
+    thesis: >-
+      Stream compacted SWA/compressed slot chunks through an online base-2 softmax,
+      sharing each gathered latent across heads and between QK and PV. BF16 probabilities
+      enable the second matrix product; KV splits trade shorter recurrences for
+      FP32 partial storage and a separate merge, while output-column partitions repeat QK.
+    rewrite:
+      - step: gather
+        name: Compact reserved slots and retain masked gather work
+        math: |
+          HB, KC, S, DQ and U are bound below; NB = ceil_div(H,HB), Hp = NB*HB.
+          For token t use the Contract's request lookup and visible length.
+          A(t) = min(max(visible,0),SW); Klen(t) = A(t) + max(min(sparse_topk_lens[t],IndexWidth)-SW,0).
+          C(t) = ceil_div(Klen(t),KC). For split s in [0,S),
+          c0(t,s) = s*floor(C(t)/S) + min(s,C(t) mod S),
+          c1(t,s) = c0(t,s) + floor(C(t)/S) + (1 if s < C(t) mod S else 0).
+          For chunk c and u in [0,KC), let k=c*KC+u and j=k if k<A(t), else SW+k-A(t).
+          id = sparse_indices[t,j] if k<Klen(t), otherwise -1; valid(c)[u] = uint8(1 if id>=0 else 0).
+          Gather(c)[u,:] is row max(id,0) of swa_kv_cache if k<A(t), otherwise compressed_kv_cache.
+          Invalid and padded positions therefore still gather row zero, not a zero latent.
+          For head block hb and r in [0,HB), Q[r,:]=query[t,hb*HB+r,:] for hb*HB+r<H,
+          otherwise Q[r,:]=bf16(0). Both matrix products include these padded head rows.
+          a1=fp32(bmm1_scale); a2=fp32(bmm2_scale); L2=fp32(1.4426950408889634);
+          neg=fp32(-3.0e38); scale=a1*L2.
+        symbol:
+          HB: {meaning: Heads per attention worktile., binding: 'bind:design.work_schedule::HB'}
+          KC: {meaning: Slots per local chunk., binding: 'bind:design.work_schedule::KC'}
+          S: {meaning: Number of independent KV splits., binding: 'bind:design.work_schedule::S'}
+          DQ: {meaning: Independent output-column partitions., binding: 'bind:design.work_schedule::DQ'}
+          U: {meaning: Contiguous key group width used by the score and probability reductions., binding: 'bind:design.tile_pipeline::U'}
+          Gather: {meaning: Actual BF16 cache rows including row-zero substitutes., shape: [slot: KC, latent: D], dtype: bf16}
+          valid: {meaning: Per-chunk validity of gathered slots before score masking., shape: [slot: KC], dtype: uint8}
+          Q: {meaning: Query head block with zero padded heads., shape: [head: HB, latent: D], dtype: bf16}
+      - step: online
+        name: FP32 recurrence with BF16 probability operands
+        math: |
+          Define E2(x) as the compiled fast exp2f(x), with E2(-inf)=0.
+          For each (t,hb,s,dq), dq in [0,DQ), let d0=dq*D/DQ;
+          within this instance abbreviate c0(t,s),c1(t,s) as c0,c1.
+          For c0<c1 initialize m(-1)[r]=sink2[r];
+          sink2[r]=sinks[hb*HB+r]*L2 for a real head, neg for a padded head.
+          Initialize l(-1)[r]=0 and Acc(-1)[r,:]=0.
+          At local iteration i=0..c1-c0-1, c=c0+i:
+            Z=mm32(Q,Gather(c)^T), accumulating the D axis as 32 successive 16-wide products.
+            Scores(c)[r,u]=Z[r,u]*scale; then replace Scores(c)[r,u] by -inf where valid(c)[u]=0.
+            zmax=maxnum(m(i-1)[r],maxnum_u Scores(c)[r,u]);
+            m(i)[r]=zmax if zmax>neg*0.5, otherwise neg.
+            alpha[r]=E2(m(i-1)[r]-m(i)[r]); E[r,u]=E2(Scores(c)[r,u]-m(i)[r]);
+            Prob(c)[r,u]=bf16(E[r,u]).
+          maxnum is FP32 fmaxf (a single NaN loses to the numeric operand).
+          The sum of E is evaluated in KC/U consecutive groups of U columns. In each group v,
+          form four sums R[a] (a=0..3), each starting at zero and successively adding
+          E[r,v*U+8*n+2*a]+E[r,v*U+8*n+2*a+1] for n=0..U/8-1.
+          Starting rs at zero, add each group's ((R[0]+R[1])+(R[2]+R[3])) in ascending v order.
+          l(i)[r]=l(i-1)[r]*alpha[r]+rs;
+          Acc(i)=mma32(Prob(c),Gather(c)[:,d0:d0+D/DQ],alpha[:,None] ⊙ Acc(i-1)).
+          The PV contraction advances through KC/16 consecutive 16-wide products.
+        symbol:
+          Scores: {meaning: Scaled and masked FP32 score matrix for the current chunk., shape: [head: HB, slot: KC], dtype: fp32}
+          alpha: {meaning: Per-chunk row rescaling factor for the running normalizer and value accumulator., shape: [head: HB], dtype: fp32}
+          sink2: {meaning: Base-2 sink logit with the defined padded-head sentinel., shape: [head: HB], dtype: fp32}
+          m: {meaning: Running base-2 row maximum., shape: [head: HB], dtype: fp32, retention: 'carry_forward (t,hb,s,dq); i=-1..c1-c0-1'}
+          l: {meaning: Running sum of unrounded exponentials excluding the sink term., shape: [head: HB], dtype: fp32, retention: 'carry_forward (t,hb,s,dq); i=-1..c1-c0-1'}
+          Acc: {meaning: Unnormalized weighted value accumulator for one output slice., shape: [head: HB, latent: 'D/DQ'], dtype: fp32, retention: 'carry_forward (t,hb,s,dq); i=-1..c1-c0-1'}
+          Prob: {meaning: Rounded per-chunk probability matrix used only by PV., shape: [head: HB, slot: KC], dtype: bf16}
+        arithmetic:
+          approx: 'E2 and FP32 division use the --use_fast_math build; unknown: no source-provided error bound. The finite maximum sentinel and clamp are preserved without an additional input-magnitude guarantee.'
+          accumulate: 'Scalar multiply/add expressions may contract under the shipped fast-math compilation; no bitwise equivalence to the FP32 reference is asserted.'
+      - step: finalize
+        name: Materialize split state
+        math: |
+          For each (t,hb,s,dq) with c0<c1, let last=c1-c0-1 and retain
+          PartO[s,hb*HB+r,d0:d0+D/DQ]=Acc(last)[r,:],
+          PartM[s,hb*HB+r]=m(last)[r], PartL[s,hb*HB+r]=l(last)[r], including padded heads.
+          If c0=c1, write only PartM=neg and PartL=0; PartO keeps its prior scratch bits.
+          All DQ partitions produce the same PartM and PartL values.
+        symbol:
+          PartO: {meaning: Unnormalized split vectors; empty-split slots remain unwritten., shape: [split: S, head: Hp, latent: D], dtype: fp32, retention: 'keep_value (t)'}
+          PartM: {meaning: Split maxima including sink initialization on nonempty chunk ranges., shape: [split: S, head: Hp], dtype: fp32, retention: 'keep_value (t)'}
+          PartL: {meaning: Split normalizers excluding the sink., shape: [split: S, head: Hp], dtype: fp32, retention: 'keep_value (t)'}
+      - step: merge
+        name: Merge split states and add the sink once
+        math: |
+          Independently for each real (t,h), use G groups, bound below.
+          M=maxnum(neg,maxnum_s PartM[s,h]);
+          w[s]=E2(PartM[s,h]-M) if PartL[s,h]>0, otherwise 0.
+          For g=0..G-1, sum w[s]*PartL[s,h] in ascending s=g,g+G,... into z_g.
+          z=sum_g z_g in ascending g, then add E2(sinks[h]*L2-M) once.
+          inv=a2/z if z>0, otherwise 0.
+          For each g and latent d, a_g starts at zero. The first four s=g+k*G (k=0..3)
+          load PartO whenever s<S, even if unwritten; add w[s]*PartO[s,h,d] only when w[s]!=0.
+          Later groups of four splits load PartO[s,h,d] when w[s]!=0, otherwise PartO[0,h,d],
+          and add their four weighted values as one expression; finish remaining splits singly
+          with the same address substitution. These later zero-weight products are still evaluated.
+          Fold a_g in ascending g, and write out[t,h,d]=bf16((sum_g a_g)*inv).
+          E2, division and contracted scalar arithmetic follow online's arithmetic exception.
+        symbol:
+          G: {meaning: Number of interleaved split reduction groups., binding: 'bind:design.work_schedule::G'}
+    ledger:
+      baseline: Direct FP32 evaluation of the Contract over valid slots, materializing full FP32 logits and probabilities before PV; no split partials. Design-side counts include the padded and repeated work explicitly evaluated by gather and online for every dq.
+      footprint:
+        - {item: Score and probability materialization, change: '8*H*count(J(t)) bytes per token -> no full-row materialization; per active worktile HB*KC FP32 scores and HB*KC BF16 probabilities, plus 4*HB*(D/DQ+2) bytes of recurrence state.', by: [online]}
+        - {item: Split state, change: '0 -> 4*S*Hp*(D+2) bytes per token; empty split vectors are allocated but not written.', by: [finalize, merge]}
+      matmul:
+        - {item: Padded and repeated contractions, change: '2*H*count(J(t))*D -> (DQ+1)*Hp*C(t)*KC*D MACs per token, including invalid slots, padded heads and repeated QK across output partitions.', by: [gather, online]}
+      traffic:
+        - {item: Split handoff, change: '0 -> 4*min(S,C(t))*Hp*D + 8*S*Hp*DQ bytes stored and 4*S*H*(D+2) bytes loaded per token, including discarded vector prefetches and duplicate statistic stores; logical payload, not DRAM traffic.', by: [finalize, merge]}
+      error:
+        - {item: Numerical changes, change: 'KC probabilities per padded head per chunk narrow FP32 -> BF16 for PV while the denominator retains FP32; base-2 fast exponentials, sentinel clamp, split grouping and FP32 scale casts add unbounded-in-source differences.', by: [online, finalize, merge]}
+  work_schedule:
+    thesis: >-
+      One CTA owns a token, head block, KV split and output-column slice. It reuses Q
+      while scanning balanced contiguous chunk ranges; smaller head blocks and KV/D
+      partitions increase work count at the cost of repeated gathers or QK. Attention
+      completes before combine consumes the global FP32 partials and writes out.
+    flow:
+      launch:
+        - {phase: [attention]}
+        - {phase: [combine], start_after: attention.kernel_done}
+      handoff:
+        PartO: {producer: attention, consumer: [combine], storage: global}
+        PartM: {producer: attention, consumer: [combine], storage: global}
+        PartL: {producer: attention, consumer: [combine], storage: global}
+    phase:
+      attention:
+        describe: Gather, QK, online softmax and PV for one split; write its FP32 partial state.
+        decomposition:
+          strategy: |
+            Use the initial plan P defined by meta_data.dispatch.when: HB=P.hb, KC=P.kc,
+            S=P.splits, with 1<S<=128. DQ=2 or 4 for P.cfg DQ2IX_CFG_5/DQ2IX_CFG_8 or
+            DQ4IX_CFG_5/DQ4IX_CFG_8 respectively, otherwise DQ=1.
+            These are fixed host choices, not freely tunable parameters: make_plan resolves
+            head/chunk geometry and scratch-capped splits from H,T,IndexWidth,W,N;
+            only cfg5/cfg8 gain DQ, at the largest power of two up to four that still fits one wave.
+            A worktile (t,hb,s,dq) traverses c0(t,s)..c1(t,s)-1. Shorter token rows can give
+            empty splits despite the common launch S. It computes full HB by KC scores
+            and normalizers but only D/DQ output columns; QK and gathers repeat across dq.
+            Empty splits publish only sentinel statistics; their vector regions remain allocated
+            with prior contents as defined by finalize.
+          partition:
+            token: {size: T, tile: 1}
+            head: {size: H, tile: HB}
+            split: {size: S, tile: 1}
+            latent: {size: D, tile: 'D/DQ'}
+          worktile:
+            invariant:
+              Q: {shape: [head: HB, latent: D], dtype: bf16}
+              sparse_indices: {shape: [slot: IndexWidth], dtype: int32}
+              sparse_topk_lens: {shape: [], dtype: int32}
+              cum_seq_lens_q: {shape: [boundary: 'B+1'], dtype: int32}
+              seq_lens: {shape: [request: B], dtype: int32}
+              sinks: {shape: [head: HB], dtype: fp32}
+            iteration:
+              Gather: {shape: [slot: KC, latent: D], dtype: bf16, direction: ascending}
+          target:
+            single_tile:
+              PartO: {shape: [head: HB, latent: 'D/DQ'], dtype: fp32}
+              PartM: {shape: [head: HB], dtype: fp32}
+              PartL: {shape: [head: HB], dtype: fp32}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: 'T*NB*S*DQ'
+        schedule:
+          strategy: 'Linear block index is (((t*S+s)*NB+hb)*DQ+dq). Adjacent dq CTAs request the same KV rows; this ordering creates reuse opportunities without a co-residency guarantee.'
+          worktile_order:
+            - {by: token, direction: ascending}
+            - {by: split, direction: ascending}
+            - {by: head, direction: ascending}
+            - {by: latent, direction: ascending}
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      combine:
+        describe: Merge all split vectors and statistics for one real output row.
+        decomposition:
+          strategy: |
+            Launch T*Hp CTAs; the padded h>=H work is empty. CT=512 if T*Hp<N,
+            otherwise CT=128, where N is the cached SM count in dispatch.when; G=CT/128.
+            Each worktile folds all S splits of one (t,h). The four initial vector
+            prefetches per group may include stale but allocated empty-split storage;
+            zero weights discard those values. Later zero-weight addresses redirect to split zero,
+            whose range is nonempty because Klen(t)>=1; their products still follow merge.
+            Scratch is not cleared between calls;
+            attention.kernel_done covers every producer of the vectors and statistics read here.
+          partition:
+            token: {size: T, tile: 1}
+            head: {size: Hp, tile: 1}
+          worktile:
+            invariant:
+              sinks: {shape: [], dtype: fp32}
+            iteration:
+              PartO: {shape: [latent: D], dtype: fp32, direction: ascending}
+              PartM: {shape: [], dtype: fp32, direction: ascending}
+              PartL: {shape: [], dtype: fp32, direction: ascending}
+          target:
+            single_tile:
+              out: {shape: [latent: D], dtype: bf16}
+            tile_reduction:
+              dimension: split
+              input: ['ref:design.math_reshape::PartO', 'ref:design.math_reshape::PartM', 'ref:design.math_reshape::PartL']
+              output: 'ref:contract.algorithm_requirement::out'
+              method: 'ref:design.math_reshape::merge'
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: 'T*Hp'
+        schedule:
+          worktile_order: [{by: token, direction: ascending}, {by: head, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+  tile_pipeline:
+    thesis: >-
+      The same eight warps gather and compute. Multi-stage rings allow future KV transfers
+      during QK, softmax and PV; a single-stage ring waits for each chunk before computing.
+      Publication and reuse barriers limit advancement. Combine can overlap its first vector
+      loads with the statistics reduction; every worker handles one worktile.
+    phase:
+      attention:
+        domain:
+          c: [c0, c1]
+        resource:
+          ring:
+            space: SMEM
+            member_slot_shape: [byte: '2*Stages*KC*D']
+            dtype: uint8
+            slot_count: 1
+            view:
+              'Gather(c)': {part: {byte: ['2*((c-c0)%Stages)*KC*D', '2*(((c-c0)%Stages)+1)*KC*D']}, dtype: bf16}
+              Q_ring: {part: {byte: [0, '2*HB*D']}, dtype: bf16}
+              PartialStage: {part: {byte: [0, '4*HB*D']}, dtype: fp32}
+          Q_shared: {space: SMEM, member_slot_shape: [head: QHeads, latent: D], dtype: bf16, slot_count: 1}
+          Q_cached: {space: register, member_slot_shape: [copy: WC1, head: HB, latent: '16*QKS'], dtype: bf16, slot_count: 1}
+          Scores: {space: register, member_slot_shape: [head: HB, slot: KC], dtype: fp32, slot_count: 1}
+          Prob: {space: SMEM, member_slot_shape: [head: HB, slot: KC], dtype: bf16, slot_count: 1}
+          Acc: {space: register, member_slot_shape: [head: HB, latent: 'D/DQ'], dtype: fp32, slot_count: 1}
+          control:
+            space: SMEM
+            member_slot_shape: [element: '4*HB+16*MT1']
+            dtype: fp32
+            slot_count: 1
+            view:
+              m: {part: {element: [0, HB]}}
+              l: {part: {element: [HB, '2*HB']}}
+              alpha: {part: {element: ['2*HB', '3*HB']}}
+              sink2: {part: {element: ['3*HB', '4*HB']}}
+              RowMax: {part: {element: ['4*HB', '4*HB+8*MT1']}}
+              RowSum: {part: {element: ['4*HB+8*MT1', '4*HB+16*MT1']}}
+              RequestBounds: {part: {element: ['4*HB', '4*HB+8*MT1']}, dtype: int32}
+              RequestLengths: {part: {element: ['4*HB+8*MT1', '4*HB+16*MT1']}, dtype: int32}
+          validity:
+            space: SMEM
+            member_slot_shape: [slot: KC]
+            dtype: uint8
+            slot_count: Stages
+            view:
+              'valid(c)': {slot_index: '(c-c0)%Stages'}
+          IndexPrefetch: {space: register, member_slot_shape: [element: '1280*Early'], dtype: int32, slot_count: 1}
+          IndexShared: {space: SMEM, member_slot_shape: [element: '1152*Early'], dtype: int32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: 'warp[0:8]'
+              verb:
+                metadata: |
+                  Work denotes this CTA's assigned (t,hb,s,dq); c0,c1 use online's abbreviation.
+                  For P.cfg 2/4/5/6/7/8, (Stages,QKS,Early) is respectively
+                  (2,16,0)/(3,32,0)/(3,32,1)/(1,0,0)/(1,32,0)/(1,32,1).
+                  The DQ IX variants retain the cfg5/cfg8 tuple. All use KSPLIT=1.
+                  WR1=HB/16 if QKS>0, otherwise max(HB/32,1); WC1=8/WR1;
+                  MT1=HB/WR1 and U=KC/WC1. QHeads=0 when QKS=32 and Stages>1, else HB.
+                  QPRE is true exactly for Stages=1 in this scope.
+                  Early=1 first issues whole-row index loads into IndexPrefetch if IndexWidth<=1152;
+                  wider rows use per-chunk global reads. It stages request boundaries, lengths and
+                  topk in the future RowMax/RowSum slabs, barriers, then resolves the request and
+                  c0,c1. Other configs scan metadata directly. Index loads may remain in flight
+                  when metadata is done; metadata resolution does not consume their results.
+                  Empty c0=c1 work publishes finalize's sentinel statistics and discards any
+                  prefetched indices without an explicit drain. No query or KV copy was issued; c is empty.
+                  prepare and finish still have issue/done events but perform no reads or writes.
+                prepare: |
+                  For nonempty Work, stage Q with zero padded heads and commit one copy group.
+                  Use Q_shared when QHeads>0, otherwise alias ring slot zero as Q_ring.
+                  If QPRE and Early=0, enqueue chunk c0 in slot zero before waiting for Q.
+                  Initialize control state, then publish cached indices into IndexShared when present.
+                  Each index store depends on its register load result; query issuance need not wait for it.
+                  Wait leaving one group outstanding only in that pre-issued case, otherwise
+                  wait all; a CTA barrier publishes Q, control and index storage and ends metadata reads.
+                  If QPRE and Early=1, only now enqueue c0, even when the width disables index caching.
+                  Cache the first QKS 16-wide Q slices in registers, duplicated across key groups.
+                  When Q occupies ring slot zero, a CTA barrier after all Q fragment reads frees it.
+                  Q_cached and any uncached Q_shared slices remain readable for the whole recurrence.
+                  Zero Acc. For j=(1 if QPRE else 0)..Stages-2, enqueue c0+j into slot j
+                  if it is below c1, otherwise commit an empty group.
+                  Enqueueing a chunk resolves slot IDs in batches before issuing 16-byte row copies,
+                  records validity and commits once; invalid slots still copy row zero of their pool.
+                  Completion of prepare means Q is ready and priming is issued, not that KV is ready.
+                await: |
+                  For Stages=1 enqueue c unless c=c0 and QPRE, then wait all groups.
+                  For Stages>1 wait until all but the newest Stages-2 groups have completed.
+                  A CTA barrier then makes current Gather(c) and valid(c) readable by all warps.
+                enqueue: |
+                  Future(c) is the prospective copy group for chunk c+Stages-1.
+                  For Stages>1 issue it into slot (c-c0+Stages-1)%Stages when below c1,
+                  otherwise commit an empty group. Stages=1 does nothing here.
+                  For Stages>1, done means the group was committed, not that the transfer landed; it can remain
+                  in flight through score, softmax and value. The target is initially unused or was
+                  released by the preceding iteration's retire barrier, so no current KV is overwritten.
+                score: |
+                  Eight warps form WR1 head groups by WC1 key groups. Each computes MT1 by U scores,
+                  reading Q_cached where present and the remaining Q from Q_shared, plus Gather(c).
+                  Complete the synchronous QK products, scale and mask scores, then publish per-warp
+                  row maxima into RowMax. A CTA barrier precedes row-owner threads folding the groups
+                  and updating m and alpha; another barrier makes those updates available to all warps.
+                softmax: |
+                  Compute online's E, retain its unrounded sums, and store BF16 Prob. Four-lane
+                  reductions publish RowSum; a CTA barrier makes both Prob and RowSum visible.
+                  Row-owner threads update l, followed by a CTA barrier. Scores can then be discarded.
+                value: |
+                  Rescale Acc, then synchronous PV reads Prob and the same Gather(c) as QK.
+                  Each warp owns all HB rows and D/(8*DQ) distinct output columns in this CTA's slice.
+                  Acc remains in registers across chunks; all probability/KV matrix reads finish here.
+                retire: |
+                  A CTA barrier joins all PV readers before rotating the ring. It protects the next
+                  writes to KV, validity, Prob and control; Q_cached remains unchanged.
+                finish: |
+                  After the last retire, every real KV copy has been waited for and consumed;
+                  only empty committed groups can remain. The source adds no final wait-all.
+                  Reinterpret the ring prefix as PartialStage. Stage the owned columns from Acc
+                  in FP32, barrier, then cooperatively copy that slice to global scratch.
+                  Identical m/l values are redundantly published by the dq CTAs; the source's
+                  non-atomic duplicate stores have no inter-CTA ordering.
+                  Global stores may still be pending when individual threads finish. Kernel completion
+                  provides the successor's visibility. This worker takes no second worktile and retains
+                  no Q, recurrence state or ring contents for another CTA or call.
+            pipe:
+              prologue: ['metadata:Work', 'prepare:Work']
+              steady:
+                - repeat: c
+                  steady: ['await:Gather(c)', 'enqueue:Future(c)', 'score:Scores(c)', 'softmax:Prob(c)', 'value:Acc(c-c0)', 'retire:Gather(c)']
+              epilogue: ['finish:Work']
+      combine:
+        resource:
+          VectorPrefetch: {space: register, member_slot_shape: [group: G, prefetch: 4, latent: D], dtype: fp32, slot_count: 1}
+          GroupAcc: {space: register, member_slot_shape: [group: G, latent: D], dtype: fp32, slot_count: 1}
+          SplitControl: {space: SMEM, member_slot_shape: [array: 3, split: 128], dtype: fp32, slot_count: 1}
+          GroupControl: {space: SMEM, member_slot_shape: [element: '2*G+1'], dtype: fp32, slot_count: 1}
+          GroupPartial: {space: SMEM, member_slot_shape: [group: G, latent: D], dtype: fp32, slot_count: 1}
+        role:
+          Merge:
+            info:
+              execution_mode: serial
+              member: 'warp[0:CT/32]'
+              verb:
+                prime:
+                  execution_mode: async
+                  meaning: >-
+                    For a real head, each 128-thread group g issues four float4 vector loads
+                    from splits g+k*G before loading statistics, substituting register zero only
+                    for s>=S. VectorPrefetch keeps their results through the statistics reduction;
+                    done means these registers are ready. For padded heads all four pipe actions
+                    are no-ops with issue/done events and no memory reads or writes.
+                normalize: |
+                  Load all S m/l pairs into SplitControl and barrier. Groups reduce maxima into
+                  GroupControl, barrier, fold M, publish weights in SplitControl, barrier.
+                  Groups reduce weighted normalizers, barrier; thread zero folds the group totals,
+                  adds the sink and publishes inv, barrier. G groups each contain 128 threads;
+                  thread offset v owns latent columns 4*v..4*v+3. Vector prefetch may overlap these steps.
+                fold: |
+                  Consume VectorPrefetch with merge's value predication; then fetch remaining split
+                  vectors four at a time and finally singly, with merge's address substitution.
+                  Keep one float4 accumulator per thread. For G>1 publish all group vectors into
+                  GroupPartial and barrier before group zero folds them; G=1 uses its registers directly.
+                store: |
+                  The first 128 threads multiply by inv, convert paired values to BF16 and overwrite
+                  the complete output row. No scratch is reset or retained as numerical state for a
+                  later invocation. This CTA has no next worktile; final visibility is kernel_done.
+            pipe:
+              steady: ['prime:Vectors', 'normalize:Statistics', 'fold:Vectors', 'store:out']
+            waits_for:
+              data:
+                'fold:Vectors': ['prime:Vectors']
+realization:
+  require:
+    - item: design.tile_pipeline::attention.Main
+      choice: >-
+        Bind copy groups to cp.async.cg.shared.global 16-byte transfers, commit_group,
+        wait_group and CTA __syncthreads at the stated publication/reuse boundaries;
+        use mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 for QK/PV.
+      reason: >-
+        Group-count waits make the current ring slot readable while later transfers
+        continue; synchronous matrix consumption lets the PV barrier release the slot.
+    - item: design.work_schedule::flow
+      choice: |
+        Model.forward caches workspace selection by argument identity; a non-CUDA or
+        smaller-than-32-MiB workspace selects cached private scratch. dsv4_run allocates larger scratch
+        if P.ws_bytes exceeds the selected capacity. The two-kernel flow uses the current
+        CUDA stream, directly or through the process-wide single-entry CUDA Graph cache.
+        Graph eligibility requires P.ws_bytes<=W in this node. Its key includes the ten
+        tensor pointers, dimensions, scales, plan and extension switches. A changed key
+        invalidates the old entry and submits directly. Repeating the last eligible key
+        synchronizes the caller stream before capturing dispatch on a private stream,
+        then instantiates and launches the graph on the caller stream. An executable key
+        hit replays without that capture synchronization.
+        Kernels read current input contents; the cache stores no numerical answers.
+        Begin-capture failure returns before dispatch; failed capture or instantiation executes
+        none of the recorded kernels. Graph failure disables graph use for the process and
+        falls through to direct dispatch; it creates no additional completion guarantee.
+      reason: >-
+        Scratch selection and graph eligibility determine the address used by both kernels.
+        Capture preparation has an additional caller-stream completion boundary; successful
+        replay retains the same producer-to-combine ordering over current input contents.

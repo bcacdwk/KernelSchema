@@ -199,6 +199,43 @@ def _scope_approval(state, stage, node):
     return state["nodes"][node].get("approval") if stage == "P5" else state["stages"][stage].get("approval")
 
 
+def _material_digest(material):
+    """Hash parser Decimals exactly; leave all existing JSON-only hashes intact."""
+    from decimal import Decimal
+
+    def contains_decimal(value):
+        if isinstance(value, Decimal):
+            return True
+        if isinstance(value, dict):
+            return any(contains_decimal(item) for item in value.values())
+        if isinstance(value, list):
+            return any(contains_decimal(item) for item in value)
+        return False
+
+    def typed(value):
+        if isinstance(value, Decimal):
+            if not value.is_finite():
+                raise ExtractError("non-finite Decimal in semantic material")
+            sign, digits, exponent = value.as_tuple()
+            digits = list(digits)
+            if not any(digits):
+                digits, exponent = [0], 0
+            else:
+                while digits[-1] == 0:
+                    digits.pop()
+                    exponent += 1
+            return ["decimal", sign, digits, exponent]
+        if isinstance(value, dict):
+            return ["mapping", [[key, typed(item)] for key, item in sorted(value.items())]]
+        if isinstance(value, list):
+            return ["sequence", [typed(item) for item in value]]
+        return [type(value).__name__, value]
+
+    if not contains_decimal(material):
+        return digest(material)
+    return sha256(b"schema_extract.material.decimal.v1\0" + json_bytes(typed(material)))
+
+
 def _material(store, state, stage, node, checkpoint, lock):
     """Small stage-specific projections allow lawful later-stage additions."""
     from .artifacts import load_yaml
@@ -223,12 +260,62 @@ def _material(store, state, stage, node, checkpoint, lock):
         material = {"file": info["files"].get(state["nodes"][node]["file"])}
     else:
         material = info["files"]
-    return digest(material)
+    return _material_digest(material)
 
 
 def _premises(store, state, stage, node, checkpoint, lock):
     upstream = {"P2": ("P1",), "P3": ("P1", "P2"), "P4": ("P1", "P2", "P3")}.get(stage, ())
     return {name: _material(store, state, name, node, checkpoint, lock) for name in upstream}
+
+
+def _retained_node_checkpoint(store, state, node, fallback):
+    """Bind preparation to the same own raw that Store.start_node will use."""
+    data = state["nodes"][node]
+    candidates = [data.get("draft_checkpoint"), data.get("last_draft_checkpoint"),
+                  (data.get("approval") or {}).get("checkpoint"),
+                  (data.get("last_approval") or {}).get("checkpoint"), fallback]
+    for checkpoint in dict.fromkeys(value for value in candidates if value):
+        _, info = store.verify_checkpoint(state, checkpoint)
+        if data["file"] in info["files"]:
+            return checkpoint
+    return fallback
+
+
+def _node_identity_migration(store, state, node, checkpoint, lock, *, entry=None, root_directory=None):
+    """Compare retained own raw with the current identity, without editing either."""
+    from .artifacts import load_yaml, _same
+    data = state["nodes"][node]
+    directory, info = store.verify_checkpoint(state, checkpoint)
+    if data["file"] not in info["files"]:
+        return None
+    if entry is None:
+        entry = next((item for item in state.get("plan") or [] if item["id"] == node), None)
+        if entry is None or data.get("status") == "removed":
+            return None
+    if root_directory is None:
+        # The retained plan and its approved root define identity. A current
+        # upstream workspace may still be an unapproved revision candidate.
+        plan_scope = state["stages"]["P4"]
+        plan_approval = plan_scope.get("approval") or plan_scope.get("last_approval")
+        if not plan_approval:
+            return None
+        root_directory, _ = store.verify_checkpoint(state, plan_approval["checkpoint"])
+    raw = load_yaml(directory, data["file"], parser_root=rules_root(lock))
+    root = load_yaml(root_directory, "root.yaml", parser_root=rules_root(lock))
+    meta, current = raw.get("meta_data", {}), root.get("meta_data", {})
+    dispatch = meta.get("dispatch", {})
+    dispatch = dispatch if isinstance(dispatch, dict) else {}
+    expected = {"id": node, "parent": (entry or data)["parent"],
+                "name": current.get("name"), "describe": current.get("describe")}
+    previous = {"id": dispatch.get("id"), "parent": dispatch.get("parent"),
+                "name": meta.get("name"), "describe": meta.get("describe")}
+    changed = [key for key in expected if not _same(previous[key], expected[key])]
+    if not changed:
+        return None
+    return {"old_checkpoint": checkpoint, "own_sha256": info["files"][data["file"]],
+            "root_sha256": sha256((root_directory / "root.yaml").read_bytes()),
+            "previous": previous, "expected": expected, "fields": changed,
+            "reason": "Retained own raw has a prior identity; worker must explicitly migrate it before review."}
 
 
 def _scope_basis(store, state, stage, node, lock):
@@ -244,16 +331,27 @@ def _scope_basis(store, state, stage, node, lock):
                           task.get("status") not in {"done", "waiting"}), None) if maintaining else None
     checkpoint = ((node_data.get("draft_checkpoint") or canonical or state.get("merged_checkpoint")) if stage == "P5"
                   else canonical or (state.get("merged_checkpoint") if state["stage"] in {"P5", "P6"} else state["checkpoint"]))
+    if stage == "P5":
+        checkpoint = _retained_node_checkpoint(store, state, node, checkpoint or state["checkpoint"])
     if previous_task and previous_task.get("history") and previous_task.get("draft_checkpoint"):
         checkpoint = previous_task["draft_checkpoint"]
     checkpoint = checkpoint or state["checkpoint"]
     _, info = store.verify_checkpoint(state, checkpoint)
     role = node_data.get("role") if stage == "P5" else state.get("role") if state["stage"] == stage else None
     complete = bool(approval or role == "reviewer" or owner.get("status") in {"reviewing", "revision", "adjudicating"})
-    if stage == "P5" and needs_authoring(node_data):
-        complete = False
-        approval = None
-        role = "worker"
+    # A retired approval is evidence that these exact raw bytes were complete,
+    # never a current approval or permission to skip independent target review.
+    historical = node_data.get("last_approval") if stage == "P5" else None
+    if not complete and historical:
+        _, historical_info = store.verify_approval_origin(state, historical)
+        if (historical.get("stage") == "P5" and historical.get("node") == node and
+                info["files"].get(node_data["file"]) is not None and
+                info["files"].get(node_data["file"]) == historical_info["files"].get(node_data["file"])):
+            complete = True
+            role = "reviewer"
+    if stage == "P5" and (needs_authoring(node_data) or
+                          _node_identity_migration(store, state, node, checkpoint, lock)):
+        complete, role, approval = False, "worker", None
     exists = bool(approval or owner.get("calls") or owner.get("started_at") or
                   (node_data.get("authored") if stage == "P5" else stage == state["stage"]))
     files = ({node_data["file"]} if stage == "P5" else {"root.yaml"} if stage in {"P1", "P3"}

@@ -181,7 +181,7 @@ def evaluate(suite_path: Path, output: Path, repo: Path, *, codex_bin="codex",
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     repo = Path(__file__).resolve().parents[2]
-    parser.add_argument("--suite", type=Path, default=repo / "schema_extract/review_cases/suite.json")
+    parser.add_argument("--suite", type=Path, default=repo / "schema_extract/archive/six-operators/20261104-review-cases/suite.json")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--model")

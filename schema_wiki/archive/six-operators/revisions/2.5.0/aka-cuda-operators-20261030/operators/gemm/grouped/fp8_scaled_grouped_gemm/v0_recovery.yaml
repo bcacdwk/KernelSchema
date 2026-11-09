@@ -1,0 +1,497 @@
+meta_data:
+  name: fp8_scaled_grouped_gemm
+  describe: Multiply contiguous row groups of FP8 activations by their FP8 weight matrices with block scales, overwriting a caller-owned BF16 output.
+  source: SchemaExtractSource_2c7b5a74c0b3@497a8077ac54ed1431bc00772871337f9a309852:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate/solution.py::Model.forward
+  version: 2
+  dispatch:
+    id: v0_recovery
+    parent: root
+    when: |
+      Let U be the engine chosen by Model initialization. U is umma when
+      the device-0 major capability queried by _Engines is 10 and the UMMA
+      library builds and loads successfully; otherwise initialization tries
+      the sync engine. A binding-module failure alone retains UMMA via ctypes.
+      Let S be the device-0 multiprocessor count passed by that wrapper.
+      Let P be the engine selector returned by sched_policy in the UMMA
+      module actually invoked. Its cache key is (address(m_indptr), E, M, N, K).
+      A cache hit reuses P, without deriving it again from current tensor contents.
+      On a miss, the host attempts a device-to-host pointer-array copy and
+      stream synchronization. P defaults to 0 if either fails or the copied
+      boundaries are not nonnegative, nondecreasing and at most M.
+      After a successful read, let h be the copied boundaries,
+      A = count of integers 0 <= g < E with h[g+1] > h[g],
+      T = sum over 0 <= g < E of ceil((h[g+1]-h[g])/128),
+      B = K/128 and I = T*(N/256).
+      Let W mean N is divisible by 256, A > 0, S > 0, and at least one of:
+      (B >= 32 and ((I >= 4*S and T >= 4*A)
+                   or (B <= 48 and 2*I >= 5*S and T >= A)));
+      (B >= 16 and I >= 8*S and (T >= 2*A or T == A));
+      (8 <= B <= 12 and I >= 10*S and T >= A);
+      (8 <= B <= 20 and I >= 4*S and T >= 2*A).
+      The new selector is P=0 when W is false, P=2 when W is true and
+      B <= 20 and 2*T >= 3*A, and P=1 otherwise. The normal build sets sareg=0.
+      Let L be this request's actual compute-kernel submissions, including
+      any submission preceding an API-error fallback. Graph construction
+      and instantiation alone add no computation to L. For a recorded request,
+      use its recorded host selection and by-value arguments at replay;
+      device reads still use the tensor contents at execution time.
+      Select exactly when U is umma, P=0, and L consists of two invocations
+      of umma_gemm<0>: a graph replay whose API call reports an error after
+      actually submitting its kernel, followed by the direct recovery submission
+      from the same fp8umma_run call on the same stream. This includes both a
+      cached graph and a newly instantiated graph. If the failed graph call
+      submitted no compute kernel, the one-submission request belongs to root.
+      API failure alone does not establish either submission or completion.
+      A pure recording describes the future execution and adds no invocation.
+design:
+  math_reshape:
+    thesis: >-
+      Multiply the stored FP8 payloads before applying each 128-element block's
+      two scales. This avoids materializing scaled FP32 operands, but adds an
+      ordered FP32 scale-and-accumulate step per output and reduction block;
+      padded rows still undergo the dense computation before being discarded.
+      Evaluate the entire product twice without sharing computed values; the
+      second evaluation replaces the first output and doubles the evaluation work.
+    rewrite:
+      - step: block_dot
+        name: Unscaled block products
+        math: |
+          For each evaluation r in {0,1}, independently compute the following
+          values from the request inputs. Worktile values are scoped by (r,g,x,y);
+          no computed value is reused between evaluations.
+          Let KB = K/ScaleK, Q = KB/2 and Tn = N/Bn. KB is even throughout
+          the Contract domain. For each group g, let
+          Rg = m_indptr[g+1]-m_indptr[g], Tm(g) = ceil_div(Rg,Bm).
+          For 0 <= x < Tm(g), 0 <= y < Tn, define
+          r0 = m_indptr[g]+x*Bm, c0 = y*Bn and V = min(Bm,Rg-x*Bm).
+          For 0 <= kb < KB, 0 <= u < Bm, 0 <= v < Bn, 0 <= z < ScaleK:
+          A_tile(kb)[u,z] = a[r0+u,kb*ScaleK+z] if u < H and r0+u < M;
+                          = 0 if u < H and r0+u >= M;
+                          = the retained, unspecified FP8 row payload if u >= H.
+          B_tile(kb)[v,z] = b[g,c0+v,kb*ScaleK+z].
+          Dot(kb) = mm32(A_tile(kb), B_tile(kb)^T).
+          All Bm rows are evaluated, including u >= V; no result from those
+          rows is used in an output. Empty groups have no such instances.
+          Let Mp = Bm*sum_g Tm(g) be the total evaluated row extent.
+        arithmetic:
+          accumulate: >-
+            Each Dot uses four consecutive 32-element reduction slices, in
+            increasing order, with FP8 inputs and a FP32 accumulator initialized
+            by the first slice. Subsequent slices accumulate into that result.
+        symbol:
+          Bm: {meaning: Evaluated rows per output worktile, binding: "bind:design.work_schedule::Bm"}
+          Bn: {meaning: Columns per output worktile, binding: "bind:design.work_schedule::Bn"}
+          H: {meaning: Loaded activation row extent for the current worktile, binding: "bind:design.work_schedule::H"}
+          A_tile: {meaning: Activation payload consumed by a block product, shape: [row: Bm, reduction: ScaleK], dtype: fp8_e4m3fn}
+          B_tile: {meaning: Weight payload consumed by a block product, shape: [column: Bn, reduction: ScaleK], dtype: fp8_e4m3fn}
+          Dot: {meaning: Unscaled reduction-block product, shape: [row: Bm, column: Bn], dtype: fp32, retention: "keep_value (r,g,x,y,kb)"}
+      - step: scaled_sum
+        name: Block scaling and ordered output accumulation
+        math: |
+          For each evaluation r and nonempty output worktile, F(-1)[u,v] = 0.
+          For kb=0,...,KB-1 in ascending order:
+          sa(kb,u) = a_scale[kb,r0+u] if r0+u < M, otherwise 0.
+          sb(kb) = b_scale[g,kb,y].
+          Scale(kb)[u] = sa(kb,u)*sb(kb).
+          F(kb)[u,v] = fma32(Scale(kb)[u], Dot(kb)[u,v], F(kb-1)[u,v]).
+          The two blocks kb=2*q and kb=2*q+1, 0 <= q < Q, have independent
+          Dot values and scales; F absorbs the even block before the odd block.
+          For 0 <= u < V and 0 <= v < Bn:
+          out[r0+u,c0+v] = bf16(F(KB-1)[u,v]).
+          Discard F for u >= V. Both evaluations overwrite the same complete
+          out_buffer view, with evaluation 1 replacing evaluation 0. Neither
+          reads incoming output values or the other evaluation's results.
+          After evaluation 1, return out with the object identity and other
+          side effects in Contract's Grouped matrix product and writeback requirement.
+        symbol:
+          Scale: {meaning: Rounded product of the two block scales, shape: [row: Bm], dtype: fp32}
+          F: {meaning: Scaled output accumulator, shape: [row: Bm, column: Bn], dtype: fp32, retention: "carry_forward (r,g,x,y); kb=-1..KB-1"}
+    ledger:
+      baseline: >-
+        Direct Contract evaluation with materialized scaled FP32 A_value and
+        B_value, followed by their grouped FP32 matrix product, evaluated once.
+        Post-rewrite counts cover this request's two evaluations, including padded rows.
+      matmul:
+        - {item: Dense products, change: "M*N*K FP32-input MACs -> 2*Mp*N*K FP8-input MACs; 2*(Mp-M)*N*K MACs compute discarded rows", by: [block_dot]}
+      vector:
+        - {item: Scale application, change: "M*K+E*N*K FP32 operand multiplications -> 2*Mp*Tn*KB scale multiplications and 2*Mp*N*KB FP32 fused multiply-adds", by: [scaled_sum]}
+      traffic:
+        - {item: Output writes, change: "2*M*N -> 4*M*N bytes written to the same output view; the first complete result is overwritten", by: [scaled_sum]}
+      footprint:
+        - {item: Scaled operands, change: "4*(M*K+E*N*K) bytes of FP32 operand materialization -> 0 bytes; each live Dot and F is 4*Bm*Bn bytes", by: [block_dot, scaled_sum]}
+      error:
+        - {item: Reassociation, change: "Per-operand scaling before the product -> rounded scale products applied after each block dot, then ordered FP32 FMA; no source-provided bound on final reference error", by: [block_dot, scaled_sum]}
+  work_schedule:
+    thesis: >-
+      Submit the complete grouped product twice, with the direct recovery
+      starting after the graph kernel completes. Independent persistent CTA
+      grids perform both output overwrites without a data handoff; group-major,
+      column-then-row work ordering exposes weight reuse within each evaluation,
+      while conservative grid sizing can submit CTAs with no work.
+    flow:
+      launch:
+        - {phase: [graph]}
+        - {phase: [direct], start_after: graph.kernel_done}
+    phase:
+      graph: &v0_work
+        describe: >-
+          Compute block_dot and scaled_sum for every grouped output tile and
+          overwrite its owned rows. The graph phase performs evaluation r=0;
+          the direct phase performs evaluation r=1. Each is a complete
+          evaluation with new workers, independent Dot and F values, and no
+          consumption of the other evaluation's output.
+        decomposition:
+          strategy: |
+            Bm = 128 and Bn = 128. Let prefix(0)=0 and
+            prefix(g+1)=prefix(g)+Tm(g); W=prefix(E)*Tn.
+            The work numbered w has the unique nonempty group g satisfying
+            prefix(g)*Tn <= w < prefix(g+1)*Tn.
+            Let z=w-prefix(g)*Tn; y=floor(z/Tm(g)), x=z%Tm(g).
+            This binds the mathematical worktile (r,g,x,y), including r0,c0,V.
+            The activation extent H is the smallest member of {16,32,64,128}
+            at least V when all three reduced-height tensor maps were obtained;
+            otherwise H=128 for this submission. Only H rows are loaded, but
+            every block product evaluates Bm rows as defined in block_dot.
+            Each local pair q consumes blocks 2*q and 2*q+1, q in [0,Q).
+            All scales and all K contributions are applied inside this worktile;
+            no cross-worktile reduction or intermediate global matrix is used.
+          partition:
+            work: {size: W, tile: 1}
+          worktile:
+            invariant:
+              m_indptr: {shape: [boundary: "E+1"], dtype: "ref:contract.algorithm_requirement::m_indptr.dtype"}
+            iteration:
+              A_tile: {shape: [pair_k: 2, row: Bm, reduction: ScaleK], dtype: "ref:design.math_reshape::A_tile.dtype", direction: ascending}
+              B_tile: {shape: [pair_k: 2, column: Bn, reduction: ScaleK], dtype: "ref:design.math_reshape::B_tile.dtype", direction: ascending}
+              a_scale: {shape: [k_block: 2, row: Bm], dtype: "ref:contract.algorithm_requirement::a_scale.dtype", direction: ascending}
+              b_scale: {shape: [k_block: 2, n_block: 1], dtype: "ref:contract.algorithm_requirement::b_scale.dtype", direction: ascending}
+          target:
+            single_tile:
+              out: {shape: [row: V, column: Bn], dtype: "ref:contract.algorithm_requirement::out.dtype"}
+        mapping:
+          strategy: |
+            Let Wub=(ceil_div(M,Bm)+E)*Tn and C=max(1,min(Wub,S)), where S
+            is the wrapper's multiprocessor count used for this submission.
+            The kernel uses 256 threads per CTA. C is a submission count,
+            not a claim that all workers are resident simultaneously.
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: C
+        schedule:
+          strategy: |
+            Each CTA independently copies the execution-time m_indptr and builds
+            prefix once. Producer and epilogue scan groups monotonically from
+            their previous group for each increasing assigned w. Empty groups
+            are skipped. Workers with worker_id >= W do initialization and
+            teardown but execute no worktile. Host policy/cache handling is as
+            defined by dispatch.when. The graph phase uses its captured by-value
+            parameters and tensor maps; direct uses the parameters and maps
+            supplied at the recovery launch. Each device schedule reads current
+            boundaries, and all resource and work indices start in its own
+            worker instance. The first output is not a handoff input to direct.
+          worktile_order: [{by: work, direction: ascending}]
+          worker_assignment:
+            preassigned: {start: worker_id, step: worker_count}
+            refill: none
+            exit: assigned_done
+      direct: *v0_work
+  tile_pipeline:
+    thesis: >-
+      Overlap pair loads, independent FP8 products and scaled epilogue work
+      using a three-slot operand ring and two TMEM pair slots. TMEM is released
+      after all reads, before the final register FMA; output staging waits only
+      for prior source reads, allowing global writes to continue into later work.
+      Each phase instantiates this pipeline in its own workers; resource contents,
+      ring generations and outstanding operations do not carry between kernels.
+      Both graph and direct execute a source V0 TMEM drain that omits the
+      row-group address contribution; this design retains the complete products,
+      distinct row ownership and resource strategy supported by product generation,
+      TMEM capacity, per-row scales and stores.
+    phase:
+      graph: &v0_pipeline
+        domain:
+          t: worktile
+          q: [0, Q]
+          n: {flatten: [t, q]}
+          p: [0, "Q+2"]
+          d: [0, 8]
+        resource:
+          Schedule:
+            space: SMEM
+            member_slot_shape: [array: 2, boundary: "E+1"]
+            dtype: int32
+            slot_count: 1
+          OperandRing:
+            space: SMEM
+            member_slot_shape: [pair_k: 2, operand: 2, row: Bm, reduction: ScaleK]
+            dtype: fp8_e4m3fn
+            slot_count: 3
+            view:
+              "Operands(n)": {slot_index: "n%3"}
+              "A_pair(n)": {slot_index: "n%3", part: {operand: [0, 1]}}
+              "B_pair(n)": {slot_index: "n%3", part: {operand: [1, 2]}}
+          ProductRing:
+            space: TMEM
+            member_slot_shape: [pair_k: 2, row: Bm, column: Bn]
+            dtype: fp32
+            slot_count: 2
+            view:
+              "DotPair(n)": {slot_index: "n%2"}
+          ActivationScaleRing:
+            space: SMEM
+            member_slot_shape: [pair_k: 2, row: Bm]
+            dtype: fp32
+            slot_count: 2
+            view:
+              "AS(t,p)": {slot_index: "p%2"}
+          WeightPrefetch:
+            space: register
+            member_slot_shape: [pair_k: 2, row: Bm]
+            dtype: fp32
+            slot_count: 1
+            view:
+              "BS(t,p)": {}
+          CurrentScales:
+            space: register
+            member_slot_shape: [pair_k: 2, operand: 2, row: Bm]
+            dtype: fp32
+            slot_count: 1
+            view:
+              "Scales(n)": {}
+          DrainRegister:
+            space: register
+            member_slot_shape: [row: Bm, column: 32]
+            dtype: fp32
+            slot_count: 2
+            view:
+              "Fragment(n,d)": {slot_index: "d%2"}
+          F: {space: register, member_slot_shape: [row: Bm, column: Bn], dtype: fp32, slot_count: 1}
+          OutputStaging:
+            space: SMEM
+            member_slot_shape: [row: Bm, column: Bn]
+            dtype: bf16
+            slot_count: 1
+            view:
+              "Output(t,f)": {}
+        role:
+          Producer:
+            info:
+              execution_mode: async
+              member: "warp[0:1]"
+              verb:
+                initialize:
+                  execution_mode: serial
+                  meaning: >-
+                    Schedule is the CTA-cooperative entry: copy m_indptr and
+                    have the leader compute prefix; initialize empty resource
+                    generations and allocate ProductRing with the issuing warp.
+                    Completion includes the CTA entry rendezvous before role
+                    divergence. Schedule stores the boundaries and prefix.
+                load: >-
+                  The elected lane loads Operands(n), the two A_tile/B_tile
+                  pairs for work t and pair q. A transfers cover H rows; rows
+                  beyond the global M extent are zero-filled, rows above H
+                  retain their previous storage without initialization. B
+                  transfers cover Bn rows. Completion covers all actual transfer
+                  bytes, not the untouched A rows. Ring position and completion
+                  generations continue across worktiles.
+                  Bstream is the actual submitted bstream flag: policy defaults
+                  it to zero on a failed or invalid host read, otherwise sets it when
+                  copied total row tiles equal copied nonempty groups; cache
+                  hits reuse the flag and graph execution uses its recorded value.
+            pipe:
+              prologue: ["initialize:Schedule"]
+              repeat: n
+              steady: ["load:Operands(n)"]
+            waits_for:
+              reuse:
+                "load:Operands(n+3)": ["Issuer/mma:A_pair(n)@B_pair(n)"]
+          Issuer:
+            info:
+              execution_mode: async
+              member: "warp[1:1+NI]"
+              verb:
+                mma: >-
+                  NI=2 when Wub*Q >= 48*C, otherwise NI=1; it is fixed from
+                  the submitted scalar parameters for this worker's lifetime.
+                  With one member its elected lane issues both block products;
+                  with two, one elected lane issues each block. A_pair(n) and
+                  B_pair(n) are the two operand views of Operands(n). They produce
+                  DotPair(n), containing Dot(2*q) and Dot(2*q+1),
+                  each independently initialized by its first reduction slice.
+                  The action's completion joins all NI member completions: both
+                  products are readable and all operand reads have ended.
+                  The same completion releases the operand stage to Producer.
+            pipe:
+              repeat: n
+              steady: ["mma:A_pair(n)@B_pair(n)"]
+            waits_for:
+              data:
+                "mma:A_pair(n)@B_pair(n)": ["Producer/load:Operands(n)"]
+              reuse:
+                "mma:A_pair(n+2)@B_pair(n+2)": ["Epilogue/release:DotPair(n)"]
+          Epilogue:
+            info:
+              execution_mode: serial
+              member: "warp[4:8]"
+              verb:
+                prepare: >-
+                  Work(t) decodes its coordinates from Schedule and initializes
+                  F to the mathematical initial state. Each epilogue member
+                  owns disjoint rows and all Bn columns of those rows. Define
+                  Full(t)=1 when V=Bm, otherwise 0. All Bm rows participate in
+                  computation and release, including discarded rows.
+                prefetch_a:
+                  execution_mode: async
+                  meaning: >-
+                    AS(t,p) commits one row-private copy group for both scales
+                    of pair p when p<Q. Rows with r0+u>=M receive zero without
+                    reading the source; rows in another physical group are
+                    still read. For p>=Q an empty group is committed and no
+                    scale slot is written. Each worktile primes two groups,
+                    then commits one replacement per consumed pair. The final
+                    two groups are empty; the group stream is not explicitly
+                    drained or reset at worktile boundaries.
+                prefetch_b:
+                  execution_mode: async
+                  meaning: >-
+                    BS(t,p) loads both weight scales for pair p into
+                    WeightPrefetch, replicated for epilogue rows, when p<Q;
+                    p=Q assigns zeros without global reads. Captured current
+                    scales survive overwriting these prefetch registers.
+                capture: >-
+                  Scales(n) waits until all but the newest committed activation
+                  copy group are complete, then captures AS(t,q) and BS(t,q)
+                  in CurrentScales. Its done ends this pair's scale-slot reads.
+                  The next weight pair can be prefetched before DotPair is ready.
+                acquire: >-
+                  DotPair(n) waits for both products to be ready and establishes
+                  their visibility to the epilogue. It then evaluates both
+                  mathematical Scale values, replacing the captured raw scales
+                  in CurrentScales and retaining the products through this pair.
+                read:
+                  execution_mode: async
+                  meaning: >-
+                    Fragment(n,d) asynchronously reads all Bm rows of columns
+                    [32*(d%4),32*(d%4+1)) from block floor(d/4) of DotPair(n)
+                    into DrainRegister. Done guarantees that this TMEM read
+                    and register delivery have completed.
+                await: Complete only after the explicitly referenced fragment delivery is guaranteed.
+                compute: >-
+                  Accum(n,d) consumes Fragment(n,d) and the corresponding
+                  retained Scale values to perform scaled_sum for those columns.
+                  Each scale product is reused across its four column fragments.
+                  Done ends all reads of that register fragment and updates F.
+                release: >-
+                  DotPair(n) joins the read completion of every epilogue row
+                  and returns its TMEM pair slot; the final register FMA has
+                  not yet executed. Staging(t,f) instead waits, through the
+                  bulk source-read completion primitive, for every outstanding
+                  earlier full-tile store to stop reading OutputStaging, then
+                  rendezvous all epilogue members. The first full tile has no
+                  earlier store to wait for. Tail tiles retain this store history.
+                publish: >-
+                  Output(t,f) converts F to BF16 in OutputStaging for a full
+                  tile; all writers publish to the asynchronous access domain
+                  and rendezvous before the elected store lane may proceed.
+                store:
+                  execution_mode: async
+                  meaning: >-
+                    Output(t,f) issues the two full-height 64-column bulk
+                    transfers to the owned out region and commits them as one
+                    group. Done means global writes are complete. The next
+                    worktile may start while these writes remain in flight.
+                store_tail: >-
+                  out(t,z) converts and directly stores only rows u<V;
+                  discarded rows do not write, and OutputStaging and prior
+                  bulk-store history remain untouched. F is no longer read
+                  when this action completes.
+                drain: >-
+                  Stores waits for global completion of all previously issued
+                  bulk-store groups, or has no data effect when none were issued.
+                  The final CTA rendezvous and ProductRing deallocation follow
+                  role completion, including for workers with no worktiles.
+            pipe:
+              prologue: ["wait:Schedule"]
+              repeat: t
+              steady:
+                - "prepare:Work(t)"
+                - repeat: "p[0:2]"
+                  steady: ["prefetch_a:AS(t,p)"]
+                - "prefetch_b:BS(t,0)"
+                - repeat: "n[t]"
+                  steady:
+                    - "capture:Scales(n)"
+                    - "prefetch_b:BS(t,q+1)"
+                    - "acquire:DotPair(n)"
+                    - "read:Fragment(n,0)"
+                    - repeat: "d[0:7]"
+                      steady:
+                        - "await:Fragment(n,d)"
+                        - "read:Fragment(n,d+1)"
+                        - "compute:Accum(n,d)"
+                    - "await:Fragment(n,7)"
+                    - "release:DotPair(n)"
+                    - "compute:Accum(n,7)"
+                    - "prefetch_a:AS(t,q+2)"
+                - repeat: {f: [0, "Full(t)"]}
+                  steady:
+                    - "release:Staging(t,f)"
+                    - "publish:Output(t,f)"
+                    - "store:Output(t,f)"
+                - repeat: {z: [0, "1-Full(t)"]}
+                  steady: ["store_tail:out(t,z)"]
+              epilogue: ["drain:Stores"]
+            waits_for:
+              data:
+                "wait:Schedule@done": ["Producer/initialize:Schedule"]
+                "capture:Scales(n)": ["prefetch_a:AS(t,q)", "prefetch_b:BS(t,q)"]
+                "acquire:DotPair(n)": ["Issuer/mma:A_pair(n)@B_pair(n)"]
+                "await:Fragment(n,d)@done": ["read:Fragment(n,d)"]
+      direct: *v0_pipeline
+realization:
+  require:
+    - item: ["design.work_schedule::graph", "design.work_schedule::direct"]
+      choice: Submit graph replay and its direct recovery on the same CUDA stream passed to fp8umma_run.
+      reason: >-
+        Stream ordering provides the declared graph.kernel_done startup
+        dependency without a host synchronization or an output readback.
+    - item: ["design.tile_pipeline::graph.Producer", "design.tile_pipeline::direct.Producer"]
+      choice: >-
+        Use tensor-map 2D asynchronous loads with byte-count completion barriers;
+        the operand maps and MMA descriptors use compatible 128-byte swizzling.
+      reason: >-
+        Readiness must cover the selected H-row A boxes and full B boxes while
+        preserving untouched rows and the three-stage operand storage.
+    - item: ["design.tile_pipeline::graph.Issuer", "design.tile_pipeline::direct.Issuer"]
+      choice: >-
+        Use tcgen05.mma.cta_group::1.kind::f8f6f4 for the FP8-to-FP32 products,
+        tcgen05.commit completion arrivals for each issuing member, and
+        tcgen05.fence::after_thread_sync after the relevant barrier waits.
+      reason: >-
+        These bind the TMEM product path and the shared completion used both
+        for product visibility and operand reuse, including the two-member join.
+    - item: ["design.tile_pipeline::graph.Epilogue", "design.tile_pipeline::direct.Epilogue"]
+      choice: >-
+        Implement activation-scale groups with predicated four-byte cp.async,
+        commit_group and wait_group 1, including empty final commits. Use
+        tcgen05.ld with tcgen05.wait::ld for TMEM fragment completion and
+        tcgen05.fence::after_thread_sync when acquiring the products.
+      reason: >-
+        Scale capture depends on the group stream, while fragment consumption
+        and early TMEM release depend on completed reads, not merely their issue.
+    - item: ["design.tile_pipeline::graph.OutputStaging", "design.tile_pipeline::direct.OutputStaging"]
+      choice: >-
+        Match the BF16 staging layout to the UINT16 64-by-128 output tensor maps.
+        Publish with fence.proxy.async.shared::cta and an epilogue rendezvous;
+        use bulk-group stores, wait_group.read 0 before reuse and wait_group 0
+        for final global completion.
+      reason: >-
+        The single staging buffer is shared by all row writers and its reuse
+        permission intentionally precedes completion of the destination writes.
+  prefer:
+    - item: ["design.tile_pipeline::graph.Producer", "design.tile_pipeline::direct.Producer"]
+      choice: Use the L2 evict_first hint for B loads exactly when Bstream is set.
+      reason: >-
+        The host policy targets one row tile per nonempty group, where B has
+        no row-tile reuse. A retained policy can outlive that tensor content;
+        the hint does not assert that the current execution has no reuse.

@@ -1,0 +1,324 @@
+meta_data:
+  name: dual_cache_latent_bf16
+  describe: Joint sparse attention over prepared sliding-window and compressed shared key/value latents, with a per-head zero-value softmax sink.
+  source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/solution.py::Model.forward
+  version: 3
+  dispatch:
+    id: mma_direct
+    parent: root
+    when: |
+      Let W be the byte capacity of the actual workspace passed by Model.forward
+      after its workspace identity cache or private scratch selection, and let N be
+      dsv4::nsm_cached(). Let P be dsv4::make_plan(H,T,IndexWidth,W,0,0,N,true)
+      in the fixed candidate/dsv4_kernel.cu, including its non-tcgen05 build fallback.
+      P is the initial plan: cfg selects the configuration, splits the KV partitions,
+      and dual indicates probe-gated packing; alt_* holds its unsplit mma alternative.
+      Select exactly when the shipped automatic policy is active (force_cfg=0,
+      force_s=0, Model.fast is false, normal non-diagnostic build and unchanged
+      default extension switches), and either:
+      (a) P.dual=0, P.cfg!=90 (TC_CFG_QIS2), and P.splits=1; or
+      (b) P.dual=1, dual_dispatch_hidden returns false before any probe or packed
+      attention is submitted, and the subsequent caller-stream probe_begin returns
+      false because gate_pinned() or gate_mapped() is null. This returns ratio=-1
+      without submitting a probe and selects P.alt_* for the whole batch.
+      In (b), the cached gate pointers are unavailable, so hidden dispatch returns
+      before recording a fork event or enqueuing a side-stream wait.
+      Let P_run=P in (a); in (b), P_run uses P.alt_cfg/alt_hb/alt_nb/alt_splits/alt_kc,
+      with gt=1, dual=0 and ws_bytes=0. Both cases submit one unsplit attention kernel.
+      Direct execution and execution of the corresponding recorded graph use this
+      same selection. Pure capture only records work; replay uses the recorded host
+      choice, scalars and bindings, with tensor contents read at execution.
+design:
+  math_reshape:
+    thesis: >-
+      Stream compacted SWA/compressed slot chunks through an online base-2 softmax,
+      sharing each gathered latent across heads and between QK and PV. BF16 probabilities
+      enable the second matrix product. One recurrence covers the entire key range
+      and normalizes directly to BF16 output; output-column partitions repeat QK.
+    rewrite:
+      - step: gather
+        name: Compact reserved slots and retain masked gather work
+        math: |
+          HB, KC, DQ and U are bound below; NB = ceil_div(H,HB), Hp = NB*HB.
+          For token t use the Contract's request lookup and visible length.
+          A(t) = min(max(visible,0),SW); Klen(t) = A(t) + max(min(sparse_topk_lens[t],IndexWidth)-SW,0).
+          C(t) = ceil_div(Klen(t),KC), with Klen(t)>=1 in the Contract domain.
+          For chunk c and u in [0,KC), let k=c*KC+u and j=k if k<A(t), else SW+k-A(t).
+          id = sparse_indices[t,j] if k<Klen(t), otherwise -1; valid(c)[u] = uint8(1 if id>=0 else 0).
+          Gather(c)[u,:] is row max(id,0) of swa_kv_cache if k<A(t), otherwise compressed_kv_cache.
+          Invalid and padded positions therefore still gather row zero, not a zero latent.
+          For head block hb and r in [0,HB), Q[r,:]=query[t,hb*HB+r,:] for hb*HB+r<H,
+          otherwise Q[r,:]=bf16(0). Both matrix products include these padded head rows.
+          a1=fp32(bmm1_scale); a2=fp32(bmm2_scale); L2=fp32(1.4426950408889634);
+          neg=fp32(-3.0e38); scale=a1*L2.
+        symbol:
+          HB: {meaning: Heads per attention worktile., binding: 'bind:design.work_schedule::HB'}
+          KC: {meaning: Slots per local chunk., binding: 'bind:design.work_schedule::KC'}
+          DQ: {meaning: Independent output-column partitions., binding: 'bind:design.work_schedule::DQ'}
+          U: {meaning: Contiguous key group width used by the score and probability reductions., binding: 'bind:design.tile_pipeline::U'}
+          Gather: {meaning: Actual BF16 cache rows including row-zero substitutes., shape: [slot: KC, latent: D], dtype: bf16}
+          valid: {meaning: Per-chunk validity of gathered slots before score masking., shape: [slot: KC], dtype: uint8}
+          Q: {meaning: Query head block with zero padded heads., shape: [head: HB, latent: D], dtype: bf16}
+      - step: online
+        name: FP32 recurrence with BF16 probability operands
+        math: |
+          Define E2(x) as the compiled fast exp2f(x), with E2(-inf)=0.
+          For each (t,hb,dq), dq in [0,DQ), let d0=dq*D/DQ.
+          Initialize m(-1)[r]=sink2[r];
+          sink2[r]=sinks[hb*HB+r]*L2 for a real head, neg for a padded head.
+          Initialize l(-1)[r]=0 and Acc(-1)[r,:]=0.
+          At iteration c=0..C(t)-1:
+            Z=mm32(Q,Gather(c)^T), accumulating the D axis as 32 successive 16-wide products.
+            Scores(c)[r,u]=Z[r,u]*scale; then replace Scores(c)[r,u] by -inf where valid(c)[u]=0.
+            zmax=maxnum(m(c-1)[r],maxnum_u Scores(c)[r,u]);
+            m(c)[r]=zmax if zmax>neg*0.5, otherwise neg.
+            alpha[r]=E2(m(c-1)[r]-m(c)[r]); E[r,u]=E2(Scores(c)[r,u]-m(c)[r]);
+            Prob(c)[r,u]=bf16(E[r,u]).
+          maxnum is FP32 fmaxf (a single NaN loses to the numeric operand).
+          The sum of E is evaluated in KC/U consecutive groups of U columns. In each group v,
+          form four sums R[a] (a=0..3), each starting at zero and successively adding
+          E[r,v*U+8*n+2*a]+E[r,v*U+8*n+2*a+1] for n=0..U/8-1.
+          Starting rs at zero, add each group's ((R[0]+R[1])+(R[2]+R[3])) in ascending v order.
+          l(c)[r]=l(c-1)[r]*alpha[r]+rs;
+          Acc(c)=mma32(Prob(c),Gather(c)[:,d0:d0+D/DQ],alpha[:,None] ⊙ Acc(c-1)).
+          The PV contraction advances through KC/16 consecutive 16-wide products.
+        symbol:
+          Scores: {meaning: Scaled and masked FP32 score matrix for the current chunk., shape: [head: HB, slot: KC], dtype: fp32}
+          alpha: {meaning: Per-chunk row rescaling factor for the running normalizer and value accumulator., shape: [head: HB], dtype: fp32}
+          sink2: {meaning: Base-2 sink logit with the defined padded-head sentinel., shape: [head: HB], dtype: fp32}
+          m: {meaning: Running base-2 row maximum., shape: [head: HB], dtype: fp32, retention: 'carry_forward (t,hb,dq); c=-1..C(t)-1'}
+          l: {meaning: Running sum of unrounded exponentials excluding the sink term., shape: [head: HB], dtype: fp32, retention: 'carry_forward (t,hb,dq); c=-1..C(t)-1'}
+          Acc: {meaning: Unnormalized weighted value accumulator for one output slice., shape: [head: HB, latent: 'D/DQ'], dtype: fp32, retention: 'carry_forward (t,hb,dq); c=-1..C(t)-1'}
+          Prob: {meaning: Rounded per-chunk probability matrix used only by PV., shape: [head: HB, slot: KC], dtype: bf16}
+        arithmetic:
+          approx: 'E2 and FP32 division use the --use_fast_math build; unknown: no source-provided error bound. The finite maximum sentinel and clamp are preserved without an additional input-magnitude guarantee.'
+          accumulate: 'Scalar multiply/add expressions may contract under the shipped fast-math compilation; no bitwise equivalence to the FP32 reference is asserted.'
+      - step: finalize
+        name: Add the sink and normalize directly to output
+        math: |
+          For each (t,hb,dq) and r in [0,HB), let last=C(t)-1 and
+          z[r]=l(last)[r]+E2(sink2[r]-m(last)[r]);
+          inv[r]=a2/z[r] if hb*HB+r<H and z[r]>0, otherwise 0.
+          Result[r,v]=bf16(Acc(last)[r,v]*inv[r]) for v in [0,D/DQ), including padded heads.
+          For real heads only, overwrite out[t,hb*HB+r,d0+v]=Result[r,v].
+          Evaluate these formulas even when J(t) is empty.
+          E2, division and contracted scalar arithmetic follow online's arithmetic exception.
+        symbol:
+          Result: {meaning: Normalized BF16 output slice including locally computed padded heads., shape: [head: HB, latent: 'D/DQ'], dtype: bf16}
+    ledger:
+      baseline: Direct FP32 evaluation of the Contract over valid slots, materializing full FP32 logits and probabilities before PV; no split partials. Design-side counts include the padded and repeated work explicitly evaluated by gather and online for every dq.
+      footprint:
+        - {item: Score and probability materialization, change: '8*H*count(J(t)) bytes per token -> no full-row materialization; per active worktile HB*KC FP32 scores and HB*KC BF16 probabilities, plus 4*HB*(D/DQ+2) bytes of recurrence state.', by: [online]}
+      matmul:
+        - {item: Padded and repeated contractions, change: '2*H*count(J(t))*D -> (DQ+1)*Hp*C(t)*KC*D MACs per token, including invalid slots, padded heads and repeated QK across output partitions.', by: [gather, online]}
+      error:
+        - {item: Numerical changes, change: 'KC probabilities per padded head per chunk narrow FP32 -> BF16 for PV while the denominator retains FP32; base-2 fast exponentials, sentinel clamp, chunk reduction grouping and FP32 scale casts add unbounded-in-source differences.', by: [online, finalize]}
+  work_schedule:
+    thesis: >-
+      One CTA owns a token, head block and output-column slice, scanning every chunk
+      before normalizing and writing its slice. Larger head blocks reuse KV across
+      more heads; DQ increases work count by repeating gathers, QK and softmax.
+    flow:
+      launch: [{phase: [attention]}]
+    phase:
+      attention:
+        describe: Gather, QK, online softmax and PV over the complete key range; normalize and overwrite the BF16 output slice.
+        decomposition:
+          strategy: |
+            Use P_run defined in dispatch.when: HB=P_run.hb, KC=P_run.kc.
+            DQ=2 for DQ2IX_CFG_5/DQ2IX_CFG_8, DQ=4 for DQ4IX_CFG_5/DQ4IX_CFG_8,
+            and DQ=1 otherwise. P_run.splits=1 and P_run.gt=1 throughout this node.
+            These are fixed host choices: make_plan resolves head/chunk geometry
+            and scratch-capped splits from H,T,IndexWidth,W,N. Only cfg5/cfg8 gain
+            DQ, using the largest power of two up to four whose CTA count fits N.
+            Each worktile (t,hb,dq) traverses c=0..C(t)-1, computes HB by KC scores
+            and row normalizers, but accumulates and writes only D/DQ output columns.
+            Short rows still have C(t)>=1; invalid slots and padded heads retain
+            gather and matrix work.
+            Each real output element has one producer; scratch is unused by this kernel.
+          partition:
+            token: {size: T, tile: 1}
+            head: {size: H, tile: HB}
+            latent: {size: D, tile: 'D/DQ'}
+          worktile:
+            invariant:
+              Q: {shape: [head: HB, latent: D], dtype: bf16}
+              sparse_indices: {shape: [slot: IndexWidth], dtype: int32}
+              sparse_topk_lens: {shape: [], dtype: int32}
+              cum_seq_lens_q: {shape: [boundary: 'B+1'], dtype: int32}
+              seq_lens: {shape: [request: B], dtype: int32}
+              sinks: {shape: [head: HB], dtype: fp32}
+            iteration:
+              Gather: {shape: [slot: KC, latent: D], dtype: bf16, direction: ascending}
+          target:
+            single_tile:
+              out: {shape: [head: HB, latent: 'D/DQ'], dtype: bf16}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: 'T*NB*DQ'
+        schedule:
+          strategy: 'Linear block index is ((t*NB+hb)*DQ+dq). Adjacent dq CTAs gather the same KV rows; this creates cache reuse opportunities without a co-residency guarantee.'
+          worktile_order:
+            - {by: token, direction: ascending}
+            - {by: head, direction: ascending}
+            - {by: latent, direction: ascending}
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+  tile_pipeline:
+    thesis: >-
+      The same eight warps gather and compute. Multi-stage rings allow future KV transfers
+      during QK, softmax and PV; a single-stage ring waits for each chunk before computing.
+      Publication and reuse barriers limit advancement. After the last PV read, the ring
+      becomes BF16 output staging; every worker handles one worktile.
+    phase:
+      attention:
+        domain:
+          c: [0, 'C(t)']
+        resource:
+          ring:
+            space: SMEM
+            member_slot_shape: [byte: '2*Stages*KC*D']
+            dtype: uint8
+            slot_count: 1
+            view:
+              'Gather(c)': {part: {byte: ['2*(c%Stages)*KC*D', '2*((c%Stages)+1)*KC*D']}, dtype: bf16}
+              Q_ring: {part: {byte: [0, '2*HB*D']}, dtype: bf16}
+              OutputStage: {part: {byte: [0, '2*HB*D']}, dtype: bf16}
+          Q_shared: {space: SMEM, member_slot_shape: [head: QHeads, latent: D], dtype: bf16, slot_count: 1}
+          Q_cached: {space: register, member_slot_shape: [copy: WC1, head: HB, latent: '16*QKS'], dtype: bf16, slot_count: 1}
+          Scores: {space: register, member_slot_shape: [head: HB, slot: KC], dtype: fp32, slot_count: 1}
+          Prob: {space: SMEM, member_slot_shape: [head: HB, slot: KC], dtype: bf16, slot_count: 1}
+          Acc: {space: register, member_slot_shape: [head: HB, latent: 'D/DQ'], dtype: fp32, slot_count: 1}
+          control:
+            space: SMEM
+            member_slot_shape: [element: '4*HB+16*MT1']
+            dtype: fp32
+            slot_count: 1
+            view:
+              m: {part: {element: [0, HB]}}
+              l: {part: {element: [HB, '2*HB']}}
+              alpha: {part: {element: ['2*HB', '3*HB']}}
+              sink2: {part: {element: ['3*HB', '4*HB']}}
+              RowMax: {part: {element: ['4*HB', '4*HB+8*MT1']}}
+              RowSum: {part: {element: ['4*HB+8*MT1', '4*HB+16*MT1']}}
+              RequestBounds: {part: {element: ['4*HB', '4*HB+8*MT1']}, dtype: int32}
+              RequestLengths: {part: {element: ['4*HB+8*MT1', '4*HB+16*MT1']}, dtype: int32}
+          validity:
+            space: SMEM
+            member_slot_shape: [slot: KC]
+            dtype: uint8
+            slot_count: Stages
+            view:
+              'valid(c)': {slot_index: 'c%Stages'}
+          IndexPrefetch: {space: register, member_slot_shape: [element: '1280*Early'], dtype: int32, slot_count: 1}
+          IndexShared: {space: SMEM, member_slot_shape: [element: '1152*Early'], dtype: int32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: 'warp[0:8]'
+              verb:
+                metadata: |
+                  Work denotes this CTA's assigned (t,hb,dq).
+                  For P_run.cfg 2/4/5/6/7/8, (Stages,QKS,Early) is respectively
+                  (2,16,0)/(3,32,0)/(3,32,1)/(1,0,0)/(1,32,0)/(1,32,1).
+                  The DQ IX variants retain the cfg5/cfg8 tuple. All use KSPLIT=1.
+                  WR1=HB/16 if QKS>0, otherwise max(HB/32,1); WC1=8/WR1;
+                  MT1=HB/WR1 and U=KC/WC1. QHeads=0 when QKS=32 and Stages>1, else HB.
+                  QPRE is true exactly for Stages=1 in this scope.
+                  Early=1 first issues whole-row index loads into IndexPrefetch if IndexWidth<=1152;
+                  wider rows use per-chunk global reads. It stages request boundaries, lengths and
+                  topk in the future RowMax/RowSum slabs, barriers, then resolves the request and
+                  C(t). Other configs scan metadata directly. Index loads may remain in flight
+                  when metadata is done; metadata resolution does not consume their results.
+                prepare: |
+                  Stage Q with zero padded heads and commit one copy group.
+                  Use Q_shared when QHeads>0, otherwise alias ring slot zero as Q_ring.
+                  If QPRE and Early=0, enqueue chunk zero in slot zero before waiting for Q.
+                  Initialize control state, then publish cached indices into IndexShared when present.
+                  Each index store depends on its register load result; query issuance need not wait for it.
+                  Wait leaving one group outstanding only in that pre-issued case, otherwise
+                  wait all; a CTA barrier publishes Q, control and index storage and ends metadata reads.
+                  If QPRE and Early=1, only now enqueue chunk zero, even when the width disables index caching.
+                  Cache the first QKS 16-wide Q slices in registers, duplicated across key groups.
+                  When Q occupies ring slot zero, a CTA barrier after all Q fragment reads frees it.
+                  Q_cached and any uncached Q_shared slices remain readable for the whole recurrence.
+                  Zero Acc. For j=(1 if QPRE else 0)..Stages-2, enqueue chunk j into slot j
+                  if j<C(t), otherwise commit an empty group.
+                  Enqueueing a chunk resolves slot IDs in batches before issuing 16-byte row copies,
+                  records validity and commits once; invalid slots still copy row zero of their pool.
+                  Completion of prepare means Q is ready and priming is issued, not that KV is ready.
+                await: |
+                  For Stages=1 enqueue c unless c=0 and QPRE, then wait all groups.
+                  For Stages>1 wait until all but the newest Stages-2 groups have completed.
+                  A CTA barrier then makes current Gather(c) and valid(c) readable by all warps.
+                enqueue: |
+                  Future(c) is the prospective copy group for chunk c+Stages-1.
+                  For Stages>1 issue it into slot (c+Stages-1)%Stages when below C(t),
+                  otherwise commit an empty group. Stages=1 does nothing here.
+                  For Stages>1, done means the group was committed, not that the transfer landed; it can remain
+                  in flight through score, softmax and value. The target is initially unused or was
+                  released by the preceding iteration's retire barrier, so no current KV is overwritten.
+                score: |
+                  Eight warps form WR1 head groups by WC1 key groups. Each computes MT1 by U scores,
+                  reading Q_cached where present and the remaining Q from Q_shared, plus Gather(c).
+                  Complete the synchronous QK products, scale and mask scores, then publish per-warp
+                  row maxima into RowMax. A CTA barrier precedes row-owner threads folding the groups
+                  and updating m and alpha; another barrier makes those updates available to all warps.
+                softmax: |
+                  Compute online's E, retain its unrounded sums, and store BF16 Prob. Four-lane
+                  reductions publish RowSum; a CTA barrier makes both Prob and RowSum visible.
+                  Row-owner threads update l, followed by a CTA barrier. Scores can then be discarded.
+                value: |
+                  Rescale Acc, then synchronous PV reads Prob and the same Gather(c) as QK.
+                  Each warp owns all HB rows and D/(8*DQ) distinct output columns in this CTA's slice.
+                  Acc remains in registers across chunks; all probability/KV matrix reads finish here.
+                retire: |
+                  A CTA barrier joins all PV readers before rotating the ring. It protects the next
+                  writes to KV, validity, Prob and control; Q_cached remains unchanged.
+                finish: |
+                  After the last retire, every real KV copy has been waited for and consumed;
+                  only empty committed groups can remain. The source adds no final wait-all.
+                  Read m, l and sink2 to form finalize's inverse; each warp scales its Acc
+                  columns and converts to BF16 Result, including padded heads. Reuse the ring
+                  prefix as OutputStage, writing only this CTA's D/DQ columns in HB by D staging.
+                  A CTA barrier publishes Result, then cooperatively copy the owned columns
+                  of real heads into out. Global stores may remain pending when individual
+                  threads finish; attention.kernel_done provides output visibility.
+                  There are no scratch statistics or duplicate inter-CTA stores. This worker
+                  takes no second worktile and retains no numerical state for another call.
+            pipe:
+              prologue: ['metadata:Work', 'prepare:Work']
+              steady:
+                - repeat: c
+                  steady: ['await:Gather(c)', 'enqueue:Future(c)', 'score:Scores(c)', 'softmax:Prob(c)', 'value:Acc(c)', 'retire:Gather(c)']
+              epilogue: ['finish:Work']
+realization:
+  require:
+    - item: design.tile_pipeline::attention.Main
+      choice: >-
+        Bind copy groups to cp.async.cg.shared.global 16-byte transfers, commit_group,
+        wait_group and CTA __syncthreads at the stated publication/reuse boundaries;
+        use mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 for QK/PV.
+      reason: >-
+        Group-count waits make the current ring slot readable while later transfers
+        continue; synchronous matrix consumption lets the PV barrier release the slot.
+    - item: design.work_schedule::flow
+      choice: |
+        Model.forward caches workspace selection by argument identity; a non-CUDA or
+        smaller-than-32-MiB buffer selects cached private scratch. P.ws_bytes=0 here,
+        so dsv4_run needs no larger allocation and attention does not consume scratch.
+        Submit on the current CUDA stream. The process-wide single-entry graph cache
+        is eligible only when the initial P.dual=0, even if P_run.dual=0 after fallback.
+        Its key includes tensor pointers, dimensions, scales, resolved plan and extension
+        switches. A new key invalidates the entry and dispatches directly. Repeating the
+        last eligible key synchronizes the caller stream before capturing dispatch on
+        a private stream, then instantiates and launches the graph on the caller stream.
+        An executable-key hit replays without that capture synchronization.
+        The cache stores no numerical answers. Begin-capture failure returns before
+        dispatch; failed capture or instantiation executes none of the recorded kernels.
+        Graph failure disables graph use for the process and falls through to direct
+        dispatch, without adding a completion guarantee.
+      reason: >-
+        Workspace selection feeds the host plan despite unused device scratch. Graph
+        eligibility and binding preserve the one-kernel flow; capture preparation adds
+        a caller-stream completion boundary that ordinary replay does not require.

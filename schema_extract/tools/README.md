@@ -264,4 +264,4 @@ python3 -B -m unittest discover -s schema_template/tools/tests -t schema_templat
 
 测试使用本地合成输入和可执行替身，不调用真实模型，`tools/tests` 不进入冻结清单。已有 YAML 用 `schema_template/check_yaml.py --skip-hardware` 检查；质量仍须独立语义审阅。
 
-[Reviewer 语义回归](../review_cases/README.md)另用真实 CLI 独立调用，记录规范/提示身份、输入、结果和用量。它与离线测试分别报告，模拟回执通过不能作为模型已识别语义问题的证据。历史验收与当前操作分开，索引见[Supervisor 手册](../README.md#验证边界)。
+[六算子试用的 Reviewer 验证材料](../archive/six-operators/20261104-review-cases/README.md)已整体归档；`review_eval` 的默认 suite 同步指向该目录，也可用 `--suite` 显式选择其他材料。该评测入口使用真实 CLI 独立调用，记录规范/提示身份、输入、结果和用量。它与离线测试分别报告，模拟回执通过不能作为模型已识别语义问题的证据。历史验收与当前操作分开，索引见[Supervisor 手册](../README.md#验证边界)。

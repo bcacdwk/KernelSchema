@@ -307,11 +307,49 @@ def _retained_approvals(store, state):
         store.verify_node(state, node_id)
 
 
+def _legacy_semantic_capabilities(lock: dict) -> list[str]:
+    """Read only the already allowlisted frozen Store.create declaration."""
+    names = ("schema_extract/tools/store.py", "schema_extract/tools/budget.py")
+    for name in names:
+        if sha256((rules_root(lock) / name).read_bytes()) != lock["rules"]["files"].get(name):
+            raise ExtractError("legacy semantic executor bytes changed: " + name)
+    if _literal(lock, names[0], "STATE_FORMAT") != "schema_extract.run.v2":
+        raise ExtractError("unsupported legacy semantic state format")
+    budget = _literal(lock, names[1], "CAPABILITY")
+    try:
+        module = ast.parse((rules_root(lock) / names[0]).read_text())
+        store_class, = [node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Store"]
+        create, = [node for node in store_class.body if isinstance(node, ast.FunctionDef) and node.name == "create"]
+        declaration, = [value for node in ast.walk(create) if isinstance(node, ast.Dict)
+                        for key, value in zip(node.keys, node.values)
+                        if isinstance(key, ast.Constant) and key.value == "capabilities"]
+        if not isinstance(declaration, ast.List):
+            raise ValueError("capabilities is not a literal list")
+        capabilities = [budget if isinstance(value, ast.Name) and value.id == "BUDGET_CAPABILITY"
+                        else ast.literal_eval(value) for value in declaration.elts]
+    except (SyntaxError, TypeError, ValueError) as exc:
+        raise ExtractError("legacy semantic capabilities are not the verified Store declaration") from exc
+    if (not all(isinstance(value, str) and value for value in capabilities) or
+            len(set(capabilities)) != len(capabilities) or budget != "budget_extension.v1"):
+        raise ExtractError("legacy semantic capability declaration is invalid")
+    return capabilities
+
+
 def _same_execution_semantics(semantic: dict, executor: dict) -> None:
-    """2.5 authoring and approval semantics require a formal semantic revision."""
+    """Keep the Design capability boundary, including three exact legacy locks.
+
+    These pre-runtime-binding rule manifests have inline Design semantics. Do
+    not infer semantics from an absent runtime module for any other rules tree.
+    """
     capability = "design_region_derivation.v1"
-    if ((capability in _executor(semantic)["capabilities"]) !=
-            (capability in _executor(executor)["capabilities"])):
+    if "schema_extract/tools/runtime.py" in semantic["rules"]["files"]:
+        source_has_derivation = capability in _executor(semantic)["capabilities"]
+    else:
+        legacy_inline_manifests = ('f5903f0ec60aee917f668eb159d6ab9abb11366e68f99963b51be93768dabde7', 'a01a660959539bbe75a9b73f46bb9d86de4fcd3e877d9912bcd21532bb7c6c95', '497880c2ddba85307ed5f404f83f1b600894364923438dca6d9535152a7c67c8')
+        if digest(semantic["rules"]["files"]) not in legacy_inline_manifests:
+            raise ExtractError("unknown legacy semantic rules; independent bridge analysis is required")
+        source_has_derivation = capability in _legacy_semantic_capabilities(semantic)
+    if source_has_derivation != (capability in _executor(executor)["capabilities"]):
         raise ExtractError("Design region derivation and provider reopening require semantic revision; compatible runtime cannot change these semantics")
 
 

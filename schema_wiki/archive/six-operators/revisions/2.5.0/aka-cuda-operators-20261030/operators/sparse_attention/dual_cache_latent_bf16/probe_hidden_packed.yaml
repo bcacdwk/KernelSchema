@@ -1,0 +1,1055 @@
+meta_data:
+  name: dual_cache_latent_bf16
+  describe: Joint sparse attention over prepared sliding-window and compressed shared key/value latents, with
+    a per-head zero-value softmax sink.
+  source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/solution.py::Model.forward
+  version: 2
+  dispatch:
+    id: probe_hidden_packed
+    parent: probe_serial_packed
+    when: |
+      Let W be the byte capacity of the workspace actually passed by Model.forward
+      following its identity cache or private scratch selection, and N=dsv4::nsm_cached().
+      Let P=dsv4::make_plan(H,T,IndexWidth,W,0,0,N,true) in the fixed source,
+      including its compile-time fallback when tcgen05 is not built. P is the initial
+      plan; dual denotes probe-gated packing, cfg the kernel, and gt queries per CTA.
+      Select exactly when the shipped automatic policy is active (force_cfg=0,
+      force_s=0, Model.fast is false, normal non-diagnostic build and unchanged default
+      extension switches), P.dual=1, dual_dispatch_hidden passes its prechecks and
+      successfully records the caller fork, queues the side-stream wait and submits
+      probe_begin, and the actual R returned by probe_end satisfies 0<R<=fp32(2.6).
+      The hidden prechecks require P.gt>1, P.splits=P.alt_splits=1, the original full
+      input token range, available nonblocking side stream, fork/join events and mapped
+      gate, and K=N-8>=1 with ceil_div(T,P.gt)>=2*K. The prefix owns [0,K*P.gt);
+      the accepted packed remainder owns [K*P.gt,T). Both dispatches clear dual.
+      P.gt starts at 64/H and halves until P.gt*IndexWidth<=2560 and
+      ceil_div(T,P.gt)>=N, returning one if the result exceeds T. Dual packing requires
+      the alternative allow_tc=false plan to have splits=1 and P.gt>2.6, so GT is 4 or 8.
+      R is the FP32 mean, accumulated in FP64, of the positive values actually read
+      from the eight mapped sample slots after the bounded poll. A timeout can still
+      produce an accepted partial mean; selection uses observed R, not final samples.
+      The extension returns directly after the hidden join is queued, without its
+      private graph cache. External capture, if performed, fixes host selection at
+      recording; replay executes the recorded kernels with recorded bindings and current
+      device tensor contents, without rerunning host polling. Pure capture produces
+      no GPU completion events.
+design:
+  math_reshape:
+    thesis: |-
+      Count sampled packing overhead and use the observed host mean to select the
+      remainder, while the prefix already uses packing. Attention retains the pool-major
+      multiplicity-preserving union, two QK partials, BF16 probabilities and chunked
+      base-2 softmax, including padding and the runtime union order.
+    rewrite:
+    - step: gather
+      name: Build a multiplicity-preserving union and pack query rows
+      math: |
+        GT, MR and KC are bound below. For group grp let t0=grp*GT,
+        G=min(GT,T-t0), nrows=G*H, and t_g=t0+g for g in [0,G).
+        For each real token use the Contract's request lookup and visible length:
+        A(t)=min(max(visible,0),SW);
+        Klen(t)=A(t)+max(min(sparse_topk_lens[t],IndexWidth)-SW,0).
+        For each distinct (pool,id) among the group's valid slots J(t_g), let
+        m_g(pool,id) count its occurrences in query g. Pools remain distinct even
+        when their pointers or row numbers coincide; pool 0 is SWA, pool 1 compressed.
+        Create one shared entry carrying all bits g with m_g>0, then m_g-1 private
+        entries carrying only bit g for each g with m_g>1. Every entry encodes
+        UnionKey[k]=int32(pool*16777216+id) and UnionMask[k]=uint8(sum_g bit_g*2^g).
+        Let Ns and Ng be the entry counts for pools 0 and 1, Nu(grp)=Ns+Ng, and
+        C(grp)=ceil_div(Nu(grp),KC). Nu(grp)<=sum_g count(J(t_g))<=GT*IndexWidth.
+        Entries are ordered with all SWA entries first and all compressed entries
+        second. Within each pool preserve the runtime union-construction permutation;
+        no stable order across executions is assumed. For each (pool,id) its number
+        of entries is 1+sum_g max(m_g(pool,id)-1,0), not max_g m_g(pool,id).
+        For r in [0,MR), Q[r,:]=query[t0+floor(r/H),r mod H,:] when r<nrows,
+        otherwise bf16(0). For c in [0,C(grp)) and u in [0,KC), let k=c*KC+u.
+        Mask(c)[u]=UnionMask[k] if k<Nu(grp), otherwise uint8(0).
+        Define pool(k)=floor(UnionKey[k]/16777216) for k<Nu(grp), otherwise 0;
+        id(k)=UnionKey[k] mod 16777216 for k<Nu(grp), otherwise 0.
+        Let mixed(c) mean 0<Ns-c*KC<KC and (Ns-c*KC) mod 4 != 0.
+        The gathered pool is pool(k) if mixed(c), otherwise pool(c*KC+4*floor(u/4));
+        Gather(c)[u,:] is row id(k) of that pool. Thus padding still fetches row zero;
+        a padded tail sharing a four-row group with compressed entries uses compressed
+        row zero, while wholly padded groups and mixed-chunk padding use SWA row zero.
+        a1=fp32(bmm1_scale); a2=fp32(bmm2_scale);
+        L2=fp32(1.4426950408889634); neg=fp32(-3.0e38); scale=a1*L2.
+      symbol:
+        GT: {meaning: Queries grouped into one worktile., binding: 'bind:design.work_schedule::GT'}
+        MR: {meaning: Matrix rows including padding., binding: 'bind:design.work_schedule::MR'}
+        KC: {meaning: Union entries per local chunk., binding: 'bind:design.work_schedule::KC'}
+        UnionKey:
+          meaning: Pool-tagged row IDs in the realized union order.
+          shape: [{entry: Nu(grp)}]
+          dtype: int32
+          retention: keep_value (grp)
+        UnionMask:
+          meaning: Membership bits selecting which queries consume each union entry.
+          shape: [{entry: Nu(grp)}]
+          dtype: uint8
+          retention: keep_value (grp)
+        Q:
+          meaning: Packed query rows with zero padding.
+          shape: [{row: MR}, {latent: D}]
+          dtype: bf16
+        Gather:
+          meaning: Shared cache rows including padding substitutes.
+          shape: [{slot: KC}, {latent: D}]
+          dtype: bf16
+        Mask:
+          meaning: Per-chunk query membership before score masking.
+          shape: [{slot: KC}]
+          dtype: uint8
+    - step: probe
+      name: Count sampled updates and retain the observed host decision
+      math: |
+        PS is bound below and NG=ceil_div(T,GT). For sample b in [0,PS),
+        if b>=NG set ProbeRatio[b]=fp32(-1). Otherwise let
+        sg(b)=b if NG<=PS, else floor(b*NG/PS), st(b)=sg(b)*GT,
+        pg(b)=min(GT,T-st(b)), and Items(b)=sum_{g=0}^{pg(b)-1} Klen(st(b)+g).
+        A sample is usable when pg(b)=GT, all its tokens belong to the same Contract
+        request, and 0<Items(b)<=2560. If unusable set ProbeRatio[b]=fp32(-1).
+        For a usable sample, enumerate occurrences x=(g,j) with g in [0,GT)
+        and j in J(st(b)+g). Let g(x)=g and
+        e(x)=uint32(sparse_indices[st(b)+g,j]) bitwise-OR
+             (0 if j<SW, otherwise 16777216).
+        For each encoded key e, Creator(e) is its first entry-creating occurrence;
+        for each (e,g), First(e,g) is its first membership-marking occurrence
+        in the actual concurrent update order. These two orders need not agree.
+        ProbeCount(b)=sum_x (1 if x=Creator(e(x)) else
+                            (0 if x=First(e(x),g(x)) else 1)).
+        Invalid IDs are absent from J, but Items includes their selected slots.
+        ProbeRatio[b]=(fp32(ProbeCount(b))*fp32(GT))/fp32(Items(b)).
+        Only the count is retained locally; no attention union or KV is produced.
+
+        Before this computation, the mapped sample slots contain fp32(-2).
+        For each b let observed[b] be the actual FP32 value read by the host's final
+        scan after its bounded poll; the scan need not observe all final sample values.
+        Starting sum64=fp64(0), visit b=0..PS-1 and add fp64(observed[b]) in FP64
+        only when observed[b]>0. Let npos count these additions.
+        R=fp32(sum64/fp64(npos)) if npos>0, otherwise fp32(-1).
+        R selects only the remainder implementation; the prefix uses packing
+        independently of R. This node accepts the same packing for the remainder.
+        No probe value enters an attention score, probability or output.
+      symbol:
+        PS: {meaning: Number of independent probe samples., binding: 'bind:design.work_schedule::PS'}
+        ProbeCount:
+          meaning: Actual integer numerator accumulated for one usable sample.
+          shape: []
+          dtype: int32
+        ProbeRatio:
+          meaning: Per-sample FP32 control results published to the mapped gate.
+          shape: [{sample: PS}]
+          dtype: fp32
+          retention: keep_value invocation
+        R:
+          meaning: Actual positive-sample mean read by the host for selection.
+          shape: []
+          dtype: fp32
+          retention: keep_value invocation
+      arithmetic:
+        approx: 'ProbeRatio division uses the shipped --use_fast_math build; unknown: no source-provided error
+          bound. R follows the explicit FP64 host accumulation and final FP32 conversion.'
+    - step: online
+      name: Two QK partials and a lazy maximum recurrence
+      math: |
+        E2(x) is the compiled fast exp2f(x), with E2(-inf)=0;
+        maxnum is FP32 fmaxf, where a single NaN loses to the numeric operand.
+        For each grp with C(grp)>0, initialize sink2[r]=sinks[r mod H]*L2
+        for r<nrows and neg for padded rows; m(-1)[r]=sink2[r].
+        l(-1)[r]=0 and Acc(-1)[r,:]=0.
+        For c=0..C(grp)-1:
+          Partial(c,a)=mm32(Q[:,a*D/2:(a+1)*D/2],
+                            Gather(c)[:,a*D/2:(a+1)*D/2]^T), a in {0,1}.
+          Each partial accumulates D/32 successive 16-wide products from zero.
+          Z=Partial(c,0)+Partial(c,1), with one FP32 addition per score.
+          Scores(c)[r,u]=Z[r,u]*scale if floor(Mask(c)[u]/2^floor(r/H)) mod 2 != 0, otherwise -inf.
+          For b in {0,1} and q in {0,1,2,3}, reduce Scores[r,b*32+4*n+q]
+          for n=0..7 by successive maxnum from -inf, obtaining M[b,q].
+          Mhalf[b]=maxnum(maxnum(M[b,0],M[b,1]),maxnum(M[b,2],M[b,3]));
+          candidate=maxnum(m(c-1)[r],maxnum(Mhalf[0],Mhalf[1]));
+          clamped=candidate if candidate>neg*0.5, otherwise neg;
+          m(c)[r]=m(c-1)[r] if clamped-m(c-1)[r]<=1, otherwise clamped.
+          alpha(c)[r]=E2(m(c-1)[r]-m(c)[r]);
+          E[r,u]=E2(Scores(c)[r,u]-m(c)[r]); Prob(c)[r,u]=bf16(E[r,u]).
+          For each b,q form SumPart[b,q] by adding E[r,b*32+4*n+q] from zero for n=0..7;
+          Rhalf[b]=(SumPart[b,0]+SumPart[b,1])+(SumPart[b,2]+SumPart[b,3]);
+          l(c)[r]=l(c-1)[r]*alpha(c)[r]+(Rhalf[0]+Rhalf[1]).
+          Acc(0)=mm32(Prob(0),Gather(0));
+          Acc(c)=mma32(Prob(c),Gather(c),alpha(c)[:,None] ⊙ Acc(c-1)) for c>0.
+        Each PV output half traverses KC/16 successive 16-wide products.
+        Partition the rows into consecutive groups of RG rows, with RG bound below.
+        Rescaling is omitted for a row group when every alpha is exactly 1;
+        otherwise all its rows are multiplied, including those with alpha=1.
+        The two key halves evaluate duplicate m,l updates; the lower half's l
+        supplies the final denominator. Unrounded E supplies l, and Prob supplies PV.
+      symbol:
+        RG: {meaning: Rows sharing the conditional rescale decision., binding: 'bind:design.tile_pipeline::RG'}
+        Partial:
+          meaning: FP32 QK sum for one latent half a of one chunk.
+          shape: [{row: MR}, {slot: KC}]
+          dtype: fp32
+        Scores:
+          meaning: Added, scaled and masked chunk scores.
+          shape: [{row: MR}, {slot: KC}]
+          dtype: fp32
+        E:
+          meaning: Unrounded exponentials used for the normalizer and probability conversion.
+          shape: [{row: MR}, {slot: KC}]
+          dtype: fp32
+        Prob:
+          meaning: BF16 probability operands for PV.
+          shape: [{row: MR}, {slot: KC}]
+          dtype: bf16
+        alpha:
+          meaning: Rescaling factor for the current chunk.
+          shape: [{row: MR}]
+          dtype: fp32
+        sink2:
+          meaning: Base-2 sink logit for each packed row, with a finite sentinel for padding.
+          shape: [{row: MR}]
+          dtype: fp32
+          retention: keep_value (grp)
+        m:
+          meaning: Lagging base-2 row maximum.
+          shape: [{row: MR}]
+          dtype: fp32
+          retention: carry_forward (grp); c=-1..C(grp)-1
+        l:
+          meaning: FP32 exponential sum excluding the sink.
+          shape: [{row: MR}]
+          dtype: fp32
+          retention: carry_forward (grp); c=-1..C(grp)-1
+        Acc:
+          meaning: Unnormalized full-latent value sum.
+          shape: [{row: MR}, {latent: D}]
+          dtype: fp32
+          retention: carry_forward (grp); c=-1..C(grp)-1
+      arithmetic:
+        approx: 'E2 and division use the shipped --use_fast_math build; unknown: no source-provided error bound.
+          The finite sentinel, clamp and maximum lag are retained without a magnitude guarantee for the full Contract
+          domain.'
+        accumulate: Scalar multiply/add expressions may contract under fast-math compilation. The half-latent
+          addition and the specified sum grouping do not imply bitwise equivalence to the reference.
+    - step: finalize
+      name: Write zero for an empty union or normalize real packed rows
+      math: |
+        If C(grp)=0, overwrite out[t0+floor(r/H),r mod H,d]=bf16(0)
+        for r in [0,nrows), d in [0,D), without evaluating online or final normalization.
+        Otherwise, last=C(grp)-1 and for r in [0,MR):
+          z[r]=l(last)[r]+E2(sink2[r]-m(last)[r]);
+          inv[r]=a2/z[r] if r<nrows and z[r]>0, otherwise 0.
+        For r<nrows and d in [0,D), Result[r,d]=bf16(Acc(last)[r,d]*inv[r]);
+        overwrite out[t0+floor(r/H),r mod H,d]=Result[r,d].
+        No Result value is formed for padded rows. All matrix products and online
+        updates still include those rows. A query with J(t_g) empty inside a nonempty
+        union follows online and normalization rather than the empty-union shortcut.
+        E2, division and scalar contraction follow online's arithmetic exception.
+      symbol:
+        inv:
+          meaning: Final per-row multiplier shared by both output halves, zero for padding.
+          shape: [{row: MR}]
+          dtype: fp32
+        Result:
+          meaning: Normalized BF16 rows for the real tokens of the group.
+          shape: [{row: nrows}, {latent: D}]
+          dtype: bf16
+    ledger:
+      baseline: Direct FP32 evaluation per query over valid slots, gathering each BF16 latent once for both QK
+        and PV and materializing full logits and probabilities. Counts below include every padded product actually
+        evaluated.
+      traffic:
+      - item: Cache payload
+        change: 2*D*sum_g count(J(t_g)) -> 2*D*C(grp)*KC bytes per group, for the gather shared by QK and PV;
+          sharing saves rows only when overlap exceeds chunk padding.
+        by: [gather]
+      - item: Probe control payload
+        change: +4*sum_b Items(b) index bytes for usable samples and 4*PS published bytes per invocation; host
+          polling adds at most 2000000*PS scalar reads and a PS-element final scan. These do not reuse attention
+          data.
+        by: [probe]
+      footprint:
+      - item: Intermediate values
+        change: 8*H*sum_g count(J(t_g)) full-row logit/probability bytes -> 5*Nu(grp) retained union bytes and
+          no full attention matrices; chunk operands include 2*MR*KC FP32 QK partials and MR*KC BF16 probabilities,
+          with 4*MR*(D+2) recurrence bytes per group.
+        by: [gather, online]
+      - item: Probe results
+        change: +4*PS retained control bytes per invocation; the host consumes observations without materializing
+          an attention matrix.
+        by: [probe]
+      matmul:
+      - item: Packed contractions
+        change: 2*H*sum_g count(J(t_g))*D -> 2*MR*C(grp)*KC*D MACs per group; C(grp)=0 executes no products.
+        by: [gather, online]
+      vector:
+      - item: QK partial merge
+        change: +MR*C(grp)*KC FP32 additions per group.
+        by: [online]
+      - item: Probe update count
+        change: +sum_b Items(b) selected-index inspections over usable samples per invocation, with runtime-dependent
+          hash-collision work and at most PS*GT*IndexWidth inspected slots.
+        by: [probe]
+      error:
+      - item: Numerical changes
+        change: The realized union permutation reorders reductions. Each chunk narrows MR*KC exponentials to BF16
+          only for PV; split QK, grouped normalizer sums, a one-unit base-2 maximum-update threshold and fast
+          exponentials change rounding. No global output error bound is supplied.
+        by: [gather, online, finalize]
+  work_schedule:
+    thesis: |-
+      Fork after the caller's preceding work, run the full-batch probe on a side stream
+      and a packed prefix on the caller stream, then submit the accepted packed remainder
+      behind the probe. The remainder need not wait for the prefix. Queue a side-to-caller
+      join after the remainder and behind the prefix, so subsequent caller work observes
+      all output rows. One probe and two attention launches
+      plus the event pair permit overlap without promising simultaneous residency.
+    flow:
+      launch:
+      - phase: [probe]
+      - phase: [prefix]
+      - phase: [remainder]
+        start_after: probe.kernel_done
+    phase:
+      probe:
+        describe: |-
+          The caller first records a fork after its prior work; the side stream waits for
+          that fork before reading input tensors. The host arms the mapped slots with -2
+          and submits this full-batch probe to the side stream. It then submits prefix to
+          the caller stream before polling at most 2000000 passes, stopping when a pass
+          finds no -2. The final scan reads each slot once and computes probe's positive-only
+          R. This node accepts packing and submits remainder using the initial P parameters.
+          Polling may finish before probe.kernel_done. Side-stream order still prevents
+          remainder from starting before probe completion; prefix has no probe completion
+          wait. ProbeRatio is consumed only by the host, not by either attention kernel,
+          so no tensor handoff connects these phases. ProbeCount follows probe's actual
+          update order and can differ from the attention union count. The source also permits
+          pending probe writes to race a later gate reset; selection uses the actual observed R.
+        decomposition:
+          strategy: |-
+            PS=8. Sample b is the ascending sample coordinate; sg(b), Items(b) and
+            usability are defined by probe. Set PG=0 for b>=NG, otherwise PG=min(GT,T-sg(b)*GT).
+            All PS samples receive a worker, including out-of-range, cross-request and
+            partial-tail samples; those still publish -1. A usable sample examines every
+            selected slot of its PG tokens and publishes one scalar, with no KV access.
+            The probe hash/membership state is private to its worktile and is not reused
+            by attention.
+          partition:
+            sample: {size: PS, tile: 1}
+          worktile:
+            invariant:
+              sparse_indices:
+                shape: [{token: PG}, {slot: IndexWidth}]
+                dtype: int32
+              sparse_topk_lens:
+                shape: [{token: PG}]
+                dtype: int32
+              cum_seq_lens_q:
+                shape: [{boundary: B+1}]
+                dtype: int32
+              seq_lens:
+                shape: [{request: B}]
+                dtype: int32
+          target:
+            single_tile:
+              ProbeRatio:
+                shape: []
+                dtype: fp32
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: PS
+        schedule:
+          worktile_order:
+          - {by: sample, direction: ascending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+      prefix:
+        describe: Build packed unions and write all outputs for the first K full groups on the caller stream.
+        decomposition:
+          strategy: |-
+            For all phases, GT=P.gt in {4,8}, MR=64, KC=64, NG=ceil_div(T,GT),
+            and K=N-PS, where N is the SM count used by the initial plan. Both range
+            launches retain P.cfg=90, splits=1, nb=1 and ws_bytes=0, and clear dual.
+            The alternative is never submitted. H is 8 or 16 and GT*H<=MR.
+            Prefix's local token coordinate equals the batch token coordinate and covers
+            [0,K*GT), giving global groups grp in [0,K). Each group owns all H heads and
+            D columns for its GT tokens. This range ends on a complete group boundary.
+            For both attention phases, resolve each real token's request independently;
+            groups may cross request boundaries although probe samples exclude those groups.
+            A nonempty union traverses c=0..C(grp)-1; an empty union still writes zeros.
+            All H sinks are shared across queries, and padded matrix rows produce no stores.
+            The two phases have disjoint outputs, no cross-phase KV/state reuse, and no combine.
+          partition:
+            token: {size: K*GT, tile: GT}
+          worktile: &id001
+            invariant:
+              Q:
+                shape: [{row: MR}, {latent: D}]
+                dtype: bf16
+              sparse_indices:
+                shape: [{token: G}, {slot: IndexWidth}]
+                dtype: int32
+              sparse_topk_lens:
+                shape: [{token: G}]
+                dtype: int32
+              cum_seq_lens_q:
+                shape: [{boundary: B+1}]
+                dtype: int32
+              seq_lens:
+                shape: [{request: B}]
+                dtype: int32
+              sinks:
+                shape: [{head: H}]
+                dtype: fp32
+            iteration:
+              Gather:
+                shape: [{slot: KC}, {latent: D}]
+                dtype: bf16
+                direction: ascending
+          target: &id002
+            single_tile:
+              out:
+                shape: [{token: G}, {head: H}, {latent: D}]
+                dtype: bf16
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: K
+        schedule:
+          strategy: For block index worker_id, grp=K-1-worker_id. Reverse ordering is local to this range; each
+            worker receives one full group.
+          worktile_order:
+          - {by: token, direction: descending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+      remainder:
+        describe: |-
+          Build packed unions and write outputs for the remaining groups on the side stream.
+          After this kernel, record the join on the side stream and queue its wait on the
+          caller stream behind prefix. The join covers remainder.kernel_done, which also
+          follows probe.kernel_done; caller order covers prefix.kernel_done. Return does
+          not block the host for either output producer. The join is an external completion
+          boundary, not a fourth compute kernel or an output merge.
+        decomposition:
+          strategy: |-
+            Use the shared GT, MR, KC, NG and K fixed by prefix. The remainder partition's
+            local token coordinate u maps to batch token K*GT+u, covering [K*GT,T).
+            Its local group coordinate j maps to global grp=K+j. Each group owns all H
+            heads and D columns for G=min(GT,T-grp*GT) real tokens, with a possible partial
+            group only at the batch tail. The full-batch pointers and T remain unchanged;
+            only the launch range and its group offset change. Resolve request crossings,
+            iterate nonempty unions and handle empty unions exactly as prefix defines.
+            Together the two partitions produce every real output element exactly once.
+          partition:
+            token: {size: T-K*GT, tile: GT}
+          worktile: *id001
+          target: *id002
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: NG-K
+        schedule:
+          strategy: For block index worker_id, grp=NG-1-worker_id. Descend only within the remainder range; no
+            prefix work is reassigned or repeated.
+          worktile_order:
+          - {by: token, direction: descending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: |-
+      Probe CTAs own independent counting state while prefix CTAs may run concurrently.
+      Both attention phases use the same per-CTA pipeline with separate resource instances:
+      union construction reuses the idle KV ring, four loader warps overlap four softmax
+      warps, and final PV completion releases the ring for output staging. The two phases
+      share no local buffers or completion notifications.
+    phase:
+      probe:
+        resource:
+          ProbeHash:
+            space: SMEM
+            member_slot_shape: [{entry: 4096}]
+            dtype: uint64
+            slot_count: 1
+          ProbeMembership:
+            space: SMEM
+            member_slot_shape: [{entry: 4096}]
+            dtype: uint8
+            slot_count: 1
+          ProbeMeta:
+            space: SMEM
+            member_slot_shape: [{element: 24}]
+            dtype: int32
+            slot_count: 1
+            view:
+              SelectedCount:
+                part:
+                  element: [0, 8]
+              SwaCount:
+                part:
+                  element: [8, 16]
+              RequestId:
+                part:
+                  element: [16, 24]
+          ProbeCount:
+            space: SMEM
+            member_slot_shape: []
+            dtype: int32
+            slot_count: 1
+          PrefetchedId:
+            space: register
+            member_slot_shape: [{element: 1024}]
+            dtype: int32
+            slot_count: 1
+          LocalCount:
+            space: register
+            member_slot_shape: [{element: 1024}]
+            dtype: int32
+            slot_count: 1
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:32]
+              verb:
+                produce: |-
+                  For an in-range sample, the first GT participants resolve SelectedCount,
+                  SwaCount and RequestId into ProbeMeta; rendezvous before checking usability.
+                  An out-of-range or unusable sample writes the final -1 from one participant,
+                  without initializing or reading the hash state. A usable sample clears
+                  ProbeHash, ProbeMembership and ProbeCount, then rendezvous before inserting.
+                  All participants share a 4096-entry open-addressed table of pool-tagged keys.
+                  A slot has one membership byte for up to eight queries. Apply probe's
+                  Creator/First contribution rule to LocalCount: atomicCAS publishes a new
+                  entry before its creator sets the membership bit; matching participants
+                  use the previous bit returned by atomicOr, without waiting for the creator.
+                  Each nonzero local count is flushed into ProbeCount once.
+                  Each participant prefetches one next selected index into PrefetchedId before
+                  processing the current key; invalid IDs skip the hash operation. No index row,
+                  query or latent is staged for reuse by either attention phase.
+                  After the counting rendezvous, form probe's scalar ratio and write only this
+                  sample's mapped slot once from one participant. There is no device reduction
+                  across samples. This publication does not assert that every CTA has finished;
+                  all local reads and stores retire by probe.kernel_done. The static resources
+                  are per CTA, and no next worktile reuses them.
+            pipe:
+              steady: ['produce:ProbeRatio']
+      prefix: &id003
+        domain:
+          v: [0, 'min(1,C(grp))']
+          e: [0, '1-min(1,C(grp))']
+          c: [0, C(grp)]
+        resource:
+          Q:
+            space: SMEM
+            member_slot_shape: [{row: MR}, {latent: D}]
+            dtype: bf16
+            slot_count: 1
+          ring:
+            space: SMEM
+            member_slot_shape: [{byte: 4*KC*D}]
+            dtype: uint8
+            slot_count: 1
+            view:
+              HashTable:
+                part:
+                  byte: [0, 65536]
+                dtype: uint64
+              IndexStage:
+                part:
+                  byte: [65536, 65536+4*GT*IndexWidth]
+                dtype: int32
+              Gather(c):
+                part:
+                  byte: [2*(c%2)*KC*D, 2*((c%2)+1)*KC*D]
+                dtype: bf16
+              OutputStage:
+                part:
+                  byte: [0, MR*(2*D+16)]
+                dtype: bf16
+          Prob:
+            space: SMEM
+            member_slot_shape: [{row: MR}, {slot: KC}]
+            dtype: bf16
+            slot_count: 2
+            view:
+              Prob(c): {slot_index: c%2}
+          validity:
+            space: SMEM
+            member_slot_shape: [{slot: KC}]
+            dtype: uint8
+            slot_count: 2
+            view:
+              Mask(c): {slot_index: c%2}
+          tensor:
+            space: TMEM
+            member_slot_shape: [{row: 128}, {column: 512}]
+            dtype: fp32
+            slot_count: 1
+            view:
+              Acc:
+                part:
+                  column: [0, 256]
+              Partial(c,a):
+                part:
+                  column: [256+(2*a+c%2)*KC, 256+(2*a+c%2+1)*KC]
+          control:
+            space: SMEM
+            member_slot_shape: [{element: 4*MR}]
+            dtype: fp32
+            slot_count: 1
+            view:
+              m_initial:
+                part:
+                  element: [0, MR]
+              l_initial:
+                part:
+                  element: [MR, 2*MR]
+              sink2:
+                part:
+                  element: [2*MR, 3*MR]
+              alpha:
+                part:
+                  element: [3*MR, 4*MR]
+              inv:
+                part:
+                  element: [3*MR, 4*MR]
+          RowState:
+            space: register
+            member_slot_shape: [{copy: 2}, {element: 2*MR}]
+            dtype: fp32
+            slot_count: 1
+            view:
+              m:
+                part:
+                  element: [0, MR]
+              l:
+                part:
+                  element: [MR, 2*MR]
+          ScoreWork:
+            space: register
+            member_slot_shape: [{row: MR}, {slot: KC}]
+            dtype: fp32
+            slot_count: 1
+            view:
+              Scores: {}
+              E: {}
+          UnionKey:
+            space: SMEM
+            member_slot_shape: [{entry: 2560}]
+            dtype: int32
+            slot_count: 1
+          UnionMask:
+            space: SMEM
+            member_slot_shape: [{entry: 2560}]
+            dtype: uint8
+            slot_count: 1
+          group_meta:
+            space: SMEM
+            member_slot_shape: [{element: 2*GT+2}]
+            dtype: int32
+            slot_count: 1
+            view:
+              TokenExtent:
+                part:
+                  element: [0, 2*GT]
+              UnionCount:
+                part:
+                  element: [2*GT, 2*GT+2]
+        role:
+          Setup:
+            info:
+              execution_mode: serial
+              member: warp[0:8]
+              verb:
+                build: |-
+                  Union denotes UnionKey, UnionMask and the two pool counts for this grp.
+                  All eight warps resolve each token's A and Klen into TokenExtent and issue
+                  Q copies, zeroing padded rows. Clear the 8192-word uint64 HashTable in the
+                  ring and the membership array. Stage the G complete sparse-index rows into
+                  IndexStage using asynchronous copies; wait for those copies and the earlier
+                  Q copies, then rendezvous before reading indices. Only the selected slot
+                  intervals feed the union; invalid markers contribute no entry.
+                  Each thread prefetches its next item before its current hash operation.
+                  Use open addressing: atomically install the pool-tagged key, allocate its
+                  canonical entry and publish the key/position pair in one atomic word.
+                  A same-key contender waits for that position publication. Atomic membership
+                  updates share the canonical entry across tokens; an already-set token bit
+                  allocates a private extra entry, as defined by gather.
+                  SWA entries allocate upward from slot zero and compressed entries downward
+                  from slot 2559. Logical entries [0,Ns) use their identical physical slots;
+                  entry k in [Ns,Nu(grp)) uses slot 2560-Ng+k-Ns. This reverses the compressed
+                  allocation order in the logical traversal; it does not move union bytes.
+                  A CTA rendezvous publishes keys, masks and counts and ends all HashTable
+                  and IndexStage reads. Their ring storage is now free for the first gather.
+                  The 65536-byte table plus 4*GT*IndexWidth index bytes fits the 131072-byte
+                  ring by the host's GT*IndexWidth<=2560 gate.
+                prepare: |-
+                  Work(v) is the nonempty group's execution setup; for both phases RG=16. Acquire
+                  512 TMEM columns, initialize m_initial, l_initial, sink2 and alpha from
+                  online, and initialize completion protocols. Only m_initial is read into
+                  the replicated register state; alpha is first initialized to one.
+                  Q completion, a proxy fence and CTA rendezvous publish Q and control before
+                  done. Acc is initialized by the first PV, not by reading new TMEM.
+                  Acc's two 256-column output halves occupy disjoint lane halves of columns
+                  0..255; each Partial uses its reserved score columns. All four score regions
+                  remain reserved throughout this nonempty worktile; unused lanes are unread.
+                  The source aliases allocation metadata and union keys with live transfer
+                  barriers; this design retains the separately budgeted objects and their
+                  lifetimes without depending on those erroneous implementation aliases.
+                zero: |-
+                  For the empty union, all eight warps overwrite every real output row
+                  with finalize's zero result. Q copies have completed in build:Union.
+                  This path acquires no TMEM and initializes no transfer barriers; it creates
+                  none of the v- or c-indexed actions. Stores complete by the containing kernel's completion.
+            pipe:
+              prologue: ['build:Union']
+              steady:
+              - repeat: v
+                steady: ['prepare:Work(v)']
+              - repeat: e
+                steady: ['zero:out(e)']
+          Loader:
+            info:
+              execution_mode: serial
+              member: warp[4:8]
+              verb:
+                load:
+                  execution_mode: async
+                  meaning: |-
+                    Read UnionKey and UnionMask through the two-block logical-to-physical
+                    mapping, write Mask(c), and issue the complete Gather(c) tile.
+                    Unless mixed(c), each of 128 loaders issues one 512-byte TMA gather4 for
+                    four rows in one 64-element latent plane using the first entry's pool map.
+                    Each issuer arms its own transaction bytes before that request. The single
+                    possible mixed-pool chunk uses batched keys and 16-byte asynchronous copies
+                    with per-loader completion arrivals. Both forms transfer the padding rows
+                    specified by gather and fill the same swizzled tile. done guarantees all
+                    tile data has landed; issuing later actions need not wait for it.
+                publish: |
+                  Rendezvous all loader warps after the current gather instructions
+                  and membership stores have been issued; publish Mask(c) with one
+                  CTA-level arrival and the required proxy ordering. This does not
+                  wait for Gather(c) to land. It precedes issuing the next gather.
+                finish: |
+                  Finish the loader issue loop, including its empty trailing copy
+                  commit. Transfers(v) denotes this issue path, not a transfer drain;
+                  real transfers are retired by the QK and PV completion chain.
+            pipe:
+              steady:
+              - repeat: v
+                steady:
+                - wait:Work(v)
+                - repeat: c
+                  steady: ['load:Gather(c)', 'publish:Mask(c)']
+                - finish:Transfers(v)
+            waits_for:
+              data:
+                wait:Work(v): ['Setup/prepare:Work(v)']
+              reuse:
+                load:Gather(c+2): ['Soft0/pv:Acc(c)']
+          Soft0:
+            info:
+              execution_mode: serial
+              member: warp[0:1]
+              verb:
+                online: |
+                  A softmax warp owns its consecutive RG matrix rows. Its two
+                  lane halves hold the two 32-key halves and duplicate m,l; read
+                  both Partial(c,a), add and scale, select the membership bit floor(r/H),
+                  then compute online's masked E and state updates. Exchange the two key-half maxima and sums within
+                  the warp. Publish alpha once per row and rendezvous the warp.
+                  Scores are replaced in place by E; both score partials have
+                  been read when done. E remains live until publish:Prob(c).
+                rescale: |
+                  For c=0 do not read or write Acc. For c>0 wait for the preceding
+                  PV even if every scale is one; then conditionally rescale this
+                  warp's rows of both output halves. The group predicate is uniform
+                  across the warp, and all TMEM reads and writes finish before done.
+                publish: |
+                  Narrow this warp's E to its rows of Prob(c), fence the shared
+                  writes and TMEM rescale, then arrive once on probability readiness.
+                  done publishes only this warp's rows and releases its score reads.
+                  Four such arrivals jointly authorize PV and score-slot reuse.
+                pv:
+                  execution_mode: async_ordered_completion
+                  meaning: |
+                    Lane zero issues both 256-column PV output halves. Each starts
+                    from zero on chunk zero; later chunks accumulate into the
+                    rescaled Acc. Its per-issuer completion group covers all prior
+                    PV operations, independently of both QK issuers. done guarantees
+                    Acc is written and all reads of Prob(c) and Gather(c) have ended.
+                stage: |
+                  After the final PV, compute finalize's inverse from the lower
+                  key-half state and sink2, share inv across the warp, read both
+                  output halves and stage only this warp's real BF16 Result rows. OutputStage
+                  aliases the retired KV ring with a D+8 BF16-element row pitch.
+                  Padded rows participate in convergent TMEM reads but perform no BF16
+                  conversion or staging. done ends these reads and publishes the staged
+                  rows; staging does not wait for the loader's empty tail commit.
+            pipe:
+              steady:
+              - repeat: v
+                steady:
+                - wait:Work(v)
+                - repeat: c
+                  steady: ['wait:Mask(c)', 'online:Scores(c)', 'rescale:Acc(c)', 'publish:Prob(c)', 'pv:Acc(c)']
+                - stage:Result(v)
+            waits_for:
+              data:
+                online:Scores(c): ['Soft1/qk:Partial(c,0)', 'Soft2/qk:Partial(c,1)']
+                pv:Acc(c): ['Soft1/publish:Prob(c)', 'Soft2/publish:Prob(c)', 'Soft3/publish:Prob(c)']
+                wait:Work(v): ['Setup/prepare:Work(v)']
+                stage:Result(v): ['pv:Acc(last(c))']
+              reuse:
+                rescale:Acc(c+1): ['pv:Acc(c)']
+          Soft1:
+            info:
+              execution_mode: serial
+              member: warp[1:2]
+              verb:
+                qk:
+                  execution_mode: async
+                  meaning: |
+                    Lane zero issues the half a named by Partial(c,a), covering all
+                    MR rows and KC keys. The first product overwrites its score
+                    region. Both issuers commit separately to a two-arrival QK
+                    completion notification; both done events use that shared
+                    notification, covering the partial writes and Q/Gather reads.
+                    Neither issuer shares the PV completion group.
+                online: |
+                  A softmax warp owns its consecutive RG matrix rows. Its two
+                  lane halves hold the two 32-key halves and duplicate m,l; read
+                  both Partial(c,a), add and scale, select the membership bit floor(r/H),
+                  then compute online's masked E and state updates. Exchange the two key-half maxima and sums within
+                  the warp. Publish alpha once per row and rendezvous the warp.
+                  Scores are replaced in place by E; both score partials have
+                  been read when done. E remains live until publish:Prob(c).
+                rescale: |
+                  For c=0 do not read or write Acc. For c>0 wait for the preceding
+                  PV even if every scale is one; then conditionally rescale this
+                  warp's rows of both output halves. The group predicate is uniform
+                  across the warp, and all TMEM reads and writes finish before done.
+                publish: |
+                  Narrow this warp's E to its rows of Prob(c), fence the shared
+                  writes and TMEM rescale, then arrive once on probability readiness.
+                  done publishes only this warp's rows and releases its score reads.
+                  Four such arrivals jointly authorize PV and score-slot reuse.
+                stage: |
+                  After the final PV, compute finalize's inverse from the lower
+                  key-half state and sink2, share inv across the warp, read both
+                  output halves and stage only this warp's real BF16 Result rows. OutputStage
+                  aliases the retired KV ring with a D+8 BF16-element row pitch.
+                  Padded rows participate in convergent TMEM reads but perform no BF16
+                  conversion or staging. done ends these reads and publishes the staged
+                  rows; staging does not wait for the loader's empty tail commit.
+            pipe:
+              steady:
+              - repeat: v
+                steady:
+                - wait:Work(v)
+                - repeat: c
+                  steady: ['wait:Mask(c)', 'qk:Partial(c,0)', 'online:Scores(c)', 'rescale:Acc(c)', 'publish:Prob(c)']
+                - stage:Result(v)
+            waits_for:
+              data:
+                qk:Partial(c,0): ['Loader/load:Gather(c)']
+                online:Scores(c): ['qk:Partial(c,0)', 'Soft2/qk:Partial(c,1)']
+                wait:Work(v): ['Setup/prepare:Work(v)']
+                stage:Result(v): ['Soft0/pv:Acc(last(c))']
+              reuse:
+                qk:Partial(c+2,0): ['Soft0/publish:Prob(c)', 'Soft1/publish:Prob(c)', 'Soft2/publish:Prob(c)',
+                  'Soft3/publish:Prob(c)']
+                rescale:Acc(c+1): ['Soft0/pv:Acc(c)']
+          Soft2:
+            info:
+              execution_mode: serial
+              member: warp[2:3]
+              verb:
+                qk:
+                  execution_mode: async
+                  meaning: |
+                    Lane zero issues the half a named by Partial(c,a), covering all
+                    MR rows and KC keys. The first product overwrites its score
+                    region. Both issuers commit separately to a two-arrival QK
+                    completion notification; both done events use that shared
+                    notification, covering the partial writes and Q/Gather reads.
+                    Neither issuer shares the PV completion group.
+                online: |
+                  A softmax warp owns its consecutive RG matrix rows. Its two
+                  lane halves hold the two 32-key halves and duplicate m,l; read
+                  both Partial(c,a), add and scale, select the membership bit floor(r/H),
+                  then compute online's masked E and state updates. Exchange the two key-half maxima and sums within
+                  the warp. Publish alpha once per row and rendezvous the warp.
+                  Scores are replaced in place by E; both score partials have
+                  been read when done. E remains live until publish:Prob(c).
+                rescale: |
+                  For c=0 do not read or write Acc. For c>0 wait for the preceding
+                  PV even if every scale is one; then conditionally rescale this
+                  warp's rows of both output halves. The group predicate is uniform
+                  across the warp, and all TMEM reads and writes finish before done.
+                publish: |
+                  Narrow this warp's E to its rows of Prob(c), fence the shared
+                  writes and TMEM rescale, then arrive once on probability readiness.
+                  done publishes only this warp's rows and releases its score reads.
+                  Four such arrivals jointly authorize PV and score-slot reuse.
+                stage: |
+                  After the final PV, compute finalize's inverse from the lower
+                  key-half state and sink2, share inv across the warp, read both
+                  output halves and stage only this warp's real BF16 Result rows. OutputStage
+                  aliases the retired KV ring with a D+8 BF16-element row pitch.
+                  Padded rows participate in convergent TMEM reads but perform no BF16
+                  conversion or staging. done ends these reads and publishes the staged
+                  rows; staging does not wait for the loader's empty tail commit.
+            pipe:
+              steady:
+              - repeat: v
+                steady:
+                - wait:Work(v)
+                - repeat: c
+                  steady: ['wait:Mask(c)', 'qk:Partial(c,1)', 'online:Scores(c)', 'rescale:Acc(c)', 'publish:Prob(c)']
+                - stage:Result(v)
+            waits_for:
+              data:
+                qk:Partial(c,1): ['Loader/load:Gather(c)']
+                online:Scores(c): ['Soft1/qk:Partial(c,0)', 'qk:Partial(c,1)']
+                wait:Work(v): ['Setup/prepare:Work(v)']
+                stage:Result(v): ['Soft0/pv:Acc(last(c))']
+              reuse:
+                qk:Partial(c+2,1): ['Soft0/publish:Prob(c)', 'Soft1/publish:Prob(c)', 'Soft2/publish:Prob(c)',
+                  'Soft3/publish:Prob(c)']
+                rescale:Acc(c+1): ['Soft0/pv:Acc(c)']
+          Soft3:
+            info:
+              execution_mode: serial
+              member: warp[3:4]
+              verb:
+                online: |
+                  A softmax warp owns its consecutive RG matrix rows. Its two
+                  lane halves hold the two 32-key halves and duplicate m,l; read
+                  both Partial(c,a), add and scale, select the membership bit floor(r/H),
+                  then compute online's masked E and state updates. Exchange the two key-half maxima and sums within
+                  the warp. Publish alpha once per row and rendezvous the warp.
+                  Scores are replaced in place by E; both score partials have
+                  been read when done. E remains live until publish:Prob(c).
+                rescale: |
+                  For c=0 do not read or write Acc. For c>0 wait for the preceding
+                  PV even if every scale is one; then conditionally rescale this
+                  warp's rows of both output halves. The group predicate is uniform
+                  across the warp, and all TMEM reads and writes finish before done.
+                publish: |
+                  Narrow this warp's E to its rows of Prob(c), fence the shared
+                  writes and TMEM rescale, then arrive once on probability readiness.
+                  done publishes only this warp's rows and releases its score reads.
+                  Four such arrivals jointly authorize PV and score-slot reuse.
+                stage: |
+                  After the final PV, compute finalize's inverse from the lower
+                  key-half state and sink2, share inv across the warp, read both
+                  output halves and stage only this warp's real BF16 Result rows. OutputStage
+                  aliases the retired KV ring with a D+8 BF16-element row pitch.
+                  Padded rows participate in convergent TMEM reads but perform no BF16
+                  conversion or staging. done ends these reads and publishes the staged
+                  rows; staging does not wait for the loader's empty tail commit.
+            pipe:
+              steady:
+              - repeat: v
+                steady:
+                - wait:Work(v)
+                - repeat: c
+                  steady: ['wait:Mask(c)', 'online:Scores(c)', 'rescale:Acc(c)', 'publish:Prob(c)']
+                - stage:Result(v)
+            waits_for:
+              data:
+                online:Scores(c): ['Soft1/qk:Partial(c,0)', 'Soft2/qk:Partial(c,1)']
+                wait:Work(v): ['Setup/prepare:Work(v)']
+                stage:Result(v): ['Soft0/pv:Acc(last(c))']
+              reuse:
+                rescale:Acc(c+1): ['Soft0/pv:Acc(c)']
+          Finish:
+            info:
+              execution_mode: serial
+              member: warp[0:8]
+              verb:
+                store: |
+                  Rejoin all eight warps at a CTA barrier after the real Result rows
+                  are staged. Cooperatively copy nrows contiguous rows from OutputStage
+                  into out, mapping row r to token t0+floor(r/H) and head r mod H.
+                  TMEM may be deallocated by its owner after that barrier while other
+                  warps copy, since copy-out no longer reads TMEM. Global stores can
+                  remain pending until the containing kernel's completion. No worker takes another
+                  worktile.
+            pipe:
+              steady:
+              - repeat: v
+                steady: ['store:Result(v)']
+            waits_for:
+              data:
+                store:Result(v): ['Soft0/stage:Result(v)', 'Soft1/stage:Result(v)', 'Soft2/stage:Result(v)', 'Soft3/stage:Result(v)',
+                  'Loader/finish:Transfers(v)']
+      remainder: *id003
+realization:
+  require:
+  - item: ['design.tile_pipeline::prefix.Soft0', 'design.tile_pipeline::prefix.Soft1', 'design.tile_pipeline::prefix.Soft2',
+      'design.tile_pipeline::prefix.Soft3', 'design.tile_pipeline::remainder.Soft0', 'design.tile_pipeline::remainder.Soft1',
+      'design.tile_pipeline::remainder.Soft2', 'design.tile_pipeline::remainder.Soft3']
+    choice: Bind the matrix products to tcgen05.mma.cta_group::1 with BF16 operands and FP32 accumulators, using
+      per-issuer tcgen05.commit notifications. Use warp-convergent tcgen05.ld/st and their completion waits; the
+      score load uses the 16x32bx2 form, while accumulator access uses 32x32b.
+    reason: Independent issuer groups preserve QK/PV overlap; the score-load shape supplies both key halves, and
+      convergent accumulator access is required even when only some rows need rescaling.
+  - item: ['design.tile_pipeline::prefix.Loader', 'design.tile_pipeline::remainder.Loader']
+    choice: Build each pool's two-dimensional BF16 CUtensorMap with row stride 2*D, a 64-element-wide box and
+      SWIZZLE_128B; pass maps by value to the kernel. Bind gather4 completion to mbarrier transaction bytes and
+      the mixed-pool chunk's cp.async completion to cp.async.mbarrier.arrive. Preserve the separate membership
+      publication and data-landing notifications.
+    reason: Both loaders feed the same shared operand layout while membership becomes visible independently of
+      transfer completion. Maps are bound to the current pool pointers for each launch.
+  - item: ['design.tile_pipeline::prefix.Setup', 'design.tile_pipeline::remainder.Setup']
+    choice: Bind hash installation/publication to shared-memory 64-bit atomicCAS/atomicExch and membership updates
+      to 32-bit atomicOr on the word containing four mask bytes. Bind index staging and query prefetch to cp.async,
+      retiring their groups with cp.async.wait_group before the CTA rendezvous.
+    reason: A competing inserter must observe a complete canonical position, and same-query duplicates must remain
+      private entries. The staged indices and asynchronous query copies must be retired before ring reuse or an
+      empty-group return.
+  - item: design.tile_pipeline::probe.Main
+    choice: |-
+      Bind hash insertion to shared-memory 64-bit atomicCAS, membership updates
+      to 32-bit atomicOr on four packed mask bytes, and count flushing to integer
+      atomicAdd. Keep probe storage static and separate from attention's
+      1024-byte-aligned dynamic shared storage; the probe fits the 48-KiB static
+      limit without a dynamic shared-memory opt-in.
+    reason: The count uses returned atomic membership bits; static probe storage avoids weakening the alignment
+      required by attention operand descriptors.
+  - item: design.work_schedule::probe
+    choice: |-
+      Use the process-lifetime 64-float cudaHostAllocMapped buffer and its
+      cudaHostGetDevicePointer alias; only its first PS slots carry samples.
+      Arm them through volatile host stores, submit the probe, poll with volatile
+      host reads, then perform the ordinary FP32 final reads used for R.
+      Retain storage through all pending probe writes even if polling stops early.
+      The source reuses this one gate without per-invocation isolation; it provides
+      no cross-call completion guarantee at poll exit.
+    reason: Mapped storage permits the bounded host decision without cudaStreamSynchronize. The actual observations,
+      including partial results, determine this node.
+  - item: design.work_schedule::flow
+    choice: |-
+      Bind the fork and join to the cached cudaEventDisableTiming events and
+      cudaEventRecord/cudaStreamWaitEvent. Use the cached cudaStreamNonBlocking side
+      stream so the legacy default stream cannot introduce a prefix-to-probe or
+      prefix-to-remainder barrier. Use the initial GT for both token ranges.
+      The side stream, events and mapped gate persist across calls. Event waits queue
+      device ordering, not a host completion wait; their reuse does not isolate gate
+      contents between calls. Return out after successfully queuing the join.
+    reason: The nonblocking stream and event pair implement the declared fork/join while preserving overlap and
+      caller-stream output visibility.
+  - item: design.work_schedule::flow
+    choice: |-
+      Model.forward caches workspace selection by object identity, substituting
+      private scratch for a non-CUDA or smaller-than-32-MiB buffer. P.ws_bytes=0 needs
+      no further allocation. The successful hidden path returns before the extension's
+      private graph machinery. External capture records the three submissions and event
+      relationships; actual replay uses those bindings without repeating host polling.
+    reason: Workspace identity participates in the initial plan, and capture must not be counted as an extra execution
+      of the probe or attention.

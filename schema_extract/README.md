@@ -2,6 +2,8 @@
 
 版本 `2.5.0`。入口 [extract.py](extract.py) 从固定 kernel 提取 schema，Runner 推进写作、独立审阅、返工与发布。本页说明操作；[提取总览](../EXTRACT_SCHEMA.md)定义 P1–P6，[工具协议](tools/README.md)说明回执与执行门禁。
 
+本目录顶层保留现行操作、审阅、阶段和工具说明。已完成的设计、六算子试用/恢复/暂停记录统一从[历史归档](archive/README.md)进入；查看六项成果与过程时直接打开[六算子档案](archive/six-operators/README.md)。来源限定材料继续放在 `inputs/`，复用问题与决定按 `issues/` 维护，正式结果由 [Schema Wiki](../schema_wiki/README.md)导航。
+
 2.5.0 同步引入[Design 显式整区引用](../schema_docs/0.common.md#design-整区引用)、共用 raw/effective 解析与来源身份、有效视图/图/standalone、首稿引用与旧稿保留、换父显式迁移及普通 P5 实际 provider 修复。语言、检查、依赖和审批含义属于正式 rules revision；旧全本地 YAML 仍合法，旧 frozen run 正常恢复继续原规则，不自动获得这些能力。已有未完成 run 采用新语义须经下述 semantic revision/maintenance 和适用性审阅，不能登记为 compatible runtime 修复。旧 checkpoint、receipt、批准历史、预算和产物不自动转换或重写。
 
 ## 开始一次试用
@@ -214,4 +216,4 @@ P3/P5/P6 的完成、批准与退修由 Runner 自动执行冻结检查器，放
 
 实际检查证据在 `attempts/ATTEMPT_UUID/check.json` 和 `validated.json`，P5 合入另有 `merge_check.json`。合入检查按[工具协议](tools/README.md#并行合入与计划修订)在受控目录取有效节点、候选及祖先闭包；维护父候选的 raw SHA 变化时，先排除后代再取闭包，即使其状态尚未失效。完整 merged raw 树保留，待迁移或重审的旧稿不计有效。回执 `checks` 只记录模型亲自执行的命令，空列表不代表 Runner 漏检。最终 P6、ready 和发布仍要求整树完整有效，交付回执绑定同一完整文件集合。
 
-维护验证方法见[离线验证](tools/README.md#离线验证)。历史结果分别保留在[试用记录](TRIAL_REPORT.md)、[算子审阅](OPERATOR_REVIEW.md)、[Reviewer 验证](review_cases/RESULTS.md)、[问题与决定](issues/TRIAGE.md)及[已完成连续修订设计](IMPROVEMENT_PLAN.md)，不作为当前 run 已通过的证据。
+维护验证方法见[离线验证](tools/README.md#离线验证)。历史设计、试用、算子审阅、恢复与暂停记录见[归档索引](archive/README.md)；它们不作为当前 run 已通过的证据。
