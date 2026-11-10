@@ -70,7 +70,7 @@ Contract 是已有前提，不随优化选择改变。字段语义、权限和�
 
 ## 4 连通设计并检查任务
 
-沿修改范围核对符号、shape、dtype、phase、role、动作、资源及交接引用，按 [DOC 6](schema_docs/6.realization.md#选择一条实现约束)更新必要的 realization 条目。重新核对规则、来源 manifest 与 effective identity，并结合输入、环境和参数判断旧反馈是否仍适用，保留原实验记录；按[反馈规则](schema_docs/6.realization.md#有证据的替代反馈)处理有证据的替代，不将无实验依据的候选写成 Coder feedback，也不将旧证据自动视为新设计的验证。
+沿修改范围核对符号、shape、dtype、phase、role、动作、资源及交接引用，按 [DOC 6](schema_docs/6.realization.md#先做删除测试再判断强度)更新必要的 realization 条目。重新核对规则、来源 manifest 与 effective identity，并结合输入、环境和参数判断旧反馈是否仍适用，保留原实验记录；按[反馈规则](schema_docs/6.realization.md#有证据的替代反馈)处理有证据的替代，不将无实验依据的候选写成 Coder feedback，也不将旧证据自动视为新设计的验证。
 
 同一路径修订原节点；只有不同 workload 确需并存设计时才派生，不能用节点保存优化历史。按[模板说明](schema_template/README.md#2-创建文件或进入已有任务)处理节点与 dispatch，并[维护版本和来源](schema_template/README.md#3-填写与修订)。
 
