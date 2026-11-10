@@ -1,0 +1,264 @@
+"meta_data":
+  "name": "nvfp4_fused_moe"
+  "describe": "Precomputed routed mixture of experts with prepared NVFP4 weights,\
+    \ gated activation, activation requantization and BF16 output."
+  "source": "SchemaExtractSource_c98aa54e58ac@ce1b7d5e8e7560b5c80abd87549bc2328c52df34:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward"
+  "version": 1
+  "dispatch":
+    "id": "no_scan_fused_serial"
+    "parent": "fused_serial"
+    "when": |
+      Let R = T*K and a be the new MoEABI built by Model.forward after both
+      its identity fast path and keyed ABI cache miss. In a, cfg/cfg2 select
+      FC1/FC2, small_thresh selects routing preparation, and zflag/zflag_host
+      are optional device verification state and its pinned host mirror.
+      All implementation controls follow the frozen default implementation scope.
+      Select exactly when the device is already in this Model's _tables_ready
+      set, no format-table initialization kernel is submitted, a.cfg = 97,
+      a.cfg2 = 81, R >= 49152, and the automatic zero-probe attempt returns or
+      raises before reaching its k_zero_scan launch, leaving zero_ok=false.
+      No route_hist readback is requested at this R; small_thresh=6500,
+      so R > a.small_thresh, and a.zflag=a.zflag_host=0. The shape gate
+      disables PDL. Workspace cache reuse does not count as ABI reuse.
+      The ensuing moe_run returns zero through one caller-stream run_pipeline
+      call or graph_replay's ordinary full-graph arm. Every private-stream
+      run_pipeline call in this request, if present, follows a successful
+      cudaStreamBeginCapture and is capture-only; there is no additional
+      uncaptured pipeline submission on that stream. This includes eager
+      execution, first replay after successful construction, existing-graph
+      replay, and eager fallback after capture-only construction failure.
+      During outer capture, recorded computation has no completion events
+      until replay. Host choices and bindings use their recorded values;
+      device tensor reads use execution-time contents. Probe and workspace
+      service calls already reached during rebuilding are retained separately
+      from the seven recorded computational submissions.
+"design":
+  "math_reshape":
+    "from_parent": "fused_serial"
+  work_schedule:
+    thesis: >-
+      Rebuild the ABI after the zero probe stops before its scan launch, retaining
+      the service operations already reached. Execute the count/fill reset and
+      seven computational kernels with ordinary stream completion between launches.
+      Routing and flat gather expose broad parallelism; statically strided GEMM
+      workers retain their rings across expert tiles. Cached workspace can survive
+      this rebuild and later requests; unwritten packed and route-result bytes
+      remain unspecified. Same-stream ordering governs reuse, with no added
+      cross-stream exclusion or host wait for the completed output.
+    flow:
+      launch:
+        - {phase: [count]}
+        - {phase: [scan], start_after: count.kernel_done}
+        - {phase: [scatter], start_after: scan.kernel_done}
+        - {phase: [gather], start_after: scatter.kernel_done}
+        - {phase: [fc1], start_after: gather.kernel_done}
+        - {phase: [fc2], start_after: fc1.kernel_done}
+        - {phase: [finalize], start_after: fc2.kernel_done}
+      handoff:
+        Counts: {producer: count, consumer: [scan, fc1, fc2], storage: global, ready: count.kernel_done}
+        Offs: {producer: scan, consumer: [scatter, gather, fc1, fc2], storage: global, ready: scan.kernel_done}
+        TilePrefix: {producer: scan, consumer: [fc1, fc2], storage: global, ready: scan.kernel_done}
+        TileExpert: {producer: scan, consumer: [fc1, fc2], storage: global, ready: scan.kernel_done}
+        TileRow: {producer: scan, consumer: [fc1, fc2], storage: global, ready: scan.kernel_done}
+        RoutePos: {producer: scatter, consumer: [gather, finalize], storage: global, ready: scatter.kernel_done}
+        GatherQ: {producer: gather, consumer: [fc1], storage: global, ready: gather.kernel_done}
+        GatherS: {producer: gather, consumer: [fc1], storage: global, ready: gather.kernel_done}
+        ActQ: {producer: fc1, consumer: [fc2], storage: global, ready: fc1.kernel_done}
+        ActS: {producer: fc1, consumer: [fc2], storage: global, ready: fc1.kernel_done}
+        RouteResult: {producer: fc2, consumer: [finalize], storage: global, ready: fc2.kernel_done}
+    phase:
+      count:
+        describe: Form block histograms and accumulate Counts.
+        decomposition:
+          strategy: >-
+            RouteBatch=256. If entered, the C zero probe attempts to allocate one
+            device int32. Allocation failure returns immediately; after allocation
+            succeeds, a failed cudaMemsetAsync of that word is followed by cudaFree.
+            A caught exception before entering the probe contributes no device work.
+            These reached service calls remain part of the request, but produce no
+            zero verdict, zero-scan completion, explicit probe stream synchronization or
+            device-to-host verdict copy. No verification state is allocated.
+            The shape/configuration-keyed workspace is reused when present. On a
+            miss, allocate scratch and zero the adjacent E-element Counts and Fill
+            arrays; the other backing buffers are uninitialized. Bind the new ABI
+            to these buffers and keep them alive with the cached ABI.
+            Independently of that allocation-time initialization, each pipeline
+            execution submits cudaMemsetAsync for Counts and Fill on its stream
+            before count starts. Each 256-route worktile then forms Hist and
+            atomically adds each nonzero expert count. Only this per-execution
+            reset is recorded in a newly constructed internal pipeline graph.
+          partition: {route: {size: R, tile: RouteBatch}}
+          worktile:
+            invariant:
+              route_ids: {shape: [route: RouteBatch], dtype: int32}
+          target:
+            single_tile: {Hist: {shape: [expert: E], dtype: int32}}
+            tile_reduction: {dimension: route, input: "ref:design.math_reshape::Hist", output: "ref:design.math_reshape::Counts", method: "ref:design.math_reshape::routing"}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: "ceil_div(R,RouteBatch)"}
+        schedule:
+          worktile_order: [{by: route, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      scan:
+        describe: Joint prefix scans followed by tile-map enumeration.
+        decomposition:
+          strategy: >-
+            BM = 128. One worktile scans all E counts and per-expert ceil counts,
+            then enumerates J row tiles by binary search of the tile prefixes.
+          partition: {}
+          worktile: {invariant: {Counts: {shape: [expert: E], dtype: int32}}}
+          target:
+            single_tile:
+              Offs: {shape: [prefix: "E+1"], dtype: int32}
+              TilePrefix: {shape: [prefix: "E+1"], dtype: int32}
+              TileExpert: {shape: [row_tile: J], dtype: int32}
+              TileRow: {shape: [row_tile: J], dtype: int32}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: 1}
+        schedule:
+          worker_assignment: {preassigned: {start: 0, count: 1}, refill: none, exit: assigned_done}
+      scatter:
+        describe: Recompute batch histograms, reserve expert intervals and publish both route maps.
+        decomposition:
+          strategy: >-
+            Hist is recomputed locally, not transferred from count. A block reserves
+            Hist[e] rows by one Fill atomic per nonempty expert and assigns ranks with
+            block-local atomics. Fill's zero initialization is the count-stage
+            memset; different blocks may reserve in any order. Map stores are clipped
+            to actual routes and RoutePos is -1 for invalid routes.
+          partition: {route: {size: R, tile: RouteBatch}}
+          worktile:
+            invariant:
+              route_ids: {shape: [route: RouteBatch], dtype: int32}
+              Offs: {shape: [prefix: "E+1"], dtype: int32}
+          target:
+            single_tile:
+              RoutePos: {shape: [route: RouteBatch], dtype: int32}
+              PackedToken: {shape: [route: RouteBatch], dtype: int32}
+              PackedSlot: {shape: [route: RouteBatch], dtype: int32}
+              PackedExpert: {shape: [route: RouteBatch], dtype: int32}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: "ceil_div(R,RouteBatch)"}
+        schedule:
+          worktile_order: [{by: route, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      gather:
+        describe: Load each source byte chunk once and replicate it to the token's valid routes.
+        decomposition:
+          strategy: >-
+            Read Offs[E] to detect an empty route set. Worktiles are 128 consecutive flattened (token,16-byte-chunk) coordinates,
+            with chunk fastest; a tile can cross token boundaries. All work is empty
+            when M=0. Otherwise chunks whose token has no routes are visited without
+            payload reads or writes; the final packet is clipped.
+          partition: {chunk: {size: "T*Nchunk*min(1,M)", tile: 128}}
+          worktile:
+            invariant:
+              SourceChunk: {shape: [chunk: 128, byte: 16], dtype: uint8}
+              RoutePos: {shape: [chunk: 128, slot: K], dtype: int32}
+              Offs: {shape: [prefix: 1], dtype: int32}
+          target:
+            single_tile: {GatherChunk: {shape: [chunk: 128, slot: K, byte: 16], dtype: uint8}}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: "min(1184,ceil_div(T*Nchunk,128))"}
+        schedule:
+          worktile_order: [{by: chunk, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, step: worker_count}, refill: none, exit: assigned_done}
+      fc1:
+        describe: Joint up/gate contraction and fused activation plus packed quantization.
+        decomposition:
+          strategy: >-
+            BN1=64, BK=256; each row tile and intermediate column group is one
+            worktile, with H/BK local iterations and four 64-channel updates per
+            iteration. Valid rows are base(j)..base(j)+valid(j); padded arithmetic
+            follows fc1_quantize. Metadata selects one expert and remains invariant; the clamp slice is
+            read only when gemm1_clamp_limit is not None.
+            TileCap=ceil_div(R,BM)+min(E,R) is the ABI's row-tile upper bound.
+            Let Cap be the cached automatic grid cap: twice the queried SM count,
+            or zero if that query failed. For Nx column groups define
+            G(Nx)=Nx*(max(1,floor(Cap/Nx)) if Cap>0 and Nx*TileCap>Cap else TileCap).
+            The submitted grid uses G(I/BN1), independent of the current J.
+          partition: {row_tile: {size: J, tile: 1}, intermediate: {size: I, tile: BN1}}
+          worktile:
+            invariant:
+              Counts: {shape: [expert: 1], dtype: int32}
+              Offs: {shape: [prefix: 1], dtype: int32}
+              TilePrefix: {shape: [prefix: 1], dtype: int32}
+              TileExpert: {shape: [row_tile: 1], dtype: int32}
+              TileRow: {shape: [row_tile: 1], dtype: int32}
+              gemm1_alpha: {shape: [expert: 1], dtype: fp32}
+              gemm1_beta: {shape: [expert: 1], dtype: fp32}
+              gemm1_clamp_limit: {shape: [expert: 1], dtype: fp32}
+            iteration:
+              GatherQ: {shape: [row: BM, packed_hidden: "BK/2"], dtype: uint8, direction: ascending}
+              GatherS: {shape: [row: BM, hidden_block: "BK/Block"], dtype: fp8_e4m3fn, direction: ascending}
+              gemm1_weights: {shape: [column: "2*BN1", packed_hidden: "BK/2"], dtype: uint8, direction: ascending}
+              gemm1_weights_scale: {shape: [column: "2*BN1", hidden_block: "BK/Block"], dtype: fp8_e4m3fn, direction: ascending}
+          target:
+            single_tile:
+              ActQ: {shape: [row: BM, packed_intermediate: "BN1/2"], dtype: uint8}
+              ActS: {shape: [row: BM, intermediate_block: "BN1/Block"], dtype: fp8_e4m3fn}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: "G(I/BN1)"}
+        schedule:
+          worktile_order: [{by: row_tile, direction: ascending}, {by: intermediate, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, step: worker_count}, refill: none, exit: assigned_done}
+      fc2:
+        describe: Packed FC2 contraction with BF16 materialization in compact route order.
+        decomposition:
+          strategy: >-
+            BN2=128; reuse BM, BK, TileCap and G from fc1. Each worktile traverses
+            I/BK local stages. Only valid(j) output rows are stored. All submitted
+            workers remain present when J=0, but their assigned sequences are empty.
+          partition: {row_tile: {size: J, tile: 1}, hidden: {size: H, tile: BN2}}
+          worktile:
+            invariant:
+              Counts: {shape: [expert: 1], dtype: int32}
+              Offs: {shape: [prefix: 1], dtype: int32}
+              TilePrefix: {shape: [prefix: 1], dtype: int32}
+              TileExpert: {shape: [row_tile: 1], dtype: int32}
+              TileRow: {shape: [row_tile: 1], dtype: int32}
+            iteration:
+              ActQ: {shape: [row: BM, packed_intermediate: "BK/2"], dtype: uint8, direction: ascending}
+              ActS: {shape: [row: BM, intermediate_block: "BK/Block"], dtype: fp8_e4m3fn, direction: ascending}
+              gemm2_weights: {shape: [column: BN2, packed_intermediate: "BK/2"], dtype: uint8, direction: ascending}
+              gemm2_weights_scale: {shape: [column: BN2, intermediate_block: "BK/Block"], dtype: fp8_e4m3fn, direction: ascending}
+          target: {single_tile: {RouteResult: {shape: [row: BM, hidden: BN2], dtype: bf16}}}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: "G(H/BN2)"}
+        schedule:
+          worktile_order: [{by: row_tile, direction: ascending}, {by: hidden, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, step: worker_count}, refill: none, exit: assigned_done}
+      finalize:
+        describe: Gather BF16 route results and execute the fixed K-slot FP32 FMA chain.
+        decomposition:
+          strategy: >-
+            FinalWidth=16; 2*R*H exceeds the default 40*2^20-byte threshold throughout this node.
+            One worker produces up to 128*FinalWidth consecutive hidden elements of one token.
+            Route slots are a local reduction, not independently assigned work;
+            masked routes do not read the route-result slab.
+          partition: {token: {size: T, tile: 1}, hidden: {size: H, tile: "128*FinalWidth"}}
+          worktile:
+            invariant:
+              RoutePos: {shape: [slot: K], dtype: int32}
+              route_weights: {shape: [slot: K], dtype: fp32}
+            iteration:
+              RouteResult: {shape: [slot: 1, hidden: "128*FinalWidth"], dtype: bf16, direction: ascending}
+          target: {single_tile: {Y: {shape: [hidden: "128*FinalWidth"], dtype: bf16}}}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: "T*ceil_div(H,128*FinalWidth)"}
+        schedule:
+          worktile_order: [{by: token, direction: ascending}, {by: hidden, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+  "tile_pipeline":
+    "from_parent": "fused_serial"
+realization:
+  require:
+    - item: ["design.tile_pipeline::fc1.MMA", "design.tile_pipeline::fc2.MMA"]
+      choice: >-
+        Use the source's tcgen05 block_scale.scale_vec::4X E2M1/E4M3 MMA and
+        tcgen05.cp scale path, with cumulative tcgen05.commit completion and
+        tcgen05.fence::after_thread_sync at the recorded synchronization boundaries.
+      reason: The shared-slot reuse and cross-work scale-copy hoist depend on the same issuer's ordered scale reads and cumulative operand-read completion.
+    - item: ["design.tile_pipeline::fc1", "design.tile_pipeline::fc2"]
+      choice: For all epilogue roles, use tcgen05.ld with tcgen05.wait::ld before each final accumulator-release arrival, using the issuing warp's hardware quadrant.
+      reason: Register materialization and early accumulator reuse require TMEM reads to have retired before the next work overwrites it.
+    - item: "design.tile_pipeline::fc2"
+      choice: >-
+        Bind bulk Sink reuse to cp.async.bulk.wait_group.read 0, its publication to
+        fence.proxy.async.shared::cta, and terminal completion to
+        cp.async.bulk.wait_group 0. The output tensor map is a byte view with a
+        64-byte by 32-row box; full quadrants use it and partial quadrants use direct stores.
+      reason: Source-read completion permits Sink overwrite but does not make RouteResult globally visible to finalize.

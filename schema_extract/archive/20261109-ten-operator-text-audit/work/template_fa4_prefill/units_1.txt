@@ -1,0 +1,199 @@
+1 t_4320672ba5771a94 algorithm_contract.math
+python_int is a Python integer; fp64 scalars are Python floats; python_none is the singleton Python None ABI type, not a tensor. Tensors are contiguous in the stated axis order on one CUDA device. batch_size=BatchCount. cum_seq_lens_q[0]=cum_seq_lens_kv[0]=0; cum_seq_lens_q[BatchCount]=TotalQ. Qlen(b)=cum_seq_lens_q[b+1]-cum_seq_lens_q[b]; L(b)=seq_lens[b]; 0<Qlen(b)<=L(b). max_q_len=max_b Qlen(b); max_kv_len=max_b L(b); Pages=sum_b ceil(L(b)/Page). cum_seq_lens_kv[b+1]-cum_seq_lens_kv[b]=ceil(L(b)/Page)<=TableColumns. For 0<=j<L(b), Kref[b,j,d]=kv_cache[block_tables[b,floor(j/Page)],0,0,j%Page,d], with Vref using kind=1. The complete standalone callable is timed. Only out is an observable input mutation; workspace_buffer is scratch.
+Contexts: root:42 contract.algorithm_requirement.compute[0].math
+
+2 t_b34a8da0898b51ff algorithm_contract.math
+For each b, 0<=q<Qlen(b), 0<=h<Hq and 0<=d<D, let a=cum_seq_lens_q[b]+q. J(b,q)={j in integers | 0<=j<L(b) and j<=L(b)-Qlen(b)+q}. score[j]=bmm1_scale*sum_{d=0}^{D-1} query[a,h,d]*Kref[b,j,d] for j in J(b,q). p[j]=exp(score[j]-max_k score[k])/sum_{k in J(b,q)} exp(score[k]-max_u score[u]), with all maxima over J(b,q). out_after[a,h,d]=bf16(bmm2_scale*sum_{j in J(b,q)} p[j]*Vref[b,j,d]); output is the same tensor object as out.
+Contexts: root:57 contract.algorithm_requirement.compute[1].math
+
+3 t_0e23b91f87366271 algorithm_contract.meaning
+Returned alias of the updated input out.
+Contexts: root:38 contract.algorithm_requirement.output.output.meaning
+
+4 t_161d515cd4827d79 algorithm_contract.meaning
+Composite output scale.
+Contexts: root:29 contract.algorithm_requirement.input.bmm2_scale.meaning
+
+5 t_302dec2005cdfd83 algorithm_contract.meaning
+Query length function of request b.
+Contexts: root:52 contract.algorithm_requirement.compute[0].symbol.Qlen.meaning
+
+6 t_33d00ca80e470ab0 algorithm_contract.meaning
+Caller scratch zeroed before first isolated use.
+Contexts: root:23 contract.algorithm_requirement.input.workspace_buffer.meaning
+
+7 t_3932d15b415420a2 algorithm_contract.meaning
+Query prefix boundaries.
+Contexts: root:31 contract.algorithm_requirement.input.cum_seq_lens_q.meaning
+
+8 t_413ef00d1623b854 algorithm_contract.meaning
+Maximum request query length.
+Contexts: root:26 contract.algorithm_requirement.input.max_q_len.meaning
+
+9 t_435ef2cea1740fc3 algorithm_contract.meaning
+KV head count.
+Contexts: root:17 contract.algorithm_requirement.constant.Hkv.meaning
+
+10 t_5f40e2f2a5ff3a66 algorithm_contract.meaning
+Used KV length function of request b.
+Contexts: root:53 contract.algorithm_requirement.compute[0].symbol.L.meaning
+
+11 t_61344414b1f0da4e algorithm_contract.meaning
+Caller destination whose initial contents are ignored.
+Contexts: root:36 contract.algorithm_requirement.input.out.meaning
+
+12 t_771571ce59cfbce7 algorithm_contract.meaning
+Logical keys on each request's valid domain.
+Contexts: root:54 contract.algorithm_requirement.compute[0].symbol.Kref.meaning
+
+13 t_7a81fe920558b776 algorithm_contract.meaning
+Logical page to physical page mapping.
+Contexts: root:24 contract.algorithm_requirement.input.block_tables.meaning
+
+14 t_92dd8f4bdba13f98 algorithm_contract.meaning
+Required disabled sink argument.
+Contexts: root:34 contract.algorithm_requirement.input.sinks.meaning
+
+15 t_cd0f1797bd10b750 algorithm_contract.meaning
+In-place contents of input out.
+Contexts: root:39 contract.algorithm_requirement.output.out_after.meaning
+
+16 t_cde865389d0fdbdf algorithm_contract.meaning
+Concatenated request queries.
+Contexts: root:21 contract.algorithm_requirement.input.query.meaning
+
+17 t_d004f487e4faf6a4 algorithm_contract.meaning
+Query and value channel count.
+Contexts: root:18 contract.algorithm_requirement.constant.D.meaning
+
+18 t_d0c960a5c6be1f7f algorithm_contract.meaning
+Maximum used KV length.
+Contexts: root:27 contract.algorithm_requirement.input.max_kv_len.meaning
+
+19 t_d25f17179de788c9 algorithm_contract.meaning
+Tokens per physical KV page.
+Contexts: root:19 contract.algorithm_requirement.constant.Page.meaning
+
+20 t_d38b1c38833b286c algorithm_contract.meaning
+Unrestricted causal history sentinel.
+Contexts: root:33 contract.algorithm_requirement.input.window_left.meaning
+
+21 t_d4e2481ddeebe933 algorithm_contract.meaning
+Prefix counts of allocated pages rather than tokens.
+Contexts: root:32 contract.algorithm_requirement.input.cum_seq_lens_kv.meaning
+
+22 t_d6e441742dec3fca algorithm_contract.meaning
+HND cache with keys then values on the kind axis.
+Contexts: root:22 contract.algorithm_requirement.input.kv_cache.meaning
+
+23 t_e361d613a56cdba6 algorithm_contract.meaning
+Visible key set function of request and query.
+Contexts: root:64 contract.algorithm_requirement.compute[1].symbol.J.meaning
+
+24 t_e42d2129a8323318 algorithm_contract.meaning
+Used KV lengths.
+Contexts: root:25 contract.algorithm_requirement.input.seq_lens.meaning
+
+25 t_e66af7be4d3dbae2 algorithm_contract.meaning
+Required disabled output quantization argument.
+Contexts: root:35 contract.algorithm_requirement.input.o_sf_scale.meaning
+
+26 t_e7bba2709488483e algorithm_contract.meaning
+ABI request count.
+Contexts: root:30 contract.algorithm_requirement.input.batch_size.meaning
+
+27 t_f441d1be8f8a8404 algorithm_contract.meaning
+Composite QK scale including quantization scales.
+Contexts: root:28 contract.algorithm_requirement.input.bmm1_scale.meaning
+
+28 t_f7685d5364954804 algorithm_contract.meaning
+Logical values on each request's valid domain.
+Contexts: root:55 contract.algorithm_requirement.compute[0].symbol.Vref.meaning
+
+29 t_fafc62027311f974 algorithm_contract.meaning
+Query head count.
+Contexts: root:16 contract.algorithm_requirement.constant.Hq.meaning
+
+30 t_5996dd1e60b2e83a algorithm_contract.range
+Any BF16 bit pattern, including inf and NaN.
+Contexts: root:36 contract.algorithm_requirement.input.out.range
+
+31 t_c8859c9506de4d0d algorithm_contract.range
+Used entries in [0,Pages); unused entries are -1.
+Contexts: root:24 contract.algorithm_requirement.input.block_tables.range
+
+32 t_c8e2f190af93b55c algorithm_contract.range
+Positive.
+Contexts: root:25 contract.algorithm_requirement.input.seq_lens.range
+
+33 t_fc93f7b072d442a0 algorithm_contract.range
+Python None.
+Contexts: root:34 contract.algorithm_requirement.input.sinks.range; root:35 contract.algorithm_requirement.input.o_sf_scale.range
+
+34 t_101c8a69d5709542 contract.compute_name
+Interpret the callable and pages
+Contexts: root:41 contract.algorithm_requirement.compute[0].name
+
+35 t_a484e2476965f9d7 contract.compute_name
+Right-aligned causal attention
+Contexts: root:56 contract.algorithm_requirement.compute[1].name
+
+36 t_28c8cfebc4cd144c contract.tolerance
+atol=0.06, rtol=0.04
+Contexts: root:67 contract.algorithm_requirement.golden_reference.tolerance.output; root:67 contract.algorithm_requirement.golden_reference.tolerance.out_after
+
+37 t_115926a57ee09c4d dispatch.md
+| [splitkv_dual_load](splitkv_dual_load.yaml) | query 工作不足时；增加 KV 分段、FP32 部分结果和独立合并 kernel |
+Contexts: dispatch.md:30 dispatch.md
+
+38 t_209ca87aa0ebe05e dispatch.md
+```mermaid flowchart TD root --> rect_joint_load root --> packed_persistent packed_persistent --> single_persistent_dual_load single_persistent_dual_load --> single_persistent_joint_load packed_persistent --> small_persistent_lpt small_persistent_lpt --> small_persistent_shared_rescale root --> small_static_lpt small_static_lpt --> small_static_shared_rescale root --> splitkv_dual_load splitkv_dual_load --> splitkv_joint_load ```
+Contexts: dispatch.md:5 dispatch.md
+
+39 t_292cae790405e474 dispatch.md
+| [small_static_shared_rescale](small_static_shared_rescale.yaml) | 特定小 batch；static 调度下改为共享已计算的 alpha |
+Contexts: dispatch.md:29 dispatch.md
+
+40 t_3f7cb032ce65ad8b dispatch.md
+| 节点 | Workload 与相对父节点的设计变化 |
+Contexts: dispatch.md:19 dispatch.md
+
+41 t_4572131c25bfdc59 dispatch.md
+| [packed_persistent](packed_persistent.yaml) | 中等 batch；折叠 query 工作并用 persistent worker 接续多份工作，保留请求次序 |
+Contexts: dispatch.md:23 dispatch.md
+
+42 t_565310feb6edd641 dispatch.md
+| [single_persistent_joint_load](single_persistent_joint_load.yaml) | 单请求；persistent 调度下由同一加载角色处理 K/V |
+Contexts: dispatch.md:25 dispatch.md
+
+43 t_66b1d3bb843a4688 dispatch.md
+| [small_static_lpt](small_static_lpt.yaml) | 小 batch；按 KV 长度降序排列并折叠 query 工作，每个 worker 只承担一份工作 |
+Contexts: dispatch.md:28 dispatch.md
+
+44 t_6e8906c949e88b5d dispatch.md
+# FA4 prefill schema
+Contexts: dispatch.md:1 dispatch.md
+
+45 t_7185c4611eb73d1f dispatch.md
+树与各节点的 `meta_data.dispatch.parent` 对应，表示设计派生关系。root 和其他节点均按各自的 `when` 在共同契约域内参与选择；精确条件与修订号分别见 YAML 的 `meta_data.dispatch.when`、`meta_data.version`。
+Contexts: dispatch.md:33 dispatch.md
+
+46 t_760c0650d972f570 dispatch.md
+| [splitkv_joint_load](splitkv_joint_load.yaml) | 单请求；保留 KV 分段与合并，由同一加载角色处理 K/V |
+Contexts: dispatch.md:31 dispatch.md
+
+47 t_854c94f126d73f55 dispatch.md
+| [small_persistent_shared_rescale](small_persistent_shared_rescale.yaml) | 特定小 batch；softmax 向 correction 传递已计算的 alpha |
+Contexts: dispatch.md:27 dispatch.md
+
+48 t_863f83078d0f22b1 dispatch.md
+LPT 指按 KV 长度降序排列请求；persistent 按固定步长接续多份工作，static 每个 worker 只承担一份工作。split 数、长度阈值等参数变化留在所属节点内。
+Contexts: dispatch.md:35 dispatch.md
+
+49 t_9e57ca613b5f2609 dispatch.md
+本任务以矩形 static 调度、K/V 独立加载的设计作为 root。它保留通用的请求与 query 网格，其他节点针对工作量、请求组织或加载方式派生。完整 Contract 只在 `root.yaml` 中定义。
+Contexts: dispatch.md:3 dispatch.md
+
+50 t_c9b880c990d844b5 dispatch.md
+| [single_persistent_dual_load](single_persistent_dual_load.yaml) | 单请求；使用单请求的 persistent 工作映射 |
+Contexts: dispatch.md:24 dispatch.md

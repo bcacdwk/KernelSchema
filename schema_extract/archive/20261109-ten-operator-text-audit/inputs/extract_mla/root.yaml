@@ -1,0 +1,652 @@
+meta_data:
+  name: Expanded MLA FP8 Attention
+  describe: Ragged attention from prepared E4M3 Q/K/V to BF16 output, with optional attention sinks and base-2 log-sum-exp.
+  source: SchemaExtractSource_f91523a50e3d@228934a2253bde4d6f0c4463dd77aeada1bf07a8:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py::Model.forward
+  version: 4
+  dispatch:
+    when: |
+      Let WorkCount = H * sum_{b=0}^{B-1} ceil_div(CuQ[b+1] - CuQ[b], 128).
+      Let ReportedSMCount be launch_impl's cached n_sm_launch value:
+      while that cache is zero, the source queries cudaDevAttrMultiProcessorCount
+      for the current device with cudaDeviceGetAttribute.
+      Let LaunchSMCount = ReportedSMCount if it is positive, otherwise 148,
+      where 148 is the source's fallback value, not an asserted device property.
+      Select exactly when 2 * WorkCount > 3 * LaunchSMCount.
+      These are the host values used for the selected launch; a recorded execution
+      retains the host selection bound at recording.
+contract:
+  algorithm_requirement:
+    constant:
+      QKDim: {value: 192, meaning: Query and key channel count.}
+      ValueDim: {value: 128, meaning: Value and output channel count.}
+    input:
+      Q: {meaning: Prepared query codes (query)., shape: [query_token: Tq, head: H, channel: QKDim], dtype: fp8_e4m3fn}
+      K: {meaning: Prepared key codes (key)., shape: [kv_token: Tk, head: H, channel: QKDim], dtype: fp8_e4m3fn}
+      V: {meaning: Prepared value codes (value)., shape: [kv_token: Tk, head: H, value: ValueDim], dtype: fp8_e4m3fn}
+      SeqLens: {meaning: Per-request KV lengths (seq_lens)., shape: [batch: B], dtype: int32, range: [1, 16384]}
+      CuQ: {meaning: Query prefix offsets (cum_seq_lens_q)., shape: [boundary: "B+1"], dtype: int32, range: "0 <= CuQ <= Tq"}
+      CuKV: {meaning: KV prefix offsets (cum_seq_lens_kv)., shape: [boundary: "B+1"], dtype: int32, range: "0 <= CuKV <= Tk"}
+      MaxQ: {meaning: Maximum query length (max_q_len)., shape: [], dtype: int64, range: [1, 16384]}
+      MaxKV: {meaning: Maximum KV length (max_kv_len)., shape: [], dtype: int64, range: [1, 16384]}
+      BatchSize: {meaning: Redundant batch count supplied by the ABI (batch_size)., shape: [], dtype: int64, range: [1, 32]}
+      ScoreScale: {meaning: Composite per-tensor Q/K and attention scale (bmm1_scale)., shape: [], dtype: fp64, range: "ScoreScale > 0"}
+      ValueScale: {meaning: Per-tensor value dequantization scale (bmm2_scale)., shape: [], dtype: fp64, range: "ValueScale > 0"}
+      Causal: {meaning: Whether each query excludes later keys (is_causal)., shape: [], dtype: bool}
+      WindowLeft: {meaning: Disabled sliding-window argument (window_left)., shape: [], dtype: int64, range: [-1, -1]}
+      Sinks: {meaning: Optional per-head sink logits (attention_sinks)., shape: [head: H], dtype: fp32, nullable: true}
+      ReturnLSE: {meaning: Whether the call returns and writes LSE (return_lse)., shape: [], dtype: bool}
+      OutBuffer: {meaning: Caller-owned destination (out); initial contents are ignored., shape: [query_token: Tq, head: H, value: ValueDim], dtype: bf16, range: "finite, NaN, or +/-inf"}
+      LseBuffer: {meaning: Optional caller-owned destination (lse); initial contents are ignored., shape: [query_token: Tq, head: H], dtype: fp32, nullable: true, range: "finite, NaN, or +/-inf"}
+      Workspace: {meaning: Caller-provided writable scratch (workspace_buffer); not a numerical result., shape: [byte: 134217728], dtype: uint8}
+      OutputScale: {meaning: Disabled output scale argument (o_sf_scale)., shape: [], dtype: fp64, range: [-1.0, -1.0]}
+      EnablePDL: {meaning: Disabled launch option (enable_pdl)., shape: [], dtype: bool, range: "EnablePDL is false"}
+      SkipSoftmax: {meaning: Disabled threshold argument (skip_softmax_threshold_scale_factor); python_none contains only Python None., shape: [], dtype: python_none}
+      SageScales: {meaning: "Disabled SAGE scales (sage_attn_sfs); python_none_tuple4 contains only the Python tuple (None, None, None, None).", shape: [], dtype: python_none_tuple4}
+      SageBlock: {meaning: "Disabled SAGE block sizes (num_elts_per_sage_attn_blk); python_zero_tuple4 contains only the Python tuple (0, 0, 0, 0).", shape: [], dtype: python_zero_tuple4}
+      Backend: {meaning: Backend selector (backend); string denotes a Python string., shape: [], dtype: string, range: "Backend == 'trtllm-gen'"}
+      QLengthsCPU: {meaning: Unused host length argument (q_seq_lens_cpu); python_none contains only Python None., shape: [], dtype: python_none}
+      KVLengthsCPU: {meaning: Unused host length argument (kv_seq_lens_cpu); python_none contains only Python None., shape: [], dtype: python_none}
+      FP16Softmax: {meaning: Unspecified softmax option (use_fp16_softmax); python_none contains only Python None., shape: [], dtype: python_none}
+      SPCompress: {meaning: Unspecified compression option (uses_spcompress); python_none contains only Python None., shape: [], dtype: python_none}
+      SkipRowCheck: {meaning: Supplied row-check option (skip_all_rows_active_check)., shape: [], dtype: bool, range: "SkipRowCheck is true"}
+    output:
+      O: {meaning: Attention result written over OutBuffer and returned with its object identity preserved., shape: [query_token: Tq, head: H, value: ValueDim], dtype: bf16}
+      LSE: {meaning: Base-2 log-sum-exp written over LseBuffer and returned with its object identity preserved when requested; otherwise Python None., shape: [query_token: Tq, head: H], dtype: fp32, nullable: true}
+    compute:
+      - name: Request domain and interface
+        math: |
+          Requests and heads are independent. All indices are zero-based.
+          1 <= B <= 32, H in {12, 24, 32, 96, 128}, and 1 <= Tq <= 16384.
+          CuQ[0] = CuKV[0] = 0, CuQ[B] = Tq, CuKV[B] = Tk.
+          For 0 <= b < B, let q_b = CuQ[b+1] - CuQ[b] and
+          k_b = CuKV[b+1] - CuKV[b]. Require 1 <= q_b = k_b = SeqLens[b] <= 16384.
+          Thus Tq = Tk; the source also bounds Tk <= 1048576.
+          BatchSize = B, MaxQ = max_b q_b, and MaxKV = max_b k_b.
+          All tensor arguments have contiguous storage in the listed axis order
+          and reside on the same CUDA device.
+          Q/K/V are the supplied stored-precision values; no unquantized payload is used.
+          Page tables, projections, RoPE and cache writes are outside this prepared ragged interface.
+          OutBuffer is always present. LseBuffer is present exactly when ReturnLSE is true.
+          Sinks may be None independently of Causal and ReturnLSE; None disables sink attention.
+          Every listed argument is supplied by the frozen input interface; no omitted-argument
+          behavior is required. The fixed disabled options have no mathematical effect.
+      - name: Scaled scores and visible keys
+        math: |
+          For each request b and 0 <= i < SeqLens[b], let t = CuQ[b] + i.
+          J(t) = {CuKV[b]+j : 0 <= j < SeqLens[b] and (not Causal or j <= i)}.
+          Equal Q/KV lengths make the causal alignment j <= i.
+          WindowLeft = -1 imposes no additional window. J(t) is nonempty throughout the domain.
+          For 0 <= t < Tq, 0 <= u < Tk and 0 <= h < H,
+          Score[t,h,u] = fp32(ScoreScale) * sum_{d=0}^{QKDim-1} Q[t,h,d] * K[u,h,d].
+          Only scores for u in J(t) contribute to the result.
+          DequantV[u,h,v] = V[u,h,v] * fp32(ValueScale), for 0 <= v < ValueDim.
+          Floating-point arithmetic and accumulation use FP32; the reference disables TF32.
+        symbol:
+          J: {meaning: Set of visible global key indices for query token t., shape: not_applicable, dtype: not_applicable}
+          Score: {meaning: Scaled query-key dot products; visibility is determined by J., shape: [query_token: Tq, head: H, key_token: Tk], dtype: fp32}
+          DequantV: {meaning: Value codes after the supplied per-tensor scale., shape: "ref:V.shape", dtype: fp32}
+      - name: Softmax with an optional zero-valued sink
+        math: |
+          For 0 <= t < Tq and 0 <= h < H,
+          let m = max_{u in J(t)} Score[t,h,u] and
+          z = sum_{u in J(t)} exp(Score[t,h,u] - m).
+          BaseLSE[t,h] = m + ln(z).
+          BaseValue[t,h,v] = sum_{u in J(t)}
+            (exp(Score[t,h,u] - m) / z) * DequantV[u,h,v], for 0 <= v < ValueDim.
+          If Sinks is None, TotalLSE[t,h] = BaseLSE[t,h].
+          Otherwise, let a = max(BaseLSE[t,h], Sinks[h]); then
+          TotalLSE[t,h] = a + ln(exp(BaseLSE[t,h]-a) + exp(Sinks[h]-a)).
+          A sink adds exp(Sinks[h]) to the softmax denominator and contributes no value vector.
+        symbol:
+          BaseLSE: {meaning: Natural-log normalization over visible keys before the sink., shape: [query_token: Tq, head: H], dtype: fp32}
+          BaseValue: {meaning: Normalized value over visible keys before the sink., shape: "ref:O.shape", dtype: fp32}
+          TotalLSE: {meaning: Natural-log normalization including the optional sink., shape: "ref:BaseLSE.shape", dtype: fp32}
+      - name: Output conversion and caller-visible writes
+        math: |
+          For every query token t, head h and value channel v,
+          O[t,h,v] = bf16(BaseValue[t,h,v] * exp(BaseLSE[t,h] - TotalLSE[t,h])).
+          If ReturnLSE is true, LSE[t,h] = TotalLSE[t,h] / ln(2), stored in FP32;
+          overwrite the full logical OutBuffer and LseBuffer and return (O, LSE).
+          Otherwise LSE is None, overwrite the full logical OutBuffer and return O alone.
+          O is OutBuffer after the write; non-None LSE is LseBuffer after the write.
+          Initial destination contents do not contribute to either result.
+          Workspace is permitted scratch with unspecified final contents and is not an output.
+          Its prepared allocation is zero-initialized; each call computes from current Q/K/V
+          and metadata, without retaining numerical state from a previous call.
+          Preserve every other input and all storage outside the logical destination and scratch views,
+          including the caller's guard regions. There are no other numerical outputs.
+    golden_reference:
+      source: SchemaExtractSource_f91523a50e3d@228934a2253bde4d6f0c4463dd77aeada1bf07a8:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/reference.py::Model.forward
+      tolerance:
+        O: >-
+          Source record from problem/metadata.json benchmark_contract.correctness_tolerances:
+          default has atol=0.01, rtol=0.05, max_mismatch_fraction=0.0;
+          mutated_inputs.out has atol=0.01, rtol=0.05, max_mismatch_fraction=0.005,
+          max_rel_l2=0.01. O is both the returned result and the out writeback.
+          The source does not define comparison formulas, relative-error basis, L2 normalization,
+          comparison precision, NaN/Inf policy, or how returned and mutated checks are routed or combined.
+          These are source records, not the schema's default atol/rtol or relative-L2 interpretation.
+          CERTIFIED_BEST.json records unchanged comparators and sampled full_pass results,
+          without supplying these missing definitions or guaranteeing the whole dynamic domain.
+        LSE: >-
+          None must match None and is not compared numerically; otherwise compare the written and
+          returned LSE against the reference. Source record from problem/metadata.json:
+          default has atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, with no LSE-specific override.
+          The source does not define the comparison formula, relative-error basis, comparison precision,
+          NaN/Inf policy, or returned-versus-mutated check routing.
+          This record does not adopt the schema's default atol/rtol interpretation.
+  hardware_specification:
+    device: null
+    arch: null
+    execution: {Unit: null}
+    feature: {Mechanism: null}
+    stack: {language: null, toolchain: null}
+    wiki:
+      hardware: null
+      programming: {language: null}
+      microbench: null
+      sota: {kernel: null, schema: null}
+      profile: null
+design:
+  math_reshape:
+    thesis: >-
+      Stream blocked QK and PV through an online normalization state instead of
+      materializing request-wide scores. Frozen maxima reduce accumulator rescaling,
+      while FP16 exponentiation/sums and E4M3 weights trade precision for narrow PV;
+      short requests also compute an FP32 correction without removing the narrow path.
+    rewrite:
+      - step: tiles
+        name: Padded tiles and visible reduction extent
+        math: |
+          Let q_b = CuQ[b+1]-CuQ[b], k_b = SeqLens[b]. For each (b,h,a),
+          0 <= a < ceil_div(q_b,Bq), let q0 = a*Bq, qv = min(Bq,q_b-q0),
+          vend = min(k_b,q0+qv) if Causal, otherwise k_b, and N = ceil_div(vend,Bk).
+          For 0 <= r < Bq, QTile[r,d] is Q[CuQ[b]+q0+r,h,d] when its global
+          token index is below Tq, otherwise zero. For 0 <= j < Bk, 0 <= t < N,
+          KTile(t)[j,d] and VTile(t)[j,v] are K[CuKV[b]+t*Bk+j,h,d] and
+          V[CuKV[b]+t*Bk+j,h,v] when that global token index is below Tk, otherwise zero.
+          Thus request-tail transfers can include the next request's stored values.
+          visible(r,t,j) means t*Bk+j < k_b and (not Causal or t*Bk+j <= q0+r).
+          Full tiles are evaluated, including r >= qv; only r < qv is written out.
+          Let A = sum_b q_b*k_b, C = sum_b sum_a N, and U = count({b | q_b <= 32}).
+        symbol:
+          Bq: {meaning: Query rows per worktile., binding: 'bind:design.work_schedule::Bq'}
+          Bk: {meaning: Keys per local iteration., binding: 'bind:design.work_schedule::Bk'}
+          QTile: {meaning: Full query transfer view for one worktile., shape: [query_token: Bq, channel: QKDim], dtype: 'ref:contract.algorithm_requirement::Q.dtype'}
+          KTile: {meaning: Full key transfer view for one local iteration., shape: [kv_token: Bk, channel: QKDim], dtype: 'ref:contract.algorithm_requirement::K.dtype'}
+          VTile: {meaning: Full value transfer view for one local iteration., shape: [kv_token: Bk, value: ValueDim], dtype: 'ref:contract.algorithm_requirement::V.dtype'}
+      - step: scores
+        name: Raw FP8 products with delayed scaling
+        math: |
+          In each tile t, S(t) = mm32(QTile[:,0:32],KTile(t)[:,0:32]ᵀ),
+          then for g = 1..5 replace S(t) by
+          mma32(QTile[:,32*g:32*g+32],KTile(t)[:,32*g:32*g+32]ᵀ,S(t)).
+          Let z = -3.4028234663852885981e38, s = fp32(ScoreScale),
+          vscale = fp32(ValueScale), c = s*1.4426950408889634074.
+          X(t)[r,j] = S(t)[r,j] if visible(r,t,j), otherwise z.
+        symbol:
+          S: {meaning: Unscaled score tile retained until softmax and any tiny correction read it., shape: [query_token: Bq, kv_token: Bk], dtype: fp32, retention: 'keep_value (b,h,a,t)'}
+        arithmetic:
+          accumulate: FP8 matrix instructions accumulate six consecutive channel groups into FP32; no claim of bitwise agreement with a scalar FP32 dot product.
+      - step: weights
+        name: Frozen maximum and narrow weights
+        math: |
+          For each row r, initialize M(-1)[r]=z and D(-1)[r]=0.
+          For t = 0..N-1, let cand = max(M(t-1)[r],max_j X(t)[r,j]).
+          M(t)[r] = cand if M(t-1)[r]=z or (cand-M(t-1)[r])*c > 0.75,
+          otherwise M(t-1)[r]. Let safe = 0 if M(t)[r]=z, otherwise M(t)[r].
+          Alpha(t)[r] = 0 if M(t-1)[r]=z, otherwise exp2((M(t-1)[r]-safe)*c).
+          Let off = fma32(-safe,c,8), and
+          E[r,j] = half_exp2(fp16(fma32(X(t)[r,j],c,off))).
+          P(t)[r,j] = e4m3_sat(E[r,j]). For u=0..3, initialize H_u=fp16(0),
+          then for g=0..31 set H_u=fp16(H_u+E[r,4*g+u]).
+          local = (fp32(H_0)+fp32(H_1))+(fp32(H_2)+fp32(H_3)).
+          D(t)[r] = fma32(D(t-1)[r],Alpha(t)[r],local).
+          e4m3_sat is round-to-nearest-even FP8 E4M3 conversion with finite saturation.
+          The offset 8 scales weights by 256 before narrowing; the denominator uses
+          the FP16 E values, not the rounded E4M3 P values. Masked entries also
+          undergo the exponent and conversion path from the finite sentinel z.
+        symbol:
+          M: {meaning: Frozen raw-score maximum state., shape: [query_token: Bq], dtype: fp32, retention: 'carry_forward (b,h,a); t=-1..N-1'}
+          D: {meaning: Narrow-weight normalization state., shape: [query_token: Bq], dtype: fp32, retention: 'carry_forward (b,h,a); t=-1..N-1'}
+          Alpha: {meaning: Rescaling factors published before weight conversion finishes., shape: [query_token: Bq], dtype: fp32, retention: 'keep_value (b,h,a,t)'}
+          P: {meaning: Rounded scaled weights consumed by the main PV path., shape: [query_token: Bq, kv_token: Bk], dtype: fp8_e4m3fn, retention: 'keep_value (b,h,a,t)'}
+        arithmetic:
+          approx: >-
+            half_exp2 is the source ex2.approx.f16x2 operation on FP16 inputs,
+            producing FP16 results. Alpha uses exp2f under the source --use_fast_math
+            build, including its approximate/flush-to-zero scalar behavior. unknown: no matched
+            instruction error bound or whole-domain output-error bound is supplied.
+      - step: value_state
+        name: Rescaled FP32 value accumulation
+        math: |
+          For t=0, initialize Yprev to the zero Bq by ValueDim matrix.
+          For t>0, Yprev[r,v] = Alpha(t)[r]*Y(t-1)[r,v].
+          Multiplication is skipped for each consecutive group of 32 rows whose
+          Alpha values are all exactly one; otherwise the whole group is multiplied.
+          Starting with Yprev, for g=0..3 accumulate
+          Yprev = mma32(P(t)[:,32*g:32*g+32],VTile(t)[32*g:32*g+32,:],Yprev).
+          Set Y(t)=Yprev. This path executes for every worktile, including tiny rows
+          whose final result instead uses the correction below.
+        symbol:
+          Y: {meaning: FP32 main PV state retained through correction and output drain., shape: [query_token: Bq, value: ValueDim], dtype: fp32, retention: 'carry_forward (b,h,a); t=0..N-1'}
+        arithmetic:
+          accumulate: Four consecutive FP8 matrix accumulation groups per key tile; the first group of the first tile initializes the output accumulator without reading old contents.
+      - step: tiny
+        name: Additional FP32 correction for short requests
+        math: |
+          When q_b <= 32 (hence a=0 and N=1), for every 0 <= r < 32 recompute
+          e[j] = exp2(fma32(S(0)[r,j],c,-M(0)[r]*c)) if visible(r,0,j),
+          otherwise zero, for j=0..31. TinyD[r] is the FP32 sum in ascending j order.
+          Initialize TinyY[r,v]=0, then in ascending j order, only when e[j] != 0,
+          TinyY[r,v]=fma32(e[j],VTile(0)[j,v],TinyY[r,v]) for all v.
+          The V codes are widened via FP16 to FP32 exactly; weights are not narrowed.
+          The original E, P, D and Y calculations still execute for these rows.
+        symbol:
+          TinyD: {meaning: Unscaled FP32 correction denominator., shape: [query_token: 32], dtype: fp32, retention: 'keep_value (b,h,a)'}
+          TinyY: {meaning: FP32 correction numerator for the first 32 rows., shape: [query_token: 32, value: ValueDim], dtype: fp32, retention: 'keep_value (b,h,a)'}
+        arithmetic:
+          approx: >-
+            exp2 follows the exp2f/build behavior specified in weights.arithmetic.approx;
+            unknown: a matched error bound is not provided, so FP32 correction does
+            not assert exact real arithmetic.
+      - step: output
+        name: Sink normalization and caller-visible writes
+        math: |
+          For every computed row, choose (Fsum,Fvalue,shift) =
+          (TinyD[r],TinyY[r,:],0) when q_b<=32 and r<32,
+          otherwise (D(N-1)[r],Y(N-1)[r,:],8).
+          Fmax[r]=M(N-1)[r]; retain Fsum and Fmax until output normalization.
+          norm = vscale/Fsum if Fsum>0, otherwise 0.
+          base = fma32(Fmax[r],s,ln(Fsum)-0.6931471805599453*shift).
+          If Sinks is present, total = max(base,Sinks[h])+log1p(exp(-abs(base-Sinks[h])))
+          and norm = norm*exp(base-total); otherwise total=base.
+          Compute result[v]=bf16(Fvalue[v]*norm) and result_lse=total*1.4426950408889634074.
+          For r<qv, write O[CuQ[b]+q0+r,h,:]=result, and, if ReturnLSE,
+          LSE[CuQ[b]+q0+r,h]=result_lse. result_lse is evaluated even without an LSE store.
+          Return the caller-owned buffers exactly as specified by the Contract.
+        symbol:
+          Fsum: {meaning: Selected final denominator for every computed row., shape: [query_token: Bq], dtype: fp32, retention: 'keep_value (b,h,a)'}
+          Fmax: {meaning: Final raw-score offset for every computed row., shape: [query_token: Bq], dtype: fp32, retention: 'keep_value (b,h,a)'}
+        arithmetic:
+          approx: >-
+            ln, log1p, exp and division follow the source logf, log1pf, expf and
+            scalar division compiled with --use_fast_math, including approximate
+            division and flush-to-zero behavior. unknown: no matched error bound is supplied.
+    ledger:
+      baseline: Full per-request QK and FP32 normalized weights materialized, followed by FP32 PV over each dense q_b by k_b score matrix with causal masking.
+      footprint:
+        - {item: Score and weight intermediates, change: '8*H*A globally materialized score/weight bytes -> 0; bounded tile and recurrence storage replaces request-wide intermediates.', by: [scores, weights, value_state, tiny]}
+      matmul:
+        - {item: Dense contractions, change: 'H*A*(QKDim+ValueDim) -> H*Bq*Bk*C*(QKDim+ValueDim) MACs; causal tile pruning reduces C, while boundary padding remains fully evaluated. PV multiplication inputs change from FP32 weights/values to E4M3.', by: [tiles, scores, weights, value_state]}
+      vector:
+        - {item: Rescaling and tiny correction, change: 'Up to H*Bq*ValueDim*sum_b sum_a (N-1) FP32 rescale multiplies; additionally at most H*U*32*32*ValueDim FP32 correction FMAs, with zero-weight terms skipped.', by: [value_state, tiny]}
+      error:
+        - {item: Narrow softmax path, change: 'Adds FP16 exponent-argument rounding, approximate FP16 exp2, four FP16 sum chains and E4M3 PV-weight rounding; tiny outputs bypass these weight errors but retain FP8 QK and compiled FP32 functions. No supplied end-to-end error bound.', by: [weights, value_state, tiny, output]}
+  work_schedule:
+    thesis: >-
+      Give each persistent CTA one head/query-block worktile and keep the entire
+      key recurrence local. A host-built geometry table and early atomic refill
+      balance unequal tile counts while retaining head locality when sorting would scatter K/V.
+    flow:
+      launch: [{phase: [main]}]
+    phase:
+      main:
+        describe: Compute all score, normalization, main PV, optional tiny correction and output work for one head and one query block.
+        decomposition:
+          strategy: |
+            Bq = 128 and Bk = 128. Item is the ordinal of a geometry-table entry
+            Geo[Item]=(b,h,a,q0,qv,N,CuQ[b]+q0,CuKV[b]); its order is defined below.
+            Each worktile consumes QTile once and traverses KTile(t),VTile(t) for
+            t=0..N-1. All reductions and optional tiny correction remain inside it.
+            Each valid output row/head belongs to exactly one entry; no cross-worktile merge.
+          partition:
+            Item: {size: WorkCount, tile: 1}
+          worktile:
+            invariant:
+              QTile: {shape: [query_token: Bq, channel: QKDim], dtype: 'ref:design.math_reshape::QTile.dtype'}
+              Sinks: {shape: [head: 1], dtype: 'ref:contract.algorithm_requirement::Sinks.dtype'}
+            iteration:
+              KTile: {shape: [kv_token: Bk, channel: QKDim], dtype: 'ref:design.math_reshape::KTile.dtype', direction: ascending}
+              VTile: {shape: [kv_token: Bk, value: ValueDim], dtype: 'ref:design.math_reshape::VTile.dtype', direction: ascending}
+          target:
+            single_tile:
+              O: {shape: [query_token: qv, value: ValueDim], dtype: 'ref:contract.algorithm_requirement::O.dtype'}
+              LSE: {shape: [query_token: qv], dtype: 'ref:contract.algorithm_requirement::LSE.dtype'}
+        mapping:
+          strategy: LaunchSMCount is the host-derived count defined in dispatch.when; it fixes the submitted CTA count, not an asserted residency guarantee. Each CTA has 384 threads.
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: LaunchSMCount
+        schedule:
+          strategy: |
+            Before the main launch, a nonblocking side stream copies SeqLens, CuQ
+            and CuKV to pinned host buffers (4*(3*B+2) bytes); the host waits for
+            these copies and constructs WorkCount table entries of 48 bytes each.
+            Start from h ascending, b ascending, a descending. Stable-sort by N
+            descending exactly when every q_b>=Bq and Scatter is false.
+            Let CachedL2 and CachedSM be launch_impl's cached device-query results,
+            refreshed while CachedL2 is zero. Let ScatterBytes =
+            min(H*B,CachedSM if positive else 148)*max_b(k_b)*(QKDim+ValueDim).
+            Scatter = CachedL2>0 and 4*ScatterBytes>3*CachedL2. This is a host
+            locality heuristic, not a measured cache-capacity guarantee.
+            Upload the complete Geo table on the side stream and record table_event;
+            the main/current stream waits for that upload before the one main kernel.
+            Only allocation capacity and descriptor encodings are cached, not reused
+            numerical metadata. During external recording this host prefix still runs;
+            later execution uses the recorded binding and the table contents actually read.
+            Sinks has a payload only when present. LSE is stored only when ReturnLSE;
+            neither option changes the work set or the main kernel submission.
+          worktile_order: [{by: Item, direction: ascending}]
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill:
+              atomic_queue: |
+                A private global uint32 counter starts at zero when allocated.
+                At the start of each assigned worktile's last key iteration, request
+                one pop; a dedicated server atomically increments the counter and
+                maps its old value p to Item=worker_count+p. Publish that worktile
+                if Item<WorkCount, otherwise publish a terminal descriptor and stop
+                popping. Exactly WorkCount pops occur: WorkCount-worker_count
+                successful refills plus one failed pop per CTA. The pop returning
+                WorkCount-1 resets the counter to zero for the next ordered launch.
+                This queue is private scratch, separate from the supplied Workspace.
+            exit: The terminal descriptor has been observed and all assigned work and in-flight reads and output writes have completed.
+  tile_pipeline:
+    thesis: >-
+      Separate loading, matrix issue, softmax, output correction and queue service.
+      Publish scales ahead of weights and refill during the last QK wait; retain
+      continuous rings across worktiles so next-Q loading can overlap the previous
+      PV and output drain. Score/probability aliasing and single-output reuse bound the lead.
+      The source has TMEM row-address and early descriptor-reuse discrepancies;
+      the complete row partition and declared two-slot lifetime constraints are retained.
+    phase:
+      main:
+        domain:
+          w: worktile
+          t: [0, 'N(w)']
+          n: {flatten: [w, t]}
+        resource:
+          Query:
+            space: SMEM
+            member_slot_shape: [query_token: Bq, channel: QKDim]
+            dtype: fp8_e4m3fn
+            slot_count: 1
+            view: {'QTile(w)': {}}
+          Keys:
+            space: SMEM
+            member_slot_shape: [kv_token: Bk, channel: QKDim]
+            dtype: fp8_e4m3fn
+            slot_count: KVSlots
+            view: {'KTile(n)': {slot_index: 'n%KVSlots'}}
+          Values:
+            space: SMEM
+            member_slot_shape: [kv_token: Bk, value: ValueDim]
+            dtype: fp8_e4m3fn
+            slot_count: KVSlots
+            view: {'VTile(n)': {slot_index: 'n%KVSlots'}}
+          ScoreProbability:
+            space: TMEM
+            member_slot_shape: [row: Bq, column: Bk]
+            dtype: fp32
+            slot_count: 3
+            view:
+              'S(n)': {slot_index: 'n%3'}
+              'P(n)': {slot_index: 'n%3', part: {column: [32, 64]}, dtype: fp8_e4m3fn}
+          Accumulator:
+            space: TMEM
+            member_slot_shape: [query_token: Bq, value: ValueDim]
+            dtype: fp32
+            slot_count: 1
+            view: {'Y(n)': {}}
+          ScoreRegisters:
+            space: register
+            member_slot_shape: [query_token: Bq, kv_token: Bk]
+            dtype: fp32
+            slot_count: 1
+            view: {'S(n)': {}}
+          PackedRegisters:
+            space: register
+            member_slot_shape: [query_token: Bq, kv_token: Bk]
+            dtype: fp8_e4m3fn
+            slot_count: 1
+            view: {'P(n)': {}}
+          Maximum:
+            space: register
+            member_slot_shape: [query_token: Bq]
+            dtype: fp32
+            slot_count: 1
+            view: {'M(n)': {}}
+          Denominator:
+            space: register
+            member_slot_shape: [query_token: Bq]
+            dtype: fp32
+            slot_count: 1
+            view: {'D(n)': {}}
+          ScaleRelay:
+            space: SMEM
+            member_slot_shape: [query_token: Bq]
+            dtype: fp32
+            slot_count: 2
+            view: {'Alpha(n)': {slot_index: 'n%2'}}
+          FinalSum:
+            space: SMEM
+            member_slot_shape: [query_token: Bq]
+            dtype: fp32
+            slot_count: 1
+            view: {'Fsum(w)': {}}
+          FinalMax:
+            space: SMEM
+            member_slot_shape: [query_token: Bq]
+            dtype: fp32
+            slot_count: 1
+            view: {'Fmax(w)': {}}
+          TinyNumerator:
+            space: SMEM
+            member_slot_shape: [query_token: 32, value: ValueDim]
+            dtype: fp32
+            slot_count: 1
+            view: {'TinyY(w)': {}}
+          CorrectionRegisters:
+            space: register
+            member_slot_shape: [query_token: Bq, value: ValueDim]
+            dtype: fp32
+            slot_count: 1
+            view:
+              'Y(n)': {}
+              'Tail(w)': {part: {value: [0, 32]}}
+          Geometry:
+            space: SMEM
+            member_slot_shape: [field: 10]
+            dtype: int32
+            slot_count: 2
+            view:
+              'Item(w)': {slot_index: 'w%2'}
+              'Next(w)': {slot_index: '(w+1)%2'}
+        role:
+          Softmax:
+            info:
+              execution_mode: serial
+              member: 'warp[0:4]'
+              register: 248
+              verb:
+                latch: |
+                  Item(w) is the assigned geometry latched into this role's registers;
+                  N(w) denotes its positive key-tile count. Item(0) comes from the
+                  preassigned table entry and the CTA initialization join. Reset M,D
+                  for this worktile, but do not reset any ring or notification epoch.
+                  Each warp handles its consecutive 32-row group throughout this role.
+                request: Next(w) requests one refill before the last score wait. This only signals the server and does not wait for the atomic result.
+                load: Scores(n) reads both halves of S(n) into ScoreRegisters; done releases the score read for subsequent QK slot reuse. The second-half transfer overlaps first-half masking/max work.
+                publish: |
+                  Alpha(n) updates M and publishes all row scales before exponentiation.
+                  P(n) copies PackedRegisters into its aliased TMEM view and completes
+                  its writes before publication. The two-slot scale relay is safe
+                  because the QK(n+2) completion preceding its next write follows
+                  PV(n), which already required the applicable rescale to read Alpha(n).
+                compute: Weights(n) performs the weights rewrite after Alpha publication, retains packed P in registers and advances D.
+                produce: |
+                  Final(w) captures Fsum,Fmax on the last tile. For short requests,
+                  the first row group rereads the first 32 S columns and VTile for
+                  the tiny rewrite, storing TinyY and TinyD into the selected final
+                  denominator. Other rows keep the main denominator. P publication remains required.
+                wait: Next(w) observes the published next descriptor, including a failed pop; terminal descriptors end the role only after its current work has finished.
+            pipe:
+              repeat: w
+              steady:
+                - 'latch:Item(w)'
+                - repeat: 'n[w,0:N(w)-1]'
+                  steady:
+                    - 'load:Scores(n)'
+                    - 'publish:Alpha(n)'
+                    - 'compute:Weights(n)'
+                    - 'publish:P(n)'
+                - 'request:Next(w)'
+                - 'load:Scores(n[w,N(w)-1])'
+                - 'publish:Alpha(n[w,N(w)-1])'
+                - 'compute:Weights(n[w,N(w)-1])'
+                - 'produce:Final(w)'
+                - 'publish:P(n[w,N(w)-1])'
+                - 'wait:Next(w)'
+            waits_for:
+              data:
+                'load:Scores(n)': ['MMA/qk:S(n)']
+              reuse:
+                'publish:P(n+3)': ['MMA/mma:P(n)@VTile(n)']
+                'produce:Final(w)': ['Correction/release:OutputState(w-1)']
+          Correction:
+            info:
+              execution_mode: serial
+              member: 'warp[4:8]'
+              register: 160
+              verb:
+                latch: Latch Item(w) geometry for this role; its four warps handle the same four consecutive 32-row groups as Softmax.
+                rescale: Y(n) reads Alpha(n), copies all 128 previous PV columns into CorrectionRegisters before multiplying and writing them back, and publishes completion for nonfirst tiles. A group with all scales equal to one skips TMEM data traffic but still completes and publishes its rescale event.
+                store: |
+                  OutputPrefix(w) evaluates the output rewrite using Fsum,Fmax and
+                  drains/stores the first 96 Y columns in three serial chunks.
+                  For tiny rows it instead reads and stores all TinyY columns.
+                  OutputTail(w) converts/stores the last 32 ordinary columns from
+                  Tail(w) registers and then conditionally writes LSE. Invalid
+                  query rows still execute collective reads and arithmetic; only
+                  logical destination stores are masked. No LSE store occurs when absent.
+                release: |
+                  OutputState(w) reads the last 32 ordinary Y columns into Tail(w).
+                  For tiny rows the preceding prefix action has completed all scratch
+                  reads and stores. done returns the shared Y/Fsum/Fmax/TinyY lifetime
+                  after every row group's required reads; ordinary tail conversion,
+                  stores and LSE write may continue after this release.
+                wait: Next(w) consumes the next descriptor or terminal publication after this worktile's output actions.
+            pipe:
+              repeat: w
+              steady:
+                - 'latch:Item(w)'
+                - repeat: 'n[w,1:]'
+                  steady: ['rescale:Y(n)']
+                - 'store:OutputPrefix(w)'
+                - 'release:OutputState(w)'
+                - 'store:OutputTail(w)'
+                - 'wait:Next(w)'
+            waits_for:
+              data:
+                'rescale:Y(n[w,t+1])': ['MMA/mma:P(n[w,t])@VTile(n[w,t])', 'Softmax/publish:Alpha(n[w,t+1])']
+                'store:OutputPrefix(w)': ['MMA/mma:P(n[w,N(w)-1])@VTile(n[w,N(w)-1])']
+          MMA:
+            info:
+              execution_mode: async_ordered_completion
+              member: 'warp[8:9]'
+              register: 32
+              verb:
+                latch: {execution_mode: serial, meaning: 'Latch Item(w). One elected issuer handles matrix operations; the warp allocates the full TMEM resource before use and frees it after the final CTA join.'}
+                wait: {execution_mode: serial, meaning: 'QTile(w) waits for the Q transfer; Next(w) consumes the next descriptor or sentinel. Neither wait drains previously issued matrix operations beyond its stated predecessors.'}
+                qk: |
+                  S(n) performs the scores rewrite from the current worktile's
+                  QTile and KTile(n). It uses the same ordered tensor stream and
+                  cumulative completion guarantee as mma.
+                mma: |
+                  P(n)@VTile(n) performs the value_state rewrite into Y. First PV
+                  initializes Y; later PV follows correction. Products issue in
+                  one ordered tensor stream, and a completion notification covers
+                  all earlier products. Earlier PV reads of an aliased P slot
+                  finish before a later QK overwrites that slot. This ordering also
+                  protects the tiny reread before the same S slot can recur.
+                  PV completion releases its K/V slot. For KVSlots=3 the release
+                  notification cycles with the three S/P slots; for KVSlots=4 it
+                  additionally cycles with the four K/V slots, preventing parity aliasing.
+            pipe:
+              repeat: w
+              steady:
+                - 'latch:Item(w)'
+                - 'wait:QTile(w)'
+                - 'qk:S(n[w,0])'
+                - repeat: 'n[w,1:]'
+                  steady: ['qk:S(n)', 'mma:P(n-1)@VTile(n-1)']
+                - 'mma:P(n[w,N(w)-1])@VTile(n[w,N(w)-1])'
+                - 'wait:Next(w)'
+            waits_for:
+              data:
+                'qk:S(n)': ['Loader/load:KV(n)']
+                'mma:P(n[w,t+1])@VTile(n[w,t+1])': ['Correction/rescale:Y(n[w,t+1])']
+              reuse:
+                'qk:S(n+3)': ['Softmax/load:Scores(n)']
+                'mma:P(n[w,0])@VTile(n[w,0])': ['Correction/release:OutputState(w-1)']
+          Loader:
+            info:
+              execution_mode: async
+              member: 'warp[9:10]'
+              register: 32
+              verb:
+                load: |
+                  KVSlots = 3 if Scatter, otherwise 4. QTile(w) loads the complete
+                  query tile into the single Query buffer; for w=0 it reads the
+                  preassigned Geo entry directly and can start during CTA initialization.
+                  For later work it uses the preceding Next descriptor. KV(n) loads
+                  KTile(n) and VTile(n); done means all bytes of both are readable.
+                  Each Q/K transfer has a 128-channel segment and a 64-channel tail;
+                  V has one 128-channel segment, with the padded views defined in tiles.
+                latch: {execution_mode: serial, meaning: 'Latch Item(w) after issuing its Q transfer; retain its K/V base and head through all local fills.'}
+                wait: {execution_mode: serial, meaning: 'Next(w) waits for the server publication. A terminal descriptor performs no next-Q transfer and no next worktile; outstanding earlier fills are not implicitly reset.'}
+            pipe:
+              repeat: w
+              steady:
+                - 'load:QTile(w)'
+                - 'latch:Item(w)'
+                - repeat: 'n[w]'
+                  steady: ['load:KV(n)']
+                - 'wait:Next(w)'
+            waits_for:
+              reuse:
+                'load:KV(n+KVSlots)': ['MMA/mma:P(n)@VTile(n)']
+                'load:QTile(w+1)': ['MMA/qk:S(n[w,N(w)-1])']
+          Queue:
+            info:
+              execution_mode: serial
+              member: 'warp[10:11]'
+              register: 32
+              verb:
+                publish: |
+                  Next(w) executes the atomic_queue rule, copies successful geometry
+                  or the negative tile-count terminal descriptor into Geometry, then
+                  release-publishes it for all other roles. The terminal publication
+                  still occurs and has a completion event; no worktile is created for
+                  it. All consumers latch their old descriptor before that slot is
+                  overwritten. Geometry and ring storage are allocated once per CTA;
+                  only the queue word persists between ordered kernel executions.
+            pipe:
+              repeat: w
+              steady: ['publish:Next(w)']
+            waits_for:
+              sync:
+                'publish:Next(w)': ['Softmax/request:Next(w)']
+              reuse:
+                'publish:Next(w+1)': ['Softmax/latch:Item(w)', 'Correction/latch:Item(w)', 'MMA/latch:Item(w)', 'Loader/latch:Item(w)']
+realization:
+  require:
+    - item: design.tile_pipeline::main.MMA
+      choice: Use the source SM10x tcgen05 FP8 matrix path with TMEM accumulation and cumulative tcgen05.commit completion notifications.
+      reason: The aliased S/P views rely on ordered earlier-operand reads before later tensor writes, and consumers rely on completion covering preceding products.
+    - item: design.tile_pipeline::main.Loader
+      choice: Bind Q and K/V loads to cp.async.bulk.tensor transfers with mbarrier transaction-byte completion waits.
+      reason: Issue alone does not make transferred bytes readable; the three-slot and four-slot reuse notifications have different periods.
+    - item: [design.tile_pipeline::main.Softmax, design.tile_pipeline::main.Correction]
+      choice: Implement TMEM reads and writes with converged full-warp tcgen05 collective accesses and the corresponding load/store completion waits.
+      reason: Invalid output rows remain participants in collective accesses, and score/accumulator release must follow the actual completion of those reads.

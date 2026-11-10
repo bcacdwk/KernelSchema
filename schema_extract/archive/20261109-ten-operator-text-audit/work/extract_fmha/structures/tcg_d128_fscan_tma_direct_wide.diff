@@ -1,0 +1,180 @@
+--- tcg_d128_fscan_tma_direct_narrow
++++ tcg_d128_fscan_tma_direct_wide
+@@ -4,12 +4,12 @@
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+   version: 2
+   dispatch:
+-    id: tcg_d128_fscan_tma_direct_narrow
+-    parent: tcg_d128_flat_tma_direct_narrow
+-    when: TEXT[150]
++    id: tcg_d128_fscan_tma_direct_wide
++    parent: tcg_d128_fscan_tma_direct_narrow
++    when: TEXT[147]
+ design:
+   math_reshape:
+-    thesis: TEXT[675]
++    thesis: TEXT[672]
+     rewrite:
+     - step: TEXT[652]
+       name: TEXT[614]
+@@ -128,13 +128,31 @@
+       arithmetic:
+         accumulate: TEXT[194]
+     - step: TEXT[661]
+-      name: TEXT[595]
+-      math: TEXT[334]
++      name: TEXT[638]
++      math: TEXT[330]
+       symbol:
++        MergeGroups:
++          meaning: TEXT[497]
++          value: 4
+         Weight:
+-          meaning: TEXT[521]
+-          shape:
+-          - split: Ns
++          meaning: TEXT[501]
++          shape:
++          - merge_group: MergeGroups
++          - split: 128
++          dtype: fp32
++          retention: keep_value (r)
++        GroupA:
++          meaning: TEXT[473]
++          shape:
++          - merge_group: MergeGroups
++          - channel: D
++          dtype: fp32
++          retention: keep_value (r)
++        GroupB:
++          meaning: TEXT[569]
++          shape:
++          - merge_group: MergeGroups
++          - segment: 4
+           dtype: fp32
+           retention: keep_value (r)
+         TotalA:
+@@ -149,7 +167,7 @@
+           dtype: fp32
+           retention: keep_value (r)
+       arithmetic:
+-        accumulate: TEXT[192]
++        accumulate: TEXT[190]
+         approx: TEXT[165]
+     ledger:
+       baseline: TEXT[249]
+@@ -169,21 +187,21 @@
+         - TEXT[662]
+       depth:
+       - item: TEXT[313]
+-        change: TEXT[218]
++        change: TEXT[244]
+         by:
+         - TEXT[651]
+         - TEXT[662]
+         - TEXT[661]
+       error:
+       - item: TEXT[277]
+-        change: TEXT[290]
++        change: TEXT[242]
+         by:
+         - TEXT[660]
+         - TEXT[654]
+         - TEXT[662]
+         - TEXT[661]
+   work_schedule:
+-    thesis: TEXT[1395]
++    thesis: TEXT[1391]
+     flow:
+       launch:
+       - phase:
+@@ -400,7 +418,7 @@
+       combine:
+         describe: TEXT[1279]
+         decomposition:
+-          strategy: TEXT[1306]
++          strategy: TEXT[1335]
+           partition:
+             row:
+               size: R
+@@ -460,7 +478,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[716]
++    thesis: TEXT[689]
+     phase:
+       group_max:
+         domain:
+@@ -758,23 +776,40 @@
+           inputs_ready:
+           - Main/dependency:Partials@done
+         resource:
+-          DenParts:
+-            space: SMEM
+-            member_slot_shape:
++          Weight:
++            space: SMEM
++            member_slot_shape:
++            - merge_group: MergeGroups
+             - split: 128
+             dtype: fp32
+             slot_count: 1
+-          Weight:
+-            space: SMEM
+-            member_slot_shape:
+-            - split: 128
++          GroupA:
++            space: SMEM
++            member_slot_shape:
++            - merge_group: MergeGroups
++            - channel: D
++            dtype: fp32
++            slot_count: 1
++          GroupB:
++            space: SMEM
++            member_slot_shape:
++            - merge_group: MergeGroups
++            - segment: 4
+             dtype: fp32
+             slot_count: 1
+           NumeratorBatch:
+             space: register
+             member_slot_shape:
++            - merge_group: MergeGroups
+             - channel: D
+             - split: 8
++            dtype: fp32
++            slot_count: 1
++          GroupAcc:
++            space: register
++            member_slot_shape:
++            - merge_group: MergeGroups
++            - channel: D
+             dtype: fp32
+             slot_count: 1
+           Totals:
+@@ -799,17 +834,17 @@
+           Main:
+             info:
+               execution_mode: serial
+-              member: warp[0:4]
++              member: warp[0:16]
+               verb:
+                 dependency: TEXT[790]
+-                sum_a: TEXT[1081]
+-                sum_b: TEXT[896]
+-                write: TEXT[884]
++                sum_a: TEXT[864]
++                sum_b: TEXT[949]
++                write: TEXT[755]
+             pipe:
+               steady:
+               - dependency:Partials
+-              - sum_a:TotalA
+-              - sum_b:TotalB
++              - sum_a:GroupA
++              - sum_b:GroupB
+               - write:Output
+ realization:
+   require:

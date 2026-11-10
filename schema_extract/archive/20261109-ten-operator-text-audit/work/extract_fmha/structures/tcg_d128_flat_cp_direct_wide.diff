@@ -1,0 +1,137 @@
+--- tcg_d128_flat_cp_direct_narrow
++++ tcg_d128_flat_cp_direct_wide
+@@ -4,9 +4,9 @@
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+   version: 2
+   dispatch:
+-    id: tcg_d128_flat_cp_direct_narrow
+-    parent: tcg_d128_flat_tma_direct_narrow
+-    when: TEXT[141]
++    id: tcg_d128_flat_cp_direct_wide
++    parent: tcg_d128_flat_cp_direct_narrow
++    when: TEXT[113]
+ design:
+   math_reshape:
+     thesis: TEXT[679]
+@@ -128,9 +128,26 @@
+         accumulate: TEXT[194]
+         approx: TEXT[155]
+     - step: TEXT[661]
+-      name: TEXT[595]
+-      math: TEXT[346]
++      name: TEXT[593]
++      math: TEXT[378]
+       symbol:
++        MergeGroups:
++          meaning: TEXT[543]
++          binding: bind:design.work_schedule::MergeGroups
++        GroupA:
++          meaning: TEXT[457]
++          shape:
++          - merge: MergeGroups
++          - channel: D
++          dtype: fp32
++          retention: keep_value (r)
++        GroupB:
++          meaning: TEXT[483]
++          shape:
++          - merge: MergeGroups
++          - part: 4
++          dtype: fp32
++          retention: keep_value (r)
+         TotalA:
+           meaning: TEXT[441]
+           shape:
+@@ -169,14 +186,14 @@
+         - TEXT[661]
+       error:
+       - item: TEXT[277]
+-        change: TEXT[290]
++        change: TEXT[242]
+         by:
+         - TEXT[660]
+         - TEXT[654]
+         - TEXT[662]
+         - TEXT[661]
+   work_schedule:
+-    thesis: TEXT[1393]
++    thesis: TEXT[1373]
+     flow:
+       launch:
+       - phase:
+@@ -438,7 +455,7 @@
+       combine:
+         describe: TEXT[1272]
+         decomposition:
+-          strategy: TEXT[1311]
++          strategy: TEXT[1288]
+           partition:
+             row:
+               size: R
+@@ -492,7 +509,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[706]
++    thesis: TEXT[709]
+     phase:
+       group_max:
+         domain:
+@@ -810,17 +827,33 @@
+           inputs_ready:
+           - Main/dependency:Partials@done
+         resource:
+-          DenParts:
++          GroupA:
+             space: SMEM
+             member_slot_shape:
+-            - split: 128
++            - merge: MergeGroups
++            - channel: D
++            dtype: fp32
++            slot_count: 1
++          GroupB:
++            space: SMEM
++            member_slot_shape:
++            - merge: MergeGroups
++            - part: 4
+             dtype: fp32
+             slot_count: 1
+           NumeratorBatch:
+             space: register
+             member_slot_shape:
++            - merge: MergeGroups
+             - channel: D
+             - split: 8
++            dtype: fp32
++            slot_count: 1
++          LocalA:
++            space: register
++            member_slot_shape:
++            - merge: MergeGroups
++            - channel: D
+             dtype: fp32
+             slot_count: 1
+           Totals:
+@@ -845,17 +878,15 @@
+           Main:
+             info:
+               execution_mode: serial
+-              member: warp[0:4]
++              member: warp[0:4*MergeGroups]
+               verb:
+                 dependency: TEXT[1011]
+-                sum_a: TEXT[774]
+-                sum_b: TEXT[846]
+-                write: TEXT[884]
++                reduce: TEXT[930]
++                write: TEXT[1135]
+             pipe:
+               steady:
+               - dependency:Partials
+-              - sum_a:TotalA
+-              - sum_b:TotalB
++              - reduce:GroupPartials
+               - write:Output
+ realization:
+   require:

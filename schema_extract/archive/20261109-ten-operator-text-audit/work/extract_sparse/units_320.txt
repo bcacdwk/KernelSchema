@@ -1,0 +1,159 @@
+[320] t_9cb95024f9e36cea pipeline.verb (1 uses)
+probe_serial_mma:359 design.tile_pipeline.phase.attention.role.Main.info.verb.softmax
+Compute online's E, retain unrounded sums and store BF16 Prob. Four-lane reductions publish RowSum; barrier makes Prob and RowSum visible. Row-owner lanes update l; another CTA barrier publishes it. Discard Scores.
+
+[321] t_9df1cb2328329682 pipeline.verb (1 uses)
+tc_heads:304 design.tile_pipeline.phase.attention.role.Soft0.info.verb.online
+A softmax warp owns its consecutive RG head rows. Its two lane halves hold the two 32-key halves and duplicate m,l; read both Partial(c,a), add, scale, mask and compute online's E and state updates. Exchange the two key-half maxima and sums within the warp. Publish alpha once per row and rendezvous the warp. Scores are replaced in place by E; both score partials have been read when done. E remains live until publish:Prob(c).
+
+[322] t_a3111e0f5352a330 pipeline.verb (2 uses)
+probe_hidden_mma:517 design.tile_pipeline.phase.probe.role.Main.info.verb.produce; probe_hidden_packed:517 design.tile_pipeline.phase.probe.role.Main.info.verb.produce
+For an in-range sample, the first GT participants resolve SelectedCount, SwaCount and RequestId into ProbeMeta; rendezvous before checking usability. An out-of-range or unusable sample writes the final -1 from one participant, without initializing or reading the hash state. A usable sample clears ProbeHash, ProbeMembership and ProbeCount, then rendezvous before inserting. All participants share a 4096-entry open-addressed table of pool-tagged keys. A slot has one membership byte for up to eight queries. Apply probe's Creator/First contribution rule to LocalCount: atomicCAS publishes a new entry before its creator sets the membership bit; matching participants use the previous bit returned by atomicOr, without waiting for the creator. Each nonzero local count is flushed into ProbeCount once. Each participant prefetches one next selected index into PrefetchedId before processing the current key; invalid IDs skip the hash operation. No index row, query or latent is staged for reuse by either attention phase. After the counting rendezvous, form probe's scalar ratio and write only this sample's mapped slot once from one participant. There is no device reduction across samples. This publication does not assert that every CTA has finished; all local reads and stores retire by probe.kernel_done. The static resources are per CTA, and no next worktile reuses them.
+
+[323] t_a3998489ce1480be pipeline.verb (1 uses)
+probe_hidden_mma:1018 design.tile_pipeline.phase.remainder.role.Main.info.verb.softmax
+Evaluate mma_online's unrounded exponentials, retain their sums and write BF16 ProbM. Four-lane reductions publish RowSum; rendezvous publishes both arrays. Row owners fold the eight sums and update lM; a second rendezvous completes the update. ScoresM can then be discarded.
+
+[324] t_a4d8c5899712b143 pipeline.verb (1 uses)
+probe_serial_mma:338 design.tile_pipeline.phase.attention.role.Main.info.verb.prepare
+Stage Q, including zero padded heads, into Q_shared and commit one copy group. Initialize m, l and sink2; publish IndexPrefetch into IndexShared, each store depending on its own load result. Wait for Q and barrier to publish Q, indices and control, also ending the metadata slab reads. Now enqueue chunk zero into KVStage, recording valid and committing once. Cache all 32 query slices in Q_cached, one copy per key group, while that gather can remain in flight. Zero Acc. Enqueueing resolves slot IDs in batches before issuing 16-byte latent copies; invalid and padded slots still read row zero of their pool. Prepare completes after Q caching and gather issuance, before KV readiness.
+
+[325] t_a6908f0f52de4401 pipeline.verb (1 uses)
+mma_direct:220 design.tile_pipeline.phase.attention.role.Main.info.verb.metadata
+Work denotes this CTA's assigned (t,hb,dq). For P_run.cfg 2/4/5/6/7/8, (Stages,QKS,Early) is respectively (2,16,0)/(3,32,0)/(3,32,1)/(1,0,0)/(1,32,0)/(1,32,1). The DQ IX variants retain the cfg5/cfg8 tuple. All use KSPLIT=1. WR1=HB/16 if QKS>0, otherwise max(HB/32,1); WC1=8/WR1; MT1=HB/WR1 and U=KC/WC1. QHeads=0 when QKS=32 and Stages>1, else HB. QPRE is true exactly for Stages=1 in this scope. Early=1 first issues whole-row index loads into IndexPrefetch if IndexWidth<=1152; wider rows use per-chunk global reads. It stages request boundaries, lengths and topk in the future RowMax/RowSum slabs, barriers, then resolves the request and C(t). Other configs scan metadata directly. Index loads may remain in flight when metadata is done; metadata resolution does not consume their results.
+
+[326] t_ad8d4cbfd0586128 pipeline.verb (2 uses)
+probe_serial_packed:631 design.tile_pipeline.phase.attention.role.Setup.info.verb.zero; tc_packed:398 design.tile_pipeline.phase.attention.role.Setup.info.verb.zero
+For the empty union, all eight warps overwrite every real output row with finalize's zero result. Q copies have completed in build:Union. This path acquires no TMEM and initializes no transfer barriers; it creates none of the v- or c-indexed actions. Stores complete by attention.kernel_done.
+
+[327] t_ae0252b0ed24072d pipeline.verb (1 uses)
+probe_hidden_mma:1013 design.tile_pipeline.phase.remainder.role.Main.info.verb.score
+Compute the synchronous QK products from Q_cached and GatherM(c), then scale and mask ScoresM. Publish per-warp maxima into RowMax and rendezvous. Row owners combine the eight groups and update mM and AlphaM, followed by a CTA rendezvous making both updates visible.
+
+[328] t_ae5989245ab2cd71 pipeline.verb (14 uses)
+probe_hidden_mma:735 design.tile_pipeline.phase.prefix.role.Soft0.info.verb.publish; probe_hidden_mma:798 design.tile_pipeline.phase.prefix.role.Soft1.info.verb.publish; probe_hidden_mma:851 design.tile_pipeline.phase.prefix.role.Soft2.info.verb.publish; probe_hidden_mma:895 design.tile_pipeline.phase.prefix.role.Soft3.info.verb.publish; probe_hidden_packed:771 design.tile_pipeline.phase.prefix.role.Soft0.info.verb.publish; probe_hidden_packed:835 design.tile_pipeline.phase.prefix.role.Soft1.info.verb.publish; probe_hidden_packed:893 design.tile_pipeline.phase.prefix.role.Soft2.info.verb.publish; probe_hidden_packed:942 design.tile_pipeline.phase.prefix.role.Soft3.info.verb.publish; probe_serial_packed:700 design.tile_pipeline.phase.attention.role.Soft0.info.verb.publish; probe_serial_packed:764 design.tile_pipeline.phase.attention.role.Soft1.info.verb.publish; probe_serial_packed:821 design.tile_pipeline.phase.attention.role.Soft2.info.verb.publish; probe_serial_packed:869 design.tile_pipeline.phase.attention.role.Soft3.info.verb.publish; tc_heads:317 design.tile_pipeline.phase.attention.role.Soft0.info.verb.publish; tc_packed:467 design.tile_pipeline.phase.attention.role.Soft0.info.verb.publish
+Narrow this warp's E to its rows of Prob(c), fence the shared writes and TMEM rescale, then arrive once on probability readiness. done publishes only this warp's rows and releases its score reads. Four such arrivals jointly authorize PV and score-slot reuse.
+
+[329] t_aee60cbbe354a819 pipeline.verb (4 uses)
+probe_hidden_mma:636 design.tile_pipeline.phase.prefix.role.Setup.info.verb.build; probe_hidden_packed:667 design.tile_pipeline.phase.prefix.role.Setup.info.verb.build; probe_serial_packed:596 design.tile_pipeline.phase.attention.role.Setup.info.verb.build; tc_packed:363 design.tile_pipeline.phase.attention.role.Setup.info.verb.build
+Union denotes UnionKey, UnionMask and the two pool counts for this grp. All eight warps resolve each token's A and Klen into TokenExtent and issue Q copies, zeroing padded rows. Clear the 8192-word uint64 HashTable in the ring and the membership array. Stage the G complete sparse-index rows into IndexStage using asynchronous copies; wait for those copies and the earlier Q copies, then rendezvous before reading indices. Only the selected slot intervals feed the union; invalid markers contribute no entry. Each thread prefetches its next item before its current hash operation. Use open addressing: atomically install the pool-tagged key, allocate its canonical entry and publish the key/position pair in one atomic word. A same-key contender waits for that position publication. Atomic membership updates share the canonical entry across tokens; an already-set token bit allocates a private extra entry, as defined by gather. SWA entries allocate upward from slot zero and compressed entries downward from slot 2559. Logical entries [0,Ns) use their identical physical slots; entry k in [Ns,Nu(grp)) uses slot 2560-Ng+k-Ns. This reverses the compressed allocation order in the logical traversal; it does not move union bytes. A CTA rendezvous publishes keys, masks and counts and ends all HashTable and IndexStage reads. Their ring storage is now free for the first gather. The 65536-byte table plus 4*GT*IndexWidth index bytes fits the 131072-byte ring by the host's GT*IndexWidth<=2560 gate.
+
+[330] t_b1e347dc95d76669 pipeline.verb (1 uses)
+root:520 design.tile_pipeline.phase.combine.role.Merge.info.verb.prime.meaning
+For a real head, each 128-thread group g issues four float4 vector loads from splits g+k*G before loading statistics, substituting register zero only for s>=S. VectorPrefetch keeps their results through the statistics reduction; done means these registers are ready. For padded heads all four pipe actions are no-ops with issue/done events and no memory reads or writes.
+
+[331] t_b30065e495f0e573 pipeline.verb (1 uses)
+probe_hidden_mma:1030 design.tile_pipeline.phase.remainder.role.Main.info.verb.finish
+Every real KV copy has landed and its readers have retired. Compute mma_finalize's inverse, scale AccM and convert ResultM, including padded heads. Reuse the ring prefix as OutputM for the HB by D BF16 result. Rendezvous before cooperatively copying only real heads to out. Stores can remain pending until remainder.kernel_done. No scratch statistics are written and this worker takes no second worktile.
+
+[332] t_b832db3785fb3a4a pipeline.verb (1 uses)
+probe_hidden_mma:1009 design.tile_pipeline.phase.remainder.role.Main.info.verb.await
+For c>0 enqueue the current GatherM and ValidM as prepare describes; c=0 uses the already committed group. Wait for all copy groups and rendezvous before any warp reads the current tile. No future chunk is issued here.
+
+[333] t_b9c4cae8fed9c5ad pipeline.verb (1 uses)
+root:526 design.tile_pipeline.phase.combine.role.Merge.info.verb.normalize
+Load all S m/l pairs into SplitControl and barrier. Groups reduce maxima into GroupControl, barrier, fold M, publish weights in SplitControl, barrier. Groups reduce weighted normalizers, barrier; thread zero folds the group totals, adds the sink and publishes inv, barrier. G groups each contain 128 threads; thread offset v owns latent columns 4*v..4*v+3. Vector prefetch may overlap these steps.
+
+[334] t_c5831293de6d8106 pipeline.verb (2 uses)
+probe_serial_packed:902 design.tile_pipeline.phase.attention.role.Finish.info.verb.store; tc_packed:597 design.tile_pipeline.phase.attention.role.Finish.info.verb.store
+Rejoin all eight warps at a CTA barrier after the real Result rows are staged. Cooperatively copy nrows contiguous rows from OutputStage into out, mapping row r to token t0+floor(r/H) and head r mod H. TMEM may be deallocated by its owner after that barrier while other warps copy, since copy-out no longer reads TMEM. Global stores can remain pending until attention.kernel_done. No worker takes another worktile.
+
+[335] t_c700ff02b3e5d83c pipeline.verb (1 uses)
+probe_serial_mma:284 design.tile_pipeline.phase.probe.role.Main.info.verb.publish
+One lane writes the final ProbeRatio[s] directly to Gate[s], including -1 for unusable groups. No provisional ratio is published. The write may reach host polling before probe.kernel_done; host selection does not wait on this action's event. The kernel completion still precedes attention. Each CTA handles one sample and has no state carried to another call.
+
+[336] t_c94a47792d86dcd4 pipeline.verb (4 uses)
+probe_hidden_mma:703 design.tile_pipeline.phase.prefix.role.Loader.info.verb.finish; probe_hidden_packed:736 design.tile_pipeline.phase.prefix.role.Loader.info.verb.finish; probe_serial_packed:665 design.tile_pipeline.phase.attention.role.Loader.info.verb.finish; tc_packed:432 design.tile_pipeline.phase.attention.role.Loader.info.verb.finish
+Finish the loader issue loop, including its empty trailing copy commit. Transfers(v) denotes this issue path, not a transfer drain; real transfers are retired by the QK and PV completion chain.
+
+[337] t_cc36237c152cd712 pipeline.verb (1 uses)
+tc_heads:245 design.tile_pipeline.phase.attention.role.Setup.info.verb.prepare
+Work is the assigned (t,hb); RG=16. Resolve request metadata and C(t), cooperatively issue Q copies, initialize online's state and acquire 512 TMEM columns. m_initial and l_initial hold the initialization values; only m_initial is read into the replicated register state. Initialize the alpha slot to one; the first online update overwrites it. Q copies complete and a proxy fence plus CTA rendezvous publishes Q, control and initialized completion protocols before done. Acc is initialized by the first PV, not by reading new TMEM. Acc's two 256-column output halves occupy disjoint lane halves of columns 0..255; each Partial uses its reserved score columns with the unused lane positions left unread. All four score regions remain reserved throughout the worktile. The source's allocation-return word overlaps a live transfer barrier; the resource and dependency design here does not rely on that erroneous implementation address alias.
+
+[338] t_d0a745644af7748c pipeline.verb (1 uses)
+mma_direct:278 design.tile_pipeline.phase.attention.role.Main.info.verb.finish
+After the last retire, every real KV copy has been waited for and consumed; only empty committed groups can remain. The source adds no final wait-all. Read m, l and sink2 to form finalize's inverse; each warp scales its Acc columns and converts to BF16 Result, including padded heads. Reuse the ring prefix as OutputStage, writing only this CTA's D/DQ columns in HB by D staging. A CTA barrier publishes Result, then cooperatively copy the owned columns of real heads into out. Global stores may remain pending when individual threads finish; attention.kernel_done provides output visibility. There are no scratch statistics or duplicate inter-CTA stores. This worker takes no second worktile and retains no numerical state for another call.
+
+[339] t_d0d32037da9d47af pipeline.verb (1 uses)
+tc_heads:269 design.tile_pipeline.phase.attention.role.Loader.info.verb.load.meaning
+Resolve IDs, write valid(c) and issue the complete Gather(c) tile. Unless 0<A(t)-c*KC<KC and (A(t)-c*KC)%4!=0, each of the 128 loaders issues one 512-byte TMA gather4 for four rows in one 64-element latent plane, using the appropriate pool map. Each issuer arms its own transaction bytes before that request. The straddling chunk instead uses batched indices and 16-byte cp.async copies with per-loader completion arrivals. Both forms transfer row-zero substitutes and fill the same swizzled tile. done guarantees all tile data has landed through the transfer completion protocol; issuing later actions need not wait for it.
+
+[340] t_d6e308ca7a7c7c5f pipeline.verb (2 uses)
+mma_direct:267 design.tile_pipeline.phase.attention.role.Main.info.verb.softmax; root:478 design.tile_pipeline.phase.attention.role.Main.info.verb.softmax
+Compute online's E, retain its unrounded sums, and store BF16 Prob. Four-lane reductions publish RowSum; a CTA barrier makes both Prob and RowSum visible. Row-owner threads update l, followed by a CTA barrier. Scores can then be discarded.
+
+[341] t_d89b0e707d355934 pipeline.verb (1 uses)
+root:428 design.tile_pipeline.phase.attention.role.Main.info.verb.metadata
+Work denotes this CTA's assigned (t,hb,s,dq); c0,c1 use online's abbreviation. For P.cfg 2/4/5/6/7/8, (Stages,QKS,Early) is respectively (2,16,0)/(3,32,0)/(3,32,1)/(1,0,0)/(1,32,0)/(1,32,1). The DQ IX variants retain the cfg5/cfg8 tuple. All use KSPLIT=1. WR1=HB/16 if QKS>0, otherwise max(HB/32,1); WC1=8/WR1; MT1=HB/WR1 and U=KC/WC1. QHeads=0 when QKS=32 and Stages>1, else HB. QPRE is true exactly for Stages=1 in this scope. Early=1 first issues whole-row index loads into IndexPrefetch if IndexWidth<=1152; wider rows use per-chunk global reads. It stages request boundaries, lengths and topk in the future RowMax/RowSum slabs, barriers, then resolves the request and c0,c1. Other configs scan metadata directly. Index loads may remain in flight when metadata is done; metadata resolution does not consume their results. Empty c0=c1 work publishes finalize's sentinel statistics and discards any prefetched indices without an explicit drain. No query or KV copy was issued; c is empty. prepare and finish still have issue/done events but perform no reads or writes.
+
+[342] t_e1959cd30d2e909d pipeline.verb (1 uses)
+mma_direct:254 design.tile_pipeline.phase.attention.role.Main.info.verb.enqueue
+Future(c) is the prospective copy group for chunk c+Stages-1. For Stages>1 issue it into slot (c+Stages-1)%Stages when below C(t), otherwise commit an empty group. Stages=1 does nothing here. For Stages>1, done means the group was committed, not that the transfer landed; it can remain in flight through score, softmax and value. The target is initially unused or was released by the preceding iteration's retire barrier, so no current KV is overwritten.
+
+[343] t_e1daf6a9c919f69b pipeline.verb (13 uses)
+probe_hidden_mma:722 design.tile_pipeline.phase.prefix.role.Soft0.info.verb.online; probe_hidden_mma:785 design.tile_pipeline.phase.prefix.role.Soft1.info.verb.online; probe_hidden_mma:838 design.tile_pipeline.phase.prefix.role.Soft2.info.verb.online; probe_hidden_mma:882 design.tile_pipeline.phase.prefix.role.Soft3.info.verb.online; probe_hidden_packed:758 design.tile_pipeline.phase.prefix.role.Soft0.info.verb.online; probe_hidden_packed:822 design.tile_pipeline.phase.prefix.role.Soft1.info.verb.online; probe_hidden_packed:880 design.tile_pipeline.phase.prefix.role.Soft2.info.verb.online; probe_hidden_packed:929 design.tile_pipeline.phase.prefix.role.Soft3.info.verb.online; probe_serial_packed:687 design.tile_pipeline.phase.attention.role.Soft0.info.verb.online; probe_serial_packed:751 design.tile_pipeline.phase.attention.role.Soft1.info.verb.online; probe_serial_packed:808 design.tile_pipeline.phase.attention.role.Soft2.info.verb.online; probe_serial_packed:856 design.tile_pipeline.phase.attention.role.Soft3.info.verb.online; tc_packed:454 design.tile_pipeline.phase.attention.role.Soft0.info.verb.online
+A softmax warp owns its consecutive RG matrix rows. Its two lane halves hold the two 32-key halves and duplicate m,l; read both Partial(c,a), add and scale, select the membership bit floor(r/H), then compute online's masked E and state updates. Exchange the two key-half maxima and sums within the warp. Publish alpha once per row and rendezvous the warp. Scores are replaced in place by E; both score partials have been read when done. E remains live until publish:Prob(c).
+
+[344] t_e20674c2ad25e5bb pipeline.verb (2 uses)
+probe_hidden_mma:924 design.tile_pipeline.phase.prefix.role.Finish.info.verb.store; probe_hidden_packed:975 design.tile_pipeline.phase.prefix.role.Finish.info.verb.store
+Rejoin all eight warps at a CTA barrier after the real Result rows are staged. Cooperatively copy nrows contiguous rows from OutputStage into out, mapping row r to token t0+floor(r/H) and head r mod H. TMEM may be deallocated by its owner after that barrier while other warps copy, since copy-out no longer reads TMEM. Global stores can remain pending until the containing kernel's completion. No worker takes another worktile.
+
+[345] t_e5928cf820bed032 pipeline.verb (1 uses)
+root:444 design.tile_pipeline.phase.attention.role.Main.info.verb.prepare
+For nonempty Work, stage Q with zero padded heads and commit one copy group. Use Q_shared when QHeads>0, otherwise alias ring slot zero as Q_ring. If QPRE and Early=0, enqueue chunk c0 in slot zero before waiting for Q. Initialize control state, then publish cached indices into IndexShared when present. Each index store depends on its register load result; query issuance need not wait for it. Wait leaving one group outstanding only in that pre-issued case, otherwise wait all; a CTA barrier publishes Q, control and index storage and ends metadata reads. If QPRE and Early=1, only now enqueue c0, even when the width disables index caching. Cache the first QKS 16-wide Q slices in registers, duplicated across key groups. When Q occupies ring slot zero, a CTA barrier after all Q fragment reads frees it. Q_cached and any uncached Q_shared slices remain readable for the whole recurrence. Zero Acc. For j=(1 if QPRE else 0)..Stages-2, enqueue c0+j into slot j if it is below c1, otherwise commit an empty group. Enqueueing a chunk resolves slot IDs in batches before issuing 16-byte row copies, records validity and commits once; invalid slots still copy row zero of their pool. Completion of prepare means Q is ready and priming is issued, not that KV is ready.
+
+[346] t_f0e5288e295640e5 pipeline.verb (1 uses)
+probe_serial_mma:363 design.tile_pipeline.phase.attention.role.Main.info.verb.value
+Rescale Acc, then read Prob and Gather(c) for synchronous PV. Each warp owns every HB row and D/8 distinct output columns. Acc stays in registers across chunks; all probability and KV reads by this warp finish before it reaches retire.
+
+[347] t_f5729978632a5911 pipeline.verb (1 uses)
+probe_serial_mma:371 design.tile_pipeline.phase.attention.role.Main.info.verb.finish
+The last retire ends all reads of Gather; all copy groups have been waited. Form finalize's inverse, scale Acc and convert to BF16 Result, including padded heads. Reuse the KVStage prefix as OutputStage and barrier before cooperatively writing all columns of real heads to out. Stores may remain pending when individual lanes finish; attention.kernel_done provides output visibility. There are no scratch statistics, and the CTA takes no second worktile or numerical state into another invocation.
+
+[348] t_f9c7952ce464f534 pipeline.verb (1 uses)
+mma_direct:250 design.tile_pipeline.phase.attention.role.Main.info.verb.await
+For Stages=1 enqueue c unless c=0 and QPRE, then wait all groups. For Stages>1 wait until all but the newest Stages-2 groups have completed. A CTA barrier then makes current Gather(c) and valid(c) readable by all warps.
+
+[349] t_fe3ebcfec286747c pipeline.verb (1 uses)
+probe_serial_mma:263 design.tile_pipeline.phase.probe.role.Main.info.verb.build
+For Usable(s), zero Hash, Membership and Count, then barrier. Hash holds a nonzero encoding of e+1 per occupied slot, zero for empty; insertion publishes the complete key with an atomic compare-and-swap. Collisions advance by linear probing until an empty or matching slot. Each slot has eight membership bits, four slots per Membership word. Enumerate occurrences in token-major compact-slot order, divided into 1024 strided lane sequences. A lane loads its first index, then in each iteration retains the current index and issues its next index into NextIndex before processing the current one. Consuming a prefetched index waits for that load result; the next load may overlap hash work. Negative IDs do no hash work. Each insertion adds one to LocalCount and sets its query bit; an existing key adds one only if the atomic bit-set returns that bit already set. Insertion does not inspect the previous membership bit and does not block other updaters until it is set. Initialize each lane's LocalCount to zero, accumulate across its sequence, then flush a nonzero count once to Count with an atomic add. A CTA barrier joins all flushes before Count is used for ProbeRatio. Hash and Membership have no consumers after this build; no next index is loaded beyond the lane's last occurrence. For an unusable sample, build completes without accessing these resources.
+
+[350] t_05bb309f43079753 realization.choice (1 uses)
+probe_serial_mma:388 realization.require[0].choice
+Bind copies to cp.async.cg.shared.global 16-byte transfers, commit_group, wait_group 0 and CTA __syncthreads at the stated publication/reuse boundaries; use mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 for QK/PV.
+
+[351] t_12266712f730210a realization.choice (4 uses)
+probe_hidden_mma:1060 realization.require[2].choice; probe_hidden_packed:1010 realization.require[2].choice; probe_serial_packed:935 realization.require[2].choice; tc_packed:629 realization.require[2].choice
+Bind hash installation/publication to shared-memory 64-bit atomicCAS/atomicExch and membership updates to 32-bit atomicOr on the word containing four mask bytes. Bind index staging and query prefetch to cp.async, retiring their groups with cp.async.wait_group before the CTA rendezvous.
+
+[352] t_3435eb7183f19207 realization.choice (5 uses)
+probe_hidden_mma:1047 realization.require[0].choice; probe_hidden_packed:997 realization.require[0].choice; probe_serial_packed:922 realization.require[0].choice; tc_heads:446 realization.require[0].choice; tc_packed:617 realization.require[0].choice
+Bind the matrix products to tcgen05.mma.cta_group::1 with BF16 operands and FP32 accumulators, using per-issuer tcgen05.commit notifications. Use warp-convergent tcgen05.ld/st and their completion waits; the score load uses the 16x32bx2 form, while accumulator access uses 32x32b.
+
+[353] t_466b6616ff8445ef realization.choice (2 uses)
+tc_heads:467 realization.require[2].choice; tc_packed:637 realization.require[3].choice
+Model.forward caches workspace selection by argument identity, using private scratch for a non-CUDA or smaller-than-32-MiB buffer. P.ws_bytes=0 here, so dsv4_run allocates no larger workspace. Submit on the current CUDA stream. The single-entry graph cache keys tensor pointers, dimensions, scales, the resolved plan and extension switches. A new eligible key dispatches directly; repeating it synchronizes the caller stream before private-stream capture, instantiation and replay. An executable-key hit replays without that synchronization. Capture records this one kernel; no numerical answers are cached. Begin-capture failure returns before dispatch; failed capture or instantiation executes no recorded work. Graph failure disables graph use and falls through to direct dispatch, without creating an additional completion guarantee.
+
+[354] t_5388fdf258b1bff8 realization.choice (1 uses)
+tc_heads:456 realization.require[1].choice
+Build each pool's two-dimensional BF16 CUtensorMap with row stride 2*D, a 64-element-wide box and SWIZZLE_128B; pass maps by value to the kernel. Bind gather4 completion to mbarrier transaction bytes and the straddling chunk's cp.async completion to cp.async.mbarrier.arrive. Preserve the separate validity publication and data-landing notifications.
+
+[355] t_7681fcbb3feb2e22 realization.choice (1 uses)
+probe_serial_mma:396 realization.require[1].choice
+Model.forward caches workspace selection by argument identity; a non-CUDA or smaller-than-32-MiB buffer selects cached private scratch. Initial P.ws_bytes=0, so no larger extension allocation is needed. Gate is the first eight words of process-cached cudaHostAllocMapped storage, with a cudaHostGetDevicePointer device alias. Reset uses volatile host stores, the readiness loop uses volatile host loads, and the final scan uses ordinary float loads. There is no cudaStreamSynchronize in this serial probe path. Submit both kernels on the current CUDA stream. Hidden setup may have attempted a fork event or side-stream wait before returning false, but submitted no side computation in this node. The internal graph cache requires initial P.dual=0; this node dispatches directly even after clearing the chosen plan's dual flag.
+
+[356] t_78f8c0c686efb483 realization.choice (1 uses)
+probe_hidden_packed:1037 realization.require[5].choice
+Bind the fork and join to the cached cudaEventDisableTiming events and cudaEventRecord/cudaStreamWaitEvent. Use the cached cudaStreamNonBlocking side stream so the legacy default stream cannot introduce a prefix-to-probe or prefix-to-remainder barrier. Use the initial GT for both token ranges. The side stream, events and mapped gate persist across calls. Event waits queue device ordering, not a host completion wait; their reuse does not isolate gate contents between calls. Return out after successfully queuing the join.
+
+[357] t_86e691845374eaeb realization.choice (1 uses)
+probe_hidden_mma:1107 realization.require[7].choice
+Bind query and KV copies to cp.async.cg.shared.global 16-byte transfers, commit_group and wait_group 0, with CTA __syncthreads at the declared publication and reuse boundaries. Use mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 for QK/PV.
+
+[358] t_89c02d2d70ba236b realization.choice (3 uses)
+probe_hidden_mma:1067 realization.require[3].choice; probe_hidden_packed:1017 realization.require[3].choice; probe_serial_packed:941 realization.require[3].choice
+Bind hash insertion to shared-memory 64-bit atomicCAS, membership updates to 32-bit atomicOr on four packed mask bytes, and count flushing to integer atomicAdd. Keep probe storage static and separate from attention's 1024-byte-aligned dynamic shared storage; the probe fits the 48-KiB static limit without a dynamic shared-memory opt-in.
+
+[359] t_ab5671cd5a6c173f realization.choice (3 uses)
+probe_hidden_mma:1076 realization.require[4].choice; probe_hidden_packed:1026 realization.require[4].choice; probe_serial_packed:950 realization.require[4].choice
+Use the process-lifetime 64-float cudaHostAllocMapped buffer and its cudaHostGetDevicePointer alias; only its first PS slots carry samples. Arm them through volatile host stores, submit the probe, poll with volatile host reads, then perform the ordinary FP32 final reads used for R. Retain storage through all pending probe writes even if polling stops early. The source reuses this one gate without per-invocation isolation; it provides no cross-call completion guarantee at poll exit.

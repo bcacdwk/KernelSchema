@@ -1,0 +1,235 @@
+--- root.yaml
++++ rect_joint_load.yaml
+@@ -3,88 +3,13 @@
+   describe: Compute right-aligned causal GQA from FP8 queries and an HND paged KV cache into the supplied BF16 output.
+   source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_prefill/aka_solution/solution.py::Model.forward
+-  version: 6
++  version: 4
+   dispatch:
+-    id: root
++    id: rect_joint_load
++    parent: root
+     when: |
+       Use packaged defaults with no FA_HD256 environment overrides, under the root contract.
+       Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count.
+       C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000).
+-      Select exactly when not Split and (B>16 or (B=1 and ceil(Q/8)<=SM+floor(SM/2) and K>=98304)).
+-contract:
+-  algorithm_requirement:
+-    constant:
+-      Hq: {value: 16, meaning: Query head count.}
+-      Hkv: {value: 1, meaning: KV head count.}
+-      D: {value: 256, meaning: Query and value channel count.}
+-      Page: {value: 64, meaning: Tokens per physical KV page.}
+-    input:
+-      query: {meaning: Concatenated request queries., shape: [{token: TotalQ}, {head: Hq}, {channel: D}], dtype: fp8_e4m3fn}
+-      kv_cache: {meaning: HND cache with keys then values on the kind axis., shape: [{page: Pages}, {kind: 2}, {head: Hkv}, {token: Page}, {channel: D}], dtype: fp8_e4m3fn}
+-      workspace_buffer: {meaning: Caller scratch zeroed before first isolated use., shape: [{byte: WorkspaceBytes}], dtype: uint8}
+-      block_tables: {meaning: Logical page to physical page mapping., shape: [{request: BatchCount}, {page_slot: TableColumns}], dtype: int32, range: 'Used entries in [0,Pages); unused entries are -1.'}
+-      seq_lens: {meaning: Used KV lengths., shape: [{request: BatchCount}], dtype: int32, range: Positive.}
+-      max_q_len: {meaning: Maximum request query length., shape: [], dtype: python_int}
+-      max_kv_len: {meaning: Maximum used KV length., shape: [], dtype: python_int}
+-      bmm1_scale: {meaning: Composite QK scale including quantization scales., shape: [], dtype: fp64, range: [0.0625, 0.0625]}
+-      bmm2_scale: {meaning: Composite output scale., shape: [], dtype: fp64, range: [1.0, 1.0]}
+-      batch_size: {meaning: ABI request count., shape: [], dtype: python_int}
+-      cum_seq_lens_q: {meaning: Query prefix boundaries., shape: [{boundary: 'BatchCount+1'}], dtype: int32}
+-      cum_seq_lens_kv: {meaning: Prefix counts of allocated pages rather than tokens., shape: [{boundary: 'BatchCount+1'}], dtype: int32}
+-      window_left: {meaning: Unrestricted causal history sentinel., shape: [], dtype: python_int, range: [-1, -1]}
+-      sinks: {meaning: Required disabled sink argument., shape: [], dtype: python_none, range: Python None.}
+-      o_sf_scale: {meaning: Required disabled output quantization argument., shape: [], dtype: python_none, range: Python None.}
+-      out: {meaning: Caller destination whose initial contents are ignored., shape: [{token: TotalQ}, {head: Hq}, {channel: D}], dtype: bf16, range: 'Any BF16 bit pattern, including inf and NaN.'}
+-    output:
+-      output: {meaning: Returned alias of the updated input out., shape: [{token: TotalQ}, {head: Hq}, {channel: D}], dtype: bf16}
+-      out_after: {meaning: In-place contents of input out., shape: [{token: TotalQ}, {head: Hq}, {channel: D}], dtype: bf16}
+-    compute:
+-    - name: Interpret the callable and pages
+-      math: |
+-        python_int is a Python integer; fp64 scalars are Python floats; python_none is the singleton Python None ABI type, not a tensor.
+-        Tensors are contiguous in the stated axis order on one CUDA device. batch_size=BatchCount.
+-        cum_seq_lens_q[0]=cum_seq_lens_kv[0]=0; cum_seq_lens_q[BatchCount]=TotalQ.
+-        Qlen(b)=cum_seq_lens_q[b+1]-cum_seq_lens_q[b]; L(b)=seq_lens[b]; 0<Qlen(b)<=L(b).
+-        max_q_len=max_b Qlen(b); max_kv_len=max_b L(b); Pages=sum_b ceil(L(b)/Page).
+-        cum_seq_lens_kv[b+1]-cum_seq_lens_kv[b]=ceil(L(b)/Page)<=TableColumns.
+-        For 0<=j<L(b), Kref[b,j,d]=kv_cache[block_tables[b,floor(j/Page)],0,0,j%Page,d], with Vref using kind=1.
+-        The complete standalone callable is timed. Only out is an observable input mutation; workspace_buffer is scratch.
+-      symbol:
+-        Qlen: {meaning: Query length function of request b., shape: not_applicable, dtype: not_applicable}
+-        L: {meaning: Used KV length function of request b., shape: not_applicable, dtype: not_applicable}
+-        Kref: {meaning: Logical keys on each request's valid domain., shape: [{request: BatchCount}, {key: max_kv_len}, {channel: D}], dtype: fp8_e4m3fn}
+-        Vref: {meaning: Logical values on each request's valid domain., shape: 'ref:Kref.shape', dtype: fp8_e4m3fn}
+-    - name: Right-aligned causal attention
+-      math: |
+-        For each b, 0<=q<Qlen(b), 0<=h<Hq and 0<=d<D, let a=cum_seq_lens_q[b]+q.
+-        J(b,q)={j in integers | 0<=j<L(b) and j<=L(b)-Qlen(b)+q}.
+-        score[j]=bmm1_scale*sum_{d=0}^{D-1} query[a,h,d]*Kref[b,j,d] for j in J(b,q).
+-        p[j]=exp(score[j]-max_k score[k])/sum_{k in J(b,q)} exp(score[k]-max_u score[u]), with all maxima over J(b,q).
+-        out_after[a,h,d]=bf16(bmm2_scale*sum_{j in J(b,q)} p[j]*Vref[b,j,d]); output is the same tensor object as out.
+-      symbol:
+-        J: {meaning: Visible key set function of request and query., shape: not_applicable, dtype: not_applicable}
+-    golden_reference:
+-      source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_prefill/reference.py::Model.forward
+-      tolerance: {output: 'atol=0.06, rtol=0.04', out_after: 'atol=0.06, rtol=0.04'}
+-  hardware_specification:
+-    device: NVIDIA L20D
+-    arch: SM103
+-    execution:
+-      warp: 32 SIMT threads within one CTA.
+-      CTA: Warps co-resident on one SM, sharing SMEM and barriers.
+-      cluster: CTAs co-scheduled within one GPC, with cluster synchronization.
+-    feature:
+-      SMEM: CTA-lifetime shared storage, addressable by cluster peers while its owner remains alive.
+-      TMEM: Explicitly allocated Tensor Core storage, separate from SMEM.
+-      register: Thread-private registers backed by the SM register file.
+-      asynchronous_execution: Asynchronous transfers and MMA require their primitive-specific completion and visibility guarantees.
+-    stack:
+-      language: CuTe DSL, nvidia-cutlass-dsl==4.6.1
+-      toolchain: nvidia-cutlass-dsl 4.6.1 bundled compiler; torch 2.9.0+cu130; cuda-python 13.1.1; CUDA compiler and driver versions were not recorded.
+-    wiki:
+-      hardware: "<wiki-hardware@pending:L20D/SM103.md>"
+-      programming: {language: '<wiki-language@pending:CuTe-DSL/4.6.1/>', virtual_isa: '<wiki-virtual-isa@pending:PTX/pending/>', machine_isa: '<wiki-machine-isa@pending:SASS/SM103/>'}
+-      microbench: "<wiki-microbench@pending:L20D/>"
+-      sota: {kernel: '<wiki-sota-kernel@pending:L20D/>', schema: '<wiki-sota-schema@pending:L20D/>'}
+-      profile: "<wiki-profile@pending:NVIDIA/>"
++      Select exactly when not Split, B=1, ceil(Q/8)<=SM+floor(SM/2), and K<98304.
+ design:
+   math_reshape:
+@@ -160,5 +85,5 @@
+             single_tile: {Oblock: {shape: [{row: M}, {channel: D}], dtype: bf16}}
+         mapping:
+-          strategy: Member list entry a is CTA rank a, for a=0,1. Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.
++          strategy: Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.
+           worker: {unit: CTA, unit_count: 2}
+           placement: {unit: cluster, unit_count: 1}
+@@ -166,11 +91,9 @@
+           member: [{row: [0, 128]}, {row: [128, 256]}]
+         schedule:
+-          strategy: |
+-            Enumerate request outside query_cluster, so query_cluster changes fastest.
+-            For its ordinal x in [0,Crect), map to m=2*x if x<ceil(Crect/2), otherwise m=2*(Crect-1-x)+1; use grid coordinates directly.
++          strategy: For ordinal x in [0,Crect), map to m=2*x if x<ceil(Crect/2), otherwise m=2*(Crect-1-x)+1; use grid coordinates directly, with query clusters fastest.
+           worktile_order: [{by: request, direction: ascending}, {by: query_cluster, direction: ascending}]
+           worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+   tile_pipeline:
+-    thesis: Independent K and V producers feed separate four-stage rings; QK leads PV by one block while softmax and correction exchange aliased scores and numerator ownership within one worktile.
++    thesis: One loader follows the QK-ahead-of-PV issue order through a shared four-token stream; separate K/V arrays and aliased score slots support softmax and correction overlap within one worktile.
+     phase:
+       attention:
+@@ -179,8 +102,10 @@
+           later: [1, N]
+           d: [0, 2]
++          p: [0, 2*N]
++          e: {flatten: [p, d]}
+         resource:
+           Query: {space: SMEM, member_slot_shape: [{row: 128}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 2, view: {'Qc(d)': {slot_index: d}}}
+-          KeyRing: {space: SMEM, member_slot_shape: [{key: 64}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Kc(i,d)': {slot_index: '(2*i+d)%4'}}}
+-          ValueRing: {space: SMEM, member_slot_shape: [{key: 128}, {channel: 64}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Vc(i,d)': {slot_index: '(2*i+d)%4'}}}
++          KeyRing: {space: SMEM, member_slot_shape: [{key: 64}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Kc(i,d)': {slot_index: 'e[max(0,2*i-1),d]%4'}}}
++          ValueRing: {space: SMEM, member_slot_shape: [{key: 128}, {channel: 64}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Vc(i,d)': {slot_index: 'e[min(2*i+2,2*N-1),d]%4'}}}
+           ScoreProbability:
+             space: TMEM
+@@ -197,28 +122,21 @@
+           OnlineState: {slot_count: 1, space: register, member_slot_shape: [{row: 128}, {state: 2}], dtype: fp32, view: {'mhat(i)': {part: {state: [0, 1]}}, 'ell(i)': {part: {state: [1, 2]}}}}
+         role:
+-          LoadQK:
+-            info:
+-              member: CTA[0:2].warp[9:10]
++          Load:
++            info:
++              member: warp[9:10]
+               execution_mode: async
+               register: 32
+               verb:
+-                load: Q holds this member's rows for the KV traversal; each K half uses one page per member. Both members contribute to pair-wide readiness.
++                load: |
++                  KVStage is a token, with K at p=max(0,2*i-1) and V at p=min(2*i+2,2*N-1), each with halves d=0,1.
++                  Issue K0,K1,V0,K2,V1,...,Klast,Vpenultimate,Vlast; N=1 uses K0,V0. Separate payload arrays share one four-token acquire/release stream.
++                  Q contains this member's rows; K uses one page per member/half and V uses two. Both members contribute to pair-wide readiness.
+             pipe:
+               steady:
+               - {repeat: d, steady: ['load:Qc(d)']}
+-              - {repeat: 'i', steady: [{repeat: d, steady: ['load:Kc(i,d)']}]}
++              - {repeat: 'e', steady: ['load:KVStage(e)']}
+             waits_for:
+               reuse:
+-                load:Kc(i+2,d)@issue: ['MMA[0]/qk:S(i,d)@done']
+-          LoadV:
+-            info:
+-              member: CTA[0:2].warp[10:11]
+-              execution_mode: async
+-              register: 32
+-              verb:
+-                load: Each V half uses two page transfers per member; done covers both and contributes to pair-wide readiness independently of K.
+-            pipe: {repeat: i, steady: [{repeat: d, steady: ['load:Vc(i,d)']}]}
+-            waits_for:
+-              reuse: {'load:Vc(i+2,d)@issue': ['MMA[0]/pv:Y(i,d)@done']}
++                load:KVStage(e+4)@issue: ['MMA/contract:KVStage(e)@done']
+           MMA:
+             info:
+@@ -227,25 +145,19 @@
+               register: 32
+               verb:
+-                qk: Issue one QK channel half; d=0 initializes S and d=1 completes it. Done returns K; last QK returns Q. Products may overlap; a product's done covers all earlier products issued by this role. Earlier PV reads P before later QK overwrites its aliased slot.
+-                pv: Issue one PV output half; i=0 initializes Y and later blocks use corrected Y. Done returns V; d=1 publishes Y and returns P, covering both CTAs.
+-            pipe:
+-              steady:
+-              - {repeat: d, steady: ['qk:S(0,d)']}
+-              - repeat: i[1:]
+-                steady:
+-                - {repeat: d, steady: ['qk:S(i,d)']}
+-                - {repeat: d, steady: ['pv:Y(i-1,d)']}
+-              - {repeat: d, steady: ['pv:Y(last(i),d)']}
++                contract: |
++                  K tokens perform QK, initializing S at d=0 and completing at d=1; V tokens perform PV, initializing Y at i=0 and using corrected Y thereafter.
++                  Completion covers both CTAs and returns the operand token. Ordered products read earlier P before a later QK overwrites its aliased slot.
++            pipe: {steady: [{repeat: 'e', steady: ['contract:KVStage(e)']}]}
+             waits_for:
+               data:
+-                qk:S(i,d)@issue: ['LoadQK[*]/load:Qc(d)@done', 'LoadQK[*]/load:Kc(i,d)@done']
+-                pv:Y(i,d)@issue: ['Softmax[*]/publish:P(i)@done', 'LoadV[*]/load:Vc(i,d)@done']
+-                pv:Y(later,0)@issue: ['Correction[*]/rescale:Y(later)@done']
++                contract:KVStage(e[max(0,2*i-1),d])@issue: ['Load/load:Qc(d)@done', 'Load/load:KVStage(e[max(0,2*i-1),d])@done']
++                contract:KVStage(e[min(2*i+2,2*N-1),d])@issue: ['Softmax/publish:P(i)@done', 'Load/load:KVStage(e[min(2*i+2,2*N-1),d])@done']
++                contract:KVStage(e[min(2*later+2,2*N-1),0])@issue: ['Correction/rescale:Y(later)@done']
+               reuse:
+-                qk:S(i,0)@issue: ['Softmax[*]/capture:S(i-2,1)@done']
++                contract:KVStage(e[max(0,2*i-1),0])@issue: ['Softmax/capture:S(i-2,1)@done']
+           Softmax:
+             info:
+               execution_mode: serial
+-              member: CTA[0:2].warp[0:4]
++              member: warp[0:4]
+               register: 256
+               verb:
+@@ -257,5 +169,5 @@
+               - publish:FinalSum
+             waits_for:
+-              data: {'capture:S(i,1)@issue': ['MMA[0]/qk:S(i,1)@done']}
++              data: {'capture:S(i,1)@issue': ['MMA/contract:KVStage(e[max(0,2*i-1),1])@done']}
+               reuse:
+                 publish:Stats(i+2)@issue: ['Correction/capture:Stats(i)@done']
+@@ -263,8 +175,8 @@
+             info:
+               execution_mode: serial
+-              member: CTA[0:2].warp[4:8]
++              member: warp[4:8]
+               register: 160
+               verb:
+-                capture: Stats and FinalSum refer to this CTA's Softmax publications. Acknowledge first-block Stats without reading its payload; capture later Stats and final ell into registers before returning their slots.
++                capture: Acknowledge first-block Stats without reading its payload; capture later Stats and final ell into registers before returning their slots.
+                 rescale: Evaluate alpha from Stats and correct both Y halves after previous PV; a warp vote skips rewriting when no row has alpha<1, retaining the
+                   ownership handshake.
+@@ -282,6 +194,6 @@
+             waits_for:
+               data:
+-                rescale:Y(later)@issue: ['MMA[0]/pv:Y(later-1,1)@done']
+-                stage:Oblock(0)@issue: ['MMA[0]/pv:Y(last(i),1)@done']
++                rescale:Y(later)@issue: ['MMA/contract:KVStage(e[min(2*(later-1)+2,2*N-1),1])@done']
++                stage:Oblock(0)@issue: ['MMA/contract:KVStage(e[2*N-1,1])@done']
+                 capture:Stats(i)@issue: ['Softmax/publish:Stats(i)@done']
+                 capture:FinalSum@issue: ['Softmax/publish:FinalSum@done']
+@@ -289,4 +201,4 @@
+   require:
+   - {item: 'design.tile_pipeline::attention.MMA', choice: Use two-CTA tcgen05 MMA with cumulative completion and earlier-PV-read-before-later-QK-write ordering., reason: Pair-wide operand returns and aliased score/probability storage depend on these guarantees.}
+-  - {item: ['design.tile_pipeline::attention.LoadQK', 'design.tile_pipeline::attention.LoadV'], choice: Use native page-64 TMA for HND FP8 KV and descriptor views for Q., reason: Pair-wide transaction completion implements the declared operand handoffs.}
++  - {item: 'design.tile_pipeline::attention.Load', choice: Use native page-64 TMA for HND FP8 KV and descriptor views for Q., reason: Pair-wide transaction completion implements the declared operand handoffs.}
+   - {item: 'design.tile_pipeline::attention', choice: Launch 384 threads per CTA with setmaxnreg budgets and one contiguous 512-column TMEM allocation., reason: Idle warps relinquish registers and the score/numerator resources share one allocation lifetime.}

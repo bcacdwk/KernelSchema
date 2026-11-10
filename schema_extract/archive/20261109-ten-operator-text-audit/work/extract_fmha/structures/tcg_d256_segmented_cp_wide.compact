@@ -1,0 +1,129 @@
+--- tcg_d256_segmented_cp_narrow
+
++++ tcg_d256_segmented_cp_wide
+
+@@ -1,2 +1,2 @@
+
+-math_reshape.rewrite=[{"step":"domain","symbol":{"Ns":{"binding":"bind:design.work_schedule::Ns"},"Nm":{"binding":"bind:design.work_schedule::Nm"},"Br":{"binding":"bind:design.work_schedule::Br"},"PSK":{"binding":"bind:design.work_schedule::PSK"}}},{"step":"scores","symbol":{"HalfMax":{"shape":[{"row":"Br"},{"half":2}],"dtype":"fp32"},"GroupMax":{"shape":[{"group":"GCount"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"segment_max","symbol":{"SegLen":{"binding":"bind:design.work_schedule::SegLen"},"SegChunk":{"binding":"bind:design.work_schedule::SegChunk"},"SegMax":{"shape":[{"segment":"Nseg"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"scan","symbol":{"Mscan":{"shape":[{"group":"GCount"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"Mtail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"normalize","symbol":{"DenPart":{"shape":[{"row":"Br"},{"half":2}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=l-1..e"},"Prob8":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"partials","symbol":{"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=l-1..e"},"DenFinal":{"shape":[{"row":"Br"}],"dtype":"fp32"},"PartA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"output"}]
++math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"},"PSK":{"binding":"bind:design.work_schedule::PSK"}}},{"step":"scores","symbol":{"HalfMax":{"shape":[{"half":2},{"row":"Br"}],"dtype":"fp32"},"GroupMax":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"segment_max","symbol":{"SegLen":{"binding":"bind:design.work_schedule::SegLen"},"SegChunk":{"binding":"bind:design.work_schedule::SegChunk"},"SegMax":{"shape":[{"segment":"Nseg"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"scan","symbol":{"Mscan":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"Mtail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"normalize","symbol":{"DenPart":{"shape":[{"row":"Br"},{"half":2}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=l-1..e"},"Prob8":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"partials","symbol":{"DenFinal":{"shape":[{"row":"Br"}],"dtype":"fp32"},"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=l-1..e"},"PartA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"output","symbol":{"SP":{"binding":"bind:design.work_schedule::SP"},"GroupNum":{"shape":[{"combine_group":"SP"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value (row)"},"GroupDen":{"shape":[{"combine_group":"SP"},{"block":4}],"dtype":"fp32","retention":"keep_value (row)"}}}]
+ work_schedule.flow.launch=[{"phase":["group_max"]},{"phase":["segment_max"],"protocol":"pdl","start_after":"group_max.launch_ready"},{"phase":["scan"],"protocol":"pdl","start_after":"segment_max.launch_ready"},{"phase":["split"],"protocol":"pdl","start_after":"scan.launch_ready"},{"phase":["combine"],"protocol":"pdl","start_after":"split.launch_ready"}]
+@@ -46,3 +46,3 @@
+
+ work_schedule.phase.group_max.decomposition.worktile.iteration.sf_k.direction="ascending"
+-work_schedule.phase.group_max.decomposition.target.single_tile.GroupMax.shape=[{"group":"count(GMGroups)"},{"row":"VRows"}]
++work_schedule.phase.group_max.decomposition.target.single_tile.GroupMax.shape=[{"group":"count(GMGroups)"},{"row":"G*min(Qph,Sq-q0)"}]
+ work_schedule.phase.group_max.decomposition.target.single_tile.GroupMax.dtype="ref:design.math_reshape::GroupMax.dtype"
+@@ -58,3 +58,3 @@
+
+ work_schedule.phase.segment_max.decomposition.partition.row={"size":"R","tile":"ScanRows"}
+-work_schedule.phase.segment_max.decomposition.worktile.invariant.GroupMax.shape=[{"group":"min(SegLen,GCount-f*SegLen)"},{"row":"min(ScanRows,R-r0)"}]
++work_schedule.phase.segment_max.decomposition.worktile.invariant.GroupMax.shape=[{"group":"min(SegLen,T-f*SegLen)"},{"row":"min(ScanRows,R-r0)"}]
+ work_schedule.phase.segment_max.decomposition.worktile.invariant.GroupMax.dtype="ref:design.math_reshape::GroupMax.dtype"
+@@ -77,3 +77,3 @@
+
+ work_schedule.phase.scan.decomposition.worktile.iteration.GroupMax.direction="ascending"
+-work_schedule.phase.scan.decomposition.target.single_tile.Mscan.shape=[{"group":"GCount"},{"row":"min(ScanRows,R-r0)"}]
++work_schedule.phase.scan.decomposition.target.single_tile.Mscan.shape=[{"group":"T"},{"row":"min(ScanRows,R-r0)"}]
+ work_schedule.phase.scan.decomposition.target.single_tile.Mscan.dtype="ref:design.math_reshape::Mscan.dtype"
+@@ -95,5 +95,5 @@
+
+ work_schedule.phase.split.decomposition.worktile.invariant.sf_q.dtype="ref:contract.algorithm_requirement::sf_q.dtype"
+-work_schedule.phase.split.decomposition.worktile.invariant.Mscan.shape=[{"group":"min(1,C)*min(1,l)"},{"row":"VRows"}]
++work_schedule.phase.split.decomposition.worktile.invariant.Mscan.shape=[{"group":"min(1,C)*min(1,l)"},{"row":"G*min(Qph,Sq-q0)"}]
+ work_schedule.phase.split.decomposition.worktile.invariant.Mscan.dtype="ref:design.math_reshape::Mscan.dtype"
+-work_schedule.phase.split.decomposition.worktile.invariant.Mtail.shape=[{"row":"min(1,C)*VRows"}]
++work_schedule.phase.split.decomposition.worktile.invariant.Mtail.shape=[{"row":"G*min(Qph,Sq-q0)"}]
+ work_schedule.phase.split.decomposition.worktile.invariant.Mtail.dtype="ref:design.math_reshape::Mtail.dtype"
+@@ -111,8 +111,8 @@
+
+ work_schedule.phase.split.decomposition.worktile.iteration.sf_v.direction="ascending"
+-work_schedule.phase.split.decomposition.worktile.iteration.Mscan.shape=[{"group":1},{"row":"VRows"}]
++work_schedule.phase.split.decomposition.worktile.iteration.Mscan.shape=[{"group":1},{"row":"G*min(Qph,Sq-q0)"}]
+ work_schedule.phase.split.decomposition.worktile.iteration.Mscan.dtype="ref:design.math_reshape::Mscan.dtype"
+ work_schedule.phase.split.decomposition.worktile.iteration.Mscan.direction="ascending"
+-work_schedule.phase.split.decomposition.target.single_tile.PartA.shape=[{"row":"VRows"},{"channel":"D"}]
++work_schedule.phase.split.decomposition.target.single_tile.PartA.shape=[{"row":"G*min(Qph,Sq-q0)"},{"channel":"D"}]
+ work_schedule.phase.split.decomposition.target.single_tile.PartA.dtype="ref:design.math_reshape::PartA.dtype"
+-work_schedule.phase.split.decomposition.target.single_tile.PartB.shape=[{"row":"VRows"}]
++work_schedule.phase.split.decomposition.target.single_tile.PartB.shape=[{"row":"G*min(Qph,Sq-q0)"}]
+ work_schedule.phase.split.decomposition.target.single_tile.PartB.dtype="ref:design.math_reshape::PartB.dtype"
+@@ -129,8 +129,6 @@
+
+ work_schedule.phase.combine.decomposition.worktile.invariant.Mtail.dtype="ref:design.math_reshape::Mtail.dtype"
+-work_schedule.phase.combine.decomposition.worktile.iteration.PartA.shape=[{"split":"min(8,Ns-s0)"},{"channel":"D"}]
+-work_schedule.phase.combine.decomposition.worktile.iteration.PartA.dtype="ref:design.math_reshape::PartA.dtype"
+-work_schedule.phase.combine.decomposition.worktile.iteration.PartA.direction="ascending"
+-work_schedule.phase.combine.decomposition.worktile.iteration.PartB.shape=[{"split":"min(8,Ns-s0)"}]
+-work_schedule.phase.combine.decomposition.worktile.iteration.PartB.dtype="ref:design.math_reshape::PartB.dtype"
+-work_schedule.phase.combine.decomposition.worktile.iteration.PartB.direction="ascending"
++work_schedule.phase.combine.decomposition.worktile.invariant.PartA.shape=[{"split":"Ns"},{"row":1},{"channel":"D"}]
++work_schedule.phase.combine.decomposition.worktile.invariant.PartA.dtype="ref:design.math_reshape::PartA.dtype"
++work_schedule.phase.combine.decomposition.worktile.invariant.PartB.shape=[{"split":"Ns"},{"row":1}]
++work_schedule.phase.combine.decomposition.worktile.invariant.PartB.dtype="ref:design.math_reshape::PartB.dtype"
+ work_schedule.phase.combine.decomposition.target.single_tile.O.shape=[{"channel":"D"}]
+@@ -198,5 +196,5 @@
+
+ tile_pipeline.phase.segment_max.role.Main.info.member="warp[0:ScanRows/32]"
+-tile_pipeline.phase.segment_max.role.Main.info.verb={"trigger":"TEXT","await":"TEXT","produce":"TEXT"}
++tile_pipeline.phase.segment_max.role.Main.info.verb={"trigger":"TEXT","await":"TEXT","load":"TEXT","produce":"TEXT"}
+ tile_pipeline.phase.segment_max.role.Main.pipe.prologue=["trigger:ScanLaunch","await:GroupMax"]
+-tile_pipeline.phase.segment_max.role.Main.pipe.steady=["produce:SegMax"]
++tile_pipeline.phase.segment_max.role.Main.pipe.steady=["load:SegmentGroups","produce:SegMax"]
+ tile_pipeline.phase.scan.milestone.input_ready=["Main/await:ScanInputs@done"]
+@@ -289,25 +287,34 @@
+
+ tile_pipeline.phase.split.role.Main.pipe.epilogue=["fold:DenFinal","stage:PartA","write:Partials","finish:Local"]
+-tile_pipeline.phase.combine.milestone.input_ready=["Main/await:Partials@done"]
+-tile_pipeline.phase.combine.resource.SharedDen.space="SMEM"
+-tile_pipeline.phase.combine.resource.SharedDen.member_slot_shape=[{"split":128}]
+-tile_pipeline.phase.combine.resource.SharedDen.dtype="fp32"
+-tile_pipeline.phase.combine.resource.SharedDen.slot_count=1
+-tile_pipeline.phase.combine.resource.SharedDen.view.PartB={}
++tile_pipeline.phase.combine.milestone.input_ready=["Output/await:Partials@done","Partners/await:Partials@done"]
++tile_pipeline.phase.combine.resource.GroupNum.space="SMEM"
++tile_pipeline.phase.combine.resource.GroupNum.member_slot_shape=[{"combine_group":"SP"},{"channel":"D"}]
++tile_pipeline.phase.combine.resource.GroupNum.dtype="fp32"
++tile_pipeline.phase.combine.resource.GroupNum.slot_count=1
++tile_pipeline.phase.combine.resource.GroupDen.space="SMEM"
++tile_pipeline.phase.combine.resource.GroupDen.member_slot_shape=[{"combine_group":"SP"},{"block":4}]
++tile_pipeline.phase.combine.resource.GroupDen.dtype="fp32"
++tile_pipeline.phase.combine.resource.GroupDen.slot_count=1
++tile_pipeline.phase.combine.resource.LocalNumerator.space="register"
++tile_pipeline.phase.combine.resource.LocalNumerator.member_slot_shape=[{"combine_group":"SP"},{"channel":"D"}]
++tile_pipeline.phase.combine.resource.LocalNumerator.dtype="fp32"
++tile_pipeline.phase.combine.resource.LocalNumerator.slot_count=1
+ tile_pipeline.phase.combine.resource.NumeratorBatch.space="register"
+-tile_pipeline.phase.combine.resource.NumeratorBatch.member_slot_shape=[{"split":8},{"channel":128}]
++tile_pipeline.phase.combine.resource.NumeratorBatch.member_slot_shape=[{"combine_group":"SP"},{"split":8},{"channel":128}]
+ tile_pipeline.phase.combine.resource.NumeratorBatch.dtype="fp32"
+ tile_pipeline.phase.combine.resource.NumeratorBatch.slot_count=1
+-tile_pipeline.phase.combine.resource.Numerator.space="register"
+-tile_pipeline.phase.combine.resource.Numerator.member_slot_shape=[{"channel":"D"}]
+-tile_pipeline.phase.combine.resource.Numerator.dtype="fp32"
+-tile_pipeline.phase.combine.resource.Numerator.slot_count=1
+-tile_pipeline.phase.combine.resource.DenCopies.space="register"
+-tile_pipeline.phase.combine.resource.DenCopies.member_slot_shape=[{"element":128}]
+-tile_pipeline.phase.combine.resource.DenCopies.dtype="fp32"
+-tile_pipeline.phase.combine.resource.DenCopies.slot_count=1
+-tile_pipeline.phase.combine.role.Main.info.execution_mode="serial"
+-tile_pipeline.phase.combine.role.Main.info.member="warp[0:4]"
+-tile_pipeline.phase.combine.role.Main.info.verb={"await":"TEXT","prepare":"TEXT","numerator":"TEXT","denominator":"TEXT","write":"TEXT"}
+-tile_pipeline.phase.combine.role.Main.pipe.prologue=["await:Partials","prepare:Row"]
+-tile_pipeline.phase.combine.role.Main.pipe.steady=[{"repeat":{"c":[0,2]},"steady":[{"repeat":{"j":[0,"ceil_div(Ns,8)"]},"steady":["numerator:PartA(c,j)"]}]}]
+-tile_pipeline.phase.combine.role.Main.pipe.epilogue=["denominator:PartB","write:Output"]
++tile_pipeline.phase.combine.resource.DenLane.space="register"
++tile_pipeline.phase.combine.resource.DenLane.member_slot_shape=[{"combine_group":"SP"},{"element":128}]
++tile_pipeline.phase.combine.resource.DenLane.dtype="fp32"
++tile_pipeline.phase.combine.resource.DenLane.slot_count=1
++tile_pipeline.phase.combine.role.Output.info.execution_mode="serial"
++tile_pipeline.phase.combine.role.Output.info.member="warp[0:4]"
++tile_pipeline.phase.combine.role.Output.info.verb={"await":"TEXT","reduce":"TEXT","join":"TEXT","write":"TEXT"}
++tile_pipeline.phase.combine.role.Output.pipe.prologue=["await:Partials"]
++tile_pipeline.phase.combine.role.Output.pipe.steady=["reduce:GroupPartials","join:GroupPartials","write:Output"]
++tile_pipeline.phase.combine.role.Output.waits_for.data.join:GroupPartials@done=["Partners/reduce:GroupPartials"]
++tile_pipeline.phase.combine.role.Partners.info.execution_mode="serial"
++tile_pipeline.phase.combine.role.Partners.info.member="warp[4:4*SP]"
++tile_pipeline.phase.combine.role.Partners.info.verb={"await":"TEXT","reduce":"TEXT","join":"TEXT"}
++tile_pipeline.phase.combine.role.Partners.pipe.prologue=["await:Partials"]
++tile_pipeline.phase.combine.role.Partners.pipe.steady=["reduce:GroupPartials","join:GroupPartials"]
++tile_pipeline.phase.combine.role.Partners.waits_for.data.join:GroupPartials@done=["Output/reduce:GroupPartials"]

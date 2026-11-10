@@ -1,0 +1,159 @@
+[80] t_19af906808997bac math.ledger (1 uses)
+tc_heads:118 design.math_reshape.ledger.matmul[0].change
+2*H*count(J(t))*D -> 2*Hp*C(t)*KC*D MACs per token; the QK split does not duplicate products.
+
+[81] t_2699bdee77db94eb math.ledger (1 uses)
+root:276 design.math_reshape.ledger.error[0].change
+KC probabilities per padded head per chunk narrow FP32 -> BF16 for PV while the denominator retains FP32; base-2 fast exponentials, sentinel clamp, split grouping and FP32 scale casts add unbounded-in-source differences.
+
+[82] t_2b3b335f7092d7c5 math.ledger (1 uses)
+root:274 design.math_reshape.ledger.traffic[0].change
+0 -> 4*min(S,C(t))*Hp*D + 8*S*Hp*DQ bytes stored and 4*S*H*(D+2) bytes loaded per token, including discarded vector prefetches and duplicate statistic stores; logical payload, not DRAM traffic.
+
+[83] t_2b4deee8d0b2c5b2 math.ledger (2 uses)
+mma_direct:109 design.math_reshape.ledger.baseline; root:267 design.math_reshape.ledger.baseline
+Direct FP32 evaluation of the Contract over valid slots, materializing full FP32 logits and probabilities before PV; no split partials. Design-side counts include the padded and repeated work explicitly evaluated by gather and online for every dq.
+
+[84] t_2e8ff6d1770a6fed math.ledger (1 uses)
+probe_hidden_mma:339 design.math_reshape.ledger.error[1].change
+CM(t)*HB*KM exponentials narrow to BF16 for PV while the denominator retains unrounded FP32 values; KM chunking, grouped sums, fast exponentials and scale casts change rounding.
+
+[85] t_3177286368eade55 math.ledger (1 uses)
+probe_serial_mma:156 design.math_reshape.ledger.vector[0].change
+Add sum_s Items(s) index positions over usable samples, bounded by 8*2560 per execution, plus eight ratio writes. Host selection adds up to 2000000 scans of at most eight flags during eager submission or graph recording, not graph replay; no attention work is removed.
+
+[86] t_32bec29c311030e2 math.ledger (3 uses)
+mma_direct:111 design.math_reshape.ledger.footprint[0].item; probe_serial_mma:152 design.math_reshape.ledger.footprint[0].item; root:269 design.math_reshape.ledger.footprint[0].item
+Score and probability materialization
+
+[87] t_33162ce0941c3c6e math.ledger (1 uses)
+tc_heads:122 design.math_reshape.ledger.error[0].change
+Each chunk narrows HB*KC exponentials to BF16 only for PV; two half-latent sums, one FP32 score addition, grouped normalizer sums, a one-unit base-2 maximum-update threshold and fast exponentials change rounding. No global output error bound is supplied.
+
+[88] t_33f21f4252f12b41 math.ledger (1 uses)
+probe_hidden_mma:338 design.math_reshape.ledger.error[1].item
+Remainder rounding
+
+[89] t_39cddda889a3a95e math.ledger (1 uses)
+mma_direct:115 design.math_reshape.ledger.error[0].change
+KC probabilities per padded head per chunk narrow FP32 -> BF16 for PV while the denominator retains FP32; base-2 fast exponentials, sentinel clamp, chunk reduction grouping and FP32 scale casts add unbounded-in-source differences.
+
+[90] t_3b3417b953503daf math.ledger (20 uses)
+mma_direct:113 design.math_reshape.ledger.matmul[0].by[0]; probe_hidden_mma:296 design.math_reshape.ledger.traffic[0].by[0]; probe_hidden_mma:310 design.math_reshape.ledger.footprint[0].by[0]; probe_hidden_mma:322 design.math_reshape.ledger.matmul[0].by[0]; probe_hidden_mma:337 design.math_reshape.ledger.error[0].by[0]; probe_hidden_packed:264 design.math_reshape.ledger.traffic[0].by[0]; probe_hidden_packed:275 design.math_reshape.ledger.footprint[0].by[0]; probe_hidden_packed:283 design.math_reshape.ledger.matmul[0].by[0]; probe_hidden_packed:297 design.math_reshape.ledger.error[0].by[0]; probe_serial_mma:154 design.math_reshape.ledger.matmul[0].by[0]; probe_serial_packed:261 design.math_reshape.ledger.traffic[0].by[0]; probe_serial_packed:271 design.math_reshape.ledger.footprint[0].by[0]; probe_serial_packed:279 design.math_reshape.ledger.matmul[0].by[0]; probe_serial_packed:293 design.math_reshape.ledger.error[0].by[0]; root:272 design.math_reshape.ledger.matmul[0].by[0]; tc_heads:118 design.math_reshape.ledger.matmul[0].by[0]; tc_packed:157 design.math_reshape.ledger.traffic[0].by[0]; tc_packed:163 design.math_reshape.ledger.footprint[0].by[0]; tc_packed:167 design.math_reshape.ledger.matmul[0].by[0]; tc_packed:177 design.math_reshape.ledger.error[0].by[0]
+gather
+
+[91] t_3cae718cae614f73 math.ledger (1 uses)
+root:270 design.math_reshape.ledger.footprint[1].item
+Split state
+
+[92] t_3d5159f9de5fac2b math.ledger (1 uses)
+root:274 design.math_reshape.ledger.traffic[0].item
+Split handoff
+
+[93] t_3d6e5e3eae079504 math.ledger (1 uses)
+probe_serial_mma:152 design.math_reshape.ledger.footprint[0].change
+8*H*count(J(t)) bytes per token -> no full-row materialization; each active attention worktile holds HB*KC FP32 scores, HB*KC BF16 probabilities and 4*HB*(D+2) bytes of recurrence state.
+
+[94] t_42c0d4ff57b64398 math.ledger (2 uses)
+mma_direct:111 design.math_reshape.ledger.footprint[0].change; root:269 design.math_reshape.ledger.footprint[0].change
+8*H*count(J(t)) bytes per token -> no full-row materialization; per active worktile HB*KC FP32 scores and HB*KC BF16 probabilities, plus 4*HB*(D/DQ+2) bytes of recurrence state.
+
+[95] t_466998addc13f4be math.ledger (1 uses)
+probe_hidden_mma:315 design.math_reshape.ledger.footprint[2].item
+Remainder intermediates
+
+[96] t_4debd329bdd01bcb math.ledger (1 uses)
+probe_hidden_mma:288 design.math_reshape.ledger.baseline
+Direct FP32 evaluation per query over valid slots, gathering each BF16 latent once for both QK and PV and materializing full logits and probabilities. Counts below include every padded product actually evaluated. Packed group counts below apply only to grp in [0,K); remainder counts apply per token t in [K*GT,T). Probe costs cover the full sampled batch independently.
+
+[97] t_5187ac0a76de1fe0 math.ledger (1 uses)
+probe_hidden_mma:324 design.math_reshape.ledger.matmul[1].change
+2*H*count(J(t))*D -> 2*HB*CM(t)*KM*D MACs per remainder token, including padded heads and slots.
+
+[98] t_56a175c1c2f34773 math.ledger (4 uses)
+probe_hidden_mma:327 design.math_reshape.ledger.vector[0].change; probe_hidden_packed:286 design.math_reshape.ledger.vector[0].change; probe_serial_packed:282 design.math_reshape.ledger.vector[0].change; tc_packed:170 design.math_reshape.ledger.vector[0].change
++MR*C(grp)*KC FP32 additions per group.
+
+[99] t_58ed309a70c950de math.ledger (2 uses)
+probe_hidden_mma:304 design.math_reshape.ledger.traffic[2].by[0]; probe_hidden_mma:325 design.math_reshape.ledger.matmul[1].by[0]
+mma_gather
+
+[100] t_59bff04cfcf09547 math.ledger (3 uses)
+probe_hidden_mma:311 design.math_reshape.ledger.footprint[1].item; probe_hidden_packed:276 design.math_reshape.ledger.footprint[1].item; probe_serial_packed:272 design.math_reshape.ledger.footprint[1].item
+Probe results
+
+[101] t_5a93183344f2b508 math.ledger (4 uses)
+probe_hidden_mma:334 design.math_reshape.ledger.error[0].change; probe_hidden_packed:294 design.math_reshape.ledger.error[0].change; probe_serial_packed:290 design.math_reshape.ledger.error[0].change; tc_packed:174 design.math_reshape.ledger.error[0].change
+The realized union permutation reorders reductions. Each chunk narrows MR*KC exponentials to BF16 only for PV; split QK, grouped normalizer sums, a one-unit base-2 maximum-update threshold and fast exponentials change rounding. No global output error bound is supplied.
+
+[102] t_5b18c3ba6e9d9e9b math.ledger (10 uses)
+mma_direct:115 design.math_reshape.ledger.error[0].by[1]; probe_hidden_mma:337 design.math_reshape.ledger.error[0].by[2]; probe_hidden_packed:297 design.math_reshape.ledger.error[0].by[2]; probe_serial_mma:158 design.math_reshape.ledger.error[0].by[1]; probe_serial_packed:293 design.math_reshape.ledger.error[0].by[2]; root:270 design.math_reshape.ledger.footprint[1].by[0]; root:274 design.math_reshape.ledger.traffic[0].by[0]; root:276 design.math_reshape.ledger.error[0].by[1]; tc_heads:122 design.math_reshape.ledger.error[0].by[1]; tc_packed:177 design.math_reshape.ledger.error[0].by[2]
+finalize
+
+[103] t_5b86fe1a0799d67d math.ledger (1 uses)
+probe_hidden_mma:316 design.math_reshape.ledger.footprint[2].change
+8*H*count(J(t)) full-row logit/probability bytes -> no full-row materialization; HB*KM FP32 scores, HB*KM BF16 probabilities and 4*HB*(D+2) recurrence bytes per remainder worktile.
+
+[104] t_5e4cbc4d5a84c104 math.ledger (5 uses)
+probe_hidden_mma:306 design.math_reshape.ledger.footprint[0].item; probe_hidden_packed:271 design.math_reshape.ledger.footprint[0].item; probe_serial_packed:267 design.math_reshape.ledger.footprint[0].item; tc_heads:116 design.math_reshape.ledger.footprint[0].item; tc_packed:159 design.math_reshape.ledger.footprint[0].item
+Intermediate values
+
+[105] t_5f7b1e096787dc92 math.ledger (1 uses)
+probe_serial_mma:156 design.math_reshape.ledger.vector[0].by[0]
+probe_count
+
+[106] t_622dcf4a1623f410 math.ledger (3 uses)
+probe_hidden_mma:328 design.math_reshape.ledger.vector[1].item; probe_hidden_packed:288 design.math_reshape.ledger.vector[1].item; probe_serial_packed:284 design.math_reshape.ledger.vector[1].item
+Probe update count
+
+[107] t_67175161edad0507 math.ledger (1 uses)
+tc_heads:114 design.math_reshape.ledger.baseline
+Direct FP32 evaluation over valid slots, materializing full logits and probabilities before PV, with no split partials. Design counts include the padded and invalid slots explicitly evaluated above.
+
+[108] t_72266bb05f8b64e0 math.ledger (1 uses)
+tc_heads:120 design.math_reshape.ledger.vector[0].change
++Hp*C(t)*KC FP32 additions per token.
+
+[109] t_7e4a708495c659f1 math.ledger (1 uses)
+probe_serial_mma:156 design.math_reshape.ledger.vector[0].by[1]
+probe_select
+
+[110] t_81d2ab2138991e56 math.ledger (4 uses)
+probe_hidden_mma:320 design.math_reshape.ledger.matmul[0].item; probe_hidden_packed:281 design.math_reshape.ledger.matmul[0].item; probe_serial_packed:277 design.math_reshape.ledger.matmul[0].item; tc_packed:165 design.math_reshape.ledger.matmul[0].item
+Packed contractions
+
+[111] t_81ded792f9ad600a math.ledger (1 uses)
+probe_serial_mma:156 design.math_reshape.ledger.vector[0].item
+Rejected overlap probe
+
+[112] t_8485e3ae4c58daf2 math.ledger (9 uses)
+probe_hidden_mma:301 design.math_reshape.ledger.traffic[1].by[0]; probe_hidden_mma:314 design.math_reshape.ledger.footprint[1].by[0]; probe_hidden_mma:331 design.math_reshape.ledger.vector[1].by[0]; probe_hidden_packed:269 design.math_reshape.ledger.traffic[1].by[0]; probe_hidden_packed:279 design.math_reshape.ledger.footprint[1].by[0]; probe_hidden_packed:291 design.math_reshape.ledger.vector[1].by[0]; probe_serial_packed:265 design.math_reshape.ledger.traffic[1].by[0]; probe_serial_packed:275 design.math_reshape.ledger.footprint[1].by[0]; probe_serial_packed:287 design.math_reshape.ledger.vector[1].by[0]
+probe
+
+[113] t_858592c9bbeb8803 math.ledger (1 uses)
+probe_hidden_mma:303 design.math_reshape.ledger.traffic[2].change
+2*D*count(J(t)) -> 2*D*CM(t)*KM bytes per remainder token; invalid and padded slots still fetch row zero.
+
+[114] t_85c8c41d6be6c7f5 math.ledger (3 uses)
+probe_hidden_mma:329 design.math_reshape.ledger.vector[1].change; probe_hidden_packed:289 design.math_reshape.ledger.vector[1].change; probe_serial_packed:285 design.math_reshape.ledger.vector[1].change
++sum_b Items(b) selected-index inspections over usable samples per invocation, with runtime-dependent hash-collision work and at most PS*GT*IndexWidth inspected slots.
+
+[115] t_8a47afaaf8f6840a math.ledger (4 uses)
+probe_hidden_mma:307 design.math_reshape.ledger.footprint[0].change; probe_hidden_packed:272 design.math_reshape.ledger.footprint[0].change; probe_serial_packed:268 design.math_reshape.ledger.footprint[0].change; tc_packed:160 design.math_reshape.ledger.footprint[0].change
+8*H*sum_g count(J(t_g)) full-row logit/probability bytes -> 5*Nu(grp) retained union bytes and no full attention matrices; chunk operands include 2*MR*KC FP32 QK partials and MR*KC BF16 probabilities, with 4*MR*(D+2) recurrence bytes per group.
+
+[116] t_8f1b8fa7b59115a1 math.ledger (1 uses)
+probe_hidden_mma:323 design.math_reshape.ledger.matmul[1].item
+Remainder contractions
+
+[117] t_9118dd5f2651de57 math.ledger (4 uses)
+probe_hidden_mma:294 design.math_reshape.ledger.traffic[0].change; probe_hidden_packed:262 design.math_reshape.ledger.traffic[0].change; probe_serial_packed:259 design.math_reshape.ledger.traffic[0].change; tc_packed:155 design.math_reshape.ledger.traffic[0].change
+2*D*sum_g count(J(t_g)) -> 2*D*C(grp)*KC bytes per group, for the gather shared by QK and PV; sharing saves rows only when overlap exceeds chunk padding.
+
+[118] t_9d971dbb12f8b924 math.ledger (4 uses)
+probe_hidden_mma:321 design.math_reshape.ledger.matmul[0].change; probe_hidden_packed:282 design.math_reshape.ledger.matmul[0].change; probe_serial_packed:278 design.math_reshape.ledger.matmul[0].change; tc_packed:166 design.math_reshape.ledger.matmul[0].change
+2*H*sum_g count(J(t_g))*D -> 2*MR*C(grp)*KC*D MACs per group; C(grp)=0 executes no products.
+
+[119] t_a073dbdb6ed1145d math.ledger (3 uses)
+root:270 design.math_reshape.ledger.footprint[1].by[1]; root:274 design.math_reshape.ledger.traffic[0].by[1]; root:276 design.math_reshape.ledger.error[0].by[2]
+merge

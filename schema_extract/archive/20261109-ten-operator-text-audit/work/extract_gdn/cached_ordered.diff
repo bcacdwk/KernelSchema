@@ -1,0 +1,340 @@
+--- root
++++ cached_ordered
+@@ -3,188 +3,9 @@
+   describe: TEXT_UNIT_163
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/candidate/solution.py::Model.forward
+-  version: 11
++  version: 2
+   dispatch:
+-    when: TEXT_UNIT_51
+-contract:
+-  algorithm_requirement:
+-    constant:
+-      KeyDim:
+-        value: 128
+-        meaning: TEXT_UNIT_13
+-      ValueDim:
+-        value: 128
+-        meaning: TEXT_UNIT_22
+-      ChunkTokens:
+-        value: 64
+-        meaning: TEXT_UNIT_14
+-    input:
+-      q:
+-        meaning: TEXT_UNIT_27
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - key_head: H
+-        - key: KeyDim
+-        dtype: bf16
+-      k:
+-        meaning: TEXT_UNIT_24
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - key_head: H
+-        - key: KeyDim
+-        dtype: bf16
+-      v:
+-        meaning: TEXT_UNIT_20
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        - value: ValueDim
+-        dtype: bf16
+-      g:
+-        meaning: TEXT_UNIT_21
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        dtype: fp32
+-        range: TEXT_UNIT_28
+-      beta:
+-        meaning: TEXT_UNIT_10
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        dtype: fp32
+-        range:
+-        - 0
+-        - 1
+-      initial_state:
+-        meaning: TEXT_UNIT_11
+-        shape:
+-        - request: N
+-        - value_head: HV
+-        - value: ValueDim
+-        - key: KeyDim
+-        dtype: bf16
+-      output_final_state:
+-        meaning: TEXT_UNIT_25
+-        shape: []
+-        dtype: bool
+-      cu_seqlens:
+-        meaning: TEXT_UNIT_26
+-        shape:
+-        - boundary: N+1
+-        dtype: int32
+-        range: TEXT_UNIT_32
+-      chunk_indices:
+-        meaning: TEXT_UNIT_6
+-        shape:
+-        - chunk: C
+-        - coordinate: 2
+-        dtype: int32
+-        range: TEXT_UNIT_29
+-      chunk_offsets:
+-        meaning: TEXT_UNIT_15
+-        shape:
+-        - boundary: N+1
+-        dtype: int32
+-        range: TEXT_UNIT_30
+-      use_qk_l2norm_in_kernel:
+-        meaning: TEXT_UNIT_18
+-        shape: []
+-        dtype: bool
+-        range: TEXT_UNIT_31
+-      core_attn_out:
+-        meaning: TEXT_UNIT_19
+-        shape:
+-        - element: CoreCapacity
+-        dtype: bf16
+-        nullable: true
+-        default: None
+-    output:
+-      Out:
+-        meaning: TEXT_UNIT_9
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        - value: ValueDim
+-        dtype: bf16
+-      FinalState:
+-        meaning: TEXT_UNIT_23
+-        shape:
+-        - request: N
+-        - value_head: HV
+-        - value: ValueDim
+-        - key: KeyDim
+-        dtype: fp32
+-        nullable: true
+-      CoreWritten:
+-        meaning: TEXT_UNIT_7
+-        shape:
+-        - element: T*HV*ValueDim
+-        dtype: bf16
+-        nullable: true
+-    compute:
+-    - name: packing
+-      math: TEXT_UNIT_3
+-      symbol:
+-        Boundary:
+-          meaning: TEXT_UNIT_12
+-          shape:
+-          - boundary: N+1
+-          dtype: int32
+-        Length:
+-          meaning: TEXT_UNIT_5
+-          shape:
+-          - request: N
+-          dtype: int32
+-    - name: query_key_values
+-      math: TEXT_UNIT_4
+-      symbol:
+-        Qn:
+-          meaning: TEXT_UNIT_17
+-          shape: ref:q.shape
+-          dtype: fp32
+-        Kn:
+-          meaning: TEXT_UNIT_8
+-          shape: ref:k.shape
+-          dtype: fp32
+-    - name: delta_recurrence
+-      math: TEXT_UNIT_2
+-      symbol:
+-        S:
+-          meaning: TEXT_UNIT_16
+-          shape: ref:initial_state.shape
+-          dtype: fp32
+-    - name: output_and_side_effect
+-      math: TEXT_UNIT_1
+-    golden_reference:
+-      source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/reference.py::Model.forward
+-      tolerance:
+-        Out: TEXT_UNIT_33
+-        FinalState: TEXT_UNIT_34
+-        CoreWritten: TEXT_UNIT_35
+-  hardware_specification:
+-    device: null
+-    arch: null
+-    execution:
+-      Unit: null
+-    feature:
+-      Mechanism: null
+-    stack:
+-      language: null
+-      toolchain: null
+-    wiki:
+-      hardware: null
+-      programming:
+-        language: null
+-      microbench: null
+-      sota:
+-        kernel: null
+-        schema: null
+-      profile: null
++    id: cached_ordered
++    parent: root
++    when: TEXT_UNIT_49
+ design:
+   math_reshape:
+@@ -193,5 +14,5 @@
+     - step: TEXT_UNIT_97
+       name: Define the actual padded chunk inputs
+-      math: TEXT_UNIT_107
++      math: TEXT_UNIT_115
+       symbol:
+         B:
+@@ -204,7 +25,11 @@
+           meaning: TEXT_UNIT_137
+           binding: bind:design.work_schedule::HeadsPerPrep
+-        PRE0:
+-          meaning: TEXT_UNIT_119
+-          binding: bind:design.work_schedule::PRE0
++        perm:
++          meaning: TEXT_UNIT_130
++          shape:
++          - request: N
++          dtype: int32
++          retention: keep_value invocation
++          binding: bind:design.work_schedule::perm
+         Qc:
+           meaning: TEXT_UNIT_156
+@@ -393,5 +218,5 @@
+         - TEXT_UNIT_69
+   work_schedule:
+-    thesis: TEXT_UNIT_314
++    thesis: TEXT_UNIT_312
+     flow:
+       launch:
+@@ -459,9 +284,16 @@
+           ready: prep.kernel_done
+           wait_at: chain.prep_ready
++        perm:
++          producer: prep
++          consumer:
++          - TEXT_UNIT_69
++          storage: global
++          ready: prep.kernel_done
++          wait_at: chain.prep_ready
+     phase:
+       prep:
+-        describe: TEXT_UNIT_281
++        describe: TEXT_UNIT_280
+         decomposition:
+-          strategy: TEXT_UNIT_289
++          strategy: TEXT_UNIT_284
+           partition:
+             slot:
+@@ -473,4 +305,8 @@
+           worktile:
+             invariant:
++              cu_seqlens:
++                shape:
++                - boundary: N+1
++                dtype: ref:contract.algorithm_requirement::cu_seqlens.dtype
+               q:
+                 shape:
+@@ -495,4 +331,8 @@
+           target:
+             single_tile:
++              perm:
++                shape:
++                - request: SortRows
++                dtype: ref:design.math_reshape::perm.dtype
+               Ti:
+                 shape:
+@@ -559,7 +399,7 @@
+         describe: TEXT_UNIT_275
+         decomposition:
+-          strategy: TEXT_UNIT_287
++          strategy: TEXT_UNIT_295
+           partition:
+-            request:
++            rank:
+               size: N
+               tile: 1
+@@ -572,4 +412,8 @@
+           worktile:
+             invariant:
++              perm:
++                shape:
++                - request: 1
++                dtype: ref:design.math_reshape::perm.dtype
+               initial_state:
+                 shape:
+@@ -646,5 +490,5 @@
+                 dtype: ref:contract.algorithm_requirement::FinalState.dtype
+         mapping:
+-          strategy: TEXT_UNIT_297
++          strategy: TEXT_UNIT_288
+           worker:
+             unit: CTA
+@@ -652,6 +496,7 @@
+           worker_count: ChainBlocks
+         schedule:
++          strategy: TEXT_UNIT_283
+           worktile_order:
+-          - by: request
++          - by: rank
+             direction: ascending
+           - by: value_head
+@@ -666,5 +511,5 @@
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT_UNIT_166
++    thesis: TEXT_UNIT_167
+     phase:
+       prep:
+@@ -770,5 +615,5 @@
+               verb:
+                 enter: TEXT_UNIT_194
+-                stage_inputs: TEXT_UNIT_198
++                stage_inputs: TEXT_UNIT_183
+                 signal: TEXT_UNIT_248
+                 gram: TEXT_UNIT_212
+@@ -961,8 +806,9 @@
+               verb:
+                 setup: TEXT_UNIT_197
+-                early_inputs: TEXT_UNIT_175
+-                join_prep: TEXT_UNIT_220
+-                prime: TEXT_UNIT_200
+-                seed: TEXT_UNIT_172
++                warm_metadata: TEXT_UNIT_173
++                join_prep: TEXT_UNIT_233
++                resolve_request: TEXT_UNIT_243
++                prime: TEXT_UNIT_180
++                seed: TEXT_UNIT_216
+                 advance: TEXT_UNIT_185
+                 project: TEXT_UNIT_171
+@@ -974,6 +820,7 @@
+               prologue:
+               - setup:Resources
+-              - early_inputs:Inputs
++              - warm_metadata:Metadata
+               - join_prep:Prepared
++              - resolve_request:Request
+               - prime:Stages
+               - seed:R
+@@ -997,5 +844,5 @@
+     - design.tile_pipeline::chain.Stages
+     choice: TEXT_UNIT_260
+-    reason: TEXT_UNIT_271
++    reason: TEXT_UNIT_267
+   - item: design.work_schedule::flow
+     choice: TEXT_UNIT_259

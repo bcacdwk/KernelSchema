@@ -1,0 +1,2798 @@
+[
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:Next(g)",
+              "land:Inputs(g)",
+              {
+                "repeat": "z",
+                "steady": [
+                  "qk:ScoreHalf(g,z)",
+                  "read_score:Score(g,z)"
+                ]
+              },
+              "advance:StateProb(g)",
+              "pv:NumState(g)",
+              "retire:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "write:Output",
+          "finish:Local"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "default",
+        "prefetch": "default",
+        "land": "default",
+        "qk": "default",
+        "read_score": "default",
+        "retire": "default",
+        "advance": "default",
+        "pv": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        2,
+        "main.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "cold:Inputs",
+          "prepare:Query",
+          "publish:Query",
+          "prime:FirstQK"
+        ],
+        "steady": [
+          {
+            "repeat": {
+              "j": [
+                0,
+                "ceil_div(Ng,2)"
+              ]
+            },
+            "steady": [
+              "stage:Ahead(j)",
+              "retire:Own(j)",
+              "read:Scores(j)",
+              "lookahead:Next(j)",
+              "maximum:State(j)",
+              "probability:Tile(j)",
+              "denominator:State(j)",
+              "rescale:NumState(j)",
+              "publish:Operands(j)",
+              "pv:Group(j)",
+              "stagev:Next(j)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "retire:LastPV",
+          "join:Accumulator",
+          "publish:Final",
+          "broadcast:Final",
+          "write:Output",
+          "finish:Local"
+        ]
+      },
+      "waits_for": {
+        "data": {
+          "maximum:State(j)@done": [
+            "Odd/maximum:State(j-1)"
+          ],
+          "denominator:State(j)@done": [
+            "Odd/denominator:State(j-1)"
+          ],
+          "rescale:NumState(j)@done": [
+            "Odd/pv:Group(j-1)"
+          ],
+          "publish:Operands(j)@done": [
+            "probability:Tile(j)",
+            "denominator:State(j)"
+          ],
+          "broadcast:Final@done": [
+            "Odd/publish:Final"
+          ]
+        },
+        "sync": {
+          "prepare:Query@done": [
+            "Odd/prepare:Query@issue"
+          ],
+          "publish:Query@done": [
+            "Odd/prepare:Query"
+          ],
+          "join:Accumulator@done": [
+            "Odd/retire:LastPV"
+          ],
+          "finish:Local@done": [
+            "Odd/write:Output"
+          ]
+        }
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "cold": "default",
+        "prepare": "default",
+        "publish": "default",
+        "prime": "default",
+        "stage": "default",
+        "retire": "default",
+        "read": "default",
+        "lookahead": "default",
+        "maximum": "async",
+        "probability": "async",
+        "denominator": "async",
+        "rescale": "default",
+        "pv": "default",
+        "stagev": "default",
+        "join": "default",
+        "broadcast": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        3,
+        "main.Even"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "cold:Inputs",
+          "prepare:Query",
+          "publish:Query",
+          "prime:FirstQK"
+        ],
+        "steady": [
+          {
+            "repeat": {
+              "j": [
+                0,
+                "floor(Ng/2)"
+              ]
+            },
+            "steady": [
+              "stage:Ahead(j)",
+              "retire:Own(j)",
+              "read:Scores(j)",
+              "lookahead:Next(j)",
+              "maximum:State(j)",
+              "probability:Tile(j)",
+              "denominator:State(j)",
+              "rescale:NumState(j)",
+              "publish:Operands(j)",
+              "pv:Group(j)",
+              "stagev:Next(j)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "retire:LastPV",
+          "join:Accumulator",
+          "publish:Final",
+          "broadcast:Final",
+          "write:Output",
+          "finish:Local"
+        ]
+      },
+      "waits_for": {
+        "data": {
+          "maximum:State(j)@done": [
+            "Even/maximum:State(j)"
+          ],
+          "denominator:State(j)@done": [
+            "Even/denominator:State(j)"
+          ],
+          "rescale:NumState(j)@done": [
+            "Even/pv:Group(j)"
+          ],
+          "publish:Operands(j)@done": [
+            "probability:Tile(j)",
+            "denominator:State(j)"
+          ],
+          "broadcast:Final@done": [
+            "Even/publish:Final"
+          ]
+        },
+        "sync": {
+          "prepare:Query@done": [
+            "Even/prepare:Query@issue"
+          ],
+          "publish:Query@done": [
+            "Even/prepare:Query"
+          ],
+          "join:Accumulator@done": [
+            "Even/retire:LastPV"
+          ],
+          "finish:Local@done": [
+            "Even/write:Output"
+          ]
+        }
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[4:8]"
+      },
+      "verbs": {
+        "setup": "default",
+        "cold": "default",
+        "prepare": "default",
+        "publish": "default",
+        "prime": "default",
+        "stage": "default",
+        "retire": "default",
+        "read": "default",
+        "lookahead": "default",
+        "maximum": "async",
+        "probability": "async",
+        "denominator": "async",
+        "rescale": "default",
+        "pv": "default",
+        "stagev": "default",
+        "join": "default",
+        "broadcast": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        3,
+        "main.Odd"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "cold:Inputs",
+          "prepare:Query",
+          "prime:FirstQK"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "stage:Ahead(g)",
+              "atoms:Upcoming(g)",
+              "retire:Previous(g)",
+              "read:Score(g)",
+              "lookahead:Next(g)",
+              "advance:StateProb(g)",
+              "pv:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "drain:LastPV",
+          "combine:DenFinal",
+          "write:Output",
+          "finish:Local"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:8]"
+      },
+      "verbs": {
+        "setup": "default",
+        "cold": "default",
+        "prepare": "default",
+        "prime": "default",
+        "stage": "default",
+        "atoms": "default",
+        "retire": "default",
+        "read": "default",
+        "lookahead": "default",
+        "advance": "default",
+        "pv": "default",
+        "drain": "default",
+        "combine": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        4,
+        "main.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prepare:Query",
+          "prime:Inputs"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "ahead:Inputs(g)",
+              "qk:Score(g)",
+              "exchange:GroupMax(g)",
+              "advance:StateProb(g)",
+              "pv:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "fold:DenFinal",
+          "write:Output",
+          "finish:Local"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:8]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prepare": "default",
+        "prime": "default",
+        "ahead": "default",
+        "qk": "default",
+        "exchange": "default",
+        "advance": "default",
+        "pv": "default",
+        "fold": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        5,
+        "main.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prepare:Query",
+          "prime:Inputs",
+          "start:FirstQK"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "ahead:Inputs(g)",
+              "read_score:Score(g)",
+              "retire:PreviousPV(g)",
+              "land:Operands(g)",
+              "exchange:GroupMax(g)",
+              "advance:StateProb(g)",
+              "pv:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "drain:LastPV",
+          "fold:DenFinal",
+          "write:Output",
+          "finish:Local"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:8]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prepare": "default",
+        "prime": "default",
+        "start": "default",
+        "ahead": "default",
+        "read_score": "default",
+        "retire": "default",
+        "land": "default",
+        "exchange": "default",
+        "advance": "default",
+        "pv": "default",
+        "drain": "default",
+        "fold": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        6,
+        "main.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:Head(g)",
+              "land:Key(g)",
+              {
+                "repeat": "z",
+                "steady": [
+                  "qk:ScoreHalf(g,z)",
+                  "read_score:Score(g,z)"
+                ]
+              },
+              "retire:Previous(g)",
+              "prefetch:ValueNext(g)",
+              "land:Value(g)",
+              "advance:StateProb(g)",
+              "pv:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "drain:LastPV",
+          "write:Output",
+          "finish:Local"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "default",
+        "prefetch": "default",
+        "land": "default",
+        "qk": "default",
+        "read_score": "default",
+        "retire": "default",
+        "advance": "default",
+        "pv": "default",
+        "drain": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        7,
+        "main.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:Next(g)",
+              "land:Inputs(g)",
+              "decode:Values(g)",
+              "qk:Score(g)",
+              "advance:RowState(g)",
+              {
+                "repeat": {
+                  "t": [
+                    0,
+                    "KeyGroup/16"
+                  ]
+                },
+                "steady": [
+                  "probability_value:Chunk(g,t)"
+                ]
+              },
+              "close:Group(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "default",
+        "prefetch": "default",
+        "land": "default",
+        "decode": "default",
+        "qk": "default",
+        "advance": "default",
+        "probability_value": "default",
+        "close": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        8,
+        "main.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:Next(g)",
+              "land:Inputs(g)",
+              "decode:KeyScale(g)",
+              "qk:Score(g)",
+              "record:BmCovered(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "write:TemporaryOutput"
+        ]
+      },
+      "info": {
+        "member": "warp[0:4]",
+        "execution_mode": "serial"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "default",
+        "prefetch": "default",
+        "land": "default",
+        "decode": "default",
+        "qk": "default",
+        "record": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        9,
+        "group_max.Main"
+      ],
+      [
+        10,
+        "group_max.Main"
+      ],
+      [
+        11,
+        "group_max.Main"
+      ],
+      [
+        12,
+        "group_max.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "entry:Protocol",
+          "initialize:ScanCarry"
+        ],
+        "steady": [
+          {
+            "repeat": "j",
+            "steady": [
+              "load:MaxBatch(j)",
+              "replay:ScanState(j)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "store:MaxTail"
+        ]
+      },
+      "info": {
+        "member": "warp[0:ScanBt/32]",
+        "execution_mode": "serial"
+      },
+      "verbs": {
+        "entry": "default",
+        "initialize": "default",
+        "load": "default",
+        "replay": "default",
+        "store": "default"
+      }
+    },
+    "uses": [
+      [
+        9,
+        "scan.Main"
+      ],
+      [
+        10,
+        "scan.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:Next(g)",
+              "land:Inputs(g)",
+              "decode:Values(g)",
+              "qk:Score(g)",
+              "advance:RowState(g)",
+              {
+                "repeat": {
+                  "t": [
+                    0,
+                    "KeyGroup/16"
+                  ]
+                },
+                "steady": [
+                  "probability_value:Chunk(g,t)"
+                ]
+              },
+              "close:Group(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "write:Partials"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "default",
+        "prefetch": "default",
+        "land": "default",
+        "decode": "default",
+        "qk": "default",
+        "advance": "default",
+        "probability_value": "default",
+        "close": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        9,
+        "split.Main"
+      ],
+      [
+        10,
+        "split.Main"
+      ],
+      [
+        11,
+        "split.Main"
+      ],
+      [
+        12,
+        "split.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "entry:Protocol",
+          "stage:Denominator"
+        ],
+        "steady": [
+          {
+            "repeat": "c",
+            "steady": [
+              {
+                "repeat": "k",
+                "steady": [
+                  "load:NumBatch(c,k)",
+                  "sum:NumBatch(c,k)"
+                ]
+              }
+            ]
+          }
+        ],
+        "epilogue": [
+          "publish:Denominator",
+          "sum:Denominator",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "member": "warp[0:CombineBt/32]",
+        "execution_mode": "serial"
+      },
+      "verbs": {
+        "entry": "default",
+        "stage": "default",
+        "load": "default",
+        "sum": "default",
+        "publish": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        9,
+        "combine.Main"
+      ],
+      [
+        11,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "entry:Protocol"
+        ],
+        "steady": [
+          "reduce:GroupSums",
+          "publish:GroupSums"
+        ],
+        "epilogue": [
+          "write:Output"
+        ]
+      },
+      "info": {
+        "member": "warp[0:16]",
+        "execution_mode": "serial"
+      },
+      "verbs": {
+        "entry": "default",
+        "reduce": "default",
+        "publish": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        10,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "entry:Protocol"
+        ],
+        "steady": [
+          "load:SegmentBatch",
+          "produce:SegmentMax"
+        ]
+      },
+      "info": {
+        "member": "warp[0:ScanBt/32]",
+        "execution_mode": "serial"
+      },
+      "verbs": {
+        "entry": "default",
+        "load": "default",
+        "produce": "default"
+      }
+    },
+    "uses": [
+      [
+        11,
+        "segmax.Main"
+      ],
+      [
+        12,
+        "segmax.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "entry:Protocol",
+          "initialize:ScanCarry",
+          "walk:FirstSegment"
+        ],
+        "steady": [
+          {
+            "repeat": "c",
+            "steady": [
+              "load:Summary(c)",
+              "select:JumpMask(c)",
+              "fill_walk:ScanState(c)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "store:MaxTail"
+        ]
+      },
+      "info": {
+        "member": "warp[0:ScanBt/32]",
+        "execution_mode": "serial"
+      },
+      "verbs": {
+        "entry": "default",
+        "initialize": "default",
+        "walk": "default",
+        "load": "default",
+        "select": "default",
+        "fill_walk": "default",
+        "store": "default"
+      }
+    },
+    "uses": [
+      [
+        11,
+        "scan.Main"
+      ],
+      [
+        12,
+        "scan.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "entry:Protocol"
+        ],
+        "steady": [
+          "accumulate:GroupFinalA",
+          "denominator:GroupB",
+          "publish:GroupPartials"
+        ],
+        "epilogue": [
+          "write:Output"
+        ]
+      },
+      "info": {
+        "member": "warp[0:CombineGroups*CombineBt/32]",
+        "execution_mode": "serial"
+      },
+      "verbs": {
+        "entry": "default",
+        "accumulate": "default",
+        "denominator": "default",
+        "publish": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        12,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query",
+          "start:FirstQK"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:FutureK(g)",
+              "stage:Scales(g)",
+              "score:DotTile(g)",
+              "reduce:GroupMax(g)",
+              "advance:NextQK(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "finish:Local"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "default",
+        "start": "default",
+        "prefetch": "default",
+        "stage": "default",
+        "score": "default",
+        "reduce": "default",
+        "advance": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        13,
+        "group_max.Main"
+      ],
+      [
+        14,
+        "group_max.Main"
+      ],
+      [
+        15,
+        "group_max.Main"
+      ],
+      [
+        16,
+        "group_max.Main"
+      ],
+      [
+        17,
+        "group_max.Main"
+      ],
+      [
+        18,
+        "group_max.Main"
+      ],
+      [
+        19,
+        "group_max.Main"
+      ],
+      [
+        20,
+        "group_max.Main"
+      ],
+      [
+        21,
+        "group_max.Main"
+      ],
+      [
+        22,
+        "group_max.Main"
+      ],
+      [
+        23,
+        "group_max.Main"
+      ],
+      [
+        24,
+        "group_max.Main"
+      ],
+      [
+        25,
+        "group_max.Main"
+      ],
+      [
+        26,
+        "group_max.Main"
+      ],
+      [
+        27,
+        "group_max.Main"
+      ],
+      [
+        29,
+        "group_max.Main"
+      ],
+      [
+        30,
+        "group_max.Main"
+      ],
+      [
+        31,
+        "group_max.Main"
+      ],
+      [
+        32,
+        "group_max.Main"
+      ],
+      [
+        33,
+        "group_max.Main"
+      ],
+      [
+        34,
+        "group_max.Main"
+      ],
+      [
+        35,
+        "group_max.Main"
+      ],
+      [
+        36,
+        "group_max.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:GroupMax",
+          "signal:SplitPermission",
+          "scan:MState",
+          "tail:MTail"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:ScanThreads/32]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "signal": "default",
+        "scan": "default",
+        "tail": "default"
+      }
+    },
+    "uses": [
+      [
+        13,
+        "flat_scan.Main"
+      ],
+      [
+        14,
+        "flat_scan.Main"
+      ],
+      [
+        15,
+        "flat_scan.Main"
+      ],
+      [
+        16,
+        "flat_scan.Main"
+      ],
+      [
+        17,
+        "flat_scan.Main"
+      ],
+      [
+        18,
+        "flat_scan.Main"
+      ],
+      [
+        19,
+        "flat_scan.Main"
+      ],
+      [
+        20,
+        "flat_scan.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query",
+          "dependency:Scan",
+          "replay:Entrance"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:Next(g)",
+              "stage:Operands(g)",
+              "qk:DotTile(g)",
+              "probability:Prob8(g)",
+              "pv:GroupPV(g)",
+              "accumulate:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "write:Partials",
+          "finish:Local"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "default",
+        "dependency": "default",
+        "replay": "default",
+        "prefetch": "default",
+        "stage": "default",
+        "qk": "default",
+        "probability": "default",
+        "pv": "default",
+        "accumulate": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        13,
+        "split.Main"
+      ],
+      [
+        14,
+        "split.Main"
+      ],
+      [
+        17,
+        "split.Main"
+      ],
+      [
+        18,
+        "split.Main"
+      ],
+      [
+        29,
+        "split.Main"
+      ],
+      [
+        30,
+        "split.Main"
+      ],
+      [
+        33,
+        "split.Main"
+      ],
+      [
+        34,
+        "split.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "sum_a:TotalA",
+          "sum_b:TotalB",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "sum_a": "default",
+        "sum_b": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        13,
+        "combine.Main"
+      ],
+      [
+        15,
+        "combine.Main"
+      ],
+      [
+        16,
+        "combine.Main"
+      ],
+      [
+        17,
+        "combine.Main"
+      ],
+      [
+        19,
+        "combine.Main"
+      ],
+      [
+        21,
+        "combine.Main"
+      ],
+      [
+        25,
+        "combine.Main"
+      ],
+      [
+        29,
+        "combine.Main"
+      ],
+      [
+        31,
+        "combine.Main"
+      ],
+      [
+        33,
+        "combine.Main"
+      ],
+      [
+        35,
+        "combine.Main"
+      ],
+      [
+        36,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "reduce:GroupPartials",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4*MergeGroups]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "reduce": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        14,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query",
+          "dependency:Scan",
+          "replay:Entrance"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:Next(g)",
+              "stage:Operands(g)",
+              "qk:DotTile(g)",
+              "probability:Prob8(g)",
+              "pv:GroupPV(g)",
+              "accumulate:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "stage_partials:PartA",
+          "write:Partials",
+          "finish:Local"
+        ]
+      },
+      "waits_for": {
+        "data": {
+          "replay:Entrance": [
+            "dependency:Scan"
+          ]
+        },
+        "sync": {
+          "stage:Operands(g)@done": [
+            "prepare:Query",
+            "replay:Entrance"
+          ],
+          "stage_partials:PartA@done": [
+            "prepare:Query",
+            "replay:Entrance"
+          ]
+        }
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "async",
+        "dependency": "async",
+        "replay": "async",
+        "prefetch": "default",
+        "stage": "default",
+        "qk": "default",
+        "probability": "default",
+        "pv": "default",
+        "accumulate": "default",
+        "stage_partials": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        15,
+        "split.Main"
+      ],
+      [
+        16,
+        "split.Main"
+      ],
+      [
+        20,
+        "split.Main"
+      ],
+      [
+        31,
+        "split.Main"
+      ],
+      [
+        32,
+        "split.Main"
+      ],
+      [
+        35,
+        "split.Main"
+      ],
+      [
+        36,
+        "split.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "partial:GroupA",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4*MergeGroups]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "partial": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        18,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query",
+          "dependency:Scan",
+          "replay:Entrance"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:Next(g)",
+              "stage:Operands(g)",
+              "qk:DotTile(g)",
+              "probability:Prob8(g)",
+              "pv:GroupPV(g)",
+              "accumulate:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "stage_partials:PartA",
+          "write:Partials",
+          "finish:Local"
+        ]
+      },
+      "waits_for": {
+        "data": {
+          "replay:Entrance": [
+            "dependency:Scan"
+          ]
+        },
+        "reuse": {
+          "stage_partials:PartA": [
+            "prepare:Query"
+          ]
+        },
+        "sync": {
+          "stage:Operands(g)@done": [
+            "prepare:Query",
+            "replay:Entrance"
+          ],
+          "stage_partials:PartA@done": [
+            "replay:Entrance"
+          ]
+        }
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "async",
+        "dependency": "async",
+        "replay": "async",
+        "prefetch": "default",
+        "stage": "default",
+        "qk": "default",
+        "probability": "default",
+        "pv": "default",
+        "accumulate": "default",
+        "stage_partials": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        19,
+        "split.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "partials:Merge",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4*SP]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "partials": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        20,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query",
+          "dependency:GroupMax",
+          "prefix:MaxState"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:Next(g)",
+              "stage:Operands(g)",
+              "qk:DotTile(g)",
+              "probability:Prob8(g)",
+              "pv:GroupPV(g)",
+              "accumulate:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "tail:MTail",
+          "write:Partials",
+          "finish:Local"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "default",
+        "dependency": "default",
+        "prefix": "default",
+        "prefetch": "default",
+        "stage": "default",
+        "qk": "default",
+        "probability": "default",
+        "pv": "default",
+        "accumulate": "default",
+        "tail": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        21,
+        "split.Main"
+      ],
+      [
+        22,
+        "split.Main"
+      ],
+      [
+        25,
+        "split.Main"
+      ],
+      [
+        26,
+        "split.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "sum_a:GroupA",
+          "sum_b:GroupB",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:16]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "sum_a": "default",
+        "sum_b": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        22,
+        "combine.Main"
+      ],
+      [
+        26,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query",
+          "dependency:GroupMax",
+          "prefix:Entrance"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:Next(g)",
+              "stage:Operands(g)",
+              "qk:DotTile(g)",
+              "probability:Prob8(g)",
+              "pv:GroupPV(g)",
+              "accumulate:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "tail:MTail",
+          "stage_partials:PartA",
+          "write:Partials",
+          "finish:Local"
+        ]
+      },
+      "waits_for": {
+        "data": {
+          "prefix:Entrance": [
+            "dependency:GroupMax"
+          ]
+        },
+        "sync": {
+          "stage:Operands(g)@done": [
+            "prepare:Query",
+            "prefix:Entrance"
+          ],
+          "stage_partials:PartA@done": [
+            "prepare:Query",
+            "prefix:Entrance",
+            "tail:MTail"
+          ]
+        }
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "async",
+        "dependency": "async",
+        "prefix": "async",
+        "prefetch": "default",
+        "stage": "default",
+        "qk": "default",
+        "probability": "default",
+        "pv": "default",
+        "accumulate": "default",
+        "tail": "async",
+        "stage_partials": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        23,
+        "split.Main"
+      ],
+      [
+        24,
+        "split.Main"
+      ],
+      [
+        28,
+        "split.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "weights:SplitWeights",
+          "prime:NumeratorBatch",
+          "sum_a:TotalA",
+          "sum_b:TotalB",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "weights": "default",
+        "prime": "default",
+        "sum_a": "default",
+        "sum_b": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        23,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "prime:WeightsAndBatch",
+          "partials:GroupSums",
+          "finalize:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4*MergeGroups]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "prime": "default",
+        "partials": "default",
+        "finalize": "default"
+      }
+    },
+    "uses": [
+      [
+        24,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query",
+          "dependency:GroupMax",
+          "prefix:Entrance"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:Next(g)",
+              "stage:Operands(g)",
+              "qk:DotTile(g)",
+              "probability:Prob8(g)",
+              "pv:GroupPV(g)",
+              "accumulate:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "stage_partials:PartA",
+          "write:Partials",
+          "finish:Local"
+        ]
+      },
+      "waits_for": {
+        "data": {
+          "prefix:Entrance": [
+            "dependency:GroupMax"
+          ]
+        },
+        "sync": {
+          "stage:Operands(g)@done": [
+            "prepare:Query",
+            "prefix:Entrance"
+          ],
+          "stage_partials:PartA@done": [
+            "prepare:Query",
+            "prefix:Entrance"
+          ]
+        }
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "async",
+        "dependency": "async",
+        "prefix": "async",
+        "prefetch": "default",
+        "stage": "default",
+        "qk": "default",
+        "probability": "default",
+        "pv": "default",
+        "accumulate": "default",
+        "stage_partials": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        27,
+        "split.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "prime:WeightsAndBatch",
+          "sum_a:TotalA",
+          "sum_b:TotalB",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "prime": "default",
+        "sum_a": "default",
+        "sum_b": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        27,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:Inputs",
+          "prepare:Query"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "prefetch:FutureK(g)",
+              "stage:Scales(g)",
+              "score:DotTile(g)",
+              "reduce:GroupMax(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "finish:Local"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "default",
+        "prefetch": "default",
+        "stage": "default",
+        "score": "default",
+        "reduce": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        28,
+        "group_max.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "weights:SplitWeights",
+          "prime:NumeratorBatch",
+          "sum_a:GroupA",
+          "sum_b:BinB",
+          "write:Output"
+        ]
+      },
+      "waits_for": {
+        "sync": {
+          "prime:NumeratorBatch@done": [
+            "weights:SplitWeights"
+          ],
+          "sum_b:BinB@done": [
+            "sum_a:GroupA"
+          ]
+        }
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:16]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "weights": "async",
+        "prime": "default",
+        "sum_a": "async",
+        "sum_b": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        28,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "signal:ScanPermission",
+          "dependency:GroupMax",
+          "produce:SegMax"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:ScanThreads/32]"
+      },
+      "verbs": {
+        "signal": "default",
+        "dependency": "default",
+        "produce": "default"
+      }
+    },
+    "uses": [
+      [
+        29,
+        "segment_max.Main"
+      ],
+      [
+        30,
+        "segment_max.Main"
+      ],
+      [
+        33,
+        "segment_max.Main"
+      ],
+      [
+        34,
+        "segment_max.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "dependency:Summaries",
+          "signal:SplitPermission",
+          "first:SegmentZero"
+        ],
+        "steady": [
+          {
+            "repeat": {
+              "c": [
+                0,
+                "ceil_div(Nseg-1,SegBatch)"
+              ]
+            },
+            "steady": [
+              "test:Prefix(c)",
+              "replay:Chunk(c)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "tail:MTail"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:ScanThreads/32]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "signal": "default",
+        "first": "default",
+        "test": "default",
+        "replay": "default",
+        "tail": "default"
+      }
+    },
+    "uses": [
+      [
+        29,
+        "segmented_scan.Main"
+      ],
+      [
+        30,
+        "segmented_scan.Main"
+      ],
+      [
+        33,
+        "segmented_scan.Main"
+      ],
+      [
+        34,
+        "segmented_scan.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "sum_a:MergeA",
+          "sum_b:MergeB",
+          "join:Partials",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4*MergeGroups]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "sum_a": "default",
+        "sum_b": "default",
+        "join": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        30,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "signal:ReplayPermission",
+          "dependency:GroupMax",
+          "produce:SegMax"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:8]"
+      },
+      "verbs": {
+        "signal": "default",
+        "dependency": "default",
+        "produce": "default"
+      }
+    },
+    "uses": [
+      [
+        31,
+        "segment_max.Main"
+      ],
+      [
+        35,
+        "segment_max.Main"
+      ],
+      [
+        36,
+        "segment_max.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:ScanInputs",
+          "signal:SplitPermission",
+          "scan:MState",
+          "tail:MTail"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:ScanThreads/32]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "signal": "default",
+        "scan": "default",
+        "tail": "default"
+      }
+    },
+    "uses": [
+      [
+        31,
+        "segmented_scan.Main"
+      ],
+      [
+        32,
+        "segmented_scan.Main"
+      ],
+      [
+        35,
+        "segmented_scan.Main"
+      ],
+      [
+        36,
+        "segmented_scan.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "signal:ReplayPermission",
+          "dependency:GroupMax",
+          "reduce:SegMax",
+          "write:SegMax"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:8]"
+      },
+      "verbs": {
+        "signal": "default",
+        "dependency": "default",
+        "reduce": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        32,
+        "segment_max.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "partials:MergePartials",
+          "merge:Totals",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:16]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "partials": "default",
+        "merge": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        32,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "steady": [
+          "dependency:Partials",
+          "partials:Groups",
+          "join:MergePartials",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4*MergeGroups]"
+      },
+      "verbs": {
+        "dependency": "default",
+        "partials": "default",
+        "join": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        34,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "setup:Local",
+          "prime:FirstKey",
+          "prepare:Query"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "land:Inputs(g)",
+              "qk:ScoreTile(g)",
+              "maximum:GroupMax(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "finish:Local"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:8]"
+      },
+      "verbs": {
+        "setup": "default",
+        "prime": "default",
+        "prepare": "default",
+        "land": "default",
+        "qk": "default",
+        "maximum": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        37,
+        "group_max.Main"
+      ],
+      [
+        38,
+        "group_max.Main"
+      ],
+      [
+        39,
+        "group_max.Main"
+      ],
+      [
+        40,
+        "group_max.Main"
+      ],
+      [
+        41,
+        "group_max.Main"
+      ],
+      [
+        42,
+        "group_max.Main"
+      ],
+      [
+        43,
+        "group_max.Main"
+      ],
+      [
+        44,
+        "group_max.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "await:GroupMax",
+          "begin:Rows"
+        ],
+        "steady": [
+          {
+            "repeat": {
+              "j": [
+                0,
+                "floor(GCount/64)"
+              ]
+            },
+            "steady": [
+              "batch64:GroupMax(j)"
+            ]
+          },
+          {
+            "repeat": {
+              "j": [
+                0,
+                "floor((GCount%64)/16)"
+              ]
+            },
+            "steady": [
+              "batch16:GroupMax(j)"
+            ]
+          },
+          {
+            "repeat": {
+              "t": [
+                "64*floor(GCount/64)+16*floor((GCount%64)/16)",
+                "GCount"
+              ]
+            },
+            "steady": [
+              "tail:Mscan(t)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "finish:Mtail"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:ScanRows/32]"
+      },
+      "verbs": {
+        "await": "default",
+        "begin": "default",
+        "batch64": "default",
+        "batch16": "default",
+        "tail": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        37,
+        "scan.Main"
+      ],
+      [
+        38,
+        "scan.Main"
+      ],
+      [
+        39,
+        "scan.Main"
+      ],
+      [
+        40,
+        "scan.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "prepare:Local",
+          "await:Scan",
+          "replay:RowState",
+          "prime:Inputs"
+        ],
+        "steady": [
+          {
+            "repeat": "g",
+            "steady": [
+              "ahead:Inputs(g)",
+              "qk:Score(g)",
+              "advance:StateProb(g)",
+              "pv:NumState(g)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "fold:DenFinal",
+          "stage:PartA",
+          "write:Partials",
+          "finish:Local"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:8]"
+      },
+      "verbs": {
+        "prepare": "default",
+        "await": "default",
+        "replay": "default",
+        "prime": "default",
+        "ahead": "default",
+        "qk": "default",
+        "advance": "default",
+        "pv": "default",
+        "fold": "default",
+        "stage": "default",
+        "write": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        37,
+        "split.Main"
+      ],
+      [
+        38,
+        "split.Main"
+      ],
+      [
+        39,
+        "split.Main"
+      ],
+      [
+        40,
+        "split.Main"
+      ],
+      [
+        41,
+        "split.Main"
+      ],
+      [
+        42,
+        "split.Main"
+      ],
+      [
+        43,
+        "split.Main"
+      ],
+      [
+        44,
+        "split.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "await:Partials",
+          "prepare:Row"
+        ],
+        "steady": [
+          {
+            "repeat": {
+              "c": [
+                0,
+                2
+              ]
+            },
+            "steady": [
+              {
+                "repeat": {
+                  "j": [
+                    0,
+                    "ceil_div(Ns,8)"
+                  ]
+                },
+                "steady": [
+                  "numerator:PartA(c,j)"
+                ]
+              }
+            ]
+          }
+        ],
+        "epilogue": [
+          "denominator:PartB",
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "await": "default",
+        "prepare": "default",
+        "numerator": "default",
+        "denominator": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        37,
+        "combine.Main"
+      ],
+      [
+        38,
+        "combine.Main"
+      ],
+      [
+        39,
+        "combine.Main"
+      ],
+      [
+        41,
+        "combine.Main"
+      ],
+      [
+        43,
+        "combine.Main"
+      ],
+      [
+        44,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "await:Partials",
+          "prepare:Row"
+        ],
+        "steady": [
+          "numerator:GroupNum",
+          "publish:GroupPartials"
+        ],
+        "epilogue": [
+          "write:Output"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:16]"
+      },
+      "verbs": {
+        "await": "default",
+        "prepare": "default",
+        "numerator": "default",
+        "publish": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        40,
+        "combine.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "trigger:ScanLaunch",
+          "await:GroupMax"
+        ],
+        "steady": [
+          "produce:SegMax"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:ScanRows/32]"
+      },
+      "verbs": {
+        "trigger": "default",
+        "await": "default",
+        "produce": "default"
+      }
+    },
+    "uses": [
+      [
+        41,
+        "segment_max.Main"
+      ],
+      [
+        43,
+        "segment_max.Main"
+      ],
+      [
+        44,
+        "segment_max.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "await:ScanInputs",
+          "begin:Rows",
+          "first:Mscan"
+        ],
+        "steady": [
+          {
+            "repeat": {
+              "c": [
+                0,
+                "ceil_div(Nseg-1,SegChunk)"
+              ]
+            },
+            "steady": [
+              "classify:SegMax(c)",
+              "replay:Mscan(c)"
+            ]
+          }
+        ],
+        "epilogue": [
+          "finish:Mtail"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:ScanRows/32]"
+      },
+      "verbs": {
+        "await": "default",
+        "begin": "default",
+        "first": "default",
+        "classify": "default",
+        "replay": "default",
+        "finish": "default"
+      }
+    },
+    "uses": [
+      [
+        41,
+        "scan.Main"
+      ],
+      [
+        42,
+        "scan.Main"
+      ],
+      [
+        43,
+        "scan.Main"
+      ],
+      [
+        44,
+        "scan.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "trigger:ScanLaunch",
+          "await:GroupMax"
+        ],
+        "steady": [
+          "load:SegmentGroups",
+          "produce:SegMax"
+        ]
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:ScanRows/32]"
+      },
+      "verbs": {
+        "trigger": "default",
+        "await": "default",
+        "load": "default",
+        "produce": "default"
+      }
+    },
+    "uses": [
+      [
+        42,
+        "segment_max.Main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "await:Partials"
+        ],
+        "steady": [
+          "reduce:GroupPartials",
+          "join:GroupPartials",
+          "write:Output"
+        ]
+      },
+      "waits_for": {
+        "data": {
+          "join:GroupPartials@done": [
+            "Partners/reduce:GroupPartials"
+          ]
+        }
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[0:4]"
+      },
+      "verbs": {
+        "await": "default",
+        "reduce": "default",
+        "join": "default",
+        "write": "default"
+      }
+    },
+    "uses": [
+      [
+        42,
+        "combine.Output"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "pipe": {
+        "prologue": [
+          "await:Partials"
+        ],
+        "steady": [
+          "reduce:GroupPartials",
+          "join:GroupPartials"
+        ]
+      },
+      "waits_for": {
+        "data": {
+          "join:GroupPartials@done": [
+            "Output/reduce:GroupPartials"
+          ]
+        }
+      },
+      "info": {
+        "execution_mode": "serial",
+        "member": "warp[4:4*SP]"
+      },
+      "verbs": {
+        "await": "default",
+        "reduce": "default",
+        "join": "default"
+      }
+    },
+    "uses": [
+      [
+        42,
+        "combine.Partners"
+      ]
+    ]
+  }
+]

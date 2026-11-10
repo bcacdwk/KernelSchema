@@ -1,0 +1,69 @@
+--- small_static_lpt.yaml
++++ small_static_shared_rescale.yaml
+@@ -5,6 +5,6 @@
+   version: 4
+   dispatch:
+-    id: small_static_lpt
+-    parent: root
++    id: small_static_shared_rescale
++    parent: small_static_lpt
+     when: |
+       Use packaged defaults with no FA_HD256 environment overrides, under the root contract.
+@@ -14,5 +14,5 @@
+       qlo=min(max(1,T-(B-1)*Q),Q); A=w+T/256; F=max(0,min(qlo*(K-63-qlo),Q*(K-63-Q)))/2048.
+       PersistSmall=(ceil(nc/g)>=4 and (ceil(K/128)*g/w<=0.30 or (B*K-T)*8<=K or (K<=8*Q and ceil((K+15)/128)*g/(A+F)<=0.60))).
+-      Select exactly when not Split, 2<=B<=4, not PersistSmall, and not (B=4 and T=16384).
++      Select exactly when not Split, B=4, T=16384, and not PersistSmall.
+ design:
+   math_reshape:
+@@ -43,5 +43,5 @@
+         Initialize mhat(-1)=-inf, ell(-1)=0, Y(-1)=0. For i=0..N-1, a=max(mhat(i-1),max_k X(i)[r,k]); safe=0 if a=-inf, otherwise a.
+         keep=(c*(mhat(i-1)-safe)>=-tau); mhat(i)=mhat(i-1) if keep, otherwise a; base=mhat(i-1) if keep, otherwise safe.
+-        alpha(i)=1 if keep, otherwise exp2_fast(c*(mhat(i-1)-safe)); Stats(i)[r,:]=(mhat(i-1),base).
++        alpha(i)=1 if keep, otherwise exp2_fast(c*(mhat(i-1)-safe)); Stats(i)[r,0]=alpha(i).
+         E(i)[r,k]=exp2_fast(fma32(c,X(i)[r,k],offset-c*base)); masked -inf maps to zero; P(i)=fp8_e4m3fn(E(i)).
+         ell(i)=alpha(i)*ell(i-1)+sum32_k E(i)[r,k].
+@@ -56,5 +56,5 @@
+         Y: {meaning: Numerator from FP8 probabilities., shape: [{row: M}, {channel: D}], dtype: fp32, retention: 'carry_forward (b,m); i=-1..N-1'}
+         P: {meaning: Value-product operand., shape: [{row: M}, {key: Bk}], dtype: fp8_e4m3fn}
+-        Stats: {meaning: Previous maximum and guarded current base., shape: [{row: M}, {stat: 2}], dtype: fp32}
++        Stats: {meaning: Shared correction factor., shape: [{row: M}, {stat: 1}], dtype: fp32}
+         Oblock: {meaning: Final output block., shape: [{row: M}, {channel: D}], dtype: bf16}
+       arithmetic:
+@@ -96,5 +96,5 @@
+           strategy: |
+             Order requests by descending L(b), using strict-greater compare-swaps on request IDs initially in input order.
+-            Pair positions are (0,1) for B=2; (0,1),(1,2),(0,1) for B=3; (0,1),(2,3),(0,2),(1,3),(1,2) for B=4; ties are not generally stable.
++            Compare position pairs (0,1),(2,3),(0,2),(1,3),(1,2); ties are not generally stable.
+             An elected thread resolves the assigned segment once and publishes the request and local query coordinates to its CTA.
+             Within a segment, ordinal x maps to m=2*x if x<ceil(C_b/2), otherwise m=2*(C_b-1-x)+1.
+@@ -102,5 +102,5 @@
+           worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+   tile_pipeline:
+-    thesis: Independent K and V producers feed separate four-stage rings; QK leads PV by one block while softmax and correction exchange aliased scores and numerator ownership within one worktile.
++    thesis: Independent K and V producers feed separate four-stage rings; QK leads PV by one block while softmax sends a one-column shared alpha to correction and exchanges numerator ownership within one worktile.
+     phase:
+       attention:
+@@ -121,5 +121,5 @@
+               S(i,d): {slot_index: i%2}
+               P(i): {slot_index: i%2, part: {column: [0, 32]}, dtype: fp8_e4m3fn}
+-              Stats(i): {slot_index: i%2, part: {column: [32, 34]}}
++              Stats(i): {slot_index: i%2, part: {column: [32, 33]}}
+           Y: {slot_count: 1, space: TMEM, member_slot_shape: [{row: 128}, {channel: D}], dtype: fp32}
+           Denominator: {slot_count: 1, space: SMEM, member_slot_shape: [{row: 128}], dtype: fp32, view: {'FinalSum': {part: {row: [0, 128]}}}}
+@@ -184,5 +184,5 @@
+               verb:
+                 capture: Capture scores and return their slot; use the load-reduced maximum for the fully visible prefix, and recompute after masking the causal/tail suffix.
+-                publish: Publish the elected thread's mapped request and query coordinates once with CTA-wide visibility; Stats carries old maximum and base; P applies online with per-tile state reset; FinalSum publishes ell(N-1) after all blocks.
++                publish: Publish the elected thread's mapped request and query coordinates once with CTA-wide visibility; Stats publishes the single FP32 alpha evaluated by Softmax and reused by both denominator and Correction; P applies online with per-tile state reset; FinalSum publishes ell(N-1) after all blocks.
+             pipe:
+               prologue: ['publish:WorkCoord']
+@@ -201,6 +201,6 @@
+               verb:
+                 capture: Acknowledge first-block Stats without reading its payload; capture later Stats and final ell into registers before returning their slots.
+-                rescale: Evaluate alpha from Stats and correct both Y halves after previous PV; a warp vote skips rewriting when no row has alpha<1, retaining the
+-                  ownership handshake.
++                rescale: Read alpha directly from Stats and correct both Y halves after previous PV; a warp vote skips rewriting when no row has alpha<1, retaining
++                  the ownership handshake.
+                 stage: Normalize and narrow one Y half into OutputStage; completion covers the correction group.
+                 store: Coalesced valid-row stores undo head packing; completion ends OutputStage reads and includes the group barrier before reuse.

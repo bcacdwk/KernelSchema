@@ -1,0 +1,395 @@
+--- segmented
++++ segmented_ordered
+@@ -5,11 +5,21 @@
+   version: 3
+   dispatch:
+-    id: segmented
+-    parent: root
+-    when: TEXT_UNIT_54
++    id: segmented_ordered
++    parent: segmented
++    when: TEXT_UNIT_53
+ design:
+   math_reshape:
+-    thesis: TEXT_UNIT_160
++    thesis: TEXT_UNIT_162
+     rewrite:
++    - step: TEXT_UNIT_93
++      name: Materialize a stable request permutation
++      math: TEXT_UNIT_104
++      symbol:
++        Perm:
++          meaning: TEXT_UNIT_143
++          shape:
++          - rank: N
++          dtype: int32
++          retention: keep_value invocation
+     - step: TEXT_UNIT_97
+       name: Define the actual padded chunk inputs
+@@ -110,5 +120,5 @@
+     - step: TEXT_UNIT_81
+       name: Hierarchical rounded inverse with different merge order at the final level
+-      math: TEXT_UNIT_113
++      math: TEXT_UNIT_111
+       symbol:
+         Ti:
+@@ -127,5 +137,5 @@
+     - step: TEXT_UNIT_79
+       name: Form segment summaries and choose readout entries
+-      math: TEXT_UNIT_114
++      math: TEXT_UNIT_106
+       symbol:
+         G:
+@@ -160,9 +170,8 @@
+           dtype: fp32
+       arithmetic:
+-        approx: TEXT_UNIT_59
+-        accumulate: TEXT_UNIT_61
++        accumulate: TEXT_UNIT_57
+     - step: TEXT_UNIT_66
+       name: Apply the state recurrence and the readout traversal
+-      math: TEXT_UNIT_102
++      math: TEXT_UNIT_109
+       symbol:
+         R:
+@@ -180,4 +189,16 @@
+           dtype: bf16
+           retention: carry_forward (n,h,vt,mode,z); cl=0..Count
++        KS:
++          meaning: TEXT_UNIT_138
++          shape:
++          - token: B
++          - value: VTT
++          dtype: fp32
++        QS:
++          meaning: TEXT_UNIT_157
++          shape:
++          - token: B
++          - value: VTT
++          dtype: fp32
+         Hrhs:
+           meaning: TEXT_UNIT_154
+@@ -202,9 +223,4 @@
+           shape:
+           - token: B
+-          - value: VTT
+-          dtype: bf16
+-        DU0:
+-          meaning: TEXT_UNIT_123
+-          shape:
+           - value: VTT
+           dtype: bf16
+@@ -215,5 +231,5 @@
+       depth:
+       - item: TEXT_UNIT_85
+-        change: TEXT_UNIT_94
++        change: TEXT_UNIT_74
+         by:
+         - TEXT_UNIT_79
+@@ -226,4 +242,8 @@
+         - TEXT_UNIT_66
+       footprint:
++      - item: TEXT_UNIT_100
++        change: TEXT_UNIT_95
++        by:
++        - TEXT_UNIT_93
+       - item: TEXT_UNIT_71
+         change: TEXT_UNIT_84
+@@ -236,7 +256,12 @@
+         by:
+         - TEXT_UNIT_79
++      vector:
++      - item: TEXT_UNIT_88
++        change: TEXT_UNIT_92
++        by:
++        - TEXT_UNIT_93
+       matmul:
+       - item: TEXT_UNIT_62
+-        change: TEXT_UNIT_98
++        change: TEXT_UNIT_65
+         by:
+         - TEXT_UNIT_90
+@@ -245,5 +270,5 @@
+       error:
+       - item: TEXT_UNIT_68
+-        change: TEXT_UNIT_87
++        change: TEXT_UNIT_86
+         by:
+         - TEXT_UNIT_90
+@@ -252,5 +277,5 @@
+         - TEXT_UNIT_66
+   work_schedule:
+-    thesis: TEXT_UNIT_315
++    thesis: TEXT_UNIT_316
+     flow:
+       launch:
+@@ -266,4 +291,14 @@
+         start_after: pass_a.launch_ready
+       handoff:
++        Perm:
++          producer: prep
++          consumer:
++          - pass_a
++          - pass_c
++          storage: global
++          ready: prep.kernel_done
++          wait_at:
++          - pass_a.prep_ready
++          - pass_c.transfers_ready
+         Ti:
+           producer: prep
+@@ -356,7 +391,7 @@
+     phase:
+       prep:
+-        describe: TEXT_UNIT_281
++        describe: TEXT_UNIT_282
+         decomposition:
+-          strategy: TEXT_UNIT_289
++          strategy: TEXT_UNIT_296
+           partition:
+             slot:
+@@ -368,4 +403,8 @@
+           worktile:
+             invariant:
++              cu_seqlens:
++                shape:
++                - boundary: N+1
++                dtype: ref:contract.algorithm_requirement::cu_seqlens.dtype
+               q:
+                 shape:
+@@ -390,4 +429,8 @@
+           target:
+             single_tile:
++              Perm:
++                shape:
++                - rank: OrderRows
++                dtype: ref:design.math_reshape::Perm.dtype
+               Ti:
+                 shape:
+@@ -439,5 +482,5 @@
+           worker_count: SU*HV/HeadsPerPrep
+         schedule:
+-          strategy: TEXT_UNIT_309
++          strategy: TEXT_UNIT_305
+           worktile_order:
+           - by: value_head
+@@ -454,7 +497,7 @@
+         describe: TEXT_UNIT_276
+         decomposition:
+-          strategy: TEXT_UNIT_306
++          strategy: TEXT_UNIT_290
+           partition:
+-            request:
++            request_rank:
+               size: N
+               tile: 1
+@@ -470,4 +513,8 @@
+           worktile:
+             invariant:
++              Perm:
++                shape:
++                - rank: 1
++                dtype: ref:design.math_reshape::Perm.dtype
+               initial_state:
+                 shape:
+@@ -525,5 +572,5 @@
+                 dtype: ref:design.math_reshape::SegA.dtype
+         mapping:
+-          strategy: TEXT_UNIT_293
++          strategy: TEXT_UNIT_301
+           worker:
+             unit: CTA
+@@ -531,6 +578,7 @@
+           worker_count: (ValueDim/VTT)*HV*N*G
+         schedule:
++          strategy: TEXT_UNIT_299
+           worktile_order:
+-          - by: request
++          - by: request_rank
+             direction: ascending
+           - by: segment
+@@ -549,7 +597,7 @@
+         describe: TEXT_UNIT_277
+         decomposition:
+-          strategy: TEXT_UNIT_304
++          strategy: TEXT_UNIT_300
+           partition:
+-            request:
++            request_rank:
+               size: N
+               tile: 1
+@@ -565,4 +613,8 @@
+           worktile:
+             invariant:
++              Perm:
++                shape:
++                - rank: 1
++                dtype: ref:design.math_reshape::Perm.dtype
+               initial_state:
+                 shape:
+@@ -574,4 +626,9 @@
+                 - segment: G
+                 dtype: ref:design.math_reshape::SegA.dtype
++              SegB:
++                shape:
++                - key: TransferKeys
++                - value: VTT
++                dtype: ref:design.math_reshape::SegB.dtype
+             iteration:
+               Kc:
+@@ -625,10 +682,4 @@
+                 dtype: ref:design.math_reshape::Dl.dtype
+                 direction: ascending
+-              SegB:
+-                shape:
+-                - key: KeyDim
+-                - value: VTT
+-                dtype: ref:design.math_reshape::SegB.dtype
+-                direction: descending
+           target:
+             single_tile:
+@@ -648,13 +699,6 @@
+                 - key: KeyDim
+                 dtype: ref:contract.algorithm_requirement::FinalState.dtype
+-            tile_reduction:
+-              dimension: segment
+-              input:
+-              - ref:design.math_reshape::SegB
+-              - ref:design.math_reshape::SegA
+-              output: ref:design.math_reshape::SeedC
+-              method: ref:design.math_reshape::segments
+         mapping:
+-          strategy: TEXT_UNIT_293
++          strategy: TEXT_UNIT_301
+           worker:
+             unit: CTA
+@@ -662,6 +706,7 @@
+           worker_count: (ValueDim/VTT)*HV*N*G
+         schedule:
++          strategy: TEXT_UNIT_299
+           worktile_order:
+-          - by: request
++          - by: request_rank
+             direction: ascending
+           - by: segment
+@@ -678,5 +723,5 @@
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT_UNIT_164
++    thesis: TEXT_UNIT_169
+     phase:
+       prep:
+@@ -781,13 +826,13 @@
+               member: warp[0:8]
+               verb:
+-                enter: TEXT_UNIT_194
+-                stage_inputs: TEXT_UNIT_198
++                enter: TEXT_UNIT_199
++                stage_inputs: TEXT_UNIT_251
+                 signal: TEXT_UNIT_215
+-                gram: TEXT_UNIT_212
++                gram: TEXT_UNIT_195
+                 save_image:
+                   execution_mode: async
+                   meaning: TEXT_UNIT_237
+-                skeleton: TEXT_UNIT_201
+-                system: TEXT_UNIT_236
++                skeleton: TEXT_UNIT_174
++                system: TEXT_UNIT_229
+                 readout_coeff:
+                   execution_mode: async
+@@ -798,5 +843,5 @@
+                 merge64_y: TEXT_UNIT_176
+                 merge64_x: TEXT_UNIT_213
+-                publish_group: TEXT_UNIT_188
++                publish_group: TEXT_UNIT_245
+                 drain_image: TEXT_UNIT_207
+             pipe:
+@@ -881,9 +926,4 @@
+             view:
+               Hrhs: {}
+-              DU0:
+-                part:
+-                  token:
+-                  - 0
+-                  - 1
+           Stages:
+             space: SMEM
+@@ -948,20 +988,22 @@
+               member: warp[0:8]
+               verb:
+-                setup: TEXT_UNIT_234
+-                early_inputs: TEXT_UNIT_252
+-                join_prep: TEXT_UNIT_253
++                setup: TEXT_UNIT_196
++                warm: TEXT_UNIT_170
++                join_prep: TEXT_UNIT_202
++                resolve: TEXT_UNIT_246
+                 prime: TEXT_UNIT_235
+-                seed: TEXT_UNIT_239
++                seed: TEXT_UNIT_250
+                 advance: TEXT_UNIT_205
+                 project: TEXT_UNIT_221
+-                rhs: TEXT_UNIT_241
+-                solve: TEXT_UNIT_227
+-                update: TEXT_UNIT_240
++                rhs: TEXT_UNIT_209
++                solve: TEXT_UNIT_255
++                update: TEXT_UNIT_177
+                 publish_transfer: TEXT_UNIT_203
+             pipe:
+               prologue:
+               - setup:Resources
+-              - early_inputs:Inputs
++              - warm:Indices
+               - join_prep:Prepared
++              - resolve:Request
+               - prime:Stages
+               - seed:R
+@@ -1037,9 +1079,4 @@
+               Hrhs: {}
+               Out: {}
+-              DU0:
+-                part:
+-                  token:
+-                  - 0
+-                  - 1
+           Stages:
+             space: SMEM
+@@ -1126,20 +1163,22 @@
+               verb:
+                 setup: TEXT_UNIT_179
+-                early_inputs: TEXT_UNIT_249
+-                join_a: TEXT_UNIT_218
++                warm: TEXT_UNIT_170
++                join_a: TEXT_UNIT_219
++                resolve: TEXT_UNIT_190
+                 classify: TEXT_UNIT_242
+                 prime: TEXT_UNIT_189
+-                seed: TEXT_UNIT_210
++                seed: TEXT_UNIT_193
+                 advance: TEXT_UNIT_206
+                 project: TEXT_UNIT_231
+-                rhs: TEXT_UNIT_232
+-                solve: TEXT_UNIT_247
+-                finish_chunk: TEXT_UNIT_228
++                rhs: TEXT_UNIT_226
++                solve: TEXT_UNIT_230
++                finish_chunk: TEXT_UNIT_181
+                 final_store: TEXT_UNIT_222
+             pipe:
+               prologue:
+               - setup:Resources
+-              - early_inputs:Inputs
++              - warm:Indices
+               - join_a:Transfers
++              - resolve:Request
+               - classify:weak
+               steady:
+@@ -1165,5 +1204,5 @@
+     - design.tile_pipeline::pass_a.Stages
+     - design.tile_pipeline::pass_c.Stages
+-    choice: TEXT_UNIT_266
++    choice: TEXT_UNIT_265
+     reason: TEXT_UNIT_270
+   - item: design.work_schedule::flow

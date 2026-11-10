@@ -1,0 +1,137 @@
+--- tcg_d128_flat_tma_direct_narrow
+
++++ tcg_d128_segmented_tma_direct_narrow
+
+@@ -1,17 +1,22 @@
+
+-math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"},"Ngm":{"binding":"bind:design.work_schedule::Ngm"},"Ns":{"binding":"bind:design.work_schedule::Ns"}}},{"step":"scores","symbol":{"DotTile":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (evaluation,b,kh,a,s,g)"},"GroupMax":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"scan","symbol":{"ScanState":{"shape":[],"dtype":"fp32","retention":"carry_forward (r); g=-1..T-1"},"MState":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"MTail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"C"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..cHi"},"DenState":{"shape":[{"row":"C"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"Prob8":{"shape":[{"row":"C"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"partials","symbol":{"NumState":{"shape":[{"row":"C"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"GroupPV":{"shape":[{"row":"C"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value (b,kh,a,s,g)"},"PartA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"combine","symbol":{"TotalA":{"shape":[{"channel":"D"}],"dtype":"fp32","retention":"keep_value (r)"},"TotalB":{"shape":[],"dtype":"fp32","retention":"keep_value (r)"}}}]
+-work_schedule.flow.launch=[{"phase":["group_max"]},{"phase":["flat_scan"],"start_after":"group_max.launch_ready","protocol":"pdl"},{"phase":["split"],"start_after":"flat_scan.launch_ready","protocol":"pdl"},{"phase":["combine"],"start_after":"split.launch_ready","protocol":"pdl"}]
++math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"},"Ngm":{"binding":"bind:design.work_schedule::Ngm"},"Ns":{"binding":"bind:design.work_schedule::Ns"}}},{"step":"scores","symbol":{"DotTile":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (evaluation,b,kh,a,s,g)"},"GroupMax":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"segment_max","symbol":{"Seg":{"value":16},"SegMax":{"shape":[{"segment":"Nseg"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"scan","symbol":{"SegBatch":{"value":16},"ScanState":{"shape":[],"dtype":"fp32","retention":"carry_forward (r); g=-1..T-1"},"MState":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"MTail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"C"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..cHi"},"DenState":{"shape":[{"row":"C"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"Prob8":{"shape":[{"row":"C"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"partials","symbol":{"NumState":{"shape":[{"row":"C"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"GroupPV":{"shape":[{"row":"C"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value (b,kh,a,s,g)"},"PartA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"combine","symbol":{"TotalA":{"shape":[{"channel":"D"}],"dtype":"fp32","retention":"keep_value (r)"},"TotalB":{"shape":[],"dtype":"fp32","retention":"keep_value (r)"}}}]
++work_schedule.flow.launch=[{"phase":["group_max"]},{"phase":["segment_max"],"start_after":"group_max.launch_ready","protocol":"pdl"},{"phase":["segmented_scan"],"start_after":"segment_max.launch_ready","protocol":"pdl"},{"phase":["split"],"start_after":"segmented_scan.launch_ready","protocol":"pdl"},{"phase":["combine"],"start_after":"split.launch_ready","protocol":"pdl"}]
+ work_schedule.flow.handoff.GroupMax.producer="group_max"
+-work_schedule.flow.handoff.GroupMax.consumer=["flat_scan"]
++work_schedule.flow.handoff.GroupMax.consumer=["segment_max","segmented_scan"]
+ work_schedule.flow.handoff.GroupMax.storage="global"
+ work_schedule.flow.handoff.GroupMax.ready="group_max.kernel_done"
+-work_schedule.flow.handoff.GroupMax.wait_at="flat_scan.inputs_ready"
+-work_schedule.flow.handoff.MState.producer="flat_scan"
++work_schedule.flow.handoff.GroupMax.wait_at=["segment_max.inputs_ready","segmented_scan.inputs_ready"]
++work_schedule.flow.handoff.SegMax.producer="segment_max"
++work_schedule.flow.handoff.SegMax.consumer=["segmented_scan"]
++work_schedule.flow.handoff.SegMax.storage="global"
++work_schedule.flow.handoff.SegMax.ready="segment_max.kernel_done"
++work_schedule.flow.handoff.SegMax.wait_at="segmented_scan.inputs_ready"
++work_schedule.flow.handoff.MState.producer="segmented_scan"
+ work_schedule.flow.handoff.MState.consumer=["split"]
+ work_schedule.flow.handoff.MState.storage="global"
+-work_schedule.flow.handoff.MState.ready="flat_scan.kernel_done"
++work_schedule.flow.handoff.MState.ready="segmented_scan.kernel_done"
+ work_schedule.flow.handoff.MState.wait_at="split.scan_ready"
+-work_schedule.flow.handoff.MTail.producer="flat_scan"
++work_schedule.flow.handoff.MTail.producer="segmented_scan"
+ work_schedule.flow.handoff.MTail.consumer=["split","combine"]
+ work_schedule.flow.handoff.MTail.storage="global"
+-work_schedule.flow.handoff.MTail.ready="flat_scan.kernel_done"
++work_schedule.flow.handoff.MTail.ready="segmented_scan.kernel_done"
+ work_schedule.flow.handoff.MTail.wait_at=["split.scan_ready","combine.inputs_ready"]
+@@ -50,17 +55,35 @@
+
+ work_schedule.phase.group_max.schedule.worker_assignment.exit="assigned_done"
+-work_schedule.phase.flat_scan.decomposition.strategy="TEXT"
+-work_schedule.phase.flat_scan.decomposition.partition.row={"size":"R","tile":"ScanThreads"}
+-work_schedule.phase.flat_scan.decomposition.worktile.iteration.GroupMax.shape=[{"group":1},{"row":"ScanRows"}]
+-work_schedule.phase.flat_scan.decomposition.worktile.iteration.GroupMax.dtype="ref:design.math_reshape::GroupMax.dtype"
+-work_schedule.phase.flat_scan.decomposition.worktile.iteration.GroupMax.direction="ascending"
+-work_schedule.phase.flat_scan.decomposition.target.single_tile.MState.shape=[{"group":"T"},{"row":"ScanRows"}]
+-work_schedule.phase.flat_scan.decomposition.target.single_tile.MState.dtype="ref:design.math_reshape::MState.dtype"
+-work_schedule.phase.flat_scan.decomposition.target.single_tile.MTail.shape=[{"row":"ScanRows"}]
+-work_schedule.phase.flat_scan.decomposition.target.single_tile.MTail.dtype="ref:design.math_reshape::MTail.dtype"
+-work_schedule.phase.flat_scan.mapping.worker={"unit":"CTA","unit_count":1}
+-work_schedule.phase.flat_scan.mapping.worker_count="ceil_div(R,ScanThreads)"
+-work_schedule.phase.flat_scan.schedule.worktile_order=[{"by":"row","direction":"ascending"}]
+-work_schedule.phase.flat_scan.schedule.worker_assignment.preassigned={"start":"worker_id","count":1}
+-work_schedule.phase.flat_scan.schedule.worker_assignment.refill="none"
+-work_schedule.phase.flat_scan.schedule.worker_assignment.exit="assigned_done"
++work_schedule.phase.segment_max.decomposition.strategy="TEXT"
++work_schedule.phase.segment_max.decomposition.partition.segment={"size":"Nseg","tile":1}
++work_schedule.phase.segment_max.decomposition.partition.row={"size":"R","tile":"ScanThreads"}
++work_schedule.phase.segment_max.decomposition.worktile.iteration.GroupMax.shape=[{"group":1},{"row":"ScanRows"}]
++work_schedule.phase.segment_max.decomposition.worktile.iteration.GroupMax.dtype="ref:design.math_reshape::GroupMax.dtype"
++work_schedule.phase.segment_max.decomposition.worktile.iteration.GroupMax.direction="ascending"
++work_schedule.phase.segment_max.decomposition.target.single_tile.SegMax.shape=[{"segment":1},{"row":"ScanRows"}]
++work_schedule.phase.segment_max.decomposition.target.single_tile.SegMax.dtype="ref:design.math_reshape::SegMax.dtype"
++work_schedule.phase.segment_max.mapping.worker={"unit":"CTA","unit_count":1}
++work_schedule.phase.segment_max.mapping.worker_count="nr*Nseg"
++work_schedule.phase.segment_max.schedule.strategy="TEXT"
++work_schedule.phase.segment_max.schedule.worktile_order=[{"by":"segment","direction":"ascending"},{"by":"row","direction":"ascending"}]
++work_schedule.phase.segment_max.schedule.worker_assignment.preassigned={"start":"worker_id","count":1}
++work_schedule.phase.segment_max.schedule.worker_assignment.refill="none"
++work_schedule.phase.segment_max.schedule.worker_assignment.exit="assigned_done"
++work_schedule.phase.segmented_scan.decomposition.strategy="TEXT"
++work_schedule.phase.segmented_scan.decomposition.partition.row={"size":"R","tile":"ScanThreads"}
++work_schedule.phase.segmented_scan.decomposition.worktile.iteration.SegMax.shape=[{"segment":1},{"row":"ScanRows"}]
++work_schedule.phase.segmented_scan.decomposition.worktile.iteration.SegMax.dtype="ref:design.math_reshape::SegMax.dtype"
++work_schedule.phase.segmented_scan.decomposition.worktile.iteration.SegMax.direction="ascending"
++work_schedule.phase.segmented_scan.decomposition.worktile.iteration.GroupMax.shape=[{"group":1},{"row":"ScanRows"}]
++work_schedule.phase.segmented_scan.decomposition.worktile.iteration.GroupMax.dtype="ref:design.math_reshape::GroupMax.dtype"
++work_schedule.phase.segmented_scan.decomposition.worktile.iteration.GroupMax.direction="ascending"
++work_schedule.phase.segmented_scan.decomposition.target.single_tile.MState.shape=[{"group":"T"},{"row":"ScanRows"}]
++work_schedule.phase.segmented_scan.decomposition.target.single_tile.MState.dtype="ref:design.math_reshape::MState.dtype"
++work_schedule.phase.segmented_scan.decomposition.target.single_tile.MTail.shape=[{"row":"ScanRows"}]
++work_schedule.phase.segmented_scan.decomposition.target.single_tile.MTail.dtype="ref:design.math_reshape::MTail.dtype"
++work_schedule.phase.segmented_scan.mapping.worker={"unit":"CTA","unit_count":1}
++work_schedule.phase.segmented_scan.mapping.worker_count="nr"
++work_schedule.phase.segmented_scan.schedule.worktile_order=[{"by":"row","direction":"ascending"}]
++work_schedule.phase.segmented_scan.schedule.worker_assignment.preassigned={"start":"worker_id","count":1}
++work_schedule.phase.segmented_scan.schedule.worker_assignment.refill="none"
++work_schedule.phase.segmented_scan.schedule.worker_assignment.exit="assigned_done"
+ work_schedule.phase.split.decomposition.strategy="TEXT"
+@@ -159,15 +182,34 @@
+
+ tile_pipeline.phase.group_max.role.Main.pipe.epilogue=["finish:Local"]
+-tile_pipeline.phase.flat_scan.milestone.inputs_ready=["Main/dependency:GroupMax@done"]
+-tile_pipeline.phase.flat_scan.resource.ScanState.space="register"
+-tile_pipeline.phase.flat_scan.resource.ScanState.member_slot_shape=[{"row":"ScanRows"}]
+-tile_pipeline.phase.flat_scan.resource.ScanState.dtype="fp32"
+-tile_pipeline.phase.flat_scan.resource.ScanState.slot_count=1
+-tile_pipeline.phase.flat_scan.resource.Batch.space="register"
+-tile_pipeline.phase.flat_scan.resource.Batch.member_slot_shape=[{"row":"ScanRows"},{"group":64}]
+-tile_pipeline.phase.flat_scan.resource.Batch.dtype="fp32"
+-tile_pipeline.phase.flat_scan.resource.Batch.slot_count=1
+-tile_pipeline.phase.flat_scan.role.Main.info.execution_mode="serial"
+-tile_pipeline.phase.flat_scan.role.Main.info.member="warp[0:ScanThreads/32]"
+-tile_pipeline.phase.flat_scan.role.Main.info.verb={"dependency":"TEXT","signal":"TEXT","scan":"TEXT","tail":"TEXT"}
+-tile_pipeline.phase.flat_scan.role.Main.pipe.steady=["dependency:GroupMax","signal:SplitPermission","scan:MState","tail:MTail"]
++tile_pipeline.phase.segment_max.milestone.inputs_ready=["Main/dependency:GroupMax@done"]
++tile_pipeline.phase.segment_max.resource.GroupBatch.space="register"
++tile_pipeline.phase.segment_max.resource.GroupBatch.member_slot_shape=[{"row":"ScanRows"},{"group":"Seg"}]
++tile_pipeline.phase.segment_max.resource.GroupBatch.dtype="fp32"
++tile_pipeline.phase.segment_max.resource.GroupBatch.slot_count=1
++tile_pipeline.phase.segment_max.role.Main.info.execution_mode="serial"
++tile_pipeline.phase.segment_max.role.Main.info.member="warp[0:ScanThreads/32]"
++tile_pipeline.phase.segment_max.role.Main.info.verb={"signal":"TEXT","dependency":"TEXT","produce":"TEXT"}
++tile_pipeline.phase.segment_max.role.Main.pipe.steady=["signal:ScanPermission","dependency:GroupMax","produce:SegMax"]
++tile_pipeline.phase.segmented_scan.milestone.inputs_ready=["Main/dependency:Summaries@done"]
++tile_pipeline.phase.segmented_scan.resource.ScanState.space="register"
++tile_pipeline.phase.segmented_scan.resource.ScanState.member_slot_shape=[{"row":"ScanRows"}]
++tile_pipeline.phase.segmented_scan.resource.ScanState.dtype="fp32"
++tile_pipeline.phase.segmented_scan.resource.ScanState.slot_count=1
++tile_pipeline.phase.segmented_scan.resource.SummaryBatch.space="register"
++tile_pipeline.phase.segmented_scan.resource.SummaryBatch.member_slot_shape=[{"row":"ScanRows"},{"segment":"SegBatch"}]
++tile_pipeline.phase.segmented_scan.resource.SummaryBatch.dtype="fp32"
++tile_pipeline.phase.segmented_scan.resource.SummaryBatch.slot_count=1
++tile_pipeline.phase.segmented_scan.resource.ReplayBatch.space="register"
++tile_pipeline.phase.segmented_scan.resource.ReplayBatch.member_slot_shape=[{"row":"ScanRows"},{"group":"Seg"}]
++tile_pipeline.phase.segmented_scan.resource.ReplayBatch.dtype="fp32"
++tile_pipeline.phase.segmented_scan.resource.ReplayBatch.slot_count=1
++tile_pipeline.phase.segmented_scan.resource.ReplayStart.space="register"
++tile_pipeline.phase.segmented_scan.resource.ReplayStart.member_slot_shape=[{"row":"ScanRows"}]
++tile_pipeline.phase.segmented_scan.resource.ReplayStart.dtype="int32"
++tile_pipeline.phase.segmented_scan.resource.ReplayStart.slot_count=1
++tile_pipeline.phase.segmented_scan.role.Main.info.execution_mode="serial"
++tile_pipeline.phase.segmented_scan.role.Main.info.member="warp[0:ScanThreads/32]"
++tile_pipeline.phase.segmented_scan.role.Main.info.verb={"dependency":"TEXT","signal":"TEXT","first":"TEXT","test":"TEXT","replay":"TEXT","tail":"TEXT"}
++tile_pipeline.phase.segmented_scan.role.Main.pipe.prologue=["dependency:Summaries","signal:SplitPermission","first:SegmentZero"]
++tile_pipeline.phase.segmented_scan.role.Main.pipe.steady=[{"repeat":{"c":[0,"ceil_div(Nseg-1,SegBatch)"]},"steady":["test:Prefix(c)","replay:Chunk(c)"]}]
++tile_pipeline.phase.segmented_scan.role.Main.pipe.epilogue=["tail:MTail"]
+ tile_pipeline.phase.split.domain.g=["cLo","max(cLo,cHi+1)"]

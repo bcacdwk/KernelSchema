@@ -1,0 +1,483 @@
+meta_data:
+  name: dual_cache_latent_bf16
+  describe: Joint sparse attention over prepared sliding-window and compressed shared key/value latents, with a per-head zero-value softmax sink.
+  source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu::tc_attn_kernel
+  version: 2
+  dispatch:
+    id: tc_heads
+    parent: mma_direct
+    when: |
+      Let W be the byte capacity of the workspace actually passed by Model.forward
+      after its identity cache or private scratch selection, and N=dsv4::nsm_cached().
+      Let P=dsv4::make_plan(H,T,IndexWidth,W,0,0,N,true) in the fixed source,
+      including its compile-time fallback when tcgen05 is not built. P is the
+      initial plan; cfg selects the kernel, gt the tokens per CTA, and dual denotes
+      probe-gated packing. Select exactly when the shipped automatic policy is
+      active (force_cfg=0, force_s=0, Model.fast is false, normal non-diagnostic build
+      and unchanged default extension switches), P.dual=0, P.cfg=90, and P.gt=1.
+      This is the tc_eligible branch: H>=64 and T*ceil_div(H,64)>=N in a tcgen05 build.
+      Direct execution and execution of its recorded graph use this same selection.
+      Pure capture records work; replay uses recorded host choices, scalars, tensor
+      bindings and tensor maps, while device reads use the current tensor contents.
+design:
+  math_reshape:
+    thesis: >-
+      Stream slot chunks through a base-2 online softmax and normalize directly.
+      Two independent half-latent QK sums shorten each accumulation chain but add a
+      score addition; a lagging maximum can avoid value rescaling, while BF16
+      probabilities change PV precision and require two score partials per chunk.
+    rewrite:
+      - step: gather
+        name: Compact reserved slots without deduplicating them
+        math: |
+          HB and KC are bound below; NB=ceil_div(H,HB), Hp=NB*HB.
+          For token t use the Contract's request lookup and visible length.
+          A(t)=min(max(visible,0),SW);
+          Klen(t)=A(t)+max(min(sparse_topk_lens[t],IndexWidth)-SW,0);
+          C(t)=ceil_div(Klen(t),KC). Klen(t)>=1 in this node's Contract domain.
+          For c in [0,C(t)) and u in [0,KC), let k=c*KC+u and
+          j=k if k<A(t), otherwise SW+k-A(t).
+          id=sparse_indices[t,j] if k<Klen(t), otherwise -1;
+          valid(c)[u]=uint8(1 if id>=0 else 0).
+          Gather(c)[u,:] is row max(id,0) of swa_kv_cache when k<A(t),
+          otherwise compressed_kv_cache. Invalid and padded slots still read row zero.
+          For hb in [0,NB), Q[r,:]=query[t,hb*HB+r,:], r in [0,HB).
+          H is a multiple of HB here; slots retain their original multiplicities.
+          a1=fp32(bmm1_scale); a2=fp32(bmm2_scale);
+          L2=fp32(1.4426950408889634); neg=fp32(-3.0e38); scale=a1*L2.
+        symbol:
+          HB: {meaning: Heads per worktile., binding: 'bind:design.work_schedule::HB'}
+          KC: {meaning: Slots per local chunk., binding: 'bind:design.work_schedule::KC'}
+          Q: {meaning: Query head block reused throughout the recurrence., shape: [head: HB, latent: D], dtype: bf16}
+          Gather: {meaning: Cache rows including invalid-slot and padding substitutes., shape: [slot: KC, latent: D], dtype: bf16}
+          valid: {meaning: Validity before score masking., shape: [slot: KC], dtype: uint8}
+      - step: online
+        name: Two QK partials and a lazy maximum recurrence
+        math: |
+          E2(x) is the compiled fast exp2f(x), with E2(-inf)=0;
+          maxnum is FP32 fmaxf, where a single NaN loses to the numeric operand.
+          For each (t,hb), initialize sink2[r]=sinks[hb*HB+r]*L2;
+          m(-1)[r]=sink2[r]; every row maps to a real head in this node.
+          l(-1)[r]=0 and Acc(-1)[r,:]=0.
+          For c=0..C(t)-1:
+            Partial(c,a)=mm32(Q[:,a*D/2:(a+1)*D/2],
+                              Gather(c)[:,a*D/2:(a+1)*D/2]^T), a in {0,1}.
+            Each partial accumulates D/32 successive 16-wide products from zero.
+            Z=Partial(c,0)+Partial(c,1), with one FP32 addition per score.
+            Scores(c)[r,u]=Z[r,u]*scale if valid(c)[u]!=0, otherwise -inf.
+            For b in {0,1} and q in {0,1,2,3}, reduce Scores[r,b*32+4*n+q]
+            for n=0..7 by successive maxnum from -inf, obtaining M[b,q].
+            Mhalf[b]=maxnum(maxnum(M[b,0],M[b,1]),maxnum(M[b,2],M[b,3]));
+            candidate=maxnum(m(c-1)[r],maxnum(Mhalf[0],Mhalf[1]));
+            clamped=candidate if candidate>neg*0.5, otherwise neg;
+            m(c)[r]=m(c-1)[r] if clamped-m(c-1)[r]<=1, otherwise clamped.
+            alpha(c)[r]=E2(m(c-1)[r]-m(c)[r]);
+            E[r,u]=E2(Scores(c)[r,u]-m(c)[r]); Prob(c)[r,u]=bf16(E[r,u]).
+            For each b,q form R[b,q] by adding E[r,b*32+4*n+q] from zero for n=0..7;
+            Rhalf[b]=(R[b,0]+R[b,1])+(R[b,2]+R[b,3]);
+            l(c)[r]=l(c-1)[r]*alpha(c)[r]+(Rhalf[0]+Rhalf[1]).
+            Acc(0)=mm32(Prob(0),Gather(0));
+            Acc(c)=mma32(Prob(c),Gather(c),alpha(c)[:,None] ⊙ Acc(c-1)) for c>0.
+          Each PV output half traverses KC/16 successive 16-wide products.
+          Partition the rows into consecutive groups of RG rows, with RG bound below.
+          Rescaling is omitted for a row group when every alpha is exactly 1;
+          otherwise all its rows are multiplied, including those with alpha=1.
+          The two key halves evaluate duplicate m,l updates; the lower half's l
+          supplies the final denominator. Unrounded E supplies l, and Prob supplies PV.
+        symbol:
+          RG: {meaning: Rows sharing the conditional rescale decision., binding: 'bind:design.tile_pipeline::RG'}
+          Partial: {meaning: FP32 QK sum for one latent half a of one chunk., shape: [head: HB, slot: KC], dtype: fp32}
+          Scores: {meaning: 'Added, scaled and masked chunk scores.', shape: [head: HB, slot: KC], dtype: fp32}
+          E: {meaning: Unrounded exponentials used for the normalizer and probability conversion., shape: [head: HB, slot: KC], dtype: fp32}
+          Prob: {meaning: BF16 probability operands for PV., shape: [head: HB, slot: KC], dtype: bf16}
+          alpha: {meaning: Rescaling factor for the current chunk., shape: [head: HB], dtype: fp32}
+          sink2: {meaning: Base-2 logit of the required sink for head hb*HB+r., shape: [head: HB], dtype: fp32, retention: 'keep_value (t,hb)'}
+          m: {meaning: Lagging base-2 row maximum., shape: [head: HB], dtype: fp32, retention: 'carry_forward (t,hb); c=-1..C(t)-1'}
+          l: {meaning: FP32 exponential sum excluding the sink., shape: [head: HB], dtype: fp32, retention: 'carry_forward (t,hb); c=-1..C(t)-1'}
+          Acc: {meaning: Unnormalized full-latent value sum., shape: [head: HB, latent: D], dtype: fp32, retention: 'carry_forward (t,hb); c=-1..C(t)-1'}
+        arithmetic:
+          approx: 'E2 and division use the shipped --use_fast_math build; unknown: no source-provided error bound. The finite sentinel, clamp and maximum lag are retained without a magnitude guarantee for the full Contract domain.'
+          accumulate: 'Scalar multiply/add expressions may contract under fast-math compilation. The half-latent addition and the specified sum grouping do not imply bitwise equivalence to the reference.'
+      - step: finalize
+        name: Add the sink and overwrite the complete output block
+        math: |
+          For last=C(t)-1, z[r]=l(last)[r]+E2(sink2[r]-m(last)[r]);
+          inv[r]=a2/z[r] if z[r]>0, otherwise 0;
+          Result[r,d]=bf16(Acc(last)[r,d]*inv[r]);
+          overwrite out[t,hb*HB+r,d]=Result[r,d] for r in [0,HB), d in [0,D).
+          These formulas are evaluated even when J(t) is empty.
+          E2, division and scalar contraction follow online's arithmetic exception.
+        symbol:
+          inv: {meaning: Final per-head output multiplier published for both latent halves., shape: [head: HB], dtype: fp32}
+          Result: {meaning: Complete normalized BF16 head block., shape: [head: HB, latent: D], dtype: bf16}
+    ledger:
+      baseline: Direct FP32 evaluation over valid slots, materializing full logits and probabilities before PV, with no split partials. Design counts include the padded and invalid slots explicitly evaluated above.
+      footprint:
+        - {item: Intermediate values, change: '8*H*count(J(t)) bytes per token -> no full-row score or probability materialization; each chunk uses 2*HB*KC FP32 QK partials and HB*KC BF16 probabilities, with 4*HB*(D+2) bytes of logical recurrence state per worktile.', by: [online]}
+      matmul:
+        - {item: Padded contractions, change: '2*H*count(J(t))*D -> 2*Hp*C(t)*KC*D MACs per token; the QK split does not duplicate products.', by: [gather, online]}
+      vector:
+        - {item: QK partial merge, change: '+Hp*C(t)*KC FP32 additions per token.', by: [online]}
+      error:
+        - {item: Numerical changes, change: 'Each chunk narrows HB*KC exponentials to BF16 only for PV; two half-latent sums, one FP32 score addition, grouped normalizer sums, a one-unit base-2 maximum-update threshold and fast exponentials change rounding. No global output error bound is supplied.', by: [online, finalize]}
+  work_schedule:
+    thesis: >-
+      One CTA computes one query and one 64-head block over all selected slots and
+      all output columns. Reverse grid order visits later queries first; no split
+      materialization or combine is needed, and KV is shared across all 64 heads.
+    flow:
+      launch: [{phase: [attention]}]
+    phase:
+      attention:
+        describe: Gather, two-part QK, online softmax, PV and direct normalized BF16 writeback.
+        decomposition:
+          strategy: |
+            HB=64 and KC=64. The selected plan has gt=1, splits=1 and ws_bytes=0.
+            Each worktile (t,hb) traverses c=0..C(t)-1 and owns every output column
+            of its HB heads. All heads are real since H is 64 or 128 in this node.
+            Invalid slots remain in the chunk computation; all-invalid indices
+            do not remove the recurrence. The sink input block is sinks[hb*HB:hb*HB+HB].
+            Each output element has one producer; workspace is unused on device.
+          partition:
+            token: {size: T, tile: 1}
+            head: {size: H, tile: HB}
+          worktile:
+            invariant:
+              Q: {shape: [head: HB, latent: D], dtype: bf16}
+              sparse_indices: {shape: [slot: IndexWidth], dtype: int32}
+              sparse_topk_lens: {shape: [], dtype: int32}
+              cum_seq_lens_q: {shape: [boundary: 'B+1'], dtype: int32}
+              seq_lens: {shape: [request: B], dtype: int32}
+              sinks: {shape: [head: HB], dtype: fp32}
+            iteration:
+              Gather: {shape: [slot: KC, latent: D], dtype: bf16, direction: ascending}
+          target:
+            single_tile:
+              out: {shape: [head: HB, latent: D], dtype: bf16}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: 'T*NB'
+        schedule:
+          strategy: >-
+            For block index worker_id, t*NB+hb=T*NB-1-worker_id. Reverse order
+            can move longer causal rows earlier; it does not guarantee concurrent
+            residency, balanced durations, or sharing between adjacent CTAs.
+          worktile_order:
+            - {by: token, direction: descending}
+            - {by: head, direction: descending}
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+  tile_pipeline:
+    thesis: >-
+      Four loader warps feed a two-slot KV ring while four softmax warps advance
+      independently. Two softmax warps issue disjoint QK halves and another issues
+      PV; separate completion groups permit QK of the next chunk during prior PV.
+      KV reuse waits for PV, score reuse waits for all softmax publishers, and the
+      final PV releases the ring for output staging.
+    phase:
+      attention:
+        domain:
+          c: [0, 'C(t)']
+        resource:
+          Q: {space: SMEM, member_slot_shape: [head: HB, latent: D], dtype: bf16, slot_count: 1}
+          ring:
+            space: SMEM
+            member_slot_shape: [byte: '4*KC*D']
+            dtype: uint8
+            slot_count: 1
+            view:
+              'Gather(c)': {part: {byte: ['2*(c%2)*KC*D', '2*((c%2)+1)*KC*D']}, dtype: bf16}
+              OutputStage: {part: {byte: [0, 'HB*(2*D+16)']}, dtype: bf16}
+          Prob:
+            space: SMEM
+            member_slot_shape: [head: HB, slot: KC]
+            dtype: bf16
+            slot_count: 2
+            view:
+              'Prob(c)': {slot_index: 'c%2'}
+          validity:
+            space: SMEM
+            member_slot_shape: [slot: KC]
+            dtype: uint8
+            slot_count: 2
+            view:
+              'valid(c)': {slot_index: 'c%2'}
+          tensor:
+            space: TMEM
+            member_slot_shape: [row: 128, column: 512]
+            dtype: fp32
+            slot_count: 1
+            view:
+              Acc: {part: {column: [0, 256]}}
+              'Partial(c,a)': {part: {column: ['256+(2*a+c%2)*KC', '256+(2*a+c%2+1)*KC']}}
+          control:
+            space: SMEM
+            member_slot_shape: [element: '4*HB']
+            dtype: fp32
+            slot_count: 1
+            view:
+              m_initial: {part: {element: [0, HB]}}
+              l_initial: {part: {element: [HB, '2*HB']}}
+              sink2: {part: {element: ['2*HB', '3*HB']}}
+              alpha: {part: {element: ['3*HB', '4*HB']}}
+              inv: {part: {element: ['3*HB', '4*HB']}}
+          RowState:
+            space: register
+            member_slot_shape: [copy: 2, element: '2*HB']
+            dtype: fp32
+            slot_count: 1
+            view:
+              m: {part: {element: [0, HB]}}
+              l: {part: {element: [HB, '2*HB']}}
+          ScoreWork:
+            space: register
+            member_slot_shape: [head: HB, slot: KC]
+            dtype: fp32
+            slot_count: 1
+            view:
+              Scores: {}
+              E: {}
+        role:
+          Setup:
+            info:
+              execution_mode: serial
+              member: 'warp[0:8]'
+              verb:
+                prepare: |
+                  Work is the assigned (t,hb); RG=16. Resolve request metadata and C(t),
+                  cooperatively issue Q copies, initialize online's state and acquire
+                  512 TMEM columns. m_initial and l_initial hold the initialization
+                  values; only m_initial is read into the replicated register state.
+                  Initialize the alpha slot to one; the first online update overwrites it.
+                  Q copies complete and a proxy fence plus CTA rendezvous publishes
+                  Q, control and initialized completion protocols before done.
+                  Acc is initialized by the first PV, not by reading new TMEM.
+                  Acc's two 256-column output halves occupy disjoint lane halves
+                  of columns 0..255; each Partial uses its reserved score columns
+                  with the unused lane positions left unread. All four score
+                  regions remain reserved throughout the worktile.
+                  The source's allocation-return word overlaps a live transfer
+                  barrier; the resource and dependency design here does not rely
+                  on that erroneous implementation address alias.
+            pipe: {prologue: ['prepare:Work']}
+          Loader:
+            info:
+              execution_mode: serial
+              member: 'warp[4:8]'
+              verb:
+                load:
+                  execution_mode: async
+                  meaning: |
+                    Resolve IDs, write valid(c) and issue the complete Gather(c) tile.
+                    Unless 0<A(t)-c*KC<KC and (A(t)-c*KC)%4!=0, each of the
+                    128 loaders issues one 512-byte TMA gather4 for four rows in
+                    one 64-element latent plane, using the appropriate pool map.
+                    Each issuer arms its own transaction bytes before that request.
+                    The straddling chunk instead uses batched indices and 16-byte
+                    cp.async copies with per-loader completion arrivals. Both forms
+                    transfer row-zero substitutes and fill the same swizzled tile.
+                    done guarantees all tile data has landed through the transfer
+                    completion protocol; issuing later actions need not wait for it.
+                publish: |
+                  Rendezvous all loader warps after the current gather instructions
+                  and validity stores have been issued; publish valid(c) with one
+                  CTA-level arrival and the required proxy ordering. This does not
+                  wait for Gather(c) to land. It precedes issuing the next gather.
+                finish: |
+                  Finish the loader issue loop, including its empty trailing copy
+                  commit. Transfers denotes this issue path, not a transfer drain;
+                  real transfers are retired by the QK and PV completion chain.
+            pipe:
+              steady:
+                - repeat: c
+                  steady: ['load:Gather(c)', 'publish:valid(c)']
+              epilogue: ['finish:Transfers']
+            waits_for:
+              data:
+                'load:Gather(0)': ['Setup/prepare:Work']
+              reuse:
+                'load:Gather(c+2)': ['Soft0/pv:Acc(c)']
+          Soft0:
+            info:
+              execution_mode: serial
+              member: 'warp[0:1]'
+              verb:
+                online: &online |
+                  A softmax warp owns its consecutive RG head rows. Its two
+                  lane halves hold the two 32-key halves and duplicate m,l; read
+                  both Partial(c,a), add, scale, mask and compute online's E and
+                  state updates. Exchange the two key-half maxima and sums within
+                  the warp. Publish alpha once per row and rendezvous the warp.
+                  Scores are replaced in place by E; both score partials have
+                  been read when done. E remains live until publish:Prob(c).
+                rescale: &rescale |
+                  For c=0 do not read or write Acc. For c>0 wait for the preceding
+                  PV even if every scale is one; then conditionally rescale this
+                  warp's rows of both output halves. The group predicate is uniform
+                  across the warp, and all TMEM reads and writes finish before done.
+                publish: &probability |
+                  Narrow this warp's E to its rows of Prob(c), fence the shared
+                  writes and TMEM rescale, then arrive once on probability readiness.
+                  done publishes only this warp's rows and releases its score reads.
+                  Four such arrivals jointly authorize PV and score-slot reuse.
+                pv:
+                  execution_mode: async_ordered_completion
+                  meaning: |
+                    Lane zero issues both 256-column PV output halves. Each starts
+                    from zero on chunk zero; later chunks accumulate into the
+                    rescaled Acc. Its per-issuer completion group covers all prior
+                    PV operations, independently of both QK issuers. done guarantees
+                    Acc is written and all reads of Prob(c) and Gather(c) have ended.
+                stage: &stage |
+                  After the final PV, compute finalize's inverse from the lower
+                  key-half state and sink2, share inv across the warp, read both
+                  output halves and stage this warp's BF16 Result rows. OutputStage
+                  aliases the retired KV ring with a D+8 BF16-element row pitch.
+                  done ends these TMEM reads and publishes the staged rows; there
+                  is no wait for the loader's empty tail commit before staging.
+            pipe:
+              steady:
+                - repeat: c
+                  steady: ['wait:valid(c)', 'online:Scores(c)', 'rescale:Acc(c)', 'publish:Prob(c)', 'pv:Acc(c)']
+              epilogue: ['stage:Result']
+            waits_for:
+              data:
+                'wait:valid(0)': ['Setup/prepare:Work']
+                'online:Scores(c)': ['Soft1/qk:Partial(c,0)', 'Soft2/qk:Partial(c,1)']
+                'pv:Acc(c)': ['Soft1/publish:Prob(c)', 'Soft2/publish:Prob(c)', 'Soft3/publish:Prob(c)']
+                'stage:Result': ['pv:Acc(last(c))']
+              reuse:
+                'rescale:Acc(c+1)': ['pv:Acc(c)']
+          Soft1:
+            info:
+              execution_mode: serial
+              member: 'warp[1:2]'
+              verb:
+                qk: &qk
+                  execution_mode: async
+                  meaning: |
+                    Lane zero issues the half a named by Partial(c,a), covering all
+                    HB rows and KC keys. The first product overwrites its score
+                    region. Both issuers commit separately to a two-arrival QK
+                    completion notification; both done events use that shared
+                    notification, covering the partial writes and Q/Gather reads.
+                    Neither issuer shares the PV completion group.
+                online: *online
+                rescale: *rescale
+                publish: *probability
+                stage: *stage
+            pipe:
+              steady:
+                - repeat: c
+                  steady: ['wait:valid(c)', 'qk:Partial(c,0)', 'online:Scores(c)', 'rescale:Acc(c)', 'publish:Prob(c)']
+              epilogue: ['stage:Result']
+            waits_for:
+              data:
+                'wait:valid(0)': ['Setup/prepare:Work']
+                'qk:Partial(c,0)': ['Loader/load:Gather(c)']
+                'online:Scores(c)': ['qk:Partial(c,0)', 'Soft2/qk:Partial(c,1)']
+                'stage:Result': ['Soft0/pv:Acc(last(c))']
+              reuse:
+                'qk:Partial(c+2,0)': ['Soft0/publish:Prob(c)', 'Soft1/publish:Prob(c)', 'Soft2/publish:Prob(c)', 'Soft3/publish:Prob(c)']
+                'rescale:Acc(c+1)': ['Soft0/pv:Acc(c)']
+          Soft2:
+            info:
+              execution_mode: serial
+              member: 'warp[2:3]'
+              verb:
+                qk: *qk
+                online: *online
+                rescale: *rescale
+                publish: *probability
+                stage: *stage
+            pipe:
+              steady:
+                - repeat: c
+                  steady: ['wait:valid(c)', 'qk:Partial(c,1)', 'online:Scores(c)', 'rescale:Acc(c)', 'publish:Prob(c)']
+              epilogue: ['stage:Result']
+            waits_for:
+              data:
+                'wait:valid(0)': ['Setup/prepare:Work']
+                'qk:Partial(c,1)': ['Loader/load:Gather(c)']
+                'online:Scores(c)': ['Soft1/qk:Partial(c,0)', 'qk:Partial(c,1)']
+                'stage:Result': ['Soft0/pv:Acc(last(c))']
+              reuse:
+                'qk:Partial(c+2,1)': ['Soft0/publish:Prob(c)', 'Soft1/publish:Prob(c)', 'Soft2/publish:Prob(c)', 'Soft3/publish:Prob(c)']
+                'rescale:Acc(c+1)': ['Soft0/pv:Acc(c)']
+          Soft3:
+            info:
+              execution_mode: serial
+              member: 'warp[3:4]'
+              verb:
+                online: *online
+                rescale: *rescale
+                publish: *probability
+                stage: *stage
+            pipe:
+              steady:
+                - repeat: c
+                  steady: ['wait:valid(c)', 'online:Scores(c)', 'rescale:Acc(c)', 'publish:Prob(c)']
+              epilogue: ['stage:Result']
+            waits_for:
+              data:
+                'wait:valid(0)': ['Setup/prepare:Work']
+                'online:Scores(c)': ['Soft1/qk:Partial(c,0)', 'Soft2/qk:Partial(c,1)']
+                'stage:Result': ['Soft0/pv:Acc(last(c))']
+              reuse:
+                'rescale:Acc(c+1)': ['Soft0/pv:Acc(c)']
+          Finish:
+            info:
+              execution_mode: serial
+              member: 'warp[0:8]'
+              verb:
+                store: |
+                  Rejoin the same eight warps at a CTA barrier after all Result rows
+                  are staged. Cooperatively copy complete contiguous output rows
+                  from OutputStage into out. TMEM may be deallocated by its owner
+                  after that barrier while other warps copy, since copy-out no
+                  longer reads TMEM. Global stores can remain pending until
+                  attention.kernel_done. No worker takes another worktile.
+            pipe: {epilogue: ['store:Result']}
+            waits_for:
+              data:
+                'store:Result': ['Soft0/stage:Result', 'Soft1/stage:Result', 'Soft2/stage:Result', 'Soft3/stage:Result', 'Loader/finish:Transfers']
+realization:
+  require:
+    - item: ['design.tile_pipeline::attention.Soft0', 'design.tile_pipeline::attention.Soft1', 'design.tile_pipeline::attention.Soft2', 'design.tile_pipeline::attention.Soft3']
+      choice: >-
+        Bind the matrix products to tcgen05.mma.cta_group::1 with BF16 operands
+        and FP32 accumulators, using per-issuer tcgen05.commit notifications.
+        Use warp-convergent tcgen05.ld/st and their completion waits; the score
+        load uses the 16x32bx2 form, while accumulator access uses 32x32b.
+      reason: >-
+        Independent issuer groups preserve QK/PV overlap; the score-load shape
+        supplies both key halves, and convergent accumulator access is required
+        even when only some rows need rescaling.
+    - item: design.tile_pipeline::attention.Loader
+      choice: >-
+        Build each pool's two-dimensional BF16 CUtensorMap with row stride 2*D,
+        a 64-element-wide box and SWIZZLE_128B; pass maps by value to the kernel.
+        Bind gather4 completion to mbarrier transaction bytes and the straddling
+        chunk's cp.async completion to cp.async.mbarrier.arrive. Preserve the
+        separate validity publication and data-landing notifications.
+      reason: >-
+        Both loaders must feed the same shared operand layout while validity
+        becomes visible independently of transfer completion. Captured maps must
+        remain bound to the pool pointers used by that graph.
+    - item: design.work_schedule::flow
+      choice: |
+        Model.forward caches workspace selection by argument identity, using
+        private scratch for a non-CUDA or smaller-than-32-MiB buffer. P.ws_bytes=0
+        here, so dsv4_run allocates no larger workspace. Submit on the current
+        CUDA stream. The single-entry graph cache keys tensor pointers, dimensions,
+        scales, the resolved plan and extension switches. A new eligible key
+        dispatches directly; repeating it synchronizes the caller stream before
+        private-stream capture, instantiation and replay. An executable-key hit
+        replays without that synchronization. Capture records this one kernel;
+        no numerical answers are cached. Begin-capture failure returns before
+        dispatch; failed capture or instantiation executes no recorded work.
+        Graph failure disables graph use and falls through to direct dispatch,
+        without creating an additional completion guarantee.
+      reason: >-
+        Workspace binding feeds selection despite unused device scratch. Graph
+        capture and replay preserve the single-kernel computation and recorded
+        tensor-map bindings while changing the host submission path.

@@ -1,0 +1,27 @@
+--- fused_d256_tma
+
++++ fused_d256_cp
+
+@@ -41,3 +41,3 @@
+
+ tile_pipeline.phase.main.resource.Key.slot_count=3
+-tile_pipeline.phase.main.resource.Key.view.Key(g)={"slot_index":"(g-cLo)%3"}
++tile_pipeline.phase.main.resource.Key.view.Key(g)={"slot_index":"(g-cLo)%2"}
+ tile_pipeline.phase.main.resource.Value.space="SMEM"
+@@ -75,3 +75,3 @@
+
+ tile_pipeline.phase.main.resource.TensorMemory.view.UnitScale.dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale(g).part.column=["416+8*(g%3)","424+8*(g%3)"]
++tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale(g).part.column=["416+8*(g%2)","424+8*(g%2)"]
+ tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale(g).dtype="uint8"
+@@ -96,5 +96,5 @@
+
+ tile_pipeline.phase.main.role.Main.info.member="warp[0:8]"
+-tile_pipeline.phase.main.role.Main.info.verb={"setup":"TEXT","prepare":"TEXT","prime":"TEXT","start":"TEXT","ahead":"TEXT","read_score":"TEXT","retire":"TEXT","land":"TEXT","exchange":"TEXT","advance":"TEXT","pv":"TEXT","drain":"TEXT","fold":"TEXT","write":"TEXT","finish":"TEXT"}
+-tile_pipeline.phase.main.role.Main.pipe.prologue=["setup:Local","prepare:Query","prime:Inputs","start:FirstQK"]
+-tile_pipeline.phase.main.role.Main.pipe.steady=[{"repeat":"g","steady":["ahead:Inputs(g)","read_score:Score(g)","retire:PreviousPV(g)","land:Operands(g)","exchange:GroupMax(g)","advance:StateProb(g)","pv:NumState(g)"]}]
+-tile_pipeline.phase.main.role.Main.pipe.epilogue=["drain:LastPV","fold:DenFinal","write:Output","finish:Local"]
++tile_pipeline.phase.main.role.Main.info.verb={"setup":"TEXT","prepare":"TEXT","prime":"TEXT","ahead":"TEXT","qk":"TEXT","exchange":"TEXT","advance":"TEXT","pv":"TEXT","fold":"TEXT","write":"TEXT","finish":"TEXT"}
++tile_pipeline.phase.main.role.Main.pipe.prologue=["setup:Local","prepare:Query","prime:Inputs"]
++tile_pipeline.phase.main.role.Main.pipe.steady=[{"repeat":"g","steady":["ahead:Inputs(g)","qk:Score(g)","exchange:GroupMax(g)","advance:StateProb(g)","pv:NumState(g)"]}]
++tile_pipeline.phase.main.role.Main.pipe.epilogue=["fold:DenFinal","write:Output","finish:Local"]

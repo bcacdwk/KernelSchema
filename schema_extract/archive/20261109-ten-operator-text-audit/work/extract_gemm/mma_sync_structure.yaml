@@ -1,0 +1,273 @@
+meta_data:
+  name: fp8_scaled_grouped_gemm
+  describe: '[128]'
+  source: SchemaExtractSource_2c7b5a74c0b3@497a8077ac54ed1431bc00772871337f9a309852:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate/solution.py::Model.forward
+  version: 1
+  dispatch:
+    id: mma_sync
+    parent: root
+    when: '[050]'
+design:
+  math_reshape:
+    thesis: '[125]'
+    rewrite:
+    - step: '[120]'
+      name: '[117]'
+      math: '[091]'
+      arithmetic:
+        accumulate: '[055]'
+      symbol:
+        Bm:
+          meaning: '[107]'
+          binding: bind:design.work_schedule::Bm
+        Bn:
+          meaning: '[106]'
+          binding: bind:design.work_schedule::Bn
+        A_tile:
+          meaning: '[116]'
+          shape:
+          - row: Bm
+          - reduction: ScaleK
+          dtype: fp8_e4m3fn
+        B_tile:
+          meaning: '[108]'
+          shape:
+          - column: Bn
+          - reduction: ScaleK
+          dtype: fp8_e4m3fn
+        Dot:
+          meaning: '[111]'
+          shape:
+          - row: Bm
+          - column: Bn
+          dtype: fp32
+          retention: keep_value (g,x,y,kb)
+    - step: '[121]'
+      name: '[118]'
+      math: '[103]'
+      symbol:
+        Scale:
+          meaning: '[110]'
+          shape:
+          - row: Bm
+          dtype: fp32
+        F:
+          meaning: '[104]'
+          shape:
+          - row: Bm
+          - column: Bn
+          dtype: fp32
+          retention: carry_forward (g,x,y); kb=-1..KB-1
+    ledger:
+      baseline: '[074]'
+      matmul:
+      - item: '[078]'
+        change: '[062]'
+        by:
+        - '[120]'
+      vector:
+      - item: '[059]'
+        change: '[088]'
+        by:
+        - '[121]'
+      footprint:
+      - item: '[081]'
+        change: '[061]'
+        by:
+        - '[120]'
+        - '[121]'
+      error:
+      - item: '[079]'
+        change: '[083]'
+        by:
+        - '[120]'
+        - '[121]'
+  work_schedule:
+    thesis: '[230]'
+    flow:
+      launch:
+      - phase:
+        - main
+    phase:
+      main:
+        describe: '[206]'
+        decomposition:
+          strategy: '[216]'
+          partition:
+            work:
+              size: W
+              tile: 1
+          worktile:
+            invariant:
+              m_indptr:
+                shape:
+                - boundary: E+1
+                dtype: ref:contract.algorithm_requirement::m_indptr.dtype
+            iteration:
+              A_tile:
+                shape:
+                - row: Bm
+                - reduction: ScaleK
+                dtype: ref:design.math_reshape::A_tile.dtype
+                direction: ascending
+              B_tile:
+                shape:
+                - column: Bn
+                - reduction: ScaleK
+                dtype: ref:design.math_reshape::B_tile.dtype
+                direction: ascending
+              a_scale:
+                shape:
+                - k_block: 1
+                - row: Bm
+                dtype: ref:contract.algorithm_requirement::a_scale.dtype
+                direction: ascending
+              b_scale:
+                shape:
+                - k_block: 1
+                - n_block: 1
+                dtype: ref:contract.algorithm_requirement::b_scale.dtype
+                direction: ascending
+          target:
+            single_tile:
+              out:
+                shape:
+                - row: V
+                - column: Bn
+                dtype: ref:contract.algorithm_requirement::out.dtype
+        mapping:
+          strategy: '[224]'
+          worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: C
+        schedule:
+          strategy: '[209]'
+          worktile_order:
+          - by: work
+            direction: ascending
+          worker_assignment:
+            preassigned:
+              start: worker_id
+              step: worker_count
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: '[129]'
+    phase:
+      main:
+        domain:
+          t: worktile
+          kb:
+          - 0
+          - KB
+          p:
+          - 0
+          - KB+2
+        resource:
+          Schedule:
+            space: SMEM
+            member_slot_shape:
+            - array: 2
+            - boundary: E+1
+            dtype: int32
+            slot_count: 1
+          InputRing:
+            space: SMEM
+            member_slot_shape:
+            - element: (Bm+Bn)*ScaleK+4*Bm
+            dtype: fp8_e4m3fn
+            slot_count: 3
+            view:
+              Stage(t,p):
+                slot_index: p%3
+              A(t,p):
+                slot_index: p%3
+                part:
+                  element:
+                  - 0
+                  - Bm*ScaleK
+              B(t,p):
+                slot_index: p%3
+                part:
+                  element:
+                  - Bm*ScaleK
+                  - (Bm+Bn)*ScaleK
+              AS(t,p):
+                slot_index: p%3
+                part:
+                  element:
+                  - (Bm+Bn)*ScaleK
+                  - (Bm+Bn)*ScaleK+4*Bm
+                dtype: fp32
+              Output(t):
+                slot_index: 0
+                dtype: bf16
+          Dot:
+            space: register
+            member_slot_shape:
+            - row: Bm
+            - column: Bn
+            dtype: ref:design.math_reshape::Dot.dtype
+            slot_count: 1
+          F:
+            space: register
+            member_slot_shape:
+            - row: Bm
+            - column: Bn
+            dtype: ref:design.math_reshape::F.dtype
+            slot_count: 1
+            view:
+              F(t): {}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:8]
+              verb:
+                initialize: '[159]'
+                prepare: '[144]'
+                load:
+                  execution_mode: async
+                  meaning: '[142]'
+                acquire: '[172]'
+                compute: '[160]'
+                drain: '[140]'
+                publish: '[136]'
+                store: '[152]'
+            pipe:
+              prologue:
+              - initialize:Schedule
+              repeat: t
+              steady:
+              - prepare:Work(t)
+              - repeat: p[0:2]
+                steady:
+                - load:Stage(t,p)
+              - zero:F(t)
+              - repeat: kb
+                steady:
+                - acquire:Ready(t,kb)
+                - load:Stage(t,kb+2)
+                - compute:Block(t,kb)
+              - drain:Copies(t)
+              - publish:Output(t)
+              - store:Output(t)
+            waits_for:
+              data:
+                acquire:Ready(t,kb)@done:
+                - load:Stage(t,kb)
+                drain:Copies(t)@done:
+                - load:Stage(t,KB)
+                - load:Stage(t,KB+1)
+realization:
+  require:
+  - item: design.tile_pipeline::main.Main
+    choice: '[185]'
+    reason: '[202]'
+  - item: design.tile_pipeline::main.Dot
+    choice: '[180]'
+    reason: '[199]'
+  - item: design.tile_pipeline::main.InputRing
+    choice: '[188]'
+    reason: '[197]'

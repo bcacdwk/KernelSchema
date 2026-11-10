@@ -1,0 +1,1199 @@
+{
+  "schema_version": 1,
+  "review": "boundary_review",
+  "language": "zh-CN",
+  "scope": "既有182条finding全量检索后对调用/外部对象/全局backing/host状态机制的定向复核；非重跑审计",
+  "date": "2026-11-10",
+  "decision_semantics": {
+    "confirmed_structural_gap": "相关核心关系没有现行显式结构端点；不证明必须新增固定字段。统一边界约定是否足够仍待比较，读取necessity_axis与new_fixed_field_required。",
+    "shared_semantic_definition": "存在不可删语义，优先短共享定义；没有证明固定新字段必要",
+    "existing_structure": "现有字段、公式、事件与已定义语义足以表达目标关系",
+    "representation_cost": "能表达但局部/跨文件复用冗长，不等价于缺执行机制",
+    "scope_decision": "当前缺结构关系已识别，纳入Pipeline IR核心或扩大边界的必要性需另判",
+    "source_or_uncertain": "来源限制、原表述问题或适用域证据不足；不表示所有源事实未知",
+    "no_gap": "相关finding是重复或非核心，不支持新结构"
+  },
+  "two_axis_note": "carrier_axis与necessity_axis独立；没有字段不等于必需字段。binding可引用整个外部对象，retention以逻辑实例定义，二者均不自动建立物理owner或外部事件关系。",
+  "recommended_minimal_mechanism": {
+    "name": "external_event_boundary",
+    "support": [
+      "extract_sparse-F05",
+      "extract_mla-F18"
+    ],
+    "relations": [
+      "caller_prior -> probe.start",
+      "caller_prior -> prefix.start",
+      "probe.kernel_done -> remainder.start",
+      "{prefix.kernel_done,remainder.kernel_done} -> caller_subsequent",
+      "Geo_upload_ready(version) -> main.start"
+    ],
+    "not_current_yaml": true,
+    "excluded_expansion": [
+      "完整host service DSL",
+      "自动将所有缓存建状态机",
+      "将全局物理owner误归retention",
+      "将源码race修成新generation保证"
+    ],
+    "status": "compare_shared_boundary_convention_and_explicit_endpoints",
+    "new_fixed_field_required": "not_proven",
+    "alternatives": [
+      {
+        "approach": "shared_boundary_convention",
+        "description": "统一请求输入/caller前序与输出/caller后继的异步排序，并统一外部Geo供给在所属grid启动前就绪；不引入内部额外顺序或CPU阻塞。"
+      },
+      {
+        "approach": "explicit_external_endpoints",
+        "description": "为实例登记可引用外部端点，绑定已有输入/输出和grid启动/完成关系；比较可组合性与新增结构成本。"
+      }
+    ]
+  },
+  "findings": [
+    {
+      "finding_id": "template_gdn_prefill-F03",
+      "operator": "template_gdn_prefill",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "missing_field_or_event",
+      "decision": "shared_semantic_definition",
+      "mechanism_groups": [
+        "external_api_identity"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": "partial",
+        "note": "对象同一性、全覆盖写集确无专用关系字段；DOC1:41 已明确由 output.meaning 写原地结果。应统一对象/存储/值三个层次的短语义，不能从缺 alias 字段直接推出必须扩语言。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "API边界必需；不是独立GPU流水线机制",
+        "new_structure_needed": "no_fixed_field_proven"
+      },
+      "supporting_reason": "对象同一性、全覆盖写集确无专用关系字段；DOC1:41 已明确由 output.meaning 写原地结果。应统一对象/存储/值三个层次的短语义，不能从缺 alias 字段直接推出必须扩语言。",
+      "minimum_fact_from_audit": "O is output，S_final is output_state；两个原buffer完整覆盖，其他输入不变。",
+      "deletion_counterexample_from_audit": "删掉别名/副作用文字后，返回新分配同值张量且不写原buffer与原地写回都满足剩余值公式。NaN初值也可能被错误累加。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:26",
+        "inputs/template_gdn_prefill/root.yaml:29",
+        "inputs/template_gdn_prefill/root.yaml:43",
+        "rules/schema_docs/1.contract.algorithm_requirement.md:38",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:812"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "O is output，S_final is output_state；两个原buffer完整覆盖，其他输入不变。",
+      "deletion_counterexample": "删掉别名/副作用文字后，返回新分配同值张量且不写原buffer与原地写回都满足剩余值公式。NaN初值也可能被错误累加。"
+    },
+    {
+      "finding_id": "template_fa4_prefill-F01",
+      "operator": "template_fa4_prefill",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "open_semantics",
+      "decision": "shared_semantic_definition",
+      "mechanism_groups": [
+        "external_api_identity"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": "partial",
+        "note": "API 原地身份与输入布局要保留；同对象和同属性不同。可按 DOC1 的既有 meaning 入口短定义，尚无新增结构必要性证据。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "API边界必需；不是独立GPU流水线机制",
+        "new_structure_needed": "no_fixed_field_proven"
+      },
+      "supporting_reason": "API 原地身份与输入布局要保留；同对象和同属性不同。可按 DOC1 的既有 meaning 入口短定义，尚无新增结构必要性证据。",
+      "minimum_fact_from_audit": "output与out是同一对象；out_after是out更新后的内容；只out可观察变异。",
+      "deletion_counterexample_from_audit": "删掉out_after meaning的原地身份，仍可把out_after解释为独立新结果并另行返回out；删完整ABI关系允许非连续或不同页单位。单删output meaning仍有compute身份句，所以它不是独占核心。",
+      "evidence": [
+        "inputs/template_fa4_prefill/root.yaml:42",
+        "inputs/template_fa4_prefill/root.yaml:57",
+        "inputs/template_fa4_prefill/root.yaml:38",
+        "inputs/template_fa4_prefill/root.yaml:39",
+        "inputs/template_fa4_prefill/root.yaml:36",
+        "inputs/template_fa4_prefill/root.yaml:24",
+        "rules/schema_docs/1.contract.algorithm_requirement.md:39",
+        "rules/schema_docs/1.contract.algorithm_requirement.md:135",
+        "work/template_fa4_prefill/solution.py:56",
+        "work/template_fa4_prefill/reference.py:112"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "output与out是同一对象；out_after是out更新后的内容；只out可观察变异。",
+      "deletion_counterexample": "删掉out_after meaning的原地身份，仍可把out_after解释为独立新结果并另行返回out；删完整ABI关系允许非连续或不同页单位。单删output meaning仍有compute身份句，所以它不是独占核心。"
+    },
+    {
+      "finding_id": "template_fa4_decode-F13",
+      "operator": "template_fa4_decode",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "open_semantics",
+      "decision": "shared_semantic_definition",
+      "mechanism_groups": [
+        "external_api_identity"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": "partial",
+        "note": "对象关系靠短定义；覆盖旧值、None 分支、访问域分别已有公式/range/nullable 或明确定义的 dtype。混合条目不能整体叫缺字段。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "API边界必需；不是独立GPU流水线机制",
+        "new_structure_needed": "no_fixed_field_proven"
+      },
+      "supporting_reason": "对象关系靠短定义；覆盖旧值、None 分支、访问域分别已有公式/range/nullable 或明确定义的 dtype。混合条目不能整体叫缺字段。",
+      "minimum_fact_from_audit": "返回 out 原对象、覆盖而不读旧内容；sentinel 必传；首轮访问 unused 合法表项，score 可见性独立。",
+      "deletion_counterexample_from_audit": "仅同 shape/dtype 容许分配另一个输出、只写 out_after 而不返 out，或将 None 视为可省略参数；这些都会改变 ABI。",
+      "evidence": [
+        "inputs/template_fa4_decode/root.yaml:58",
+        "inputs/template_fa4_decode/root.yaml:45",
+        "inputs/template_fa4_decode/root.yaml:35",
+        "inputs/template_fa4_decode/root.yaml:36",
+        "inputs/template_fa4_decode/root.yaml:32",
+        "inputs/template_fa4_decode/root.yaml:37",
+        "inputs/template_fa4_decode/root.yaml:41",
+        "inputs/template_fa4_decode/root.yaml:42",
+        "inputs/template_fa4_decode/root.yaml:39",
+        "inputs/template_fa4_decode/root.yaml:28",
+        "inputs/template_fa4_decode/root.yaml:30",
+        "inputs/template_fa4_decode/root.yaml:72",
+        "inputs/template_fa4_decode/q1_direct.yaml:18",
+        "inputs/template_fa4_decode/q4_direct.yaml:18",
+        "inputs/template_fa4_decode/q1_cluster.yaml:22",
+        "inputs/template_fa4_decode/q1_global.yaml:22",
+        "inputs/template_fa4_decode/q4_cluster.yaml:21",
+        "inputs/template_fa4_decode/q4_compact.yaml:22",
+        "inputs/template_fa4_decode/root.yaml:99",
+        "inputs/template_fa4_decode/q1_cluster.yaml:86",
+        "inputs/template_fa4_decode/q4_cluster.yaml:85",
+        "rules/schema_docs/1.contract.algorithm_requirement.md:56",
+        "rules/schema_docs/1.contract.algorithm_requirement.md:240",
+        "work/template_fa4_decode/source_reference.py:72",
+        "work/template_fa4_decode/source_operator.py:599"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "返回 out 原对象、覆盖而不读旧内容；sentinel 必传；首轮访问 unused 合法表项，score 可见性独立。",
+      "deletion_counterexample": "仅同 shape/dtype 容许分配另一个输出、只写 out_after 而不返 out，或将 None 视为可省略参数；这些都会改变 ABI。"
+    },
+    {
+      "finding_id": "template_qsa_prefill-F01",
+      "operator": "template_qsa_prefill",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "open_semantics",
+      "decision": "shared_semantic_definition",
+      "mechanism_groups": [
+        "external_api_identity"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": "partial",
+        "note": "O/out 同对象及 K/V 共 backing、stride/base delta 各有不同含义；返回包装用短定义，决定访存的定量 ABI 关系保留。不存在仅由 ref 属性恢复身份的结构替代。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "API边界必需；不是独立GPU流水线机制",
+        "new_structure_needed": "no_fixed_field_proven"
+      },
+      "supporting_reason": "O/out 同对象及 K/V 共 backing、stride/base delta 各有不同含义；返回包装用短定义，决定访存的定量 ABI 关系保留。不存在仅由 ref 属性恢复身份的结构替代。",
+      "minimum_fact_from_audit": "O/out 同对象、K/V 共 allocation 与 stride/base delta、out 完整覆盖、use_prefill_config 忽略。",
+      "deletion_counterexample_from_audit": "只保留 shape/dtype/输出数值时，可返回新 tensor 而未按要求返回 out；独立 K/V allocations 同 shape 也满足余下结构。",
+      "evidence": [
+        "inputs/template_qsa_prefill/root.yaml:20",
+        "inputs/template_qsa_prefill/root.yaml:37",
+        "rules/schema_docs/1.contract.algorithm_requirement.md:47",
+        "rules/schema_docs/0.common.md:70",
+        "work/template_qsa_prefill/operator.py:49"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "O/out 同对象、K/V 共 allocation 与 stride/base delta、out 完整覆盖、use_prefill_config 忽略。",
+      "deletion_counterexample": "只保留 shape/dtype/输出数值时，可返回新 tensor 而未按要求返回 out；独立 K/V allocations 同 shape 也满足余下结构。"
+    },
+    {
+      "finding_id": "extract_gdn-F01",
+      "operator": "extract_gdn",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "open_semantics",
+      "decision": "shared_semantic_definition",
+      "mechanism_groups": [
+        "external_api_identity"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": "partial",
+        "note": "fresh Out 与 caller CoreWritten 前缀是不同外部结果；必须保留写域和不别名。input/output/compute 的短统一定义足够承载 API 要求，暂不加专属 alias/write-set 字段。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "API边界必需；不是独立GPU流水线机制",
+        "new_structure_needed": "no_fixed_field_proven"
+      },
+      "supporting_reason": "fresh Out 与 caller CoreWritten 前缀是不同外部结果；必须保留写域和不别名。input/output/compute 的短统一定义足够承载 API 要求，暂不加专属 alias/write-set 字段。",
+      "minimum_fact_from_audit": "CoreWritten是副作用而非第三个返回值；Out不alias core，输入初态不改，prefix外字节保持。",
+      "deletion_counterexample_from_audit": "删掉output_and_side_effect的存储条件后，返回core的视图或覆盖其整个capacity均可满足剩余shape/dtype/nullable及Out数值公式。",
+      "evidence": [
+        "inputs/extract_gdn/root.yaml:122",
+        "inputs/extract_gdn/root.yaml:73",
+        "rules/schema_docs/1.contract.algorithm_requirement.md:40",
+        "work/extract_gdn/reference.py:41",
+        "work/extract_gdn/input.py:248"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "CoreWritten是副作用而非第三个返回值；Out不alias core，输入初态不改，prefix外字节保持。",
+      "deletion_counterexample": "删掉output_and_side_effect的存储条件后，返回core的视图或覆盖其整个capacity均可满足剩余shape/dtype/nullable及Out数值公式。"
+    },
+    {
+      "finding_id": "extract_sparse-F15",
+      "operator": "extract_sparse",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "open_semantics",
+      "decision": "shared_semantic_definition",
+      "mechanism_groups": [
+        "external_api_identity"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": "partial",
+        "note": "只改 output_buffer、同对象返回和 scratch 无最终数值不能删；DOC1 规定的 meaning/compute 短定义可集中保留，未证明需新增固定字段。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "API边界必需；不是独立GPU流水线机制",
+        "new_structure_needed": "no_fixed_field_proven"
+      },
+      "supporting_reason": "只改 output_buffer、同对象返回和 scratch 无最终数值不能删；DOC1 规定的 meaning/compute 短定义可集中保留，未证明需新增固定字段。",
+      "minimum_fact_from_audit": "out 与 output_buffer 同一对象，其他 input storage 保持；空 J 直接写零、pool alias 不去重。",
+      "deletion_counterexample_from_audit": "新建同值 BF16 tensor 返回而不覆盖 supplied output，满足单纯 out 公式却违反调用者观察；把相同池指针当同一个集合去重也改变 softmax multiplicity。",
+      "evidence": [
+        "inputs/extract_sparse/root.yaml:42",
+        "inputs/extract_sparse/root.yaml:60",
+        "work/extract_sparse/problem_reference.py:81",
+        "work/extract_sparse/problem_metadata.json:17",
+        "rules/schema_docs/1.contract.algorithm_requirement.md:31"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "out 与 output_buffer 同一对象，其他 input storage 保持；空 J 直接写零、pool alias 不去重。",
+      "deletion_counterexample": "新建同值 BF16 tensor 返回而不覆盖 supplied output，满足单纯 out 公式却违反调用者观察；把相同池指针当同一个集合去重也改变 softmax multiplicity。"
+    },
+    {
+      "finding_id": "extract_moe-F04",
+      "operator": "extract_moe",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "open_semantics",
+      "decision": "shared_semantic_definition",
+      "mechanism_groups": [
+        "external_api_identity"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": "partial",
+        "note": "把输出身份部分与 route 数值规则分开：前者需要短 API 定义，后者已有 compute.math、cast 和分支结构。不能整体升级为量化或副作用语言缺口。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "API边界必需；不是独立GPU流水线机制",
+        "new_structure_needed": "no_fixed_field_proven"
+      },
+      "supporting_reason": "把输出身份部分与 route 数值规则分开：前者需要短 API 定义，后者已有 compute.math、cast 和分支结构。不能整体升级为量化或副作用语言缺口。",
+      "minimum_fact_from_audit": "无效route不求值、BF16 route舍入后加权、输出别名/全覆盖写入、TP外部合并范围。",
+      "deletion_counterexample_from_audit": "只保留dtype/shape不能决定route舍入点、guard外写入或返回新tensor是否允许。",
+      "evidence": [
+        "inputs/extract_moe/root.yaml:79",
+        "inputs/extract_moe/root.yaml:163",
+        "rules/schema_docs/1.contract.algorithm_requirement.md:45",
+        "work/extract_moe/source_reference.py:69"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "无效route不求值、BF16 route舍入后加权、输出别名/全覆盖写入、TP外部合并范围。",
+      "deletion_counterexample": "只保留dtype/shape不能决定route舍入点、guard外写入或返回新tensor是否允许。"
+    },
+    {
+      "finding_id": "extract_mla-F03",
+      "operator": "extract_mla",
+      "original_kind": "redundancy",
+      "original_gap_kind": "open_semantics",
+      "decision": "no_gap",
+      "mechanism_groups": [
+        "external_api_identity"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "该 finding 指 meaning 与 compute[3] 的本地重复；缩短 meaning 不丢唯一 API 事实，不作为缺口。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "核心存储边界在compute保留",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "该 finding 指 meaning 与 compute[3] 的本地重复；缩短 meaning 不丢唯一 API 事实，不作为缺口。",
+      "minimum_fact_from_audit": "原位覆盖全部逻辑输出、保护其他输入/guard、每次使用当前输入。",
+      "deletion_counterexample_from_audit": "删掉compute存储约束可让kernel读取旧Out进行累加或越界写guard；仅换Python返回包装不算核心反例。",
+      "evidence": [
+        "inputs/extract_mla/root.yaml:57",
+        "inputs/extract_mla/root.yaml:105",
+        "inputs/extract_mla/root.yaml:54",
+        "inputs/extract_mla/root.yaml:53",
+        "inputs/extract_mla/root.yaml:38",
+        "inputs/extract_mla/root.yaml:40",
+        "inputs/extract_mla/root.yaml:39"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "原位覆盖全部逻辑输出、保护其他输入/guard、每次使用当前输入。",
+      "deletion_counterexample": "删掉compute存储约束可让kernel读取旧Out进行累加或越界写guard；仅换Python返回包装不算核心反例。"
+    },
+    {
+      "finding_id": "extract_fmha-F08",
+      "operator": "extract_fmha",
+      "original_kind": "redundancy",
+      "original_gap_kind": "none",
+      "decision": "no_gap",
+      "mechanism_groups": [
+        "external_api_identity"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "子 math 尾部不读旧目标/返回 None 已被 root 唯一外部定义覆盖，属于可删重复。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "root Contract已给出外部边界",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "子 math 尾部不读旧目标/返回 None 已被 root 唯一外部定义覆盖，属于可删重复。",
+      "minimum_fact_from_audit": "每份实际输出公式、nullable分支、源缺陷和中间物化不受候选删句影响。",
+      "deletion_counterexample_from_audit": "候选不删任何数值式、空分支或store动作，剩余Contract已排除读旧目标和替换调用方存储。",
+      "evidence": [
+        "inputs/extract_fmha/root.yaml:101",
+        "rules/schema_docs/0.common.md:123"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "每份实际输出公式、nullable分支、源缺陷和中间物化不受候选删句影响。",
+      "deletion_counterexample": "候选不删任何数值式、空分支或store动作，剩余Contract已排除读旧目标和替换调用方存储。"
+    },
+    {
+      "finding_id": "template_fa4_prefill-F02",
+      "operator": "template_fa4_prefill",
+      "original_kind": "noncore",
+      "original_gap_kind": "none",
+      "decision": "no_gap",
+      "mechanism_groups": [
+        "unused_workspace"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "源路径删除未使用 workspace 参数，清零与非零都不参与工作；保留 ABI 参数即可，不能新增初始化机制。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "非核心初值说明",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "源路径删除未使用 workspace 参数，清零与非零都不参与工作；保留 ABI 参数即可，不能新增初始化机制。",
+      "minimum_fact_from_audit": "仅scratch ABI对象身份需保留。",
+      "deletion_counterexample_from_audit": "非零workspace与零workspace均被solution/reference删除且不参与计算，数值、提交、资源与主要性能不变。",
+      "evidence": [
+        "inputs/template_fa4_prefill/root.yaml:23",
+        "work/template_fa4_prefill/solution.py:57",
+        "work/template_fa4_prefill/reference.py:31"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "仅scratch ABI对象身份需保留。",
+      "deletion_counterexample": "非零workspace与零workspace均被solution/reference删除且不参与计算，数值、提交、资源与主要性能不变。"
+    },
+    {
+      "finding_id": "template_fa4_prefill-F21",
+      "operator": "template_fa4_prefill",
+      "original_kind": "source_limitation",
+      "original_gap_kind": "none",
+      "decision": "source_or_uncertain",
+      "mechanism_groups": [
+        "source_scope"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "本模板实际调用私有入口，未调用公有 fastpath cache；不能用不在调用链的缓存扩展本任务。误差/工具链未知仍是来源限制。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "来源和覆盖范围",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "本模板实际调用私有入口，未调用公有 fastpath cache；不能用不在调用链的缓存扩展本任务。误差/工具链未知仍是来源限制。",
+      "minimum_fact_from_audit": "默认环境前提；缺快速数学独立界及compiler/driver/wiki绑定；计时/ABI源路径固定。",
+      "deletion_counterexample_from_audit": "删unknown或默认环境限定会把未经审阅的近似/override路线纳入已证设计。",
+      "evidence": [
+        "inputs/template_fa4_prefill/root.yaml:42",
+        "inputs/template_fa4_prefill/root.yaml:67",
+        "inputs/template_fa4_prefill/root.yaml:82",
+        "inputs/template_fa4_prefill/splitkv_dual_load.yaml:81",
+        "inputs/template_fa4_prefill/splitkv_joint_load.yaml:81",
+        "inputs/template_fa4_prefill/packed_persistent.yaml:58",
+        "inputs/template_fa4_prefill/rect_joint_load.yaml:58",
+        "inputs/template_fa4_prefill/root.yaml:133",
+        "inputs/template_fa4_prefill/single_persistent_dual_load.yaml:58",
+        "inputs/template_fa4_prefill/single_persistent_joint_load.yaml:58",
+        "inputs/template_fa4_prefill/small_persistent_lpt.yaml:61",
+        "inputs/template_fa4_prefill/small_persistent_shared_rescale.yaml:61",
+        "inputs/template_fa4_prefill/small_static_lpt.yaml:61",
+        "inputs/template_fa4_prefill/small_static_shared_rescale.yaml:61",
+        "inputs/template_fa4_prefill/splitkv_dual_load.yaml:64",
+        "inputs/template_fa4_prefill/splitkv_joint_load.yaml:64",
+        "inputs/template_fa4_prefill/small_persistent_shared_rescale.yaml:9",
+        "inputs/template_fa4_prefill/small_persistent_lpt.yaml:9",
+        "inputs/template_fa4_prefill/small_static_shared_rescale.yaml:9",
+        "inputs/template_fa4_prefill/splitkv_dual_load.yaml:9",
+        "inputs/template_fa4_prefill/single_persistent_dual_load.yaml:9",
+        "inputs/template_fa4_prefill/rect_joint_load.yaml:9",
+        "inputs/template_fa4_prefill/root.yaml:8",
+        "inputs/template_fa4_prefill/splitkv_joint_load.yaml:9",
+        "inputs/template_fa4_prefill/packed_persistent.yaml:9",
+        "inputs/template_fa4_prefill/single_persistent_joint_load.yaml:9",
+        "inputs/template_fa4_prefill/small_static_lpt.yaml:9",
+        "work/template_fa4_prefill/solution.py:34",
+        "work/template_fa4_prefill/solution.py:94",
+        "work/template_fa4_prefill/interface.py:1740",
+        "work/template_fa4_prefill/interface.py:3748",
+        "rules/schema_template/examples/README.md:69"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "默认环境前提；缺快速数学独立界及compiler/driver/wiki绑定；计时/ABI源路径固定。",
+      "deletion_counterexample": "删unknown或默认环境限定会把未经审阅的近似/override路线纳入已证设计。"
+    },
+    {
+      "finding_id": "extract_gdn-F16",
+      "operator": "extract_gdn",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "missing_field_or_event",
+      "decision": "scope_decision",
+      "mechanism_groups": [
+        "global_backing",
+        "cross_invocation_owner",
+        "host_cache"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": true,
+        "note": "缺载体针对地址/owner/跨请求物理关系，非数学逻辑保留或名称不可表达。l2norm稳定norm缓存的成本例不在本批Contract false域内。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "物理共享关系可能核心；allocator容量与并发域需分项判断",
+        "new_structure_needed": "conditional"
+      },
+      "supporting_reason": "DOC4:341明确global不规定地址或owner，局部resource不能直接充任process分配。ref可定位已定义整个外部对象，retention可表达逻辑实例；未提供统一物理view/owner关系。当前每次重分配的一阶影响与允许并发域证据不足；无设备键LC可用when短定义，不应整体升级。",
+      "minimum_fact_from_audit": "workspace不足或设备改变才分配；direct-QK仍保留未用图像容量；perm在尾pad，seg summaries随后；仅同stream顺序可支持复用，无跨stream锁/事件；L2缓存无设备键。",
+      "deletion_counterexample_from_audit": "删掉这些文字后，每调用重分配、跨stream复用同一workspace、或查询本设备L2均满足相同raw flow/shape，但有不同主要开销、并发冲突或dispatch。",
+      "evidence": [
+        "inputs/extract_gdn/direct_qk_ordered.yaml:256",
+        "inputs/extract_gdn/cached_ordered.yaml:250",
+        "inputs/extract_gdn/root.yaml:380",
+        "inputs/extract_gdn/direct_qk.yaml:237",
+        "inputs/extract_gdn/segmented_ordered.yaml:284",
+        "inputs/extract_gdn/segmented.yaml:274",
+        "rules/schema_docs/0.common.md:43",
+        "rules/schema_docs/3.design.math_reshape.md:116",
+        "rules/schema_docs/4.design.work_schedule.md:344",
+        "work/extract_gdn/gdn_kernel.cu:3258",
+        "work/extract_gdn/gdn_kernel.cu:3267",
+        "work/extract_gdn/gdn_kernel.cu:3316"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "ws_cache按容量不足或device变化重新分配；请求复用同一backing，perm/seg占据确定尾部区域；无设备键LC决定选择。区分物理owner、逻辑值和选择缓存；并发允许域未获确认。",
+      "deletion_counterexample": "去除backing区域约束会允许以逻辑有效shape替代实际合法访问容量；去除LC缓存来源会允许按当前设备重查而改变选择。每次重分配有不同开销，但本批尚无足够一阶证据；跨stream竞争是允许并发时的条件反例，不是已证有效域行为。"
+    },
+    {
+      "finding_id": "extract_moe-F07",
+      "operator": "extract_moe",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "representation_cost",
+      "decision": "representation_cost",
+      "mechanism_groups": [
+        "global_backing",
+        "cross_invocation_owner"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": true,
+        "note": "M有效视图与R backing、旧值保留可用数学对象/视图/retention表达，物理地址共用未结构化；现有材料未证明必须增加完整global allocation语言。优先检验短backing定义与对象引用，不能把M当R容量或把initialize当每次清零。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "R合法访问、旧字节与版本规则属于核心",
+        "new_structure_needed": "conditional"
+      },
+      "supporting_reason": "M有效视图与R backing、旧值保留可用数学对象/视图/retention表达，物理地址共用未结构化；现有材料未证明必须增加完整global allocation语言。优先检验短backing定义与对象引用，不能把M当R容量或把initialize当每次清零。",
+      "minimum_fact_from_audit": "空Clean不清scratch；split activation先读所有R尾行再检查expert；表结果虽未消费仍真实写入。",
+      "deletion_counterexample_from_audit": "用M形状替代R backing会使合法尾部访问越界；删旧字节/版本规则会允许额外清零或另配快照。",
+      "evidence": [
+        "inputs/extract_moe/direct.yaml:115",
+        "inputs/extract_moe/double_verify_split_store.yaml:176",
+        "inputs/extract_moe/init_no_scan_direct.yaml:43",
+        "inputs/extract_moe/init_no_scan_fused_small_flat.yaml:925",
+        "rules/schema_docs/3.design.math_reshape.md:109",
+        "rules/schema_docs/4.design.work_schedule.md:360",
+        "rules/schema_docs/5.design.tile_pipeline.md:285",
+        "work/extract_moe/source_solution.py:932",
+        "work/extract_moe/source_nvfp4_moe.cu:1352"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "空Clean不清scratch；split activation先读所有R尾行再检查expert；表结果虽未消费仍真实写入。",
+      "deletion_counterexample": "用M形状替代R backing会使合法尾部访问越界；删旧字节/版本规则会允许额外清零或另配快照。"
+    },
+    {
+      "finding_id": "template_fa4_decode-F14",
+      "operator": "template_fa4_decode",
+      "original_kind": "source_limitation",
+      "original_gap_kind": "unresolved",
+      "decision": "source_or_uncertain",
+      "mechanism_groups": [
+        "global_backing",
+        "source_scope"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": true,
+        "note": "首次零与后续有限旧值不能改成每次initialize；逻辑旧值前提可写输入/math。native cache建立/失败的额外提交未被当前模板范围覆盖，需原范围证据，不能由此证明新事件类型缺失。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "scratch旧值前提必需；完整native入口覆盖未完成",
+        "new_structure_needed": "not_proven"
+      },
+      "supporting_reason": "首次零与后续有限旧值不能改成每次initialize；逻辑旧值前提可写输入/math。native cache建立/失败的额外提交未被当前模板范围覆盖，需原范围证据，不能由此证明新事件类型缺失。",
+      "minimum_fact_from_audit": "保留跨调用 scratch 值与额外预留 region 容量；capture 时 host 选择/标量固定、seq_lens 等设备内容按当次读取。",
+      "deletion_counterexample_from_audit": "去掉 finite 前提允许 NaN scratch 被零权重读取造成 NaN；改成每调用初始化增加工作。把首次 eager native 验证的 ffi 再执行当成仅编译，可漏算真实计算。",
+      "evidence": [
+        "inputs/template_fa4_decode/root.yaml:45",
+        "inputs/template_fa4_decode/root.yaml:27",
+        "inputs/template_fa4_decode/root.yaml:44",
+        "inputs/template_fa4_decode/q1_global.yaml:86",
+        "inputs/template_fa4_decode/root.yaml:163",
+        "inputs/template_fa4_decode/q1_global.yaml:101",
+        "inputs/template_fa4_decode/root.yaml:178",
+        "inputs/template_fa4_decode/q4_compact.yaml:96",
+        "inputs/template_fa4_decode/q1_global.yaml:97",
+        "inputs/template_fa4_decode/root.yaml:174",
+        "inputs/template_fa4_decode/q1_global.yaml:249",
+        "inputs/template_fa4_decode/q4_compact.yaml:250",
+        "inputs/template_fa4_decode/root.yaml:331",
+        "inputs/template_fa4_decode/q4_compact.yaml:354",
+        "inputs/template_fa4_decode/q1_global.yaml:365",
+        "inputs/template_fa4_decode/root.yaml:436",
+        "inputs/template_fa4_decode/q1_global.yaml:373",
+        "inputs/template_fa4_decode/q4_compact.yaml:362",
+        "inputs/template_fa4_decode/root.yaml:444",
+        "inputs/template_fa4_decode/q1_global.yaml:374",
+        "inputs/template_fa4_decode/q4_compact.yaml:363",
+        "inputs/template_fa4_decode/root.yaml:445",
+        "rules/schema_docs/4.design.work_schedule.md:353",
+        "rules/schema_docs/0.common.md:39",
+        "work/template_fa4_decode/source_operator.py:227",
+        "work/template_fa4_decode/source_input.py:83",
+        "work/template_fa4_decode/source_operator.py:547",
+        "work/template_fa4_decode/source_operator.py:699",
+        "work/template_fa4_decode/source_operator.py:826"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "保留跨调用 scratch 值与额外预留 region 容量；capture 时 host 选择/标量固定、seq_lens 等设备内容按当次读取。",
+      "deletion_counterexample": "去掉 finite 前提允许 NaN scratch 被零权重读取造成 NaN；改成每调用初始化增加工作。把首次 eager native 验证的 ffi 再执行当成仅编译，可漏算真实计算。"
+    },
+    {
+      "finding_id": "template_gdn_prefill-F17",
+      "operator": "template_gdn_prefill",
+      "original_kind": "source_limitation",
+      "original_gap_kind": "unresolved",
+      "decision": "source_or_uncertain",
+      "mechanism_groups": [
+        "cross_invocation_owner"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": true,
+        "note": "缓存workspace事实确定，但是否允许同配置跨stream并发未核实；没有并发域便不能把假设race当确定新结构必要性。仍需保留来源限制。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "共享descriptor可能影响复用安全",
+        "new_structure_needed": "not_proven"
+      },
+      "supporting_reason": "缓存workspace事实确定，但是否允许同配置跨stream并发未核实；没有并发域便不能把假设race当确定新结构必要性。仍需保留来源限制。",
+      "minimum_fact_from_audit": "一次调用的phase/worker身份不能自动为跨调用复用的同一物理descriptor存储建立退役关系。",
+      "deletion_counterexample_from_audit": "若同配置同device允许两stream并发调用，共享workspace可能在旧TMA读取期间被另一次调用更新；若调用串行则无此反例。本轮未取得并发调用约束，故不宣称已证race。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:321",
+        "rules/schema_docs/0.common.md:41",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:803",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:805"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "一次调用的phase/worker身份不能自动为跨调用复用的同一物理descriptor存储建立退役关系。",
+      "deletion_counterexample": "若同配置同device允许两stream并发调用，共享workspace可能在旧TMA读取期间被另一次调用更新；若调用串行则无此反例。本轮未取得并发调用约束，故不宣称已证race。"
+    },
+    {
+      "finding_id": "extract_gdn-F13",
+      "operator": "extract_gdn",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "open_semantics",
+      "decision": "shared_semantic_definition",
+      "mechanism_groups": [
+        "raw_byte_access",
+        "global_backing"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": "partial",
+        "note": "DOC4:368已有raw合法访问而不补初始化的语义边界；保留warm短动作定义及post-wait重读。通用load已就绪数学值不能冒充投机旧字节，未证明必须新原语字段。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "实际暖读、合法地址和丢弃用途核心",
+        "new_structure_needed": "no_fixed_field_proven"
+      },
+      "supporting_reason": "DOC4:368已有raw合法访问而不补初始化的语义边界；保留warm短动作定义及post-wait重读。通用load已就绪数学值不能冒充投机旧字节，未证明必须新原语字段。",
+      "minimum_fact_from_audit": "暖读地址在界内，读值仅丢弃，post-wait重新读取并用memory clobber避免CSE；该前置工作只在排序分支。",
+      "deletion_counterexample_from_audit": "若把暖读当load:Perm，会无据要求初始化或等prep；若用暖读结果作为n，会读错request或越界。",
+      "evidence": [
+        "inputs/extract_gdn/segmented_ordered.yaml:550",
+        "inputs/extract_gdn/cached_ordered.yaml:479",
+        "inputs/extract_gdn/direct_qk_ordered.yaml:484",
+        "inputs/extract_gdn/cached_ordered.yaml:488",
+        "rules/schema_docs/4.design.work_schedule.md:362",
+        "work/extract_gdn/gdn_kernel.cu:2041"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "暖读地址在界内，读值仅丢弃，post-wait重新读取并用memory clobber避免CSE；该前置工作只在排序分支。",
+      "deletion_counterexample": "若把暖读当load:Perm，会无据要求初始化或等prep；若用暖读结果作为n，会读错request或越界。"
+    },
+    {
+      "finding_id": "extract_gdn-F05",
+      "operator": "extract_gdn",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "representation_cost",
+      "decision": "representation_cost",
+      "mechanism_groups": [
+        "host_cache",
+        "capture_binding"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "LC来源含process缓存而不是当前shape，可由when有定义运行时事实表达；六节点重复派生式是缺共享入口的表示成本。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "选择结果影响实际pipeline",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "LC来源含process缓存而不是当前shape，可由when有定义运行时事实表达；六节点重复派生式是缺共享入口的表示成本。",
+      "minimum_fact_from_audit": "四个非segmented节点区分direct_qk/ordered，两个segmented节点区分排序；segmented_ordered严格G=2,VTT=16。",
+      "deletion_counterexample_from_audit": "按父when隐式约束子when会使分支域错误；用当前设备L2替代LC缓存可能选择另一条路径；删除G/VTT定义使分支绑定失效。",
+      "evidence": [
+        "inputs/extract_gdn/cached_ordered.yaml:9",
+        "inputs/extract_gdn/segmented_ordered.yaml:9",
+        "inputs/extract_gdn/segmented.yaml:9",
+        "rules/schema_docs/0.common.md:156",
+        "work/extract_gdn/gdn_kernel.cu:3162",
+        "work/extract_gdn/gdn_kernel.cu:3220",
+        "work/extract_gdn/gdn_kernel.cu:3316"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "四个非segmented节点区分direct_qk/ordered，两个segmented节点区分排序；segmented_ordered严格G=2,VTT=16。",
+      "deletion_counterexample": "按父when隐式约束子when会使分支域错误；用当前设备L2替代LC缓存可能选择另一条路径；删除G/VTT定义使分支绑定失效。"
+    },
+    {
+      "finding_id": "extract_gemm-F03",
+      "operator": "extract_gemm",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "representation_cost",
+      "decision": "representation_cost",
+      "mechanism_groups": [
+        "host_cache",
+        "capture_binding"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "缓存key、永久fallback状态与实际提交前缀可在独立when完整定义；DOC0已规定capture/replay，恢复多提交已有flow。缺紧凑复用而非新计算事件。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "选择结果影响实际pipeline",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "缓存key、永久fallback状态与实际提交前缀可在独立when完整定义；DOC0已规定capture/replay，恢复多提交已有flow。缺紧凑复用而非新计算事件。",
+      "minimum_fact_from_audit": "策略缓存按地址和E/M/N/K命中可与当前设备group内容不同；图保存by-value Params与maps；错误API可能带已提交前缀，录图本身不计算。",
+      "deletion_counterexample_from_audit": "删缓存规则会用新m_indptr内容重选P；删actual-L约束会将失败图调用一律计0或计1次。两者改变tile路径或重复全量计算次数。",
+      "evidence": [
+        "inputs/extract_gemm/root.yaml:7",
+        "inputs/extract_gemm/wide_recovery_chain.yaml:10",
+        "work/extract_gemm/fp8gg_umma.cu:1539",
+        "work/extract_gemm/fp8gg_umma.cu:1707",
+        "work/extract_gemm/candidate_solution.py:275",
+        "rules/schema_docs/0.common.md:151"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "策略缓存按地址和E/M/N/K命中可与当前设备group内容不同；图保存by-value Params与maps；错误API可能带已提交前缀，录图本身不计算。",
+      "deletion_counterexample": "删缓存规则会用新m_indptr内容重选P；删actual-L约束会将失败图调用一律计0或计1次。两者改变tile路径或重复全量计算次数。"
+    },
+    {
+      "finding_id": "extract_fmha-F04",
+      "operator": "extract_fmha",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "representation_cost",
+      "decision": "representation_cost",
+      "mechanism_groups": [
+        "host_cache",
+        "capture_binding"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "HostPlan/MapsValid可用完整局部选择谓词定义；图录制本身无计算已有DOC0规范。跨文件重复是表示成本，不能造prepared专属事件。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "选择结果影响实际pipeline",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "HostPlan/MapsValid可用完整局部选择谓词定义；图录制本身无计算已有DOC0规范。跨文件重复是表示成本，不能造prepared专属事件。",
+      "minimum_fact_from_audit": "每个when独立定义HostPlan、实际probe与MapsValid，图录制无计算，回放/直接提交产生同一静态flow。",
+      "deletion_counterexample_from_audit": "若把MapsValid当常真会漏cp.async；若把捕获当额外执行会重复整个计算序列。",
+      "evidence": [
+        "rules/schema_docs/0.common.md:157",
+        "work/extract_fmha/source/candidate/fmha_mxfp8_qkv.cu:553",
+        "work/extract_fmha/source/candidate/fmha_mxfp8_qkv.cu:2241",
+        "work/extract_fmha/source/problem/input.py:205",
+        "work/extract_fmha/source/candidate/solution.py:176"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "每个when独立定义HostPlan、实际probe与MapsValid，图录制无计算，回放/直接提交产生同一静态flow。",
+      "deletion_counterexample": "若把MapsValid当常真会漏cp.async；若把捕获当额外执行会重复整个计算序列。"
+    },
+    {
+      "finding_id": "extract_moe-F05",
+      "operator": "extract_moe",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "representation_cost",
+      "decision": "representation_cost",
+      "mechanism_groups": [
+        "host_cache",
+        "capture_binding"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "ABI构建快照、最终HostObserved及实际提交路径均可由when定义；父when不继承导致复用成本。观察值与完成不能混写，但重复106次不证明106份新机制。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "选择结果影响实际pipeline",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "ABI构建快照、最终HostObserved及实际提交路径均可由when定义；父when不继承导致复用成本。观察值与完成不能混写，但重复106次不证明106份新机制。",
+      "minimum_fact_from_audit": "不能以现在route_hist替代ABI构建快照，不能用poll超时预测最终read，也不能把录图计成执行。",
+      "deletion_counterexample_from_audit": "同样shape/cfg可以只有full图、先clean再full，或BeginCapture失败后的两条实际前缀；剩余shape字段不足区分。",
+      "evidence": [
+        "inputs/extract_moe/root.yaml:7",
+        "inputs/extract_moe/double_verify_fused_big_cp.yaml:10",
+        "inputs/extract_moe/verify_only.yaml:10",
+        "rules/schema_docs/0.common.md:132",
+        "work/extract_moe/source_nvfp4_moe.cu:9471",
+        "work/extract_moe/source_nvfp4_moe.cu:9533"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "不能以现在route_hist替代ABI构建快照，不能用poll超时预测最终read，也不能把录图计成执行。",
+      "deletion_counterexample": "同样shape/cfg可以只有full图、先clean再full，或BeginCapture失败后的两条实际前缀；剩余shape字段不足区分。"
+    },
+    {
+      "finding_id": "extract_mla-F05",
+      "operator": "extract_mla",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "open_semantics",
+      "decision": "shared_semantic_definition",
+      "mechanism_groups": [
+        "host_cache",
+        "geometry_order"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": "partial",
+        "note": "stable_sort/base_order/Scatter可用现有数学和strategy定义，worktile_order只消费Item次序；缓存来源需短定义。上传ready事件另由F18处理，不能把全部选择正文算成事件缺口。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "Geo次序和Scatter直接影响分配及槽数",
+        "new_structure_needed": "no_fixed_field_proven"
+      },
+      "supporting_reason": "stable_sort/base_order/Scatter可用现有数学和strategy定义，worktile_order只消费Item次序；缓存来源需短定义。上传ready事件另由F18处理，不能把全部选择正文算成事件缺口。",
+      "minimum_fact_from_audit": "Geo次序决定工作分配/局部性，Scatter同时选KVSlots。",
+      "deletion_counterexample_from_audit": "删排序门控允许始终head-major或始终N降序；删缓存规则会使后来设备查询改变已录选择。",
+      "evidence": [
+        "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/fa6531820137d090dc39755c2756ad1072c8f3b21aa722d3b7725e1b225c2ed4/source/kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py:1695",
+        "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/fa6531820137d090dc39755c2756ad1072c8f3b21aa722d3b7725e1b225c2ed4/source/kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py:1781",
+        "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/fa6531820137d090dc39755c2756ad1072c8f3b21aa722d3b7725e1b225c2ed4/source/kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py:1855",
+        "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/fa6531820137d090dc39755c2756ad1072c8f3b21aa722d3b7725e1b225c2ed4/source/kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py:2000",
+        "inputs/extract_mla/bootstrap.yaml:58",
+        "inputs/extract_mla/root.yaml:321"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "Geo次序决定工作分配/局部性，Scatter同时选KVSlots。",
+      "deletion_counterexample": "删排序门控允许始终head-major或始终N降序；删缓存规则会使后来设备查询改变已录选择。"
+    },
+    {
+      "finding_id": "extract_gemm-F04",
+      "operator": "extract_gemm",
+      "original_kind": "redundancy",
+      "original_gap_kind": "none",
+      "decision": "existing_structure",
+      "mechanism_groups": [
+        "actual_launches"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "不同phase及逐次kernel_done可完整列出恢复路径2/3/4次实际提交，已有worker身份与anchor复用；不新增fallback事件。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "实际重算次数与顺序核心",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "不同phase及逐次kernel_done可完整列出恢复路径2/3/4次实际提交，已有worker身份与anchor复用；不新增fallback事件。",
+      "minimum_fact_from_audit": "v0两次，wide恢复2/3/4次；每次从原输入重算覆盖，无输出handoff；q/r绑定仍要保留。",
+      "deletion_counterexample_from_audit": "删 start_after 会容许重叠覆盖；仅删文字“new workers”不会，因为DOC4跨kernel新worker规则与实际launch已唯一确定。",
+      "evidence": [
+        "inputs/extract_gemm/v0_recovery.yaml:130",
+        "inputs/extract_gemm/wide_recovery_chain.yaml:155",
+        "inputs/extract_gemm/wide_recovery_full.yaml:156",
+        "rules/schema_docs/4.design.work_schedule.md:266",
+        "rules/schema_docs/4.design.work_schedule.md:312"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "v0两次，wide恢复2/3/4次；每次从原输入重算覆盖，无输出handoff；q/r绑定仍要保留。",
+      "deletion_counterexample": "删 start_after 会容许重叠覆盖；仅删文字“new workers”不会，因为DOC4跨kernel新worker规则与实际launch已唯一确定。"
+    },
+    {
+      "finding_id": "extract_sparse-F05",
+      "operator": "extract_sparse",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "missing_field_or_event",
+      "decision": "confirmed_structural_gap",
+      "mechanism_groups": [
+        "external_event_boundary",
+        "host_completion"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": true,
+        "note": "仅hidden路径caller fork/join已确认；源6384的capture前host同步另判scope_decision。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "caller输入可见与输出汇合直接构成GPU依赖和重叠",
+        "new_structure_needed": "not_proven"
+      },
+      "supporting_reason": "DOC4:309只允许phase.milestone；三条现有launch缺caller-prior与caller-subsequent端点。源6155的fork及6188的join确证必要边；不能以prefix→remainder串行代替。capture前host同步子项为范围决策，不继承主判。 当前没有反例排除正确的统一异步请求边界约定，故新增固定端点字段必要性未证。",
+      "minimum_fact_from_audit": "内部图只写 probe.kernel_done→remainder；完整请求还必须保证 side 输入可见及后继 caller 看到两段 output，且不添加 prefix→remainder 等待。",
+      "deletion_counterexample_from_audit": "去掉 fork/join 正文后，两个实现都满足三条 launch：A 正确等待 caller 先前写入并在返回后 caller 排序；B side 抢读旧输入或 caller 后继在 remainder 完成前消费输出。差异是可见性/依赖而非 event API 名。",
+      "evidence": [
+        "inputs/extract_sparse/probe_hidden_packed.yaml:305",
+        "inputs/extract_sparse/probe_hidden_packed.yaml:428",
+        "work/extract_sparse/dsv4_kernel.cu:6153",
+        "work/extract_sparse/dsv4_kernel.cu:6187",
+        "work/extract_sparse/dsv4_kernel.cu:6384",
+        "rules/schema_docs/4.design.work_schedule.md:269"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "hidden路径caller-prior必须先于probe/prefix输入访问；probe完成先于remainder；prefix与remainder均先于caller-subsequent；remainder不等待prefix完成。capture前host同步子项另外范围判定。",
+      "deletion_counterexample": "去掉 fork/join 正文后，两个实现都满足三条 launch：A 正确等待 caller 先前写入并在返回后 caller 排序；B side 抢读旧输入或 caller 后继在 remainder 完成前消费输出。差异是可见性/依赖而非 event API 名。",
+      "new_fixed_field_required": "not_proven",
+      "qualification": "已确认现行显式端点缺失，不等价于必须新增结构。当前没有反例排除一次定义的统一边界约定；应与动作shared-definition使用相同必要性门槛，比较统一约定与实例端点。",
+      "shared_definition_alternative": "caller前序先于相关输入访问，本请求全部相关输出生产完成先于caller后续消费；只建立设备排序，不要求CPU返回前完成，且不增加prefix→remainder。现有反例不能排除此统一约定。"
+    },
+    {
+      "finding_id": "extract_mla-F18",
+      "operator": "extract_mla",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "missing_field_or_event",
+      "decision": "confirmed_structural_gap",
+      "mechanism_groups": [
+        "external_event_boundary",
+        "host_preparation"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": true,
+        "note": "仅确认外部Geo-upload-ready到整个main grid启动的边；current metadata已在root:114–115与Geo定义:299保留，capture时点已有DOC0。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "整grid启动前等待的位置决定worker占用与重叠窗口",
+        "new_structure_needed": "not_proven"
+      },
+      "supporting_reason": "源1669/1895/2011确证side D2H、上传和main等待。root:114–115已排除跨调用数值保留，:299定义Geo当前坐标，故旧Geo不是删除host前缀后的独占反例。真正未结构化的是upload完成→整个main grid启动；不能以读Geo前晚等待替代源启动边界。与Sparse共享外部ready端点即可，无需完整host服务图。 正确定义的统一外部供给前提也可能表达grid启动前ready；尚无反例排除它，新增固定字段必要性未证。",
+      "minimum_fact_from_audit": "每次host前缀从当前metadata建表；主核读取上传完成的Geo；host值录入与device内容读取时点不同。",
+      "deletion_counterexample_from_audit": "删此前缀约束允许重用旧Geo或先launch后upload，即使同一compute launch结构仍在也会分错工作/读旧坐标。",
+      "evidence": [
+        "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/fa6531820137d090dc39755c2756ad1072c8f3b21aa722d3b7725e1b225c2ed4/source/kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py:1638",
+        "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/fa6531820137d090dc39755c2756ad1072c8f3b21aa722d3b7725e1b225c2ed4/source/kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py:1669",
+        "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/fa6531820137d090dc39755c2756ad1072c8f3b21aa722d3b7725e1b225c2ed4/source/kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py:1895",
+        "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/fa6531820137d090dc39755c2756ad1072c8f3b21aa722d3b7725e1b225c2ed4/source/kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py:2011",
+        "inputs/extract_mla/bootstrap.yaml:58",
+        "inputs/extract_mla/root.yaml:321",
+        "inputs/extract_mla/root.yaml:114",
+        "inputs/extract_mla/root.yaml:299",
+        "rules/schema_docs/4.design.work_schedule.md:309",
+        "rules/schema_docs/4.design.work_schedule.md:317"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "本次side-stream Geo上传完成之后，整个main grid才允许开始；Geo当前内容与capture绑定原则已有其他定义，不重复计为独占。",
+      "deletion_counterexample": "A在side upload完成后才启动main；B先启动main、到读Geo前才等upload。两者满足当前值定义，但worker开始占用设备的时点和可重叠窗口不同。缺外部事件端点时不能由start_after显式区分。原审计旧Geo反例有其他Contract/Geo定义限制，不能直接当独占证据。",
+      "new_fixed_field_required": "not_proven",
+      "qualification": "已确认现行显式端点缺失，不等价于必须新增结构。当前没有反例排除一次定义的统一边界约定；应与动作shared-definition使用相同必要性门槛，比较统一约定与实例端点。",
+      "shared_definition_alternative": "以统一外部供给前提规定Geo上传完成先于所属main grid启动，实例引用已有Geo定义并采用该前提；本轮未证明必须另设可引用事件字段。"
+    },
+    {
+      "finding_id": "template_qsa_prefill-F10",
+      "operator": "template_qsa_prefill",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "open_semantics",
+      "decision": "shared_semantic_definition",
+      "mechanism_groups": [
+        "scheduler_state",
+        "cross_invocation_owner"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": "partial",
+        "note": "DOC4:225的refill本就规定计数维护和terminal，DOC4:232允许全局counter；用Delta及base递推配短owner/有序调用前提可以统一。不因device ticket跨次保留就必须新增状态DSL；replay缺安全依据要保留。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "ticket/base/terminal与eager范围直接影响工作领取",
+        "new_structure_needed": "no_fixed_field_proven"
+      },
+      "supporting_reason": "DOC4:225的refill本就规定计数维护和terminal，DOC4:232允许全局counter；用Delta及base递推配短owner/有序调用前提可以统一。不因device ticket跨次保留就必须新增状态DSL；replay缺安全依据要保留。",
+      "minimum_fact_from_audit": "设备 ticket 和 host base 起始0；每次 eager 消耗 W+C 个票、base 加同数、int32 wrap-safe；禁止把每调用重置 counter 当成同设计。",
+      "deletion_counterexample_from_audit": "若相同捕获的按值 tbase 第二次回放而 ticket 已增加，所有 worker 可拿 terminal 并不写本次 O；剩余单次 partition/order 字段无法排除。",
+      "evidence": [
+        "inputs/template_qsa_prefill/root.yaml:189",
+        "inputs/template_qsa_prefill/dispatch.md:12",
+        "rules/schema_docs/0.common.md:39",
+        "work/template_qsa_prefill/operator.py:108",
+        "work/template_qsa_prefill/operator.py:153"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "设备 ticket 和 host base 起始0；每次 eager 消耗 W+C 个票、base 加同数、int32 wrap-safe；禁止把每调用重置 counter 当成同设计。",
+      "deletion_counterexample": "若相同捕获的按值 tbase 第二次回放而 ticket 已增加，所有 worker 可拿 terminal 并不写本次 O；剩余单次 partition/order 字段无法排除。"
+    },
+    {
+      "finding_id": "extract_mla-F10",
+      "operator": "extract_mla",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "open_semantics",
+      "decision": "shared_semantic_definition",
+      "mechanism_groups": [
+        "scheduler_state",
+        "cross_invocation_owner"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": "partial",
+        "note": "现有refill可定义计数、映射、terminal和最后复位；request→publish与旧descriptor读者退役已有边。物理owner缺表不等于整条队列服务需要新结构，适合短协议定义。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "请求/发布/末pop复位与读者退役核心",
+        "new_structure_needed": "no_fixed_field_proven"
+      },
+      "supporting_reason": "现有refill可定义计数、映射、terminal和最后复位；request→publish与旧descriptor读者退役已有边。物理owner缺表不等于整条队列服务需要新结构，适合短协议定义。",
+      "minimum_fact_from_audit": "每worktile末轮前异步request；pop映射、terminal事件、WorkCount总pop及最后重置。",
+      "deletion_counterexample_from_audit": "删counter reset则下一次调用可直接取到错误Item；删request完成点可让softmax等原子结果、缩短重叠。",
+      "evidence": [
+        "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/fa6531820137d090dc39755c2756ad1072c8f3b21aa722d3b7725e1b225c2ed4/source/kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py:899",
+        "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/fa6531820137d090dc39755c2756ad1072c8f3b21aa722d3b7725e1b225c2ed4/source/kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py:1456",
+        "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/fa6531820137d090dc39755c2756ad1072c8f3b21aa722d3b7725e1b225c2ed4/source/kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py:1730",
+        "inputs/extract_mla/root.yaml:343"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "每worktile末轮前异步request；pop映射、terminal事件、WorkCount总pop及最后重置。",
+      "deletion_counterexample": "删counter reset则下一次调用可直接取到错误Item；删request完成点可让softmax等原子结果、缩短重叠。"
+    },
+    {
+      "finding_id": "extract_sparse-F06",
+      "operator": "extract_sparse",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "missing_field_or_event",
+      "decision": "scope_decision",
+      "mechanism_groups": [
+        "host_observation",
+        "cross_invocation_owner"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": true,
+        "note": "缺载体针对process gate共享及跨请求观察/写者关联；不针对R公式、实际probe提交或内部完成边。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "实际观测R核心；全process跨请求验证范围待定",
+        "new_structure_needed": "conditional"
+      },
+      "supporting_reason": "R是最终普通scan的实际正值均值，when/math可定义；probe→attention已有kernel_done，capture时点已有DOC0。尚无process gate与跨请求writer/host observation关系；若目标包含跨请求可组合检查才扩存储/外部边界。不得造generation或复用完成来修复源竞争。",
+      "minimum_fact_from_audit": "R 来自最终一次普通 FP32 scan 的正值均值，可能局部可见；poll exit 不是 probe 完成，后续 gate reset 可能与先前写竞争。",
+      "deletion_counterexample_from_audit": "若将 poll exit 当作全局发布或复用完成，会错误排除部分样本接受 packed 的路径；若按 invocation 新建私有 gate，则改变原实现跨调用状态与竞争。",
+      "evidence": [
+        "inputs/extract_sparse/probe_serial_mma.yaml:88",
+        "inputs/extract_sparse/probe_serial_mma.yaml:172",
+        "work/extract_sparse/dsv4_kernel.cu:5561",
+        "work/extract_sparse/dsv4_kernel.cu:5582",
+        "work/extract_sparse/dsv4_kernel.cu:5593",
+        "rules/schema_docs/4.design.work_schedule.md:323"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "R取最终普通scan实际读到的正值均值；poll退出不是probe完成，内部attention仍等probe.kernel_done；同process gate的下一次host reset可能遇到旧pending writer。",
+      "deletion_counterexample": "若将 poll exit 当作全局发布或复用完成，会错误排除部分样本接受 packed 的路径；若按 invocation 新建私有 gate，则改变原实现跨调用状态与竞争。"
+    },
+    {
+      "finding_id": "extract_sparse-F13",
+      "operator": "extract_sparse",
+      "original_kind": "source_limitation",
+      "original_gap_kind": "none",
+      "decision": "source_or_uncertain",
+      "mechanism_groups": [
+        "source_race"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "gate timeout竞争与其他源偏差属于固定源事实；新增同步、generation或修复算法不是表达能力补齐。approved不证明源执行正确。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "源偏差和未保证安全范围需要保留",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "gate timeout竞争与其他源偏差属于固定源事实；新增同步、generation或修复算法不是表达能力补齐。approved不证明源执行正确。",
+      "minimum_fact_from_audit": "当前 Design 按独立预算对象与依赖描述，不依赖错误 metadata alias；这属于规范允许的边界外实现偏差记录，不是证明修复后的执行已通过。",
+      "deletion_counterexample_from_audit": "删除限制会让读者把 source 原字节执行等同无冲突抽象设计，或者无据添加跨 CTA/call 序列化。",
+      "evidence": [
+        "work/extract_sparse/dsv4_kernel.cu:2104",
+        "work/extract_sparse/dsv4_kernel.cu:2497",
+        "work/extract_sparse/dsv4_kernel.cu:2510",
+        "work/extract_sparse/dsv4_kernel.cu:1460",
+        "work/extract_sparse/dsv4_kernel.cu:5599",
+        "rules/schema_extract/REVIEW.md:34"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "当前 Design 按独立预算对象与依赖描述，不依赖错误 metadata alias；这属于规范允许的边界外实现偏差记录，不是证明修复后的执行已通过。",
+      "deletion_counterexample": "删除限制会让读者把 source 原字节执行等同无冲突抽象设计，或者无据添加跨 CTA/call 序列化。"
+    },
+    {
+      "finding_id": "extract_sparse-F17",
+      "operator": "extract_sparse",
+      "original_kind": "correctness",
+      "original_gap_kind": "none",
+      "decision": "existing_structure",
+      "mechanism_groups": [
+        "empty_and_observation_boundary"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "公式分情形、domain、flow.start_after与短no-op动作语义足以保留这些区别；不新增empty flag或将已提交probe删掉。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "无工作/no-op/stale/未完整观察必须区分",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "公式分情形、domain、flow.start_after与短no-op动作语义足以保留这些区别；不新增empty flag或将已提交probe删掉。",
+      "minimum_fact_from_audit": "空 split 留 PartO stale；combine 前四向量可读取但 predication 丢弃，后段换读 split0仍计算零乘；all-invalid MMA 仍算 recurrence，空 packed union 才直接零；partial-tail/cross-request probe 写-1，attention 仍处理这些 token。",
+      "deletion_counterexample_from_audit": "将空 split 的 PartO 清零增加未声明初始化；将 all-invalid MMA 当 empty union 删除循环改变负无穷/sentinel/NaN 路径；把 host timeout 当未提交 probe 将漏掉实际工作。",
+      "evidence": [
+        "inputs/extract_sparse/root.yaml:238",
+        "inputs/extract_sparse/root.yaml:250",
+        "inputs/extract_sparse/tc_packed.yaml:133",
+        "inputs/extract_sparse/probe_serial_mma.yaml:61",
+        "work/extract_sparse/dsv4_kernel.cu:491",
+        "work/extract_sparse/dsv4_kernel.cu:576",
+        "work/extract_sparse/dsv4_kernel.cu:598",
+        "work/extract_sparse/dsv4_kernel.cu:2466"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "空 split 留 PartO stale；combine 前四向量可读取但 predication 丢弃，后段换读 split0仍计算零乘；all-invalid MMA 仍算 recurrence，空 packed union 才直接零；partial-tail/cross-request probe 写-1，attention 仍处理这些 token。",
+      "deletion_counterexample": "将空 split 的 PartO 清零增加未声明初始化；将 all-invalid MMA 当 empty union 删除循环改变负无穷/sentinel/NaN 路径；把 host timeout 当未提交 probe 将漏掉实际工作。"
+    },
+    {
+      "finding_id": "extract_moe-F23",
+      "operator": "extract_moe",
+      "original_kind": "correctness",
+      "original_gap_kind": "none",
+      "decision": "source_or_uncertain",
+      "mechanism_groups": [
+        "host_observation",
+        "source_race"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "来源中mirror无代际且CPU reset不等先前GPU writer；观测1可能旧请求。它是已证源限制，非需要添加generation结构的证据。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "不能把HostObserved等同当前Clean",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "来源中mirror无代际且CPU reset不等先前GPU writer；观测1可能旧请求。它是已证源限制，非需要添加generation结构的证据。",
+      "minimum_fact_from_audit": "host最终读1不等于当前Clean=1，也不等于当前output完成。",
+      "deletion_counterexample_from_audit": "先前full图末尾写1覆盖新请求sentinel，当前verify尚未写镜像时host可误取旧1而跳过full。",
+      "evidence": [
+        "inputs/extract_moe/verify_only.yaml:123",
+        "work/extract_moe/source_nvfp4_moe.cu:9471",
+        "work/extract_moe/source_nvfp4_moe.cu:1723"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "host最终读1不等于当前Clean=1，也不等于当前output完成。",
+      "deletion_counterexample": "先前full图末尾写1覆盖新请求sentinel，当前verify尚未写镜像时host可误取旧1而跳过full。"
+    },
+    {
+      "finding_id": "extract_moe-F24",
+      "operator": "extract_moe",
+      "original_kind": "correctness",
+      "original_gap_kind": "none",
+      "decision": "source_or_uncertain",
+      "mechanism_groups": [
+        "host_observation",
+        "source_race"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": false,
+        "note": "共用publish契约把mirror复用过度概括，需限定device顺序与host无等待。属于表述/来源修正，不是新的流水线原语缺口。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "host reset与device stream的ordering域不同",
+        "new_structure_needed": "no"
+      },
+      "supporting_reason": "共用publish契约把mirror复用过度概括，需限定device顺序与host无等待。属于表述/来源修正，不是新的流水线原语缺口。",
+      "minimum_fact_from_audit": "device ZeroState与host写镜像的ordering域不同。",
+      "deletion_counterexample_from_audit": "同流排队保护device写者，却不延迟CPU *zh=-1。",
+      "evidence": [
+        "inputs/extract_moe/init_probe_verify_fused_small_mono.yaml:710",
+        "work/extract_moe/source_nvfp4_moe.cu:9471"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "device ZeroState与host写镜像的ordering域不同。",
+      "deletion_counterexample": "同流排队保护device写者，却不延迟CPU *zh=-1。"
+    },
+    {
+      "finding_id": "extract_moe-F15",
+      "operator": "extract_moe",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "open_semantics",
+      "decision": "scope_decision",
+      "mechanism_groups": [
+        "host_completion",
+        "host_preparation",
+        "cross_invocation_owner"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": true,
+        "note": "F15集合含actual初始化、ready发布、probe观察和owner等不同问题；GPU实际工作照旧登记，handoff.initialize不可代真实memset。确定全设备host同步子项归F25；其余先拆机制与范围。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "混合host服务集合；不能整体认作一阶核心",
+        "new_structure_needed": "conditional"
+      },
+      "supporting_reason": "F15集合含actual初始化、ready发布、probe观察和owner等不同问题；GPU实际工作照旧登记，handoff.initialize不可代真实memset。确定全设备host同步子项归F25；其余先拆机制与范围。",
+      "minimum_fact_from_audit": "ensure_tables在全设备同步成功后发布per-Model ready；probe结果的host观察先于ABI构建；actual memset与初始化时机保留。",
+      "deletion_counterexample_from_audit": "只保留tables.kernel_done→后续kernel可允许host立刻标记ready并提交后续；源码torch.cuda.synchronize还等其他流此前工作，host延迟与后续提交时机可显著不同。",
+      "evidence": [
+        "inputs/extract_moe/init_no_scan_fused_small_flat.yaml:870",
+        "inputs/extract_moe/init_no_scan_fused_small_flat.yaml:877",
+        "inputs/extract_moe/init_probe_fused_big_cp.yaml:320",
+        "inputs/extract_moe/init_probe_verify_fused_serial.yaml:390",
+        "rules/schema_docs/4.design.work_schedule.md:274",
+        "rules/schema_docs/4.design.work_schedule.md:334",
+        "work/extract_moe/source_solution.py:1005",
+        "work/extract_moe/source_nvfp4_moe.cu:9585"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "ensure_tables在全设备同步成功后发布per-Model ready；probe结果的host观察先于ABI构建；actual memset与初始化时机保留。",
+      "deletion_counterexample": "只保留tables.kernel_done→后续kernel可允许host立刻标记ready并提交后续；源码torch.cuda.synchronize还等其他流此前工作，host延迟与后续提交时机可显著不同。"
+    },
+    {
+      "finding_id": "extract_moe-F25",
+      "operator": "extract_moe",
+      "original_kind": "structural_gap",
+      "original_gap_kind": "missing_field_or_event",
+      "decision": "scope_decision",
+      "mechanism_groups": [
+        "host_completion",
+        "external_event_boundary"
+      ],
+      "carrier_axis": {
+        "structural_relation_absent": true,
+        "note": "source_solution.py:1015–1016确证同步后ready发布，另stream长工作使tables.kernel_done不等价。DOC4:317禁止把start_after解释为host阻塞。先决定是否比较完整host/cold-start时序；若纳入可复用外部事件，不建host服务DSL。"
+      },
+      "necessity_axis": {
+        "pipeline_core": "主机全设备等待确有时序影响；cold/setup是否IR目标待定",
+        "new_structure_needed": "conditional"
+      },
+      "supporting_reason": "source_solution.py:1015–1016确证同步后ready发布，另stream长工作使tables.kernel_done不等价。DOC4:317禁止把start_after解释为host阻塞。先决定是否比较完整host/cold-start时序；若纳入可复用外部事件，不建host服务DSL。",
+      "minimum_fact_from_audit": "table初始化之后CPU等待全设备此前工作完成才更新per-Model ready并继续后续构建。",
+      "deletion_counterexample_from_audit": "让另一stream有很长的既有工作：仅tables.kernel_done依赖允许立即继续host构建，而实际torch.cuda.synchronize阻塞到该工作完成；两者满足同一剩余GPU flow却有不同主时序/成本。",
+      "evidence": [
+        "inputs/extract_moe/init_no_scan_fused_small_flat.yaml:870",
+        "inputs/extract_moe/init_probe_fused_big_cp.yaml:320",
+        "inputs/extract_moe/init_probe_verify_fused_serial.yaml:390",
+        "work/extract_moe/source_solution.py:1005",
+        "rules/schema_docs/4.design.work_schedule.md:274"
+      ],
+      "evidence_qualification": "原审计锚点保留；本次独立亲读的强证据及具体字段排除见 boundary_review.md。未将原 finding 的字段面积或强度自动继承为新结构必要性。",
+      "minimum_fact": "表初始化之后CPU等待全device此前工作完成才发布per-Model ready并继续构建；这是host completion，不是仅本请求tables.kernel_done。",
+      "deletion_counterexample": "让另一stream有很长的既有工作：仅tables.kernel_done依赖允许立即继续host构建，而实际torch.cuda.synchronize阻塞到该工作完成；两者满足同一剩余GPU flow却有不同主时序/成本。"
+    }
+  ],
+  "audit_fields_note": "minimum_fact_from_audit与deletion_counterexample_from_audit仅保留原审计追溯，非本轮最新裁决。最新判定读decision/supporting_reason及minimum_fact/deletion_counterexample，尤其MLA F18已撤回旧Geo为独占缺口的表述。",
+  "consistency_qualification": "本轮最后一致性复核未找到能排除一次定义的请求边界约定或外部供给前提的具体反例。保留MLA/Sparse两条现行显式端点缺口，撤回其必然通过新增结构必要性轴的较强表述；源码事实不变。"
+}

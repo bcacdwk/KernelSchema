@@ -1,0 +1,133 @@
+--- single_persistent_dual_load.yaml
++++ single_persistent_joint_load.yaml
+@@ -5,11 +5,11 @@
+   version: 5
+   dispatch:
+-    id: single_persistent_dual_load
+-    parent: packed_persistent
++    id: single_persistent_joint_load
++    parent: single_persistent_dual_load
+     when: |
+       Use packaged defaults with no FA_HD256 environment overrides, under the root contract.
+       Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count.
+       C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000).
+-      Select exactly when not Split, B=1, ceil(Q/8)>SM+floor(SM/2), and K>=98304.
++      Select exactly when not Split, B=1, ceil(Q/8)>SM+floor(SM/2), and K<98304.
+ design:
+   math_reshape:
+@@ -97,5 +97,5 @@
+           worker_assignment: {preassigned: {start: worker_id, step: worker_count}, refill: none, exit: assigned_done}
+   tile_pipeline:
+-    thesis: Independent K and V producers feed separate four-stage rings; QK leads PV by one block while softmax and correction exchange aliased scores and numerator ownership across persistent worktiles.
++    thesis: One loader follows the QK-ahead-of-PV issue order through a shared four-token stream; separate K/V arrays and aliased score slots support softmax and correction overlap across persistent worktiles.
+     phase:
+       attention:
+@@ -106,8 +106,10 @@
+           n: {flatten: [t, i]}
+           d: [0, 2]
++          p: [0, 2*N]
++          e: {flatten: [t, p, d]}
+         resource:
+           Query: {space: SMEM, member_slot_shape: [{row: 128}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 2, view: {'Qc(t,d)': {slot_index: d}}}
+-          KeyRing: {space: SMEM, member_slot_shape: [{key: 64}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Kc(n,d)': {slot_index: '(2*n+d)%4'}}}
+-          ValueRing: {space: SMEM, member_slot_shape: [{key: 128}, {channel: 64}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Vc(n,d)': {slot_index: '(2*n+d)%4'}}}
++          KeyRing: {space: SMEM, member_slot_shape: [{key: 64}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Kc(n[t,i],d)': {slot_index: 'e[t,max(0,2*i-1),d]%4'}}}
++          ValueRing: {space: SMEM, member_slot_shape: [{key: 128}, {channel: 64}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Vc(n[t,i],d)': {slot_index: 'e[t,min(2*i+2,2*N-1),d]%4'}}}
+           ScoreProbability:
+             space: TMEM
+@@ -125,5 +127,5 @@
+           RequestMap: {slot_count: 1, space: SMEM, member_slot_shape: [{element: 36}], dtype: int32}
+         role:
+-          LoadQK:
++          Load:
+             info:
+               member: warp[9:10]
+@@ -131,26 +133,18 @@
+               register: 32
+               verb:
+-                load: Q holds this member's rows for the KV traversal; each K half uses one page per member. Both members contribute to pair-wide readiness.
++                load: |
++                  KVStage is a token, with K at p=max(0,2*i-1) and V at p=min(2*i+2,2*N-1), each with halves d=0,1.
++                  Issue K0,K1,V0,K2,V1,...,Klast,Vpenultimate,Vlast; N=1 uses K0,V0. Separate payload arrays share one four-token acquire/release stream.
++                  Q contains this member's rows; K uses one page per member/half and V uses two. Both members contribute to pair-wide readiness.
+             pipe:
+               repeat: t
+               steady:
+               - {repeat: d, steady: ['load:Qc(t,d)']}
+-              - {repeat: 'n[t]', steady: [{repeat: d, steady: ['load:Kc(n,d)']}]}
++              - {repeat: 'e[t]', steady: ['load:KVStage(e)']}
+             waits_for:
+               data: {'load:Qc(t,0)@issue': ['Softmax/publish:RequestMap@done']}
+               reuse:
+-                load:Qc(t+1,d)@issue: ['MMA/qk:S(n[t,last(i)],d)@done']
+-                load:Kc(n+2,d)@issue: ['MMA/qk:S(n,d)@done']
+-          LoadV:
+-            info:
+-              member: warp[10:11]
+-              execution_mode: async
+-              register: 32
+-              verb:
+-                load: Each V half uses two page transfers per member; done covers both and contributes to pair-wide readiness independently of K.
+-            pipe: {repeat: n, steady: [{repeat: d, steady: ['load:Vc(n,d)']}]}
+-            waits_for:
+-              data: {'load:Vc(n[t,0],0)@issue': ['Softmax/publish:RequestMap@done']}
+-              reuse: {'load:Vc(n+2,d)@issue': ['MMA/pv:Y(n,d)@done']}
++                load:Qc(t+1,d)@issue: ['MMA/contract:KVStage(e[t,max(0,2*(N-1)-1),d])@done']
++                load:KVStage(e+4)@issue: ['MMA/contract:KVStage(e)@done']
+           MMA:
+             info:
+@@ -159,23 +153,16 @@
+               register: 32
+               verb:
+-                qk: Issue one QK channel half; d=0 initializes S and d=1 completes it. Done returns K; last QK returns Q. Ordered pair products read earlier P before later QK overwrites its aliased slot.
+-                pv: Issue one PV output half; i=0 initializes Y and later blocks use corrected Y. Done returns V; d=1 publishes Y and returns P, covering both CTAs.
+-            pipe:
+-              repeat: t
+-              steady:
+-              - {repeat: d, steady: ['qk:S(n[t,0],d)']}
+-              - repeat: n[t,1:]
+-                steady:
+-                - {repeat: d, steady: ['qk:S(n,d)']}
+-                - {repeat: d, steady: ['pv:Y(n-1,d)']}
+-              - {repeat: d, steady: ['pv:Y(n[t,last(i)],d)']}
++                contract: |
++                  K tokens perform QK, initializing S at d=0 and completing at d=1; V tokens perform PV, initializing Y at i=0 and using corrected Y thereafter.
++                  Completion covers both CTAs and returns the operand token. Ordered products read earlier P before a later QK overwrites its aliased slot.
++            pipe: {repeat: t, steady: [{repeat: 'e[t]', steady: ['contract:KVStage(e)']}]}
+             waits_for:
+               data:
+-                qk:S(n,d)@issue: ['LoadQK/load:Qc(t,d)@done', 'LoadQK/load:Kc(n,d)@done']
+-                pv:Y(n,d)@issue: ['Softmax/publish:P(n)@done', 'LoadV/load:Vc(n,d)@done']
+-                pv:Y(n[t,later],0)@issue: ['Correction/rescale:Y(n[t,later])@done']
++                contract:KVStage(e[t,max(0,2*i-1),d])@issue: ['Load/load:Qc(t,d)@done', 'Load/load:KVStage(e[t,max(0,2*i-1),d])@done']
++                contract:KVStage(e[t,min(2*i+2,2*N-1),d])@issue: ['Softmax/publish:P(n[t,i])@done', 'Load/load:KVStage(e[t,min(2*i+2,2*N-1),d])@done']
++                contract:KVStage(e[t,min(2*later+2,2*N-1),0])@issue: ['Correction/rescale:Y(n[t,later])@done']
+               reuse:
+-                qk:S(n,0)@issue: ['Softmax/capture:S(n-2,1)@done']
+-                pv:Y(n[t,0],0)@issue: ['Correction/release:Y(t-1)@done']
++                contract:KVStage(e[t,max(0,2*i-1),0])@issue: ['Softmax/capture:S(n[t,i]-2,1)@done']
++                contract:KVStage(e[t,min(2,2*N-1),0])@issue: ['Correction/release:Y(t-1)@done']
+           Softmax:
+             info:
+@@ -193,5 +180,5 @@
+               - publish:FinalSum(t)
+             waits_for:
+-              data: {'capture:S(n,1)@issue': ['MMA/qk:S(n,1)@done']}
++              data: {'capture:S(n[t,i],1)@issue': ['MMA/contract:KVStage(e[t,max(0,2*i-1),1])@done']}
+               reuse:
+                 publish:Stats(n+2)@issue: ['Correction/capture:Stats(n)@done']
+@@ -222,6 +209,6 @@
+             waits_for:
+               data:
+-                rescale:Y(n[t,later])@issue: ['MMA/pv:Y(n[t,later-1],1)@done']
+-                stage:Oblock(t,0)@issue: ['MMA/pv:Y(n[t,last(i)],1)@done']
++                rescale:Y(n[t,later])@issue: ['MMA/contract:KVStage(e[t,min(2*(later-1)+2,2*N-1),1])@done']
++                stage:Oblock(t,0)@issue: ['MMA/contract:KVStage(e[t,2*N-1,1])@done']
+                 capture:Stats(n)@issue: ['Softmax/publish:Stats(n)@done']
+                 capture:FinalSum(t)@issue: ['Softmax/publish:FinalSum(t)@done']
+@@ -229,4 +216,4 @@
+   require:
+   - {item: 'design.tile_pipeline::attention.MMA', choice: Use two-CTA tcgen05 MMA with cumulative completion and earlier-PV-read-before-later-QK-write ordering., reason: Pair-wide operand returns and aliased score/probability storage depend on these guarantees.}
+-  - {item: ['design.tile_pipeline::attention.LoadQK', 'design.tile_pipeline::attention.LoadV'], choice: Use native page-64 TMA for HND FP8 KV and descriptor views for Q., reason: Pair-wide transaction completion implements the declared operand handoffs.}
++  - {item: 'design.tile_pipeline::attention.Load', choice: Use native page-64 TMA for HND FP8 KV and descriptor views for Q., reason: Pair-wide transaction completion implements the declared operand handoffs.}
+   - {item: 'design.tile_pipeline::attention', choice: Launch 384 threads per CTA with setmaxnreg budgets and one contiguous 512-column TMEM allocation., reason: Idle warps relinquish registers and the score/numerator resources share one allocation lifetime.}

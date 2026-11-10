@@ -1,0 +1,298 @@
+meta_data:
+  name: nvfp4_fused_moe
+  describe: Precomputed routed mixture of experts with prepared NVFP4 weights, gated activation, activation requantization
+    and BF16 output.
+  source: SchemaExtractSource_c98aa54e58ac@ce1b7d5e8e7560b5c80abd87549bc2328c52df34:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward
+  version: 2
+  dispatch:
+    id: verify_only
+    parent: verify_root
+    when: |
+      Let a be the effective MoEABI used by Model.forward or its default cached
+      C wrapper. Reuse means selecting a previously published ABI without rebuilding
+      it. exec_clean is the cached graph containing only k_zero_verify; a.zflag is
+      its device verification state and a.zflag_host is the pinned verdict mirror.
+      All implementation controls and graph construction follow the frozen default
+      implementation scope. Select exactly when the call reuses a, reaches
+      graph_replay with exec_clean present and a.zflag_host nonzero, observes no
+      outer capture on the caller stream, successfully launches exec_clean, and
+      the final volatile mirror read after the bounded poll equals 1, so moe_run
+      returns zero without launching the full graph. This includes a graph-cache
+      hit or successful capture-only graph construction followed by this replay;
+      any private-stream construction in this request records work without executing
+      an additional pipeline. The nonzero mirror was created only after an accepted
+      zero eligibility probe with T*H>=2^20. Neither that probe nor ABI initialization
+      is repeated here. Recorded tensor bindings and scalar parameters stay fixed;
+      the verification reads their current device contents on this execution.
+design:
+  math_reshape:
+    thesis: |
+      On the host-selected verify-only path, evaluate the current zero/finite
+      predicates and unconditionally write zero output. This omits routed
+      arithmetic and intermediate materialization, at the cost of a streaming
+      verification scan and the final zero-output write.
+    rewrite:
+    - step: zero_verify
+      name: Recompute the zero verdict and write the complete output
+      math: |
+        R=T*K. HasLimit=1 when gemm1_clamp_limit is not None, otherwise 0.
+        For 0<=i<T*H/8 and 0<=b<4, Q4[i,b] is byte 4*i+b of flattened
+        hidden_states, a view without a saved copy. VerifyIndex(s,L) partitions
+        [0,L) among VerifyWorkers shards as bound by work_schedule.
+        For 0<=s<VerifyWorkers, DirtyPart(s)=int32(1) if any of:
+          Q4[i,b] bitwise-AND 0x77 is nonzero for i in VerifyIndex(s,T*H/8),
+            0<=b<4;
+          a flattened hidden_states_scale byte has its low seven bits equal
+            to 127 at an index in VerifyIndex(s,T*H/16);
+          a flattened route_weights element is nonfinite at an index in
+            VerifyIndex(s,R);
+          gemm1_alpha[e] or gemm1_beta[e] is nonfinite for e in VerifyIndex(s,E);
+          HasLimit=1 and gemm1_clamp_limit[e] is nonfinite at such an expert index.
+        Otherwise DirtyPart(s)=int32(0). Clean=int32(1-OR_s DirtyPart(s)).
+        Independently of these tests, write Y[t,h]=bf16(0) for every 0<=t<T,
+        0<=h<H directly into the caller's output storage, and return its existing
+        one-element list alias.
+        No routed intermediate is produced. Existing routing, gathered activation,
+        quantized activation and route-result scratch retains its previous bytes,
+        including the route-count and route-fill arrays. No route IDs, expert
+        weights or expert weight scales are read by this computation.
+      symbol:
+        VerifyWorkers:
+          meaning: Number of verification shards
+          binding: bind:design.work_schedule::VerifyWorkers
+        VerifyIndex:
+          meaning: Index subset assigned to each shard for one flattened stream
+          binding: bind:design.work_schedule::VerifyIndex
+        Q4:
+          meaning: Four-byte view of the packed activation
+          shape:
+          - word: T*H/8
+          - byte: 4
+          dtype: uint8
+        DirtyPart:
+          meaning: One shard predicate before the global OR
+          shape: []
+          dtype: int32
+        Clean:
+          meaning: Verdict reduced from this execution's DirtyPart values
+          shape: []
+          dtype: int32
+          retention: keep_value invocation
+    ledger:
+      baseline: Contract evaluation over all R route slots, materializing decoded FP32 activations, FP32 FC1 up/gate and activated
+        values, and BF16 per-route FC2 results.
+      matmul:
+      - item: Expert contractions
+        change: Up to 3*R*H*I -> 0 routed MACs per invocation
+        by:
+        - zero_verify
+      vector:
+      - item: Verification
+        change: Add O(T*H+R+E) zero/finite tests; all routed activation and quantization evaluations become zero
+        by:
+        - zero_verify
+      footprint:
+      - item: Routed intermediates
+        change: 4*T*H+12*R*I+2*R*H -> 0 bytes of the baseline materialized intermediates; preexisting ABI allocations remain
+          live
+        by:
+        - zero_verify
+      traffic:
+      - item: Executed data passes
+        change: Routed operand/intermediate passes become one scan of 9*T*H/16+4*R+4*E*(2+HasLimit) input bytes and one write
+          of 2*T*H output bytes per invocation; zero weight traffic
+        by:
+        - zero_verify
+  work_schedule:
+    thesis: |
+      Submit one verification kernel on the caller stream and return the output
+      alias when the host mirror observation is 1. This avoids the full graph,
+      including its verification, routing memset and all routed kernels.
+      ABI buffers persist across calls; same-stream execution orders device accesses,
+      with no cross-stream exclusion supplied by this path.
+    flow:
+      launch:
+      - phase:
+        - verify
+        protocol: shape_gated_pdl
+    phase:
+      verify:
+        describe: Stream the output zero stores and current-input predicates, then publish the reduced verdict to device state
+          and the host mirror.
+        decomposition:
+          strategy: |
+            VerifyWorkers=min(T,296), VerifyWidth=256.
+            VerifyIndex(s,L)={i in integers | 0<=i<L and
+              floor(i/VerifyWidth)%VerifyWorkers=s}.
+            Each shard s is one complete worktile. For each flattened stream,
+            independently visit packets starting at s*VerifyWidth with stride
+            VerifyWorkers*VerifyWidth, clipping to that stream's length. These
+            are separate local loops, not a product of independent work dimensions.
+            A Q4 packet contains four bytes per word; output unit i covers flattened
+            BF16 elements 8*i through 8*i+7. Optional clamp packets are read only
+            when HasLimit=1. Every shard contributes one DirtyPart and one arrival
+            ticket, even if its expert or score stream is empty. The last arrival
+            performs zero_verify's OR fold and publishes Clean without grid spinning.
+            The persistent device state is four int32 words: Clean, a dirty-bit
+            accumulator, an arrival count, and an unused word. The accumulator and
+            count enter at zero from ABI construction or the previous completed
+            verification. The last arrival resets both to zero before publishing
+            Clean to the single int32 pinned host mirror; the unused word is untouched.
+            The shape_gated_pdl protocol records the programmatic serialization
+            attribute for R<49152 and ordinary stream serialization otherwise.
+            The device entry helpers remain present in either case. There is no
+            successor kernel in this request to consume an early launch permission.
+            Before the replay, the host writes -1 to the mirror. After successful
+            launch it polls while the mirror is -1 and the incremented spin count
+            is below 200000000. Let HostObserved be the separate final volatile
+            mirror read; HostObserved=1 selects the return with no full-graph
+            submission. Source limitation: the mirror has no request-generation
+            tag and its CPU reset does not await prior GPU writers, so HostObserved
+            may come from an earlier verification, including one in a full graph,
+            rather than this execution's Clean, and does not certify the zero result.
+            This observation is neither verify.kernel_done nor a stream synchronization.
+            Output visibility and completion of all verification workers are guaranteed at
+            verify.kernel_done; subsequent same-stream consumers are ordered after
+            it. Keep the recorded tensors, output and both flag allocations alive
+            through execution and the host observation. This call performs no
+            workspace allocation, eligibility probe or routing initialization.
+          partition:
+            shard:
+              size: VerifyWorkers
+              tile: 1
+          worktile:
+            iteration:
+              Q4:
+                shape:
+                - word: VerifyWidth
+                - byte: 4
+                dtype: uint8
+                direction: ascending
+              hidden_states_scale:
+                shape:
+                - element: VerifyWidth
+                dtype: fp8_e4m3fn
+                direction: ascending
+              route_weights:
+                shape:
+                - route: VerifyWidth
+                dtype: fp32
+                direction: ascending
+              gemm1_alpha:
+                shape:
+                - expert: VerifyWidth
+                dtype: fp32
+                direction: ascending
+              gemm1_beta:
+                shape:
+                - expert: VerifyWidth
+                dtype: fp32
+                direction: ascending
+              gemm1_clamp_limit:
+                shape:
+                - expert: VerifyWidth
+                dtype: fp32
+                direction: ascending
+          target:
+            single_tile:
+              Y:
+                shape:
+                - unit: count(VerifyIndex(s,T*H/8))
+                - element: 8
+                dtype: bf16
+              DirtyPart:
+                shape: []
+                dtype: int32
+            tile_reduction:
+              dimension: shard
+              input: ref:design.math_reshape::DirtyPart
+              output: ref:design.math_reshape::Clean
+              method: ref:design.math_reshape::zero_verify
+        mapping:
+          worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: VerifyWorkers
+        schedule:
+          worktile_order:
+          - by: shard
+            direction: ascending
+          worker_assignment:
+            preassigned:
+              start: worker_id
+              count: 1
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: |
+      One cooperative role per CTA streams output stores and predicate scans, then
+      contributes to a last-arrival reduction. The host observes the shared mirror
+      independently of kernel completion; no payload ring, tensor accumulator or
+      cross-phase handoff is needed.
+    phase:
+      verify:
+        resource:
+          DirtyLane:
+            space: register
+            member_slot_shape:
+            - element: VerifyWidth
+            dtype: int32
+            slot_count: 1
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:8]
+              verb:
+                enter: |
+                  Execute the predecessor-completion/visibility helper, then warp 0
+                  issues the dependent-launch trigger. With no pending predecessor
+                  or with the recorded attribute disabled, the wait is immediate;
+                  without a dependent grid the trigger has no effect. These actions
+                  still execute and have issue/done events.
+                store: |
+                  Walk this shard's output units and submit Y's zero stores. Done
+                  means the local store loop finished issuing its writes; global
+                  output visibility is guaranteed by verify.kernel_done.
+                scan: |
+                  Initialize one DirtyLane accumulator per thread and walk the
+                  payload, activation-scale, score and expert-parameter streams in
+                  that order, using zero_verify's predicates. Every thread joins
+                  the CTA predicate OR, including those with no elements to read;
+                  its result is DirtyPart. Done covers all shard reads and this OR.
+                publish: |
+                  The elected thread contributes a dirty bit atomically if DirtyPart
+                  is nonzero, orders that contribution before one global arrival
+                  ticket, then takes the ticket. The last arriving CTA reads the
+                  combined dirty state, writes Clean and resets both counters.
+                  It then orders these state writes before publishing the same
+                  verdict to the pinned host mirror. Other CTAs finish after their
+                  own contribution without waiting for the last arrival. Done
+                  covers this CTA's state updates; neither an individual done nor
+                  host observation of the mirror replaces verify.kernel_done for
+                  output visibility. Same-stream execution orders subsequent device
+                  accesses to the flag and counters; no cross-stream synchronization
+                  is added.
+            pipe:
+              prologue:
+              - enter:Protocol
+              steady:
+              - store:Y
+              - scan:DirtyPart
+              - publish:Clean
+realization:
+  require:
+  - item: design.tile_pipeline::verify.Main
+    choice: |
+      Bind the CTA predicate fold to __syncthreads_or, dirty contributions to
+      CUDA atomicOr, and arrival tickets to atomicAdd with __threadfence before
+      taking the ticket. Use __threadfence_system before the volatile int32
+      device store into CUDA-accessible pinned host memory; the host reset,
+      poll and final selection read use volatile int32 accesses to that mirror.
+    reason: The last arrival must observe all dirty contributions and publish its mirror write to host-visible storage.
+  - item: design.work_schedule::flow
+    choice: |
+      Preserve the recorded shape_gated_pdl launch attribute using CUDA
+      programmatic-stream-serialization and the device griddepcontrol.wait /
+      griddepcontrol.launch_dependents helpers.
+    reason: These implement the selected stream protocol and its immediate no-op cases without changing the one-kernel submission.

@@ -1,0 +1,199 @@
+151 t_8472b8bf5f6d80b9 pipeline.verb
+Issue cp.async copies; PartialLSE includes -inf padding. The first three partial prefetches may read unspecified empty-split payloads; later copies skip splits beyond each thread-owned row group's last nonempty split.
+Contexts: splitkv_dual_load:285 design.tile_pipeline.phase.combine.role.Main.info.verb.load; splitkv_joint_load:273 design.tile_pipeline.phase.combine.role.Main.info.verb.load
+
+152 t_94309e835096e85f pipeline.verb
+Capture scores and return their slot; use the load-reduced maximum for the fully visible prefix, and recompute after masking the causal/tail suffix.
+Contexts: packed_persistent:186 design.tile_pipeline.phase.attention.role.Softmax.info.verb.capture; rect_joint_load:164 design.tile_pipeline.phase.attention.role.Softmax.info.verb.capture; root:252 design.tile_pipeline.phase.attention.role.Softmax.info.verb.capture; single_persistent_dual_load:186 design.tile_pipeline.phase.attention.role.Softmax.info.verb.capture; single_persistent_joint_load:173 design.tile_pipeline.phase.attention.role.Softmax.info.verb.capture; small_persistent_lpt:191 design.tile_pipeline.phase.attention.role.Softmax.info.verb.capture; small_persistent_shared_rescale:191 design.tile_pipeline.phase.attention.role.Softmax.info.verb.capture; small_static_lpt:185 design.tile_pipeline.phase.attention.role.Softmax.info.verb.capture; small_static_shared_rescale:185 design.tile_pipeline.phase.attention.role.Softmax.info.verb.capture; splitkv_dual_load:229 design.tile_pipeline.phase.attention.role.Softmax.info.verb.capture; splitkv_joint_load:217 design.tile_pipeline.phase.attention.role.Softmax.info.verb.capture
+
+153 t_94ac361b1ae881e0 pipeline.verb
+Normalize one Y half into FP32 OutputStage; completion covers the correction group.
+Contexts: splitkv_dual_load:251 design.tile_pipeline.phase.attention.role.Correction.info.verb.stage; splitkv_joint_load:239 design.tile_pipeline.phase.attention.role.Correction.info.verb.stage
+
+154 t_9bb88449bf8dbd38 pipeline.verb
+K tokens perform QK, initializing S at d=0 and completing at d=1; V tokens perform PV, initializing Y at i=0 and using corrected Y thereafter. Completion covers both CTAs and returns the operand token. Ordered products read earlier P before a later QK overwrites its aliased slot.
+Contexts: rect_joint_load:147 design.tile_pipeline.phase.attention.role.MMA.info.verb.contract; single_persistent_joint_load:155 design.tile_pipeline.phase.attention.role.MMA.info.verb.contract; splitkv_joint_load:200 design.tile_pipeline.phase.attention.role.MMA.info.verb.contract
+
+155 t_9fc2bd79eb80daf3 pipeline.verb
+Coalesced stores write the split PartialO slice; completion ends OutputStage reads and includes the group barrier. EmptyLSE writes only PartialLSE=-inf without waiting on unused pipelines.
+Contexts: splitkv_dual_load:252 design.tile_pipeline.phase.attention.role.Correction.info.verb.store; splitkv_joint_load:240 design.tile_pipeline.phase.attention.role.Correction.info.verb.store
+
+156 t_a5cca1d18a2e6ed8 pipeline.verb
+Normalize and narrow one Y half into OutputStage; completion covers the correction group.
+Contexts: packed_persistent:208 design.tile_pipeline.phase.attention.role.Correction.info.verb.stage; rect_joint_load:183 design.tile_pipeline.phase.attention.role.Correction.info.verb.stage; root:271 design.tile_pipeline.phase.attention.role.Correction.info.verb.stage; single_persistent_dual_load:208 design.tile_pipeline.phase.attention.role.Correction.info.verb.stage; single_persistent_joint_load:195 design.tile_pipeline.phase.attention.role.Correction.info.verb.stage; small_persistent_lpt:213 design.tile_pipeline.phase.attention.role.Correction.info.verb.stage; small_persistent_shared_rescale:213 design.tile_pipeline.phase.attention.role.Correction.info.verb.stage; small_static_lpt:205 design.tile_pipeline.phase.attention.role.Correction.info.verb.stage; small_static_shared_rescale:205 design.tile_pipeline.phase.attention.role.Correction.info.verb.stage
+
+157 t_a85b960ddb3dab48 pipeline.verb
+Build immutable RequestMap once per CTA and release all roles after CTA-wide visibility; Stats publishes the single FP32 alpha evaluated by Softmax and reused by both denominator and Correction; P applies online with per-tile state reset; FinalSum publishes ell(N-1) after all blocks.
+Contexts: small_persistent_shared_rescale:192 design.tile_pipeline.phase.attention.role.Softmax.info.verb.publish
+
+158 t_bf61446f0729da28 pipeline.verb
+Compute and store LSEpart into PartialLSE for valid rows after publishing FinalSum; correction can already stage Opart.
+Contexts: splitkv_dual_load:230 design.tile_pipeline.phase.attention.role.Softmax.info.verb.produce; splitkv_joint_load:218 design.tile_pipeline.phase.attention.role.Softmax.info.verb.produce
+
+159 t_c100bdea654dace0 pipeline.verb
+KVStage is a token, with K at p=max(0,2*i-1) and V at p=min(2*i+2,2*N-1), each with halves d=0,1. Issue K0,K1,V0,K2,V1,...,Klast,Vpenultimate,Vlast; N=1 uses K0,V0. Separate payload arrays share one four-token acquire/release stream. Q contains this member's rows; K uses one page per member/half and V uses two. Both members contribute to pair-wide readiness.
+Contexts: rect_joint_load:130 design.tile_pipeline.phase.attention.role.Load.info.verb.load; single_persistent_joint_load:135 design.tile_pipeline.phase.attention.role.Load.info.verb.load; splitkv_joint_load:182 design.tile_pipeline.phase.attention.role.Load.info.verb.load
+
+160 t_ce274e8894eaf92a pipeline.verb
+Issue one PV output half; i=0 initializes Y and later blocks use corrected Y. Done returns V; d=1 publishes Y and returns P, covering both CTAs.
+Contexts: packed_persistent:162 design.tile_pipeline.phase.attention.role.MMA.info.verb.pv; root:230 design.tile_pipeline.phase.attention.role.MMA.info.verb.pv; single_persistent_dual_load:162 design.tile_pipeline.phase.attention.role.MMA.info.verb.pv; small_persistent_lpt:167 design.tile_pipeline.phase.attention.role.MMA.info.verb.pv; small_persistent_shared_rescale:167 design.tile_pipeline.phase.attention.role.MMA.info.verb.pv; small_static_lpt:163 design.tile_pipeline.phase.attention.role.MMA.info.verb.pv; small_static_shared_rescale:163 design.tile_pipeline.phase.attention.role.MMA.info.verb.pv; splitkv_dual_load:206 design.tile_pipeline.phase.attention.role.MMA.info.verb.pv
+
+161 t_d9cd95fa7788ec17 pipeline.verb
+Stats and FinalSum refer to this CTA's Softmax publications. Acknowledge first-block Stats without reading its payload; capture later Stats and final ell into registers before returning their slots.
+Contexts: root:268 design.tile_pipeline.phase.attention.role.Correction.info.verb.capture
+
+162 t_e512ef5cedb4d1e1 pipeline.verb
+Acknowledge first-block Stats without reading its payload; capture later Stats and final ell into registers before returning their slots.
+Contexts: packed_persistent:205 design.tile_pipeline.phase.attention.role.Correction.info.verb.capture; rect_joint_load:180 design.tile_pipeline.phase.attention.role.Correction.info.verb.capture; single_persistent_dual_load:205 design.tile_pipeline.phase.attention.role.Correction.info.verb.capture; single_persistent_joint_load:192 design.tile_pipeline.phase.attention.role.Correction.info.verb.capture; small_persistent_lpt:210 design.tile_pipeline.phase.attention.role.Correction.info.verb.capture; small_persistent_shared_rescale:210 design.tile_pipeline.phase.attention.role.Correction.info.verb.capture; small_static_lpt:202 design.tile_pipeline.phase.attention.role.Correction.info.verb.capture; small_static_shared_rescale:202 design.tile_pipeline.phase.attention.role.Correction.info.verb.capture; splitkv_dual_load:248 design.tile_pipeline.phase.attention.role.Correction.info.verb.capture; splitkv_joint_load:236 design.tile_pipeline.phase.attention.role.Correction.info.verb.capture
+
+163 t_ee029bd4bfe3c351 pipeline.verb
+Each V half uses two page transfers per member; done covers both and contributes to pair-wide readiness independently of K.
+Contexts: packed_persistent:150 design.tile_pipeline.phase.attention.role.LoadV.info.verb.load; root:219 design.tile_pipeline.phase.attention.role.LoadV.info.verb.load; single_persistent_dual_load:150 design.tile_pipeline.phase.attention.role.LoadV.info.verb.load; small_persistent_lpt:155 design.tile_pipeline.phase.attention.role.LoadV.info.verb.load; small_persistent_shared_rescale:155 design.tile_pipeline.phase.attention.role.LoadV.info.verb.load; small_static_lpt:151 design.tile_pipeline.phase.attention.role.LoadV.info.verb.load; small_static_shared_rescale:151 design.tile_pipeline.phase.attention.role.LoadV.info.verb.load; splitkv_dual_load:195 design.tile_pipeline.phase.attention.role.LoadV.info.verb.load
+
+164 t_f98ffc677442ff07 pipeline.verb
+Q holds this member's rows for the KV traversal; each K half uses one page per member. Both members contribute to pair-wide readiness.
+Contexts: packed_persistent:133 design.tile_pipeline.phase.attention.role.LoadQK.info.verb.load; root:205 design.tile_pipeline.phase.attention.role.LoadQK.info.verb.load; single_persistent_dual_load:133 design.tile_pipeline.phase.attention.role.LoadQK.info.verb.load; small_persistent_lpt:138 design.tile_pipeline.phase.attention.role.LoadQK.info.verb.load; small_persistent_shared_rescale:138 design.tile_pipeline.phase.attention.role.LoadQK.info.verb.load; small_static_lpt:136 design.tile_pipeline.phase.attention.role.LoadQK.info.verb.load; small_static_shared_rescale:136 design.tile_pipeline.phase.attention.role.LoadQK.info.verb.load; splitkv_dual_load:180 design.tile_pipeline.phase.attention.role.LoadQK.info.verb.load
+
+165 t_ff12b271ba9c3460 pipeline.verb
+Build immutable RequestMap once per CTA and release all roles after CTA-wide visibility; Stats carries old maximum and base; P applies online with per-tile state reset; FinalSum publishes ell(N-1) after all blocks.
+Contexts: packed_persistent:187 design.tile_pipeline.phase.attention.role.Softmax.info.verb.publish; single_persistent_dual_load:187 design.tile_pipeline.phase.attention.role.Softmax.info.verb.publish; single_persistent_joint_load:174 design.tile_pipeline.phase.attention.role.Softmax.info.verb.publish; small_persistent_lpt:192 design.tile_pipeline.phase.attention.role.Softmax.info.verb.publish
+
+166 t_0425c7d2822cadd3 realization.choice
+Use two-CTA tcgen05 MMA with cumulative completion and earlier-PV-read-before-later-QK-write ordering.
+Contexts: packed_persistent:230 realization.require[0].choice; rect_joint_load:202 realization.require[0].choice; root:290 realization.require[0].choice; single_persistent_dual_load:230 realization.require[0].choice; single_persistent_joint_load:217 realization.require[0].choice; small_persistent_lpt:235 realization.require[0].choice; small_persistent_shared_rescale:235 realization.require[0].choice; small_static_lpt:224 realization.require[0].choice; small_static_shared_rescale:224 realization.require[0].choice; splitkv_dual_load:311 realization.require[0].choice; splitkv_joint_load:299 realization.require[0].choice
+
+167 t_29fda24ab1b4f9e7 realization.choice
+Use cp.async commit/wait groups for the four-stage partial ring.
+Contexts: splitkv_dual_load:314 realization.require[3].choice; splitkv_joint_load:302 realization.require[3].choice
+
+168 t_a009767f679ced1d realization.choice
+Use native page-64 TMA for HND FP8 KV and descriptor views for Q.
+Contexts: packed_persistent:231 realization.require[1].choice; rect_joint_load:203 realization.require[1].choice; root:291 realization.require[1].choice; single_persistent_dual_load:231 realization.require[1].choice; single_persistent_joint_load:218 realization.require[1].choice; small_persistent_lpt:236 realization.require[1].choice; small_persistent_shared_rescale:236 realization.require[1].choice; small_static_lpt:225 realization.require[1].choice; small_static_shared_rescale:225 realization.require[1].choice; splitkv_dual_load:312 realization.require[1].choice; splitkv_joint_load:300 realization.require[1].choice
+
+169 t_b26038334e8e6428 realization.choice
+Launch 384 threads per CTA with setmaxnreg budgets and one contiguous 512-column TMEM allocation.
+Contexts: packed_persistent:232 realization.require[2].choice; rect_joint_load:204 realization.require[2].choice; root:292 realization.require[2].choice; single_persistent_dual_load:232 realization.require[2].choice; single_persistent_joint_load:219 realization.require[2].choice; small_persistent_lpt:237 realization.require[2].choice; small_persistent_shared_rescale:237 realization.require[2].choice; small_static_lpt:226 realization.require[2].choice; small_static_shared_rescale:226 realization.require[2].choice; splitkv_dual_load:313 realization.require[2].choice; splitkv_joint_load:301 realization.require[2].choice
+
+170 t_381c2211d1ce88c5 realization.reason
+Pair-wide transaction completion implements the declared operand handoffs.
+Contexts: packed_persistent:231 realization.require[1].reason; rect_joint_load:203 realization.require[1].reason; root:291 realization.require[1].reason; single_persistent_dual_load:231 realization.require[1].reason; single_persistent_joint_load:218 realization.require[1].reason; small_persistent_lpt:236 realization.require[1].reason; small_persistent_shared_rescale:236 realization.require[1].reason; small_static_lpt:225 realization.require[1].reason; small_static_shared_rescale:225 realization.require[1].reason; splitkv_dual_load:312 realization.require[1].reason; splitkv_joint_load:300 realization.require[1].reason
+
+171 t_539672a8e7f29b78 realization.reason
+Pair-wide operand returns and aliased score/probability storage depend on these guarantees.
+Contexts: packed_persistent:230 realization.require[0].reason; rect_joint_load:202 realization.require[0].reason; root:290 realization.require[0].reason; single_persistent_dual_load:230 realization.require[0].reason; single_persistent_joint_load:217 realization.require[0].reason; small_persistent_lpt:235 realization.require[0].reason; small_persistent_shared_rescale:235 realization.require[0].reason; small_static_lpt:224 realization.require[0].reason; small_static_shared_rescale:224 realization.require[0].reason; splitkv_dual_load:311 realization.require[0].reason; splitkv_joint_load:299 realization.require[0].reason
+
+172 t_8335a20ddb3a8a9e realization.reason
+Three-stage prefetch overlaps copies and weighted accumulation while preserving thread-private stage readiness.
+Contexts: splitkv_dual_load:314 realization.require[3].reason; splitkv_joint_load:302 realization.require[3].reason
+
+173 t_b1cb841883ea8348 realization.reason
+Idle warps relinquish registers and the score/numerator resources share one allocation lifetime.
+Contexts: packed_persistent:232 realization.require[2].reason; rect_joint_load:204 realization.require[2].reason; root:292 realization.require[2].reason; single_persistent_dual_load:232 realization.require[2].reason; single_persistent_joint_load:219 realization.require[2].reason; small_persistent_lpt:237 realization.require[2].reason; small_persistent_shared_rescale:237 realization.require[2].reason; small_static_lpt:226 realization.require[2].reason; small_static_shared_rescale:226 realization.require[2].reason; splitkv_dual_load:313 realization.require[2].reason; splitkv_joint_load:301 realization.require[2].reason
+
+174 t_45f4169d210726fd schedule.describe
+Final BF16 attention with a single-request flattened persistent schedule.
+Contexts: single_persistent_dual_load:72 design.work_schedule.phase.attention.describe; single_persistent_joint_load:72 design.work_schedule.phase.attention.describe
+
+175 t_4dab27ea52cdb39f schedule.describe
+Reduce all splits into one final BF16 output slice.
+Contexts: splitkv_dual_load:128 design.work_schedule.phase.combine.describe; splitkv_joint_load:128 design.work_schedule.phase.combine.describe
+
+176 t_53dddb1c944a2d53 schedule.describe
+Final BF16 attention with a small-batch LPT flattened persistent schedule.
+Contexts: small_persistent_lpt:75 design.work_schedule.phase.attention.describe; small_persistent_shared_rescale:75 design.work_schedule.phase.attention.describe
+
+177 t_63921062fe5b1306 schedule.describe
+Produce FP32 partial outputs and LSE with a rectangular static split-KV schedule.
+Contexts: splitkv_dual_load:100 design.work_schedule.phase.attention.describe; splitkv_joint_load:100 design.work_schedule.phase.attention.describe
+
+178 t_856c6813706c7a37 schedule.describe
+Final BF16 attention with a original-request-order flattened persistent schedule.
+Contexts: packed_persistent:72 design.work_schedule.phase.attention.describe
+
+179 t_909561ef5d3e2cbc schedule.describe
+Final BF16 attention with a small-batch LPT flattened static schedule.
+Contexts: small_static_lpt:75 design.work_schedule.phase.attention.describe; small_static_shared_rescale:75 design.work_schedule.phase.attention.describe
+
+180 t_f8d68a32ae40dfb4 schedule.describe
+Final BF16 attention with a rectangular static schedule.
+Contexts: rect_joint_load:72 design.work_schedule.phase.attention.describe; root:147 design.work_schedule.phase.attention.describe
+
+181 t_044b296d58f01412 schedule.strategy
+Member list entry a is CTA rank a, for a=0,1. Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.
+Contexts: root:162 design.work_schedule.phase.attention.mapping.strategy
+
+182 t_0f2409562337689a schedule.strategy
+Keep input request order. Build the request-id/prefix map once per CTA; find each segment with a fixed four-step binary search of its prefix boundaries. Within a segment, ordinal x maps to m=2*x if x<ceil(C_b/2), otherwise m=2*(C_b-1-x)+1.
+Contexts: packed_persistent:93 design.work_schedule.phase.attention.schedule.strategy
+
+183 t_6381618b4f7d8e3a schedule.strategy
+SMCount is the runtime multiprocessor count; rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.
+Contexts: packed_persistent:87 design.work_schedule.phase.attention.mapping.strategy; single_persistent_dual_load:87 design.work_schedule.phase.attention.mapping.strategy; single_persistent_joint_load:87 design.work_schedule.phase.attention.mapping.strategy; small_persistent_lpt:90 design.work_schedule.phase.attention.mapping.strategy; small_persistent_shared_rescale:90 design.work_schedule.phase.attention.mapping.strategy
+
+184 t_92b4ae1649eb5a2c schedule.strategy
+For ordinal x in [0,Crect), map to m=2*x if x<ceil(Crect/2), otherwise m=2*(Crect-1-x)+1; use grid coordinates directly, with query clusters fastest.
+Contexts: rect_joint_load:93 design.work_schedule.phase.attention.schedule.strategy; splitkv_dual_load:124 design.work_schedule.phase.attention.schedule.strategy; splitkv_joint_load:124 design.work_schedule.phase.attention.schedule.strategy
+
+185 t_94808f9cd9fcbbc0 schedule.strategy
+M=256; Bk=128; Crect=ceil(TotalQ/16), independently for every request. A worktile covers 16 query tokens and all Hq heads; N=min(ceil(L(b)/Bk),ceil((L(b)-Qlen(b)+16*(m+1))/Bk)); sigma(i)=i. Reject m>=ceil(Qlen(b)/16) before pipeline actions. Active tiles have N>=1.
+Contexts: rect_joint_load:74 design.work_schedule.phase.attention.decomposition.strategy; root:149 design.work_schedule.phase.attention.decomposition.strategy
+
+186 t_a78539136fa99eb1 schedule.strategy
+Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.
+Contexts: rect_joint_load:87 design.work_schedule.phase.attention.mapping.strategy; small_static_lpt:90 design.work_schedule.phase.attention.mapping.strategy; small_static_shared_rescale:90 design.work_schedule.phase.attention.mapping.strategy; splitkv_dual_load:118 design.work_schedule.phase.attention.mapping.strategy; splitkv_joint_load:118 design.work_schedule.phase.attention.mapping.strategy
+
+187 t_b0cd643f1a97dbe0 schedule.strategy
+M=256; Bk=128; C_b=ceil(Qlen(b)/16); Cpad=ceil((TotalQ+15*(BatchCount-1))/16). A worktile covers 16 query tokens and all Hq heads; N=min(ceil(L(b)/Bk),ceil((L(b)-Qlen(b)+16*(m+1))/Bk)); sigma(i)=i. Flatten request segments of C_b tiles into Cpad positions; reject positions beyond sum_b C_b before pipeline actions. Active tiles have N>=1.
+Contexts: packed_persistent:74 design.work_schedule.phase.attention.decomposition.strategy; single_persistent_dual_load:74 design.work_schedule.phase.attention.decomposition.strategy; single_persistent_joint_load:74 design.work_schedule.phase.attention.decomposition.strategy; small_persistent_lpt:77 design.work_schedule.phase.attention.decomposition.strategy; small_persistent_shared_rescale:77 design.work_schedule.phase.attention.decomposition.strategy; small_static_lpt:77 design.work_schedule.phase.attention.decomposition.strategy; small_static_shared_rescale:77 design.work_schedule.phase.attention.decomposition.strategy
+
+188 t_d582ae5d06eca3ad schedule.strategy
+M=256; Bk=128; Crect=ceil(TotalQ/16), independently for every request. SMCount is the runtime multiprocessor count; C=BatchCount*Crect; G=max(1,floor(SMCount/2)); Kblocks=ceil(64*ceil(max_kv_len/64)/Bk). Ssplit=min(floor(G/C),floor(Kblocks/2),floor(24000000/(TotalQ*Hq*D*4)),64); this dispatch guarantees Ssplit>=2. Nfull=min(ceil(L(b)/Bk),ceil((L(b)-Qlen(b)+16*(m+1))/Bk)); span=ceil(ceil(L(b)/Bk)/Ssplit). Split s owns [lo,hi), where lo=s*span, hi=min((s+1)*span,ceil(L(b)/Bk),Nfull); N=max(0,hi-lo); sigma(i)=lo+i. Reject m>=ceil(Qlen(b)/16). A valid query tile with N=0 writes only -inf LSE and performs no operand traffic or pipeline waits.
+Contexts: splitkv_dual_load:102 design.work_schedule.phase.attention.decomposition.strategy; splitkv_joint_load:102 design.work_schedule.phase.attention.decomposition.strategy
+
+189 t_d5cce79e73e9346a schedule.strategy
+Order requests by descending L(b), using strict-greater compare-swaps on request IDs initially in input order. Compare position pairs (0,1),(2,3),(0,2),(1,3),(1,2); ties are not generally stable. An elected thread resolves the assigned segment once and publishes the request and local query coordinates to its CTA. Within a segment, ordinal x maps to m=2*x if x<ceil(C_b/2), otherwise m=2*(C_b-1-x)+1.
+Contexts: small_static_shared_rescale:96 design.work_schedule.phase.attention.schedule.strategy
+
+190 t_d7fd3f1512f83c2f schedule.strategy
+Mc=8; Dc=128; Smax=32 if Ssplit<=32, otherwise 64; pad absent LSE slots with -inf. A request-local row x maps to h=floor(x/Qlen(b)), q=x%Qlen(b), a=cum_seq_lens_q[b]+q; combine is head-major, attention is head-fast. Read PartialO[s,a,h,d] and PartialLSE[s,h,a]; the combine interface takes a zero-copy [split,token,head] transpose of PartialLSE. Launch TotalQ*Hq rows for each request; reject blocks beyond Qlen(b)*Hq and mask its final partial row block.
+Contexts: splitkv_dual_load:130 design.work_schedule.phase.combine.decomposition.strategy; splitkv_joint_load:130 design.work_schedule.phase.combine.decomposition.strategy
+
+191 t_e0f245e8e619776f schedule.strategy
+Order requests by descending L(b), using strict-greater compare-swaps on request IDs initially in input order. Pair positions are (0,1) for B=2; (0,1),(1,2),(0,1) for B=3; (0,1),(2,3),(0,2),(1,3),(1,2) for B=4; ties are not generally stable. An elected thread resolves the assigned segment once and publishes the request and local query coordinates to its CTA. Within a segment, ordinal x maps to m=2*x if x<ceil(C_b/2), otherwise m=2*(C_b-1-x)+1.
+Contexts: small_static_lpt:96 design.work_schedule.phase.attention.schedule.strategy
+
+192 t_e981ca6a6599f148 schedule.strategy
+Enumerate request outside query_cluster, so query_cluster changes fastest. For its ordinal x in [0,Crect), map to m=2*x if x<ceil(Crect/2), otherwise m=2*(Crect-1-x)+1; use grid coordinates directly.
+Contexts: root:168 design.work_schedule.phase.attention.schedule.strategy
+
+193 t_ed0b29bd56dcfc85 schedule.strategy
+Order requests by descending L(b), using strict-greater compare-swaps on request IDs initially in input order. Pair positions are (0,1) for B=2; (0,1),(1,2),(0,1) for B=3; (0,1),(2,3),(0,2),(1,3),(1,2) for B=4; ties are not generally stable. Build this request-id/prefix map once per CTA; resolve each position by linear lookup. Within a segment, ordinal x maps to m=2*x if x<ceil(C_b/2), otherwise m=2*(C_b-1-x)+1.
+Contexts: small_persistent_lpt:96 design.work_schedule.phase.attention.schedule.strategy
+
+194 t_f41f272e46bf56c0 schedule.strategy
+The request order is identity. Build the request-id/prefix map once per CTA; resolve each position by linear lookup. Within a segment, ordinal x maps to m=2*x if x<ceil(C_b/2), otherwise m=2*(C_b-1-x)+1.
+Contexts: single_persistent_dual_load:93 design.work_schedule.phase.attention.schedule.strategy; single_persistent_joint_load:93 design.work_schedule.phase.attention.schedule.strategy
+
+195 t_f42a81f4f55bd391 schedule.strategy
+Order requests by descending L(b), using strict-greater compare-swaps on request IDs initially in input order. Compare position pairs (0,1),(2,3),(0,2),(1,3),(1,2); ties are not generally stable. Build this request-id/prefix map once per CTA; resolve each position by linear lookup. Within a segment, ordinal x maps to m=2*x if x<ceil(C_b/2), otherwise m=2*(C_b-1-x)+1.
+Contexts: small_persistent_shared_rescale:96 design.work_schedule.phase.attention.schedule.strategy
+
+196 t_11987257cbd81380 schedule.thesis
+Distribute contiguous KV splits over a rectangular CTA-pair grid, then launch independent eight-row combine CTAs after attention completes.
+Contexts: splitkv_dual_load:92 design.work_schedule.thesis; splitkv_joint_load:92 design.work_schedule.thesis
+
+197 t_4ee18d17dc7e402c schedule.thesis
+Front-load longer KV requests and fold their query tiles; launch one CTA pair per position so hardware can schedule each tile independently.
+Contexts: small_static_lpt:70 design.work_schedule.thesis; small_static_shared_rescale:70 design.work_schedule.thesis
+
+198 t_66ed307219a81919 schedule.thesis
+Use a rectangular request/query grid with one CTA pair per position; fold the query axis and reject excess positions locally.
+Contexts: rect_joint_load:67 design.work_schedule.thesis; root:142 design.work_schedule.thesis
+
+199 t_7a82e33ea2268243 schedule.thesis
+Reuse a bounded grid of CTA pairs over folded query work; retain mapping and pipeline state across statically assigned tiles.
+Contexts: packed_persistent:67 design.work_schedule.thesis; single_persistent_dual_load:67 design.work_schedule.thesis; single_persistent_joint_load:67 design.work_schedule.thesis
+
+200 t_87f5385b19ce1801 schedule.thesis
+Front-load longer KV requests, fold their query tiles, and stride a bounded persistent grid over the resulting sequence; amortize request-map and pipeline setup.
+Contexts: small_persistent_lpt:70 design.work_schedule.thesis; small_persistent_shared_rescale:70 design.work_schedule.thesis

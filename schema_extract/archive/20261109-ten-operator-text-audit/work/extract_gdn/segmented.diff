@@ -1,0 +1,1048 @@
+--- root
++++ segmented
+@@ -3,195 +3,16 @@
+   describe: TEXT_UNIT_163
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/candidate/solution.py::Model.forward
+-  version: 11
++  version: 3
+   dispatch:
+-    when: TEXT_UNIT_51
+-contract:
+-  algorithm_requirement:
+-    constant:
+-      KeyDim:
+-        value: 128
+-        meaning: TEXT_UNIT_13
+-      ValueDim:
+-        value: 128
+-        meaning: TEXT_UNIT_22
+-      ChunkTokens:
+-        value: 64
+-        meaning: TEXT_UNIT_14
+-    input:
+-      q:
+-        meaning: TEXT_UNIT_27
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - key_head: H
+-        - key: KeyDim
+-        dtype: bf16
+-      k:
+-        meaning: TEXT_UNIT_24
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - key_head: H
+-        - key: KeyDim
+-        dtype: bf16
+-      v:
+-        meaning: TEXT_UNIT_20
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        - value: ValueDim
+-        dtype: bf16
+-      g:
+-        meaning: TEXT_UNIT_21
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        dtype: fp32
+-        range: TEXT_UNIT_28
+-      beta:
+-        meaning: TEXT_UNIT_10
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        dtype: fp32
+-        range:
+-        - 0
+-        - 1
+-      initial_state:
+-        meaning: TEXT_UNIT_11
+-        shape:
+-        - request: N
+-        - value_head: HV
+-        - value: ValueDim
+-        - key: KeyDim
+-        dtype: bf16
+-      output_final_state:
+-        meaning: TEXT_UNIT_25
+-        shape: []
+-        dtype: bool
+-      cu_seqlens:
+-        meaning: TEXT_UNIT_26
+-        shape:
+-        - boundary: N+1
+-        dtype: int32
+-        range: TEXT_UNIT_32
+-      chunk_indices:
+-        meaning: TEXT_UNIT_6
+-        shape:
+-        - chunk: C
+-        - coordinate: 2
+-        dtype: int32
+-        range: TEXT_UNIT_29
+-      chunk_offsets:
+-        meaning: TEXT_UNIT_15
+-        shape:
+-        - boundary: N+1
+-        dtype: int32
+-        range: TEXT_UNIT_30
+-      use_qk_l2norm_in_kernel:
+-        meaning: TEXT_UNIT_18
+-        shape: []
+-        dtype: bool
+-        range: TEXT_UNIT_31
+-      core_attn_out:
+-        meaning: TEXT_UNIT_19
+-        shape:
+-        - element: CoreCapacity
+-        dtype: bf16
+-        nullable: true
+-        default: None
+-    output:
+-      Out:
+-        meaning: TEXT_UNIT_9
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        - value: ValueDim
+-        dtype: bf16
+-      FinalState:
+-        meaning: TEXT_UNIT_23
+-        shape:
+-        - request: N
+-        - value_head: HV
+-        - value: ValueDim
+-        - key: KeyDim
+-        dtype: fp32
+-        nullable: true
+-      CoreWritten:
+-        meaning: TEXT_UNIT_7
+-        shape:
+-        - element: T*HV*ValueDim
+-        dtype: bf16
+-        nullable: true
+-    compute:
+-    - name: packing
+-      math: TEXT_UNIT_3
+-      symbol:
+-        Boundary:
+-          meaning: TEXT_UNIT_12
+-          shape:
+-          - boundary: N+1
+-          dtype: int32
+-        Length:
+-          meaning: TEXT_UNIT_5
+-          shape:
+-          - request: N
+-          dtype: int32
+-    - name: query_key_values
+-      math: TEXT_UNIT_4
+-      symbol:
+-        Qn:
+-          meaning: TEXT_UNIT_17
+-          shape: ref:q.shape
+-          dtype: fp32
+-        Kn:
+-          meaning: TEXT_UNIT_8
+-          shape: ref:k.shape
+-          dtype: fp32
+-    - name: delta_recurrence
+-      math: TEXT_UNIT_2
+-      symbol:
+-        S:
+-          meaning: TEXT_UNIT_16
+-          shape: ref:initial_state.shape
+-          dtype: fp32
+-    - name: output_and_side_effect
+-      math: TEXT_UNIT_1
+-    golden_reference:
+-      source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/reference.py::Model.forward
+-      tolerance:
+-        Out: TEXT_UNIT_33
+-        FinalState: TEXT_UNIT_34
+-        CoreWritten: TEXT_UNIT_35
+-  hardware_specification:
+-    device: null
+-    arch: null
+-    execution:
+-      Unit: null
+-    feature:
+-      Mechanism: null
+-    stack:
+-      language: null
+-      toolchain: null
+-    wiki:
+-      hardware: null
+-      programming:
+-        language: null
+-      microbench: null
+-      sota:
+-        kernel: null
+-        schema: null
+-      profile: null
++    id: segmented
++    parent: root
++    when: TEXT_UNIT_54
+ design:
+   math_reshape:
+-    thesis: TEXT_UNIT_159
++    thesis: TEXT_UNIT_160
+     rewrite:
+     - step: TEXT_UNIT_97
+       name: Define the actual padded chunk inputs
+-      math: TEXT_UNIT_107
++      math: TEXT_UNIT_112
+       symbol:
+         B:
+@@ -204,7 +25,4 @@
+           meaning: TEXT_UNIT_137
+           binding: bind:design.work_schedule::HeadsPerPrep
+-        PRE0:
+-          meaning: TEXT_UNIT_119
+-          binding: bind:design.work_schedule::PRE0
+         Qc:
+           meaning: TEXT_UNIT_156
+@@ -292,5 +110,5 @@
+     - step: TEXT_UNIT_81
+       name: Hierarchical rounded inverse with different merge order at the final level
+-      math: TEXT_UNIT_110
++      math: TEXT_UNIT_113
+       symbol:
+         Ti:
+@@ -307,39 +125,76 @@
+           - column: 32
+           dtype: bf16
+-    - step: TEXT_UNIT_69
+-      name: Carry FP32 state and separately round readout and update operands
+-      math: TEXT_UNIT_117
++    - step: TEXT_UNIT_79
++      name: Form segment summaries and choose readout entries
++      math: TEXT_UNIT_114
++      symbol:
++        G:
++          meaning: TEXT_UNIT_127
++          binding: bind:design.work_schedule::G
++        SegB:
++          meaning: TEXT_UNIT_139
++          shape:
++          - key: KeyDim
++          - value: VTT
++          dtype: fp32
++          retention: keep_value (n,h,vt,z)
++        SegA:
++          meaning: TEXT_UNIT_140
++          shape: []
++          dtype: fp32
++          retention: keep_value (n,h,vt,z)
++        aprod:
++          meaning: TEXT_UNIT_152
++          shape: []
++          dtype: fp32
++          retention: carry_forward (n,h,vt,z); cl=0..m_z
++        weak:
++          meaning: TEXT_UNIT_122
++          shape: []
++          dtype: bool
++        SeedC:
++          meaning: TEXT_UNIT_158
++          shape:
++          - key: KeyDim
++          - value: VTT
++          dtype: fp32
++      arithmetic:
++        approx: TEXT_UNIT_59
++        accumulate: TEXT_UNIT_61
++    - step: TEXT_UNIT_66
++      name: Apply the state recurrence and the readout traversal
++      math: TEXT_UNIT_102
+       symbol:
+         R:
+-          meaning: TEXT_UNIT_131
++          meaning: TEXT_UNIT_135
+           shape:
+           - key: KeyDim
+-          - value: ValueDim
++          - value: VTT
+           dtype: fp32
+-          retention: carry_forward (n,h); c=0..c_n
++          retention: carry_forward (n,h,vt,mode,z); cl=0..Count
+         Rh:
+-          meaning: TEXT_UNIT_132
++          meaning: TEXT_UNIT_120
+           shape:
+           - key: KeyDim
+-          - value: ValueDim
+-          dtype: bf16
+-          retention: carry_forward (n,h); c=0..c_n
++          - value: VTT
++          dtype: bf16
++          retention: carry_forward (n,h,vt,mode,z); cl=0..Count
+         Hrhs:
+           meaning: TEXT_UNIT_154
+           shape:
+           - token: B
+-          - value: ValueDim
++          - value: VTT
+           dtype: bf16
+         U:
+-          meaning: TEXT_UNIT_128
++          meaning: TEXT_UNIT_153
+           shape:
+           - token: B
+-          - value: ValueDim
++          - value: VTT
+           dtype: fp32
+         Uh:
+-          meaning: TEXT_UNIT_149
++          meaning: TEXT_UNIT_118
+           shape:
+           - token: B
+-          - value: ValueDim
++          - value: VTT
+           dtype: bf16
+         DU:
+@@ -347,51 +202,55 @@
+           shape:
+           - token: B
+-          - value: ValueDim
++          - value: VTT
+           dtype: bf16
+         DU0:
+-          meaning: TEXT_UNIT_136
+-          shape:
+-          - value: ValueDim
++          meaning: TEXT_UNIT_123
++          shape:
++          - value: VTT
+           dtype: bf16
+       arithmetic:
+-        accumulate: TEXT_UNIT_56
++        accumulate: TEXT_UNIT_60
+     ledger:
+-      baseline: TEXT_UNIT_64
++      baseline: TEXT_UNIT_78
+       depth:
+       - item: TEXT_UNIT_85
+-        change: TEXT_UNIT_75
++        change: TEXT_UNIT_94
+         by:
+-        - TEXT_UNIT_90
+-        - TEXT_UNIT_81
+-        - TEXT_UNIT_69
++        - TEXT_UNIT_79
++        - TEXT_UNIT_66
++      pass:
++      - item: TEXT_UNIT_63
++        change: TEXT_UNIT_77
++        by:
++        - TEXT_UNIT_79
++        - TEXT_UNIT_66
+       footprint:
+-      - item: TEXT_UNIT_76
+-        change: TEXT_UNIT_89
++      - item: TEXT_UNIT_71
++        change: TEXT_UNIT_84
+         by:
+         - TEXT_UNIT_97
+         - TEXT_UNIT_90
+         - TEXT_UNIT_81
++      - item: TEXT_UNIT_72
++        change: TEXT_UNIT_70
++        by:
++        - TEXT_UNIT_79
+       matmul:
+       - item: TEXT_UNIT_62
+-        change: TEXT_UNIT_101
++        change: TEXT_UNIT_98
+         by:
+         - TEXT_UNIT_90
+         - TEXT_UNIT_81
+-        - TEXT_UNIT_69
+-      vector:
+-      - item: TEXT_UNIT_91
+-        change: TEXT_UNIT_96
+-        by:
+-        - TEXT_UNIT_81
+-        - TEXT_UNIT_69
++        - TEXT_UNIT_66
+       error:
+       - item: TEXT_UNIT_68
+-        change: TEXT_UNIT_83
++        change: TEXT_UNIT_87
+         by:
+         - TEXT_UNIT_90
+         - TEXT_UNIT_81
+-        - TEXT_UNIT_69
++        - TEXT_UNIT_79
++        - TEXT_UNIT_66
+   work_schedule:
+-    thesis: TEXT_UNIT_314
++    thesis: TEXT_UNIT_315
+     flow:
+       launch:
+@@ -399,64 +258,100 @@
+         - prep
+       - phase:
+-        - TEXT_UNIT_69
++        - pass_a
+         protocol: pdl
+         start_after: prep.launch_ready
++      - phase:
++        - pass_c
++        protocol: pdl
++        start_after: pass_a.launch_ready
+       handoff:
+         Ti:
+           producer: prep
+           consumer:
+-          - TEXT_UNIT_69
++          - pass_a
++          - pass_c
+           storage: global
+           ready: prep.kernel_done
+-          wait_at: chain.prep_ready
++          wait_at:
++          - pass_a.prep_ready
++          - pass_c.transfers_ready
+         Qd:
+           producer: prep
+           consumer:
+-          - TEXT_UNIT_69
++          - pass_c
+           storage: global
+           ready: prep.kernel_done
+-          wait_at: chain.prep_ready
++          wait_at: pass_c.transfers_ready
+         b:
+           producer: prep
+           consumer:
+-          - TEXT_UNIT_69
++          - pass_a
++          - pass_c
+           storage: global
+           ready: prep.kernel_done
+-          wait_at: chain.prep_ready
++          wait_at:
++          - pass_a.prep_ready
++          - pass_c.transfers_ready
+         bc:
+           producer: prep
+           consumer:
+-          - TEXT_UNIT_69
++          - pass_a
++          - pass_c
+           storage: global
+           ready: prep.kernel_done
+-          wait_at: chain.prep_ready
++          wait_at:
++          - pass_a.prep_ready
++          - pass_c.transfers_ready
+         Ai:
+           producer: prep
+           consumer:
+-          - TEXT_UNIT_69
++          - pass_a
++          - pass_c
+           storage: global
+           ready: prep.kernel_done
+-          wait_at: chain.prep_ready
++          wait_at:
++          - pass_a.prep_ready
++          - pass_c.transfers_ready
+         Dl:
+           producer: prep
+           consumer:
+-          - TEXT_UNIT_69
++          - pass_a
++          - pass_c
+           storage: global
+           ready: prep.kernel_done
+-          wait_at: chain.prep_ready
++          wait_at:
++          - pass_a.prep_ready
++          - pass_c.transfers_ready
+         Qc:
+           producer: prep
+           consumer:
+-          - TEXT_UNIT_69
++          - pass_c
+           storage: global
+           ready: prep.kernel_done
+-          wait_at: chain.prep_ready
++          wait_at: pass_c.transfers_ready
+         Kc:
+           producer: prep
+           consumer:
+-          - TEXT_UNIT_69
++          - pass_a
++          - pass_c
+           storage: global
+           ready: prep.kernel_done
+-          wait_at: chain.prep_ready
++          wait_at:
++          - pass_a.prep_ready
++          - pass_c.transfers_ready
++        SegB:
++          producer: pass_a
++          consumer:
++          - pass_c
++          storage: global
++          ready: pass_a.kernel_done
++          wait_at: pass_c.transfers_ready
++        SegA:
++          producer: pass_a
++          consumer:
++          - pass_c
++          storage: global
++          ready: pass_a.kernel_done
++          wait_at: pass_c.transfers_ready
+     phase:
+       prep:
+@@ -538,5 +433,5 @@
+                 dtype: ref:design.math_reshape::Kc.dtype
+         mapping:
+-          strategy: TEXT_UNIT_291
++          strategy: TEXT_UNIT_303
+           worker:
+             unit: CTA
+@@ -544,9 +439,9 @@
+           worker_count: SU*HV/HeadsPerPrep
+         schedule:
+-          strategy: TEXT_UNIT_292
++          strategy: TEXT_UNIT_309
+           worktile_order:
++          - by: value_head
++            direction: ascending
+           - by: slot
+-            direction: ascending
+-          - by: value_head
+             direction: ascending
+           worker_assignment:
+@@ -556,11 +451,14 @@
+             refill: none
+             exit: assigned_done
+-      chain:
+-        describe: TEXT_UNIT_275
++      pass_a:
++        describe: TEXT_UNIT_276
+         decomposition:
+-          strategy: TEXT_UNIT_287
++          strategy: TEXT_UNIT_306
+           partition:
+             request:
+               size: N
++              tile: 1
++            segment:
++              size: G
+               tile: 1
+             value_head:
+@@ -574,14 +472,8 @@
+               initial_state:
+                 shape:
+-                - value: VTT
++                - value: InitialRows
+                 - key: KeyDim
+                 dtype: ref:contract.algorithm_requirement::initial_state.dtype
+             iteration:
+-              Qc:
+-                shape:
+-                - token: B
+-                - key: KeyDim
+-                dtype: ref:design.math_reshape::Qc.dtype
+-                direction: ascending
+               Kc:
+                 shape:
+@@ -602,4 +494,109 @@
+                 dtype: ref:design.math_reshape::Ti.dtype
+                 direction: ascending
++              b:
++                shape:
++                - token: B
++                dtype: ref:design.math_reshape::b.dtype
++                direction: ascending
++              bc:
++                shape:
++                - token: B
++                dtype: ref:design.math_reshape::bc.dtype
++                direction: ascending
++              Ai:
++                shape:
++                - token: B
++                dtype: ref:design.math_reshape::Ai.dtype
++                direction: ascending
++              Dl:
++                shape:
++                - token: B
++                dtype: ref:design.math_reshape::Dl.dtype
++                direction: ascending
++          target:
++            single_tile:
++              SegB:
++                shape:
++                - key: KeyDim
++                - value: VTT
++                dtype: ref:design.math_reshape::SegB.dtype
++              SegA:
++                shape: []
++                dtype: ref:design.math_reshape::SegA.dtype
++        mapping:
++          strategy: TEXT_UNIT_293
++          worker:
++            unit: CTA
++            unit_count: 1
++          worker_count: (ValueDim/VTT)*HV*N*G
++        schedule:
++          worktile_order:
++          - by: request
++            direction: ascending
++          - by: segment
++            direction: ascending
++          - by: value_head
++            direction: ascending
++          - by: value
++            direction: ascending
++          worker_assignment:
++            preassigned:
++              start: worker_id
++              count: 1
++            refill: none
++            exit: assigned_done
++      pass_c:
++        describe: TEXT_UNIT_277
++        decomposition:
++          strategy: TEXT_UNIT_304
++          partition:
++            request:
++              size: N
++              tile: 1
++            segment:
++              size: G
++              tile: 1
++            value_head:
++              size: HV
++              tile: 1
++            value:
++              size: ValueDim
++              tile: VTT
++          worktile:
++            invariant:
++              initial_state:
++                shape:
++                - value: InitialRows
++                - key: KeyDim
++                dtype: ref:contract.algorithm_requirement::initial_state.dtype
++              SegA:
++                shape:
++                - segment: G
++                dtype: ref:design.math_reshape::SegA.dtype
++            iteration:
++              Kc:
++                shape:
++                - token: B
++                - key: KeyDim
++                dtype: ref:design.math_reshape::Kc.dtype
++                direction: ascending
++              Qc:
++                shape:
++                - token: B
++                - key: KeyDim
++                dtype: ref:design.math_reshape::Qc.dtype
++                direction: ascending
++              Vc:
++                shape:
++                - token: B
++                - value: VTT
++                dtype: ref:design.math_reshape::Vc.dtype
++                direction: ascending
++              Ti:
++                shape:
++                - row: B
++                - column: B
++                dtype: ref:design.math_reshape::Ti.dtype
++                direction: ascending
+               Qd:
+                 shape:
+@@ -628,4 +625,10 @@
+                 dtype: ref:design.math_reshape::Dl.dtype
+                 direction: ascending
++              SegB:
++                shape:
++                - key: KeyDim
++                - value: VTT
++                dtype: ref:design.math_reshape::SegB.dtype
++                direction: descending
+           target:
+             single_tile:
+@@ -645,13 +648,22 @@
+                 - key: KeyDim
+                 dtype: ref:contract.algorithm_requirement::FinalState.dtype
++            tile_reduction:
++              dimension: segment
++              input:
++              - ref:design.math_reshape::SegB
++              - ref:design.math_reshape::SegA
++              output: ref:design.math_reshape::SeedC
++              method: ref:design.math_reshape::segments
+         mapping:
+-          strategy: TEXT_UNIT_297
++          strategy: TEXT_UNIT_293
+           worker:
+             unit: CTA
+             unit_count: 1
+-          worker_count: ChainBlocks
++          worker_count: (ValueDim/VTT)*HV*N*G
+         schedule:
+           worktile_order:
+           - by: request
++            direction: ascending
++          - by: segment
+             direction: ascending
+           - by: value_head
+@@ -666,5 +678,5 @@
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT_UNIT_166
++    thesis: TEXT_UNIT_164
+     phase:
+       prep:
+@@ -771,5 +783,5 @@
+                 enter: TEXT_UNIT_194
+                 stage_inputs: TEXT_UNIT_198
+-                signal: TEXT_UNIT_248
++                signal: TEXT_UNIT_215
+                 gram: TEXT_UNIT_212
+                 save_image:
+@@ -814,12 +826,165 @@
+                 drain_image:KQImage(a)@done:
+                 - save_image:KQImage(a)@done
+-      chain:
++      pass_a:
+         domain:
+-          c:
++          cl:
+           - 0
+-          - c_n
++          - m_z
+         milestone:
+           prep_ready:
+           - Main/join_prep:Prepared@done
++        resource:
++          aprod:
++            space: register
++            member_slot_shape: []
++            dtype: fp32
++            slot_count: 1
++          R:
++            space: register
++            member_slot_shape:
++            - key: KeyDim
++            - value: VTT
++            dtype: fp32
++            slot_count: 1
++          Projections:
++            space: register
++            member_slot_shape:
++            - matrix: 1
++            - partial: Partials
++            - token: B
++            - value: VTT
++            dtype: fp32
++            slot_count: 1
++            view:
++              KS: {}
++          Rh:
++            space: SMEM
++            member_slot_shape:
++            - key: KeyDim
++            - value: Pitch
++            dtype: bf16
++            slot_count: 1
++          DU:
++            space: SMEM
++            member_slot_shape:
++            - token: B
++            - value: Pitch
++            dtype: bf16
++            slot_count: 1
++          RhsScratch:
++            space: SMEM
++            member_slot_shape:
++            - token: B
++            - value: Pitch
++            dtype: bf16
++            slot_count: 1
++            view:
++              Hrhs: {}
++              DU0:
++                part:
++                  token:
++                  - 0
++                  - 1
++          Stages:
++            space: SMEM
++            member_slot_shape:
++            - element: StageBytes
++            dtype: uint8
++            slot_count: NSTAGE
++            view:
++              Kc(cl):
++                slot_index: cl%NSTAGE
++                part:
++                  element:
++                  - 0
++                  - 16384
++                dtype: bf16
++              Vc(cl):
++                slot_index: cl%NSTAGE
++                part:
++                  element:
++                  - 32768
++                  - 32768+128*VTT
++                dtype: bf16
++              Ti(cl):
++                slot_index: cl%NSTAGE
++                part:
++                  element:
++                  - 32768+128*VTT
++                  - 37888+128*VTT
++                dtype: bf16
++              b(cl):
++                slot_index: cl%NSTAGE
++                part:
++                  element:
++                  - 43008+128*VTT
++                  - 43264+128*VTT
++                dtype: fp32
++              bc(cl):
++                slot_index: cl%NSTAGE
++                part:
++                  element:
++                  - 43264+128*VTT
++                  - 43520+128*VTT
++                dtype: fp32
++              Ai(cl):
++                slot_index: cl%NSTAGE
++                part:
++                  element:
++                  - 43520+128*VTT
++                  - 43776+128*VTT
++                dtype: fp32
++              Dl(cl):
++                slot_index: cl%NSTAGE
++                part:
++                  element:
++                  - 43776+128*VTT
++                  - 44032+128*VTT
++                dtype: fp32
++        role:
++          Main:
++            info:
++              execution_mode: serial
++              member: warp[0:8]
++              verb:
++                setup: TEXT_UNIT_234
++                early_inputs: TEXT_UNIT_252
++                join_prep: TEXT_UNIT_253
++                prime: TEXT_UNIT_235
++                seed: TEXT_UNIT_239
++                advance: TEXT_UNIT_205
++                project: TEXT_UNIT_221
++                rhs: TEXT_UNIT_241
++                solve: TEXT_UNIT_227
++                update: TEXT_UNIT_240
++                publish_transfer: TEXT_UNIT_203
++            pipe:
++              prologue:
++              - setup:Resources
++              - early_inputs:Inputs
++              - join_prep:Prepared
++              - prime:Stages
++              - seed:R
++              steady:
++              - repeat: cl
++                steady:
++                - advance:Stage(cl)
++                - project:KS(cl)
++                - rhs:Hrhs(cl)
++                - solve:U(cl)
++                - update:R(cl)
++              epilogue:
++              - publish_transfer:SegB_SegA
++      pass_c:
++        domain:
++          run:
++          - 0
++          - Run
++          cl:
++          - 0
++          - Count
++        milestone:
++          transfers_ready:
++          - Main/join_a:Transfers@done
+         resource:
+           R:
+@@ -884,6 +1049,6 @@
+             slot_count: NSTAGE
+             view:
+-              Kc(c):
+-                slot_index: c%NSTAGE
++              Kc(cl):
++                slot_index: cl%NSTAGE
+                 part:
+                   element:
+@@ -891,6 +1056,6 @@
+                   - 16384
+                 dtype: bf16
+-              Qc(c):
+-                slot_index: c%NSTAGE
++              Qc(cl):
++                slot_index: cl%NSTAGE
+                 part:
+                   element:
+@@ -898,6 +1063,6 @@
+                   - 32768
+                 dtype: bf16
+-              Vc(c):
+-                slot_index: c%NSTAGE
++              Vc(cl):
++                slot_index: cl%NSTAGE
+                 part:
+                   element:
+@@ -905,6 +1070,6 @@
+                   - 32768+128*VTT
+                 dtype: bf16
+-              Ti(c):
+-                slot_index: c%NSTAGE
++              Ti(cl):
++                slot_index: cl%NSTAGE
+                 part:
+                   element:
+@@ -912,6 +1077,6 @@
+                   - 37888+128*VTT
+                 dtype: bf16
+-              Qd(c):
+-                slot_index: c%NSTAGE
++              Qd(cl):
++                slot_index: cl%NSTAGE
+                 part:
+                   element:
+@@ -919,6 +1084,6 @@
+                   - 43008+128*VTT
+                 dtype: bf16
+-              b(c):
+-                slot_index: c%NSTAGE
++              b(cl):
++                slot_index: cl%NSTAGE
+                 part:
+                   element:
+@@ -926,6 +1091,6 @@
+                   - 43264+128*VTT
+                 dtype: fp32
+-              bc(c):
+-                slot_index: c%NSTAGE
++              bc(cl):
++                slot_index: cl%NSTAGE
+                 part:
+                   element:
+@@ -933,6 +1098,6 @@
+                   - 43520+128*VTT
+                 dtype: fp32
+-              Ai(c):
+-                slot_index: c%NSTAGE
++              Ai(cl):
++                slot_index: cl%NSTAGE
+                 part:
+                   element:
+@@ -940,6 +1105,6 @@
+                   - 43776+128*VTT
+                 dtype: fp32
+-              Dl(c):
+-                slot_index: c%NSTAGE
++              Dl(cl):
++                slot_index: cl%NSTAGE
+                 part:
+                   element:
+@@ -960,44 +1125,48 @@
+               member: warp[0:8]
+               verb:
+-                setup: TEXT_UNIT_197
+-                early_inputs: TEXT_UNIT_175
+-                join_prep: TEXT_UNIT_220
+-                prime: TEXT_UNIT_200
+-                seed: TEXT_UNIT_172
+-                advance: TEXT_UNIT_185
+-                project: TEXT_UNIT_171
+-                rhs: TEXT_UNIT_244
+-                solve: TEXT_UNIT_214
+-                finish_chunk: TEXT_UNIT_238
+-                final_store: TEXT_UNIT_211
++                setup: TEXT_UNIT_179
++                early_inputs: TEXT_UNIT_249
++                join_a: TEXT_UNIT_218
++                classify: TEXT_UNIT_242
++                prime: TEXT_UNIT_189
++                seed: TEXT_UNIT_210
++                advance: TEXT_UNIT_206
++                project: TEXT_UNIT_231
++                rhs: TEXT_UNIT_232
++                solve: TEXT_UNIT_247
++                finish_chunk: TEXT_UNIT_228
++                final_store: TEXT_UNIT_222
+             pipe:
+               prologue:
+               - setup:Resources
+               - early_inputs:Inputs
+-              - join_prep:Prepared
+-              - prime:Stages
+-              - seed:R
++              - join_a:Transfers
++              - classify:weak
+               steady:
+-              - repeat: c
++              - repeat: run
+                 steady:
+-                - advance:Stage(c)
+-                - project:KS_QS(c)
+-                - rhs:Hrhs(c)
+-                - solve:U(c)
+-                - finish_chunk:Out_R(c)
+-              epilogue:
+-              - final_store:FinalState
++                - prime:Stages
++                - seed:R
++                - repeat: cl
++                  steady:
++                  - advance:Stage(cl)
++                  - project:KS_QS(cl)
++                  - rhs:Hrhs(cl)
++                  - solve:U(cl)
++                  - finish_chunk:Out_R(cl)
++                - final_store:FinalState
+ realization:
+   require:
+   - item: design.work_schedule::flow
+-    choice: TEXT_UNIT_257
++    choice: TEXT_UNIT_261
+     reason: TEXT_UNIT_268
+   - item:
+     - design.tile_pipeline::prep.KQImage
+-    - design.tile_pipeline::chain.Stages
+-    choice: TEXT_UNIT_260
+-    reason: TEXT_UNIT_271
++    - design.tile_pipeline::pass_a.Stages
++    - design.tile_pipeline::pass_c.Stages
++    choice: TEXT_UNIT_266
++    reason: TEXT_UNIT_270
+   - item: design.work_schedule::flow
+-    choice: TEXT_UNIT_259
++    choice: TEXT_UNIT_256
+     reason: TEXT_UNIT_269
+   prefer:

@@ -1,0 +1,115 @@
+"meta_data":
+  "name": "nvfp4_fused_moe"
+  "describe": "Precomputed routed mixture of experts with prepared NVFP4 weights,\
+    \ gated activation, activation requantization and BF16 output."
+  "source": "SchemaExtractSource_c98aa54e58ac@ce1b7d5e8e7560b5c80abd87549bc2328c52df34:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward"
+  "version": 2
+  "dispatch":
+    "id": "no_scan_fused_small_flat"
+    "parent": "fused_small_flat"
+    "when": |
+      Let a be the MoEABI rebuilt by Model.forward after its identity and key
+      caches miss. All implementation controls follow the frozen default
+      implementation scope. In a, cfg/cfg2 select FC1/FC2, small_thresh is
+      the saved routing preparation threshold, and zflag/zflag_host are the
+      optional device verification state and pinned host mirror.
+      Let R=T*K. Within this rebuild, route_hist counts valid expert IDs
+      0<=e<E in route_ids after an ids.tolist() readback, where ids is the
+      contiguous route_ids tensor. The readback occurs only when an automatic
+      gate requests this histogram, and later gates reuse it. Under the
+      defaults, small_thresh is 3000 when 3000<R<=6500 and route_hist is
+      nonempty, otherwise 6500.
+      TableInit means an actual k_init_tables submission by ensure_tables;
+      its per-device ready-set hit returns without that submission or its
+      device synchronization. ProbeScan means an actual k_zero_scan submission
+      by moe_zero_probe. Both include work recorded for later execution.
+      A probe error or exception does not imply that ProbeScan is absent:
+      classify by the work actually submitted. The allocation-error
+      return -1 and reset-error return -2 precede the scan launch.
+      Let p be Params derived from a. FC2Flat means launch_gemm<false>
+      obtains a non-null map set from tma_set(p,false,128,false) and selects
+      the cfg2=23 flat-stream NK1 kernel. For recorded work use that selection
+      at recording.
+      Select exactly when this call rebuilds a, TableInit and ProbeScan are
+      both absent, zero_ok is false, a.cfg=97, a.cfg2=23, I=256, FC2Flat,
+      a.zflag=0, a.zflag_host=0, R<=a.small_thresh, and moe_run returns zero
+      through either a single caller-stream run_pipeline call or graph_replay's
+      ordinary full-graph arm. Every private-stream run_pipeline call in this
+      request, if present, is capture-only after successful
+      cudaStreamBeginCapture; no additional uncaptured pipeline is submitted
+      there. This includes eager execution, replay after graph construction,
+      existing-graph replay, and eager fallback with the same submitted work.
+      During outer capture the computation and its completion events occur
+      only on later execution of the recorded request. Host choices, by-value
+      scalars and tensor bindings stay fixed at recording; device tensor reads
+      use execution-time contents. Replay does not rerun host cache checks,
+      route_hist or ABI construction; recorded scratch initialization executes with its graph.
+"design":
+  "math_reshape":
+    "from_parent": "fused_small_flat"
+  "work_schedule":
+    "from_parent": "fused_small_flat"
+  "tile_pipeline":
+    "from_parent": "fused_small_flat"
+realization:
+  require:
+  - item: ['design.tile_pipeline::fc1.MMA', 'design.tile_pipeline::fc2.Main']
+    choice: >-
+      Use tcgen05 block_scale.scale_vec::4X E2M1/E4M3 MMA and the tcgen05.cp scale path, with cumulative
+      tcgen05.commit completion and tcgen05.fence::after_thread_sync at the stated synchronization boundaries.
+    reason: Ordered scale consumption and cumulative operand-read completion implement both phases' ring
+      and accumulator reuse protocols.
+  - item: ['design.tile_pipeline::fc1', 'design.tile_pipeline::fc2.Main']
+    choice: >-
+      Use tcgen05.ld and tcgen05.wait::ld for register materialization, respecting each issuing warp's hardware
+      quadrant. Retire the reads before FC1's early release or FC2's boundary epilogue rendezvous.
+    reason: Accumulator reuse requires completed TMEM reads, independently of the later global store completion.
+  - item: design.tile_pipeline::fc2.Main
+    choice: >-
+      Bind PayloadPair to TMA boxes over ActQ and the prepared FC2 weight byte map, with transaction-byte
+      completion. Stage scales through vector global-to-register loads and shared stores, using fence.proxy.async.shared::cta
+      and the stated CTA rendezvous before tensor consumption.
+    reason: >-
+      The scale lookahead is carried in registers, so payload transactions and shared scale publication
+      have distinct completion guarantees.
+  - item: design.work_schedule::flow
+    choice: >-
+      Preserve programmatic-stream-serialization launches and the griddepcontrol.wait / launch_dependents
+      protocol for eager and recorded work.
+    reason: Launch permission and visible predecessor results are separate guarantees.
+  - item: design.work_schedule::flow
+    choice: >-
+      Retain the reached rebuild services before moe_run: automatic-gate
+      ids.tolist() readback, and the zero probe's attempted four-byte allocation,
+      reset attempt only after allocation succeeds, and cleanup on reset failure.
+      A Python exception retains the services already reached. If a scan launch
+      is attempted but rejected, retain the reached error query and cleanup,
+      with no scan completion event. Neither
+      allocation failure nor reset failure supplies a scan result or a scan
+      completion wait; zero_ok remains false and both verification pointers are
+      null. The reset-error exit calls cudaFree before returning -2.
+    reason: >-
+      These service costs and failure boundaries distinguish ABI reconstruction
+      from reuse without supplying a zero verdict or changing the five computing
+      submissions. An error cannot be treated as a completed probe.
+  - item: ['design.work_schedule::flow', 'design.math_reshape::GatherQ',
+      'design.math_reshape::GatherS', 'design.math_reshape::ActQ',
+      'design.math_reshape::ActS', 'design.math_reshape::RouteResult']
+    choice: >-
+      Bind the rebuilt ABI to its keyed workspace. A scratch miss allocates and
+      zeroes the contiguous 2*E int32 counts/fill slab; a hit reuses it without
+      that initialization. Other selected scratch uses uninitialized allocation.
+      GatherQ and GatherS occupy consecutive R*H/2 and R*H/16 byte views;
+      ActQ and ActS occupy consecutive R*I/2 and R*I/16 byte views within the
+      2*R*I-byte activation allocation. RouteResult has R*H BF16 elements.
+      The route maps have R entries and the tile maps have TileCap entries.
+      Keep caller tensors, workspace and ABI alive for every recorded or in-flight
+      use; cache publication after a successful moe_run retains their strong
+      references and the existing output alias. Rebuilding does not wait for
+      output completion or introduce cross-stream workspace exclusion.
+    reason: >-
+      The concrete ABI views must agree with both tensor maps and global handoffs.
+      Preparation rewrites the consumed counts and prefixes, so allocation-time
+      zeroing is a service operation, not an additional handoff initial value.
+      Unwritten operand rows retain unspecified bytes as the mathematical padding
+      rule requires; a fresh allocation does not imply zero-filled padding.

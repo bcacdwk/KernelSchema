@@ -1,0 +1,320 @@
+"meta_data":
+  "name": "Expanded MLA FP8 Attention"
+  "describe": "Ragged attention from prepared E4M3 Q/K/V to BF16 output, with optional\
+    \ attention sinks and base-2 log-sum-exp."
+  "source": "SchemaExtractSource_f91523a50e3d@228934a2253bde4d6f0c4463dd77aeada1bf07a8:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py::Model.forward"
+  "version": 1
+  "dispatch":
+    "id": "bootstrap"
+    "parent": "root"
+    "when": |
+      Let WorkCount = H * sum_{b=0}^{B-1} ceil_div(CuQ[b+1] - CuQ[b], 128).
+      Let ReportedSMCount be launch_impl's cached n_sm_launch value:
+      while that cache is zero, the source queries cudaDevAttrMultiProcessorCount
+      for the current device with cudaDeviceGetAttribute.
+      Let LaunchSMCount = ReportedSMCount if it is positive, otherwise 148,
+      where 148 is the source's fallback value, not an asserted device property.
+      Select exactly when 2 * WorkCount <= 3 * LaunchSMCount.
+      These are the host values used for the selected launch; a recorded execution
+      retains the host selection bound at recording.
+"design":
+  "math_reshape":
+    "from_parent": "root"
+  work_schedule:
+    thesis: >-
+      Assign one head/query-block worktile to each CTA and keep the full key
+      recurrence local. Host table ordering retains its locality and heavy-first
+      rules; submitting all worktiles avoids refill traffic but has no dynamic rebalancing.
+    flow:
+      launch: [{phase: [main]}]
+    phase:
+      main:
+        describe: Compute all score, normalization, main PV, optional tiny correction and output work for one head and one query block.
+        decomposition:
+          strategy: |
+            Bq = 128 and Bk = 128. Item is the ordinal of a geometry-table entry
+            Geo[Item]=(b,h,a,q0,qv,N,CuQ[b]+q0,CuKV[b]); its order is defined below.
+            Each worktile consumes QTile once and traverses KTile(t),VTile(t) for
+            t=0..N-1. All reductions and optional tiny correction remain inside it.
+            Each valid output row/head belongs to exactly one entry; no cross-worktile merge.
+          partition:
+            Item: {size: WorkCount, tile: 1}
+          worktile:
+            invariant:
+              QTile: {shape: [query_token: Bq, channel: QKDim], dtype: 'ref:design.math_reshape::QTile.dtype'}
+              Sinks: {shape: [head: 1], dtype: 'ref:contract.algorithm_requirement::Sinks.dtype'}
+            iteration:
+              KTile: {shape: [kv_token: Bk, channel: QKDim], dtype: 'ref:design.math_reshape::KTile.dtype', direction: ascending}
+              VTile: {shape: [kv_token: Bk, value: ValueDim], dtype: 'ref:design.math_reshape::VTile.dtype', direction: ascending}
+          target:
+            single_tile:
+              O: {shape: [query_token: qv, value: ValueDim], dtype: 'ref:contract.algorithm_requirement::O.dtype'}
+              LSE: {shape: [query_token: qv], dtype: 'ref:contract.algorithm_requirement::LSE.dtype'}
+        mapping:
+          strategy: WorkCount is defined in dispatch.when. Submit one 384-thread CTA per table entry; the submitted count is not an asserted residency guarantee.
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: WorkCount
+        schedule:
+          strategy: |
+            Before the main launch, a nonblocking side stream copies SeqLens, CuQ
+            and CuKV to pinned host buffers (4*(3*B+2) bytes); the host waits for
+            these copies and constructs WorkCount table entries of 48 bytes each.
+            Start from h ascending, b ascending, a descending. Stable-sort by N
+            descending exactly when every q_b>=Bq and Scatter is false.
+            Let CachedL2 and CachedSM be launch_impl's cached device-query results,
+            refreshed while CachedL2 is zero. Let ScatterBytes =
+            min(H*B,CachedSM if positive else 148)*max_b(k_b)*(QKDim+ValueDim).
+            Scatter = CachedL2>0 and 4*ScatterBytes>3*CachedL2. This is a host
+            locality heuristic, not a measured cache-capacity guarantee.
+            Upload the complete Geo table on the side stream and record table_event;
+            the main/current stream waits for that upload before the one main kernel.
+            Only allocation capacity and descriptor encodings are cached, not reused
+            numerical metadata. During external recording this host prefix still runs;
+            later execution uses the recorded binding and the table contents actually read.
+            Sinks has a payload only when present. LSE is stored only when ReturnLSE;
+            neither option changes the work set or the main kernel submission.
+          worktile_order: [{by: Item, direction: ascending}]
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: >-
+      Separate loading, matrix issue, softmax and output correction within one
+      worktile. Publish scales ahead of weights; three score/probability slots
+      and a three- or four-slot K/V ring bound the producer lead.
+      The source's TMEM row-address discrepancy remains a limitation;
+      the full row partition and its data lifetimes are retained.
+    phase:
+      main:
+        domain:
+          t: [0, N]
+        resource:
+          Query:
+            space: SMEM
+            member_slot_shape: [query_token: Bq, channel: QKDim]
+            dtype: fp8_e4m3fn
+            slot_count: 1
+            view: {'QTile': {}}
+          Keys:
+            space: SMEM
+            member_slot_shape: [kv_token: Bk, channel: QKDim]
+            dtype: fp8_e4m3fn
+            slot_count: KVSlots
+            view: {'KTile(t)': {slot_index: 't%KVSlots'}}
+          Values:
+            space: SMEM
+            member_slot_shape: [kv_token: Bk, value: ValueDim]
+            dtype: fp8_e4m3fn
+            slot_count: KVSlots
+            view: {'VTile(t)': {slot_index: 't%KVSlots'}}
+          ScoreProbability:
+            space: TMEM
+            member_slot_shape: [row: Bq, column: Bk]
+            dtype: fp32
+            slot_count: 3
+            view:
+              'S(t)': {slot_index: 't%3'}
+              'P(t)': {slot_index: 't%3', part: {column: [32, 64]}, dtype: fp8_e4m3fn}
+          Accumulator:
+            space: TMEM
+            member_slot_shape: [query_token: Bq, value: ValueDim]
+            dtype: fp32
+            slot_count: 1
+            view: {'Y(t)': {}}
+          ScoreRegisters:
+            space: register
+            member_slot_shape: [query_token: Bq, kv_token: Bk]
+            dtype: fp32
+            slot_count: 1
+            view: {'S(t)': {}}
+          PackedRegisters:
+            space: register
+            member_slot_shape: [query_token: Bq, kv_token: Bk]
+            dtype: fp8_e4m3fn
+            slot_count: 1
+            view: {'P(t)': {}}
+          Maximum:
+            space: register
+            member_slot_shape: [query_token: Bq]
+            dtype: fp32
+            slot_count: 1
+            view: {'M(t)': {}}
+          Denominator:
+            space: register
+            member_slot_shape: [query_token: Bq]
+            dtype: fp32
+            slot_count: 1
+            view: {'D(t)': {}}
+          ScaleRelay:
+            space: SMEM
+            member_slot_shape: [query_token: Bq]
+            dtype: fp32
+            slot_count: 2
+            view: {'Alpha(t)': {slot_index: 't%2'}}
+          FinalSum:
+            space: SMEM
+            member_slot_shape: [query_token: Bq]
+            dtype: fp32
+            slot_count: 1
+            view: {'Fsum': {}}
+          FinalMax:
+            space: SMEM
+            member_slot_shape: [query_token: Bq]
+            dtype: fp32
+            slot_count: 1
+            view: {'Fmax': {}}
+          TinyNumerator:
+            space: SMEM
+            member_slot_shape: [query_token: 32, value: ValueDim]
+            dtype: fp32
+            slot_count: 1
+            view: {'TinyY': {}}
+          CorrectionRegisters:
+            space: register
+            member_slot_shape: [query_token: Bq, value: ValueDim]
+            dtype: fp32
+            slot_count: 1
+            view:
+              'Y(t)': {}
+              'OutputChunk': {part: {value: [0, 32]}}
+          Geometry:
+            space: SMEM
+            member_slot_shape: [field: 10]
+            dtype: int32
+            slot_count: 2
+            view:
+              Item: {slot_index: 0}
+        role:
+          Softmax:
+            info:
+              execution_mode: serial
+              member: 'warp[0:4]'
+              register: 248
+              verb:
+                latch: |
+                  Latch this CTA's preassigned Item geometry after the initialization
+                  join, and reset M,D. The first Geometry slot is initialized from
+                  Geo[worker_id]; the second allocated slot remains unused.
+                  Each warp handles its consecutive 32-row group throughout this role.
+                load: Scores(t) reads both halves of S(t) into ScoreRegisters; done releases the score read for subsequent QK slot reuse. The second-half transfer overlaps first-half masking/max work.
+                publish: |
+                  Alpha(t) updates M and publishes all row scales before exponentiation.
+                  P(t) copies PackedRegisters into its aliased TMEM view and completes
+                  its writes before publication. The two-slot scale relay is safe
+                  because QK(t+2) completion preceding its next write follows PV(t),
+                  which already required the applicable rescale to read Alpha(t).
+                compute: Weights(t) performs the weights rewrite after Alpha publication, retains packed P in registers and advances D.
+                produce: |
+                  Final captures Fsum,Fmax on the last tile. For short requests,
+                  the first row group rereads the first 32 S columns and VTile for
+                  the tiny rewrite, storing TinyY and TinyD into the selected final
+                  denominator. Other rows keep the main denominator. P publication remains required.
+            pipe:
+              prologue: ['latch:Item']
+              steady:
+                - repeat: {i: [0, 'N-1']}
+                  steady: ['load:Scores(i)', 'publish:Alpha(i)', 'compute:Weights(i)', 'publish:P(i)']
+                - 'load:Scores(N-1)'
+                - 'publish:Alpha(N-1)'
+                - 'compute:Weights(N-1)'
+                - 'produce:Final'
+                - 'publish:P(N-1)'
+            waits_for:
+              data:
+                'load:Scores(t)': ['MMA/qk:S(t)']
+              reuse:
+                'publish:P(t+3)': ['MMA/mma:P(t)@VTile(t)']
+          Correction:
+            info:
+              execution_mode: serial
+              member: 'warp[4:8]'
+              register: 160
+              verb:
+                latch: Latch the preassigned Item geometry after the initialization join; its four warps handle the same four consecutive 32-row groups as Softmax. Initial output credit declares the new accumulator and final-statistic storage free of old readers.
+                rescale: Y(t) reads Alpha(t), copies all 128 previous PV columns into CorrectionRegisters before multiplying and writing them back, and publishes completion for nonfirst tiles. A group with all scales equal to one skips TMEM data traffic but still completes and publishes its rescale event.
+                store: |
+                  Output evaluates the output rewrite using Fsum,Fmax. Ordinary rows
+                  drain Y in four serial 32-column read/wait/convert/store chunks,
+                  using OutputChunk registers; tiny rows read and store all TinyY
+                  columns instead. The source returns output-state credit after its
+                  final scratch read; this CTA has no later worktile to consume it.
+                  Invalid query rows still execute collective reads and arithmetic;
+                  only destination stores are masked. Write LSE exactly when present.
+                  done covers all output writes and required source reads.
+            pipe:
+              prologue: ['latch:Item']
+              steady:
+                - repeat: {i: [1, N]}
+                  steady: ['rescale:Y(i)']
+              epilogue: ['store:Output']
+            waits_for:
+              data:
+                'rescale:Y(t+1)': ['MMA/mma:P(t)@VTile(t)', 'Softmax/publish:Alpha(t+1)']
+                'store:Output': ['MMA/mma:P(N-1)@VTile(N-1)']
+          MMA:
+            info:
+              execution_mode: async_ordered_completion
+              member: 'warp[8:9]'
+              register: 32
+              verb:
+                latch: {execution_mode: serial, meaning: 'Latch the preassigned Item after the initialization join. One elected issuer handles matrix operations; the warp allocates the full TMEM resource before use and frees it after the final CTA join, when all roles and their required reads and output writes have finished.'}
+                wait: {execution_mode: serial, meaning: 'QTile waits for the initial Q transfer; it does not drain unrelated operations.'}
+                qk: |
+                  S(t) performs the scores rewrite from QTile and KTile(t).
+                  It uses the same ordered tensor stream and cumulative completion
+                  guarantee as mma.
+                mma: |
+                  P(t)@VTile(t) performs the value_state rewrite into Y. First PV
+                  initializes Y; later PV follows correction. Products issue in
+                  one ordered tensor stream, and a completion notification covers
+                  all earlier products. Earlier PV reads of an aliased P slot
+                  finish before a later QK overwrites that slot. This ordering also
+                  protects the tiny reread before the same S slot can recur.
+                  PV completion releases its K/V slot. For KVSlots=3 the release
+                  notification cycles with the three S/P slots; for KVSlots=4 it
+                  additionally cycles with the four K/V slots, preventing parity aliasing.
+            pipe:
+              prologue: ['latch:Item', 'wait:QTile', 'qk:S(0)']
+              steady:
+                - repeat: {i: [1, N]}
+                  steady: ['qk:S(i)', 'mma:P(i-1)@VTile(i-1)']
+              epilogue: ['mma:P(N-1)@VTile(N-1)']
+            waits_for:
+              data:
+                'qk:S(t)': ['Loader/load:KV(t)']
+                'mma:P(t+1)@VTile(t+1)': ['Correction/rescale:Y(t+1)']
+              reuse:
+                'qk:S(t+3)': ['Softmax/load:Scores(t)']
+          Loader:
+            info:
+              execution_mode: async
+              member: 'warp[9:10]'
+              register: 32
+              verb:
+                load: |
+                  KVSlots = 3 if Scatter, otherwise 4. QTile loads the complete
+                  query tile into Query directly from the preassigned Geo entry
+                  and can start during CTA initialization. KV(t) loads KTile(t)
+                  and VTile(t); done means all bytes of both are readable.
+                  Each Q/K transfer has a 128-channel segment and a 64-channel tail;
+                  V has one 128-channel segment, with the padded views defined in tiles.
+                latch: {execution_mode: serial, meaning: 'Latch Item after issuing Q and completing the initialization join; retain its K/V base and head through all local fills.'}
+            pipe:
+              repeat: t
+              prologue: ['load:QTile', 'latch:Item']
+              steady: ['load:KV(t)']
+            waits_for:
+              reuse:
+                'load:KV(t+KVSlots)': ['MMA/mma:P(t)@VTile(t)']
+realization:
+  require:
+    - item: design.tile_pipeline::main.MMA
+      choice: Use the source SM10x tcgen05 FP8 matrix path with TMEM accumulation and cumulative tcgen05.commit completion notifications.
+      reason: The aliased S/P views rely on ordered earlier-operand reads before later tensor writes, and consumers rely on completion covering preceding products.
+    - item: design.tile_pipeline::main.Loader
+      choice: Bind Q and K/V loads to cp.async.bulk.tensor transfers with mbarrier transaction-byte completion waits.
+      reason: Issue alone does not make transferred bytes readable; the three-slot and four-slot reuse notifications have different periods.
+    - item: [design.tile_pipeline::main.Softmax, design.tile_pipeline::main.Correction]
+      choice: Implement TMEM reads and writes with converged full-warp tcgen05 collective accesses and the corresponding load/store completion waits.
+      reason: Invalid output rows remain participants in collective accesses, and score/accumulator release must follow the actual completion of those reads.

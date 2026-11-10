@@ -1,0 +1,849 @@
+meta_data:
+  name: mxfp8_qkv_attention
+  describe: Dense grouped-query attention on block-scaled FP8 Q/K/V with FP8 probability rounding, BF16 output, and optional FP32 natural-log LSE.
+  source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+  version: 1
+  dispatch:
+    id: tcg_d128_segmented_cp_xpose_wide
+    parent: tcg_d128_segmented_cp_xpose_narrow
+    when: |-
+      Let active mean window_left is not None and window_left >= 0, and wl be
+      window_left when active, otherwise 0. Let HostPlan be the actual cached Plan
+      returned by fmha_mxfp8::plan_geometry(B,H,KH,Sq,Skv,D,is_causal,wl,active) in
+      source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/fmha_mxfp8_qkv.cu::fmha_mxfp8::plan_geometry.
+      Let SmCount be that source's actual device_sm_count() result, including its
+      query fallback. Let MapsValid be the actual short-circuit conjunction of K
+      and V encode_tile_map results in fmha_mxfp8_forward, including cache hits.
+      Let split mean HostPlan.use_tc and HostPlan.nsplit>1 and W>0 and
+      W>=HostPlan.workspace. Let scan2p mean HostPlan.T>=128 and
+      HostPlan.rows_total<=512 and not active. Let psk mean
+      2*Sq*(H/KH)<=128*HostPlan.qtiles128. Let wide mean
+      (HostPlan.rows_total<2*SmCount and HostPlan.nsplit>=8) or HostPlan.nsplit>128.
+      Select exactly when HostPlan.use_tcg and split and D=128 and not MapsValid
+      and not HostPlan.scan_fused and scan2p and not psk and wide.
+      The fixed defaults select FP32 partials, QK128, non-PSK rows, cp.async,
+      segment-max then row replay, and wide combine. Both matrix kernels
+      have one warpgroup; split stages partial numerators in reused shared
+      operand storage for a cooperative transposed write.
+design:
+  math_reshape:
+    thesis: Materialize group and segment maxima, then use segment tests to skip unchanged portions of the ordered delayed-max scan. Independent
+      key splits replay its snapshots and combine FP32 partials, shortening numerator recurrences at the cost of repeated QK products and global
+      scalar/partial traffic; native MXFP8 products and probability rounding retain the fixed source's numerical path.
+    rewrite:
+      - step: domain
+        name: Grouped rows and split intervals
+        math: |
+          Let G=H/KH, Qph=Br/G, R=B*H*Sq, T=ceil_div(Skv,KeyGroup).
+          For each (b,kh,a), 0<=a<ceil_div(Sq,Qph), let q0=a*Qph,
+          U=G*min(Qph,Sq-q0). Rows u=0,...,Br-1 map to
+          i=q0+(u mod Qph), h=kh*G+floor(u/Qph).
+          Valid rows have i<Sq; their count is U and they need not form a prefix.
+          Set ic=min(i,Sq-1) for masks.
+          Use the Contract's stored operands, scale addressing and inclusive masks.
+          Let lo(u)=max(0,ic+Skv-Sq-wl) when active, otherwise 0;
+          hi(u)=ic+Skv-Sq when is_causal, otherwise Skv-1.
+          Let gLoAll=floor((active ? max(0,q0+Skv-Sq-wl) : 0)/KeyGroup),
+          gHiAll=floor((is_causal ? min(q0+Qph-1,Sq-1)+Skv-Sq : Skv-1)/KeyGroup),
+          Span=gHiAll-gLoAll+1. For split count N and 0<=s<N, define
+          per(N)=ceil_div(Span,N), L(N,s)=gLoAll+s*per(N),
+          Hlast(N,s)=min(L(N,s)+per(N)-1,gHiAll),
+          Count(N,s)=max(0,Hlast(N,s)-L(N,s)+1).
+          Group-max uses N=Ngm; the numerator pass uses N=Ns.
+          The pass label below distinguishes these two QK evaluations.
+          For g in a nonempty split, j=g*KeyGroup+v, 0<=v<KeyGroup.
+          Qb, Kb, Vb denote the stored E4M3 payloads with their original E8M0
+          block scales, not separately rounded decoded arrays. Invalid Q rows
+          have zero payload and unit scales. K/V payload is zero for j>=Skv;
+          the allocated padding scale bytes are still read. All Br rows and
+          KeyGroup keys participate in the contractions, score evaluation and
+          probabilities, including padded rows. Only valid rows contribute
+          global mathematical results. Let r=(b*H+h)*Sq+i
+          for valid rows. Groups outside gLoAll..gHiAll have no matrix evaluation.
+        symbol:
+          Br: {meaning: Grouped row capacity, binding: 'bind:design.work_schedule::Br'}
+          Ns: {meaning: Numerator split count, binding: 'bind:design.work_schedule::Ns'}
+          Ngm: {meaning: Group-maximum split count, binding: 'bind:design.work_schedule::Ngm'}
+      - step: scores
+        name: Native QK and materialized group maxima
+        math: |
+          On each evaluated group, initialize A[-1]=0 by overwrite and, for k=0,...,3,
+          A[k]=mma32(Qb[:,32*k:32*k+32],Kb[:,32*k:32*k+32]^T,A[k-1]).
+          DotTile=A[3]. For u<Br, Score[u,v]=DotTile[u,v] when
+          lo(u)<=g*KeyGroup+v<=hi(u), otherwise -inf. Let scale=fp32(D^(-1/2)).
+          GroupMax[g,r]=scale*fmax(Score[u,:]) for valid rows, reducing from -inf.
+          The source uses fmaxf behavior for NaN: masked chunks use a 32-element
+          halving tree then combine four chunk maxima; wholly unmasked readout
+          can use native 32-value max reduction then fmaxf across chunks.
+          GroupMax[g,r]=-inf outside gLoAll..gHiAll, filled by the first/last
+          group-max split. Empty splits produce no interior entries.
+          The numerator pass recomputes DotTile with the same contractions but
+          does not recompute maxima; each score chunk is consumed by normalize.
+        symbol:
+          DotTile: {meaning: Unscaled current QK result, shape: [{row: Br}, {key: KeyGroup}], dtype: fp32, retention: 'keep_value (pass,b,kh,a,s,g)'}
+          GroupMax: {meaning: Complete group-major maxima consumed by scan, shape: [{group: T}, {row: R}], dtype: fp32, retention: keep_value
+              invocation}
+        arithmetic:
+          accumulate: mma32 here consumes native E4M3 payloads and E8M0 block scales through tcgen05 block-scaled contraction, four ordered 32-channel
+            products. FP32 accumulation does not assert separately decoded FP32 products, reference reduction order or a bound on native internal
+            rounding.
+      - step: segment_max
+        name: Materialized segment maxima
+        math: |
+          Let Nseg=ceil_div(T,SegLen). For 0<=z<Nseg and each row r,
+          initialize mx=-inf and fold fmaxf(mx,GroupMax[z*SegLen+k,r])
+          in increasing k=0,...,SegLen-1, using -inf when z*SegLen+k>=T.
+          Store SegMax[z,r]=mx. fmaxf selects the non-NaN operand when only
+          one operand is NaN. SegMax[0,r] is materialized but not consumed.
+        symbol:
+          SegLen: {meaning: Groups per segment, value: 16}
+          SegBatch: {meaning: Segments tested against one incoming scan state, value: 16}
+          SegMax: {meaning: Segment maxima used to locate replay suffixes, shape: [{segment: Nseg}, {row: R}], dtype: fp32, retention: keep_value invocation}
+      - step: scan
+        name: Segment tests and ordered delayed-normalizer replay
+        math: |
+          Let tau=fp32(2.7725887222397812). For each r initialize ScanState(-1)=-inf.
+          Walking a group g means evaluating
+          ScanState(g)=GroupMax[g,r] if GroupMax[g,r]-ScanState(g-1)>tau,
+          otherwise ScanState(g-1), then storing MState[g,r]=ScanState(g).
+          All comparisons are false for NaN. Walk g=0,...,min(SegLen,T)-1.
+          For z0=1,1+SegBatch,...<Nseg, let t0=z0*SegLen,
+          t1=min((z0+SegBatch)*SegLen,T), m=ScanState(t0-1).
+          For each k=0,...,SegBatch-1 test v[k]-m>tau, where
+          v[k]=SegMax[z0+k,r] if z0+k<Nseg, otherwise -inf.
+          Let kfirst be the smallest passing k, when any exists.
+          Set tp=t0+kfirst*SegLen when a test passes, otherwise tp=t1.
+          For t0<=g<tp assign ScanState(g)=m and store MState[g,r]=m,
+          without reading GroupMax[g,r]. Walk every g from tp through t1-1,
+          including segments after the first passing segment regardless of
+          their individual tests. Store MTail[r]=ScanState(T-1).
+          Let WalkCount(r) count groups actually walked, including segment zero;
+          min(SegLen,T)<=WalkCount(r)<=T. Every MState entry is stored.
+        symbol:
+          ScanState: {meaning: Running delayed maximum for one row, shape: [], dtype: fp32, retention: carry_forward (r); g=-1..T-1}
+          MState: {meaning: Per-group delayed state replayed by splits, shape: [{group: T}, {row: R}], dtype: fp32, retention: keep_value invocation}
+          MTail: {meaning: Final delayed maximum used for split weights and LSE, shape: [{row: R}], dtype: fp32, retention: keep_value invocation}
+      - step: normalize
+        name: Replay scan states and round probabilities
+        math: |
+          For numerator split s, let cLo=L(Ns,s), cHi=Hlast(Ns,s).
+          For a nonempty split and u<Br, initialize MaxState(cLo-1)[u]
+          from MState[cLo-1,r] when cLo>0, otherwise -inf, and DenState(cLo-1)=0.
+          For padding use r=(b*H+h)*Sq, the first real row of that head.
+          For each g=cLo,...,cHi, MaxState(g)[u]=MState[g,r].
+          safe[u]=MaxState(g)[u] if finite, otherwise 0;
+          alpha[u]=expf(MaxState(g-1)[u]-safe[u]) if the old state is finite,
+          otherwise 0. Compute x=Score[u,v]*scale-safe[u], with separate FP32
+          multiply and subtract. Define the actual E16 approximation by
+          t=sat01(fma32(x,fp32(0.0057249800302088261),0.5)),
+          w=fma_rm32(t,252,12582917), e=fma32(x,fp32(1.4426950216293335),12583043-w),
+          d=bitcast_f32((bitcast_u32(w)<<23) mod 2^32), E16(x)=d*ex2_ftz(e).
+          fma_rm32 rounds toward negative infinity; sat01 is the source saturating
+          FP32 conversion to [0,1], including NaN-to-zero; ex2_ftz is its approximate
+          base-two exponential with flush-to-zero. There is no low log2(e) correction.
+          Prob[u,v]=E16(x); Prob8[u,v]=satfinite_e4m3_rne(Prob[u,v]), the hardware
+          saturating RNE conversion with unit scale. For nonnegative finite values
+          it rounds min(Prob,ProbabilityMax) to E4M3FN.
+          For each chunk c=0,...,3, pair p=0,1 and partition z=0,...,3,
+          F[c,z,p] is the left-to-right FP32 sum from zero of
+          Prob[u,32*c+8*z+2*j+p], j=0,...,3.
+          Sum (F[c,0,p]+F[c,1,p])+(F[c,2,p]+F[c,3,p]) over increasing c from
+          zero to E[p]. DenState(g)[u]=DenState(g-1)[u]*alpha[u]+(E[0]+E[1]),
+          with the source's scalar FP32 compiler path; no additional contraction
+          restriction is imposed. The denominator never uses rounded Prob8.
+        symbol:
+          MaxState: {meaning: Current replayed maximum, shape: [{row: Br}], dtype: fp32, retention: 'carry_forward (b,kh,a,s); g=cLo-1..max(cLo-1,cHi)'}
+          DenState: {meaning: Local unrounded-probability denominator, shape: [{row: Br}], dtype: fp32, retention: 'carry_forward (b,kh,a,s);
+              g=cLo-1..max(cLo-1,cHi)'}
+          Prob8: {meaning: Generated probability rows consumed by PV, shape: [{row: Br}, {key: KeyGroup}], dtype: fp8_e4m3fn, retention: 'keep_value
+              (b,kh,a,s,g)'}
+        arithmetic:
+          approx: 'E16 is expf2_bias<4> with FMHA_BIAS_MAGIC_FOLD=1 and FMHA_EXP_NO_KTINY=1. alpha uses CUDA expf. unknown: a reliable error bound
+            for this path and its probability-rounding effects is not supplied; the shared external tolerance record provides no numerical design
+            guarantee.'
+      - step: partials
+        name: Per-group numerator and FP32 globally weighted partials
+        math: |
+          Initialize NumState(cLo-1)[u,d]=0. For each nonempty split group,
+          C[-1]=0 and C[k]=mma32(Prob8[:,32*k:32*k+32],
+          Vb[32*k:32*k+32,:],C[k-1]), k=0,...,3; GroupPV=C[3].
+          First rescale the numerator state by alpha unless alpha equals one,
+          then add GroupPV in FP32: NumState(g)=NumState(g-1)*alpha+GroupPV.
+          This is a fresh PV accumulation per group followed by a separate addition,
+          not the fused path's carried native MMA accumulator.
+          For each valid row in a nonempty split let weight=
+          expf(MaxState(cHi)[u]-MTail[r]) when both maxima are finite, otherwise 0.
+          Store PartA[s,r,d]=NumState(cHi)[u,d]*weight and
+          PartB[s,r]=DenState(cHi)[u]*weight, both FP32, without BF16 narrowing.
+          For an empty split, NumState=0, DenState=0 and weight=0 for every
+          valid row, so the evaluated numerator and denominator to be stored
+          are zero. PartB[s,r]=0. The materialized PartA slice is not guaranteed
+          to be zero: an unsynchronized overwrite in the fixed source can corrupt
+          overlapping entries. PartA denotes the actual stored FP32 values,
+          including this empty-split case, rather than the evaluated zeros.
+          MaxState, DenState and NumState are discarded after these stores.
+          No multiplication by zero suppresses NaN or Inf in a nonempty split.
+        symbol:
+          NumState: {meaning: Local numerator carried between groups, shape: [{row: Br}, {channel: D}], dtype: fp32, retention: 'carry_forward
+              (b,kh,a,s); g=cLo-1..max(cLo-1,cHi)'}
+          GroupPV: {meaning: Fresh native PV result before addition to the numerator, shape: [{row: Br}, {channel: D}], dtype: fp32, retention: 'keep_value
+              (b,kh,a,s,g)'}
+          PartA: {meaning: Materialized numerator including unspecified empty-split entries, shape: [{split: Ns}, {row: R}, {channel: D}], dtype: fp32, retention: keep_value
+              invocation}
+          PartB: {meaning: Weighted denominator for every split and output row, shape: [{split: Ns}, {row: R}], dtype: fp32, retention: keep_value
+              invocation}
+        arithmetic:
+          accumulate: PV uses the scores step's native block-scaled path, with E4M3 Prob8 and unit E8M0 scales, original E4M3 V and its key-axis
+            E8M0 scales. No BF16 intermediate is introduced. The numerator rescale is a multiply when alpha differs from one; the post-PV addition
+            is separate.
+          approx: 'weight uses CUDA expf; unknown: no end-to-end error bound is supplied.'
+      - step: combine
+        name: Grouped merge and caller writes
+        math: |
+          For each real row r, let chunk=ceil_div(Ns,MergeGroups).
+          For m=0,...,MergeGroups-1 let sLo(m)=min(m*chunk,Ns) and
+          sHi(m)=min(sLo(m)+chunk,Ns). MergeA[m,d] is the left-to-right
+          FP32 sum from zero of PartA[s,r,d], s=sLo(m),...,sHi(m)-1.
+          An empty interval gives zero. No extra terms pad this numerator sum.
+          For w=0,...,3 and j=0,...,31 set x[j]=PartB[sLo(m)+32*w+j,r]
+          when sLo(m)+32*w+j<sHi(m), otherwise 0. Reduce x by offsets
+          16,8,4,2,1: at each offset simultaneously replace x[j] by
+          x[j]+x[j+offset] for 0<=j<offset. Store MergeB[m,w]=x[0].
+          The host bounds Ns<=128*MergeGroups, so these four trees cover
+          every denominator entry in each interval.
+          TotalA[d] sums MergeA[m,d] from zero by increasing m.
+          TotalB sums MergeB[m,w] from zero by increasing m, then w.
+          All additions are FP32. All Ns partials are read, including empty
+          splits even when their PartB is zero. Set live=(TotalB>0), inv=1/TotalB when live,
+          otherwise 0. Write O[b,h,i,d]=bf16(TotalA[d]*inv) when live, otherwise
+          bf16(0), with RNE. If LSE is present, write MTail[r]+logf(TotalB/16)
+          when live and MTail[r] is finite, otherwise -inf.
+          Initial O and LSE bytes are never read; all valid destinations are written.
+          The host returns None. Workspace retains intermediates without a
+          mathematical output requirement; no scratch zero initialization is required.
+        symbol:
+          MergeGroups: {meaning: Parallel intervals in the final split reduction, binding: 'bind:design.work_schedule::MergeGroups'}
+          MergeA: {meaning: Numerator sums for contiguous split intervals, shape: [{interval: MergeGroups}, {channel: D}], dtype: fp32, retention: 'keep_value (r)'}
+          MergeB: {meaning: Four denominator tree results per split interval, shape: [{interval: MergeGroups}, {tree: 4}], dtype: fp32, retention: 'keep_value (r)'}
+          TotalA: {meaning: Merged numerator retained through final normalization, shape: [{channel: D}], dtype: fp32, retention: 'keep_value (r)'}
+          TotalB: {meaning: Merged denominator used by O and LSE, shape: [], dtype: fp32, retention: 'keep_value (r)'}
+        arithmetic:
+          approx: 'Reciprocal/division and CUDA logf retain the fixed compilation path. unknown: no matched numerical bound for final O/LSE is
+            supplied.'
+    ledger:
+      baseline: Direct Contract evaluation materializing FP32 scores and probabilities plus E4M3 probabilities before PV; logical payload bytes,
+        with padding and useful-group traversal included below.
+      footprint:
+        - {item: Global intermediates, change: 9*R*Skv -> 4*R*(2*T+Nseg+1+Ns*(D+1)) bytes; excludes untouched alignment,
+          by: [scores, segment_max, scan, partials]}
+      matmul:
+        - {item: Recomputed score pass, change: 'Per (b,kh,a), 2*U*Skv*D -> 3*Br*KeyGroup*Span*D MACs, including padding and masked boundary products',
+          by: [domain, scores, partials]}
+      depth:
+        - {item: Numerator recurrence, change: 'T -> max_s Count(Ns,s) group steps per numerator; per row the scalar scan walks WalkCount(r) groups,
+            tests 16*ceil_div(Nseg-1,16) segment bounds and retains all T stores; combine requires at most ceil_div(Ns,MergeGroups)+MergeGroups dependent numerator additions per channel', by: [segment_max, scan, partials, combine]}
+      error:
+        - {item: Numerical departures, change: 'Native block-scaled contractions, E16, denominator trees, separate per-group PV addition, split
+            weighting and grouped merge replace the reference evaluation choices; no end-to-end bound asserted', by: [scores, normalize, partials,
+            combine]}
+  work_schedule:
+    thesis: Split the useful key interval across independent CTAs while each CTA reuses Q and shares K/V across grouped heads. Separate group-max,
+      segment-max, row replay and wide merge supply the dependencies that make numerator splits independent; segment-parallel reduction adds
+      a launch and global FP32 storage while letting row replay avoid unchanged prefix loads. Each merge CTA parallelizes its split reduction
+      across four intervals and locally combines their partials before writing the row.
+    flow:
+      launch:
+        - {phase: [group_max]}
+        - {phase: [segment_max], start_after: group_max.launch_ready, protocol: pdl}
+        - {phase: [segmented_scan], start_after: segment_max.launch_ready, protocol: pdl}
+        - {phase: [split], start_after: segmented_scan.launch_ready, protocol: pdl}
+        - {phase: [combine], start_after: split.launch_ready, protocol: pdl}
+      handoff:
+        GroupMax: {producer: group_max, consumer: [segment_max, segmented_scan], storage: global, ready: group_max.kernel_done,
+          wait_at: [segment_max.inputs_ready, segmented_scan.inputs_ready]}
+        SegMax: {producer: segment_max, consumer: [segmented_scan], storage: global, ready: segment_max.kernel_done, wait_at: segmented_scan.inputs_ready}
+        MState: {producer: segmented_scan, consumer: [split], storage: global, ready: segmented_scan.kernel_done, wait_at: split.scan_ready}
+        MTail: {producer: segmented_scan, consumer: [split, combine], storage: global, ready: segmented_scan.kernel_done, wait_at: [split.scan_ready, combine.inputs_ready]}
+        PartA: {producer: split, consumer: [combine], storage: global, ready: split.kernel_done, wait_at: combine.inputs_ready}
+        PartB: {producer: split, consumer: [combine], storage: global, ready: split.kernel_done, wait_at: combine.inputs_ready}
+    phase:
+      group_max:
+        describe: Compute all GroupMax entries, including explicit -inf outside each query tile's useful interval. Model.forward resolves HostPlan
+          and MapsValid. A successful cached graph replay executes this same five-kernel sequence; eligible calls may capture and instantiate
+          it before replay. Capture records without executing the kernels; absent a successful replay, launch_sequence submits directly on the
+          caller stream. No host completion wait is added.
+        decomposition:
+          strategy: |
+            Br=128, Ns=HostPlan.nsplit, Ngm=HostPlan.gm_nsplit, nx=ceil_div(Sq,Qph),
+            ny=B*KH. Each tile is (s,kvflat=b*KH+kh,a). Use the domain step's
+            row map, U and interval with N=Ngm. In this phase define
+            cLo=L(Ngm,s), cHi=Hlast(Ngm,s), Ng=Count(Ngm,s).
+            WrittenG contains integers cLo<=g<=cHi, also 0<=g<gLoAll for s=0
+            and gHiAll<g<T for s=Ngm-1; empty ranges contribute nothing.
+            Long means Ng>=8.
+            Maximum reduction is local to this tile. Empty splits still own
+            their assigned outside-range fills, if any, and execute setup/teardown.
+          partition:
+            split: {size: Ngm, tile: 1}
+            kvflat: {size: B*KH, tile: 1}
+            query: {size: Sq, tile: Qph}
+          worktile:
+            invariant:
+              q_tensor: {shape: [{query: Qph}, {head: G}, {channel: D}], dtype: 'ref:contract.algorithm_requirement::q_tensor.dtype'}
+              sf_q: {shape: [{scale_row: Br}, {scale_column: D/Block}], dtype: 'ref:contract.algorithm_requirement::sf_q.dtype'}
+            iteration:
+              k_tensor: {shape: [{key: KeyGroup}, {channel: D}], dtype: 'ref:contract.algorithm_requirement::k_tensor.dtype', direction: ascending}
+              sf_k: {shape: [{scale_row: KeyGroup}, {scale_column: D/Block}], dtype: 'ref:contract.algorithm_requirement::sf_k.dtype', direction: ascending}
+          target:
+            single_tile:
+              GroupMax: {shape: [{group: count(WrittenG)}, {row: U}], dtype: 'ref:design.math_reshape::GroupMax.dtype'}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: nx*ny*Ngm
+        schedule:
+          strategy: 'Physical grid=(nx,ny,Ngm); worker_id=x+nx*(y+ny*z) owns (s=z,kvflat=y,a=x). p.lpt=0: no mask-dependent remapping or refill.'
+          worktile_order:
+            - {by: split, direction: ascending}
+            - {by: kvflat, direction: ascending}
+            - {by: query, direction: ascending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+      segment_max:
+        describe: Reduce each segment's group maxima independently for every row, including segment zero whose summary is unused.
+        decomposition:
+          strategy: Each tile owns segment z and rows r0=x*256 through min(r0+256,R)-1, with SegRows=min(256,R-r0).
+            The groups z*SegLen through min((z+1)*SegLen,T)-1 are a local reduction.
+          partition:
+            segment: {size: Nseg, tile: 1}
+            row: {size: R, tile: 256}
+          worktile:
+            iteration:
+              GroupMax: {shape: [{group: 1}, {row: SegRows}], dtype: 'ref:design.math_reshape::GroupMax.dtype', direction: ascending}
+          target:
+            single_tile:
+              SegMax: {shape: [{row: SegRows}], dtype: 'ref:design.math_reshape::SegMax.dtype'}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: ceil_div(R,256)*Nseg
+        schedule:
+          strategy: Physical grid=(ceil_div(R,256),Nseg); worker_id=x+ceil_div(R,256)*z owns row block x and segment z.
+          worktile_order:
+            - {by: segment, direction: ascending}
+            - {by: row, direction: ascending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+      segmented_scan:
+        describe: Use SegMax to select replay suffixes independently for each row; publish every MState entry and MTail.
+        decomposition:
+          strategy: ScanThreads=256. A worktile covers rows r0=worker_id*ScanThreads through min(r0+ScanThreads,R)-1;
+            let ScanRows=min(ScanThreads,R-r0). Each row follows scan's segment batches and conditional group walks locally.
+            SegMax traversal begins at segment one; GroupMax supplies segment zero and each selected suffix. Neither axis creates independent work here.
+          partition:
+            row: {size: R, tile: ScanThreads}
+          worktile:
+            iteration:
+              GroupMax: {shape: [{group: 1}, {row: ScanRows}], dtype: 'ref:design.math_reshape::GroupMax.dtype', direction: ascending}
+              SegMax: {shape: [{segment: 1}, {row: ScanRows}], dtype: 'ref:design.math_reshape::SegMax.dtype', direction: ascending}
+          target:
+            single_tile:
+              MState: {shape: [{group: T}, {row: ScanRows}], dtype: 'ref:design.math_reshape::MState.dtype'}
+              MTail: {shape: [{row: ScanRows}], dtype: 'ref:design.math_reshape::MTail.dtype'}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: ceil_div(R,ScanThreads)
+        schedule:
+          worktile_order:
+            - {by: row, direction: ascending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+      split:
+        describe: Recompute QK, replay the scan, and write FP32 PartA and PartB for one numerator split under the partials step's cases.
+        decomposition:
+          strategy: Use the group_max phase's Br, Ns, nx, ny and the domain step's head-major row map. Each tile (s,kvflat,a) sets cLo=L(Ns,s), cHi=Hlast(Ns,s),
+            Ng=Count(Ns,s). Each nonempty split scans g=cLo..cHi locally; reductions across keys stay within the CTA. Empty splits have no matrix
+            iteration but still write PartA and PartB for all U valid rows, with the partials step's empty-split limitation.
+          partition:
+            split: {size: Ns, tile: 1}
+            kvflat: {size: B*KH, tile: 1}
+            query: {size: Sq, tile: Qph}
+          worktile:
+            invariant:
+              q_tensor: {shape: [{query: Qph}, {head: G}, {channel: D}], dtype: 'ref:contract.algorithm_requirement::q_tensor.dtype'}
+              sf_q: {shape: [{scale_row: Br}, {scale_column: D/Block}], dtype: 'ref:contract.algorithm_requirement::sf_q.dtype'}
+              MTail: {shape: [{row: U}], dtype: 'ref:design.math_reshape::MTail.dtype'}
+            iteration:
+              k_tensor: {shape: [{key: KeyGroup}, {channel: D}], dtype: 'ref:contract.algorithm_requirement::k_tensor.dtype', direction: ascending}
+              v_tensor: {shape: [{key: KeyGroup}, {channel: D}], dtype: 'ref:contract.algorithm_requirement::v_tensor.dtype', direction: ascending}
+              sf_k: {shape: [{scale_row: KeyGroup}, {scale_column: D/Block}], dtype: 'ref:contract.algorithm_requirement::sf_k.dtype', direction: ascending}
+              sf_v: {shape: [{channel: D}, {sequence_block: KeyGroup/Block}], dtype: 'ref:contract.algorithm_requirement::sf_v.dtype', direction: ascending}
+              MState: {shape: [{group: 1}, {row: U}], dtype: 'ref:design.math_reshape::MState.dtype', direction: ascending}
+          target:
+            single_tile:
+              PartA: {shape: [{row: U}, {channel: D}], dtype: 'ref:design.math_reshape::PartA.dtype'}
+              PartB: {shape: [{row: U}], dtype: 'ref:design.math_reshape::PartB.dtype'}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: nx*ny*Ns
+        schedule:
+          strategy: Physical grid=(nx,ny,Ns) and worker_id=x+nx*(y+ny*z) owns (s=z,kvflat=y,a=x), without CTA remapping. MState also supplies
+            the entrance value at cLo-1 when cLo>0; the pipeline records extra padding/empty-split loads separately from these mathematical inputs.
+          worktile_order:
+            - {by: split, direction: ascending}
+            - {by: kvflat, direction: ascending}
+            - {by: query, direction: ascending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+      combine:
+        describe: Sum all materialized partials for one real row, then write its D BF16 channels and optional FP32 LSE.
+        decomposition:
+          strategy: MergeGroups=4. One row per CTA, with grid=(Sq,H,B), r=i+Sq*(h+H*b). All Ns splits are consumed locally using combine's
+            contiguous intervals; they do not create independent worktiles. HostPlan caps Ns at 128*MergeGroups, so each interval has at most
+            128 splits. The final channel range is the full D; no channel slicing or further reduction follows.
+          partition:
+            row: {size: R, tile: 1}
+          worktile:
+            invariant:
+              MTail: {shape: [], dtype: 'ref:design.math_reshape::MTail.dtype'}
+            iteration:
+              PartA: {shape: [{channel: D}], dtype: 'ref:design.math_reshape::PartA.dtype', direction: ascending}
+              PartB: {shape: [], dtype: 'ref:design.math_reshape::PartB.dtype', direction: ascending}
+          target:
+            single_tile:
+              O: {shape: [{channel: D}], dtype: 'ref:contract.algorithm_requirement::O.dtype'}
+              LSE: {shape: [], dtype: 'ref:contract.algorithm_requirement::LSE.dtype'}
+            tile_reduction:
+              dimension: split
+              input:
+                - ref:design.math_reshape::PartA
+                - ref:design.math_reshape::PartB
+              output:
+                - ref:contract.algorithm_requirement::O
+                - ref:contract.algorithm_requirement::LSE
+              method: ref:design.math_reshape::combine
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: R
+        schedule:
+          strategy: LSE stores occur only with a caller destination. No CTA shares output elements or local resources with another.
+          worktile_order:
+            - {by: row, direction: ascending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: Each matrix CTA uses four cooperative warps, a persistent Q tile and cp.async payload/scale rings with per-thread copy-group waits
+      followed by CTA publication. Group-max can issue QK one group early;
+      split instead reuses the score TMEM region for each fresh PV result and carries its numerator in registers. At split exit, the
+      Q/K/V shared arena stages FP32 partial numerators for a CTA-wide cooperative write, adding a shared round trip and publication barrier.
+      Segment reduction, row replay and combine consume global intermediates through PDL waits. Row replay batches segment tests before
+      loading only the required group-max suffix; register batches are consumed before reuse. Wide combine publishes four interval numerators
+      and sixteen denominator tree results through shared memory, then its first thread group writes the row after a CTA join.
+    phase:
+      group_max:
+        domain:
+          g:
+            - cLo
+            - max(cLo,cHi+1)
+        resource:
+          Query: {space: SMEM, member_slot_shape: [{row: Br}, {channel: D}], dtype: fp8_e4m3fn, slot_count: 1}
+          Key:
+            space: SMEM
+            member_slot_shape:
+              - {key: KeyGroup}
+              - {channel: D}
+            dtype: fp8_e4m3fn
+            slot_count: 3
+            view:
+              Key(g): {slot_index: (g-cLo)%RingUsed}
+          KeyAtom:
+            space: SMEM
+            member_slot_shape:
+              - {element: 512}
+            dtype: uint8
+            slot_count: 3
+            view:
+              KeyAtom(g): {slot_index: (g-cLo)%RingUsed}
+          TensorMemory:
+            space: TMEM
+            member_slot_shape:
+              - {row: Br}
+              - {column: 256}
+            dtype: fp32
+            slot_count: 1
+            view:
+              DotTile: {part: {column: [0, 128]}}
+              QueryScale: {part: {column: [128, 136]}, dtype: uint8}
+              KeyScale(g): {part: {column: [ScaleCol(g), ScaleCol(g)+8]}, dtype: uint8}
+          QueryPrefetch: {space: register, member_slot_shape: [{element: Br*D+Br*(D/Block)}], dtype: uint8, slot_count: 1}
+          MaxChunk: {space: register, member_slot_shape: [{row: Br}, {key: 32}], dtype: fp32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:4]
+              verb:
+                setup: Establish the scheduled coordinates, row masks and completion parities, initially zero. RingUsed=3 for Long, otherwise
+                  2; ScaleCol(g)=136+8*(g%2) for Long, otherwise 136. The allocated three shared slots are unchanged. The q0>=Sq guard is unreachable
+                  under this grid. Valid rows of split zero/last issue the outside -inf stores. Thread zero initializes the QK/PV completion
+                  barriers and issues MMA. All warps cooperatively copy payload; the first warp copies the 512-byte K scale atom. Each thread
+                  commits and waits its own copy groups. All four warps read scores, including padded rows; only valid rows write global maxima.
+                prime: For Ng>0 cooperatively enqueue K(cLo) and its scale atom into slot zero, then each thread commits its copies as one group.
+                  Each payload copy moves 16 bytes, zero-filling keys beyond Skv; scale atoms use unguarded 16-byte copies from allocated padding.
+                  For Ng=0 issue neither copies nor a commit. done denotes submission, not arrival.
+                prepare: Load Q payload and scale words into QueryPrefetch registers even for empty splits. First warp allocates TMEM; a CTA barrier
+                  publishes its base before that warp relinquishes the permit. Write Query and QueryScale, wait for TMEM stores, then discard
+                  QueryPrefetch. Query persists through all groups. No V or P operand is prepared.
+                start: For Ng>0 each thread first commits an empty copy group, preserving the in-body prime after the hoisted prime.
+                  For Long then enqueue K(cLo+1) and its atom and commit another group. Wait until at most one copy group remains pending per
+                  thread, proving slot zero's payload and atom; fence shared async access and CTA-sync. Publish the first KeyScale, wait for
+                  its TMEM stores, fence and CTA-sync, then enqueue QK(cLo) and commit its completion phase. For non-Long there is no copy wait,
+                  CTA join or QK here; Ng=0 also has no commit.
+                prefetch: Enqueue K(g+2) and its atom for Long, otherwise K(g+1) and its atom, only when that group is <=cHi. Each thread then
+                  commits a copy group even when it is empty. done means submission only. Ring reuse follows prior QK completion and joined
+                  score readers; payload and atoms for a group belong to the same per-thread commit.
+                stage: Every thread waits until at most one copy group remains pending. For Long this proves K(g+1) and its atom when g<cHi;
+                  for non-Long it proves current K(g) and its atom. Fence shared async access and CTA-sync before reading shared atoms. Publish
+                  the next group's alternating KeyScale for Long, or the current fixed-base KeyScale otherwise; wait for TMEM stores, fence
+                  and CTA-sync. At g=cHi Long still reads the previously filled next physical atom slot and writes stale bytes to an unused
+                  alternate TMEM scale slot. The final empty commits retire all payload copies; no following QK consumes the stale scale.
+                  These CTA joins also publish Q. Copy-group completion has no transaction-byte count or ring parity.
+                score: For non-Long enqueue this group's four 32-channel QK contractions and commit; for Long the preceding start/advance already
+                  issued them. Wait for the QK completion phase, toggle its parity and apply the completion fence. DotTile is now readable and
+                  K/KeyScale reads are retired. The first contraction overwrites the score region.
+                reduce: All warps reduce masked score chunks through MaxChunk or use the native unmasked read-and-max path, each with its TMEM-load
+                  wait. Only valid rows issue GroupMax stores. A CTA barrier joins every score reader before the next QK overwrites DotTile. No
+                  whole-group score register array, PV, or cross-warpgroup reduction exists.
+                advance: For Long and g<cHi, enqueue QK(g+1) using the staged next K and alternating scale slot and commit; done means enqueue
+                  only. Otherwise perform no product or wait. This lets QK(g+1) run underneath the following prefetch/stage work without changing
+                  the single-score-slot reader barrier.
+                finish: All enqueued K payload/atom copies and QK products have been waited; only empty copy groups may remain. A before-thread-sync fence and CTA barrier join final TMEM
+                  users; the first warp deallocates 256 columns. Each CTA signals PDL launch completion after its global stores and local teardown;
+                  launch_ready applies when the whole grid satisfies the protocol. Actual global result visibility is established by kernel completion
+                  and the successor dependency wait, not by enqueueing a store.
+            pipe:
+              prologue:
+                - setup:Local
+                - prime:Inputs
+                - prepare:Query
+                - start:FirstQK
+              steady:
+                - repeat: g
+                  steady:
+                    - prefetch:FutureK(g)
+                    - stage:Scales(g)
+                    - score:DotTile(g)
+                    - reduce:GroupMax(g)
+                    - advance:NextQK(g)
+              epilogue:
+                - finish:Local
+      segment_max:
+        milestone:
+          inputs_ready:
+            - Main/dependency:GroupMax@done
+        resource:
+          GroupBatch: {space: register, member_slot_shape: [{row: SegRows}, {group: SegLen}], dtype: fp32, slot_count: 1}
+          SegmentState: {space: register, member_slot_shape: [{row: SegRows}], dtype: fp32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:8]
+              verb:
+                signal: Every thread signals PDL launch permission for segmented_scan at entry, before waiting for group_max.
+                  This permits successor launch but does not publish SegMax or complete the predecessor.
+                dependency: Every thread waits for the group_max grid before the row-range guard or first GroupMax load.
+                  done guarantees completion and visibility of all GroupMax producers.
+                reduce: Each valid thread loads its segment into GroupBatch, substituting -inf beyond T, before folding into
+                  SegmentState initialized to -inf. Lanes address consecutive rows in group-major storage. Reduction is within each thread,
+                  without a cross-thread tree or barrier. Out-of-range rows perform no loads or reduction.
+                write: Valid row owners issue SegMax stores from SegmentState, consuming the register value. All segments are written,
+                  including segment zero. Out-of-range rows have no stores. Global visibility follows kernel completion and the successor wait.
+            pipe:
+              steady:
+                - signal:ReplayPermission
+                - dependency:GroupMax
+                - reduce:SegMax
+                - write:SegMax
+      segmented_scan:
+        milestone:
+          inputs_ready:
+            - Main/dependency:ScanInputs@done
+        resource:
+          ScanState: {space: register, member_slot_shape: [{row: ScanRows}], dtype: fp32, slot_count: 1}
+          SegmentBounds: {space: register, member_slot_shape: [{row: ScanRows}, {segment: SegBatch}], dtype: fp32, slot_count: 1}
+          WalkBatch: {space: register, member_slot_shape: [{row: ScanRows}, {group: SegLen}], dtype: fp32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:ScanThreads/32]
+              verb:
+                dependency: Every thread executes the PDL grid-dependency wait before any early exit or input load. done guarantees
+                  segment_max completion and SegMax visibility, and transitively group_max completion and GroupMax visibility.
+                signal: Signal permission for split to start immediately after that wait, before any scan arithmetic. Out-of-range lanes also
+                  signal; their subsequent scan/tail actions have no data effects, matching the source early return. This launch_ready permission
+                  does not publish MState.
+                scan: >-
+                  One valid thread owns one row and initializes ScanState. Walk segment zero unconditionally, using WalkBatch to load
+                  16 groups before their ordered recurrence and stores, with a scalar tail for a partial segment. For each later segment batch,
+                  load all SegmentBounds registers with -inf for missing segments, then consume every bound to build the 16-bit jump mask
+                  against the same incoming state. Consume all bounds before calling the walk helper. The lowest set bit selects the suffix:
+                  a zero mask performs only constant MState stores, otherwise store the unchanged prefix and walk the whole remaining batch.
+                  WalkBatch is reused only after its values have been consumed. ScanState carries across helper calls and constant fills.
+                  No cross-thread reduction or CTA join is needed. Rows outside R perform no loads, arithmetic or stores.
+                tail: Valid threads issue MTail stores after their last MState entry. Store completion and visibility are supplied by kernel completion.
+                  Every invocation rewrites all R*T snapshots and all R tails.
+            pipe:
+              steady:
+                - dependency:ScanInputs
+                - signal:SplitPermission
+                - scan:MState
+                - tail:MTail
+      split:
+        domain:
+          g:
+            - cLo
+            - max(cLo,cHi+1)
+        milestone:
+          scan_ready:
+            - Main/dependency:Scan@done
+        resource:
+          OperandArena:
+            space: SMEM
+            member_slot_shape: [{element: "5*Br*D"}]
+            dtype: uint8
+            slot_count: 1
+            view:
+              Query: {part: {element: [0, "Br*D"]}, dtype: fp8_e4m3fn}
+              Key(g): {part: {element: ["(1+(g-cLo)%2)*Br*D", "(2+(g-cLo)%2)*Br*D"]}, dtype: fp8_e4m3fn}
+              Value(g): {part: {element: ["(3+(g-cLo)%2)*Br*D", "(4+(g-cLo)%2)*Br*D"]}, dtype: fp8_e4m3fn}
+              PartA: {dtype: fp32}
+          KeyAtom:
+            space: SMEM
+            member_slot_shape:
+              - {element: 512}
+            dtype: uint8
+            slot_count: 2
+            view:
+              KeyAtom(g): {slot_index: (g-cLo)%2}
+          ValueAtom:
+            space: SMEM
+            member_slot_shape:
+              - {element: 512}
+            dtype: uint8
+            slot_count: 2
+            view:
+              ValueAtom(g): {slot_index: (g-cLo)%2}
+          TensorMemory:
+            space: TMEM
+            member_slot_shape:
+              - {row: Br}
+              - {column: 256}
+            dtype: fp32
+            slot_count: 1
+            view:
+              DotTile: {part: {column: [0, 128]}}
+              GroupPV: {part: {column: [0, 128]}}
+              QueryScale: {part: {column: [128, 136]}, dtype: uint8}
+              KeyScale: {part: {column: [136, 144]}, dtype: uint8}
+              UnitScale: {part: {column: [144, 152]}, dtype: uint8}
+              ValueScale: {part: {column: [152, 160]}, dtype: uint8}
+              Prob8: {part: {column: [192, 224]}, dtype: fp8_e4m3fn}
+          QueryPrefetch: {space: register, member_slot_shape: [{element: Br*D+Br*(D/Block)}], dtype: uint8, slot_count: 1}
+          ScoreChunk: {space: register, member_slot_shape: [{row: Br}, {key: 32}], dtype: fp32, slot_count: 1}
+          NumState: {space: register, member_slot_shape: [{row: Br}, {channel: D}], dtype: fp32, slot_count: 1}
+          DenState: {space: register, member_slot_shape: [{row: Br}], dtype: fp32, slot_count: 1}
+          Replay:
+            space: register
+            member_slot_shape:
+              - {row: Br}
+              - {column: 3}
+            dtype: fp32
+            slot_count: 1
+            view:
+              MaxState: {part: {column: [0, 1]}}
+              CurrentMax: {part: {column: [1, 2]}}
+              NextMax: {part: {column: [2, 3]}}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:4]
+              verb:
+                setup: Establish coordinates and the head-major row-valid predicate; rowsLive is always true. Thread zero initializes QK/PV
+                  completion barriers with phase zero and issues MMA. All four warps remain cooperative participants; each thread maps to one row.
+                  All warps copy payload, the first warp copies K/V scale atoms, and each thread commits and waits its own copy groups.
+                  The exact grid never takes q0>=Sq early exit.
+                prime: For Ng>0 enqueue K(cLo), V(cLo) and both scale atoms in slot zero, then each thread commits its payload/atom copies in one
+                  group. Payload copies move 16 bytes with zero-fill for keys beyond Skv; scale atoms use unguarded 16-byte copies from allocated
+                  padding. For Ng=0 issue neither copies nor a commit. done means submission, not arrival.
+                prepare:
+                  execution_mode: async
+                  meaning: Prefetch Q and scale words into QueryPrefetch, allocate 256 TMEM columns with the first warp, publish the base by
+                    CTA barrier and relinquish the permit. Each thread writes Query, QueryScale and UnitScale, waits for its TMEM stores,
+                    discards QueryPrefetch and clears its numerator before its dependency/replay work. These ordinary shared Q writes
+                    are not followed by a CTA join here. done guarantees completion of preparation across all warps; later actions may
+                    start before that collective completion. The first stage CTA join proves it for Ng>0; for Ng=0 only the barrier
+                    after the stage_partials writes proves it. The asynchronous completion expresses this cross-warp progression,
+                    not a different copy instruction. Preparation also occurs for empty splits and can precede scan completion.
+                dependency:
+                  execution_mode: async
+                  meaning: Each thread executes the PDL scan-dependency wait after its own preparation and before its first scan-state read.
+                    done guarantees all MState and MTail results, including entrance snapshots, are visible. This wait is for the predecessor
+                    grid; it does not join this CTA's warps or complete their Query writes.
+                replay:
+                  execution_mode: async
+                  meaning: After its dependency wait, each thread initializes DenState to zero and MaxState to -inf and loads the entrance
+                    snapshot at (cLo-1)*R+rowG whenever cLo>0, even for an empty split. CurrentMax at cLo is loaded only for Ng>0. rowG is
+                    the valid row r or that head's first real row for padding. done covers all replay work; threads can continue with their
+                    own initialized registers before other warps finish. The subsequent stage or stage_partials CTA join covers completion.
+                    For Ng>0 each thread then commits an empty copy group at the original in-body prime; Ng=0 has no commit or extra join.
+                    The entrance index is not clamped to T-1 or guarded by any_compute; an out-of-range empty-split read is not promised
+                    initialized or safe. Its value is discarded on empty splits.
+                prefetch: Load NextMax for g+1 when g<cHi, otherwise retain -inf; this load occurs for all threads, including padded rows. Enqueue
+                  K/V(g+1) and their atoms into the alternate slot when g<cHi. Every thread then commits a group, including an empty group at
+                  g=cHi. Prior QK/PV completion has retired that slot's operand reads; done does not wait for newly enqueued copies.
+                stage: Each thread waits until at most one copy group remains pending, proving the current K/V payload and both atoms;
+                  the last iteration's empty commit also makes its current data older than the newest group. Fence shared async access and
+                  CTA-sync; cooperatively write current K/V scales into their fixed TMEM slots, wait for TMEM stores, then fence and CTA-sync.
+                  The preceding group already waited for PV, so ValueScale and the refilled V slot have no remaining matrix readers. This CTA
+                  join also retires previous GroupPV readout before QK reuses its overlapping score region.
+                qk: Enqueue four ordered QK contractions, first overwriting DotTile, commit, then wait for QK completion and apply the completion
+                  fence. No maximum readout is performed in this pass.
+                probability: All warps advance replayed MaxState/CurrentMax, rescale DenState and NumState, then consume DotTile in 32-key chunks
+                  through ScoreChunk and normalize, including padded rows. Pack every Prob8 chunk into TMEM and wait for its stores. Fence
+                  and CTA-sync before PV; this join publishes all probability rows and retires every DotTile reader before PV overwrites
+                  the same columns. Padded rows are computed but never written to global partials.
+                pv: Enqueue four ordered native PV contractions into GroupPV, using overwrite for the first contraction of every group. Commit,
+                  wait for PV completion, toggle parity and apply the completion fence. All current Value, ValueScale and Prob8 operand reads
+                  have retired.
+                accumulate: 'All warps read GroupPV in 32-channel chunks with TMEM-load waits and add to register NumState. There is no tail CTA
+                  barrier: the next stage action''s CTA joins protect the next TMEM overwrite; the last iteration joins during stage_partials.'
+                stage_partials: >-
+                  Nonempty valid rows load MTail and form weighted FP32 numerators; empty splits evaluate zeros. Each valid
+                  row writes its D channels into the PartA view of OperandArena; padded rows are neither staged nor later read. The
+                  81920-byte operand capacity accommodates the 67584-byte staging span, including row spacing.
+                  For Ng>0, stage's CTA joins completed all Query writes, QK/PV waits retired operand reads, and the last group enqueued
+                  no future transfer, so the arena is free before these writes. For Ng=0, no matrix iteration or its CTA joins occur:
+                  a warp's zero staging writes can overlap another warp's unfinished Query writes in the same shared region. No
+                  pre-staging barrier orders those writes, so the staged bytes need not encode zero.
+                  The source's CTA barrier is after the staging writes. It joins all preparation/staging writes and any final TMEM
+                  readouts, making the resulting bytes readable; it does not repair the empty-split race. done includes this barrier.
+                write: All 128 threads cooperatively read 16-byte chunks of the actual shared bytes for valid staged rows and issue global
+                  PartA stores, remapping each row through the head-major map. FP32 bit patterns are preserved, including any empty-split
+                  corruption. Each valid row owner separately stores weighted DenState to PartB after its numerator stores; empty splits
+                  still write PartB=0 from registers. No O or LSE is written here. done means stores issued with their sources consumed;
+                  no later local reuse occurs, and global visibility still requires kernel completion. The successor reads these actual
+                  PartA values without an empty-split mask, so the race may affect TotalA and O; it has no PartB or MTail data path to LSE.
+                finish: A before-thread-sync fence and CTA barrier join all final TMEM accesses; the first warp deallocates. Every requested transfer
+                  and matrix product was already waited, including on the last group. Signal PDL launch completion after local teardown and partial
+                  stores. Each CTA ends after its one tile. Subsequent kernels have fresh local resources; scratch regions remain live through
+                  their declared consumers, and caller-stream completion orders later uses.
+            pipe:
+              prologue:
+                - setup:Local
+                - prime:Inputs
+                - prepare:Query
+                - dependency:Scan
+                - replay:Entrance
+              steady:
+                - repeat: g
+                  steady:
+                    - prefetch:Next(g)
+                    - stage:Operands(g)
+                    - qk:DotTile(g)
+                    - probability:Prob8(g)
+                    - pv:GroupPV(g)
+                    - accumulate:NumState(g)
+              epilogue:
+                - stage_partials:PartA
+                - write:Partials
+                - finish:Local
+            waits_for:
+              data:
+                replay:Entrance: [dependency:Scan]
+              sync:
+                stage:Operands(g)@done: [prepare:Query, replay:Entrance]
+                stage_partials:PartA@done: [prepare:Query, replay:Entrance]
+      combine:
+        milestone:
+          inputs_ready:
+            - Main/dependency:Partials@done
+        resource:
+          MergeA: {space: SMEM, member_slot_shape: [{interval: MergeGroups}, {channel: D}], dtype: fp32, slot_count: 1}
+          MergeB: {space: SMEM, member_slot_shape: [{interval: MergeGroups}, {tree: 4}], dtype: fp32, slot_count: 1}
+          NumeratorBatch: {space: register, member_slot_shape: [{interval: MergeGroups}, {channel: D}, {split: 8}], dtype: fp32, slot_count: 1}
+          IntervalSum: {space: register, member_slot_shape: [{interval: MergeGroups}, {channel: D}], dtype: fp32, slot_count: 1}
+          Totals:
+            space: register
+            member_slot_shape: [{channel: D}, {column: 2}]
+            dtype: fp32
+            slot_count: 1
+            view:
+              TotalA: {part: {column: [0, 1]}}
+              TotalB: {part: {column: [1, 2]}}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:16]
+              verb:
+                dependency: All threads execute the PDL dependency wait at kernel entry. done guarantees every PartA/PartB producer has completed;
+                  the earlier scan is complete transitively, including MTail for LSE.
+                partials: >-
+                  Four consecutive 128-thread groups own combine's intervals m=0,...,MergeGroups-1. Each thread owns one channel within its
+                  group and initializes IntervalSum to zero. Load eight PartA entries at a time into NumeratorBatch, consume them in order
+                  before register reuse, then consume the scalar tail. Store IntervalSum to MergeA. Each thread also loads one PartB entry
+                  at its local split offset, substituting zero past sHi(m); each warp reduces its 32 values with the specified tree and its
+                  first lane writes MergeB. All groups, including empty intervals, publish their zero or computed partials. The CTA barrier
+                  at the end joins all MergeA/MergeB stores; done guarantees their visibility to the first group. There is no fused-scan
+                  weight array, weight computation or preceding weight-publication barrier in this instantiation.
+                merge: The first 128-thread group reads all MergeB entries in combine's order, independently forming TotalB per thread, and
+                  each thread sums the MergeA entries for its channel into TotalA. Other groups have completed their shared writes and have
+                  no data effects in merge or write. Both shared arrays remain unchanged through all readers; no later local worktile reuses them.
+                write: The first group writes all D BF16 channels; its first thread additionally reads MTail and writes LSE when present.
+                  Caller destinations are not read. Kernel completion supplies visibility, with no further launch-permission signal.
+            pipe:
+              steady:
+                - dependency:Partials
+                - partials:MergePartials
+                - merge:Totals
+                - write:Output
+realization:
+  require:
+    - item:
+        - design.tile_pipeline::group_max
+        - design.tile_pipeline::split
+      choice: Bind matrix completion to tcg_commit plus parity mbar_wait, TMEM readout to tcg_ld32/tcg_ld32_redmax with their wait::ld, stores
+        to wait::st, and TMEM publication to the before/after thread-sync fences at the stated CTA joins. Bind payload and atom copies to
+        cp.async.cg.shared.global with src-size zero-fill for invalid payload rows, per-thread commit_group and wait_group 1, retaining the empty commits and following
+        shared fences/CTA joins. Preserve SWIZZLE_128B operands, 1024-byte shared alignment and the replicated scale
+        representation expected by native block_scale.scale_vec::1X descriptors; QK is K-major and PV uses TMEM A with MN-major V.
+      reason: CTA barriers alone do not complete matrix or async-copy operations, and a copy-group wait alone does not publish other threads' copies.
+        These bindings protect score/PV aliasing, single scale/probability
+        slots and the correspondence between payload, probability and scale operands.
+    - item: design.work_schedule::flow
+      choice: 'Use the fixed PDL wrappers: cudaLaunchKernelEx/ExC with programmatic stream serialization for the four successors, cudaTriggerProgrammaticLaunchCompletion
+        at the stated signal points and cudaGridDependencySynchronize at dependency waits. group_max itself uses an ordinary launch.'
+      reason: Launch permission alone cannot make the producer's global stores readable; split's independent preparation must remain before its
+        scan wait.
+  prefer:
+    - item:
+        - design.tile_pipeline::group_max.TensorMemory
+        - design.tile_pipeline::split.TensorMemory
+      choice: launch_tcg begins with dynamic shared requests of 69632 bytes for group-max and 102912 for split. In addition to live buffers these
+        include 512 bytes for shared Q scales, 1024 for exchange and 1024 for alignment; split also reserves an unused 16384-byte shared P tile.
+        tmem_safe_smem queries occupancy and increases the request by 4096 while blocks*256>512, for at most 96 attempts, stopping on API error
+        or a still-failing request >=220000. It retries an unpublished attribute, clears the error and returns/caches the last request; it does
+        not guarantee actual residency.
+      reason: Shared reservations affect CTA capacity even when P resides in TMEM; the helper compensates for occupancy accounting that omits
+        TMEM columns.

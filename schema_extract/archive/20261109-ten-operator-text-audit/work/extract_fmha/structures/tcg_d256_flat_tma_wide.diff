@@ -1,0 +1,192 @@
+--- tcg_d256_flat_tma_narrow
++++ tcg_d256_flat_tma_wide
+@@ -2,11 +2,11 @@
+   name: mxfp8_qkv_attention
+   describe: TEXT[682]
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+-  version: 3
++  version: 2
+   dispatch:
+-    id: tcg_d256_flat_tma_narrow
+-    parent: fused_d256_tma
+-    when: TEXT[116]
++    id: tcg_d256_flat_tma_wide
++    parent: tcg_d256_flat_tma_narrow
++    when: TEXT[136]
+ design:
+   math_reshape:
+     thesis: TEXT[674]
+@@ -126,8 +126,26 @@
+         accumulate: TEXT[174]
+         approx: TEXT[179]
+     - step: TEXT[659]
+-      name: TEXT[639]
+-      math: TEXT[325]
++      name: TEXT[637]
++      math: TEXT[396]
++      symbol:
++        SP:
++          meaning: TEXT[476]
++          binding: bind:design.work_schedule::SP
++        GroupNum:
++          meaning: TEXT[520]
++          shape:
++          - group: SP
++          - channel: D
++          dtype: fp32
++          retention: keep_value (b,h,i)
++        GroupDen:
++          meaning: TEXT[539]
++          shape:
++          - group: SP
++          - block: 4
++          dtype: fp32
++          retention: keep_value (b,h,i)
+       arithmetic:
+         approx: TEXT[196]
+     ledger:
+@@ -148,7 +166,7 @@
+         - TEXT[662]
+       depth:
+       - item: TEXT[313]
+-        change: TEXT[322]
++        change: TEXT[291]
+         by:
+         - TEXT[651]
+         - TEXT[662]
+@@ -161,14 +179,14 @@
+         - TEXT[659]
+       error:
+       - item: TEXT[214]
+-        change: TEXT[260]
++        change: TEXT[243]
+         by:
+         - TEXT[660]
+         - TEXT[654]
+         - TEXT[662]
+         - TEXT[659]
+   work_schedule:
+-    thesis: TEXT[1396]
++    thesis: TEXT[1387]
+     flow:
+       launch:
+       - phase:
+@@ -435,7 +453,7 @@
+       combine:
+         describe: TEXT[1255]
+         decomposition:
+-          strategy: TEXT[1350]
++          strategy: TEXT[1325]
+           partition:
+             row:
+               size: R
+@@ -446,17 +464,16 @@
+                 shape:
+                 - row: 1
+                 dtype: ref:design.math_reshape::Mtail.dtype
++              PartB:
++                shape:
++                - split: Ns
++                dtype: ref:design.math_reshape::PartB.dtype
+             iteration:
+               PartA:
+                 shape:
+-                - split: min(8,Ns-s0)
++                - split: 1
+                 - channel: D
+                 dtype: ref:design.math_reshape::PartA.dtype
+-                direction: ascending
+-              PartB:
+-                shape:
+-                - split: min(8,Ns-s0)
+-                dtype: ref:design.math_reshape::PartB.dtype
+                 direction: ascending
+           target:
+             single_tile:
+@@ -493,7 +510,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[711]
++    thesis: TEXT[685]
+     phase:
+       group_max:
+         domain:
+@@ -849,17 +866,24 @@
+           input_ready:
+           - Main/await:Partials@done
+         resource:
+-          SharedDen:
++          GroupNum:
+             space: SMEM
+             member_slot_shape:
+-            - split: 128
+-            dtype: fp32
+-            slot_count: 1
+-            view:
+-              PartB: {}
++            - group: SP
++            - channel: D
++            dtype: fp32
++            slot_count: 1
++          GroupDen:
++            space: SMEM
++            member_slot_shape:
++            - group: SP
++            - block: 4
++            dtype: fp32
++            slot_count: 1
+           NumeratorBatch:
+             space: register
+             member_slot_shape:
++            - group: SP
+             - split: 8
+             - channel: 128
+             dtype: fp32
+@@ -867,6 +891,7 @@
+           Numerator:
+             space: register
+             member_slot_shape:
++            - group: SP
+             - channel: D
+             dtype: fp32
+             slot_count: 1
+@@ -880,31 +905,21 @@
+           Main:
+             info:
+               execution_mode: serial
+-              member: warp[0:4]
++              member: warp[0:16]
+               verb:
+                 await: TEXT[1070]
+-                prepare: TEXT[1089]
+-                numerator: TEXT[853]
+-                denominator: TEXT[920]
+-                write: TEXT[1137]
++                prepare: TEXT[761]
++                numerator: TEXT[1129]
++                publish: TEXT[897]
++                write: TEXT[1074]
+             pipe:
+               prologue:
+               - await:Partials
+               - prepare:Row
+               steady:
+-              - repeat:
+-                  c:
+-                  - 0
+-                  - 2
+-                steady:
+-                - repeat:
+-                    j:
+-                    - 0
+-                    - ceil_div(Ns,8)
+-                  steady:
+-                  - numerator:PartA(c,j)
++              - numerator:GroupNum
++              - publish:GroupPartials
+               epilogue:
+-              - denominator:PartB
+               - write:Output
+ realization:
+   require:

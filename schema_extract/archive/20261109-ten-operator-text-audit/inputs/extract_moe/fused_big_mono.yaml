@@ -1,0 +1,512 @@
+"meta_data":
+  "name": "nvfp4_fused_moe"
+  "describe": "Precomputed routed mixture of experts with prepared NVFP4 weights,\
+    \ gated activation, activation requantization and BF16 output."
+  "source": "SchemaExtractSource_c98aa54e58ac@ce1b7d5e8e7560b5c80abd87549bc2328c52df34:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward"
+  "version": 1
+  "dispatch":
+    "id": "fused_big_mono"
+    "parent": "root"
+    "when": |
+      Let a be the effective MoEABI passed to moe_run. Reuse means that
+      Model.forward's identity/key cache, or its default C call wrapper,
+      selects an already published ABI without rebuilding it. In a, cfg
+      and cfg2 select FC1 and FC2, small_thresh is the saved routing
+      preparation threshold, and zflag/zflag_host are the optional device
+      verification state and its pinned host mirror. All implementation
+      controls used to construct a and any reused graph follow the frozen
+      default implementation scope. Let R = T*K.
+      Select exactly when the call reuses a, a.cfg = 97, a.cfg2 = 44,
+      a.zflag = 0, a.zflag_host = 0, R > a.small_thresh, R < 49152,
+      and moe_run returns zero through either one caller-stream run_pipeline
+      call or graph_replay's ordinary full-graph arm. The executed or recorded
+      FC2 launch uses a successful tma_set lookup for FC2 with 128-column
+      boxes and the cfg44 TMA/SFCP entry.
+      Every private-stream run_pipeline call in this request, if present,
+      is capture-only following successful cudaStreamBeginCapture; there is
+      no additional uncaptured pipeline submission on that stream.
+      This includes eager execution, first replay after graph construction
+      and existing-graph replay with this work. Outer-graph capture only
+      records the request; its computation and events occur on later replay.
+      ABI choices and bindings are fixed at recording, while device tensor
+      reads use execution-time contents. Reuse does not repeat route_hist,
+      table initialization, workspace construction or the ABI zero probe.
+"design":
+  "math_reshape":
+    "from_parent": "root"
+  "work_schedule":
+    "from_parent": "root"
+  tile_pipeline:
+    thesis: >-
+      FC1 separates scale and payload producers, MMA issue and four epilogue warps,
+      retaining its rings and early accumulator release across worktiles. FC2 uses
+      four cooperative warps with three-slot payload and scale staging; each stage
+      waits for the previous MMA before refill, and each worktile completes its
+      direct BF16 store submissions before the next worktile is primed.
+    phase:
+      count:
+        resource:
+          Hist: {space: SMEM, member_slot_shape: [expert: 256], dtype: int32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:8]"
+              verb:
+                enter: &pdl_entry >-
+                  All participating threads wait for predecessor grid completion
+                  and visibility; warp 0 then grants dependent-grid launch permission.
+                  This grants no data readiness. The entry executes even if this
+                  worker has no payload work.
+                produce: Zero Hist, synchronize the CTA, histogram valid routes, synchronize, then atomically add nonzero Hist entries into Counts.
+            pipe: {prologue: ["enter:Protocol"], steady: ["produce:Counts"]}
+      scan:
+        resource:
+          PrefixScratch: {space: SMEM, member_slot_shape: [element: 386], dtype: int32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:32]"
+              verb:
+                enter: *pdl_entry
+                produce: >-
+                  PrefixScratch holds 257 tile-prefix entries, two 64-word
+                  scan arrays and the tile total. Warp-local scans, the scan of warp totals and CTA
+                  rendezvous produce both prefixes. After their publication within
+                  the CTA, threads enumerate tile IDs by binary search and write
+                  Offs, TilePrefix, TileExpert and TileRow. J=0 still writes prefixes.
+            pipe: {prologue: ["enter:Protocol"], steady: ["produce:TilePrefix"]}
+      scatter:
+        resource:
+          Reservation: {space: SMEM, member_slot_shape: [table: 3, expert: 256], dtype: int32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:8]"
+              verb:
+                enter: *pdl_entry
+                produce: >-
+                  Reservation contains batch counts, reserved bases and local ranks.
+                  Zero counts/ranks, CTA rendezvous, histogram, rendezvous, reserve
+                  intervals from Fill, rendezvous, then assign atomic local ranks
+                  and write all four maps defined by routing. No thread exits before
+                  the last rendezvous; invalid real routes still write RoutePos=-1.
+            pipe: {prologue: ["enter:Protocol"], steady: ["produce:RoutePos"]}
+      gather:
+        domain: {t: worktile}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:4]"
+              verb:
+                enter: *pdl_entry
+                produce: >-
+                  Each of the 128 threads handles one SourceChunk, reads its token's
+                  eight RoutePos entries, and loads a 16-byte source only if some
+                  route is valid. Replicate to those destinations; the same registers
+                  hold this chunk through all route stores. No inter-thread exchange.
+            pipe: {repeat: t, prologue: ["enter:Protocol"], steady: ["produce:GatherChunk(t)"]}
+      fc1:
+        domain:
+          t: worktile
+          i: [0, "H/BK"]
+          g: {flatten: [t, i]}
+          c: [0, 2]
+        resource:
+          PayloadA: &payload_a
+            space: SMEM
+            member_slot_shape: [row: BM, byte: "BK/2"]
+            dtype: uint8
+            slot_count: 3
+            view: {"PayloadA(g)": {slot_index: "g%3"}}
+          PayloadB: &payload_b
+            space: SMEM
+            member_slot_shape: [row: 128, byte: "BK/2"]
+            dtype: uint8
+            slot_count: 3
+            view: {"PayloadB(g)": {slot_index: "g%3"}}
+          AScale: &scale_a
+            space: SMEM
+            member_slot_shape: [row: BM, block: "BK/Block"]
+            dtype: fp8_e4m3fn
+            slot_count: 2
+            view: {"AScale(g)": {slot_index: "g%2"}}
+          BScale: &scale_b
+            space: SMEM
+            member_slot_shape: [row: 128, block: "BK/Block"]
+            dtype: fp8_e4m3fn
+            slot_count: 2
+            view: {"BScale(g)": {slot_index: "g%2"}}
+          APrefetch: &a_prefetch
+            space: register
+            member_slot_shape: [row: BM, block: "BK/Block"]
+            dtype: fp8_e4m3fn
+            slot_count: 2
+            view: {"APrefetch(t,i)": {slot_index: "i%2"}}
+          TensorStorage:
+            space: TMEM
+            member_slot_shape: [row: BM, column: 256]
+            dtype: fp32
+            slot_count: 1
+            view:
+              C1: {part: {column: [0, 128]}}
+              "ScaleTM(g)": {part: {column: ["128+32*(g%2)", "160+32*(g%2)"]}, dtype: uint8}
+          Fragment: &fragment
+            space: register
+            member_slot_shape: [row: BM, column: 64]
+            dtype: fp32
+            slot_count: 1
+          ScalePack: {space: register, member_slot_shape: [row: BM, block: 4], dtype: uint8, slot_count: 1}
+        role:
+          AProducer: &a_producer
+            info:
+              execution_mode: serial
+              member: "warp[0:1]"
+              verb:
+                enter: &gemm_enter >-
+                  Execute the PDL entry protocol. If global J=0, perform no local
+                  allocation; subsequent work domains are empty. Otherwise warp 0
+                  initializes the shared completion protocol and allocates TensorStorage;
+                  all seven warps rendezvous once before entering their independent
+                  work loops. A worker with no assigned item still participates.
+                prime: &a_prime >-
+                  Resolve this worktile's expert and row base. The activation-scale
+                  source is GatherS. Load the first stage
+                  and, when the local stage count exceeds one, the second into
+                  APrefetch. All BM rows are loaded, redirecting padding scales to
+                  the first valid row. Prefetch registers are restarted per worktile.
+                publish: &a_publish >-
+                  Scatter the current APrefetch set into AScale, then establish
+                  shared-to-async visibility. If a next stage exists in this worktile,
+                  load it into the other register set before the warp rendezvous and
+                  full-stage arrival. Thus stage 1 is loaded again after being primed;
+                  the first primed copy is overwritten without use. Done includes this
+                  arrival, not completion of the independent payload/weight-scale loads.
+                retire: &gemm_retire >-
+                  After this role's whole assigned sequence, rendezvous with all seven
+                  warps; warp 0 deallocates TensorStorage. For global J=0 this action
+                  is a no-op. It does not insert a per-worktile drain or a new global
+                  memory fence; kernel completion supplies the external visibility.
+            pipe:
+              repeat: t
+              prologue: ["enter:Protocol"]
+              steady:
+                - "prime:APrefetch(t)"
+                - repeat: "g[t]"
+                  steady: ["publish:AScale(g)"]
+              epilogue: ["retire:TensorStorage"]
+            waits_for:
+              reuse:
+                "publish:AScale(g+2)": ["MMA/mma:PayloadA(g)@PayloadB(g)"]
+          BProducer:
+            info:
+              execution_mode: async
+              member: "warp[1:2]"
+              verb:
+                enter: {execution_mode: serial, meaning: *gemm_enter}
+                load: >-
+                  Stage PayloadA from GatherQ and PayloadB as the two contiguous
+                  up/gate weight boxes. Arm the full-stage transaction count for
+                  32768 payload bytes. Done covers both payload transfers. Payloads
+                  use three slots independently of the two scale slots.
+                stage: >-
+                  Copy prepared weight scales into BScale's fused 128-row up/gate
+                  image, preserving the prepared ABI permutation. The lane-permuted
+                  4-byte asynchronous copies collectively stage 2048 bytes. Done is
+                  their completion arrival to the full-stage protocol. Also issue
+                  an L2-only weight-scale hint two stages ahead when that stage lies
+                  in the same worktile; the hint has no consumer or completion edge.
+                retire: {execution_mode: serial, meaning: *gemm_retire}
+            pipe:
+              repeat: g
+              prologue: ["enter:Protocol"]
+              steady: ["load:PayloadPair(g)", "stage:BScale(g)"]
+              epilogue: ["retire:TensorStorage"]
+            waits_for:
+              reuse:
+                "load:PayloadPair(g+3)": ["MMA/mma:PayloadA(g)@PayloadB(g)"]
+                "stage:BScale(g+2)": ["MMA/mma:PayloadA(g)@PayloadB(g)"]
+          MMA:
+            info:
+              execution_mode: async_ordered_completion
+              member: "warp[2:3]"
+              verb:
+                enter: {execution_mode: serial, meaning: *gemm_enter}
+                wait: &drain_wait
+                  execution_mode: serial
+                  meaning: >-
+                    Hoist=1 when R>=16*E, otherwise Hoist=0. Drain(t,q) completes
+                    after its explicit predecessors; q identifies the optional
+                    wait before the first scale copy of a worktile.
+                prepare: &scale_prepare >-
+                  The elected issuer waits for the full-stage protocol and copies
+                  AScale and BScale into ScaleTM: four scale-copy operations for each
+                  operand. Issuance includes submission of all scale copies;
+                  only then does this issuer advance to the MMA action. Done is covered
+                  by the following cumulative MMA completion.
+                mma: >-
+                  Consume PayloadA/PayloadB and ScaleTM in four ordered 64-channel
+                  block-scaled updates to C1. The first update initializes C1 without
+                  reading its old value. The fused 128-column product covers both up
+                  and gate. Issue a cumulative completion commit after each stage;
+                  done covers scale copies, payload reads and accumulator updates.
+                  The last stage also commits result readiness for the epilogue.
+                  Same-issuer ordering ensures an earlier MMA has consumed ScaleTM
+                  before a later scale copy overwrites that scale slot, and makes each
+                  scale copy visible before the MMA that uses it.
+                retire: {execution_mode: serial, meaning: *gemm_retire}
+            pipe:
+              repeat: t
+              prologue: ["enter:Protocol"]
+              steady:
+                - repeat: {q: [0, "min(1,t)*(1-Hoist)"]}
+                  steady: ["wait:Drain(t,q)"]
+                - repeat: "g[t]"
+                  steady: ["prepare:ScaleTM(g)", "mma:PayloadA(g)@PayloadB(g)"]
+              epilogue: ["retire:TensorStorage"]
+            waits_for:
+              data:
+                "prepare:ScaleTM(g)": ["AProducer/publish:AScale(g)", "BProducer/load:PayloadPair(g)", "BProducer/stage:BScale(g)"]
+              reuse:
+                "wait:Drain(t,q)@done": &prior_drain ["Epilogue/release:Accumulator(t-1)", "Epilogue0/release:Accumulator(t-1)", "Epilogue1/release:Accumulator(t-1)", "Epilogue2/release:Accumulator(t-1)"]
+                "mma:PayloadA(g[t,0])@PayloadB(g[t,0])": *prior_drain
+          Epilogue:
+            info:
+              execution_mode: serial
+              member: "warp[3:4]"
+              verb: &fc1_epi_verb
+                enter: *gemm_enter
+                drain: >-
+                  Each warp owns its hardware TMEM quadrant (warp index modulo four),
+                  one row per lane. For c=0 or 1, load the matching 32 up and 32 gate
+                  values into this quadrant's rows of Fragment, issue both reads before waiting, and wait for
+                  all their TMEM reads to retire. Done makes this register fragment usable.
+                emit: >-
+                  Evaluate fc1_quantize for this 32-channel Fragment, including padding
+                  rows. For c=0 initialize ScalePack and retain its first two scale bytes;
+                  c=1 adds the last two, stores the full four-byte scale word on valid
+                  rows and resets it. Store valid payload bytes for each c. Done means
+                  local computation and store submission consumed Fragment; global
+                  stores can still be in flight. Invalid rows submit no output stores.
+                release: &acc_release >-
+                  This warp arrives once after its last TMEM-read wait and warp
+                  rendezvous. Done releases only this warp's accumulator quadrant;
+                  MMA reuse waits for all four epilogue roles. This warp immediately
+                  continues its final conversion/store tail without waiting for the
+                  other epilogue warps or for global output-store completion.
+                retire: *gemm_retire
+            pipe: &fc1_epi_pipe
+              repeat: t
+              prologue: ["enter:Protocol"]
+              steady: ["drain:Fragment(t,0)", "emit:ActQ(t,0)", "drain:Fragment(t,1)", "release:Accumulator(t)", "emit:ActQ(t,1)"]
+              epilogue: ["retire:TensorStorage"]
+            waits_for: &fc1_epi_wait
+              data:
+                "drain:Fragment(t,0)": ["MMA/mma:PayloadA(g[t,last(i)])@PayloadB(g[t,last(i)])"]
+          Epilogue0:
+            info:
+              execution_mode: serial
+              member: "warp[4:5]"
+              verb: *fc1_epi_verb
+            pipe: *fc1_epi_pipe
+            waits_for: *fc1_epi_wait
+          Epilogue1:
+            info:
+              execution_mode: serial
+              member: "warp[5:6]"
+              verb: *fc1_epi_verb
+            pipe: *fc1_epi_pipe
+            waits_for: *fc1_epi_wait
+          Epilogue2:
+            info:
+              execution_mode: serial
+              member: "warp[6:7]"
+              verb: *fc1_epi_verb
+            pipe: *fc1_epi_pipe
+            waits_for: *fc1_epi_wait
+      fc2:
+        domain:
+          t: worktile
+          i: [0, "I/BK"]
+          g: {flatten: [t, i]}
+          s: [0, "I/BK+2"]
+          c: [0, "BN2/32"]
+        resource:
+          RowIndex: {space: SMEM, member_slot_shape: [row: BM], dtype: int32, slot_count: 1}
+          PayloadA: *payload_a
+          PayloadB: *payload_b
+          AScale:
+            space: SMEM
+            member_slot_shape: [row: BM, block: "BK/Block"]
+            dtype: fp8_e4m3fn
+            slot_count: 3
+            view: {"AScale(g)": {slot_index: "g%3"}}
+          BScale:
+            space: SMEM
+            member_slot_shape: [row: BN2, block: "BK/Block"]
+            dtype: fp8_e4m3fn
+            slot_count: 3
+            view: {"BScale(g)": {slot_index: "g%3"}}
+          TensorStorage:
+            space: TMEM
+            member_slot_shape: [row: BM, column: 256]
+            dtype: fp32
+            slot_count: 1
+            view:
+              C2: {part: {column: [0, 128]}}
+              "ScaleTM(g)": {part: {column: ["128+32*(g%3)", "160+32*(g%3)"]}, dtype: uint8}
+          Fragment: {space: register, member_slot_shape: [row: BM, column: 32], dtype: fp32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: async
+              member: "warp[0:4]"
+              verb:
+                enter:
+                  execution_mode: serial
+                  meaning: >-
+                    Execute the PDL entry protocol. For global J=0, allocate nothing
+                    and leave all work domains empty. Otherwise initialize the
+                    shared completion protocol, allocate TensorStorage from warp 0
+                    and rendezvous the CTA, including workers with no assigned item.
+                resolve:
+                  execution_mode: serial
+                  meaning: >-
+                    Resolve the expert and compact row base. Populate RowIndex
+                    for all BM rows, redirecting padding scale rows to base(j),
+                    then rendezvous the CTA. RowIndex remains live through this
+                    worktile's scale copies; payload boxes keep consecutive rows.
+                stage: >-
+                  CopyGroup(t,s) commits one asynchronous scale-copy group.
+                  For s < I/BK, it stages AScale from ActS and prepared BScale
+                  from gemm2_weights_scale by four 4-byte copies per row and
+                  operand. Warp 0 also issues the ActQ and weight-payload tensor
+                  boxes, whose combined completion accounts for 32768 bytes.
+                  Payload and scale slots use the continuous stage g[t,s] modulo
+                  three; no scale-prefetch register buffer is used. Done covers
+                  these scale copies and payload transfers, before acquire's CTA
+                  publication. For s >= I/BK, only the empty copy group is committed;
+                  the action still has issue and done events and touches no slot.
+                  The first two groups prime each worktile. Each iteration then
+                  commits one more group, preserving the two-group lookahead even
+                  in the final two iterations.
+                wait:
+                  execution_mode: serial
+                  meaning: >-
+                    Previous(g,q) collectively waits for its explicit MMA predecessor
+                    and rendezvous the CTA before any slot refill. q identifies the
+                    occurrence for noninitial local stages; the first stage has none.
+                acquire:
+                  execution_mode: serial
+                  meaning: >-
+                    Wait for the current stage's scale-copy group, leaving at most
+                    two newer groups outstanding, and for both tensor boxes.
+                    Rendezvous the CTA and establish shared-to-async visibility.
+                    Done makes PayloadA, PayloadB, AScale and BScale readable.
+                mma:
+                  execution_mode: async_ordered_completion
+                  meaning: >-
+                    The elected warp-0 issuer copies both scale images into ScaleTM,
+                    then issues four ordered 64-channel block-scaled updates of C2
+                    and one cumulative completion commit. The first update of each
+                    worktile initializes C2 without reading its previous value.
+                    Done covers scale copies, operand reads and accumulator updates.
+                    Same-issuer scale-copy/MMA ordering makes each scale image
+                    available before its consuming update.
+                drain:
+                  execution_mode: serial
+                  meaning: >-
+                    Before c=0, wait for the final MMA commit and rendezvous the CTA.
+                    Each warp owns its TMEM quadrant, one row per lane. Load this
+                    quadrant's next 32 columns into Fragment and wait for all those
+                    TMEM reads to retire, including reads for padding rows.
+                emit:
+                  execution_mode: serial
+                  meaning: >-
+                    Convert Fragment to BF16 and directly store the valid rows to
+                    RouteResult. Done consumes Fragment and submits the stores;
+                    global visibility is supplied by kernel completion. Padding
+                    rows produce no stores. There is no shared output sink.
+                close:
+                  execution_mode: serial
+                  meaning: >-
+                    Rendezvous all four warps after their last drain and direct
+                    store submission. Only then may the next worktile resolve and
+                    prime its operands. All payload and scale data copies for this
+                    worktile have been consumed; trailing empty copy groups have no
+                    data. Carry ring position and completion parity across worktiles.
+                retire:
+                  execution_mode: serial
+                  meaning: >-
+                    After the assigned sequence, warp 0 deallocates TensorStorage.
+                    For global J=0 this action is a no-op. Prior drain and close
+                    actions have finished all TMEM reads; ordinary global stores
+                    finish as part of kernel completion, without a bulk-store drain.
+            pipe:
+              repeat: t
+              prologue: ["enter:Protocol"]
+              steady:
+                - "resolve:RowIndex(t)"
+                - repeat: {p: [0, 2]}
+                  steady: ["stage:CopyGroup(t,p)"]
+                - repeat: "g[t]"
+                  steady:
+                    - repeat: {q: [0, "min(1,i)"]}
+                      steady: ["wait:Previous(g,q)"]
+                    - "stage:CopyGroup(t,i+2)"
+                    - "acquire:Operands(g)"
+                    - "mma:PayloadA(g)@PayloadB(g)"
+                - repeat: c
+                  steady: ["drain:Fragment(t,c)", "emit:RouteResult(t,c)"]
+                - "close:Worktile(t)"
+              epilogue: ["retire:TensorStorage"]
+            waits_for:
+              data:
+                "acquire:Operands(g)": ["stage:CopyGroup(t,i)"]
+                "drain:Fragment(t,0)": ["mma:PayloadA(g[t,last(i)])@PayloadB(g[t,last(i)])"]
+              reuse:
+                "wait:Previous(g,q)@done": ["mma:PayloadA(g[t,i-1])@PayloadB(g[t,i-1])"]
+      finalize:
+        resource:
+          Accumulator: {space: register, member_slot_shape: [hidden: "128*FinalWidth"], dtype: fp32, slot_count: 1}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:4]"
+              verb:
+                enter: *pdl_entry
+                produce: >-
+                  Each thread owns FinalWidth independent output elements. Hoist its eight
+                  route indices and scores, initialize Accumulator, then consume
+                  valid BF16 route vectors in increasing slot order using finalize's
+                  FMA recurrence. Convert and store Y once; no CTA reduction or
+                  inter-thread barrier is required. Empty routing still writes zeros.
+            pipe: {prologue: ["enter:Protocol"], steady: ["produce:Y"]}
+realization:
+  require:
+    - item: ["design.tile_pipeline::fc1.MMA", "design.tile_pipeline::fc2.Main"]
+      choice: >-
+        Use tcgen05 block_scale.scale_vec::4X E2M1/E4M3 MMA and tcgen05.cp
+        scale copies, with cumulative tcgen05.commit completion and
+        tcgen05.fence::after_thread_sync at the recorded synchronization boundaries.
+      reason: Scale visibility and operand-slot reuse depend on ordered scale reads and cumulative MMA completion.
+    - item: ["design.tile_pipeline::fc1", "design.tile_pipeline::fc2.Main"]
+      choice: >-
+        Use tcgen05.ld with tcgen05.wait::ld before releasing or reusing an
+        accumulator quadrant, using the issuing warp's hardware quadrant.
+      reason: The register fragment must be materialized and all TMEM reads retired before accumulator overwrite or deallocation.
+    - item: "design.tile_pipeline::fc2.Main"
+      choice: >-
+        Use cp.async.ca 4-byte scale copies with one commit group per CopyGroup
+        and cp.async.wait_group 2 at acquire. Preserve empty commits, the TMA
+        transaction-byte completion waits and the CTA publication rendezvous.
+      reason: Independent scale and payload completion mechanisms jointly make each stage ready; empty commits preserve which scale group the wait retires.
+    - item: "design.work_schedule::flow"
+      choice: >-
+        Preserve programmatic-stream-serialization launches and the
+        griddepcontrol.wait / launch_dependents protocol for eager and recorded work.
+      reason: Launch permission and visible predecessor results are separate guarantees.

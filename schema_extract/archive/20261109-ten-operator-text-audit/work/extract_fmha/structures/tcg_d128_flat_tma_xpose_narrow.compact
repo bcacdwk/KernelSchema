@@ -1,0 +1,65 @@
+--- tcg_d128_flat_tma_direct_narrow
+
++++ tcg_d128_flat_tma_xpose_narrow
+
+@@ -1,2 +1,2 @@
+
+-math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"},"Ngm":{"binding":"bind:design.work_schedule::Ngm"},"Ns":{"binding":"bind:design.work_schedule::Ns"}}},{"step":"scores","symbol":{"DotTile":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (evaluation,b,kh,a,s,g)"},"GroupMax":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"scan","symbol":{"ScanState":{"shape":[],"dtype":"fp32","retention":"carry_forward (r); g=-1..T-1"},"MState":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"MTail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"C"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..cHi"},"DenState":{"shape":[{"row":"C"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"Prob8":{"shape":[{"row":"C"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"partials","symbol":{"NumState":{"shape":[{"row":"C"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"GroupPV":{"shape":[{"row":"C"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value (b,kh,a,s,g)"},"PartA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"combine","symbol":{"TotalA":{"shape":[{"channel":"D"}],"dtype":"fp32","retention":"keep_value (r)"},"TotalB":{"shape":[],"dtype":"fp32","retention":"keep_value (r)"}}}]
++math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"},"Ngm":{"binding":"bind:design.work_schedule::Ngm"},"Ns":{"binding":"bind:design.work_schedule::Ns"}}},{"step":"scores","symbol":{"DotTile":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (evaluation,b,kh,a,s,g)"},"GroupMax":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"scan","symbol":{"ScanState":{"shape":[],"dtype":"fp32","retention":"carry_forward (r); g=-1..T-1"},"MState":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"MTail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..cHi"},"DenState":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"Prob8":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"partials","symbol":{"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"GroupPV":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value (b,kh,a,s,g)"},"PartA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"combine","symbol":{"TotalA":{"shape":[{"channel":"D"}],"dtype":"fp32","retention":"keep_value (r)"},"TotalB":{"shape":[],"dtype":"fp32","retention":"keep_value (r)"}}}]
+ work_schedule.flow.launch=[{"phase":["group_max"]},{"phase":["flat_scan"],"start_after":"group_max.launch_ready","protocol":"pdl"},{"phase":["split"],"start_after":"flat_scan.launch_ready","protocol":"pdl"},{"phase":["combine"],"start_after":"split.launch_ready","protocol":"pdl"}]
+@@ -174,16 +174,13 @@
+
+ tile_pipeline.phase.split.milestone.scan_ready=["Main/dependency:Scan@done"]
+-tile_pipeline.phase.split.resource.Query.space="SMEM"
+-tile_pipeline.phase.split.resource.Query.member_slot_shape=[{"row":"Br"},{"channel":"D"}]
+-tile_pipeline.phase.split.resource.Query.dtype="fp8_e4m3fn"
+-tile_pipeline.phase.split.resource.Query.slot_count=1
+-tile_pipeline.phase.split.resource.Key.space="SMEM"
+-tile_pipeline.phase.split.resource.Key.member_slot_shape=[{"key":"KeyGroup"},{"channel":"D"}]
+-tile_pipeline.phase.split.resource.Key.dtype="fp8_e4m3fn"
+-tile_pipeline.phase.split.resource.Key.slot_count=2
+-tile_pipeline.phase.split.resource.Key.view.Key(g)={"slot_index":"(g-cLo)%2"}
+-tile_pipeline.phase.split.resource.Value.space="SMEM"
+-tile_pipeline.phase.split.resource.Value.member_slot_shape=[{"key":"KeyGroup"},{"channel":"D"}]
+-tile_pipeline.phase.split.resource.Value.dtype="fp8_e4m3fn"
+-tile_pipeline.phase.split.resource.Value.slot_count=2
+-tile_pipeline.phase.split.resource.Value.view.Value(g)={"slot_index":"(g-cLo)%2"}
++tile_pipeline.phase.split.resource.OperandArena.space="SMEM"
++tile_pipeline.phase.split.resource.OperandArena.member_slot_shape=[{"element":"5*Br*D"}]
++tile_pipeline.phase.split.resource.OperandArena.dtype="uint8"
++tile_pipeline.phase.split.resource.OperandArena.slot_count=1
++tile_pipeline.phase.split.resource.OperandArena.view.Query.part.element=[0,"Br*D"]
++tile_pipeline.phase.split.resource.OperandArena.view.Query.dtype="fp8_e4m3fn"
++tile_pipeline.phase.split.resource.OperandArena.view.Key(g).part.element=["(1+(g-cLo)%2)*Br*D","(2+(g-cLo)%2)*Br*D"]
++tile_pipeline.phase.split.resource.OperandArena.view.Key(g).dtype="fp8_e4m3fn"
++tile_pipeline.phase.split.resource.OperandArena.view.Value(g).part.element=["(3+(g-cLo)%2)*Br*D","(4+(g-cLo)%2)*Br*D"]
++tile_pipeline.phase.split.resource.OperandArena.view.Value(g).dtype="fp8_e4m3fn"
++tile_pipeline.phase.split.resource.OperandArena.view.PartA={"dtype":"fp32"}
+ tile_pipeline.phase.split.resource.KeyAtom.space="SMEM"
+@@ -235,6 +232,23 @@
+
+ tile_pipeline.phase.split.role.Main.info.member="warp[0:4]"
+-tile_pipeline.phase.split.role.Main.info.verb={"setup":"TEXT","prime":"TEXT","prepare":"TEXT","dependency":"TEXT","replay":"TEXT","prefetch":"TEXT","stage":"TEXT","qk":"TEXT","probability":"TEXT","pv":"TEXT","accumulate":"TEXT","write":"TEXT","finish":"TEXT"}
++tile_pipeline.phase.split.role.Main.info.verb.setup="TEXT"
++tile_pipeline.phase.split.role.Main.info.verb.prime="TEXT"
++tile_pipeline.phase.split.role.Main.info.verb.prepare={"execution_mode":"async"}
++tile_pipeline.phase.split.role.Main.info.verb.dependency={"execution_mode":"async"}
++tile_pipeline.phase.split.role.Main.info.verb.replay={"execution_mode":"async"}
++tile_pipeline.phase.split.role.Main.info.verb.prefetch="TEXT"
++tile_pipeline.phase.split.role.Main.info.verb.stage="TEXT"
++tile_pipeline.phase.split.role.Main.info.verb.qk="TEXT"
++tile_pipeline.phase.split.role.Main.info.verb.probability="TEXT"
++tile_pipeline.phase.split.role.Main.info.verb.pv="TEXT"
++tile_pipeline.phase.split.role.Main.info.verb.accumulate="TEXT"
++tile_pipeline.phase.split.role.Main.info.verb.stage_partials="TEXT"
++tile_pipeline.phase.split.role.Main.info.verb.write="TEXT"
++tile_pipeline.phase.split.role.Main.info.verb.finish="TEXT"
+ tile_pipeline.phase.split.role.Main.pipe.prologue=["setup:Local","prime:Inputs","prepare:Query","dependency:Scan","replay:Entrance"]
+ tile_pipeline.phase.split.role.Main.pipe.steady=[{"repeat":"g","steady":["prefetch:Next(g)","stage:Operands(g)","qk:DotTile(g)","probability:Prob8(g)","pv:GroupPV(g)","accumulate:NumState(g)"]}]
+-tile_pipeline.phase.split.role.Main.pipe.epilogue=["write:Partials","finish:Local"]
++tile_pipeline.phase.split.role.Main.pipe.epilogue=["stage_partials:PartA","write:Partials","finish:Local"]
++tile_pipeline.phase.split.role.Main.waits_for.data.replay:Entrance=["dependency:Scan"]
++tile_pipeline.phase.split.role.Main.waits_for.reuse.stage_partials:PartA=["prepare:Query"]
++tile_pipeline.phase.split.role.Main.waits_for.sync.stage:Operands(g)@done=["prepare:Query","replay:Entrance"]
++tile_pipeline.phase.split.role.Main.waits_for.sync.stage_partials:PartA@done=["replay:Entrance"]
+ tile_pipeline.phase.combine.milestone.inputs_ready=["Main/dependency:Partials@done"]

@@ -1,0 +1,159 @@
+--- tcg_d128_segmented_tma_direct_narrow
++++ tcg_d128_segmented_tma_direct_wide
+@@ -4,9 +4,9 @@
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+   version: 2
+   dispatch:
+-    id: tcg_d128_segmented_tma_direct_narrow
+-    parent: tcg_d128_flat_tma_direct_narrow
+-    when: TEXT[118]
++    id: tcg_d128_segmented_tma_direct_wide
++    parent: tcg_d128_segmented_tma_direct_narrow
++    when: TEXT[139]
+ design:
+   math_reshape:
+     thesis: TEXT[668]
+@@ -145,9 +145,26 @@
+         accumulate: TEXT[194]
+         approx: TEXT[155]
+     - step: TEXT[661]
+-      name: TEXT[595]
+-      math: TEXT[360]
++      name: TEXT[612]
++      math: TEXT[368]
+       symbol:
++        MergeGroups:
++          meaning: TEXT[552]
++          binding: bind:design.work_schedule::MergeGroups
++        GroupA:
++          meaning: TEXT[524]
++          shape:
++          - merge_group: MergeGroups
++          - channel: D
++          dtype: fp32
++          retention: keep_value (r)
++        GroupB:
++          meaning: TEXT[551]
++          shape:
++          - merge_group: MergeGroups
++          - part: 4
++          dtype: fp32
++          retention: keep_value (r)
+         TotalA:
+           meaning: TEXT[441]
+           shape:
+@@ -171,6 +188,10 @@
+         - TEXT[653]
+         - TEXT[651]
+         - TEXT[662]
++      - item: TEXT[247]
++        change: TEXT[209]
++        by:
++        - TEXT[661]
+       matmul:
+       - item: TEXT[318]
+         change: TEXT[211]
+@@ -180,7 +201,7 @@
+         - TEXT[662]
+       depth:
+       - item: TEXT[313]
+-        change: TEXT[224]
++        change: TEXT[281]
+         by:
+         - TEXT[651]
+         - TEXT[662]
+@@ -193,14 +214,14 @@
+         - TEXT[651]
+       error:
+       - item: TEXT[277]
+-        change: TEXT[290]
++        change: TEXT[242]
+         by:
+         - TEXT[660]
+         - TEXT[654]
+         - TEXT[662]
+         - TEXT[661]
+   work_schedule:
+-    thesis: TEXT[1379]
++    thesis: TEXT[1370]
+     flow:
+       launch:
+       - phase:
+@@ -526,7 +547,7 @@
+       combine:
+         describe: TEXT[1272]
+         decomposition:
+-          strategy: TEXT[1311]
++          strategy: TEXT[1330]
+           partition:
+             row:
+               size: R
+@@ -580,7 +601,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[699]
++    thesis: TEXT[703]
+     phase:
+       group_max:
+         domain:
+@@ -948,17 +969,33 @@
+           inputs_ready:
+           - Main/dependency:Partials@done
+         resource:
+-          DenParts:
++          GroupA:
+             space: SMEM
+             member_slot_shape:
+-            - split: 128
++            - merge_group: MergeGroups
++            - channel: D
++            dtype: fp32
++            slot_count: 1
++          GroupB:
++            space: SMEM
++            member_slot_shape:
++            - merge_group: MergeGroups
++            - part: 4
+             dtype: fp32
+             slot_count: 1
+           NumeratorBatch:
+             space: register
+             member_slot_shape:
++            - merge_group: MergeGroups
+             - channel: D
+             - split: 8
++            dtype: fp32
++            slot_count: 1
++          GroupAccum:
++            space: register
++            member_slot_shape:
++            - merge_group: MergeGroups
++            - channel: D
+             dtype: fp32
+             slot_count: 1
+           Totals:
+@@ -983,17 +1020,17 @@
+           Main:
+             info:
+               execution_mode: serial
+-              member: warp[0:4]
++              member: warp[0:4*MergeGroups]
+               verb:
+                 dependency: TEXT[1011]
+-                sum_a: TEXT[774]
+-                sum_b: TEXT[846]
+-                write: TEXT[884]
++                partials: TEXT[1133]
++                join: TEXT[1143]
++                write: TEXT[952]
+             pipe:
+               steady:
+               - dependency:Partials
+-              - sum_a:TotalA
+-              - sum_b:TotalB
++              - partials:Groups
++              - join:MergePartials
+               - write:Output
+ realization:
+   require:

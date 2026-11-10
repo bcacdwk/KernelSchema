@@ -1,0 +1,421 @@
+meta_data:
+  name: nvfp4_fused_moe
+  describe: Precomputed routed mixture of experts with prepared NVFP4 weights, gated activation, activation requantization
+    and BF16 output.
+  source: SchemaExtractSource_c98aa54e58ac@ce1b7d5e8e7560b5c80abd87549bc2328c52df34:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward
+  version: 1
+  dispatch:
+    id: direct
+    parent: root
+    when: |
+      Let a be the effective MoEABI selected by Model.forward's identity/key
+      cache or its default C call wrapper, without rebuilding that ABI. All
+      implementation controls used to construct a and any reused graph follow
+      the frozen default implementation scope. Let R=T*K.
+      Select exactly when this call reuses a, a.cfg=a.cfg2=92,
+      a.zflag=a.zflag_host=0, and moe_run returns zero through one caller-stream
+      run_pipeline call or graph_replay's ordinary full-graph arm. Any private-
+      stream run_pipeline in this request is capture-only after a successful
+      cudaStreamBeginCapture; no extra uncaptured private-stream submission occurs.
+      This includes eager execution, replay after successful graph construction,
+      and existing-graph replay with the same work, including caller-stream
+      fallback when graph construction records but does not execute the kernel.
+      The saved default choice 92 was established with K=8, R<=8192,
+      R*H<=32000000, I mod 32=0, H mod 256=0,
+      4*(H+H/8+96)+64<=49152 bytes, and an empty route_hist at ABI construction.
+      Here route_hist counts valid expert IDs. Those saved facts do not constrain current
+      route contents: every execution can have empty, masked or nonempty routing.
+      During outer capture only the request is recorded; its computation and
+      completion events occur on later replay. Host scalar choices and tensor
+      bindings are fixed at recording, while device reads use execution-time
+      contents. Reuse does not rerun route_hist, format-table initialization,
+      workspace allocation or the ABI zero probe.
+design:
+  math_reshape:
+    thesis: Evaluate valid routes directly in 32-channel intermediate chunks, with scale-factored FP32 FC1 and local
+      activation QDQ. Atomic FC2 partials replace gathered operands and full intermediate materialization; this costs
+      a persistent FP32 route accumulator and changes reduction order. Current empty routing needs only route census
+      and zero output.
+    rewrite:
+      - step: census
+        name: Current routing and zero rows
+        math: |
+          R=T*K. Let V={(t,k) | 0<=t<T, 0<=k<K, route_ids[t,k]>=0},
+          n(t)=count({k | (t,k) in V}), and M=count(V).
+          Each replica w in [0,G) evaluates Census(w)=M from current route_ids.
+          For every t with n(t)=0, set Y[t,:]=bf16(0).
+          Let S=I/B. A unit u=r*S+s has r=t*K+k, 0<=s<S.
+          Units with (t,k) not in V produce no contraction or accumulator update.
+          When M=0 there are no active units. Use Contract's exact F, Decode,
+          Unswizzle, P and g(r) definitions for the external prepared ABI.
+          For an active token define X[:]=Decode(hidden_states[t,:],hidden_states_scale[t,:]).
+          For logical FC1 row c, B1[e,c,h] is its unscaled F-decoded payload at
+          prepared row P(g(c)); S1[e,c,b] is its Unswizzle scale at block b.
+          W2[e,h,j] is the Contract's decoded FC2 weight, evaluated on demand.
+        symbol:
+          G: {meaning: Number of route-census replicas, binding: 'bind:design.work_schedule::G'}
+          Census: {meaning: Current valid-route total in one replica, shape: [], dtype: int32, retention: keep_value
+              (w)}
+          X: {meaning: Decoded input for the currently retained token, shape: [{hidden: H}], dtype: fp32, retention: 'keep_value
+              (w,t)'}
+          B: {meaning: Intermediate channels in each atomic FC2 partial, value: 32}
+      - step: fc1
+        name: Scale-factored grouped FP32 contractions
+        math: |
+          For each active unit (t,k,s), let e=route_ids[t,k]. Evaluate c in
+          {B*s,...,B*s+B-1} for up and {I+B*s,...,I+B*s+B-1} for gate.
+          Split the H/Block scale blocks into 32 groups: b=32*j+l,
+          0<=l<32, j=0..H/512-1. For each (c,b), initialize D_even(-1)=D_odd(-1)=0.
+          For a=0..7, D_even(a)=fma32(X[16*b+2*a],B1[e,c,16*b+2*a],D_even(a-1))
+          and D_odd(a)=fma32(X[16*b+2*a+1],B1[e,c,16*b+2*a+1],D_odd(a-1)).
+          Group(-1)[c,l]=0;
+          Group(j)[c,l]=fma32(S1[e,c,32*j+l],D_even(7)+D_odd(7),Group(j-1)[c,l]).
+          Starting with Z0[l]=Group(H/512-1)[c,l], perform five simultaneous
+          FP32 butterfly updates Z_next[l]=Z_old[l]+Z_old[l xor o],
+          for o=16,8,4,2,1; xor is bitwise exclusive-or on integer indices.
+          Set UpGate[a,0]=Z_final[0] for c=B*s+a,
+          and UpGate[a,1]=Z_final[0] for c=I+B*s+a, 0<=a<B.
+          Retain these B up/gate pairs until local activation has consumed them.
+        symbol:
+          Group: {meaning: FC1 partial sums for the 32 scale-block groups, shape: [{channel: 2*B}, {group: 32}], dtype: fp32,
+            retention: 'carry_forward (t,k,s); j=-1..H/512-1'}
+          UpGate: {meaning: One intermediate chunk of paired FC1 results, shape: [{intermediate: B}, {pair: 2}], dtype: fp32,
+            retention: 'keep_value (t,k,s)'}
+      - step: activate
+        name: Nonfolded approximate activation and local quantized values
+        math: |
+          For each UpGate pair take u=UpGate[a,0], v=UpGate[a,1] and apply
+          Contract's asymmetric clamp when gemm1_clamp_limit is not None.
+          Let alpha=gemm1_alpha[e], beta=gemm1_beta[e], L=fp32(-1.44269504),
+          ia=rcp_rn(alpha), ib=rcp_rn(beta); rcp_rn is an FP32 RNE reciprocal.
+          Define Sig(x)=rcp_approx(1+exp2_ftz(x*L)),
+          Tan(x)=fma32(Sig(x+x),2,-1).
+          For activation_type=3, vact=(v*Sig(v*alpha))*(u+beta).
+          For activation_type=10, vact=((alpha*Tan(v*ia))*Sig(v))*(beta*Tan(u*ib)).
+          Each activation is evaluated as two identical components; only the first
+          is consumed. The beta reciprocal is evaluated but unused by type 3.
+          Independently in each of the two Block-channel groups, let peak=max(abs(vact)),
+          sf=fp8_e4m3fn(min(peak*fp32(1/FP4Max),ScaleMax)),
+          q=vact*rcp_rn(max(sf,fp32(1.17549435e-38))).
+          The reciprocal multiplication likewise evaluates two identical components.
+          Convert eight identical copies of the first q using Contract's saturated
+          RNE E2M1 rule, retain only the first code, and discard the other seven.
+          QChunk[a]=F(code)*sf. A zero scale still evaluates reciprocal,
+          multiplication and conversion. Retain these B FP32 QDQ values through FC2;
+          neither their packed codes nor scales are materialized globally.
+        symbol:
+          QChunk: {meaning: Locally retained QDQ activation chunk, shape: [{intermediate: B}], dtype: fp32, retention: 'keep_value
+              (t,k,s)'}
+        arithmetic:
+          approx: 'exp2_ftz is ex2.approx.ftz.f32 and rcp_approx is rcp.approx.f32. Sig and Tan retain the nonfolded
+            argument evaluation shown above; quantization uses reciprocal multiplication. unknown: the fixed material
+            supplies no verified uniform error bound for these composed approximations.'
+      - step: fc2_finalize
+        name: Atomic route sums and last-arrival token output
+        math: |
+          For every active unit and h in [0,H), C(-1)=0 and
+          C(a)=fma32(W2[e,h,B*s+a],QChunk[a],C(a-1)), a=0..B-1.
+          Partial(r,s)[h]=C(B-1). For each valid (r,h), let pi(r,h) be the
+          permutation of [0,S) given by the actual FP32 atomic serialization order.
+          RouteAccum(-1)[r,h]=0 and, for q=0..S-1,
+          RouteAccum(q)[r,h]=RouteAccum(q-1)[r,h]+Partial(r,pi(r,h)[q])[h].
+          For each token with n(t)>0, Arrivals(-1)[t]=0 and
+          Arrivals(q)[t]=Arrivals(q-1)[t]+1, q=0..n(t)*S-1, one increment per
+          completed active unit after its H additions. The increment's returned
+          old value n(t)*S-1 identifies the token's final arrival.
+          Once all n(t)*S units have contributed, independently for each h set
+          Z(-1)=0 and, for k=0..K-1,
+          Z(k)=fma32(bf16(RouteAccum(S-1)[t*K+k,h]),route_weights[t,k],Z(k-1))
+          on (t,k) in V; otherwise Z(k)=Z(k-1) without reading that row.
+          Set Y[t,h]=bf16(Z(K-1)). The intermediate BF16 cast is local;
+          no BF16 route-result array is materialized. After consuming each valid
+          route row, RouteAccum(S)[r,h]=0 resets it. After all token output writes
+          and row resets, Arrivals(n(t)*S)[t]=0 resets the token's counter.
+          Invalid-route accumulator rows and route-less token counters are unchanged.
+          New workspace establishes zero in all R*H route entries and T counters;
+          completed ordered requests retain zero for the next execution even if
+          route contents change. These scratch arrays survive ABI reuse.
+          Y covers all T*H elements together with census's zero rows and aliases
+          the caller output returned in its existing list.
+        symbol:
+          Partial: {meaning: One unit's FP32 FC2 partial, shape: [{hidden: H}], dtype: fp32}
+          RouteAccum: {meaning: Persistent FP32 route accumulator reset after consumption, shape: [{route: R}, {hidden: H}],
+            dtype: fp32, retention: carry_forward invocation; per-element q=-1..S}
+          Arrivals: {meaning: Persistent per-token unit arrival counts, shape: [{token: T}], dtype: int32, retention: carry_forward
+              invocation; per-token q=-1..n(t)*S}
+          Z: {meaning: Route-weighted accumulator for one output element, shape: [], dtype: fp32,
+            retention: 'carry_forward (t,h); k=-1..K-1'}
+    ledger:
+      baseline: Direct Contract evaluation on M valid routes, saving both FP32 FC1 outputs, full FP32 Act and QAct, and
+        BF16 route results before route weighting.
+      vector:
+        - item: Contractions
+          change: 3*M*H*I MAC-equivalents remain; FC1 factors its weight scale outside each 16-term inner sum and FC2
+            adds M*S*H atomic partials
+          by:
+            - fc1
+            - fc2_finalize
+        - item: Routing census
+          change: Add G*R valid-ID tests plus route-less-token tests and local token counts; no compact route permutation
+          by:
+            - census
+        - item: Duplicated local activation and conversions
+          change: M*I useful values execute 2*M*I activation component evaluations and 8*M*I E2M1 code conversions; discarded
+            duplicates are not saved
+          by:
+            - activate
+      footprint:
+        - item: Saved route intermediates
+          change: 16*M*I + 2*M*H bytes -> 4*R*H + 4*T persistent scratch bytes; local decoded input and activation chunks
+            are bounded independently of M
+          by:
+            - fc1
+            - activate
+            - fc2_finalize
+      error:
+        - item: Numerical evaluation
+          change: Scale-factored FC1, approximate activation and split atomic FC2 change evaluation for M routes; no
+            uniform final-output error bound is inferred
+          by:
+            - fc1
+            - activate
+            - fc2_finalize
+  work_schedule:
+    thesis: One kernel uses G cooperative CTAs. Each CTA zeroes its route-less token rows and independently scans the
+      routing, then consumes a contiguous unit interval. Last-arrival token finalization avoids a grid barrier and a
+      second launch; direct weight reads and repeated census trade throughput for the small empty-path resource envelope.
+      Scratch persists across requests with ordered reuse.
+    flow:
+      launch:
+        - phase:
+            - prelude
+            - direct
+          order: per_worker
+      handoff:
+        Census:
+          producer: prelude
+          consumer:
+            - direct
+          storage: tile_pipeline.phase.prelude.resource.Census
+    phase:
+      prelude:
+        describe: Zero route-less output rows and form a private current-route census in every CTA.
+        decomposition:
+          strategy: G=min(296,R*S), which is positive throughout this node. One worktile per replica w visits tokens
+            t=w,w+G,... below T; only n(t)=0 rows are written. Then every replica scans all R route IDs to form its own
+            Census. Nz(w)=count({t | 0<=t<T, t mod G=w, n(t)=0}) denotes the sparse output-row count. This is replication,
+            not a reduction of G different route subsets.
+          partition:
+            replica: {size: G, tile: 1}
+          worktile:
+            invariant:
+              route_ids: {shape: [{token: T}, {slot: K}], dtype: int32}
+          target:
+            single_tile:
+              Census: {shape: [], dtype: int32}
+              Y: {shape: [{token: Nz(worker_id)}, {hidden: H}], dtype: bf16}
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: G
+        schedule:
+          worktile_order:
+            - {by: replica, direction: ascending}
+          worker_assignment:
+            preassigned: {start: worker_id, count: 1}
+            refill: none
+            exit: assigned_done
+      direct:
+        describe: Compute valid route chunks, atomically merge them, and finalize tokens at their last arrival.
+        decomposition:
+          strategy: 'Unit order is u=(t*K+k)*S+s with s fastest. Per=ceil_div(R*S,G). Q(w)=max(0,min(Per,R*S-w*Per))
+            and N(w)=Q(w) if M>0, otherwise zero. Worker w processes u=w*Per..w*Per+N(w)-1; local work index v maps to
+            u=w*Per+v. Invalid units visit their ID but perform no payload computation or ticket. Each valid unit contains
+            the full H reduction for B up/gate pairs, local QDQ, and B-channel FC2 contributions across all H outputs.
+            Cache X and n(t) through consecutive valid units of the same token in this worker, reloading only at a new
+            token. Prepared weight payloads and scales stream directly from global memory for each unit. FC2 contributions
+            merge by device FP32 atomic addition into global RouteAccum, with one global Arrivals ticket per completed
+            valid unit. The last-ticket unit executes fc2_finalize for the whole token and resets its valid accumulator
+            rows and counter. Thus Partial and Y below are conditional targets: invalid units produce neither, and non-last
+            valid units only contribute Partial. No extra finalizer work is allocated. RouteAccum has R*H FP32 elements
+            and Arrivals has T int32 elements. Their zero initialization belongs to workspace construction before the
+            reused ABI; this launch has no memset. Completion and ordered reuse protect the self-clean state. No cross-stream
+            exclusion is added by source.'
+          partition:
+            unit: {size: R*S, tile: 1}
+          worktile:
+            invariant:
+              Census: {shape: [], dtype: int32}
+              route_ids: {shape: [{slot: K}], dtype: int32}
+              route_weights: {shape: [{slot: K}], dtype: fp32}
+              hidden_states: {shape: [{packed_hidden: H/2}], dtype: uint8}
+              hidden_states_scale: {shape: [{hidden_block: H/Block}], dtype: fp8_e4m3fn}
+              gemm1_alpha: {shape: [{expert: 1}], dtype: fp32}
+              gemm1_beta: {shape: [{expert: 1}], dtype: fp32}
+              gemm1_clamp_limit: {shape: [{expert: 1}], dtype: fp32}
+            iteration:
+              gemm1_weights: {shape: [{channel: 2*B}, {packed_hidden: 256}], dtype: uint8, direction: ascending}
+              gemm1_weights_scale: {shape: [{channel: 2*B}, {hidden_block: 32}], dtype: fp8_e4m3fn, direction: ascending}
+              gemm2_weights: {shape: [{hidden: 'min(2048,H)'}, {packed_intermediate: B/2}], dtype: uint8, direction: ascending}
+              gemm2_weights_scale: {shape: [{hidden: 'min(2048,H)'}, {intermediate_block: B/Block}], dtype: fp8_e4m3fn,
+                direction: ascending}
+              RouteAccum: {shape: [{route: 1}, {hidden: 'min(2048,H)'}], dtype: fp32, direction: ascending}
+          target:
+            single_tile:
+              Partial: {shape: [{hidden: H}], dtype: fp32}
+              Y: {shape: [{hidden: H}], dtype: bf16}
+            tile_reduction:
+              dimension: unit
+              input: ref:design.math_reshape::Partial
+              output:
+                - ref:design.math_reshape::RouteAccum
+                - ref:contract.algorithm_requirement::Y
+              method: ref:design.math_reshape::fc2_finalize
+        mapping:
+          worker: {unit: CTA, unit_count: 1}
+          worker_count: G
+        schedule:
+          strategy: A worker with zero Census ends after its prelude; otherwise all units in its clipped interval are
+            visited, including masked no-payload units. Assigned completion includes any elected finalization and scratch
+            reset. Clamp data is read only when the nullable input is present.
+          worktile_order:
+            - {by: unit, direction: ascending}
+          worker_assignment:
+            preassigned: {start: 'min(worker_id*Per,R*S)', count: N(worker_id)}
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: One sixteen-warp cooperative role per CTA executes the direct path synchronously. Decoded input survives
+      consecutive units of one token; UpGate and QChunk each use one shared slot. Device atomic accumulation and the
+      last-arrival protocol allow independent CTAs to finish tokens without a grid-wide wait or weight-staging ring.
+    phase:
+      prelude:
+        resource:
+          Census: {space: SMEM, member_slot_shape: [], dtype: int32, slot_count: 1}
+          Exchange:
+            space: SMEM
+            member_slot_shape:
+              - {element: 16}
+            dtype: int32
+            slot_count: 1
+            view:
+              WarpCounts: {}
+              FinalRoutes:
+                part:
+                  element:
+                    - 0
+                    - K
+        role:
+          Main:
+            info:
+              member: warp[0:16]
+              execution_mode: serial
+              verb:
+                prepare: First issue the assigned route-less rows' vector zero stores. All threads independently test
+                  each such token's route IDs. Then scan all R IDs with disjoint thread strides, reduce to sixteen warp
+                  totals in Exchange, rendezvous the CTA, let one thread sum those totals into Census, and rendezvous
+                  again. Done publishes Census locally; kernel completion covers the output stores. No payload, weights,
+                  counters or route accumulators are touched when Census=0.
+            pipe:
+              steady:
+                - prepare:Census
+      direct:
+        domain: {v: worktile}
+        resource:
+          InputCache:
+            space: SMEM
+            member_slot_shape:
+              - {element: H+H/8}
+            dtype: fp32
+            slot_count: 1
+            view:
+              X: {}
+          Group: {space: register, member_slot_shape: [{channel: 2*B}, {group: 32}], dtype: fp32, slot_count: 1}
+          UpGate: {space: SMEM, member_slot_shape: [{intermediate: B}, {pair: 2}], dtype: fp32, slot_count: 1}
+          QChunk: {space: SMEM, member_slot_shape: [{intermediate: B}], dtype: fp32, slot_count: 1}
+          TokenCount: {space: SMEM, member_slot_shape: [], dtype: int32, slot_count: 1}
+          Last: {space: SMEM, member_slot_shape: [], dtype: int32, slot_count: 1}
+          OutputSum: {space: register, member_slot_shape: [{hidden: 'min(2048,H)'}], dtype: fp32, slot_count: 1}
+          FinalScores: {space: SMEM, member_slot_shape: [{slot: K}], dtype: fp32, slot_count: 1}
+        role:
+          Main:
+            info:
+              member: warp[0:16]
+              execution_mode: serial
+              verb:
+                inspect: Unit(v) resolves the statically assigned u(v), route, intermediate chunk and current expert
+                  ID. Define ValidUnit(v)=1 for an in-range expert and 0 otherwise. Invalid units have no following payload
+                  or synchronization actions. The cached token identity starts invalid and changes only on a valid unit's
+                  input preparation.
+                prepare: If this valid unit changes the cached token, decode its entire X from global packed input and
+                  scales through the already initialized global E2M1/E4M3 lookup tables, and have one thread count its
+                  valid routes into TokenCount. Retain X and TokenCount while the token is unchanged. InputCache includes
+                  H/8 unused padding elements. Complete a CTA rendezvous on every valid unit, including a cache hit.
+                  Any previous token's input reads finished before this slot can change.
+                contract: Execute fc1 using all sixteen warps, with two up/gate pairs per warp and the 32 reduction groups
+                  mapped across its lanes. Weight payloads and scales are read directly from global memory through the
+                  format tables; no shared weight buffer is allocated. Group starts at zero for this unit. After its
+                  local reduction, publish UpGate to shared memory and rendezvous all warps before activation.
+                quantize: Warp zero consumes UpGate, evaluates activate and forms the two independent 16-channel maxima.
+                  It publishes the B FP32 QChunk values, then all sixteen warps rendezvous. UpGate is now consumed; QChunk
+                  remains live until every FC2 hidden stripe has read it.
+                accumulate: Each thread computes four consecutive hidden channels at a time, traversing the next stripe
+                  after 2048 channels. Read each unit's packed FC2 weight slice and scales directly from global memory,
+                  consume QChunk, and issue scalar FP32 atomic additions of Partial into RouteAccum. All H channels are
+                  covered. Done means this CTA's additions have been issued and QChunk's local reads have ended; publication
+                  to other CTAs is completed by arrive.
+                arrive: Every thread publishes its own RouteAccum additions to device scope, then the CTA rendezvous
+                  orders those publications before one elected thread increments Arrivals[t]. Record Last=1 exactly for
+                  the ticket n(t)*S-1 and 0 otherwise; publish it to all threads with a CTA rendezvous. The last-arrival
+                  consumption ordering makes all n(t)*S units' contributions visible before final reads. This protocol
+                  does not wait for other CTAs to reach a grid barrier. Last(v,a) names this unit's returned flag for
+                  the nested occurrence a.
+                gather: Only the last unit executes this action. One thread collects valid flattened route indices into
+                  prelude's Exchange.FinalRoutes and their current routing weights into FinalScores in increasing slot
+                  order. The census already consumed Exchange.WarpCounts. Rendezvous before any thread reads the finalizer
+                  metadata.
+                finalize: 'Execute fc2_finalize in four-hidden-element stripes: initialize the current stripe of Z in
+                  OutputSum, read the completed route sums, cast each route value to BF16 before its weighted FP32 FMA,
+                  reset each consumed route accumulator stripe, and
+                  write the BF16 output stripe. Finish the CTA''s output and reset store submissions, rendezvous, then
+                  one thread resets Arrivals[t]. No output scratch array is created. Global completion and visibility
+                  to later requests are supplied by the single kernel''s completion.'
+                advance: Rendezvous all sixteen warps after every valid unit, including a non-last unit that did no finalization.
+                  This protects Last, TokenCount, UpGate, QChunk and finalizer metadata before subsequent units reuse
+                  them. The elected finalizer has submitted its counter reset before this rendezvous completes; no per-unit
+                  global wait or grid synchronization is inserted.
+            pipe:
+              repeat: v
+              steady:
+                - inspect:Unit(v)
+                - repeat:
+                    a:
+                      - 0
+                      - ValidUnit(v)
+                  steady:
+                    - prepare:X(v,a)
+                    - contract:UpGate(v,a)
+                    - quantize:QChunk(v,a)
+                    - accumulate:Partial(v,a)
+                    - arrive:Ticket(v,a)
+                    - repeat:
+                        f:
+                          - 0
+                          - Last(v,a)
+                      steady:
+                        - gather:FinalRoutes(v,a,f)
+                        - finalize:Y(v,a,f)
+                    - advance:Unit(v,a)
+realization:
+  require:
+    - item: design.tile_pipeline::direct.Main
+      choice: Bind arrive's device publication and ticket protocol to per-thread __threadfence, CTA __syncthreads and
+        integer atomicAdd, with the source's last-arrival fence before cooperative accumulator loads; use device-scope
+        FP32 atomicAdd for RouteAccum. Preserve the publication-before-ticket and all-arrivals-before-consumption guarantees
+        when lowering these operations.
+      reason: Counter atomicity alone cannot publish other threads' partials, and the sole finisher must consume every
+        contributing CTA's completed additions.
+  prefer:
+    - item: design.math_reshape::fc1
+      choice: Use packed fma.rn.f32x2 for the independent even and odd FC1 sums, preserving their separate FP32 rounding.
+      reason: The two independent accumulations share decoded inputs and can halve their arithmetic instruction issue
+        count.

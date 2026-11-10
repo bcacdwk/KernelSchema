@@ -1,0 +1,384 @@
+meta_data:
+  name: paged_sparse_grouped_query_attention
+  describe: Compute selected paged attention, round the attention result, and apply an elementwise sigmoid gate.
+  source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/qsa_prefill/aka_solution/solution.py::Model.forward
+  version: 9
+contract:
+  algorithm_requirement:
+    constant:
+      Rows: {value: 4096, meaning: CP-local query rows.}
+      QueryHeads: {value: 24, meaning: Query head count.}
+      KVHeads: {value: 2, meaning: KV head count.}
+      D: {value: 256, meaning: Query and value dimension.}
+      PageSize: {value: 128, meaning: Tokens per physical cache page.}
+      CachePages: {value: 2626, meaning: Physical cache page count.}
+      TableWidth: {value: 2054, meaning: Logical page-table width.}
+      SelectedWidth: {value: 2051, meaning: Selection slots before the valid-count word.}
+      GroupSize: {value: "QueryHeads/KVHeads", meaning: Query heads sharing one KV head.}
+      scale: {value: "1/sqrt(D)", meaning: Attention score scale.}
+    input:
+      q: {meaning: Query rows., shape: [row: Rows, head: QueryHeads, d: D], dtype: bf16}
+      k_cache: {meaning: Paged keys., shape: [page: CachePages, page_token: PageSize, kv_head: KVHeads, d: D], dtype: bf16, range: "Mapped pages are finite; other storage may contain arbitrary BF16 bits, including NaN and infinity."}
+      v_cache: {meaning: Paged values sharing the interleaved K allocation and strides., shape: [page: CachePages, page_token: PageSize, kv_head: KVHeads, d: D], dtype: bf16, range: "Mapped pages are finite; other storage may contain arbitrary BF16 bits, including NaN and infinity."}
+      logical_indices:
+        meaning: Selected logical token IDs followed by the valid count.
+        shape: [row: Rows, packed: "SelectedWidth+1"]
+        dtype: int32
+        range: |
+          One invocation-wide CP rank rho is in {0,1}; c_r=floor((15*8192+rho*Rows+r+1)/4), t_r=(r+1)%4.
+          The first 2048 entries are 512 quads 4*g+[0,1,2,3] with distinct 0<=g<c_r.
+          Entries 2048+l equal 4*c_r+l for 0<=l<t_r; remaining selection slots are -1; the last word is 2048+t_r.
+      block_table: {meaning: Request-to-physical-page lookup., shape: [request: 1, logical_page: TableWidth], dtype: int32, range: "block_table[0,p]=1352+p for 0<=p<1024; -1 otherwise."}
+      token_to_req: {meaning: Request owning each row., shape: [row: Rows], dtype: int32, range: [0, 0]}
+      use_prefill_config: {meaning: Ignored configuration hint., shape: [], dtype: bool}
+      output_gate: {meaning: Elementwise sigmoid logits., shape: [row: Rows, head: QueryHeads, d: D], dtype: bf16}
+      out: {meaning: Optional destination whose initial contents are not read., shape: [row: Rows, head: QueryHeads, d: D], dtype: bf16, range: "Arbitrary BF16 bits, including NaN and infinity.", default: "allocate empty_like(q)"}
+    output:
+      O: {meaning: Result written into out and returned as that same tensor., shape: [row: Rows, head: QueryHeads, d: D], dtype: bf16}
+    compute:
+      - name: Resolve the supplied selection and apply gated attention
+        math: |
+          K/V share storage with element strides [2157376,512,256,1]; v_cache starts 65536 elements after k_cache.
+          For each independent row r and head h, v=floor(h/GroupSize), J(r)={0,...,logical_indices[r,SelectedWidth]-1}.
+          For j in J(r), k=logical_indices[r,j], page=block_table[0,floor(k/PageSize)], offset=k%PageSize.
+          K_j=k_cache[page,offset,v,:], V_j=v_cache[page,offset,v,:]; score[j]=scale*sum_{d=0}^{D-1} q[r,h,d]*K_j[d].
+          a=max_{j in J(r)} score[j]; z=sum_{j in J(r)} exp(score[j]-a).
+          A[r,h,d]=bf16(sum_{j in J(r)} (exp(score[j]-a)/z)*V_j[d]).
+          O[r,h,d]=bf16(A[r,h,d]/(1+exp(-output_gate[r,h,d]))).
+          The supplied selection encodes causality; add no further mask. Write every out element and leave other inputs unchanged.
+          The timed callable includes selection preprocessing, attention, gating and output allocation when needed; input construction is excluded.
+        symbol:
+          J: {meaning: Valid selection-slot indices of a row., shape: not_applicable, dtype: not_applicable}
+          A: {meaning: Attention result rounded before gating., shape: "ref:O.shape", dtype: bf16}
+    golden_reference:
+      source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/qsa_prefill/reference.py::Model.forward
+      tolerance: {O: "atol=3.2e-5, rtol=0.02; check both the returned tensor and mutated out."}
+  hardware_specification:
+    device: NVIDIA L20D
+    arch: SM103
+    execution:
+      warp: 32 SIMT threads within one CTA.
+      CTA: Warps co-resident on one SM, sharing SMEM and barriers.
+      cluster: CTAs co-scheduled within one GPC, with cluster synchronization.
+    feature:
+      SMEM: CTA-lifetime shared storage, addressable by cluster peers while its owner remains alive.
+      TMEM: Explicitly allocated Tensor Core storage, separate from SMEM.
+      register: Thread-private registers backed by the SM register file.
+      asynchronous_execution: Asynchronous transfers and MMA require their primitive-specific completion and visibility guarantees.
+    stack:
+      language: CuTe DSL 4.6.1 (nvidia-cutlass-dsl).
+      toolchain: "CuTe DSL 4.6.1 bundled compiler; CUDA 13.0; cuda-python 13.1.1; torch 2.9.0+cu130."
+    wiki:
+      hardware: "<wiki-hardware@pending:L20D/SM103.md>"
+      programming: {language: "<wiki-language@pending:CuTe-DSL/4.6.1/>", virtual_isa: "<wiki-virtual-isa@pending:PTX/pending/>", machine_isa: "<wiki-machine-isa@pending:SASS/SM103/>"}
+      microbench: "<wiki-microbench@pending:L20D/>"
+      sota: {kernel: "<wiki-sota-kernel@pending:L20D/>", schema: "<wiki-sota-schema@pending:L20D/>"}
+      profile: "<wiki-profile@pending:NVIDIA/>"
+design:
+  math_reshape:
+    thesis: Share a union of nearby rows' selected groups across packed GQA heads; streaming softmax saves KV gathers and global probabilities at the cost of masked products and one preprocessing pass.
+    rewrite:
+      - step: union
+        name: Materialize four-token unions with row membership
+        math: |
+          Rb={r | b*Br<=r<min((b+1)*Br,Rows)}; MaxE=Br*(floor(SelectedWidth/4)+1).
+          Union(b) enumerates distinct (req=0,g=floor(logical_indices[r,j]/4)) over r in Rb, j in J(r); Count(b) is its length.
+          Each entry stores (req,g,lo,hi), with bit 4*(r-b*Br)+l set iff row r selects token 4*g+l; order need not be sorted.
+          For each KV head v, pack p=GroupSize*(r-b*Br)+h: Qblk[p,:]=q[r,v*GroupSize+h,:], 0<=h<GroupSize.
+          Other packed rows remain unwritten and produce no output; their influence on the shared correction vote has not been established.
+          N(b)=ceil(Count(b)/Etile)>=32. Tile i column u uses entry e=i*Etile+floor(u/4) and token offset u%4.
+          Kblk(i)[u,:] and Vblk(i)[u,:] gather that group's paged KV rows; e>=Count(b) rereads entry zero's finite payload.
+          selected(p,i,u) is the row's membership bit, false for inactive p or e>=Count(b).
+        symbol:
+          Br: {meaning: Query rows sharing one union., binding: "bind:design.work_schedule::Br"}
+          Etile: {meaning: Union entries per iteration., binding: "bind:design.work_schedule::Etile"}
+          Bk: {meaning: Token columns per iteration., binding: "bind:design.work_schedule::Bk"}
+          M: {meaning: Packed query capacity., binding: "bind:design.work_schedule::M"}
+          Union: {meaning: Compacted request/group/membership entries., shape: [entry: MaxE, word: 4], dtype: int32, retention: "keep_value (b)"}
+          Count: {meaning: Live union entry count., shape: [], dtype: int32, retention: "keep_value (b)"}
+          Qblk: {meaning: Packed query/head rows., shape: [packed_query: M, d: D], dtype: bf16}
+          Kblk: {meaning: Gathered union keys., shape: [kv: Bk, d: D], dtype: bf16}
+          Vblk: {meaning: Gathered union values., shape: [kv: Bk, d: D], dtype: bf16}
+      - step: online
+        name: Stream two half-denominators against a shared lagged reference
+        math: |
+          For each (b,v), c=scale*log2(e); m(-1)[p]=-inf and L(-1)[w,p]=0 for w in {0,1}, 0<=p<M.
+          For 0<=i<N(b), S(i)=mm32(Qblk,Kblk(i)ᵀ); vmax(i,p)=c*max_{0<=u<Bk} S(i)[p,u], before membership masking.
+          first(i,p)=(m(i-1)[p]==-inf); drift(i,p)=0 if first(i,p), otherwise vmax(i,p)-m(i-1)[p].
+          move_ref(i,p)=any_{p' in rescale_peer(p)}(drift(i,p')>tau).
+          m(i)[p]=vmax(i,p) if first(i,p) or move_ref(i,p), otherwise m(i-1)[p]; a triggered update may decrease m. The two halves keep replicas m_A=m_B=m.
+          alpha(i,p)=exp2_fast(m(i-1)[p]-m(i)[p]) if move_ref(i,p), otherwise 1.
+          Evaluate exp2_fast(c*S(i)[p,u]-m(i)[p]) for every column; E(i)[p,u] keeps it iff selected(p,i,u), otherwise 0.
+          P(i)=bf16(E(i)); P_A(i)=P(i)[:,0:Bk/2], P_B(i)=P(i)[:,Bk/2:Bk].
+          L(i)[w,p]=alpha(i,p)*L(i-1)[w,p]+sum32_{w*Bk/2<=u<(w+1)*Bk/2} E(i)[p,u].
+          Y(0)=mm32(P(0),Vblk(0)); for i>0, Y(i)=mma32(P(i),Vblk(i),alpha(i)[:,None] ⊙ Y(i-1)).
+        symbol:
+          tau: {meaning: Base-two reference-update threshold., value: 8.0}
+          rescale_peer: {meaning: Packed rows sharing a correction vote., binding: "bind:design.tile_pipeline::rescale_peer"}
+          S: {meaning: Unmasked QK scores., shape: [packed_query: M, kv: Bk], dtype: fp32}
+          P: {meaning: Rounded numerator weights., shape: [packed_query: M, kv: Bk], dtype: bf16}
+          P_A: {meaning: First column half of P., shape: [packed_query: M, kv: "Bk/2"], dtype: bf16}
+          P_B: {meaning: Second column half of P., shape: [packed_query: M, kv: "Bk/2"], dtype: bf16}
+          m: {meaning: Common reference replicated by the two halves., shape: [packed_query: M], dtype: fp32, retention: "carry_forward (b,v); i=-1..N(b)-1"}
+          L: {meaning: Separate FP32 half-denominators., shape: [half: 2, packed_query: M], dtype: fp32, retention: "carry_forward (b,v); i=-1..N(b)-1"}
+          Y: {meaning: Unnormalized numerator., shape: [packed_query: M, d: D], dtype: fp32, retention: "carry_forward (b,v); i=0..N(b)-1"}
+        arithmetic:
+          approx: "exp2_fast uses approximate FP32 exp2 on the shown arguments; unknown: no numerical error bound has been established for exp2_fast."
+      - step: gate
+        name: Normalize and preserve both output roundings
+        math: |
+          ell[p]=L(N(b)-1)[0,p]+L(N(b)-1)[1,p]; inv[p]=rcp_fast(ell[p]) if ell[p]!=0, otherwise 0.
+          For each real packed row p=GroupSize*(r-b*Br)+h, A[r,v*GroupSize+h,d]=bf16(Y(N(b)-1)[p,d]*inv[p]) if ell[p]!=0, otherwise 0.
+          sig=1/(1+exp2_fast(-output_gate[r,v*GroupSize+h,d]*log2(e))); O[r,v*GroupSize+h,d]=bf16(A[r,v*GroupSize+h,d]*sig).
+        arithmetic:
+          approx: "exp2_fast follows online; rcp_fast is approximate FP32 reciprocal for nonzero denominators; unknown: no numerical error bound has been established for rcp_fast."
+    ledger:
+      baseline: Direct selected attention with one KV gather per query and KV head, sharing KV across grouped heads, and global FP32 scores and probabilities.
+      traffic:
+        - {item: KV payload, change: "4*D*sum_{r in Rb} count(J(r)) -> 4*D*Bk*N(b) bytes per (b,v), including gathered tail padding", by: [union]}
+        - {item: Score and probability round trips, change: "-16*GroupSize*sum_{r in Rb} count(J(r)) bytes per (b,v)", by: [online]}
+      matmul:
+        - {item: QK and PV, change: "2*D*GroupSize*sum_{r in Rb} count(J(r)) -> 2*D*M*Bk*N(b) MAC per (b,v), including padded rows and masked columns", by: [union, online]}
+      footprint:
+        - {item: Intermediate state, change: "8*GroupSize*sum_{r in Rb} count(J(r)) global score/probability bytes -> 4*M*(D+3) logical carried-state bytes per (b,v), excluding transient tiles and replicated m", by: [online]}
+        - {item: Union workspace, change: "+16*Count(b)+4 live bytes per row block, shared by both KV-head worktiles", by: [union]}
+      pass:
+        - {item: Sparse indices, change: "+1 preprocessing traversal before attention", by: [union]}
+      error:
+        - {item: Numerical path, change: "BF16 P adds one rounding per PV weight; union order, split FP32 denominators, lagged reference, fast exp2 and reciprocal alter rounding", by: [union, online, gate]}
+  work_schedule:
+    thesis: Build shared unions first, then balance variable-length row-block/head traversals with dynamic persistent CTAs and descending row-block order.
+    flow:
+      launch: [{phase: [preprocess]}, {phase: [attention], start_after: preprocess.kernel_done}]
+      handoff:
+        Union: {producer: preprocess, consumer: [attention], storage: global}
+        Count: {producer: preprocess, consumer: [attention], storage: global}
+    phase:
+      preprocess:
+        describe: Build one union per consecutive query-row block.
+        decomposition:
+          strategy: Br=10.
+          partition: {row: {size: Rows, tile: Br}}
+          worktile:
+            invariant:
+              logical_indices: {shape: [row: Br, packed: "SelectedWidth+1"], dtype: int32}
+              token_to_req: {shape: [row: Br], dtype: int32}
+              block_table: {shape: [request: 1, logical_page: TableWidth], dtype: int32}
+          target: {single_tile: {Union: {shape: [entry: MaxE, word: 4], dtype: int32}, Count: {shape: [], dtype: int32}}}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: worktile_count}
+        schedule:
+          worktile_order: [{by: row, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      attention:
+        describe: Keep one row-block/KV-head union traversal and all its grouped outputs inside one worktile.
+        decomposition:
+          strategy: M=128; Etile=16; Bk=4*Etile. The final row block contains six rows; no cross-worktile reduction is needed.
+          partition: {row: {size: Rows, tile: Br}, kv_head: {size: KVHeads, tile: 1}}
+          worktile:
+            invariant:
+              Qblk: {shape: [packed_query: M, d: D], dtype: bf16}
+              Count: {shape: [], dtype: int32}
+              output_gate: {shape: [row: Br, head: GroupSize, d: D], dtype: bf16}
+            iteration:
+              Union: {shape: [entry: Etile, word: 4], dtype: int32, direction: ascending}
+              Kblk: {shape: [kv: Bk, d: D], dtype: bf16, direction: ascending}
+              Vblk: {shape: [kv: Bk, d: D], dtype: bf16, direction: ascending}
+          target: {single_tile: {O: {shape: [row: Br, head: GroupSize, d: D], dtype: bf16}}}
+        mapping: {strategy: SMCount is queried from device properties., worker: {unit: CTA, unit_count: 1}, worker_count: "min(SMCount,worktile_count)"}
+        schedule:
+          strategy: Cached device ticket and host base start at zero; each serialized eager call consumes worktile_count+worker_count tickets and advances the host base by that amount, using signed-int32 wrap-safe subtraction without a counter reset.
+          worktile_order: [{by: row, direction: descending}, {by: kv_head, direction: ascending}]
+          worker_assignment:
+            refill: {atomic_counter: "One scheduler thread per CTA atomically claims one ticket minus the launch base; IDs below worktile_count follow worktile_order, and each CTA stops on its first terminal ticket."}
+            exit: Terminal ticket acknowledged by all roles, all acquired work complete, and all in-flight accesses drained.
+  tile_pipeline:
+    thesis: Two softmax column halves overlap three leading QKs with PV; KV rings span worktiles, and Q refill overlaps output drain while the next first PV waits for both Y halves to be released.
+    phase:
+      preprocess:
+        resource:
+          Hash: {slot_count: 1, space: SMEM, member_slot_shape: [word: 3, hash_slot: 16384], dtype: int32}
+          RowHeader: {slot_count: 1, space: SMEM, member_slot_shape: [row: Br, word: 2], dtype: int32}
+          PageTable: {slot_count: 1, space: SMEM, member_slot_shape: [logical_page: TableWidth], dtype: int32}
+          CompactCount: {slot_count: 1, space: SMEM, member_slot_shape: [], dtype: int32}
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: "warp[0:16]"
+              verb:
+                build: >
+                  Clear Hash and CompactCount, cache row counts/requests and request-zero PageTable, then rendezvous.
+                  Stream 16-byte index quads one item ahead in registers; one CAS/linear-probing insertion per nonempty group
+                  merges membership with atomic OR by every inserter, including the creator. Rendezvous before compaction.
+                compact: Each warp prefix-scans contiguous hash-slot ranges, atomically reserves an output interval, and emits Union; publish Count after all writes. Warp reservation order is unspecified.
+            pipe: {steady: ["build:Hash", "compact:Union_Count"]}
+      attention:
+        domain: {t: worktile, i: [0, "N(b)"], n: {flatten: [t, i]}}
+        resource:
+          Ticket: {slot_count: 1, space: SMEM, member_slot_shape: [], dtype: int32}
+          Qblk: {slot_count: 1, space: SMEM, member_slot_shape: [packed_query: M, d: D], dtype: bf16}
+          KeyRing: {space: SMEM, member_slot_shape: [kv: Bk, d: D], dtype: bf16, slot_count: 2, view: {"Kblk(n)": {slot_index: "n%2"}}}
+          ValueRing: {space: SMEM, member_slot_shape: [kv: Bk, d: D], dtype: bf16, slot_count: 2, view: {"Vblk(n)": {slot_index: "n%2"}}}
+          Accumulator:
+            slot_count: 1
+            space: TMEM
+            member_slot_shape: [row: M, column: 512]
+            dtype: fp32
+            view:
+              "S(n)": {part: {column: ["Bk*(n%3)", "Bk*(n%3+1)"]}}
+              "P(n)": {part: {column: ["Bk*(n%3)", "Bk*(n%3)+Bk/2"]}, dtype: bf16}
+              Y: {part: {column: ["3*Bk", "3*Bk+D"]}}
+          HalfMax: {slot_count: 1, space: SMEM, member_slot_shape: [half: 2, packed_query: M], dtype: fp32}
+          HalfSum: {slot_count: 1, space: SMEM, member_slot_shape: [half: 2, packed_query: M], dtype: fp32}
+          Reference: {slot_count: 1, space: register, member_slot_shape: [half: 2, packed_query: M], dtype: fp32, view: {m_A: {part: {half: [0, 1]}}, m_B: {part: {half: [1, 2]}}}}
+          L: {slot_count: 1, space: register, member_slot_shape: [half: 2, packed_query: M], dtype: fp32}
+        role:
+          Scheduler:
+            info:
+              execution_mode: serial
+              member: warp[11:12]
+              verb:
+                publish: Claim and post a ticket; done means readable. Before claiming the following ticket, await all eleven consumer warps' copies and acknowledgements
+                  of the current ticket. Acknowledgement permits one-worktile lookahead while that work is still executing. Ticket0 is the first ticket; Next(t) includes
+                  the terminal ticket, whose acknowledgement is required before exit.
+                wait: Join all consumer acknowledgements before posting the following ticket or retiring the terminal ticket.
+            pipe: {repeat: t, prologue: ['publish:Ticket0', 'wait:Ticket0'], steady: ['publish:Next(t)', 'wait:Next(t)']}
+            waits_for:
+              sync:
+                wait:Ticket0@issue: ['GatherK/accept:Ticket0@done', 'GatherV/accept:Ticket0@done', 'MMA/accept:Ticket0@done', 'SoftmaxA/accept:Ticket0@done', 'SoftmaxB/accept:Ticket0@done']
+                wait:Next(t)@issue: ['GatherK/accept:Next(t)@done', 'GatherV/accept:Next(t)@done', 'MMA/accept:Next(t)@done', 'SoftmaxA/accept:Next(t)@done', 'SoftmaxB/accept:Next(t)@done']
+          GatherK:
+            info:
+              member: warp[9:10]
+              execution_mode: async
+              verb:
+                accept: {execution_mode: serial, meaning: Copy and acknowledge the published ticket; terminal tickets start no work.}
+                load: |
+                  Prime address lookahead per worktile, then resolve Union two tiles ahead and block_table one ahead, clamped to that worktile's last tile. Resolve one base per union-entry position and share it within the gather warp across that entry's token/channel copies; issue the current paged copy into KeyRing. load:Kblk(n) becomes done only after issuing tile n+1 and publishing n's completed copy. Carry delayed publication across worktiles; drain publishes the final outstanding tile.
+                drain: {execution_mode: serial, meaning: 'After the terminal ticket, finish and publish the last outstanding gather if any data was loaded. If Ticket0 was already terminal, no gather exists and this action completes without waiting for a last tile.'}
+            pipe:
+              repeat: t
+              prologue: ['accept:Ticket0']
+              steady:
+              - {repeat: 'n[t]', steady: ['load:Kblk(n)']}
+              - accept:Next(t)
+              epilogue: ['drain:KeyRing']
+            waits_for:
+              reuse: {'load:Kblk(n+2)@issue': ['MMA/mma:Qblk(t)@Kblk(n)@done']}
+              data: {'accept:Next(t)@issue': ['Scheduler/publish:Next(t)@done'], 'accept:Ticket0@issue': ['Scheduler/publish:Ticket0@done']}
+              sync: {'load:Kblk(n)@done': ['load:Kblk(n+1)@issue'], 'drain:KeyRing@done': ['load:Kblk(n)@done']}
+          GatherV:
+            info:
+              member: warp[10:11]
+              execution_mode: async
+              verb:
+                accept: {execution_mode: serial, meaning: Copy and acknowledge the published ticket; terminal tickets start no work.}
+                load: Follow GatherK's address lookahead and delayed publication for ValueRing, adding the V base delta and using the value-product orientation.
+                drain: {execution_mode: serial, meaning: 'After the terminal ticket, finish and publish the last outstanding gather if any data was loaded. If Ticket0 was already terminal, no gather exists and this action completes without waiting for a last tile.'}
+            pipe:
+              repeat: t
+              prologue: ['accept:Ticket0']
+              steady:
+              - {repeat: 'n[t]', steady: ['load:Vblk(n)']}
+              - accept:Next(t)
+              epilogue: ['drain:ValueRing']
+            waits_for:
+              reuse: {'load:Vblk(n+2)@issue': ['MMA/mma:P(n)@Vblk(n)@done']}
+              data: {'accept:Next(t)@issue': ['Scheduler/publish:Next(t)@done'], 'accept:Ticket0@issue': ['Scheduler/publish:Ticket0@done']}
+              sync: {'load:Vblk(n)@done': ['load:Vblk(n+1)@issue'], 'drain:ValueRing@done': ['load:Vblk(n)@done']}
+          MMA:
+            info:
+              member: warp[8:9]
+              execution_mode: async_ordered_completion
+              verb:
+                accept: {execution_mode: serial, meaning: Copy and acknowledge the published ticket; terminal tickets start no work.}
+                wait: {execution_mode: serial, meaning: Wait for the initial Q publication even when Ticket0 is terminal.}
+                mma: QK initializes S and each worktile's first PV initializes Y. Cumulative completion includes operand reads; PV(n) reads P before a later QK overwrites
+                  its aliased S/P stage.
+            pipe:
+              repeat: t
+              prologue: ['accept:Ticket0', 'wait:Qblk0']
+              steady:
+              - repeat: n[t,0:count(i)-2]
+                prologue: ['mma:Qblk(t)@Kblk(n[t,0])', 'mma:Qblk(t)@Kblk(n[t,1])']
+                steady: ['mma:Qblk(t)@Kblk(n+2)', 'mma:P(n)@Vblk(n)']
+                epilogue: ['mma:P(n[t,last(i)-1])@Vblk(n[t,last(i)-1])', 'mma:P(n[t,last(i)])@Vblk(n[t,last(i)])']
+              - accept:Next(t)
+            waits_for:
+              data:
+                mma:Qblk(t)@Kblk(n[t,i])@issue: ['SoftmaxA/publish:Qnext(t-1)@done']
+                mma:P(n)@Vblk(n)@issue: ['SoftmaxA/publish:P_A(n)@done', 'SoftmaxB/publish:P_B(n)@done']
+                accept:Ticket0@issue: ['Scheduler/publish:Ticket0@done']
+                accept:Next(t)@issue: ['Scheduler/publish:Next(t)@done']
+              reuse: {'mma:P(n[t+1,0])@Vblk(n[t+1,0])@issue': ['SoftmaxA/drain:Y_A(t)@done', 'SoftmaxB/drain:Y_B(t)@done']}
+          SoftmaxA:
+            info:
+              execution_mode: serial
+              member: warp[0:4]
+              verb:
+                accept: Copy and acknowledge the published ticket; terminal tickets start no work.
+                publish: |
+                  Qblk0 gathers real packed rows for min(Ticket0,worktile_count-1), including unused payload on an initial terminal ticket.
+                  HalfMax_A captures all S[:,0:Bk/2] into registers, writes this HalfMax half and joins B's 256-thread rendezvous.
+                  Both score halves have been captured before either group overwrites the aliased stage with P; HalfMax_A done precedes peer-maximum capture.
+                  P_A captures the peer maximum and evaluates online from the retained register scores. rescale_peer(p) is the 32-row interval containing p, including padding.
+                  Only warps with move_ref true wait for PV(n-1) when i>0, then A rescales all D columns of their Y rows before publishing P_A.
+                  Prime membership per worktile; retain the current packed mask through weight formation while prefetching raw words for min(i+1,N(b)-1) in registers. Count masks dead entries when packing the next mask.
+                  HalfMax overwrite safety has not been established; no extra read-complete barrier is assumed.
+                  Qnext completes the issued Q refill and publishes readiness after this group's final Y read; terminal Next(t) is a no-op.
+                prefetch: {execution_mode: async, meaning: Issue the next valid ticket's Q gather into Qblk after the current final QK has retired.}
+                combine: Exchange final L halves through HalfSum with a 256-thread rendezvous and capture the normalization factor.
+                drain: Read Y[:,0:D/2] in 32-column pieces, gate/store the first pieces and retain the last in registers; done releases this half of Y before its
+                  final gate/store.
+                store: Gate and directly store the retained final output piece on real rows.
+            pipe:
+              repeat: t
+              prologue: ['accept:Ticket0', 'publish:Qblk0']
+              steady:
+              - {repeat: 'n[t]', steady: ['publish:HalfMax_A(n)', 'publish:P_A(n)']}
+              - accept:Next(t)
+              - prefetch:Qnext(t)
+              - combine:Normalization_A(t)
+              - drain:Y_A(t)
+              - publish:Qnext(t)
+              - store:O_A_tail(t)
+            waits_for:
+              data:
+                publish:HalfMax_A(n)@issue: ['MMA/mma:Qblk(t)@Kblk(n)@done']
+                publish:P_A(n)@issue: ['SoftmaxB/publish:HalfMax_B(n)@done']
+                drain:Y_A(t)@issue: ['MMA/mma:P(n[t,last(i)])@Vblk(n[t,last(i)])@done']
+                publish:Qnext(t)@issue: ['prefetch:Qnext(t)@done']
+                accept:Ticket0@issue: ['Scheduler/publish:Ticket0@done']
+                accept:Next(t)@issue: ['Scheduler/publish:Next(t)@done']
+          SoftmaxB:
+            info:
+              execution_mode: serial
+              member: warp[4:8]
+              verb:
+                accept: Copy and acknowledge the published ticket; terminal tickets start no work.
+                publish: Capture S[:,Bk/2:Bk] into registers before the shared HalfMax rendezvous; follow A's peer capture, correction vote and mask lookahead, forming
+                  this half of L and P from that register copy without modifying Y.
+                combine: Follow A's HalfSum exchange and normalization capture.
+                drain: Follow A's drain for Y[:,D/2:D], releasing this half before the final gate/store.
+                store: Gate and directly store the retained final output piece on real rows.
+            pipe:
+              repeat: t
+              prologue: ['accept:Ticket0']
+              steady:
+              - {repeat: 'n[t]', steady: ['publish:HalfMax_B(n)', 'publish:P_B(n)']}
+              - accept:Next(t)
+              - combine:Normalization_B(t)
+              - drain:Y_B(t)
+              - store:O_B_tail(t)
+            waits_for:
+              data:
+                publish:HalfMax_B(n)@issue: ['MMA/mma:Qblk(t)@Kblk(n)@done']
+                publish:P_B(n)@issue: ['SoftmaxA/publish:HalfMax_A(n)@done']
+                drain:Y_B(t)@issue: ['MMA/mma:P(n[t,last(i)])@Vblk(n[t,last(i)])@done']
+                accept:Ticket0@issue: ['Scheduler/publish:Ticket0@done']
+                accept:Next(t)@issue: ['Scheduler/publish:Next(t)@done']
+realization:
+  require:
+    - {item: design.tile_pipeline::attention.MMA, choice: "Single-CTA tcgen05.mma with TMEM accumulators, TMEM P for PV and cumulative completion commits.", reason: S/P alias reuse and Y correction depend on direct TMEM handoff and operand-read completion.}
+    - {item: [design.tile_pipeline::attention.GatherK, design.tile_pipeline::attention.GatherV, design.tile_pipeline::attention.SoftmaxA], choice: "cp.async with wait_group(1) for delayed KV publication and wait_group(0) for final drain/Q readiness, plus shared-memory visibility publication.", reason: These completion guarantees preserve two-slot cross-worktile gathers and next-Q overlap.}
+    - {item: [contract.algorithm_requirement::logical_indices, contract.algorithm_requirement::output_gate, contract.algorithm_requirement::out], choice: "Contiguous 16-byte-aligned logical_indices; gate/out last-axis stride 1 and outer element strides divisible by 8.", reason: Packed index quads and vector gate/output transfers require these addressing conditions.}

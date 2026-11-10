@@ -1,0 +1,119 @@
+--- root
+
++++ tc_fused
+
+@@ -1,2 +1,2 @@
+
+-math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"}}},{"step":"scores","symbol":{"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,g)"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"DenState":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"Prob8":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,g)"}}},{"step":"value_output","symbol":{"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"}}}]
++math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"},"Qraw":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"ref:contract.algorithm_requirement::q_tensor.dtype"},"Kraw":{"shape":[{"key":"KeyGroup"},{"channel":"D"}],"dtype":"ref:contract.algorithm_requirement::k_tensor.dtype"},"Vraw":{"shape":[{"key":"KeyGroup"},{"channel":"D"}],"dtype":"ref:contract.algorithm_requirement::v_tensor.dtype"},"QueryScale":{"shape":[{"row":"Br"},{"channel_block":"D/Block"}],"dtype":"fp32","retention":"keep_value (b,kh,a)"},"KeyScale":{"shape":[{"key":"KeyGroup"},{"channel_block":"D/Block"}],"dtype":"fp32","retention":"keep_value (b,kh,a,g)"},"ValueScale":{"shape":[{"sequence_block":"KeyGroup/Block"},{"channel":"D"}],"dtype":"bf16","retention":"keep_value (b,kh,a,g)"}}},{"step":"scores","symbol":{"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,g)"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"DenPart":{"shape":[{"row":"Br"},{"partial":4}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"E":{"shape":[{"row":"Br"},{"partial":4},{"component":2}],"dtype":"fp32"}}},{"step":"value_output","symbol":{"Vbf":{"shape":[{"key":"KeyGroup"},{"channel":"D"}],"dtype":"bf16","retention":"keep_value (b,kh,a,g)"},"Pfrag":{"shape":[{"row":"Br"},{"key":16}],"dtype":"bf16"},"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"}}}]
+ work_schedule.flow.launch=[{"phase":["main"]}]
+@@ -29,3 +29,3 @@
+
+ work_schedule.phase.main.schedule.worktile_order=[{"by":"kvflat","direction":"ascending"},{"by":"query","direction":"ascending"}]
+-work_schedule.phase.main.schedule.worker_assignment.preassigned={"start":"WorkId(worker_id)","count":1}
++work_schedule.phase.main.schedule.worker_assignment.preassigned={"start":"worker_id","count":1}
+ work_schedule.phase.main.schedule.worker_assignment.refill="none"
+@@ -33,3 +33,2 @@
+
+ tile_pipeline.phase.main.domain.g=["cLo","cHi+1"]
+-tile_pipeline.phase.main.domain.z=[0,2]
+ tile_pipeline.phase.main.resource.Query.space="SMEM"
+@@ -38,2 +37,3 @@
+
+ tile_pipeline.phase.main.resource.Query.slot_count=1
++tile_pipeline.phase.main.resource.Query.view.Qraw={}
+ tile_pipeline.phase.main.resource.Key.space="SMEM"
+@@ -42,3 +42,3 @@
+
+ tile_pipeline.phase.main.resource.Key.slot_count=2
+-tile_pipeline.phase.main.resource.Key.view.Key(g)={"slot_index":"(g-cLo)%2"}
++tile_pipeline.phase.main.resource.Key.view.Kraw(g)={"slot_index":"(g-cLo)%2"}
+ tile_pipeline.phase.main.resource.Value.space="SMEM"
+@@ -47,5 +47,5 @@
+
+ tile_pipeline.phase.main.resource.Value.slot_count=2
+-tile_pipeline.phase.main.resource.Value.view.Value(g)={"slot_index":"(g-cLo)%2"}
++tile_pipeline.phase.main.resource.Value.view.Vraw(g)={"slot_index":"(g-cLo)%2"}
+ tile_pipeline.phase.main.resource.KeyAtom.space="SMEM"
+-tile_pipeline.phase.main.resource.KeyAtom.member_slot_shape=[{"element":512}]
++tile_pipeline.phase.main.resource.KeyAtom.member_slot_shape=[{"element":"KeyGroup*(D/Block)"}]
+ tile_pipeline.phase.main.resource.KeyAtom.dtype="uint8"
+@@ -54,3 +54,3 @@
+
+ tile_pipeline.phase.main.resource.ValueAtom.space="SMEM"
+-tile_pipeline.phase.main.resource.ValueAtom.member_slot_shape=[{"element":512}]
++tile_pipeline.phase.main.resource.ValueAtom.member_slot_shape=[{"element":"512*(D/128)"}]
+ tile_pipeline.phase.main.resource.ValueAtom.dtype="uint8"
+@@ -58,22 +58,18 @@
+
+ tile_pipeline.phase.main.resource.ValueAtom.view.ValueAtom(g)={"slot_index":"(g-cLo)%2"}
+-tile_pipeline.phase.main.resource.TensorMemory.space="TMEM"
+-tile_pipeline.phase.main.resource.TensorMemory.member_slot_shape=[{"row":"Br"},{"column":256}]
+-tile_pipeline.phase.main.resource.TensorMemory.dtype="fp32"
+-tile_pipeline.phase.main.resource.TensorMemory.slot_count=1
+-tile_pipeline.phase.main.resource.TensorMemory.view.ScoreHalf.part.column=[0,64]
+-tile_pipeline.phase.main.resource.TensorMemory.view.QueryScale.part.column=[64,72]
+-tile_pipeline.phase.main.resource.TensorMemory.view.QueryScale.dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.KeyScale.part.column=[72,80]
+-tile_pipeline.phase.main.resource.TensorMemory.view.KeyScale.dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.UnitScale.part.column=[80,88]
+-tile_pipeline.phase.main.resource.TensorMemory.view.UnitScale.dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale.part.column=[88,96]
+-tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale.dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.NumState.part.column=[96,224]
+-tile_pipeline.phase.main.resource.TensorMemory.view.Prob8.part.column=[224,256]
+-tile_pipeline.phase.main.resource.TensorMemory.view.Prob8.dtype="fp8_e4m3fn"
+-tile_pipeline.phase.main.resource.QueryPrefetch.space="register"
+-tile_pipeline.phase.main.resource.QueryPrefetch.member_slot_shape=[{"element":"Br*D+Br*(D/Block)"}]
+-tile_pipeline.phase.main.resource.QueryPrefetch.dtype="uint8"
+-tile_pipeline.phase.main.resource.QueryPrefetch.slot_count=1
++tile_pipeline.phase.main.resource.QueryScale.space="SMEM"
++tile_pipeline.phase.main.resource.QueryScale.member_slot_shape=[{"row":"Br"},{"channel_block":"D/Block"}]
++tile_pipeline.phase.main.resource.QueryScale.dtype="fp32"
++tile_pipeline.phase.main.resource.QueryScale.slot_count=1
++tile_pipeline.phase.main.resource.KeyScale.space="SMEM"
++tile_pipeline.phase.main.resource.KeyScale.member_slot_shape=[{"key":"KeyGroup"},{"channel_block":"D/Block"}]
++tile_pipeline.phase.main.resource.KeyScale.dtype="fp32"
++tile_pipeline.phase.main.resource.KeyScale.slot_count=1
++tile_pipeline.phase.main.resource.ValueScale.space="SMEM"
++tile_pipeline.phase.main.resource.ValueScale.member_slot_shape=[{"sequence_block":"KeyGroup/Block"},{"channel":"D"}]
++tile_pipeline.phase.main.resource.ValueScale.dtype="bf16"
++tile_pipeline.phase.main.resource.ValueScale.slot_count=1
++tile_pipeline.phase.main.resource.Vbf.space="SMEM"
++tile_pipeline.phase.main.resource.Vbf.member_slot_shape=[{"key":"KeyGroup"},{"channel":"D"}]
++tile_pipeline.phase.main.resource.Vbf.dtype="bf16"
++tile_pipeline.phase.main.resource.Vbf.slot_count=1
+ tile_pipeline.phase.main.resource.Score.space="register"
+@@ -82,13 +78,25 @@
+
+ tile_pipeline.phase.main.resource.Score.slot_count=1
++tile_pipeline.phase.main.resource.NumState.space="register"
++tile_pipeline.phase.main.resource.NumState.member_slot_shape=[{"row":"Br"},{"channel":"D"}]
++tile_pipeline.phase.main.resource.NumState.dtype="fp32"
++tile_pipeline.phase.main.resource.NumState.slot_count=1
+ tile_pipeline.phase.main.resource.RowState.space="register"
+-tile_pipeline.phase.main.resource.RowState.member_slot_shape=[{"row":"Br"},{"column":2}]
++tile_pipeline.phase.main.resource.RowState.member_slot_shape=[{"row":"Br"},{"partial":4},{"field":2}]
+ tile_pipeline.phase.main.resource.RowState.dtype="fp32"
+ tile_pipeline.phase.main.resource.RowState.slot_count=1
+-tile_pipeline.phase.main.resource.RowState.view.MaxState.part.column=[0,1]
+-tile_pipeline.phase.main.resource.RowState.view.DenState.part.column=[1,2]
++tile_pipeline.phase.main.resource.RowState.view.MaxState.part.field=[0,1]
++tile_pipeline.phase.main.resource.RowState.view.DenPart.part.field=[1,2]
++tile_pipeline.phase.main.resource.E.space="register"
++tile_pipeline.phase.main.resource.E.member_slot_shape=[{"row":"Br"},{"partial":4},{"component":2}]
++tile_pipeline.phase.main.resource.E.dtype="fp32"
++tile_pipeline.phase.main.resource.E.slot_count=1
++tile_pipeline.phase.main.resource.Pfrag.space="register"
++tile_pipeline.phase.main.resource.Pfrag.member_slot_shape=[{"row":"Br"},{"key":16}]
++tile_pipeline.phase.main.resource.Pfrag.dtype="bf16"
++tile_pipeline.phase.main.resource.Pfrag.slot_count=1
+ tile_pipeline.phase.main.role.Main.info.execution_mode="serial"
+ tile_pipeline.phase.main.role.Main.info.member="warp[0:4]"
+-tile_pipeline.phase.main.role.Main.info.verb={"setup":"TEXT","prime":"TEXT","prepare":"TEXT","prefetch":"TEXT","land":"TEXT","qk":"TEXT","read_score":"TEXT","retire":"TEXT","advance":"TEXT","pv":"TEXT","drain":"TEXT","write":"TEXT","finish":"TEXT"}
++tile_pipeline.phase.main.role.Main.info.verb={"setup":"TEXT","prime":"TEXT","prepare":"TEXT","prefetch":"TEXT","land":"TEXT","decode":"TEXT","qk":"TEXT","advance":"TEXT","probability_value":"TEXT","close":"TEXT","write":"TEXT"}
+ tile_pipeline.phase.main.role.Main.pipe.prologue=["setup:Local","prime:Inputs","prepare:Query"]
+-tile_pipeline.phase.main.role.Main.pipe.steady=[{"repeat":"g","steady":["prefetch:Head(g)","land:Key(g)",{"repeat":"z","steady":["qk:ScoreHalf(g,z)","read_score:Score(g,z)"]},"retire:Previous(g)","prefetch:ValueNext(g)","land:Value(g)","advance:StateProb(g)","pv:NumState(g)"]}]
+-tile_pipeline.phase.main.role.Main.pipe.epilogue=["drain:LastPV","write:Output","finish:Local"]
++tile_pipeline.phase.main.role.Main.pipe.steady=[{"repeat":"g","steady":["prefetch:Next(g)","land:Inputs(g)","decode:Values(g)","qk:Score(g)","advance:RowState(g)",{"repeat":{"t":[0,"KeyGroup/16"]},"steady":["probability_value:Chunk(g,t)"]},"close:Group(g)"]}]
++tile_pipeline.phase.main.role.Main.pipe.epilogue=["write:Output"]

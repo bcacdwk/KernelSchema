@@ -1,0 +1,88 @@
+--- tcg_d256_flat_tma_narrow
+
++++ tcg_d256_segmented_tma_narrow
+
+@@ -1,8 +1,13 @@
+
+-math_reshape.rewrite=[{"step":"domain","symbol":{"Ns":{"binding":"bind:design.work_schedule::Ns"},"Nm":{"binding":"bind:design.work_schedule::Nm"},"Br":{"binding":"bind:design.work_schedule::Br"},"PSK":{"binding":"bind:design.work_schedule::PSK"}}},{"step":"scores","symbol":{"HalfMax":{"shape":[{"row":"Br"},{"half":2}],"dtype":"fp32"},"GroupMax":{"shape":[{"group":"GCount"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"scan","symbol":{"Mscan":{"shape":[{"group":"GCount"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"Mtail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"normalize","symbol":{"DenPart":{"shape":[{"row":"Br"},{"half":2}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=l-1..e"},"Prob8":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"partials","symbol":{"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=l-1..e"},"DenFinal":{"shape":[{"row":"Br"}],"dtype":"fp32"},"PartA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"output"}]
+-work_schedule.flow.launch=[{"phase":["group_max"]},{"phase":["scan"],"protocol":"pdl","start_after":"group_max.launch_ready"},{"phase":["split"],"protocol":"pdl","start_after":"scan.launch_ready"},{"phase":["combine"],"protocol":"pdl","start_after":"split.launch_ready"}]
++math_reshape.rewrite=[{"step":"domain","symbol":{"Ns":{"binding":"bind:design.work_schedule::Ns"},"Nm":{"binding":"bind:design.work_schedule::Nm"},"Br":{"binding":"bind:design.work_schedule::Br"},"PSK":{"binding":"bind:design.work_schedule::PSK"}}},{"step":"scores","symbol":{"HalfMax":{"shape":[{"row":"Br"},{"half":2}],"dtype":"fp32"},"GroupMax":{"shape":[{"group":"GCount"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"segment_max","symbol":{"SegLen":{"binding":"bind:design.work_schedule::SegLen"},"SegChunk":{"binding":"bind:design.work_schedule::SegChunk"},"SegMax":{"shape":[{"segment":"Nseg"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"scan","symbol":{"Mscan":{"shape":[{"group":"GCount"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"Mtail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"normalize","symbol":{"DenPart":{"shape":[{"row":"Br"},{"half":2}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=l-1..e"},"Prob8":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"partials","symbol":{"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=l-1..e"},"DenFinal":{"shape":[{"row":"Br"}],"dtype":"fp32"},"PartA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"output"}]
++work_schedule.flow.launch=[{"phase":["group_max"]},{"phase":["segment_max"],"protocol":"pdl","start_after":"group_max.launch_ready"},{"phase":["scan"],"protocol":"pdl","start_after":"segment_max.launch_ready"},{"phase":["split"],"protocol":"pdl","start_after":"scan.launch_ready"},{"phase":["combine"],"protocol":"pdl","start_after":"split.launch_ready"}]
+ work_schedule.flow.handoff.GroupMax.producer="group_max"
+-work_schedule.flow.handoff.GroupMax.consumer=["scan"]
++work_schedule.flow.handoff.GroupMax.consumer=["segment_max","scan"]
+ work_schedule.flow.handoff.GroupMax.storage="global"
+ work_schedule.flow.handoff.GroupMax.ready="group_max.kernel_done"
+-work_schedule.flow.handoff.GroupMax.wait_at="scan.input_ready"
++work_schedule.flow.handoff.GroupMax.wait_at=["segment_max.input_ready","scan.input_ready"]
++work_schedule.flow.handoff.SegMax.producer="segment_max"
++work_schedule.flow.handoff.SegMax.consumer=["scan"]
++work_schedule.flow.handoff.SegMax.storage="global"
++work_schedule.flow.handoff.SegMax.ready="segment_max.kernel_done"
++work_schedule.flow.handoff.SegMax.wait_at="scan.input_ready"
+ work_schedule.flow.handoff.Mscan.producer="scan"
+@@ -50,4 +55,21 @@
+
+ work_schedule.phase.group_max.schedule.worker_assignment.exit="assigned_done"
++work_schedule.phase.segment_max.decomposition.strategy="TEXT"
++work_schedule.phase.segment_max.decomposition.partition.segment={"size":"Nseg","tile":1}
++work_schedule.phase.segment_max.decomposition.partition.row={"size":"R","tile":"ScanRows"}
++work_schedule.phase.segment_max.decomposition.worktile.invariant.GroupMax.shape=[{"group":"min(SegLen,GCount-f*SegLen)"},{"row":"min(ScanRows,R-r0)"}]
++work_schedule.phase.segment_max.decomposition.worktile.invariant.GroupMax.dtype="ref:design.math_reshape::GroupMax.dtype"
++work_schedule.phase.segment_max.decomposition.target.single_tile.SegMax.shape=[{"row":"min(ScanRows,R-r0)"}]
++work_schedule.phase.segment_max.decomposition.target.single_tile.SegMax.dtype="ref:design.math_reshape::SegMax.dtype"
++work_schedule.phase.segment_max.mapping.worker={"unit":"CTA","unit_count":1}
++work_schedule.phase.segment_max.mapping.worker_count="Nseg*ceil_div(R,ScanRows)"
++work_schedule.phase.segment_max.schedule.strategy="TEXT"
++work_schedule.phase.segment_max.schedule.worktile_order=[{"by":"segment","direction":"ascending"},{"by":"row","direction":"ascending"}]
++work_schedule.phase.segment_max.schedule.worker_assignment.preassigned={"start":"worker_id","count":1}
++work_schedule.phase.segment_max.schedule.worker_assignment.refill="none"
++work_schedule.phase.segment_max.schedule.worker_assignment.exit="assigned_done"
+ work_schedule.phase.scan.decomposition.strategy="TEXT"
+ work_schedule.phase.scan.decomposition.partition.row={"size":"R","tile":"ScanRows"}
++work_schedule.phase.scan.decomposition.worktile.iteration.SegMax.shape=[{"segment":"min(SegChunk,Nseg-f0)"},{"row":"min(ScanRows,R-r0)"}]
++work_schedule.phase.scan.decomposition.worktile.iteration.SegMax.dtype="ref:design.math_reshape::SegMax.dtype"
++work_schedule.phase.scan.decomposition.worktile.iteration.SegMax.direction="ascending"
+ work_schedule.phase.scan.decomposition.worktile.iteration.GroupMax.shape=[{"group":1},{"row":"min(ScanRows,R-r0)"}]
+@@ -168,8 +190,24 @@
+
+ tile_pipeline.phase.group_max.role.Main.pipe.epilogue=["finish:Local"]
+-tile_pipeline.phase.scan.milestone.input_ready=["Main/await:GroupMax@done"]
+-tile_pipeline.phase.scan.resource.Batch.space="register"
+-tile_pipeline.phase.scan.resource.Batch.member_slot_shape=[{"group":64},{"row":"ScanRows"}]
+-tile_pipeline.phase.scan.resource.Batch.dtype="fp32"
+-tile_pipeline.phase.scan.resource.Batch.slot_count=1
+-tile_pipeline.phase.scan.resource.Batch.view.GroupMaxBatch={}
++tile_pipeline.phase.segment_max.milestone.input_ready=["Main/await:GroupMax@done"]
++tile_pipeline.phase.segment_max.resource.GroupBatch.space="register"
++tile_pipeline.phase.segment_max.resource.GroupBatch.member_slot_shape=[{"group":"SegLen"},{"row":"ScanRows"}]
++tile_pipeline.phase.segment_max.resource.GroupBatch.dtype="fp32"
++tile_pipeline.phase.segment_max.resource.GroupBatch.slot_count=1
++tile_pipeline.phase.segment_max.resource.GroupBatch.view.SegmentGroups={}
++tile_pipeline.phase.segment_max.role.Main.info.execution_mode="serial"
++tile_pipeline.phase.segment_max.role.Main.info.member="warp[0:ScanRows/32]"
++tile_pipeline.phase.segment_max.role.Main.info.verb={"trigger":"TEXT","await":"TEXT","produce":"TEXT"}
++tile_pipeline.phase.segment_max.role.Main.pipe.prologue=["trigger:ScanLaunch","await:GroupMax"]
++tile_pipeline.phase.segment_max.role.Main.pipe.steady=["produce:SegMax"]
++tile_pipeline.phase.scan.milestone.input_ready=["Main/await:ScanInputs@done"]
++tile_pipeline.phase.scan.resource.SegmentBatch.space="register"
++tile_pipeline.phase.scan.resource.SegmentBatch.member_slot_shape=[{"segment":"SegChunk"},{"row":"ScanRows"}]
++tile_pipeline.phase.scan.resource.SegmentBatch.dtype="fp32"
++tile_pipeline.phase.scan.resource.SegmentBatch.slot_count=1
++tile_pipeline.phase.scan.resource.SegmentBatch.view.Hseg={}
++tile_pipeline.phase.scan.resource.GroupBatch.space="register"
++tile_pipeline.phase.scan.resource.GroupBatch.member_slot_shape=[{"group":"SegLen"},{"row":"ScanRows"}]
++tile_pipeline.phase.scan.resource.GroupBatch.dtype="fp32"
++tile_pipeline.phase.scan.resource.GroupBatch.slot_count=1
++tile_pipeline.phase.scan.resource.GroupBatch.view.ReplayGroups={}
+ tile_pipeline.phase.scan.resource.ScanState.space="register"
+@@ -180,5 +218,5 @@
+
+ tile_pipeline.phase.scan.role.Main.info.member="warp[0:ScanRows/32]"
+-tile_pipeline.phase.scan.role.Main.info.verb={"await":"TEXT","begin":"TEXT","batch64":"TEXT","batch16":"TEXT","tail":"TEXT","finish":"TEXT"}
+-tile_pipeline.phase.scan.role.Main.pipe.prologue=["await:GroupMax","begin:Rows"]
+-tile_pipeline.phase.scan.role.Main.pipe.steady=[{"repeat":{"j":[0,"floor(GCount/64)"]},"steady":["batch64:GroupMax(j)"]},{"repeat":{"j":[0,"floor((GCount%64)/16)"]},"steady":["batch16:GroupMax(j)"]},{"repeat":{"t":["64*floor(GCount/64)+16*floor((GCount%64)/16)","GCount"]},"steady":["tail:Mscan(t)"]}]
++tile_pipeline.phase.scan.role.Main.info.verb={"await":"TEXT","begin":"TEXT","first":"TEXT","classify":"TEXT","replay":"TEXT","finish":"TEXT"}
++tile_pipeline.phase.scan.role.Main.pipe.prologue=["await:ScanInputs","begin:Rows","first:Mscan"]
++tile_pipeline.phase.scan.role.Main.pipe.steady=[{"repeat":{"c":[0,"ceil_div(Nseg-1,SegChunk)"]},"steady":["classify:SegMax(c)","replay:Mscan(c)"]}]
+ tile_pipeline.phase.scan.role.Main.pipe.epilogue=["finish:Mtail"]

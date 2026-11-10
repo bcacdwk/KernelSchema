@@ -1,0 +1,43 @@
+--- tcg_d128_segmented_cp_direct_narrow
+
++++ tcg_d128_segmented_cp_direct_wide
+
+@@ -1,2 +1,2 @@
+
+-math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"},"Ngm":{"binding":"bind:design.work_schedule::Ngm"},"Ns":{"binding":"bind:design.work_schedule::Ns"}}},{"step":"scores","symbol":{"DotTile":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (evaluation,b,kh,a,s,g)"},"GroupMax":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"segment_max","symbol":{"Seg":{"value":16},"SegMax":{"shape":[{"segment":"Nseg"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"scan","symbol":{"SegBatch":{"value":16},"ScanState":{"shape":[],"dtype":"fp32","retention":"carry_forward (r); g=-1..T-1"},"MState":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"MTail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"C"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..cHi"},"DenState":{"shape":[{"row":"C"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"Prob8":{"shape":[{"row":"C"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"partials","symbol":{"NumState":{"shape":[{"row":"C"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"GroupPV":{"shape":[{"row":"C"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value (b,kh,a,s,g)"},"PartA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"combine","symbol":{"TotalA":{"shape":[{"channel":"D"}],"dtype":"fp32","retention":"keep_value (r)"},"TotalB":{"shape":[],"dtype":"fp32","retention":"keep_value (r)"}}}]
++math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"},"Ngm":{"binding":"bind:design.work_schedule::Ngm"},"Ns":{"binding":"bind:design.work_schedule::Ns"}}},{"step":"scores","symbol":{"DotTile":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (evaluation,b,kh,a,s,g)"},"GroupMax":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"segment_max","symbol":{"Seg":{"value":16},"SegMax":{"shape":[{"segment":"Nseg"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"scan","symbol":{"SegBatch":{"value":16},"ScanState":{"shape":[],"dtype":"fp32","retention":"carry_forward (r); g=-1..T-1"},"MState":{"shape":[{"group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"MTail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"C"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..cHi"},"DenState":{"shape":[{"row":"C"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"Prob8":{"shape":[{"row":"C"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,s,g)"}}},{"step":"partials","symbol":{"NumState":{"shape":[{"row":"C"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,s); g=cLo-1..end"},"GroupPV":{"shape":[{"row":"C"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value (b,kh,a,s,g)"},"PartA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"combine","symbol":{"MergeGroups":{"binding":"bind:design.work_schedule::MergeGroups"},"MergeA":{"shape":[{"merge_group":"MergeGroups"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value (r)"},"MergeB":{"shape":[{"merge_group":"MergeGroups"},{"block":4}],"dtype":"fp32","retention":"keep_value (r)"},"TotalA":{"shape":[{"channel":"D"}],"dtype":"fp32","retention":"keep_value (r)"},"TotalB":{"shape":[],"dtype":"fp32","retention":"keep_value (r)"}}}]
+ work_schedule.flow.launch=[{"phase":["group_max"]},{"phase":["segment_max"],"start_after":"group_max.launch_ready","protocol":"pdl"},{"phase":["segmented_scan"],"start_after":"segment_max.launch_ready","protocol":"pdl"},{"phase":["split"],"start_after":"segmented_scan.launch_ready","protocol":"pdl"},{"phase":["combine"],"start_after":"split.launch_ready","protocol":"pdl"}]
+@@ -282,10 +282,18 @@
+
+ tile_pipeline.phase.combine.milestone.inputs_ready=["Main/dependency:Partials@done"]
+-tile_pipeline.phase.combine.resource.DenParts.space="SMEM"
+-tile_pipeline.phase.combine.resource.DenParts.member_slot_shape=[{"split":128}]
+-tile_pipeline.phase.combine.resource.DenParts.dtype="fp32"
+-tile_pipeline.phase.combine.resource.DenParts.slot_count=1
++tile_pipeline.phase.combine.resource.MergeA.space="SMEM"
++tile_pipeline.phase.combine.resource.MergeA.member_slot_shape=[{"merge_group":"MergeGroups"},{"channel":"D"}]
++tile_pipeline.phase.combine.resource.MergeA.dtype="fp32"
++tile_pipeline.phase.combine.resource.MergeA.slot_count=1
++tile_pipeline.phase.combine.resource.MergeB.space="SMEM"
++tile_pipeline.phase.combine.resource.MergeB.member_slot_shape=[{"merge_group":"MergeGroups"},{"block":4}]
++tile_pipeline.phase.combine.resource.MergeB.dtype="fp32"
++tile_pipeline.phase.combine.resource.MergeB.slot_count=1
+ tile_pipeline.phase.combine.resource.NumeratorBatch.space="register"
+-tile_pipeline.phase.combine.resource.NumeratorBatch.member_slot_shape=[{"channel":"D"},{"split":8}]
++tile_pipeline.phase.combine.resource.NumeratorBatch.member_slot_shape=[{"merge_group":"MergeGroups"},{"channel":"D"},{"split":8}]
+ tile_pipeline.phase.combine.resource.NumeratorBatch.dtype="fp32"
+ tile_pipeline.phase.combine.resource.NumeratorBatch.slot_count=1
++tile_pipeline.phase.combine.resource.NumeratorState.space="register"
++tile_pipeline.phase.combine.resource.NumeratorState.member_slot_shape=[{"merge_group":"MergeGroups"},{"channel":"D"}]
++tile_pipeline.phase.combine.resource.NumeratorState.dtype="fp32"
++tile_pipeline.phase.combine.resource.NumeratorState.slot_count=1
+ tile_pipeline.phase.combine.resource.Totals.space="register"
+@@ -297,4 +305,4 @@
+
+ tile_pipeline.phase.combine.role.Main.info.execution_mode="serial"
+-tile_pipeline.phase.combine.role.Main.info.member="warp[0:4]"
+-tile_pipeline.phase.combine.role.Main.info.verb={"dependency":"TEXT","sum_a":"TEXT","sum_b":"TEXT","write":"TEXT"}
+-tile_pipeline.phase.combine.role.Main.pipe.steady=["dependency:Partials","sum_a:TotalA","sum_b:TotalB","write:Output"]
++tile_pipeline.phase.combine.role.Main.info.member="warp[0:4*MergeGroups]"
++tile_pipeline.phase.combine.role.Main.info.verb={"dependency":"TEXT","sum_a":"TEXT","sum_b":"TEXT","join":"TEXT","write":"TEXT"}
++tile_pipeline.phase.combine.role.Main.pipe.steady=["dependency:Partials","sum_a:MergeA","sum_b:MergeB","join:Partials","write:Output"]

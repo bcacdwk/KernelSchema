@@ -1,0 +1,3258 @@
+{
+  "operator": "template_gdn_prefill",
+  "prompt_version": "v1.1",
+  "unit_annotations": [
+    {
+      "id": "t_09eb3c457258c03d",
+      "category": "SOURCE_LIMIT",
+      "core": "some",
+      "structure": "not_applicable",
+      "reason": "定义实际oracle求值路径与实数递推的区别；固定参考实现确为FP32、block_size=32。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:53"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F05"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_328abd3390325a8a",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "递推是正式核心定义；连续CUDA布局、生成分布、仅两输出可变和计时域混在同一字段，不能整段删。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:33"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02",
+        "template_gdn_prefill-F03",
+        "template_gdn_prefill-F04"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_02228a924ff40f4e",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "DV=128的语义标签；V/O/state的dv轴与公式已确定其用途。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:15"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_238bbb50b1f21d01",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "mandatory由无default决定，Python由scale.range给出，乘数用途由compute给出。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:25"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_33bf0b815560f8e4",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "State(t)更新后的时点由compute递推和inclusive readout确定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:47"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_448cee0c44d458bc",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "cu_seqlens的边界含义由range和L_b/x公式确定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:24"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_48e86097184ce227",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "v的简短对象标签；delta公式定义数值用途。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:20"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_4c9d80558e36cf51",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "初值关系State(-1)=initial_state与dv/dk轴已明确。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:23"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_56a2488c70b8ff61",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "DK标签；k/q的dk轴与求和轴已经明确。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:14"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_69db0dca0637b672",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "HV标签；v/state的head轴已用HV登记。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:13"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_6ae617e7af900e94",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "output已是调用者必须提供的输入对象，返回别名由O.meaning唯一约定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:26"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01",
+        "template_gdn_prefill-F03"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_7897b9c05e6a6412",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "new_structure_candidate",
+      "reason": "返回顺序及O与输入output的对象别名没有结构字段；shape相同和数学值相同不足以保证写回同一对象。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:29"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F03"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_7f64c16fca084b63",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "归一化域已由k.range精确定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:19"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_9106e71a77a1e6f2",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "output_state已登记为必传输入，返回别名由S_final.meaning定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:27"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01",
+        "template_gdn_prefill-F03"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_b5c49c3a57a8ea60",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "new_structure_candidate",
+      "reason": "第二返回值与output_state的对象别名没有结构字段；仅公式S_final不能表达此副作用。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:30"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F03"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_c9c4342f956bf0f5",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "beta在delta公式中的乘数用途已有唯一来源。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:22"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_dfe8ee431d8b0f73",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "HQ标签；q/k的head轴及hq映射已有定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:12"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_e49b2328ca2a64bc",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "alpha的线性衰减用途由D公式确定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:21"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_ec06ba8ce47a66c9",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "q的生成及直接参与readout由compute定义；标签无需承担第二份输入域。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:18"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_fecf230a6f4d2abd",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "epsilon的加性稳定用途在D和chunk公式中明确。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:16"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_044937ae45a516d3",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "beta的半开有效域是正式谓词，不能改为闭区间[0,1]。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:22"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_0588c07a723593e9",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "zero/独立32-token参考前缀是初态的正式有效域；不是缺省初态或None分支。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:23"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_54366254e437de83",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "alpha的半开有效域是正式谓词。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:21"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_5485d7ce1226bf07",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "输入域由BF16生成后再normalize的操作关系确定；精度顺序必须保留。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:19"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_b63ee7c06b98f0ed",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "边界严格增长、B/T上限与首尾值构成正式域，排除空序列。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:24"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_b958fd734bd04fee",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "允许NaN是非默认输入域；previous contents ignored被完整覆盖及compute不读取两个buffer所覆盖。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:26",
+        "inputs/template_gdn_prefill/root.yaml:27"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F03",
+        "template_gdn_prefill-F04"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_c32d83714413cf4b",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "精确Python binary64标量值及其算法定义，不是可自由舍入的文案。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:25"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_5c985cbceafd5785",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "atol/rtol与返回及mutated_inputs的比较路由构成正式验收谓词。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:51"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02",
+        "template_gdn_prefill-F03"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_6164115ce2fe99a1",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "state使用另一组阈值和相同双路比较要求，不能按O阈值合并。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:52"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02",
+        "template_gdn_prefill-F03"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_0f7376c7514cf6c5",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "共享Contract、parent、when和版本的权威位置由DOC0规定，索引此句仅重复导航。",
+      "evidence": [
+        "inputs/template_gdn_prefill/dispatch.md:15"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_3f7cb032ce65ad8b",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "表头用于导航，无设计定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/dispatch.md:10"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_73df9924b3c14109",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "single的固定界与四chunk标量前瞻由其Load/ScalarOutput及pipe确定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/dispatch.md:13"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_779345bc7e6772ef",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "M64由partition.dv.tile=64确定；对齐与初态均未改变when，只是索引提示。",
+      "evidence": [
+        "inputs/template_gdn_prefill/dispatch.md:17"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_848563f239f8b32a",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "派生树重述single.parent=root；保留其导航价值。",
+      "evidence": [
+        "inputs/template_gdn_prefill/dispatch.md:5"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_886460849560fe48",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "节点差异与共享Contract的入口摘要，无独占定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/dispatch.md:3"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_8c547aad00c18067",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "索引标题，无执行语义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/dispatch.md:1"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_9bf940e6b6fec2d5",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "root的可变界和共用warp在两个对应role中明示。",
+      "evidence": [
+        "inputs/template_gdn_prefill/dispatch.md:12"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_89bb4b6e5937114b",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "B>1是root选择谓词，与B=1互斥并覆盖1<=B<=16。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:8"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_973d554715a852a3",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "B=1为single的充要条件；不是在父B>1上叠加条件。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:9"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_263d5b133f5e61d6",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "open_semantics",
+      "reason": "硬件层没有register所有权的结构字段或隐式默认；线程私有性由此定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:64"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F16"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_6c67314fe3205270",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "open_semantics",
+      "reason": "TMEM显式分配、与SMEM独立是硬件机制定义；仅space名称不提供这些语义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:63"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F16"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_bf65cfd621166b87",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "DOC5已要求primitive-specific done/visibility；该句没有新增哪一原语的保证。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:65"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01",
+        "template_gdn_prefill-F16"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_fbe55b4f6cea5249",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "CTA存续/peer可达性是开放硬件定义；当前单CTA未使用peer能力，不能以未使用推断硬件条目无效。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:62"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F16"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_4f201fb09921413f",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "open_semantics",
+      "reason": "实现栈名称和版本是有意开放的身份绑定，不能由Device或Design推导。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:67"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F16"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_7e4016ec26766b60",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "选定torch/cuda-python/编译链身份必要，末句为未记录编译器/驱动的来源限制；不能整体删。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:68"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F05",
+        "template_gdn_prefill-F16"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_18bdcc1dac780fe8",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "规定32-token分组及FP32合并路径；sum32本身不规定分组，不属冗余精度。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:37",
+        "inputs/template_gdn_prefill/root.yaml:102"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_51298e81989315e3",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "主动fast近似路径是核心数值限定，误差未建立是必要来源限制。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:36",
+        "inputs/template_gdn_prefill/root.yaml:101"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02",
+        "template_gdn_prefill-F05"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_e4c62488f606729c",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "把recurrence近似显式关联到chunk定义；DOC3不允许跨步骤默默继承arithmetic。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:75",
+        "inputs/template_gdn_prefill/root.yaml:140"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_0298fa2c8bae14f7",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "账本计量对象标签Token recurrence。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:80",
+        "inputs/template_gdn_prefill/root.yaml:145"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_05c7b177f0175ad8",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "账本计量对象标签State dependency。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:78",
+        "inputs/template_gdn_prefill/root.yaml:143"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_157dab9ce93a9558",
+      "category": "FORMAL",
+      "core": "none",
+      "structure": "formula_or_predicate",
+      "reason": "定量对照由Contract token递推与rewrite的Np递推推导，非新的执行决定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:78",
+        "inputs/template_gdn_prefill/root.yaml:143"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_19c80c00542ebb48",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "baseline选择用于理解差额，直接递推与无全局中间state不约束现有Design。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:77",
+        "inputs/template_gdn_prefill/root.yaml:142"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_1e1d496686c459aa",
+      "category": "FORMAL",
+      "core": "none",
+      "structure": "formula_or_predicate",
+      "reason": "按C/shape推导局部额外元素量级；不是安全可删字数或实测峰值。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:81",
+        "inputs/template_gdn_prefill/root.yaml:146"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_25be23c7ed3f3c89",
+      "category": "FORMAL",
+      "core": "none",
+      "structure": "formula_or_predicate",
+      "reason": "ledger.by中的rewrite step引用，不是自然语言正文。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:78",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:79",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:80",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:81",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:82",
+        "inputs/template_gdn_prefill/root.yaml:143",
+        "inputs/template_gdn_prefill/root.yaml:144",
+        "inputs/template_gdn_prefill/root.yaml:145",
+        "inputs/template_gdn_prefill/root.yaml:146",
+        "inputs/template_gdn_prefill/root.yaml:147"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_2bd79a3681ec0911",
+      "category": "FORMAL",
+      "core": "none",
+      "structure": "formula_or_predicate",
+      "reason": "ledger.by的chunk正式引用，所有depth/footprint/error作用域已核对。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:78",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:81",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:82",
+        "inputs/template_gdn_prefill/root.yaml:143",
+        "inputs/template_gdn_prefill/root.yaml:146",
+        "inputs/template_gdn_prefill/root.yaml:147"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_3d4bb15128e038dd",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "账本误差条目标签。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:82",
+        "inputs/template_gdn_prefill/root.yaml:147"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_4645f39032fa9869",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "fast及BF16误差来源均有公式cast/arithmetic定义；作为账本摘要有阅读价值。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:82",
+        "inputs/template_gdn_prefill/root.yaml:147"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_50f410388ae5159e",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "账本矩阵乘条目标签。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:79",
+        "inputs/template_gdn_prefill/root.yaml:144"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_8280173fa2d36e48",
+      "category": "FORMAL",
+      "core": "none",
+      "structure": "formula_or_predicate",
+      "reason": "ledger.by的inverse正式引用；五处账本引用均对应已定义step。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:78",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:79",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:80",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:81",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:82",
+        "inputs/template_gdn_prefill/root.yaml:143",
+        "inputs/template_gdn_prefill/root.yaml:144",
+        "inputs/template_gdn_prefill/root.yaml:145",
+        "inputs/template_gdn_prefill/root.yaml:146",
+        "inputs/template_gdn_prefill/root.yaml:147"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_942574c9c058fc3c",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "账本footprint的对象标签。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:81",
+        "inputs/template_gdn_prefill/root.yaml:146"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_c9cc86f85a733d23",
+      "category": "FORMAL",
+      "core": "none",
+      "structure": "formula_or_predicate",
+      "reason": "3*L_b*DV*DK及替代量级由递推和block公式推导；保留为量化账本，不是新算法。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:80",
+        "inputs/template_gdn_prefill/root.yaml:145"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_d47420ff649e9ff6",
+      "category": "FORMAL",
+      "core": "none",
+      "structure": "formula_or_predicate",
+      "reason": "KK/QK/KS/QS/U/Y/S七个dense product加hierarchical inverse的计数。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:79",
+        "inputs/template_gdn_prefill/root.yaml:144"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_03e7f003d1a1e456",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "Gauss-Jordan 8x8、分层8→64及中间BF16舍入共同定义正式算法，不能因英文句式当成解释。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:40",
+        "inputs/template_gdn_prefill/root.yaml:105"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_268eeef78f301be6",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "single本地chunk定义用b=0,L_b=T，不读取Cu32，但保留已提交转换。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:16"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_40df5dc7792535c7",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "root的完整精度分叉、初态/末态及packed输出索引；Sdec和Udec来源不能删。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:120"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_83944359c0217afb",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "single的完整递推及直接输出索引，已核对与共享Contract的一致绑定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:55"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_be86032434361a08",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "root的Cu32边界、偶数padding、neutral gates及前缀公式全部正式必要。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:81"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_06b74a4b00421eb0",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Beta=0的padding由chunk.math定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:31",
+        "inputs/template_gdn_prefill/root.yaml:96"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_0aaef773eb6fa619",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Gamma相对初态的作用由chunk与recurrence公式确定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:33",
+        "inputs/template_gdn_prefill/root.yaml:98"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_0f986bb23bb1428a",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "U的FP32结果由mm32与dtype确定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:69",
+        "inputs/template_gdn_prefill/root.yaml:134"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_12cc71bc981ebf96",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Ubar=bf16(U)及Y公式确定读出用途。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:70",
+        "inputs/template_gdn_prefill/root.yaml:135"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_13953c5deb7bde1c",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "直接从U衰减并窄化由Udec=bf16(U⊙Decay)确定，不能反向把本标签当定义来源。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:72",
+        "inputs/template_gdn_prefill/root.yaml:137"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_3964705ab301e71b",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "K的padding由chunk索引和边界分支给出。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:28",
+        "inputs/template_gdn_prefill/root.yaml:93"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_4404ed6cfde10939",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "W的共享由keep_value、A/Bmat公式及Wpair资源给出。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:34",
+        "inputs/template_gdn_prefill/root.yaml:99"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_490580c9f75b1c57",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Bmat的衰减、scale与因果性来自inverse.math。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:52",
+        "inputs/template_gdn_prefill/root.yaml:117"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_5777bfa1fc55f7b5",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "G的inclusive范围与log2在chunk.math定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:32",
+        "inputs/template_gdn_prefill/root.yaml:97"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_57cacaaa34edef2b",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Tinv的列beta缩放和舍入来自inverse.math。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:50",
+        "inputs/template_gdn_prefill/root.yaml:115"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_5cf4671fbaf99a2f",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "KS的投影由mm32(Sbar,Kᵀ)定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:66",
+        "inputs/template_gdn_prefill/root.yaml:131"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_649331bc4009f6a8",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "single的Cu32无handoff、无gdn invariant/消费者且公式用T，故未消费已由完整结构确定；不能删index_cast本身。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:26"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F07"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_6db7812837549460",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "两次BF16舍入已显式写入R公式。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:68",
+        "inputs/template_gdn_prefill/root.yaml:133"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_6e0582597a0fa3dc",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Sbar=bf16(S(c-1))和Sdec并列公式已定义前衰减快照。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:64",
+        "inputs/template_gdn_prefill/root.yaml:129"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_7cf3756998bf8ddb",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "C是token chunk轴、value=64，标签保留可读性。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:24",
+        "inputs/template_gdn_prefill/root.yaml:89"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_7df165f0a63b19f7",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "KK=mm32(K,Kᵀ)唯一确定Gram量。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:48",
+        "inputs/template_gdn_prefill/root.yaml:113"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_883ca107f3905f83",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "V的padding由chunk.math给出。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:29",
+        "inputs/template_gdn_prefill/root.yaml:94"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_8a1eba8e4d9d0f23",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "root flow.handoff.Cu32与gdn invariant及chunk公式明确core消费。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:91"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F07"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_8afdbb706b6006ef",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Y由mma32得到，最后O=bf16(Y)；标签不新增舍入。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:74",
+        "inputs/template_gdn_prefill/root.yaml:139"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_8b92db6188a380a0",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Sdec的Gamma[C-1]公式定义末端缩放。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:65",
+        "inputs/template_gdn_prefill/root.yaml:130"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_91c93ad2e2a72ccf",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "S的fp32、dv/dk及carry_forward范围已有结构/公式。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:63",
+        "inputs/template_gdn_prefill/root.yaml:128"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_97709533776d8965",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "QS由mm32(Sbar,Qᵀ)定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:67",
+        "inputs/template_gdn_prefill/root.yaml:132"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_9b8a0c46171a2d65",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "QK由mm32(Q,Kᵀ)定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:51",
+        "inputs/template_gdn_prefill/root.yaml:116"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_ab649368db08e1c1",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "A数值由inverse.math，原地逆workspace由Tring的A/Tinv同槽view与invert定义承载。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:49",
+        "inputs/template_gdn_prefill/root.yaml:114"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01",
+        "template_gdn_prefill-F09"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_c04aea241f61cff9",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Alpha=1 padding在chunk.math定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:30",
+        "inputs/template_gdn_prefill/root.yaml:95"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_d0491b410260f8d3",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "QSscaled的scale/Gamma乘法由recurrence.math定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:73",
+        "inputs/template_gdn_prefill/root.yaml:138"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_d44624e5ca4f3ac3",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Decay由G末项减G[i]正式定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:71",
+        "inputs/template_gdn_prefill/root.yaml:136"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_fa4216613f3e4884",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Q padding在chunk.math定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:27",
+        "inputs/template_gdn_prefill/root.yaml:92"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_fcf3e639e4c70fc0",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Np=2*ceil(L_b/(2*C))已给出偶数和当前序列域。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:25",
+        "inputs/template_gdn_prefill/root.yaml:90"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_77748160509f3f78",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "thesis总结已定义的chunk/inverse/FP32 carry与ledger代价。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:12",
+        "inputs/template_gdn_prefill/root.yaml:77"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_6f05304359c0b22c",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "任务摘要；外部buffer覆盖约束以Contract为权威，跨文件相同不单独构成可删理由。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:3",
+        "inputs/template_gdn_prefill/root.yaml:3"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_9ad391a797c48070",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "两个compute组、两个issuer、rings和early return分别由role/resource/verb/边定义；是摘要。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:186"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_d870b1a3c36b1cb6",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "four-lookahead/five-stage及ready-only已由single ScalarOutput定义；thesis未独占。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:119"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_0f07081619eca457",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Beta的zero pad在chunk.math，独立5槽BetaRing与旧Tinv读完的reuse已表达acquire条件。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:304"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F07"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_106cd544b6cbc270",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "Gamma的数学和compute在publish前由上游/pipe覆盖；Alpha/GateRegs的寄存器捕获与合成对象绑定仍靠此句。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:302"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F10"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_1760e93dd2d618d9",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Tinv/Bmat公式及beta-stage的reuse前驱Inverse/publish:Tinv已覆盖计算和归还时点。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:243"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F07"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_18aca5f842ce6acc",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "open_semantics",
+      "reason": "Gate是G/Gamma的合成发布对象；资源同槽不自动定义其成员或共同ready事件。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:303"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F10"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_1c4ecd3132b3b929",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "S(-1)=initial_state及每t的load和carry_forward重置规则已明确，包括零值输入。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:195",
+        "inputs/template_gdn_prefill/root.yaml:268"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F07"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_2d944261e9874f56",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "公式、数据边与别名重复；独次S读取和合成StateOperand/UpdateOperand仍含核心动作语义。共用ready流是已核实源码事实，但其流身份的独立核心重要性未证。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:196"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F09",
+        "template_gdn_prefill-F10",
+        "template_gdn_prefill-F11"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_304cb8b6f5a7d0fd",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "零累加器由mm32定义，累积done由execution_mode及realization保证；自定义matmul仍需保留简短上游绑定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:161",
+        "inputs/template_gdn_prefill/root.yaml:228"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F08"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_373e3471edbe11bf",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "两chunk Pair→W的动作绑定与捕获必要；gate归还边、Wpair存储及Bmat用途已明示。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:239"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F09",
+        "template_gdn_prefill-F10"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_3f802932ce3ebc5c",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "open_semantics",
+      "reason": "store.done覆盖bulk-store读完O的原语保证，直接支撑Recurrence下轮O覆盖；不能只保留store.issue。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:305"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F15"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_43bffef6cb85ae17",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "Cu32界更新与fence/旧请求在途是不可省的描述符协议；偏移和zero-fill已在math中定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:220"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F05",
+        "template_gdn_prefill-F15",
+        "template_gdn_prefill-F17"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_47ae33007ef4ae5b",
+      "category": "STRUCTURABLE",
+      "core": "all",
+      "structure": "existing_structure",
+      "reason": "raw相邻四head数学视图加两次异步load的prologue可完整表达本句；无需创造新事件种类。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:228"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F13"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_4908bdeb7a81806c",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "KS/QS/U零初值、Y/QSscaled和S/Sdec由mm32/mma32确定，completion由mode/原语契约确定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:181",
+        "inputs/template_gdn_prefill/root.yaml:253"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F08"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_513dd7d932964669",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Cu32转换由math，合法B+1区域由target/input，PyTorch copy由describe；serial单produce已无设计级异步stage。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:124",
+        "inputs/template_gdn_prefill/root.yaml:191"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F07"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_64d091036abe724f",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "row Beta捕获与column Beta持续读取是不同寿命；整体BetaRing及Tinv reuse仅承载后者，不能删捕获语义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:240"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F09"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_7a8b041439bedb57",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "Gamma/Decay寄存器捕获是必要动作绑定；StateOperand前后顺序、gate归还与可重叠边已在pipe/reuse中。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:273"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F09"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_83652c75fb992cb9",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "O descriptor更新/fence为开放原语契约；抑制padding由math有效输出域重述。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:301"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F15"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_883da689cc69177a",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "open_semantics",
+      "reason": "read:U把共享TMEM中的U捕获进寄存器后归还，resource.view只说明别名而不说明捕获复制。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:201",
+        "inputs/template_gdn_prefill/root.yaml:274"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F09"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_94171abdbbd93873",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "单读S与fused写出含必要动作语义；数值舍入、已有数据链和别名部分重复。root独立四通知流属源码事实，不能只凭流数量差异证明核心设计缺字段。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:269"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F09",
+        "template_gdn_prefill-F10",
+        "template_gdn_prefill-F11"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_983106a340af33ce",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "固定T边界已在math/realization，bulk-store读完才能归还O的完成含义须保留。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:234"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F15"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_b030da1c7751ec8f",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "双raw完成、h%4捕获和c+2先发射是内部协议核心；c%2/c%5及store(c)→prepare(c+5)已由resource/serial pipe确定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:229"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F11",
+        "template_gdn_prefill-F13"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_c145f25b39585b2a",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "open_semantics",
+      "reason": "KK/QK从TMEM提前捕获到register是核心存储/重叠事实；边只证明read完成，不能替代动作读何处写何处。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:173",
+        "inputs/template_gdn_prefill/root.yaml:241"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F09"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_c47de18ba3ae684c",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "new_structure_candidate",
+      "reason": "每级动态改变warp分工且组间rendezvous是核心执行分配；静态member无逐动作切片，现有拆role/动作表示成本较高。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:174",
+        "inputs/template_gdn_prefill/root.yaml:242"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F12"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_cb27bc7b5078acf8",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "open_semantics",
+      "reason": "Scalar合成对象对应G/Gamma/Beta全写完的联合ready；名称和ScalarRing容量不能自己定义成员。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:233"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F10"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_cec860337c98f00f",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "捕获Gamma/Decay必要；StateOperand后和潜在KS/QS重叠由serial顺序与独立MMA role决定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:200"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F09"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_d61b4c2a7ef13a4f",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Tinv/Bmat的列beta/权重来自inverse.math，W保留来自Wpair与prepare定义；可短写绑定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:175"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_dd4a2966a273836b",
+      "category": "STRUCTURABLE",
+      "core": "all",
+      "structure": "existing_structure",
+      "reason": "可把rescale:QS换为既有compute:QSscaled，并同步事件引用；公式与同址Arena view完整定义其计算和原地目标。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:202",
+        "inputs/template_gdn_prefill/root.yaml:275"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F14"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_dd6e50e80e7b8620",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "Pair到W/row Beta的捕获以及column Beta持续读取是核心；Wpair及Tinv/Bmat公式已覆盖保留/用途的一部分。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:172"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F09",
+        "template_gdn_prefill-F10"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_fd3ce3eba9be55e9",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "embedded descriptor由本节点realization绑定，T界与synthetic zero-fill由chunk.math定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:153"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F15"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_77f0d01467df493b",
+      "category": "MIXED",
+      "core": "uncertain",
+      "structure": "mixed",
+      "reason": "源码确用四独立PipelineAsyncUmma并省略producer acquire；读者退役已由现有依赖链保证，未证该API或通知流数量有独立一阶影响。保留来源事实，其独立核心重要性未决。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:324"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F11",
+        "template_gdn_prefill-F15"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_7dfe0e091a8ad1f2",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "open_semantics",
+      "reason": "warp mma.sync与两个异步tcgen05 issuer的引擎分离不能仅由BF16公式或warp成员推导。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:242",
+        "inputs/template_gdn_prefill/root.yaml:318"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F15"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_b1a00a9ae185d899",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "tcgen05绑定必要；single-CTA、TMEM和cumulative completion由mapping/resource/mode重复。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:239",
+        "inputs/template_gdn_prefill/root.yaml:315"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F08",
+        "template_gdn_prefill-F15"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_c8e7b4b4b6ebbe7e",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "TensorMapManager/PipelineCpAsync/PipelineAsync提供具体保证；可变界与分离阶段的设计决定已在Design。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:321"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F15",
+        "template_gdn_prefill-F17"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_fdd0d988c0872744",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "raw事务完成、warp rendezvous和async-shared fence提供必要可见性保证；ready-only/compact是动作契约重复的来源协议，其通知存储/API选择的独立性能重要性未证。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:245"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F11",
+        "template_gdn_prefill-F13",
+        "template_gdn_prefill-F15"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_6390584ff8db3df0",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "解释tcgen05为何支撑已有alias/reuse，新增保证应以matmul契约为准。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:240",
+        "inputs/template_gdn_prefill/root.yaml:316"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F08"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_731675cc45401616",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "解释inverse独立引擎选择的理由，相关绑定在choice中。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:243",
+        "inputs/template_gdn_prefill/root.yaml:319"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F15"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_768b71c4eecdfa3b",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "首半为已有设计理由，末半是未建立旧descriptor在途读取顺序的必要限制，不能省成已证正确。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:322"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F05",
+        "template_gdn_prefill-F15",
+        "template_gdn_prefill-F17"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_9457c507c163ecd7",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "recurrent复用已在数据链中；full/empty握手可能只落实传递上已满足的条件。本句声称影响overlap，但缺少新增非传递等待或一阶成本证据。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:325"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F11"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_fafd588dd07dab16",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "transfer visibility/ready-only的理由，具体fence与原语已由choice给出。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:246"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F13",
+        "template_gdn_prefill-F15"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_1a5ed071695eca1f",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "root多序列descriptor和独立流的摘要，详细定义在pipeline/realization。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:164"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_71e6999a09164fa8",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "single固定界、TMA标量及compact事件的摘要。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:98"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_b5977bf32348dc3a",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "PyTorch copy/版本在Convert动作与stack，timing在Contract，前后提交由flow定义；摘要保留阅读用途。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:89",
+        "inputs/template_gdn_prefill/root.yaml:155"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F07"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_02b7c3cf9d41a509",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "one-worktile由空partition/target/mapping，512容量只解释库lowering容纳B+1；本次未独立取得PyTorch该kernel源码。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:91",
+        "inputs/template_gdn_prefill/root.yaml:157"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F07"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_2a0f6a7113cc1467",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "统一preassigned来自work_schedule，flatten n定义跨t游标，DOC5默认不排空且math/pipe每t重置S。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:182"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F07"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_3b33887778ec93dc",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "P公式是核心但可内联worker_count；runtime num_sm绑定必要，线性id已由order定义，148-SM/64CTA是实例解释。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:112"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F06"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_56041319279124d3",
+      "category": "DUPLICATE",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "Np域/pipe n[t]、Cu32 invariant和single_tile双半输出已明确无跨半合并。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:166"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F07"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_5b334a0189d7d8e5",
+      "category": "MIXED",
+      "core": "some",
+      "structure": "mixed",
+      "reason": "核心P数量可写进worker_count；runtime查询仍是开放绑定，linear id由order确定，148仅来源实例。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:178"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F06"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_cfdbf59620953e19",
+      "category": "MIXED",
+      "core": "none",
+      "structure": "mixed",
+      "reason": "Np/双半独立与Cu32不消费已有结构；passed是调用ABI实现说明，不新增计算依赖。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:100"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F07"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_e65d1c79fa3e54f1",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "dv.tile=64、full recurrent worktile和重复Q/K/inverse可推出；保留thesis作主要成本解释。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:84",
+        "inputs/template_gdn_prefill/root.yaml:149"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_cd916003912abd86",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "compute标题；更新后inclusive readout已经由State/O的公式确定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:32"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_680d6642a8764eac",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "open_semantics",
+      "reason": "CTA成员共驻SM并共享SMEM/barrier是硬件层级定义，DOC2不给隐式默认；下游单CTA依赖该组成。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:59"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F16"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_6f5eff329130bc7c",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "not_applicable",
+      "reason": "cluster的设备空间摘要；本例worker.unit_count=1且无cluster placement/peer访问，因此对既定两节点不增加核心约束；不能据此修改共用设备事实。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:60"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F16"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_707ed1a5b6536df5",
+      "category": "ESSENTIAL_TEXT",
+      "core": "all",
+      "structure": "open_semantics",
+      "reason": "warp=32及CTA内从属是role规模和寄存器/线程预算的必要硬件定义；无独立数值组成字段。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:58"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F16"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_432c9e0b148109b9",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "inverse标题，BF16 merge rounding全部保留在inverse.math。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:39",
+        "inputs/template_gdn_prefill/root.yaml:104"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_de20a419c9fd7490",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "chunk标题，even pairs和prefix由Np/G公式定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:15",
+        "inputs/template_gdn_prefill/root.yaml:80"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_f20bc386256985f1",
+      "category": "EXPLANATION",
+      "core": "none",
+      "structure": "already_present",
+      "reason": "recurrence标题，值修正和state更新已有公式。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:54",
+        "inputs/template_gdn_prefill/root.yaml:119"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F01"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_48857c9a607fe610",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "rewrite正式step身份，ledger.by与算术跨步引用需要该名字；不是自然语言正文。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:38",
+        "inputs/template_gdn_prefill/root.yaml:103"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_4e32c8e46d5b4f61",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "recurrence正式step身份；与ledger.by中相同文本分属不同字段族。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:53",
+        "inputs/template_gdn_prefill/root.yaml:118"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    },
+    {
+      "id": "t_7b767d78cd5bd935",
+      "category": "FORMAL",
+      "core": "all",
+      "structure": "formula_or_predicate",
+      "reason": "chunk正式step身份，recurrence.arithmetic明确指回本步近似定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:14",
+        "inputs/template_gdn_prefill/root.yaml:79"
+      ],
+      "finding_ids": [
+        "template_gdn_prefill-F02"
+      ],
+      "contexts_checked": true,
+      "occurrence_overrides": []
+    }
+  ],
+  "findings": [
+    {
+      "id": "template_gdn_prefill-F01",
+      "kind": "redundancy",
+      "unit_ids": [
+        "t_02228a924ff40f4e",
+        "t_238bbb50b1f21d01",
+        "t_33bf0b815560f8e4",
+        "t_448cee0c44d458bc",
+        "t_48e86097184ce227",
+        "t_4c9d80558e36cf51",
+        "t_56a2488c70b8ff61",
+        "t_69db0dca0637b672",
+        "t_6ae617e7af900e94",
+        "t_7f64c16fca084b63",
+        "t_9106e71a77a1e6f2",
+        "t_c9c4342f956bf0f5",
+        "t_dfe8ee431d8b0f73",
+        "t_e49b2328ca2a64bc",
+        "t_ec06ba8ce47a66c9",
+        "t_fecf230a6f4d2abd",
+        "t_0f7376c7514cf6c5",
+        "t_3f7cb032ce65ad8b",
+        "t_73df9924b3c14109",
+        "t_779345bc7e6772ef",
+        "t_848563f239f8b32a",
+        "t_886460849560fe48",
+        "t_8c547aad00c18067",
+        "t_9bf940e6b6fec2d5",
+        "t_0298fa2c8bae14f7",
+        "t_05c7b177f0175ad8",
+        "t_19c80c00542ebb48",
+        "t_3d4bb15128e038dd",
+        "t_4645f39032fa9869",
+        "t_50f410388ae5159e",
+        "t_942574c9c058fc3c",
+        "t_06b74a4b00421eb0",
+        "t_0aaef773eb6fa619",
+        "t_0f986bb23bb1428a",
+        "t_12cc71bc981ebf96",
+        "t_13953c5deb7bde1c",
+        "t_3964705ab301e71b",
+        "t_4404ed6cfde10939",
+        "t_490580c9f75b1c57",
+        "t_5777bfa1fc55f7b5",
+        "t_57cacaaa34edef2b",
+        "t_5cf4671fbaf99a2f",
+        "t_6db7812837549460",
+        "t_6e0582597a0fa3dc",
+        "t_7cf3756998bf8ddb",
+        "t_7df165f0a63b19f7",
+        "t_883ca107f3905f83",
+        "t_8afdbb706b6006ef",
+        "t_8b92db6188a380a0",
+        "t_91c93ad2e2a72ccf",
+        "t_97709533776d8965",
+        "t_9b8a0c46171a2d65",
+        "t_ab649368db08e1c1",
+        "t_c04aea241f61cff9",
+        "t_d0491b410260f8d3",
+        "t_d44624e5ca4f3ac3",
+        "t_fa4216613f3e4884",
+        "t_fcf3e639e4c70fc0",
+        "t_77748160509f3f78",
+        "t_6f05304359c0b22c",
+        "t_9ad391a797c48070",
+        "t_d870b1a3c36b1cb6",
+        "t_d61b4c2a7ef13a4f",
+        "t_1a5ed071695eca1f",
+        "t_71e6999a09164fa8",
+        "t_e65d1c79fa3e54f1",
+        "t_cd916003912abd86",
+        "t_432c9e0b148109b9",
+        "t_de20a419c9fd7490",
+        "t_f20bc386256985f1"
+      ],
+      "claim": "对象标签、thesis、dispatch和部分账本为有用摘要；可缩的依据是当前公式/结构，而非另一文件文本相同。",
+      "core_fact": "核心数值唯一来源为rewrite/Contract，布局和角色唯一来源为resource/mapping/pipe。",
+      "deletion_counterexample": "去掉标签不会改变已定数值或执行；但必填meaning/thesis以及custom matmul等仍须合法短写，不能删除所有字段。",
+      "existing_structural_candidate": "保留简短meaning/必填thesis；例如Udec.meaning: End-decayed update. 其直接从FP32 U窄化仍由Udec=bf16(U⊙Decay)定义。",
+      "gap_kind": "none",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:120",
+        "inputs/template_gdn_prefill/root.yaml:195",
+        "rules/schema_docs/3.design.math_reshape.md:85",
+        "rules/README.md:80"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F02",
+      "kind": "style",
+      "unit_ids": [
+        "t_328abd3390325a8a",
+        "t_044937ae45a516d3",
+        "t_0588c07a723593e9",
+        "t_54366254e437de83",
+        "t_5485d7ce1226bf07",
+        "t_b63ee7c06b98f0ed",
+        "t_c32d83714413cf4b",
+        "t_5c985cbceafd5785",
+        "t_6164115ce2fe99a1",
+        "t_89bb4b6e5937114b",
+        "t_973d554715a852a3",
+        "t_18bdcc1dac780fe8",
+        "t_51298e81989315e3",
+        "t_e4c62488f606729c",
+        "t_157dab9ce93a9558",
+        "t_1e1d496686c459aa",
+        "t_25be23c7ed3f3c89",
+        "t_2bd79a3681ec0911",
+        "t_8280173fa2d36e48",
+        "t_c9cc86f85a733d23",
+        "t_d47420ff649e9ff6",
+        "t_03e7f003d1a1e456",
+        "t_268eeef78f301be6",
+        "t_40df5dc7792535c7",
+        "t_83944359c0217afb",
+        "t_be86032434361a08",
+        "t_48857c9a607fe610",
+        "t_4e32c8e46d5b4f61",
+        "t_7b767d78cd5bd935"
+      ],
+      "claim": "正式关系包括英文算法步骤、范围、精度分组、ledger计数及step引用，不能计为自由叙述漏洞。",
+      "core_fact": "偶数chunk padding、BF16多次窄化、FP32 carry、8→64 inverse、32-token分组均影响既定数值。",
+      "deletion_counterexample": "删除R的内层bf16或把Udec由Ubar计算将允许不同舍入路径；删除prefix分组允许另一sum32归约顺序。",
+      "existing_structural_candidate": "既有math及arithmetic足够：R=bf16(Vᵀ-bf16(KS⊙Gamma[None,:])); Udec=bf16(U⊙Decay[None,:])。无需新增字段。",
+      "gap_kind": "none",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:101",
+        "inputs/template_gdn_prefill/root.yaml:105",
+        "inputs/template_gdn_prefill/root.yaml:120",
+        "rules/schema_docs/3.design.math_reshape.md:223"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F03",
+      "kind": "structural_gap",
+      "unit_ids": [
+        "t_328abd3390325a8a",
+        "t_238bbb50b1f21d01",
+        "t_6ae617e7af900e94",
+        "t_7897b9c05e6a6412",
+        "t_9106e71a77a1e6f2",
+        "t_b5c49c3a57a8ea60",
+        "t_b958fd734bd04fee",
+        "t_5c985cbceafd5785",
+        "t_6164115ce2fe99a1"
+      ],
+      "claim": "外部返回顺序、对象别名和仅指定输入可变依赖Contract文字，input/output shape或ref属性不能表示对象身份。",
+      "core_fact": "O is output，S_final is output_state；两个原buffer完整覆盖，其他输入不变。",
+      "deletion_counterexample": "删掉别名/副作用文字后，返回新分配同值张量且不写原buffer与原地写回都满足剩余值公式。NaN初值也可能被错误累加。",
+      "existing_structural_candidate": "已查output.meaning、compute.math、shape/dtype ref、flow.storage及resource.view：后两者分别是内部物化与局部资源别名，不能合法表示外部Python对象别名。现有方式只能保留meaning/compute中的关系；外部alias/mutation字段是候选，未自行采用。",
+      "gap_kind": "missing_field_or_event",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:26",
+        "inputs/template_gdn_prefill/root.yaml:29",
+        "inputs/template_gdn_prefill/root.yaml:43",
+        "rules/schema_docs/1.contract.algorithm_requirement.md:38",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:812"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F04",
+      "kind": "structural_gap",
+      "unit_ids": [
+        "t_328abd3390325a8a",
+        "t_0588c07a723593e9",
+        "t_5485d7ce1226bf07",
+        "t_b63ee7c06b98f0ed",
+        "t_b958fd734bd04fee",
+        "t_c32d83714413cf4b"
+      ],
+      "claim": "输入分布、normalization、初态来源可写正式关系；连续CUDA布局与计时域则仍为Contract中的开放任务环境语义。",
+      "core_fact": "输入生成/normalize/前缀评估不在计时中，实际forward含index_cast；有效域允许zero/continuation、排除空序列。",
+      "deletion_counterexample": "删除计时域会允许把生成或prefix计入成本，删除contiguous会允许不同地址步长输入；删除初态域会把任意FP32 state误当等价测试域。",
+      "existing_structural_candidate": "可将生成关系压缩为q/k/v的range谓词，并继续用compute给出联合分布；现有Contract没有contiguity/benchmark_scope字段。公式化分布不是扩语言，计时字段缺少只是任务环境表达候选。",
+      "gap_kind": "open_semantics",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:33",
+        "rules/schema_docs/1.contract.algorithm_requirement.md:45",
+        "work/template_gdn_prefill/source/input.py:24",
+        "work/template_gdn_prefill/source/input.py:47"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F05",
+      "kind": "source_limitation",
+      "unit_ids": [
+        "t_09eb3c457258c03d",
+        "t_7e4016ec26766b60",
+        "t_51298e81989315e3",
+        "t_43bffef6cb85ae17",
+        "t_768b71c4eecdfa3b"
+      ],
+      "claim": "三类限制须保留：oracle blocked FP32比较值、fast log2/exp2无可靠误差界、多序列旧descriptor在途读与更新顺序未建立；编译器/驱动记录不全也不能伪造。",
+      "core_fact": "不能把数值误差边界或descriptor更新安全当成已获证明；已有schema不是GPU验证基线。",
+      "deletion_counterexample": "删限制后读者可能把实数递推当逐位oracle，或认为fence证明旧请求读完；后二者都不是当前证据所支持。",
+      "existing_structural_candidate": "已有golden_reference.gap、arithmetic.approx和realization.reason可承载短限制；新增reuse边会改变已抽取设计，不能以修词自动补入。",
+      "gap_kind": "unresolved",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:53",
+        "inputs/template_gdn_prefill/root.yaml:101",
+        "inputs/template_gdn_prefill/root.yaml:322",
+        "work/template_gdn_prefill/source/reference.py:269",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:222"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F06",
+      "kind": "existing_structure",
+      "unit_ids": [
+        "t_3b33887778ec93dc",
+        "t_5b334a0189d7d8e5"
+      ],
+      "claim": "P数量公式目前仅在mapping.strategy，而worker_count填P；可以用现有数值表达式承载数量，无须新字段。",
+      "core_fact": "worker_count=min(worktile_count,num_sm)，工作按既有batch/head/dv顺序展平并步长分配；num_sm来自运行时设备属性。",
+      "deletion_counterexample": "只删strategy将使P未绑定，任意CTA数量均可能满足worker_count:P；固定148也会把runtime查询改成常量设计。",
+      "existing_structural_candidate": "mapping: {strategy: \"num_sm is the runtime device SM count.\", worker: {unit: CTA, unit_count: 1}, worker_count: \"min(worktile_count,num_sm)\"}\nschedule.worker_assignment: {preassigned: {start: worker_id, step: worker_count}, refill: none, exit: assigned_done}\n保留现有worktile_order，线性id由DOC4推导。",
+      "gap_kind": "none",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:178",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:112",
+        "rules/schema_docs/4.design.work_schedule.md:167",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:35",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:794"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F07",
+      "kind": "redundancy",
+      "unit_ids": [
+        "t_649331bc4009f6a8",
+        "t_8a1eba8e4d9d0f23",
+        "t_0f07081619eca457",
+        "t_1760e93dd2d618d9",
+        "t_1c4ecd3132b3b929",
+        "t_513dd7d932964669",
+        "t_b5977bf32348dc3a",
+        "t_02b7c3cf9d41a509",
+        "t_2a0f6a7113cc1467",
+        "t_56041319279124d3",
+        "t_cfdbf59620953e19"
+      ],
+      "claim": "已有flow、域、资源、边及共享默认覆盖一批重复叙述：转换提交、零初态加载、Beta归还、跨worktile游标和不排空。",
+      "core_fact": "single虽无Cu32消费者仍保留实际index_cast；root flattened n跨工作，状态按每t重载；Beta复用等Tinv。",
+      "deletion_counterexample": "这些结构保留时缩句不改变设计；若连index_cast一起删则丢一次实际kernel，或把n重置则改变ring复用，均不在删减候选内。",
+      "existing_structural_candidate": "当前已写：flow.launch: [{phase: [index_cast]}, {phase: [gdn], start_after: index_cast.kernel_done}]；domain: {t: worktile, c: [0,Np], n: {flatten: [t,c]}}；每t先load:initial_state(t)。DOC5默认资源跨工作接续，不额外加drain。",
+      "gap_kind": "none",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:151",
+        "inputs/template_gdn_prefill/root.yaml:182",
+        "inputs/template_gdn_prefill/root.yaml:194",
+        "inputs/template_gdn_prefill/root.yaml:277",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:85",
+        "rules/schema_docs/5.design.tile_pipeline.md:383",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:812"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F08",
+      "kind": "redundancy",
+      "unit_ids": [
+        "t_304cb8b6f5a7d0fd",
+        "t_4908bdeb7a81806c",
+        "t_b1a00a9ae185d899",
+        "t_6390584ff8db3df0"
+      ],
+      "claim": "matmul零初值/累加目标与cumulative completion重复了mm32/mma32、execution_mode及原语绑定。",
+      "core_fact": "数学产物名绑定仍需一句；operand-read完成保证不能在没有原语证据时凭mode猜测。",
+      "deletion_counterexample": "保留math、async_ordered_completion及tcgen05契约时删重复不会丢数值；若省略operand-read语义的最后一份定义，Sbar/R与累加器alias可能过早覆盖。",
+      "existing_structural_candidate": "verb.matmul: \"Compute the named upstream matrix product; done covers operand reads.\"\ninfo.execution_mode: async_ordered_completion\n保留realization对tcgen05的绑定；零初始及C参数由mm32/mma32确定。",
+      "gap_kind": "none",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:228",
+        "inputs/template_gdn_prefill/root.yaml:253",
+        "inputs/template_gdn_prefill/root.yaml:315",
+        "rules/schema_docs/5.design.tile_pipeline.md:112",
+        "rules/schema_docs/3.design.math_reshape.md:231"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F09",
+      "kind": "structural_gap",
+      "unit_ids": [
+        "t_ab649368db08e1c1",
+        "t_2d944261e9874f56",
+        "t_373e3471edbe11bf",
+        "t_64d091036abe724f",
+        "t_7a8b041439bedb57",
+        "t_883da689cc69177a",
+        "t_94171abdbbd93873",
+        "t_c145f25b39585b2a",
+        "t_cec860337c98f00f",
+        "t_dd6e50e80e7b8620"
+      ],
+      "claim": "资源别名已结构化，但从别名槽捕获到寄存器、提前归还以及row/column Beta不同寿命仍依赖动作契约。",
+      "core_fact": "KK/QK/U读到register后允许TMEM覆盖；Wpair保留到Bmat；row Beta可先捕获但column Beta读到Tinv。",
+      "deletion_counterexample": "只保留read名和reuse边，可把read实现为晚读取TMEM的view，或者提前归还Beta而Tinv继续读SMEM；会破坏存储安全或失去提前归还的重叠。",
+      "existing_structural_candidate": "resource.space/register、view.part、waits_for.reuse可记容量/同址/读完成；没有通用read/write access-set或capture目的值绑定。可拆出已定义捕获值与load/release动作，但必须另给捕获数学/存储关系，不能只造Captured名当已解决。当前短动作契约属有意开放语义。",
+      "gap_kind": "open_semantics",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:204",
+        "inputs/template_gdn_prefill/root.yaml:211",
+        "inputs/template_gdn_prefill/root.yaml:240",
+        "inputs/template_gdn_prefill/root.yaml:274",
+        "rules/schema_docs/5.design.tile_pipeline.md:298",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:478",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:724"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F10",
+      "kind": "structural_gap",
+      "unit_ids": [
+        "t_106cd544b6cbc270",
+        "t_18aca5f842ce6acc",
+        "t_2d944261e9874f56",
+        "t_373e3471edbe11bf",
+        "t_94171abdbbd93873",
+        "t_cb27bc7b5078acf8",
+        "t_dd6e50e80e7b8620"
+      ],
+      "claim": "StateOperand/Gate/Scalar/UpdateOperand/Pair是合成接口，名称未在上游定义；组成和一次读取复用只能从verb正文确定。",
+      "core_fact": "StateOperand一次读S同时产Sbar并原地Sdec；Gate={G,Gamma}、Scalar={G,Gamma,Beta}、UpdateOperand={Ubar,Udec}在各自done后共同可读。",
+      "deletion_counterexample": "删合成定义后，一个实现只发布Sbar或Ubar，另一个完成全部组合，都能使用相同动作名和剩余边；多次重读S也不违反现有资源容量。",
+      "existing_structural_candidate": "已查resource.view、math.symbol、milestone：view只声明存储，milestone只给已有事件组命名，均不能声明单动作包含哪些写入或单读复用。拆成多个publish并显式同步可表达顺序但改变原子发布粒度/性能；目前保留短合成契约，候选为结构化动作读写/发布成员，未引入新字段。",
+      "gap_kind": "open_semantics",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:269",
+        "inputs/template_gdn_prefill/root.yaml:303",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:196",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:233",
+        "rules/schema_docs/5.design.tile_pipeline.md:81",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:679"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F11",
+      "kind": "structural_gap",
+      "unit_ids": [
+        "t_2d944261e9874f56",
+        "t_94171abdbbd93873",
+        "t_b030da1c7751ec8f",
+        "t_77f0d01467df493b",
+        "t_fdd0d988c0872744",
+        "t_9457c507c163ecd7"
+      ],
+      "claim": "已核实源码用独立/共用通知流及ready-only协议，但未证明通知流身份需要专用核心字段；保留为开放的来源协议绑定，撤回missing_field_or_event结论。",
+      "core_fact": "已证核心关系是数据发布及全部旧读者退役。root四条通知流、single共用一流、single Scalar五个ready-only槽是来源事实；它们的物理barrier数量/API身份是否另有一阶影响未决。single把Ubar/Udec合为UpdateOperand的发布关系已在pipe/data体现，不应再算流身份缺口。",
+      "deletion_counterexample": "未找到只改变流身份/full-empty形式就必然新增不可推导等待的反例：StateOperand(n)已等S(n-1).done，MMA1累积完成覆盖旧KS/QS；Ubar覆盖R前已等U(n).done；R(n)和Udec(n)所需旧读者也由上一S.done传递保证。single prepare(c+5)在store:O(c).done之后，后者传递覆盖旧scalar读者。若full-empty在这些已有退役点归还，acquire只等待已满足条件；增加barrier存储/指令不等于增加图依赖，现有证据也未量化一阶性能影响。",
+      "existing_structural_candidate": "保留现有pipe、data/reuse和operand-read completion契约即可表达已证发布/退役关系；require/verb可以简短保存源码通知API及ready-only选择。没有专用流身份字段本身不证明核心表达不足；若未来证据显示不同协议引入新的等待/发布位置，应先用现有动作和边表达，再评估紧凑表示需求。此次不提出新增通知流字段。",
+      "gap_kind": "open_semantics",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:253",
+        "inputs/template_gdn_prefill/root.yaml:269",
+        "inputs/template_gdn_prefill/root.yaml:286",
+        "inputs/template_gdn_prefill/root.yaml:324",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:196",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:229",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:235",
+        "rules/schema_docs/5.design.tile_pipeline.md:112",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:154",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:162",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:349"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "template_gdn_prefill-F12",
+      "kind": "structural_gap",
+      "unit_ids": [
+        "t_c47de18ba3ae684c"
+      ],
+      "claim": "Inverse在8/32/64层每chunk两个warp，而16层四warp依次处理两个chunk；固定role.member不能表达逐层分工。",
+      "core_fact": "组内rendezvous和每级不同成员工作分配决定inverse critical path及两chunk并行度。",
+      "deletion_counterexample": "删这句后，用全四warp串行做每个chunk和两warp同时处理两个chunk都满足member=warp[0:4]与invert:Pair，但吞吐/同步不同。",
+      "existing_structural_candidate": "现有语法可把固定warp子集拆role，按stage/level列pipe并用sync边rendezvous；需显式展开16层与其他层不同工作区域且为各动作定义数学绑定，不能让info.member依赖repeat变量。没有已审核的紧凑等价替稿，因此归为表示成本候选，保留原句。",
+      "gap_kind": "representation_cost",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:242",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:174",
+        "rules/schema_docs/5.design.tile_pipeline.md:194",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:518",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:523"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F13",
+      "kind": "existing_structure",
+      "unit_ids": [
+        "t_47ae33007ef4ae5b",
+        "t_b030da1c7751ec8f",
+        "t_fdd0d988c0872744"
+      ],
+      "claim": "raw标量相邻四head、首两次load和c+2条件预取可以迁入现有公式/repeat/事件；当前单个prepare隐藏内部异步工作，部分原语可见性仍需开放契约。",
+      "core_fact": "raw读取h所在四head组；capture h%4且读完才覆盖c%2；c+2预取先于本chunk的G/Gamma计算；processed c%5由输出进度保护。",
+      "deletion_counterexample": "删内部顺序可先算G再预取，失去重叠；删四head绑定可取错列；把五槽误作完整acquire/release会改变协议。",
+      "existing_structural_candidate": "数学视图：RawScalar(c)[0,i,r]=alpha[c*C+i,4*floor(h/4)+r], RawScalar(c)[1,i,r]=beta[c*C+i,4*floor(h/4)+r], 0<=r<4；域外raw采用TMA零填充，随后逻辑Alpha用1替换域外行。\n首发可用：prologue: [{repeat: {j: [0,2]}, steady: [\"load:RawScalar(n[t,j])\"]}]，load采用execution_mode: async。\n对内部次序可拆现有read契约为捕获column h%4的serial动作，再用repeat: {r: [\"min(c+2,Np)\",\"min(c+3,Np)\"]}发射load:RawScalar(n[t,r])，然后compute:G/Gamma；read等待对应load.done。此局部片段说明可表达性，未宣称完整短稿已等价审阅；warp fence/事务合并仍保留realization。",
+      "gap_kind": "none",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:136",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:228",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:235",
+        "rules/schema_docs/5.design.tile_pipeline.md:145",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:271",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:280"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F14",
+      "kind": "existing_structure",
+      "unit_ids": [
+        "t_dd4a2966a273836b"
+      ],
+      "claim": "rescale是自定义动作，但其全部语义已可由compute:QSscaled、上游公式和Arena别名表示。",
+      "core_fact": "QSscaled原地覆盖QS，等QS完成后执行，MMA1/Y等缩放完成。",
+      "deletion_counterexample": "只删verb而保留rescale名会留下未定义动作；连同动作与引用改成compute:QSscaled则数值和先后保持。",
+      "existing_structural_candidate": "pipe中\"rescale:QS(n)\"→\"compute:QSscaled(n)\"；data: {\"compute:QSscaled(n)@issue\": [\"MMA1/matmul:QS(n)@done\"]}；MMA1的Y前驱改\"Recurrence/compute:QSscaled(n)@done\"。保留Arena中QS/QSscaled同part，以及math的QSscaled=(QS⊙Gamma)*fp32(scale)。不新增动作词或事件种类。",
+      "gap_kind": "none",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:125",
+        "inputs/template_gdn_prefill/root.yaml:212",
+        "inputs/template_gdn_prefill/root.yaml:275",
+        "inputs/template_gdn_prefill/root.yaml:259",
+        "rules/schema_docs/5.design.tile_pipeline.md:87"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F15",
+      "kind": "structural_gap",
+      "unit_ids": [
+        "t_3f802932ce3ebc5c",
+        "t_43bffef6cb85ae17",
+        "t_83652c75fb992cb9",
+        "t_983106a340af33ce",
+        "t_fd3ce3eba9be55e9",
+        "t_77f0d01467df493b",
+        "t_7dfe0e091a8ad1f2",
+        "t_b1a00a9ae185d899",
+        "t_c8e7b4b4b6ebbe7e",
+        "t_fdd0d988c0872744",
+        "t_731675cc45401616",
+        "t_768b71c4eecdfa3b",
+        "t_fafd588dd07dab16"
+      ],
+      "claim": "原语身份和原语自身可见性/descriptor更新行为是有意开放绑定；物理DMA完成与通用done并非由字符串动作名自行证明。",
+      "core_fact": "tcgen05读完成/累积顺序、warp MMA独立引擎、mutable或embedded TMA界、O bulk-store完成、raw fence均需具体保证。",
+      "deletion_counterexample": "换成不覆盖operand-read的通知或store.issue即归还O，仍可保留同图名称但资源被过早覆盖；descriptor更新不等待旧访问亦可能越序列界。",
+      "existing_structural_candidate": "已用realization.require.item关联Design对象，choice绑定tcgen05/mma.sync/TMA/管线API；未找到闭合的原语语义表可完全去除必要短契约。已有约束图承载设计先后，choice承担实现兼容性，不能据允许自由文本推定图本身足够。",
+      "gap_kind": "open_semantics",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:220",
+        "inputs/template_gdn_prefill/root.yaml:305",
+        "inputs/template_gdn_prefill/root.yaml:315",
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:245",
+        "rules/schema_docs/6.realization.md:9",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:737"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F16",
+      "kind": "structural_gap",
+      "unit_ids": [
+        "t_263d5b133f5e61d6",
+        "t_6c67314fe3205270",
+        "t_bf65cfd621166b87",
+        "t_fbe55b4f6cea5249",
+        "t_4f201fb09921413f",
+        "t_7e4016ec26766b60",
+        "t_680d6642a8764eac",
+        "t_6f5eff329130bc7c",
+        "t_707ed1a5b6536df5"
+      ],
+      "claim": "硬件execution/feature及软件栈是有意开放的设备事实；冻结wiki仍为pending，不能假设已提供完整共享语义。",
+      "core_fact": "存储层级所有权、TMEM独立分配、执行组成及版本身份须在本任务定义或真实资料绑定中可读。",
+      "deletion_counterexample": "仅留SMEM/TMEM/register键名会允许不同存储所有权/可见性解释；仅留L20D不确定CuTe/torch版本。",
+      "existing_structural_candidate": "DOC2的execution/feature值限定为摘要字符串，禁止任意嵌套；wiki引用是既有复用入口，但当前pending不是真实替代。设备统一事实可在将来已固定wiki中共享，此处不擅自新增硬件结构。",
+      "gap_kind": "open_semantics",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:58",
+        "inputs/template_gdn_prefill/root.yaml:62",
+        "inputs/template_gdn_prefill/root.yaml:67",
+        "inputs/template_gdn_prefill/root.yaml:70",
+        "rules/schema_docs/2.contract.hardware_specification.md:79"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "template_gdn_prefill-F17",
+      "kind": "source_limitation",
+      "unit_ids": [
+        "t_43bffef6cb85ae17",
+        "t_c8e7b4b4b6ebbe7e",
+        "t_768b71c4eecdfa3b"
+      ],
+      "claim": "跨调用边界：源码按编译配置/device缓存TensorMap workspace，root的可变descriptor需额外核对并发stream调用是否允许；当前文本仅描述一次worker执行。",
+      "core_fact": "一次调用的phase/worker身份不能自动为跨调用复用的同一物理descriptor存储建立退役关系。",
+      "deletion_counterexample": "若同配置同device允许两stream并发调用，共享workspace可能在旧TMA读取期间被另一次调用更新；若调用串行则无此反例。本轮未取得并发调用约束，故不宣称已证race。",
+      "existing_structural_candidate": "DOC0为每次真实执行建立新事件实例，不能靠重命名调用消除共享存储；flow.kernel_done可表达同一次plan内顺序，现有节点没有跨调用workspace所有权契约。需核对调用域/库的并发保证或保留来源限制，不能擅自新增跨stream同步。single使用embedded descriptors，不依赖这份mutable workspace。",
+      "gap_kind": "unresolved",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:321",
+        "rules/schema_docs/0.common.md:41",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:803",
+        "work/template_gdn_prefill/source/aka_solution/solution.py:805"
+      ],
+      "confidence": "medium"
+    }
+  ],
+  "removal_candidates": [
+    {
+      "unit_id": "t_0f7376c7514cf6c5",
+      "quote": "树与 `meta_data.dispatch.parent` 对应；两份设计按各自的 `meta_data.dispatch.when` 选择，共同使用 root 的 Contract。修订号见各节点的 `meta_data.version`。",
+      "replacement": "精确选择条件与版本以各节点 YAML 为准。",
+      "kind": "redundancy",
+      "reason": "DOC0已确定共享Contract、parent和version，保留索引指引。",
+      "evidence": [
+        "inputs/template_gdn_prefill/dispatch.md:15"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_13953c5deb7bde1c",
+      "quote": "End-decayed update rounded directly from U.",
+      "replacement": "End-decayed update.",
+      "kind": "redundancy",
+      "reason": "直接从U窄化在两个recurrence.math中明确。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:72",
+        "inputs/template_gdn_prefill/root.yaml:137"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_6db7812837549460",
+      "quote": "Residual after two separate BF16 roundings.",
+      "replacement": "Residual.",
+      "kind": "redundancy",
+      "reason": "R公式保留双bf16。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:68",
+        "inputs/template_gdn_prefill/root.yaml:133"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_6e0582597a0fa3dc",
+      "quote": "Rounded state snapshot before decay.",
+      "replacement": "State snapshot.",
+      "kind": "redundancy",
+      "reason": "Sbar公式在衰减前从S(c-1)窄化。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:64",
+        "inputs/template_gdn_prefill/root.yaml:129"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_ab649368db08e1c1",
+      "quote": "Rounded feedback and in-place inverse workspace.",
+      "replacement": "Feedback workspace.",
+      "kind": "redundancy",
+      "reason": "bf16由公式/dtype，A/Tinv同址由Tring view和invert定义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:49",
+        "inputs/template_gdn_prefill/root.yaml:114"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_0f07081619eca457",
+      "quote": "Acquire a separate beta stage and copy Beta with explicit zero-fill for padded rows.",
+      "replacement": "Copy Beta into its stage.",
+      "kind": "redundancy",
+      "reason": "Beta zero-pad在math，独立槽与acquire旧读者边在BetaRing/reuse。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:304"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_1c4ecd3132b3b929",
+      "quote": "Initialize S from this worktile's explicit initial_state, including all-zero input states.",
+      "replacement": "Load S from initial_state for this worktile.",
+      "kind": "redundancy",
+      "reason": "保留load动作的S绑定；无default且公式S(-1)包含零值输入。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:195",
+        "inputs/template_gdn_prefill/root.yaml:268"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_304cb8b6f5a7d0fd",
+      "quote": "Issue the named upstream product with zero FP32 accumulator; completion covers this issuer's prior products and operand reads.",
+      "replacement": "Compute the named upstream matrix product; done covers operand reads.",
+      "kind": "redundancy",
+      "reason": "mm32给零FP32累加；mode给此前完成，保留custom product绑定和read completion。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:161",
+        "inputs/template_gdn_prefill/root.yaml:228"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_4908bdeb7a81806c",
+      "quote": "Issue the named upstream product; KS/QS/U start from zero, Y accumulates into QSscaled, S into Sdec. Completion covers this issuer's prior products and operand reads.",
+      "replacement": "Compute the named upstream matrix product; done covers operand reads.",
+      "kind": "redundancy",
+      "reason": "mm32/mma32已规定零、QSscaled、Sdec；保留必要动作/原语绑定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:181",
+        "inputs/template_gdn_prefill/root.yaml:253"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_513dd7d932964669",
+      "quote": "Perform the upstream Cu32 conversion with the contiguous PyTorch copy kernel; only valid B+1 elements are read and written, with no internal asynchronous stage.",
+      "replacement": "Perform the upstream Cu32 conversion with the contiguous PyTorch copy kernel.",
+      "kind": "redundancy",
+      "reason": "B+1有效域由shape/target，serial单动作无设计级异步stage。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:124",
+        "inputs/template_gdn_prefill/root.yaml:191"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_7a8b041439bedb57",
+      "quote": " after StateOperand publication",
+      "replacement": "",
+      "kind": "redundancy",
+      "reason": "serial pipe已将compute:Decay放在publish:StateOperand之后。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:273"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_7a8b041439bedb57",
+      "quote": ", and overlap with KS/QS",
+      "replacement": "",
+      "kind": "redundancy",
+      "reason": "MMA1独立推进且仅受声明边约束；不把潜在overlap写成额外保证。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:273"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_b030da1c7751ec8f",
+      "quote": "Raw stages use c%2; write G/Gamma/Beta into processed stage c%5. ",
+      "replacement": "",
+      "kind": "redundancy",
+      "reason": "RawScalar/ScalarRing view已完全给出槽映射；保留接下来的ready-only限定及读者保护解释。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:229"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_c145f25b39585b2a",
+      "quote": " before subsequent weighting arithmetic",
+      "replacement": "",
+      "kind": "redundancy",
+      "reason": "Inverse的serial pipe将read放在compute:A或publish:Bmat之前。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:173",
+        "inputs/template_gdn_prefill/root.yaml:241"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_cec860337c98f00f",
+      "quote": " after StateOperand publication, permitting overlap with KS/QS",
+      "replacement": "",
+      "kind": "redundancy",
+      "reason": "same-role serial及独立MMA1的已声明边共同确定。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:200"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_2a0f6a7113cc1467",
+      "quote": "All roles follow the same preassigned sequence; ring cursors continue across worktiles while S reloads each worktile's initial_state. No per-worktile global drain.",
+      "replacement": "",
+      "kind": "redundancy",
+      "reason": "DOC5默认跨工作不排空、flatten n跨t、每t load和carry_forward重置已全部存在。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:182"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_3b33887778ec93dc",
+      "quote": " For B=1, linear id=2*h+row_half; the recorded 148-SM run gives 64 CTAs, one worktile each.",
+      "replacement": "",
+      "kind": "redundancy",
+      "reason": "保留P/runtime定义；linear id和64个worktile由B=1、HV/DV和worktile_order推导，148仅运行例。",
+      "evidence": [
+        "inputs/template_gdn_prefill/m64_single_sequence.yaml:112"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_56041319279124d3",
+      "quote": "Traverse Np chunks per worktile using Cu32[b:b+2]; the two value-row halves never merge.",
+      "replacement": "",
+      "kind": "redundancy",
+      "reason": "Cu32 invariant、Np domain、n[t] pipe和single_tile输出已表达全部含义。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:166"
+      ],
+      "applies_to_occurrences": "all"
+    },
+    {
+      "unit_id": "t_5b334a0189d7d8e5",
+      "quote": "; linear id=b*(2*HV)+2*h+row_half. The source L20D run records num_sm=148.",
+      "replacement": ".",
+      "kind": "redundancy",
+      "reason": "保留runtime P；worktile_order决定id，148并非设计常量。",
+      "evidence": [
+        "inputs/template_gdn_prefill/root.yaml:178"
+      ],
+      "applies_to_occurrences": "all"
+    }
+  ],
+  "node_review": [
+    {
+      "node": "root",
+      "reviewed": true,
+      "effective_binding_checked": true,
+      "notes": "template v7；Contract完整共享；三区本地，B>1。index_cast→gdn及Cu32 handoff；12 warp、双inverse/recurrent组；变长偶数padding、跨t flatten环、双gate读者与K/Q双issuer复用均逐一核对；descriptor旧请求顺序未证。"
+    },
+    {
+      "node": "m64_single_sequence",
+      "reviewed": true,
+      "effective_binding_checked": true,
+      "notes": "template v6；B=1独立于父when；共享root Contract，三区均本地。保留无消费者Cu32转换；固定T、raw双槽/processed五槽/四chunk lookahead，共用Recurrence ready流；首末chunk、Np=2/4及长序列、零/continuation初态已覆盖。"
+    }
+  ],
+  "limits": [
+    "审计对象为规范化template，非GPU/语义/性能已验证基线；没有运行GPU、修改原schema或Runner。",
+    "固定source commit 01fff90d714abc6e84904ea9c44523ba66d34a0e；亲读selected aka_solution/solution.py的scheduler、dispatch、各本例活跃role/原语调用路径，reference.py和input.py；未重新审计全部低层inverse汇编或安装版PyTorch copy内核的512元素容量。",
+    "fast log2/exp2误差界、TensorMapManager旧descriptor读取与更新顺序、pending wiki及独立编译器/driver版本仍未补齐。",
+    "未独立验证并发调用共享tensormap workspace的stream安全；source缓存按device复用workspace，跨调用/外层capture回放只能按DOC0区分实际执行，当前源码没有自有capture/fallback计算分支。",
+    "逐字段面积不是可删量；removal_candidates只是保持原结构的保守短写候选，未生成或批准完整等价短稿。结构化片段是可审查建议而非已应用修改。",
+    "现有from_parent只支持整区；本例math有Cu32/输出索引差异、schedule和pipeline有实际差异，不能仅凭跨文件相同文字删除子节点定义。"
+  ]
+}

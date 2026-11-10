@@ -1,0 +1,173 @@
+1: meta_data:
+2:   name: paged_grouped_query_decode_attention
+3:   describe: Compute right-aligned causal attention against a paged FP8 KV cache; overwrite BF16 out.
+4:   source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_decode/aka_solution/solution.py::Model.forward
+5:   version: 7
+6:   dispatch:
+7:     id: q4_direct
+8:     parent: root
+9:     when: | # U048
+11: design:
+12:   math_reshape:
+13:     thesis: Stream the sole key block without score/probability materialization. Pack heads and query tokens into matrix columns; two FP8 probability components feed the numerator
+14:       while its denominator remains FP32.
+15:     rewrite:
+16:     - step: block
+17:       name: Pack the query and retain one key block
+18:       math: | # U096
+25:       symbol:
+26:         Bk: {meaning: Key-block length., binding: 'bind:design.work_schedule::Bk'}
+27:         QueryTile: {meaning: Queries sharing a KV traversal., binding: 'bind:design.work_schedule::QueryTile'}
+28:         PackedColumns: {meaning: Packed query-head column count., binding: 'bind:design.work_schedule::PackedColumns'}
+29:         Qpack: {meaning: Packed query rows., shape: [{packed_query: PackedColumns}, {d: D}], dtype: fp8_e4m3fn, retention: 'keep_value (b,q)'}
+30:         Kblk: {meaning: Padded logical key block., shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn}
+31:         Vblk: {meaning: Padded logical value block., shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn}
+32:         ScoreBlock: {meaning: Raw key-query product before the softmax mask., shape: [{kv: Bk}, {packed_query: PackedColumns}], dtype: fp32}
+33:     - step: exponent
+34:       name: Split scaled probabilities into leading and residual FP8 components
+35:       math: | # U099
+42:       symbol:
+43:         m: {meaning: Running base-two maximum., shape: [{packed_query: PackedColumns}], dtype: fp32}
+44:         P_hi: {meaning: Leading scaled probability., shape: 'ref:ScoreBlock.shape', dtype: fp8_e4m3fn}
+45:         P_lo: {meaning: Independently rounded residual., shape: 'ref:ScoreBlock.shape', dtype: fp8_e4m3fn}
+46:         ExponentialSum: {meaning: FP32 probability partial sums., shape: [{partial: 128}, {packed_query: PackedColumns}], dtype: fp32}
+47:         Llocal: {meaning: Split denominator., shape: 'ref:m.shape', dtype: fp32}
+48:       arithmetic: {approx: 'exp2_fast is the source fast-math base-two exponential; unknown: no verified error bound for this fast-exp2 path.'}
+49:     - step: normalize
+50:       name: Normalize the two-component numerator locally
+51:       math: | # U097
+55:       symbol:
+56:         Y: {meaning: Scaled local numerator., shape: [{d: D}, {packed_query: PackedColumns}], dtype: fp32}
+57:         Normalization: {meaning: Final multiplier., shape: [{packed_query: PackedColumns}], dtype: fp32}
+58:       arithmetic:
+59:         approx: 'rcp_fast is the source approximate reciprocal; unknown: no verified error bound for this reciprocal path.'
+60:         accumulate: Each reduction slice accumulates its leading product then its residual into the same FP32 Y; Llocal sums four warp partials.
+61:     ledger:
+62:       baseline: Dense FP32 scores/probabilities in global memory, with one value contraction.
+63:       traffic:
+64:       - {item: Dense intermediates, change: '-16*q_len_per_req*HeadCount*seq_lens[b] bytes per request of score/probability writes and reads.', by: [block, exponent]}
+65:       matmul:
+66:       - {item: Contractions, change: '2*D*seq_lens[b] -> 3*D*Bk MAC per query head; padding and the residual product add work.', by: [block, normalize]}
+67:       error:
+68:       - {item: Probability representation, change: +two FP8 roundings per exponential; denominator remains FP32; fast exp2 and reciprocal add approximation., by: [exponent, normalize]}
+69:   work_schedule:
+70:     thesis: Keep the one-block KV reduction inside one CTA; no split workspace or collective is needed.
+71:     flow: {launch: [{phase: [attention]}]}
+72:     phase:
+73:       attention:
+74:         describe: Compute and normalize one query block within its assigned worker.
+75:         decomposition:
+76:           strategy: Bk=256; QueryTile=2; PackedColumns=HeadCount*QueryTile. The dispatch domain has exactly one KV block per request; load its four logical pages directly from HND
+77:             storage.
+78:           partition: {batch: {size: BatchCount, tile: 1}, query_tail: {size: q_len_per_req, tile: QueryTile}}
+79:           worktile:
+80:             invariant: {Qpack: {shape: [{packed_query: PackedColumns}, {d: D}], dtype: fp8_e4m3fn}, seq_lens: {shape: [{batch: 1}], dtype: int32}}
+81:             iteration: {block_tables: {shape: [{page_index: 4}], dtype: int32, direction: ascending}, Kblk: {shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn, direction: ascending},
+82:               Vblk: {shape: [{kv: Bk}, {d: D}], dtype: fp8_e4m3fn, direction: ascending}}
+83:           target: {single_tile: {output: {shape: [{query_tail: QueryTile}, {head: HeadCount}, {d: D}], dtype: bf16}}}
+84:         mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: worktile_count}
+85:         schedule: {worktile_order: [{by: batch, direction: ascending}, {by: query_tail, direction: ascending}], worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none,
+86:             exit: assigned_done}}
+87:   tile_pipeline:
+88:     thesis: Pack two tail queries per CTA and use one softmax warpgroup; retain the initialized empty parity for the one-block drain and redistribute registers to Correction.
+89:     phase:
+90:       attention:
+91:         resource:
+92:           Qpack: {slot_count: 1, space: SMEM, member_slot_shape: [{packed_query: PackedColumns}, {d: D}], dtype: fp8_e4m3fn}
+93:           PageIndex: {space: SMEM, member_slot_shape: [{page_index: 4}], dtype: int32, slot_count: 4, view: {PageIndex: {slot_index: 0}}}
+94:           KV:
+95:             slot_count: 1
+96:             space: SMEM
+97:             member_slot_shape: [{element: 16384*KVStageCount}]
+98:             dtype: fp8_e4m3fn
+99:             view:
+100:               Kslice(u): {part: {element: [16384*(u%KVStageCount), 16384*(u%KVStageCount+1)]}}
+101:               Vslice(u): {part: {element: [16384*((4+u)%KVStageCount), 16384*((4+u)%KVStageCount+1)]}}
+102:               Ostage: {part: {element: [0, 2*D*PackedColumns]}, dtype: bf16}
+103:           ScoreBlock: {space: TMEM, member_slot_shape: [{kv: Bk}, {packed_query: PackedColumns}], dtype: fp32, slot_count: ScoreStageCount, view: {ScoreBlock: {slot_index: 0}}}
+104:           P_hi: {space: SMEM, member_slot_shape: [{kv: Bk}, {packed_query: PackedColumns}], dtype: fp8_e4m3fn, slot_count: 4, view: {P_hi: {slot_index: 0}}}
+105:           P_lo: {space: SMEM, member_slot_shape: [{kv: Bk}, {packed_query: PackedColumns}], dtype: fp8_e4m3fn, slot_count: 4, view: {P_lo: {slot_index: 0}}}
+106:           Y: {space: TMEM, member_slot_shape: [{d: D}, {packed_query: PackedColumns}], dtype: fp32, slot_count: 2, view: {Y: {slot_index: 0}, EmptyY: {slot_index: 1}}}
+107:           ExponentialSum: {space: TMEM, member_slot_shape: [{partial: 128}, {packed_query: PackedColumns}], dtype: fp32, slot_count: 2, view: {ExponentialSum: {slot_index: 0}, EmptySum: {slot_index: 1}}}
+108:           Maximum: {slot_count: 1, space: SMEM, member_slot_shape: [{packed_query: PackedColumns}], dtype: fp32, view: {m: {}, Normalization: {}}}
+109:           FinalSum: {slot_count: 1, space: SMEM, member_slot_shape: [{packed_query: PackedColumns}, {warp: 4}], dtype: fp32}
+110:           TailNumerator: {slot_count: 1, space: register, member_slot_shape: [{age: 2}, {d: D}, {packed_query: PackedColumns}], dtype: fp32}
+111:         domain: {u: [0, 4]}
+112:         role:
+113:           LoadK:
+114:             info:
+115:               member: warp[2:3]
+116:               execution_mode: async
+117:               verb:
+118:                 load: Issue Q first, independently of the prefetched page table. K uses four slices; a reused slice waits for its previous matrix operand read.
+119:                 yield_turn: {execution_mode: serial, meaning: Release the V issue turn after the last K slice is acquired; transfers need not have completed.}
+120:                 prepare:
+121:                   execution_mode: serial
+122:                   meaning: | # U188
+135:               register: 64
+136:             pipe: {prologue: ['prepare:Startup'], steady: ['load:Qpack', 'load:Kblk', 'yield_turn:K']}
+137:             waits_for: {data: {'load:Kblk@issue': ['prepare:Startup@done'], 'prepare:Startup@issue': ['Softmax/initialize:Statistic@done']}}
+138:           LoadV:
+139:             info: {member: 'warp[3:4]', execution_mode: async, verb: {load: Load four V slices through the shared per-slice acquire protocol; use the same completed PageIndex as K., store: Transfer
+140:                   BF16 Ostage to out and complete its asynchronous store before worker exit.}, register: 64}
+141:             pipe: {steady: ['load:Vblk'], epilogue: ['store:output']}
+142:             waits_for: {data: {'load:Vblk@issue': ['LoadK/prepare:Startup@done'], 'store:output@issue': ['Correction/publish:Ostage@done']}, sync: {'load:Vblk@issue': ['LoadK/yield_turn:K@done']}}
+143:           Score:
+144:             info:
+145:               member: warp[0:1]
+146:               execution_mode: async
+147:               verb:
+148:                 yield_turn: {execution_mode: serial, meaning: 'Release Value after the final K operand is acquired, before score completion is required.'}
+149:                 wait: {execution_mode: serial, meaning: Join Correction's existing final-sum rendezvous; allow its final Y capture only after this peer arrival.}
+150:                 publish: {execution_mode: serial, meaning: Reduce four FinalSum warp entries and publish Normalization over the captured maximum storage.}
+151:                 score: Complete both key halves and both reduction slices into ScoreBlock; return K slices after their operand reads. Wait for each operand slice
+152:                   separately; later transfers may overlap earlier products.
+153:               register: 64
+154:             pipe: {steady: ['score:ScoreBlock', 'yield_turn:Score'], epilogue: ['wait:FinalSum', 'publish:Normalization']}
+155:             waits_for: {data: {'wait:FinalSum@issue': ['Correction/publish:FinalSum@done'], 'score:ScoreBlock@issue': ['LoadK/load:Qpack@done'], 'score:ScoreBlock@done': ['LoadK/load:Kblk@done']}}
+156:           Value:
+157:             info:
+158:               member: warp[1:2]
+159:               execution_mode: async
+160:               verb:
+161:                 retire:
+162:                   execution_mode: serial
+163:                   meaning: Free TMEM after Correction has captured and returned both Y parities; normalization and Ostage publication may still be pending.
+164:                 accumulate: P_pair comprises P_hi and P_lo; accumulate both per V reduction slice into Y parity 0; return V/P after both reads and signal completion
+165:                   of empty parity 1. Wait for each operand slice separately; later transfers may overlap earlier products.
+166:               register: 64
+167:             pipe: {steady: ['accumulate:Y'], epilogue: ['retire:TMEM']}
+168:             waits_for:
+169:               data: {'accumulate:Y@issue': ['Correction/zero:Y@done', 'Softmax/publish:P_pair@done'], 'accumulate:Y@done': ['LoadV/load:Vblk@done']}
+170:               sync: {'accumulate:Y@issue': ['Score/yield_turn:Score@done']}
+171:               reuse: {'retire:TMEM@issue': ['Correction/capture:Y@done']}
+172:           Correction:
+173:             info: {execution_mode: serial, member: 'warp[8:12]', verb: {zero: Zero both Y parities and ExponentialSum parity 1; fence initialization before admitting softmax., read: Capture the sole maximum;
+174:                   drain empty sum parity 1 then the valid parity 0., publish: 'FinalSum publishes four warp partials and arrives at Score''s rendezvous; Ostage normalizes the valid
+175:                   Y, casts to BF16 and aliases the retired KV region.', capture: 'Capture empty parity 1 and valid Y parity 0 into TailNumerator[0:2] (older, newer), returning both
+176:                   TMEM slots; retain these registers through Ostage formation.'}, register: 256}
+177:             pipe: {steady: ['zero:Y', 'read:m', 'read:ExponentialSum', 'publish:FinalSum', 'capture:Y', 'publish:Ostage']}
+178:             waits_for:
+179:               data: {'read:m@issue': ['Softmax/publish_max:m@done'], 'read:ExponentialSum@issue': ['Softmax/publish:ExponentialSum@done', 'Softmax/signal:EmptySum@done'], 'capture:Y@issue': ['Value/accumulate:Y@done'],
+180:                 'publish:Ostage@issue': ['Score/publish:Normalization@done'], 'zero:Y@issue': ['LoadK/prepare:Startup@done']}
+181:               sync: {'capture:Y@issue': ['Score/wait:FinalSum@done']}
+182:               reuse: {'publish:Ostage@issue': ['Score/score:ScoreBlock@done', 'Value/accumulate:Y@done']}
+183:           Softmax:
+184:             info: {execution_mode: serial, member: 'warp[4:8]', verb: {read: 'Capture raw ScoreBlock in registers and immediately return its TMEM slot. Let last=ceil(seq_lens[b]/Bk)-1. Apply the contract
+185:                   mask in registers only for logical block last when q_len_per_req>1 or seq_lens[b]%Bk!=0, and also last-1 when 0<seq_lens[b]%Bk<q_len_per_req; interior blocks are
+186:                   mask-free.', publish_max: Update the masked maximum and rendezvous with Correction so it captures m before that shared storage is reused., publish: Publish both
+187:                   FP8 P components together; then publish 128 FP32 partial sums per column in ExponentialSum parity 0., signal: 'For this single-block path, signal initialized ExponentialSum
+188:                   parity 1 before computing and publishing the real parity 0.', initialize: During CTA setup initialize the shared maximum to -inf and FinalSum to zero.}, register: 168}
+189:             pipe: {steady: ['read:ScoreBlock', 'publish_max:m', 'publish:P_pair', 'publish:ExponentialSum'], prologue: ['initialize:Statistic', 'signal:EmptySum']}
+190:             waits_for: {data: {'read:ScoreBlock@issue': ['Score/score:ScoreBlock@done'], 'signal:EmptySum@issue': ['LoadK/prepare:Startup@done']}, sync: {'publish_max:m@issue': ['Correction/zero:Y@done']}}
+191: realization:
+192:   require:
+193:   - item: ['design.tile_pipeline::attention.Score', 'design.tile_pipeline::attention.Value']
+194:     choice: tcgen05.mma with FP8 E4M3FN operands and FP32 TMEM accumulation; completion-aware operand release.
+195:     reason: The pipeline exchanges TMEM accumulators and reuses KV slices after operand reads.
+196:   - item: ['design.tile_pipeline::attention.LoadK', 'design.tile_pipeline::attention.LoadV']
+197:     choice: TMA query/KV/output transfers; cp.async page-table prefetch; per-slice producer/consumer barriers.
+198:     reason: Paged HND inputs are consumed directly through the shared KV ring.
+199:   - item: design.tile_pipeline::attention.Correction
+200:     choice: 'setmaxnreg: issuers decrease from the 168-register launch budget to 64; Softmax stays at 168; Correction increases to 256.'
+201:     reason: The issuer reduction funds Correction; Softmax must not request an increase beyond its launch allocation.

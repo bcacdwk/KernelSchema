@@ -1,0 +1,88 @@
+"meta_data":
+  "name": "nvfp4_fused_moe"
+  "describe": "Precomputed routed mixture of experts with prepared NVFP4 weights,\
+    \ gated activation, activation requantization and BF16 output."
+  "source": "SchemaExtractSource_c98aa54e58ac@ce1b7d5e8e7560b5c80abd87549bc2328c52df34:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward"
+  "version": 1
+  "dispatch":
+    "id": "no_scan_fused_small_cp"
+    "parent": "fused_small_cp"
+    "when": |
+      Let a be the effective MoEABI passed to moe_run. Rebuild means that
+      neither the identity/key cache in Model.forward nor its default C call
+      wrapper supplies a published ABI: this call reaches forward's full
+      validation, automatic dispatch and ABI construction. All implementation
+      controls follow the frozen default implementation scope.
+      Let R=T*K. In a, cfg/cfg2 select FC1/FC2, small_thresh is the saved
+      routing preparation threshold (3000 or 6500), and zflag/zflag_host
+      are the optional device verification state and pinned host mirror.
+      TablesReady means ensure_tables returns from its per-device ready set
+      without submitting k_init_tables. NoScan means the eligible zero probe
+      stops before reaching the k_zero_scan launch: allocation failure returns
+      -1, or allocation succeeds and a failed asynchronous clear is followed
+      by cudaFree and return -2. A Python exception before that launch also
+      leaves zero_ok=false. A scan whose launch was attempted, or whose result
+      was rejected or unreadable, does not satisfy NoScan.
+      Let p be Params derived from a. FC2CP means launch_gemm<false> selects
+      k_gemm_f4<128,false,3> with effective fc=8 after tma_set(p,false,128,0)
+      is refused. For cfg2=23, the refused flat entry first sets cfg=12 and
+      its unchanged map-cache key remains refused; cfg2=44 reaches the same
+      fallback directly. For recorded work use the selection at recording.
+      Select exactly when this call rebuilds a, TablesReady, NoScan,
+      a.cfg=97, a.cfg2 in {23,44}, FC2CP, zero_ok=false,
+      a.zflag=0, a.zflag_host=0, R<=a.small_thresh, and moe_run returns zero
+      through either a single caller-stream run_pipeline call or
+      graph_replay's ordinary full-graph arm. Every private-stream
+      run_pipeline call in this request, if present, is capture-only after
+      successful cudaStreamBeginCapture; no uncaptured pipeline is added
+      on that stream.
+      Retain the reached probe services: the allocation attempt and, if
+      reached, the failed clear and cleanup. Their error does not establish
+      a completed clear or a scan event. Automatic dispatch may also read
+      route IDs to the host once through the call-local route_hist cache;
+      that statistic does not replace device routing preparation. Workspace
+      lookup may reuse storage or allocate it, including the 2*E-word
+      counts/fill clear on a miss. Prepare rewrites every consumed count,
+      and this path does not consume fill; that allocation clear adds no
+      required handoff initialization. Successful enqueue permits ABI/cache
+      publication without asserting GPU completion.
+      This includes eager execution, first replay after successful graph
+      construction and existing full-graph replay with the same work.
+      Outer capture records the request; its recorded device work and
+      completion events occur on replay. Host construction and dispatch
+      decisions use recording-time facts, as do saved scalar values and
+      tensor bindings; device reads use execution-time tensor contents.
+"design":
+  "math_reshape":
+    "from_parent": "fused_small_cp"
+  "work_schedule":
+    "from_parent": "fused_small_cp"
+  "tile_pipeline":
+    "from_parent": "fused_small_cp"
+realization:
+  require:
+    - item: ["design.tile_pipeline::fc1.MMA", "design.tile_pipeline::fc2.Main"]
+      choice: >-
+        Use tcgen05 block_scale.scale_vec::4X E2M1/E4M3 MMA and the
+        tcgen05.cp scale path, with cumulative tcgen05.commit completion
+        and tcgen05.fence::after_thread_sync at the stated synchronization boundaries.
+      reason: Ordered scale consumption and cumulative operand-read completion implement both phases' ring and accumulator reuse protocols.
+    - item: ["design.tile_pipeline::fc1", "design.tile_pipeline::fc2.Main"]
+      choice: >-
+        Use tcgen05.ld and tcgen05.wait::ld for register materialization,
+        respecting each issuing warp's hardware quadrant. Retire the reads
+        before FC1's early release or FC2's end-of-work rendezvous.
+      reason: Accumulator reuse requires completed TMEM reads, independently of the later global store completion.
+    - item: "design.tile_pipeline::fc2.Main"
+      choice: >-
+        Bind payload staging to cp.async.cg 16-byte copies with
+        cp.async.commit_group for every Operands group, including empty
+        terminal groups, and cp.async.wait_group 2 before the CTA rendezvous.
+        Stage scales through ordinary global loads and shared stores,
+        publishing them with fence.proxy.async.shared::cta.
+      reason: The payload lookahead uses copy-group completion, while the synchronous scale tail relies on shared-to-async visibility before tcgen05.cp.
+    - item: "design.work_schedule::flow"
+      choice: >-
+        Preserve programmatic-stream-serialization launches and the
+        griddepcontrol.wait / launch_dependents protocol for eager and recorded work.
+      reason: Launch permission and visible predecessor results are separate guarantees.

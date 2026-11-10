@@ -5,6 +5,8 @@
 | 材料 | 归档入口 | 用途 |
 | --- | --- | --- |
 | 六个典型算子的研究过程 | [六算子档案](six-operators/README.md) | 串联初次交付、质量初验、独立恢复评估、执行记录和暂停清单 |
+| 十算子与全部 dispatch 的文字语义审计 | [全量统计与判断](20261109-ten-operator-text-audit/README.md) | 四模板与六算子、193份有内容YAML、5875个文本组的逐组标注、结构缺口与精简候选 |
+| 核心文本与 schema 语言缺口复核 | [五个问题的通俗讨论稿](20261109-ten-operator-text-audit/SCHEMA_DISCUSSION.md) · [技术依据](20261109-ten-operator-text-audit/SCHEMA_LANGUAGE_GAPS.md) | 问题如何造成膨胀、影响多大、应改哪里，以及逐项证据 |
 | 2.4.0 连续修订设计 | [保进度连续修订](designs/2.4.0-continuous-revision.md) | 保留设计边界、实施分工与当轮验证依据 |
 | 2.5.0 Design 整区引用设计 | [整区派生引用](designs/2.5.0-design-region-derivation.md) | 保留 DRD 决定、接口及整合验证；现行字段语义见公共规范 |
 | 已处理的问题与决定 | [issue 归档](../issues/archive/README.md) | 按稳定 ID 和类别追踪决定、保留事项及来源证据 |

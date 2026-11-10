@@ -1,0 +1,199 @@
+51 t_cd4085da26f0fb4d dispatch.md
+| [rect_joint_load](rect_joint_load.yaml) | 单请求；矩形调度下由同一加载角色处理 K/V |
+Contexts: dispatch.md:22 dispatch.md
+
+52 t_dfcaa80c0ed7db86 dispatch.md
+| [root](root.yaml) | 通用矩形 static 双加载设计，承接大 batch 及部分单请求 workload |
+Contexts: dispatch.md:21 dispatch.md
+
+53 t_ecf0996549f6bab5 dispatch.md
+| [small_persistent_lpt](small_persistent_lpt.yaml) | 小 batch；persistent 遍历按 KV 长度降序排列请求 |
+Contexts: dispatch.md:26 dispatch.md
+
+54 t_4209f7e147edb1ea dispatch.when
+Use packaged defaults with no FA_HD256 environment overrides, under the root contract. Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count. C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000). nc=ceil((T+15*(B-1))/16); g=max(1,min(floor(SM/2),nc)); w=T*T/(4096*B). qlo=min(max(1,T-(B-1)*Q),Q); A=w+T/256; F=max(0,min(qlo*(K-63-qlo),Q*(K-63-Q)))/2048. PersistSmall=(ceil(nc/g)>=4 and (ceil(K/128)*g/w<=0.30 or (B*K-T)*8<=K or (K<=8*Q and ceil((K+15)/128)*g/(A+F)<=0.60))). Select exactly when not Split, B=4, T=16384, and PersistSmall.
+Contexts: small_persistent_shared_rescale:9 meta_data.dispatch.when
+
+55 t_4b280404384bb5a3 dispatch.when
+Use packaged defaults with no FA_HD256 environment overrides, under the root contract. Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count. C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000). nc=ceil((T+15*(B-1))/16); g=max(1,min(floor(SM/2),nc)); w=T*T/(4096*B). qlo=min(max(1,T-(B-1)*Q),Q); A=w+T/256; F=max(0,min(qlo*(K-63-qlo),Q*(K-63-Q)))/2048. PersistSmall=(ceil(nc/g)>=4 and (ceil(K/128)*g/w<=0.30 or (B*K-T)*8<=K or (K<=8*Q and ceil((K+15)/128)*g/(A+F)<=0.60))). Select exactly when not Split, 2<=B<=4, PersistSmall, and not (B=4 and T=16384).
+Contexts: small_persistent_lpt:9 meta_data.dispatch.when
+
+56 t_5117abcbb17b7105 dispatch.when
+Use packaged defaults with no FA_HD256 environment overrides, under the root contract. Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count. C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000). nc=ceil((T+15*(B-1))/16); g=max(1,min(floor(SM/2),nc)); w=T*T/(4096*B). qlo=min(max(1,T-(B-1)*Q),Q); A=w+T/256; F=max(0,min(qlo*(K-63-qlo),Q*(K-63-Q)))/2048. PersistSmall=(ceil(nc/g)>=4 and (ceil(K/128)*g/w<=0.30 or (B*K-T)*8<=K or (K<=8*Q and ceil((K+15)/128)*g/(A+F)<=0.60))). Select exactly when not Split, B=4, T=16384, and not PersistSmall.
+Contexts: small_static_shared_rescale:9 meta_data.dispatch.when
+
+57 t_543b5759eefcb8fd dispatch.when
+Use packaged defaults with no FA_HD256 environment overrides, under the root contract. Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count. C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000). Select exactly when Split and (B>1 or K>=98304).
+Contexts: splitkv_dual_load:9 meta_data.dispatch.when
+
+58 t_69c8c431c5aabf76 dispatch.when
+Use packaged defaults with no FA_HD256 environment overrides, under the root contract. Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count. C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000). Select exactly when not Split, B=1, ceil(Q/8)>SM+floor(SM/2), and K>=98304.
+Contexts: single_persistent_dual_load:9 meta_data.dispatch.when
+
+59 t_709730c14ec9203e dispatch.when
+Use packaged defaults with no FA_HD256 environment overrides, under the root contract. Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count. C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000). Select exactly when not Split, B=1, ceil(Q/8)<=SM+floor(SM/2), and K<98304.
+Contexts: rect_joint_load:9 meta_data.dispatch.when
+
+60 t_76d23997a65d73bd dispatch.when
+Use packaged defaults with no FA_HD256 environment overrides, under the root contract. Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count. C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000). Select exactly when not Split and (B>16 or (B=1 and ceil(Q/8)<=SM+floor(SM/2) and K>=98304)).
+Contexts: root:8 meta_data.dispatch.when
+
+61 t_84497ad4c2c2cbd1 dispatch.when
+Use packaged defaults with no FA_HD256 environment overrides, under the root contract. Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count. C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000). Select exactly when Split, B=1, and K<98304.
+Contexts: splitkv_joint_load:9 meta_data.dispatch.when
+
+62 t_a15d2ae59ab8c976 dispatch.when
+Use packaged defaults with no FA_HD256 environment overrides, under the root contract. Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count. C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000). Select exactly when not Split and 5<=B<=16.
+Contexts: packed_persistent:9 meta_data.dispatch.when
+
+63 t_c64f2e95260985b4 dispatch.when
+Use packaged defaults with no FA_HD256 environment overrides, under the root contract. Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count. C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000). Select exactly when not Split, B=1, ceil(Q/8)>SM+floor(SM/2), and K<98304.
+Contexts: single_persistent_joint_load:9 meta_data.dispatch.when
+
+64 t_d527482167e99293 dispatch.when
+Use packaged defaults with no FA_HD256 environment overrides, under the root contract. Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count. C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000). nc=ceil((T+15*(B-1))/16); g=max(1,min(floor(SM/2),nc)); w=T*T/(4096*B). qlo=min(max(1,T-(B-1)*Q),Q); A=w+T/256; F=max(0,min(qlo*(K-63-qlo),Q*(K-63-Q)))/2048. PersistSmall=(ceil(nc/g)>=4 and (ceil(K/128)*g/w<=0.30 or (B*K-T)*8<=K or (K<=8*Q and ceil((K+15)/128)*g/(A+F)<=0.60))). Select exactly when not Split, 2<=B<=4, not PersistSmall, and not (B=4 and T=16384).
+Contexts: small_static_lpt:9 meta_data.dispatch.when
+
+65 t_680d6642a8764eac hardware.execution
+Warps co-resident on one SM, sharing SMEM and barriers.
+Contexts: root:73 contract.hardware_specification.execution.CTA
+
+66 t_6f5eff329130bc7c hardware.execution
+CTAs co-scheduled within one GPC, with cluster synchronization.
+Contexts: root:74 contract.hardware_specification.execution.cluster
+
+67 t_707ed1a5b6536df5 hardware.execution
+32 SIMT threads within one CTA.
+Contexts: root:72 contract.hardware_specification.execution.warp
+
+68 t_263d5b133f5e61d6 hardware.feature
+Thread-private registers backed by the SM register file.
+Contexts: root:78 contract.hardware_specification.feature.register
+
+69 t_6c67314fe3205270 hardware.feature
+Explicitly allocated Tensor Core storage, separate from SMEM.
+Contexts: root:77 contract.hardware_specification.feature.TMEM
+
+70 t_bf65cfd621166b87 hardware.feature
+Asynchronous transfers and MMA require their primitive-specific completion and visibility guarantees.
+Contexts: root:79 contract.hardware_specification.feature.asynchronous_execution
+
+71 t_fbe55b4f6cea5249 hardware.feature
+CTA-lifetime shared storage, addressable by cluster peers while its owner remains alive.
+Contexts: root:76 contract.hardware_specification.feature.SMEM
+
+72 t_49c12c04800f7f35 hardware.stack
+nvidia-cutlass-dsl 4.6.1 bundled compiler; torch 2.9.0+cu130; cuda-python 13.1.1; CUDA compiler and driver versions were not recorded.
+Contexts: root:82 contract.hardware_specification.stack.toolchain
+
+73 t_b3bd6578aa86a562 hardware.stack
+CuTe DSL, nvidia-cutlass-dsl==4.6.1
+Contexts: root:81 contract.hardware_specification.stack.language
+
+74 t_05d9ebfd803511d2 math.arithmetic
+Seed both components of one FP32 pair with ell_previous*(alpha*0.5), seed three other pairs with zero, add four E fragments, merge (g0+g1)+(g2+g3), then add components.
+Contexts: packed_persistent:59 design.math_reshape.rewrite[1].arithmetic.accumulate; rect_joint_load:59 design.math_reshape.rewrite[1].arithmetic.accumulate; root:134 design.math_reshape.rewrite[1].arithmetic.accumulate; single_persistent_dual_load:59 design.math_reshape.rewrite[1].arithmetic.accumulate; single_persistent_joint_load:59 design.math_reshape.rewrite[1].arithmetic.accumulate; small_persistent_lpt:62 design.math_reshape.rewrite[1].arithmetic.accumulate; small_persistent_shared_rescale:62 design.math_reshape.rewrite[1].arithmetic.accumulate; small_static_lpt:62 design.math_reshape.rewrite[1].arithmetic.accumulate; small_static_shared_rescale:62 design.math_reshape.rewrite[1].arithmetic.accumulate; splitkv_dual_load:65 design.math_reshape.rewrite[1].arithmetic.accumulate; splitkv_joint_load:65 design.math_reshape.rewrite[1].arithmetic.accumulate
+
+75 t_295a565bb7ad4dd4 math.arithmetic
+Native fast exp2 and division have the unknown bounds stated in online.
+Contexts: splitkv_dual_load:81 design.math_reshape.rewrite[2].arithmetic.approx; splitkv_joint_load:81 design.math_reshape.rewrite[2].arithmetic.approx
+
+76 t_ace6651be84050cb math.arithmetic
+Warp max and sum over padded split slots determine weights; output accumulates positive-weight terms in ascending split order in FP32.
+Contexts: splitkv_dual_load:82 design.math_reshape.rewrite[2].arithmetic.accumulate; splitkv_joint_load:82 design.math_reshape.rewrite[2].arithmetic.accumulate
+
+77 t_b54b6b0dabad52d2 math.arithmetic
+exp2_fast is native fast exp2 on SM103 without polynomial substitution; unknown: standalone fast-exp2 and output-division error bounds are not supplied.
+Contexts: packed_persistent:58 design.math_reshape.rewrite[1].arithmetic.approx; rect_joint_load:58 design.math_reshape.rewrite[1].arithmetic.approx; root:133 design.math_reshape.rewrite[1].arithmetic.approx; single_persistent_dual_load:58 design.math_reshape.rewrite[1].arithmetic.approx; single_persistent_joint_load:58 design.math_reshape.rewrite[1].arithmetic.approx; small_persistent_lpt:61 design.math_reshape.rewrite[1].arithmetic.approx; small_persistent_shared_rescale:61 design.math_reshape.rewrite[1].arithmetic.approx; small_static_lpt:61 design.math_reshape.rewrite[1].arithmetic.approx; small_static_shared_rescale:61 design.math_reshape.rewrite[1].arithmetic.approx
+
+78 t_ff3ae9ec2975ed5d math.arithmetic
+exp2_fast and log_fast are native fast math on SM103 without polynomial substitution; unknown: standalone exp2, log and division error bounds are not supplied.
+Contexts: splitkv_dual_load:64 design.math_reshape.rewrite[1].arithmetic.approx; splitkv_joint_load:64 design.math_reshape.rewrite[1].arithmetic.approx
+
+79 t_06311df5f243ef15 math.ledger
+online
+Contexts: packed_persistent:63 design.math_reshape.ledger.footprint[0].by[1]; packed_persistent:65 design.math_reshape.ledger.error[0].by[0]; rect_joint_load:63 design.math_reshape.ledger.footprint[0].by[1]; rect_joint_load:65 design.math_reshape.ledger.error[0].by[0]; root:138 design.math_reshape.ledger.footprint[0].by[1]; root:140 design.math_reshape.ledger.error[0].by[0]; single_persistent_dual_load:63 design.math_reshape.ledger.footprint[0].by[1]; single_persistent_dual_load:65 design.math_reshape.ledger.error[0].by[0]; single_persistent_joint_load:63 design.math_reshape.ledger.footprint[0].by[1]; single_persistent_joint_load:65 design.math_reshape.ledger.error[0].by[0]; small_persistent_lpt:66 design.math_reshape.ledger.footprint[0].by[1]; small_persistent_lpt:68 design.math_reshape.ledger.error[0].by[0]; small_persistent_shared_rescale:66 design.math_reshape.ledger.footprint[0].by[1]; small_persistent_shared_rescale:68 design.math_reshape.ledger.error[0].by[0]; small_static_lpt:66 design.math_reshape.ledger.footprint[0].by[1]; small_static_lpt:68 design.math_reshape.ledger.error[0].by[0]; small_static_shared_rescale:66 design.math_reshape.ledger.footprint[0].by[1]; small_static_shared_rescale:68 design.math_reshape.ledger.error[0].by[0]; splitkv_dual_load:86 design.math_reshape.ledger.footprint[0].by[1]; splitkv_dual_load:88 design.math_reshape.ledger.traffic[0].by[0]; splitkv_dual_load:90 design.math_reshape.ledger.error[0].by[0]; splitkv_joint_load:86 design.math_reshape.ledger.footprint[0].by[1]; splitkv_joint_load:88 design.math_reshape.ledger.traffic[0].by[0]; splitkv_joint_load:90 design.math_reshape.ledger.error[0].by[0]
+
+80 t_1331b1b38b550457 math.ledger
+8*Hq*sum_b(Qlen(b)*L(b)) bytes -> M*(D+2) FP32 recurrent scalars per active worktile plus block-local values.
+Contexts: packed_persistent:63 design.math_reshape.ledger.footprint[0].change; rect_joint_load:63 design.math_reshape.ledger.footprint[0].change; root:138 design.math_reshape.ledger.footprint[0].change; single_persistent_dual_load:63 design.math_reshape.ledger.footprint[0].change; single_persistent_joint_load:63 design.math_reshape.ledger.footprint[0].change; small_persistent_lpt:66 design.math_reshape.ledger.footprint[0].change; small_persistent_shared_rescale:66 design.math_reshape.ledger.footprint[0].change; small_static_lpt:66 design.math_reshape.ledger.footprint[0].change; small_static_shared_rescale:66 design.math_reshape.ledger.footprint[0].change
+
+81 t_425972b26b87b9e2 math.ledger
+Up to +8*Ssplit*TotalQ*Hq*(D+1) logical bytes for one write/read per partial; empty splits leave O unwritten, and combine tiling may reread LSE.
+Contexts: splitkv_dual_load:88 design.math_reshape.ledger.traffic[0].change; splitkv_joint_load:88 design.math_reshape.ledger.traffic[0].change
+
+82 t_4c7dbfb7dcb4ee8e math.ledger
+8*Hq*sum_b(Qlen(b)*L(b)) bytes -> M*(D+2) FP32 recurrent scalars per active worktile plus block-local values and 4*Ssplit*TotalQ*Hq*(D+1) bytes of reserved global partial capacity.
+Contexts: splitkv_dual_load:86 design.math_reshape.ledger.footprint[0].change; splitkv_joint_load:86 design.math_reshape.ledger.footprint[0].change
+
+83 t_57aaaf43c8724e4a math.ledger
+stream
+Contexts: packed_persistent:63 design.math_reshape.ledger.footprint[0].by[0]; rect_joint_load:63 design.math_reshape.ledger.footprint[0].by[0]; root:138 design.math_reshape.ledger.footprint[0].by[0]; single_persistent_dual_load:63 design.math_reshape.ledger.footprint[0].by[0]; single_persistent_joint_load:63 design.math_reshape.ledger.footprint[0].by[0]; small_persistent_lpt:66 design.math_reshape.ledger.footprint[0].by[0]; small_persistent_shared_rescale:66 design.math_reshape.ledger.footprint[0].by[0]; small_static_lpt:66 design.math_reshape.ledger.footprint[0].by[0]; small_static_shared_rescale:66 design.math_reshape.ledger.footprint[0].by[0]; splitkv_dual_load:86 design.math_reshape.ledger.footprint[0].by[0]; splitkv_joint_load:86 design.math_reshape.ledger.footprint[0].by[0]
+
+84 t_6e6008f1013d18be math.ledger
+Materialize FP32 scores and probabilities for every request and query head, each written and read once.
+Contexts: packed_persistent:61 design.math_reshape.ledger.baseline; rect_joint_load:61 design.math_reshape.ledger.baseline; root:136 design.math_reshape.ledger.baseline; single_persistent_dual_load:61 design.math_reshape.ledger.baseline; single_persistent_joint_load:61 design.math_reshape.ledger.baseline; small_persistent_lpt:64 design.math_reshape.ledger.baseline; small_persistent_shared_rescale:64 design.math_reshape.ledger.baseline; small_static_lpt:64 design.math_reshape.ledger.baseline; small_static_shared_rescale:64 design.math_reshape.ledger.baseline; splitkv_dual_load:84 design.math_reshape.ledger.baseline; splitkv_joint_load:84 design.math_reshape.ledger.baseline
+
+85 t_786c17c865d400d6 math.ledger
++1 E4M3FN rounding per PV multiplicand; denominator retains FP32 exponentials.
+Contexts: packed_persistent:65 design.math_reshape.ledger.error[0].change; rect_joint_load:65 design.math_reshape.ledger.error[0].change; root:140 design.math_reshape.ledger.error[0].change; single_persistent_dual_load:65 design.math_reshape.ledger.error[0].change; single_persistent_joint_load:65 design.math_reshape.ledger.error[0].change; small_persistent_lpt:68 design.math_reshape.ledger.error[0].change; small_persistent_shared_rescale:68 design.math_reshape.ledger.error[0].change; small_static_lpt:68 design.math_reshape.ledger.error[0].change; small_static_shared_rescale:68 design.math_reshape.ledger.error[0].change; splitkv_dual_load:90 design.math_reshape.ledger.error[0].change; splitkv_joint_load:90 design.math_reshape.ledger.error[0].change
+
+86 t_8d1a25742302e8ef math.ledger
+combine
+Contexts: splitkv_dual_load:88 design.math_reshape.ledger.traffic[0].by[1]; splitkv_joint_load:88 design.math_reshape.ledger.traffic[0].by[1]
+
+87 t_985d31bab877ec22 math.ledger
+Probability precision
+Contexts: packed_persistent:65 design.math_reshape.ledger.error[0].item; rect_joint_load:65 design.math_reshape.ledger.error[0].item; root:140 design.math_reshape.ledger.error[0].item; single_persistent_dual_load:65 design.math_reshape.ledger.error[0].item; single_persistent_joint_load:65 design.math_reshape.ledger.error[0].item; small_persistent_lpt:68 design.math_reshape.ledger.error[0].item; small_persistent_shared_rescale:68 design.math_reshape.ledger.error[0].item; small_static_lpt:68 design.math_reshape.ledger.error[0].item; small_static_shared_rescale:68 design.math_reshape.ledger.error[0].item; splitkv_dual_load:90 design.math_reshape.ledger.error[0].item; splitkv_joint_load:90 design.math_reshape.ledger.error[0].item
+
+88 t_a6bc41e9ce2671f1 math.ledger
+Dense intermediates
+Contexts: packed_persistent:63 design.math_reshape.ledger.footprint[0].item; rect_joint_load:63 design.math_reshape.ledger.footprint[0].item; root:138 design.math_reshape.ledger.footprint[0].item; single_persistent_dual_load:63 design.math_reshape.ledger.footprint[0].item; single_persistent_joint_load:63 design.math_reshape.ledger.footprint[0].item; small_persistent_lpt:66 design.math_reshape.ledger.footprint[0].item; small_persistent_shared_rescale:66 design.math_reshape.ledger.footprint[0].item; small_static_lpt:66 design.math_reshape.ledger.footprint[0].item; small_static_shared_rescale:66 design.math_reshape.ledger.footprint[0].item; splitkv_dual_load:86 design.math_reshape.ledger.footprint[0].item; splitkv_joint_load:86 design.math_reshape.ledger.footprint[0].item
+
+89 t_af461efc9ac156d4 math.ledger
+Split partials
+Contexts: splitkv_dual_load:88 design.math_reshape.ledger.traffic[0].item; splitkv_joint_load:88 design.math_reshape.ledger.traffic[0].item
+
+90 t_2aa9ec0d460fa91f math.math
+For every token a and head h, z=max_s PartialLSE[s,h,a]; safez=0 if z=-inf, otherwise z. w_s=exp2_fast(PartialLSE[s,h,a]*log2(e)-safez*log2(e)); denom=sum32_s w_s. invdenom=1/denom if denom is nonzero and not NaN, otherwise zero; Weights[s]=w_s*invdenom. Facc(-1)=0; for s=0..Ssplit-1, Facc(s)=Facc(s-1)+Weights[s]*PartialO[s,a,h,:] if Weights[s]>0, otherwise Facc(s-1). Zero-weight partials never enter arithmetic. Fblock=bf16(Facc(Ssplit-1)); store its valid slice into out_after and return out as output.
+Contexts: splitkv_dual_load:68 design.math_reshape.rewrite[2].math; splitkv_joint_load:68 design.math_reshape.rewrite[2].math
+
+91 t_39c4d91fa4c3a8e4 math.math
+For each valid row independently, c=fp32(bmm1_scale*log2(e)), with the expression inside the cast evaluated in Python binary64. Initialize mhat(-1)=-inf, ell(-1)=0, Y(-1)=0. For i=0..N-1, a=max(mhat(i-1),max_k X(i)[r,k]); safe=0 if a=-inf, otherwise a. keep=(c*(mhat(i-1)-safe)>=-tau); mhat(i)=mhat(i-1) if keep, otherwise a; base=mhat(i-1) if keep, otherwise safe. alpha(i)=1 if keep, otherwise exp2_fast(c*(mhat(i-1)-safe)); Stats(i)[r,0]=alpha(i). E(i)[r,k]=exp2_fast(fma32(c,X(i)[r,k],offset-c*base)); masked -inf maps to zero; P(i)=fp8_e4m3fn(E(i)). ell(i)=alpha(i)*ell(i-1)+sum32_k E(i)[r,k]. For d in {0,1}, Y(i)[:,128*d:128*(d+1)]=mma32(P(i),Vc(i)[:,128*d:128*(d+1)],alpha(i)*Y(i-1)[:,128*d:128*(d+1)]). invell=1/ell(N-1) if ell is nonzero and not NaN, otherwise zero; Oblock=bf16(Y(N-1)*invell). Store valid rows of Oblock into out_after by undoing head packing; return out as output.
+Contexts: small_persistent_shared_rescale:41 design.math_reshape.rewrite[1].math; small_static_shared_rescale:41 design.math_reshape.rewrite[1].math
+
+92 t_66ee124f50fdb01f math.math
+For each split s and valid row independently, c=fp32(bmm1_scale*log2(e)), with the expression inside the cast evaluated in Python binary64. Initialize mhat(-1)=-inf, ell(-1)=0, Y(-1)=0. For i=0..N-1, a=max(mhat(i-1),max_k X(i)[r,k]); safe=0 if a=-inf, otherwise a. keep=(c*(mhat(i-1)-safe)>=-tau); mhat(i)=mhat(i-1) if keep, otherwise a; base=mhat(i-1) if keep, otherwise safe. alpha(i)=1 if keep, otherwise exp2_fast(c*(mhat(i-1)-safe)); Stats(i)[r,:]=(mhat(i-1),base). E(i)[r,k]=exp2_fast(fma32(c,X(i)[r,k],offset-c*base)); masked -inf maps to zero; P(i)=fp8_e4m3fn(E(i)). ell(i)=alpha(i)*ell(i-1)+sum32_k E(i)[r,k]. For d in {0,1}, Y(i)[:,128*d:128*(d+1)]=mma32(P(i),Vc(i)[:,128*d:128*(d+1)],alpha(i)*Y(i-1)[:,128*d:128*(d+1)]). For N>0, invell=1/ell(N-1) if ell is nonzero and not NaN, otherwise zero; Opart=fp32(Y(N-1)*invell). LSEpart=fp32(bmm1_scale)*mhat(N-1)+log_fast(ell(N-1))-offset*ln(2) when ell is nonzero and not NaN, otherwise -inf. For r=h+Hq*u and a=cum_seq_lens_q[b]+16*m+u, store valid rows to PartialO[s,a,h,:]=Opart[r,:] and PartialLSE[s,h,a]=LSEpart[r]. For N=0, write only PartialLSE=-inf for valid rows; PartialO is unspecified.
+Contexts: splitkv_dual_load:39 design.math_reshape.rewrite[1].math; splitkv_joint_load:39 design.math_reshape.rewrite[1].math
+
+93 t_e8c20b1e4ec5817b math.math
+For request b and query block m, Qc[r,d]=query[cum_seq_lens_q[b]+16*m+floor(r/Hq),r%Hq,d], 0<=r<M, on valid query rows. For 0<=i<N and 0<=k<Bk, j=Bk*sigma(i)+k and p=floor(j/Page). Read page p when p*Page<L(b), otherwise this block's first page; Kc(i)[k,d] and Vc(i)[k,d] use kind 0 and 1 of kv_cache. These are block views; no full-cache gather is materialized. Invalid rows and keys are excluded from results. S(i,0)=mm32(Qc[:,0:128],transpose(Kc(i)[:,0:128])); S(i,1)=mma32(Qc[:,128:256],transpose(Kc(i)[:,128:256]),S(i,0)). X(i)[r,k]=S(i,1)[r,k] if j in J(b,16*m+floor(r/Hq)), otherwise -inf.
+Contexts: packed_persistent:20 design.math_reshape.rewrite[0].math; rect_joint_load:20 design.math_reshape.rewrite[0].math; root:95 design.math_reshape.rewrite[0].math; single_persistent_dual_load:20 design.math_reshape.rewrite[0].math; single_persistent_joint_load:20 design.math_reshape.rewrite[0].math; small_persistent_lpt:23 design.math_reshape.rewrite[0].math; small_persistent_shared_rescale:23 design.math_reshape.rewrite[0].math; small_static_lpt:23 design.math_reshape.rewrite[0].math; small_static_shared_rescale:23 design.math_reshape.rewrite[0].math; splitkv_dual_load:20 design.math_reshape.rewrite[0].math; splitkv_joint_load:20 design.math_reshape.rewrite[0].math
+
+94 t_f6b241b38e7d2a6a math.math
+For each valid row independently, c=fp32(bmm1_scale*log2(e)), with the expression inside the cast evaluated in Python binary64. Initialize mhat(-1)=-inf, ell(-1)=0, Y(-1)=0. For i=0..N-1, a=max(mhat(i-1),max_k X(i)[r,k]); safe=0 if a=-inf, otherwise a. keep=(c*(mhat(i-1)-safe)>=-tau); mhat(i)=mhat(i-1) if keep, otherwise a; base=mhat(i-1) if keep, otherwise safe. alpha(i)=1 if keep, otherwise exp2_fast(c*(mhat(i-1)-safe)); Stats(i)[r,:]=(mhat(i-1),base). E(i)[r,k]=exp2_fast(fma32(c,X(i)[r,k],offset-c*base)); masked -inf maps to zero; P(i)=fp8_e4m3fn(E(i)). ell(i)=alpha(i)*ell(i-1)+sum32_k E(i)[r,k]. For d in {0,1}, Y(i)[:,128*d:128*(d+1)]=mma32(P(i),Vc(i)[:,128*d:128*(d+1)],alpha(i)*Y(i-1)[:,128*d:128*(d+1)]). invell=1/ell(N-1) if ell is nonzero and not NaN, otherwise zero; Oblock=bf16(Y(N-1)*invell). Store valid rows of Oblock into out_after by undoing head packing; return out as output.
+Contexts: packed_persistent:38 design.math_reshape.rewrite[1].math; rect_joint_load:38 design.math_reshape.rewrite[1].math; root:113 design.math_reshape.rewrite[1].math; single_persistent_dual_load:38 design.math_reshape.rewrite[1].math; single_persistent_joint_load:38 design.math_reshape.rewrite[1].math; small_persistent_lpt:41 design.math_reshape.rewrite[1].math; small_static_lpt:41 design.math_reshape.rewrite[1].math
+
+95 t_0049d7b384b364f3 math.meaning
+Keys per local iteration.
+Contexts: packed_persistent:29 design.math_reshape.rewrite[0].symbol.Bk.meaning; rect_joint_load:29 design.math_reshape.rewrite[0].symbol.Bk.meaning; root:104 design.math_reshape.rewrite[0].symbol.Bk.meaning; single_persistent_dual_load:29 design.math_reshape.rewrite[0].symbol.Bk.meaning; single_persistent_joint_load:29 design.math_reshape.rewrite[0].symbol.Bk.meaning; small_persistent_lpt:32 design.math_reshape.rewrite[0].symbol.Bk.meaning; small_persistent_shared_rescale:32 design.math_reshape.rewrite[0].symbol.Bk.meaning; small_static_lpt:32 design.math_reshape.rewrite[0].symbol.Bk.meaning; small_static_shared_rescale:32 design.math_reshape.rewrite[0].symbol.Bk.meaning; splitkv_dual_load:29 design.math_reshape.rewrite[0].symbol.Bk.meaning; splitkv_joint_load:29 design.math_reshape.rewrite[0].symbol.Bk.meaning
+
+96 t_038c3d5bb46c0ac2 math.meaning
+Maximum lag in base-two score units.
+Contexts: packed_persistent:49 design.math_reshape.rewrite[1].symbol.tau.meaning; rect_joint_load:49 design.math_reshape.rewrite[1].symbol.tau.meaning; root:124 design.math_reshape.rewrite[1].symbol.tau.meaning; single_persistent_dual_load:49 design.math_reshape.rewrite[1].symbol.tau.meaning; single_persistent_joint_load:49 design.math_reshape.rewrite[1].symbol.tau.meaning; small_persistent_lpt:52 design.math_reshape.rewrite[1].symbol.tau.meaning; small_persistent_shared_rescale:52 design.math_reshape.rewrite[1].symbol.tau.meaning; small_static_lpt:52 design.math_reshape.rewrite[1].symbol.tau.meaning; small_static_shared_rescale:52 design.math_reshape.rewrite[1].symbol.tau.meaning; splitkv_dual_load:52 design.math_reshape.rewrite[1].symbol.tau.meaning; splitkv_joint_load:52 design.math_reshape.rewrite[1].symbol.tau.meaning
+
+97 t_0929fab35a683f2f math.meaning
+Channels per combine worktile.
+Contexts: splitkv_dual_load:76 design.math_reshape.rewrite[2].symbol.Dc.meaning; splitkv_joint_load:76 design.math_reshape.rewrite[2].symbol.Dc.meaning
+
+98 t_09e928cb262d5e30 math.meaning
+Rows per combine worktile.
+Contexts: splitkv_dual_load:75 design.math_reshape.rewrite[2].symbol.Mc.meaning; splitkv_joint_load:75 design.math_reshape.rewrite[2].symbol.Mc.meaning
+
+99 t_0bcfc49baf340b57 math.meaning
+Materialized split normalizer.
+Contexts: splitkv_dual_load:62 design.math_reshape.rewrite[1].symbol.PartialLSE.meaning; splitkv_joint_load:62 design.math_reshape.rewrite[1].symbol.PartialLSE.meaning
+
+100 t_2518ac8186edf3bb math.meaning
+Previous maximum and guarded current base.
+Contexts: packed_persistent:55 design.math_reshape.rewrite[1].symbol.Stats.meaning; rect_joint_load:55 design.math_reshape.rewrite[1].symbol.Stats.meaning; root:130 design.math_reshape.rewrite[1].symbol.Stats.meaning; single_persistent_dual_load:55 design.math_reshape.rewrite[1].symbol.Stats.meaning; single_persistent_joint_load:55 design.math_reshape.rewrite[1].symbol.Stats.meaning; small_persistent_lpt:58 design.math_reshape.rewrite[1].symbol.Stats.meaning; small_static_lpt:58 design.math_reshape.rewrite[1].symbol.Stats.meaning; splitkv_dual_load:58 design.math_reshape.rewrite[1].symbol.Stats.meaning; splitkv_joint_load:58 design.math_reshape.rewrite[1].symbol.Stats.meaning

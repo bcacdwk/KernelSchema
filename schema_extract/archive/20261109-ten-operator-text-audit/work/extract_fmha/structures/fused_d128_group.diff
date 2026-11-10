@@ -1,0 +1,525 @@
+--- fused_d128_key
++++ fused_d128_group
+@@ -4,12 +4,12 @@
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+   version: 3
+   dispatch:
+-    id: fused_d128_key
+-    parent: root
+-    when: TEXT[140]
++    id: fused_d128_group
++    parent: fused_d128_key
++    when: TEXT[119]
+ design:
+   math_reshape:
+-    thesis: TEXT[667]
++    thesis: TEXT[663]
+     rewrite:
+     - step: TEXT[652]
+       name: TEXT[629]
+@@ -19,8 +19,8 @@
+           meaning: TEXT[482]
+           binding: bind:design.work_schedule::Br
+     - step: TEXT[660]
+-      name: TEXT[600]
+-      math: TEXT[357]
++      name: TEXT[647]
++      math: TEXT[381]
+       symbol:
+         Score:
+           meaning: TEXT[564]
+@@ -29,17 +29,11 @@
+           - key: KeyGroup
+           dtype: fp32
+           retention: keep_value (b,kh,a,g)
+-        HalfMax:
+-          meaning: TEXT[504]
+-          shape:
+-          - slice: 2
+-          - row: Br
+-          dtype: fp32
+       arithmetic:
+         accumulate: TEXT[154]
+     - step: TEXT[654]
+       name: TEXT[641]
+-      math: TEXT[342]
++      math: TEXT[382]
+       symbol:
+         MaxState:
+           meaning: TEXT[429]
+@@ -47,15 +41,14 @@
+           - row: Br
+           dtype: fp32
+           retention: carry_forward (b,kh,a); g=cLo-1..cHi
+-        DenSlice:
+-          meaning: TEXT[530]
++        DenState:
++          meaning: TEXT[549]
+           shape:
+-          - slice: 2
+           - row: Br
+           dtype: fp32
+           retention: carry_forward (b,kh,a); g=cLo-1..cHi
+-        DenFinal:
+-          meaning: TEXT[555]
++        alpha:
++          meaning: TEXT[544]
+           shape:
+           - row: Br
+           dtype: fp32
+@@ -70,7 +63,7 @@
+         approx: TEXT[163]
+     - step: TEXT[656]
+       name: TEXT[591]
+-      math: TEXT[362]
++      math: TEXT[376]
+       symbol:
+         NumState:
+           meaning: TEXT[493]
+@@ -86,7 +79,7 @@
+       baseline: TEXT[306]
+       footprint:
+       - item: TEXT[199]
+-        change: TEXT[257]
++        change: TEXT[288]
+         by:
+         - TEXT[660]
+         - TEXT[654]
+@@ -106,13 +99,13 @@
+         - TEXT[654]
+       error:
+       - item: TEXT[214]
+-        change: TEXT[271]
++        change: TEXT[261]
+         by:
+         - TEXT[660]
+         - TEXT[654]
+         - TEXT[656]
+   work_schedule:
+-    thesis: TEXT[1378]
++    thesis: TEXT[1376]
+     flow:
+       launch:
+       - phase:
+@@ -121,7 +114,7 @@
+       main:
+         describe: TEXT[1262]
+         decomposition:
+-          strategy: TEXT[1321]
++          strategy: TEXT[1353]
+           partition:
+             kvflat:
+               size: B*KH
+@@ -199,7 +192,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[714]
++    thesis: TEXT[695]
+     phase:
+       main:
+         domain:
+@@ -220,10 +213,10 @@
+             - key: KeyGroup
+             - channel: D
+             dtype: fp8_e4m3fn
+-            slot_count: 4
++            slot_count: 6
+             view:
+               Key(g):
+-                slot_index: (g-cLo)%4
++                slot_index: 3*((g-cLo)%2)+floor((g-cLo)/2)%3
+           Value:
+             space: SMEM
+             member_slot_shape:
+@@ -233,25 +226,25 @@
+             slot_count: 4
+             view:
+               Value(g):
+-                slot_index: (g-cLo)%4
++                slot_index: 2*((g-cLo)%2)+floor((g-cLo)/2)%2
+           KeyAtom:
++            space: SMEM
++            member_slot_shape:
++            - element: 512
++            dtype: uint8
++            slot_count: 6
++            view:
++              KeyAtom(g):
++                slot_index: 3*((g-cLo)%2)+floor((g-cLo)/2)%3
++          ValueAtom:
+             space: SMEM
+             member_slot_shape:
+             - element: 512
+             dtype: uint8
+             slot_count: 4
+             view:
+-              KeyAtom(g):
+-                slot_index: (g-cLo)%4
+-          ValueAtom:
+-            space: SMEM
+-            member_slot_shape:
+-            - element: 512
+-            dtype: uint8
+-            slot_count: 4
+-            view:
+               ValueAtom(g):
+-                slot_index: (g-cLo)%4
++                slot_index: 2*((g-cLo)%2)+floor((g-cLo)/2)%2
+           TensorMemory:
+             space: TMEM
+             member_slot_shape:
+@@ -263,8 +256,8 @@
+               RawScore(g):
+                 part:
+                   column:
+-                  - 128*(g%2)
+-                  - 128*(g%2)+128
++                  - 128*((g-cLo)%2)
++                  - 128*((g-cLo)%2)+128
+               NumState:
+                 part:
+                   column:
+@@ -279,8 +272,8 @@
+               KeyScale(g):
+                 part:
+                   column:
+-                  - 392+8*(g%2)
+-                  - 400+8*(g%2)
++                  - 392+8*((g-cLo)%2)
++                  - 400+8*((g-cLo)%2)
+                 dtype: uint8
+               UnitScale:
+                 part:
+@@ -291,14 +284,14 @@
+               ValueScale(g):
+                 part:
+                   column:
+-                  - 416+8*(g%2)
+-                  - 424+8*(g%2)
++                  - 416+8*((g-cLo)%2)
++                  - 424+8*((g-cLo)%2)
+                 dtype: uint8
+-              Prob8:
+-                part:
+-                  column:
+-                  - 448
+-                  - 480
++              Prob8(g):
++                part:
++                  column:
++                  - 448+32*((g-cLo)%2)
++                  - 480+32*((g-cLo)%2)
+                 dtype: fp8_e4m3fn
+           QueryPrefetch:
+             space: register
+@@ -306,33 +299,55 @@
+             - element: Br*D+Br*(D/Block)
+             dtype: uint8
+             slot_count: 1
+-          Score:
++          Scores:
+             space: register
+             member_slot_shape:
+             - row: Br
+             - key: KeyGroup
+             dtype: fp32
+-            slot_count: 1
++            slot_count: 2
++            view:
++              Score(g):
++                slot_index: (g-cLo)%2
+           RowState:
+             space: register
+             member_slot_shape:
+-            - slice: 2
++            - stream: 2
+             - row: Br
+-            - column: 2
++            - column: 3
+             dtype: fp32
+             slot_count: 1
+             view:
+-              MaxState:
+-                part:
++              MaxState(g):
++                part:
++                  stream:
++                  - (g-cLo)%2
++                  - (g-cLo)%2+1
+                   column:
+                   - 0
+                   - 1
+-              DenSlice:
+-                part:
++              DenState(g):
++                part:
++                  stream:
++                  - (g-cLo)%2
++                  - (g-cLo)%2+1
+                   column:
+                   - 1
+                   - 2
+-              DenFinal:
++              alpha(g):
++                part:
++                  stream:
++                  - (g-cLo)%2
++                  - (g-cLo)%2+1
++                  column:
++                  - 2
++                  - 3
++              FinalMax:
++                part:
++                  column:
++                  - 0
++                  - 1
++              FinalDen:
+                 part:
+                   column:
+                   - 1
+@@ -340,64 +355,207 @@
+           Exchange:
+             space: SMEM
+             member_slot_shape:
+-            - slice: 2
++            - block: 8
+             - row: Br
+             dtype: fp32
+             slot_count: 1
+             view:
+-              HalfMax: {}
+-              DenSlice: {}
++              MaxTransfer(g):
++                part:
++                  block:
++                  - (g-cLo)%2
++                  - (g-cLo)%2+1
++              DenTransfer(g):
++                part:
++                  block:
++                  - 2+2*((g-cLo)%2)+floor((g-cLo)/2)%2
++                  - 3+2*((g-cLo)%2)+floor((g-cLo)/2)%2
++              FinalMax:
++                part:
++                  block:
++                  - 6
++                  - 7
++              FinalDen:
++                part:
++                  block:
++                  - 7
++                  - 8
+         role:
+-          Main:
++          Even:
+             info:
+               execution_mode: serial
+-              member: warp[0:8]
++              member: warp[0:4]
+               verb:
+-                setup: TEXT[1099]
+-                cold: TEXT[1013]
+-                prepare: TEXT[956]
+-                prime: TEXT[892]
+-                stage: TEXT[868]
+-                atoms: TEXT[839]
+-                retire: TEXT[783]
+-                read: TEXT[878]
+-                lookahead: TEXT[799]
+-                advance: TEXT[1022]
+-                pv: TEXT[860]
+-                drain: TEXT[869]
+-                combine: TEXT[950]
+-                write: TEXT[1028]
+-                finish: TEXT[895]
++                setup: TEXT[802]
++                cold: TEXT[945]
++                prepare: TEXT[804]
++                publish: TEXT[796]
++                prime: TEXT[859]
++                stage: TEXT[822]
++                retire: TEXT[953]
++                read: TEXT[934]
++                lookahead: TEXT[1054]
++                maximum:
++                  execution_mode: async
++                  meaning: TEXT[993]
++                probability:
++                  execution_mode: async
++                  meaning: TEXT[831]
++                denominator:
++                  execution_mode: async
++                  meaning: TEXT[988]
++                rescale: TEXT[1147]
++                pv: TEXT[951]
++                stagev: TEXT[777]
++                join: TEXT[979]
++                broadcast: TEXT[794]
++                write: TEXT[1126]
++                finish: TEXT[1069]
+             pipe:
+               prologue:
+               - setup:Local
+               - cold:Inputs
+               - prepare:Query
++              - publish:Query
+               - prime:FirstQK
+               steady:
+-              - repeat: g
++              - repeat:
++                  j:
++                  - 0
++                  - ceil_div(Ng,2)
+                 steady:
+-                - stage:Ahead(g)
+-                - atoms:Upcoming(g)
+-                - retire:Previous(g)
+-                - read:Score(g)
+-                - lookahead:Next(g)
+-                - advance:StateProb(g)
+-                - pv:NumState(g)
++                - stage:Ahead(j)
++                - retire:Own(j)
++                - read:Scores(j)
++                - lookahead:Next(j)
++                - maximum:State(j)
++                - probability:Tile(j)
++                - denominator:State(j)
++                - rescale:NumState(j)
++                - publish:Operands(j)
++                - pv:Group(j)
++                - stagev:Next(j)
+               epilogue:
+-              - drain:LastPV
+-              - combine:DenFinal
++              - retire:LastPV
++              - join:Accumulator
++              - publish:Final
++              - broadcast:Final
+               - write:Output
+               - finish:Local
++            waits_for:
++              data:
++                maximum:State(j)@done:
++                - Odd/maximum:State(j-1)
++                denominator:State(j)@done:
++                - Odd/denominator:State(j-1)
++                rescale:NumState(j)@done:
++                - Odd/pv:Group(j-1)
++                publish:Operands(j)@done:
++                - probability:Tile(j)
++                - denominator:State(j)
++                broadcast:Final@done:
++                - Odd/publish:Final
++              sync:
++                prepare:Query@done:
++                - Odd/prepare:Query@issue
++                publish:Query@done:
++                - Odd/prepare:Query
++                join:Accumulator@done:
++                - Odd/retire:LastPV
++                finish:Local@done:
++                - Odd/write:Output
++          Odd:
++            info:
++              execution_mode: serial
++              member: warp[4:8]
++              verb:
++                setup: TEXT[802]
++                cold: TEXT[945]
++                prepare: TEXT[804]
++                publish: TEXT[796]
++                prime: TEXT[859]
++                stage: TEXT[822]
++                retire: TEXT[953]
++                read: TEXT[934]
++                lookahead: TEXT[1054]
++                maximum:
++                  execution_mode: async
++                  meaning: TEXT[993]
++                probability:
++                  execution_mode: async
++                  meaning: TEXT[831]
++                denominator:
++                  execution_mode: async
++                  meaning: TEXT[988]
++                rescale: TEXT[1147]
++                pv: TEXT[951]
++                stagev: TEXT[777]
++                join: TEXT[979]
++                broadcast: TEXT[794]
++                write: TEXT[1126]
++                finish: TEXT[1069]
++            pipe:
++              prologue:
++              - setup:Local
++              - cold:Inputs
++              - prepare:Query
++              - publish:Query
++              - prime:FirstQK
++              steady:
++              - repeat:
++                  j:
++                  - 0
++                  - floor(Ng/2)
++                steady:
++                - stage:Ahead(j)
++                - retire:Own(j)
++                - read:Scores(j)
++                - lookahead:Next(j)
++                - maximum:State(j)
++                - probability:Tile(j)
++                - denominator:State(j)
++                - rescale:NumState(j)
++                - publish:Operands(j)
++                - pv:Group(j)
++                - stagev:Next(j)
++              epilogue:
++              - retire:LastPV
++              - join:Accumulator
++              - publish:Final
++              - broadcast:Final
++              - write:Output
++              - finish:Local
++            waits_for:
++              data:
++                maximum:State(j)@done:
++                - Even/maximum:State(j)
++                denominator:State(j)@done:
++                - Even/denominator:State(j)
++                rescale:NumState(j)@done:
++                - Even/pv:Group(j)
++                publish:Operands(j)@done:
++                - probability:Tile(j)
++                - denominator:State(j)
++                broadcast:Final@done:
++                - Even/publish:Final
++              sync:
++                prepare:Query@done:
++                - Even/prepare:Query@issue
++                publish:Query@done:
++                - Even/prepare:Query
++                join:Accumulator@done:
++                - Even/retire:LastPV
++                finish:Local@done:
++                - Even/write:Output
+ realization:
+   require:
++  - item: design.tile_pipeline::main.TensorMemory
++    choice: TEXT[1166]
++    reason: TEXT[1210]
+   - item: design.tile_pipeline::main
+-    choice: TEXT[1172]
+-    reason: TEXT[1213]
+-  - item: design.tile_pipeline::main.TensorMemory
+-    choice: TEXT[1198]
+-    reason: TEXT[1227]
++    choice: TEXT[1200]
++    reason: TEXT[1237]
+   prefer:
+   - item: design.tile_pipeline::main
+-    choice: TEXT[1173]
+-    reason: TEXT[1217]
++    choice: TEXT[1185]
++    reason: TEXT[1208]

@@ -1,0 +1,810 @@
+[
+  {
+    "value": {
+      "launch": [
+        {
+          "phase": [
+            "main"
+          ]
+        }
+      ]
+    },
+    "uses": [
+      [
+        2,
+        "flow"
+      ],
+      [
+        3,
+        "flow"
+      ],
+      [
+        4,
+        "flow"
+      ],
+      [
+        5,
+        "flow"
+      ],
+      [
+        6,
+        "flow"
+      ],
+      [
+        7,
+        "flow"
+      ],
+      [
+        8,
+        "flow"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "launch": [
+        {
+          "phase": [
+            "group_max"
+          ]
+        },
+        {
+          "phase": [
+            "scan"
+          ],
+          "start_after": "group_max.kernel_done",
+          "protocol": "pdl"
+        },
+        {
+          "phase": [
+            "split"
+          ],
+          "start_after": "scan.kernel_done"
+        },
+        {
+          "phase": [
+            "combine"
+          ],
+          "start_after": "split.kernel_done",
+          "protocol": "pdl"
+        }
+      ],
+      "handoff": {
+        "BmCovered": {
+          "producer": "group_max",
+          "consumer": [
+            "scan"
+          ],
+          "storage": "global",
+          "ready": "group_max.kernel_done"
+        },
+        "ScanState": {
+          "producer": "scan",
+          "consumer": [
+            "split"
+          ],
+          "storage": "global",
+          "ready": "scan.kernel_done"
+        },
+        "MaxTail": {
+          "producer": "scan",
+          "consumer": [
+            "split",
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "scan.kernel_done"
+        },
+        "PartialA": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done"
+        },
+        "PartialB": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        9,
+        "flow"
+      ],
+      [
+        10,
+        "flow"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "launch": [
+        {
+          "phase": [
+            "group_max"
+          ]
+        },
+        {
+          "phase": [
+            "segmax"
+          ],
+          "start_after": "group_max.kernel_done",
+          "protocol": "pdl"
+        },
+        {
+          "phase": [
+            "scan"
+          ],
+          "start_after": "segmax.launch_ready",
+          "protocol": "pdl"
+        },
+        {
+          "phase": [
+            "split"
+          ],
+          "start_after": "scan.kernel_done"
+        },
+        {
+          "phase": [
+            "combine"
+          ],
+          "start_after": "split.kernel_done",
+          "protocol": "pdl"
+        }
+      ],
+      "handoff": {
+        "BmCovered": {
+          "producer": "group_max",
+          "consumer": [
+            "segmax",
+            "scan"
+          ],
+          "storage": "global",
+          "ready": "group_max.kernel_done"
+        },
+        "SegmentMax": {
+          "producer": "segmax",
+          "consumer": [
+            "scan"
+          ],
+          "storage": "global",
+          "ready": "segmax.kernel_done",
+          "wait_at": "scan.inputs_ready"
+        },
+        "ScanState": {
+          "producer": "scan",
+          "consumer": [
+            "split"
+          ],
+          "storage": "global",
+          "ready": "scan.kernel_done"
+        },
+        "MaxTail": {
+          "producer": "scan",
+          "consumer": [
+            "split",
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "scan.kernel_done"
+        },
+        "PartialA": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done"
+        },
+        "PartialB": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        11,
+        "flow"
+      ],
+      [
+        12,
+        "flow"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "launch": [
+        {
+          "phase": [
+            "group_max"
+          ]
+        },
+        {
+          "phase": [
+            "flat_scan"
+          ],
+          "start_after": "group_max.launch_ready",
+          "protocol": "pdl"
+        },
+        {
+          "phase": [
+            "split"
+          ],
+          "start_after": "flat_scan.launch_ready",
+          "protocol": "pdl"
+        },
+        {
+          "phase": [
+            "combine"
+          ],
+          "start_after": "split.launch_ready",
+          "protocol": "pdl"
+        }
+      ],
+      "handoff": {
+        "GroupMax": {
+          "producer": "group_max",
+          "consumer": [
+            "flat_scan"
+          ],
+          "storage": "global",
+          "ready": "group_max.kernel_done",
+          "wait_at": "flat_scan.inputs_ready"
+        },
+        "MState": {
+          "producer": "flat_scan",
+          "consumer": [
+            "split"
+          ],
+          "storage": "global",
+          "ready": "flat_scan.kernel_done",
+          "wait_at": "split.scan_ready"
+        },
+        "MTail": {
+          "producer": "flat_scan",
+          "consumer": [
+            "split",
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "flat_scan.kernel_done",
+          "wait_at": [
+            "split.scan_ready",
+            "combine.inputs_ready"
+          ]
+        },
+        "PartA": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.inputs_ready"
+        },
+        "PartB": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.inputs_ready"
+        }
+      }
+    },
+    "uses": [
+      [
+        13,
+        "flow"
+      ],
+      [
+        14,
+        "flow"
+      ],
+      [
+        15,
+        "flow"
+      ],
+      [
+        16,
+        "flow"
+      ],
+      [
+        17,
+        "flow"
+      ],
+      [
+        18,
+        "flow"
+      ],
+      [
+        19,
+        "flow"
+      ],
+      [
+        20,
+        "flow"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "launch": [
+        {
+          "phase": [
+            "group_max"
+          ]
+        },
+        {
+          "phase": [
+            "split"
+          ],
+          "start_after": "group_max.launch_ready",
+          "protocol": "pdl"
+        },
+        {
+          "phase": [
+            "combine"
+          ],
+          "start_after": "split.launch_ready",
+          "protocol": "pdl"
+        }
+      ],
+      "handoff": {
+        "GroupMax": {
+          "producer": "group_max",
+          "consumer": [
+            "split"
+          ],
+          "storage": "global",
+          "ready": "group_max.kernel_done",
+          "wait_at": "split.maxima_ready"
+        },
+        "PartA": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.inputs_ready"
+        },
+        "PartB": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.inputs_ready"
+        },
+        "PartM": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.inputs_ready"
+        },
+        "MTail": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.inputs_ready"
+        }
+      }
+    },
+    "uses": [
+      [
+        21,
+        "flow"
+      ],
+      [
+        22,
+        "flow"
+      ],
+      [
+        23,
+        "flow"
+      ],
+      [
+        24,
+        "flow"
+      ],
+      [
+        25,
+        "flow"
+      ],
+      [
+        26,
+        "flow"
+      ],
+      [
+        27,
+        "flow"
+      ],
+      [
+        28,
+        "flow"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "launch": [
+        {
+          "phase": [
+            "group_max"
+          ]
+        },
+        {
+          "phase": [
+            "segment_max"
+          ],
+          "start_after": "group_max.launch_ready",
+          "protocol": "pdl"
+        },
+        {
+          "phase": [
+            "segmented_scan"
+          ],
+          "start_after": "segment_max.launch_ready",
+          "protocol": "pdl"
+        },
+        {
+          "phase": [
+            "split"
+          ],
+          "start_after": "segmented_scan.launch_ready",
+          "protocol": "pdl"
+        },
+        {
+          "phase": [
+            "combine"
+          ],
+          "start_after": "split.launch_ready",
+          "protocol": "pdl"
+        }
+      ],
+      "handoff": {
+        "GroupMax": {
+          "producer": "group_max",
+          "consumer": [
+            "segment_max",
+            "segmented_scan"
+          ],
+          "storage": "global",
+          "ready": "group_max.kernel_done",
+          "wait_at": [
+            "segment_max.inputs_ready",
+            "segmented_scan.inputs_ready"
+          ]
+        },
+        "SegMax": {
+          "producer": "segment_max",
+          "consumer": [
+            "segmented_scan"
+          ],
+          "storage": "global",
+          "ready": "segment_max.kernel_done",
+          "wait_at": "segmented_scan.inputs_ready"
+        },
+        "MState": {
+          "producer": "segmented_scan",
+          "consumer": [
+            "split"
+          ],
+          "storage": "global",
+          "ready": "segmented_scan.kernel_done",
+          "wait_at": "split.scan_ready"
+        },
+        "MTail": {
+          "producer": "segmented_scan",
+          "consumer": [
+            "split",
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "segmented_scan.kernel_done",
+          "wait_at": [
+            "split.scan_ready",
+            "combine.inputs_ready"
+          ]
+        },
+        "PartA": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.inputs_ready"
+        },
+        "PartB": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.inputs_ready"
+        }
+      }
+    },
+    "uses": [
+      [
+        29,
+        "flow"
+      ],
+      [
+        30,
+        "flow"
+      ],
+      [
+        31,
+        "flow"
+      ],
+      [
+        32,
+        "flow"
+      ],
+      [
+        33,
+        "flow"
+      ],
+      [
+        34,
+        "flow"
+      ],
+      [
+        35,
+        "flow"
+      ],
+      [
+        36,
+        "flow"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "launch": [
+        {
+          "phase": [
+            "group_max"
+          ]
+        },
+        {
+          "phase": [
+            "scan"
+          ],
+          "protocol": "pdl",
+          "start_after": "group_max.launch_ready"
+        },
+        {
+          "phase": [
+            "split"
+          ],
+          "protocol": "pdl",
+          "start_after": "scan.launch_ready"
+        },
+        {
+          "phase": [
+            "combine"
+          ],
+          "protocol": "pdl",
+          "start_after": "split.launch_ready"
+        }
+      ],
+      "handoff": {
+        "GroupMax": {
+          "producer": "group_max",
+          "consumer": [
+            "scan"
+          ],
+          "storage": "global",
+          "ready": "group_max.kernel_done",
+          "wait_at": "scan.input_ready"
+        },
+        "Mscan": {
+          "producer": "scan",
+          "consumer": [
+            "split"
+          ],
+          "storage": "global",
+          "ready": "scan.kernel_done",
+          "wait_at": "split.input_ready"
+        },
+        "Mtail": {
+          "producer": "scan",
+          "consumer": [
+            "split",
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "scan.kernel_done",
+          "wait_at": [
+            "split.input_ready",
+            "combine.input_ready"
+          ]
+        },
+        "PartA": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.input_ready"
+        },
+        "PartB": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.input_ready"
+        }
+      }
+    },
+    "uses": [
+      [
+        37,
+        "flow"
+      ],
+      [
+        38,
+        "flow"
+      ],
+      [
+        39,
+        "flow"
+      ],
+      [
+        40,
+        "flow"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "launch": [
+        {
+          "phase": [
+            "group_max"
+          ]
+        },
+        {
+          "phase": [
+            "segment_max"
+          ],
+          "protocol": "pdl",
+          "start_after": "group_max.launch_ready"
+        },
+        {
+          "phase": [
+            "scan"
+          ],
+          "protocol": "pdl",
+          "start_after": "segment_max.launch_ready"
+        },
+        {
+          "phase": [
+            "split"
+          ],
+          "protocol": "pdl",
+          "start_after": "scan.launch_ready"
+        },
+        {
+          "phase": [
+            "combine"
+          ],
+          "protocol": "pdl",
+          "start_after": "split.launch_ready"
+        }
+      ],
+      "handoff": {
+        "GroupMax": {
+          "producer": "group_max",
+          "consumer": [
+            "segment_max",
+            "scan"
+          ],
+          "storage": "global",
+          "ready": "group_max.kernel_done",
+          "wait_at": [
+            "segment_max.input_ready",
+            "scan.input_ready"
+          ]
+        },
+        "SegMax": {
+          "producer": "segment_max",
+          "consumer": [
+            "scan"
+          ],
+          "storage": "global",
+          "ready": "segment_max.kernel_done",
+          "wait_at": "scan.input_ready"
+        },
+        "Mscan": {
+          "producer": "scan",
+          "consumer": [
+            "split"
+          ],
+          "storage": "global",
+          "ready": "scan.kernel_done",
+          "wait_at": "split.input_ready"
+        },
+        "Mtail": {
+          "producer": "scan",
+          "consumer": [
+            "split",
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "scan.kernel_done",
+          "wait_at": [
+            "split.input_ready",
+            "combine.input_ready"
+          ]
+        },
+        "PartA": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.input_ready"
+        },
+        "PartB": {
+          "producer": "split",
+          "consumer": [
+            "combine"
+          ],
+          "storage": "global",
+          "ready": "split.kernel_done",
+          "wait_at": "combine.input_ready"
+        }
+      }
+    },
+    "uses": [
+      [
+        41,
+        "flow"
+      ],
+      [
+        42,
+        "flow"
+      ],
+      [
+        43,
+        "flow"
+      ],
+      [
+        44,
+        "flow"
+      ]
+    ]
+  }
+]

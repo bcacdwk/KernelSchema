@@ -1,0 +1,225 @@
+--- tc_split_flat_narrow
++++ tc_split_flat_wide
+@@ -1,12 +1,12 @@
+ meta_data:
+   name: mxfp8_qkv_attention
+   describe: TEXT[682]
+-  source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/fmha_tc.cuh::fmha_tc_kernel
+-  version: 3
++  source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/fmha_tc.cuh::fmha_combine_kernel_wide
++  version: 2
+   dispatch:
+-    id: tc_split_flat_narrow
+-    parent: tc_fused
+-    when: TEXT[121]
++    id: tc_split_flat_wide
++    parent: tc_split_flat_narrow
++    when: TEXT[112]
+ design:
+   math_reshape:
+     thesis: TEXT[678]
+@@ -195,22 +195,29 @@
+         accumulate: TEXT[161]
+         approx: TEXT[168]
+     - step: TEXT[661]
+-      name: TEXT[643]
+-      math: TEXT[336]
++      name: TEXT[645]
++      math: TEXT[380]
+       symbol:
+-        SumA:
+-          meaning: TEXT[420]
+-          shape:
+-          - row: R
++        GroupAccum:
++          meaning: TEXT[419]
++          shape:
+           - channel: D
+           dtype: fp32
+-          retention: carry_forward invocation; s=-1..PaddedNs-1
+-        SumB:
+-          meaning: TEXT[485]
+-          shape:
+-          - row: R
+-          dtype: fp32
+-          retention: carry_forward invocation; s=-1..PaddedNs-1
++          retention: carry_forward (r,f); s=-1..n(f)-1
++        GroupA:
++          meaning: TEXT[480]
++          shape:
++          - combine_group: 4
++          - channel: D
++          dtype: fp32
++          retention: keep_value (r)
++        GroupB:
++          meaning: TEXT[470]
++          shape:
++          - combine_group: 4
++          - partial: 4
++          dtype: fp32
++          retention: keep_value (r)
+       arithmetic:
+         approx: TEXT[166]
+     ledger:
+@@ -237,7 +244,7 @@
+         - TEXT[661]
+       depth:
+       - item: TEXT[292]
+-        change: TEXT[286]
++        change: TEXT[289]
+         by:
+         - TEXT[651]
+         - TEXT[654]
+@@ -245,7 +252,7 @@
+         - TEXT[661]
+       error:
+       - item: TEXT[214]
+-        change: TEXT[278]
++        change: TEXT[273]
+         by:
+         - TEXT[660]
+         - TEXT[651]
+@@ -253,7 +260,7 @@
+         - TEXT[658]
+         - TEXT[661]
+   work_schedule:
+-    thesis: TEXT[1374]
++    thesis: TEXT[1392]
+     flow:
+       launch:
+       - phase:
+@@ -528,7 +535,7 @@
+       combine:
+         describe: TEXT[1250]
+         decomposition:
+-          strategy: TEXT[1317]
++          strategy: TEXT[1297]
+           partition:
+             batch:
+               size: B
+@@ -551,7 +558,7 @@
+             iteration:
+               PartialA:
+                 shape:
+-                - split: min(8,Ns-s0)
++                - split: Nbatch(k)
+                 - channel: D
+                 dtype: ref:design.math_reshape::PartialA.dtype
+                 direction: ascending
+@@ -579,7 +586,7 @@
+             unit_count: 1
+           worker_count: R
+         schedule:
+-          strategy: TEXT[1337]
++          strategy: TEXT[1308]
+           worktile_order:
+           - by: batch
+             direction: ascending
+@@ -594,7 +601,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[691]
++    thesis: TEXT[688]
+     phase:
+       group_max:
+         domain:
+@@ -911,73 +918,53 @@
+               epilogue:
+               - write:Partials
+       combine:
+-        domain:
+-          c:
+-          - 0
+-          - D/CombineBt
+-          k:
+-          - 0
+-          - ceil_div(Ns,8)
+         resource:
+-          Denominator:
+-            space: SMEM
+-            member_slot_shape:
+-            - split: CombineBt
+-            dtype: fp32
+-            slot_count: 1
+-            view:
+-              PartialB:
+-                part:
+-                  split:
+-                  - 0
+-                  - Ns
++          GroupAccum:
++            space: register
++            member_slot_shape:
++            - combine_group: 4
++            - channel: D
++            dtype: fp32
++            slot_count: 1
+           NumeratorBatch:
+             space: register
+             member_slot_shape:
+-            - channel: CombineBt
++            - combine_group: 4
++            - channel: 128
+             - split: 8
+             dtype: fp32
+             slot_count: 1
+-            view:
+-              NumBatch(c,k): {}
+-          SumA:
+-            space: register
+-            member_slot_shape:
++          GroupA:
++            space: SMEM
++            member_slot_shape:
++            - combine_group: 4
+             - channel: D
+             dtype: fp32
+             slot_count: 1
+-          SumB:
+-            space: register
+-            member_slot_shape:
+-            - replica: CombineBt
++          GroupB:
++            space: SMEM
++            member_slot_shape:
++            - combine_group: 4
++            - partial: 4
+             dtype: fp32
+             slot_count: 1
+         role:
+           Main:
+             info:
+-              member: warp[0:CombineBt/32]
++              member: warp[0:16]
+               execution_mode: serial
+               verb:
+-                entry: TEXT[767]
+-                stage: TEXT[1131]
+-                load: TEXT[764]
+-                sum: TEXT[873]
+-                publish: TEXT[1116]
+-                write: TEXT[932]
++                entry: TEXT[814]
++                reduce: TEXT[879]
++                publish: TEXT[754]
++                write: TEXT[1111]
+             pipe:
+               prologue:
+               - entry:Protocol
+-              - stage:Denominator
+               steady:
+-              - repeat: c
+-                steady:
+-                - repeat: k
+-                  steady:
+-                  - load:NumBatch(c,k)
+-                  - sum:NumBatch(c,k)
++              - reduce:GroupSums
++              - publish:GroupSums
+               epilogue:
+-              - publish:Denominator
+-              - sum:Denominator
+               - write:Output
+ realization:
+   require:

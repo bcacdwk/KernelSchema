@@ -1,0 +1,1177 @@
+meta_data:
+  name: gated_delta_rule_prefill
+  describe: TEXT_UNIT_163
+  source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/candidate/solution.py::Model.forward
+  version: 3
+  dispatch:
+    id: segmented
+    parent: root
+    when: TEXT_UNIT_54
+design:
+  math_reshape:
+    thesis: TEXT_UNIT_160
+    rewrite:
+    - step: TEXT_UNIT_97
+      name: Define the actual padded chunk inputs
+      math: TEXT_UNIT_112
+      symbol:
+        B:
+          meaning: TEXT_UNIT_145
+          value: 64
+        VTT:
+          meaning: TEXT_UNIT_151
+          binding: bind:design.work_schedule::VTT
+        HeadsPerPrep:
+          meaning: TEXT_UNIT_137
+          binding: bind:design.work_schedule::HeadsPerPrep
+        Qc:
+          meaning: TEXT_UNIT_156
+          shape:
+          - token: B
+          - key: KeyDim
+          dtype: bf16
+          retention: keep_value (slot,m)
+        Kc:
+          meaning: TEXT_UNIT_147
+          shape:
+          - token: B
+          - key: KeyDim
+          dtype: bf16
+          retention: keep_value (slot,m)
+        Vc:
+          meaning: TEXT_UNIT_126
+          shape:
+          - token: B
+          - value: ValueDim
+          dtype: bf16
+    - step: TEXT_UNIT_90
+      name: Form decay-weighted BF16 triangular coefficients
+      math: TEXT_UNIT_116
+      symbol:
+        Gm:
+          meaning: TEXT_UNIT_144
+          shape:
+          - row: B
+          - column: B
+          dtype: bf16
+          retention: keep_value (slot,m)
+        F:
+          meaning: TEXT_UNIT_133
+          shape:
+          - row: B
+          - column: B
+          dtype: fp32
+          retention: keep_value (slot,m)
+        Sys:
+          meaning: TEXT_UNIT_134
+          shape:
+          - row: B
+          - column: B
+          dtype: bf16
+        Qd:
+          meaning: TEXT_UNIT_124
+          shape:
+          - row: B
+          - column: B
+          dtype: bf16
+          retention: keep_value (slot,h)
+        b:
+          meaning: TEXT_UNIT_155
+          shape:
+          - token: B
+          dtype: fp32
+          retention: keep_value (slot,h)
+        bc:
+          meaning: TEXT_UNIT_129
+          shape:
+          - token: B
+          dtype: fp32
+          retention: keep_value (slot,h)
+        rho:
+          meaning: TEXT_UNIT_146
+          shape:
+          - token: B
+          dtype: fp32
+        Ai:
+          meaning: TEXT_UNIT_125
+          shape:
+          - token: B
+          dtype: fp32
+          retention: keep_value (slot,h)
+        Dl:
+          meaning: TEXT_UNIT_150
+          shape:
+          - token: B
+          dtype: fp32
+          retention: keep_value (slot,h)
+      arithmetic:
+        approx: TEXT_UNIT_58
+        accumulate: TEXT_UNIT_55
+    - step: TEXT_UNIT_81
+      name: Hierarchical rounded inverse with different merge order at the final level
+      math: TEXT_UNIT_113
+      symbol:
+        Ti:
+          meaning: TEXT_UNIT_121
+          shape:
+          - row: B
+          - column: B
+          dtype: bf16
+          retention: keep_value (slot,h)
+        Y:
+          meaning: TEXT_UNIT_142
+          shape:
+          - row: 32
+          - column: 32
+          dtype: bf16
+    - step: TEXT_UNIT_79
+      name: Form segment summaries and choose readout entries
+      math: TEXT_UNIT_114
+      symbol:
+        G:
+          meaning: TEXT_UNIT_127
+          binding: bind:design.work_schedule::G
+        SegB:
+          meaning: TEXT_UNIT_139
+          shape:
+          - key: KeyDim
+          - value: VTT
+          dtype: fp32
+          retention: keep_value (n,h,vt,z)
+        SegA:
+          meaning: TEXT_UNIT_140
+          shape: []
+          dtype: fp32
+          retention: keep_value (n,h,vt,z)
+        aprod:
+          meaning: TEXT_UNIT_152
+          shape: []
+          dtype: fp32
+          retention: carry_forward (n,h,vt,z); cl=0..m_z
+        weak:
+          meaning: TEXT_UNIT_122
+          shape: []
+          dtype: bool
+        SeedC:
+          meaning: TEXT_UNIT_158
+          shape:
+          - key: KeyDim
+          - value: VTT
+          dtype: fp32
+      arithmetic:
+        approx: TEXT_UNIT_59
+        accumulate: TEXT_UNIT_61
+    - step: TEXT_UNIT_66
+      name: Apply the state recurrence and the readout traversal
+      math: TEXT_UNIT_102
+      symbol:
+        R:
+          meaning: TEXT_UNIT_135
+          shape:
+          - key: KeyDim
+          - value: VTT
+          dtype: fp32
+          retention: carry_forward (n,h,vt,mode,z); cl=0..Count
+        Rh:
+          meaning: TEXT_UNIT_120
+          shape:
+          - key: KeyDim
+          - value: VTT
+          dtype: bf16
+          retention: carry_forward (n,h,vt,mode,z); cl=0..Count
+        Hrhs:
+          meaning: TEXT_UNIT_154
+          shape:
+          - token: B
+          - value: VTT
+          dtype: bf16
+        U:
+          meaning: TEXT_UNIT_153
+          shape:
+          - token: B
+          - value: VTT
+          dtype: fp32
+        Uh:
+          meaning: TEXT_UNIT_118
+          shape:
+          - token: B
+          - value: VTT
+          dtype: bf16
+        DU:
+          meaning: TEXT_UNIT_148
+          shape:
+          - token: B
+          - value: VTT
+          dtype: bf16
+        DU0:
+          meaning: TEXT_UNIT_123
+          shape:
+          - value: VTT
+          dtype: bf16
+      arithmetic:
+        accumulate: TEXT_UNIT_60
+    ledger:
+      baseline: TEXT_UNIT_78
+      depth:
+      - item: TEXT_UNIT_85
+        change: TEXT_UNIT_94
+        by:
+        - TEXT_UNIT_79
+        - TEXT_UNIT_66
+      pass:
+      - item: TEXT_UNIT_63
+        change: TEXT_UNIT_77
+        by:
+        - TEXT_UNIT_79
+        - TEXT_UNIT_66
+      footprint:
+      - item: TEXT_UNIT_71
+        change: TEXT_UNIT_84
+        by:
+        - TEXT_UNIT_97
+        - TEXT_UNIT_90
+        - TEXT_UNIT_81
+      - item: TEXT_UNIT_72
+        change: TEXT_UNIT_70
+        by:
+        - TEXT_UNIT_79
+      matmul:
+      - item: TEXT_UNIT_62
+        change: TEXT_UNIT_98
+        by:
+        - TEXT_UNIT_90
+        - TEXT_UNIT_81
+        - TEXT_UNIT_66
+      error:
+      - item: TEXT_UNIT_68
+        change: TEXT_UNIT_87
+        by:
+        - TEXT_UNIT_90
+        - TEXT_UNIT_81
+        - TEXT_UNIT_79
+        - TEXT_UNIT_66
+  work_schedule:
+    thesis: TEXT_UNIT_315
+    flow:
+      launch:
+      - phase:
+        - prep
+      - phase:
+        - pass_a
+        protocol: pdl
+        start_after: prep.launch_ready
+      - phase:
+        - pass_c
+        protocol: pdl
+        start_after: pass_a.launch_ready
+      handoff:
+        Ti:
+          producer: prep
+          consumer:
+          - pass_a
+          - pass_c
+          storage: global
+          ready: prep.kernel_done
+          wait_at:
+          - pass_a.prep_ready
+          - pass_c.transfers_ready
+        Qd:
+          producer: prep
+          consumer:
+          - pass_c
+          storage: global
+          ready: prep.kernel_done
+          wait_at: pass_c.transfers_ready
+        b:
+          producer: prep
+          consumer:
+          - pass_a
+          - pass_c
+          storage: global
+          ready: prep.kernel_done
+          wait_at:
+          - pass_a.prep_ready
+          - pass_c.transfers_ready
+        bc:
+          producer: prep
+          consumer:
+          - pass_a
+          - pass_c
+          storage: global
+          ready: prep.kernel_done
+          wait_at:
+          - pass_a.prep_ready
+          - pass_c.transfers_ready
+        Ai:
+          producer: prep
+          consumer:
+          - pass_a
+          - pass_c
+          storage: global
+          ready: prep.kernel_done
+          wait_at:
+          - pass_a.prep_ready
+          - pass_c.transfers_ready
+        Dl:
+          producer: prep
+          consumer:
+          - pass_a
+          - pass_c
+          storage: global
+          ready: prep.kernel_done
+          wait_at:
+          - pass_a.prep_ready
+          - pass_c.transfers_ready
+        Qc:
+          producer: prep
+          consumer:
+          - pass_c
+          storage: global
+          ready: prep.kernel_done
+          wait_at: pass_c.transfers_ready
+        Kc:
+          producer: prep
+          consumer:
+          - pass_a
+          - pass_c
+          storage: global
+          ready: prep.kernel_done
+          wait_at:
+          - pass_a.prep_ready
+          - pass_c.transfers_ready
+        SegB:
+          producer: pass_a
+          consumer:
+          - pass_c
+          storage: global
+          ready: pass_a.kernel_done
+          wait_at: pass_c.transfers_ready
+        SegA:
+          producer: pass_a
+          consumer:
+          - pass_c
+          storage: global
+          ready: pass_a.kernel_done
+          wait_at: pass_c.transfers_ready
+    phase:
+      prep:
+        describe: TEXT_UNIT_281
+        decomposition:
+          strategy: TEXT_UNIT_289
+          partition:
+            slot:
+              size: SU
+              tile: 1
+            value_head:
+              size: HV
+              tile: HeadsPerPrep
+          worktile:
+            invariant:
+              q:
+                shape:
+                - token: B
+                - key: KeyDim
+                dtype: ref:contract.algorithm_requirement::q.dtype
+              k:
+                shape:
+                - token: B
+                - key: KeyDim
+                dtype: ref:contract.algorithm_requirement::k.dtype
+              g:
+                shape:
+                - token: B
+                - value_head: HeadsPerPrep
+                dtype: ref:contract.algorithm_requirement::g.dtype
+              beta:
+                shape:
+                - token: B
+                - value_head: HeadsPerPrep
+                dtype: ref:contract.algorithm_requirement::beta.dtype
+          target:
+            single_tile:
+              Ti:
+                shape:
+                - value_head: HeadRows
+                - row: B
+                - column: B
+                dtype: ref:design.math_reshape::Ti.dtype
+              Qd:
+                shape:
+                - value_head: HeadRows
+                - row: B
+                - column: B
+                dtype: ref:design.math_reshape::Qd.dtype
+              b:
+                shape:
+                - value_head: HeadRows
+                - token: B
+                dtype: ref:design.math_reshape::b.dtype
+              bc:
+                shape:
+                - value_head: HeadRows
+                - token: B
+                dtype: ref:design.math_reshape::bc.dtype
+              Ai:
+                shape:
+                - value_head: HeadRows
+                - token: B
+                dtype: ref:design.math_reshape::Ai.dtype
+              Dl:
+                shape:
+                - value_head: HeadRows
+                - token: B
+                dtype: ref:design.math_reshape::Dl.dtype
+              Qc:
+                shape:
+                - token: SaveRows
+                - key: KeyDim
+                dtype: ref:design.math_reshape::Qc.dtype
+              Kc:
+                shape:
+                - token: SaveRows
+                - key: KeyDim
+                dtype: ref:design.math_reshape::Kc.dtype
+        mapping:
+          strategy: TEXT_UNIT_303
+          worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: SU*HV/HeadsPerPrep
+        schedule:
+          strategy: TEXT_UNIT_309
+          worktile_order:
+          - by: value_head
+            direction: ascending
+          - by: slot
+            direction: ascending
+          worker_assignment:
+            preassigned:
+              start: worker_id
+              count: 1
+            refill: none
+            exit: assigned_done
+      pass_a:
+        describe: TEXT_UNIT_276
+        decomposition:
+          strategy: TEXT_UNIT_306
+          partition:
+            request:
+              size: N
+              tile: 1
+            segment:
+              size: G
+              tile: 1
+            value_head:
+              size: HV
+              tile: 1
+            value:
+              size: ValueDim
+              tile: VTT
+          worktile:
+            invariant:
+              initial_state:
+                shape:
+                - value: InitialRows
+                - key: KeyDim
+                dtype: ref:contract.algorithm_requirement::initial_state.dtype
+            iteration:
+              Kc:
+                shape:
+                - token: B
+                - key: KeyDim
+                dtype: ref:design.math_reshape::Kc.dtype
+                direction: ascending
+              Vc:
+                shape:
+                - token: B
+                - value: VTT
+                dtype: ref:design.math_reshape::Vc.dtype
+                direction: ascending
+              Ti:
+                shape:
+                - row: B
+                - column: B
+                dtype: ref:design.math_reshape::Ti.dtype
+                direction: ascending
+              b:
+                shape:
+                - token: B
+                dtype: ref:design.math_reshape::b.dtype
+                direction: ascending
+              bc:
+                shape:
+                - token: B
+                dtype: ref:design.math_reshape::bc.dtype
+                direction: ascending
+              Ai:
+                shape:
+                - token: B
+                dtype: ref:design.math_reshape::Ai.dtype
+                direction: ascending
+              Dl:
+                shape:
+                - token: B
+                dtype: ref:design.math_reshape::Dl.dtype
+                direction: ascending
+          target:
+            single_tile:
+              SegB:
+                shape:
+                - key: KeyDim
+                - value: VTT
+                dtype: ref:design.math_reshape::SegB.dtype
+              SegA:
+                shape: []
+                dtype: ref:design.math_reshape::SegA.dtype
+        mapping:
+          strategy: TEXT_UNIT_293
+          worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: (ValueDim/VTT)*HV*N*G
+        schedule:
+          worktile_order:
+          - by: request
+            direction: ascending
+          - by: segment
+            direction: ascending
+          - by: value_head
+            direction: ascending
+          - by: value
+            direction: ascending
+          worker_assignment:
+            preassigned:
+              start: worker_id
+              count: 1
+            refill: none
+            exit: assigned_done
+      pass_c:
+        describe: TEXT_UNIT_277
+        decomposition:
+          strategy: TEXT_UNIT_304
+          partition:
+            request:
+              size: N
+              tile: 1
+            segment:
+              size: G
+              tile: 1
+            value_head:
+              size: HV
+              tile: 1
+            value:
+              size: ValueDim
+              tile: VTT
+          worktile:
+            invariant:
+              initial_state:
+                shape:
+                - value: InitialRows
+                - key: KeyDim
+                dtype: ref:contract.algorithm_requirement::initial_state.dtype
+              SegA:
+                shape:
+                - segment: G
+                dtype: ref:design.math_reshape::SegA.dtype
+            iteration:
+              Kc:
+                shape:
+                - token: B
+                - key: KeyDim
+                dtype: ref:design.math_reshape::Kc.dtype
+                direction: ascending
+              Qc:
+                shape:
+                - token: B
+                - key: KeyDim
+                dtype: ref:design.math_reshape::Qc.dtype
+                direction: ascending
+              Vc:
+                shape:
+                - token: B
+                - value: VTT
+                dtype: ref:design.math_reshape::Vc.dtype
+                direction: ascending
+              Ti:
+                shape:
+                - row: B
+                - column: B
+                dtype: ref:design.math_reshape::Ti.dtype
+                direction: ascending
+              Qd:
+                shape:
+                - row: B
+                - column: B
+                dtype: ref:design.math_reshape::Qd.dtype
+                direction: ascending
+              b:
+                shape:
+                - token: B
+                dtype: ref:design.math_reshape::b.dtype
+                direction: ascending
+              bc:
+                shape:
+                - token: B
+                dtype: ref:design.math_reshape::bc.dtype
+                direction: ascending
+              Ai:
+                shape:
+                - token: B
+                dtype: ref:design.math_reshape::Ai.dtype
+                direction: ascending
+              Dl:
+                shape:
+                - token: B
+                dtype: ref:design.math_reshape::Dl.dtype
+                direction: ascending
+              SegB:
+                shape:
+                - key: KeyDim
+                - value: VTT
+                dtype: ref:design.math_reshape::SegB.dtype
+                direction: descending
+          target:
+            single_tile:
+              Out:
+                shape:
+                - token: OutputRows
+                - value: VTT
+                dtype: ref:contract.algorithm_requirement::Out.dtype
+              CoreWritten:
+                shape:
+                - token: CoreRows
+                - value: VTT
+                dtype: ref:contract.algorithm_requirement::CoreWritten.dtype
+              FinalState:
+                shape:
+                - value: FinalRows
+                - key: KeyDim
+                dtype: ref:contract.algorithm_requirement::FinalState.dtype
+            tile_reduction:
+              dimension: segment
+              input:
+              - ref:design.math_reshape::SegB
+              - ref:design.math_reshape::SegA
+              output: ref:design.math_reshape::SeedC
+              method: ref:design.math_reshape::segments
+        mapping:
+          strategy: TEXT_UNIT_293
+          worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: (ValueDim/VTT)*HV*N*G
+        schedule:
+          worktile_order:
+          - by: request
+            direction: ascending
+          - by: segment
+            direction: ascending
+          - by: value_head
+            direction: ascending
+          - by: value
+            direction: ascending
+          worker_assignment:
+            preassigned:
+              start: worker_id
+              count: 1
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: TEXT_UNIT_164
+    phase:
+      prep:
+        domain:
+          a:
+          - 0
+          - Active
+          r:
+          - 0
+          - ceil_div(HeadsPerPrep,GroupWidth)
+        resource:
+          KQImage:
+            space: SMEM
+            member_slot_shape:
+            - element: 16384
+            dtype: bf16
+            slot_count: 1
+            view:
+              Kc:
+                part:
+                  element:
+                  - 0
+                  - 8192
+              Qc:
+                part:
+                  element:
+                  - 8192
+                  - 16384
+          Gm:
+            space: SMEM
+            member_slot_shape:
+            - row: B
+            - column: 72
+            dtype: bf16
+            slot_count: 1
+          F:
+            space: register
+            member_slot_shape:
+            - element: 2560
+            dtype: fp32
+            slot_count: 1
+          Systems:
+            space: SMEM
+            member_slot_shape:
+            - head: GroupWidth
+            - row: B
+            - column: 72
+            dtype: bf16
+            slot_count: 1
+            view:
+              Sys: {}
+          Inverses:
+            space: SMEM
+            member_slot_shape:
+            - head: GroupWidth
+            - row: B
+            - column: 72
+            dtype: bf16
+            slot_count: 1
+            view:
+              Ti: {}
+          Decays:
+            space: SMEM
+            member_slot_shape:
+            - element: 3*HeadsPerPrep*B
+            dtype: fp32
+            slot_count: 1
+            view:
+              b:
+                part:
+                  element:
+                  - 0
+                  - HeadsPerPrep*B
+              bc:
+                part:
+                  element:
+                  - HeadsPerPrep*B
+                  - 2*HeadsPerPrep*B
+              rho:
+                part:
+                  element:
+                  - 2*HeadsPerPrep*B
+                  - 3*HeadsPerPrep*B
+          MergeScratch:
+            space: SMEM
+            member_slot_shape:
+            - head: GroupWidth
+            - element: 1280
+            dtype: fp32
+            slot_count: 1
+            view:
+              Y:
+                part:
+                  element:
+                  - 0
+                  - 640
+                dtype: bf16
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:8]
+              verb:
+                enter: TEXT_UNIT_194
+                stage_inputs: TEXT_UNIT_198
+                signal: TEXT_UNIT_215
+                gram: TEXT_UNIT_212
+                save_image:
+                  execution_mode: async
+                  meaning: TEXT_UNIT_237
+                skeleton: TEXT_UNIT_201
+                system: TEXT_UNIT_236
+                readout_coeff:
+                  execution_mode: async
+                  meaning: TEXT_UNIT_192
+                solve8: TEXT_UNIT_191
+                merge16: TEXT_UNIT_178
+                merge32: TEXT_UNIT_254
+                merge64_y: TEXT_UNIT_176
+                merge64_x: TEXT_UNIT_213
+                publish_group: TEXT_UNIT_188
+                drain_image: TEXT_UNIT_207
+            pipe:
+              prologue:
+              - enter:Metadata
+              steady:
+              - repeat: a
+                steady:
+                - stage_inputs:KQ_Decays
+                - signal:Launch
+                - gram:Gm_F
+                - save_image:KQImage(a)
+                - skeleton:Ti
+                - repeat: r
+                  steady:
+                  - system:Sys(r)
+                  - readout_coeff:Qd(r)
+                  - solve8:Ti(r)
+                  - merge16:Ti(r)
+                  - merge32:Ti(r)
+                  - merge64_y:Y(r)
+                  - merge64_x:Ti(r)
+                  - publish_group:Coefficients(r)
+                - drain_image:KQImage(a)
+            waits_for:
+              data:
+                drain_image:KQImage(a)@done:
+                - save_image:KQImage(a)@done
+      pass_a:
+        domain:
+          cl:
+          - 0
+          - m_z
+        milestone:
+          prep_ready:
+          - Main/join_prep:Prepared@done
+        resource:
+          aprod:
+            space: register
+            member_slot_shape: []
+            dtype: fp32
+            slot_count: 1
+          R:
+            space: register
+            member_slot_shape:
+            - key: KeyDim
+            - value: VTT
+            dtype: fp32
+            slot_count: 1
+          Projections:
+            space: register
+            member_slot_shape:
+            - matrix: 1
+            - partial: Partials
+            - token: B
+            - value: VTT
+            dtype: fp32
+            slot_count: 1
+            view:
+              KS: {}
+          Rh:
+            space: SMEM
+            member_slot_shape:
+            - key: KeyDim
+            - value: Pitch
+            dtype: bf16
+            slot_count: 1
+          DU:
+            space: SMEM
+            member_slot_shape:
+            - token: B
+            - value: Pitch
+            dtype: bf16
+            slot_count: 1
+          RhsScratch:
+            space: SMEM
+            member_slot_shape:
+            - token: B
+            - value: Pitch
+            dtype: bf16
+            slot_count: 1
+            view:
+              Hrhs: {}
+              DU0:
+                part:
+                  token:
+                  - 0
+                  - 1
+          Stages:
+            space: SMEM
+            member_slot_shape:
+            - element: StageBytes
+            dtype: uint8
+            slot_count: NSTAGE
+            view:
+              Kc(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 0
+                  - 16384
+                dtype: bf16
+              Vc(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 32768
+                  - 32768+128*VTT
+                dtype: bf16
+              Ti(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 32768+128*VTT
+                  - 37888+128*VTT
+                dtype: bf16
+              b(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 43008+128*VTT
+                  - 43264+128*VTT
+                dtype: fp32
+              bc(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 43264+128*VTT
+                  - 43520+128*VTT
+                dtype: fp32
+              Ai(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 43520+128*VTT
+                  - 43776+128*VTT
+                dtype: fp32
+              Dl(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 43776+128*VTT
+                  - 44032+128*VTT
+                dtype: fp32
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:8]
+              verb:
+                setup: TEXT_UNIT_234
+                early_inputs: TEXT_UNIT_252
+                join_prep: TEXT_UNIT_253
+                prime: TEXT_UNIT_235
+                seed: TEXT_UNIT_239
+                advance: TEXT_UNIT_205
+                project: TEXT_UNIT_221
+                rhs: TEXT_UNIT_241
+                solve: TEXT_UNIT_227
+                update: TEXT_UNIT_240
+                publish_transfer: TEXT_UNIT_203
+            pipe:
+              prologue:
+              - setup:Resources
+              - early_inputs:Inputs
+              - join_prep:Prepared
+              - prime:Stages
+              - seed:R
+              steady:
+              - repeat: cl
+                steady:
+                - advance:Stage(cl)
+                - project:KS(cl)
+                - rhs:Hrhs(cl)
+                - solve:U(cl)
+                - update:R(cl)
+              epilogue:
+              - publish_transfer:SegB_SegA
+      pass_c:
+        domain:
+          run:
+          - 0
+          - Run
+          cl:
+          - 0
+          - Count
+        milestone:
+          transfers_ready:
+          - Main/join_a:Transfers@done
+        resource:
+          R:
+            space: register
+            member_slot_shape:
+            - key: KeyDim
+            - value: VTT
+            dtype: fp32
+            slot_count: 1
+          Projections:
+            space: register
+            member_slot_shape:
+            - matrix: 2
+            - partial: Partials
+            - token: B
+            - value: VTT
+            dtype: fp32
+            slot_count: 1
+            view:
+              KS_QS: {}
+          Rh:
+            space: SMEM
+            member_slot_shape:
+            - key: KeyDim
+            - value: Pitch
+            dtype: bf16
+            slot_count: 1
+          Uh:
+            space: SMEM
+            member_slot_shape:
+            - token: B
+            - value: Pitch
+            dtype: bf16
+            slot_count: 1
+          DU:
+            space: SMEM
+            member_slot_shape:
+            - token: B
+            - value: Pitch
+            dtype: bf16
+            slot_count: 1
+          RhsOutput:
+            space: SMEM
+            member_slot_shape:
+            - token: B
+            - value: Pitch
+            dtype: bf16
+            slot_count: 1
+            view:
+              Hrhs: {}
+              Out: {}
+              DU0:
+                part:
+                  token:
+                  - 0
+                  - 1
+          Stages:
+            space: SMEM
+            member_slot_shape:
+            - element: StageBytes
+            dtype: uint8
+            slot_count: NSTAGE
+            view:
+              Kc(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 0
+                  - 16384
+                dtype: bf16
+              Qc(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 16384
+                  - 32768
+                dtype: bf16
+              Vc(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 32768
+                  - 32768+128*VTT
+                dtype: bf16
+              Ti(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 32768+128*VTT
+                  - 37888+128*VTT
+                dtype: bf16
+              Qd(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 37888+128*VTT
+                  - 43008+128*VTT
+                dtype: bf16
+              b(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 43008+128*VTT
+                  - 43264+128*VTT
+                dtype: fp32
+              bc(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 43264+128*VTT
+                  - 43520+128*VTT
+                dtype: fp32
+              Ai(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 43520+128*VTT
+                  - 43776+128*VTT
+                dtype: fp32
+              Dl(cl):
+                slot_index: cl%NSTAGE
+                part:
+                  element:
+                  - 43776+128*VTT
+                  - 44032+128*VTT
+                dtype: fp32
+              FinalState:
+                slot_index: 0
+                part:
+                  element:
+                  - 0
+                  - 4*128*(VTT+1)
+                dtype: fp32
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:8]
+              verb:
+                setup: TEXT_UNIT_179
+                early_inputs: TEXT_UNIT_249
+                join_a: TEXT_UNIT_218
+                classify: TEXT_UNIT_242
+                prime: TEXT_UNIT_189
+                seed: TEXT_UNIT_210
+                advance: TEXT_UNIT_206
+                project: TEXT_UNIT_231
+                rhs: TEXT_UNIT_232
+                solve: TEXT_UNIT_247
+                finish_chunk: TEXT_UNIT_228
+                final_store: TEXT_UNIT_222
+            pipe:
+              prologue:
+              - setup:Resources
+              - early_inputs:Inputs
+              - join_a:Transfers
+              - classify:weak
+              steady:
+              - repeat: run
+                steady:
+                - prime:Stages
+                - seed:R
+                - repeat: cl
+                  steady:
+                  - advance:Stage(cl)
+                  - project:KS_QS(cl)
+                  - rhs:Hrhs(cl)
+                  - solve:U(cl)
+                  - finish_chunk:Out_R(cl)
+                - final_store:FinalState
+realization:
+  require:
+  - item: design.work_schedule::flow
+    choice: TEXT_UNIT_261
+    reason: TEXT_UNIT_268
+  - item:
+    - design.tile_pipeline::prep.KQImage
+    - design.tile_pipeline::pass_a.Stages
+    - design.tile_pipeline::pass_c.Stages
+    choice: TEXT_UNIT_266
+    reason: TEXT_UNIT_270
+  - item: design.work_schedule::flow
+    choice: TEXT_UNIT_256
+    reason: TEXT_UNIT_269
+  prefer:
+  - item:
+    - design.math_reshape::Ti
+    - design.math_reshape::Qd
+    choice: TEXT_UNIT_262
+    reason: TEXT_UNIT_272

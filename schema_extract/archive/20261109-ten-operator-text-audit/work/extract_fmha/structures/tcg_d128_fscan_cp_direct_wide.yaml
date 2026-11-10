@@ -1,0 +1,866 @@
+meta_data:
+  name: mxfp8_qkv_attention
+  describe: TEXT[682]
+  source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+  version: 2
+  dispatch:
+    id: tcg_d128_fscan_cp_direct_wide
+    parent: tcg_d128_fscan_cp_direct_narrow
+    when: TEXT[148]
+design:
+  math_reshape:
+    thesis: TEXT[675]
+    rewrite:
+    - step: TEXT[652]
+      name: TEXT[614]
+      math: TEXT[353]
+      symbol:
+        Br:
+          meaning: TEXT[512]
+          binding: bind:design.work_schedule::Br
+        Ngm:
+          meaning: TEXT[518]
+          binding: bind:design.work_schedule::Ngm
+        Ns:
+          meaning: TEXT[495]
+          binding: bind:design.work_schedule::Ns
+    - step: TEXT[660]
+      name: TEXT[623]
+      math: TEXT[349]
+      symbol:
+        DotTile:
+          meaning: TEXT[527]
+          shape:
+          - row: Br
+          - key: KeyGroup
+          dtype: fp32
+          retention: keep_value (evaluation,b,kh,a,s,g)
+        GroupMax:
+          meaning: TEXT[581]
+          shape:
+          - group: T
+          - row: R
+          dtype: fp32
+          retention: keep_value invocation
+      arithmetic:
+        accumulate: TEXT[159]
+    - step: TEXT[651]
+      name: TEXT[622]
+      math: TEXT[399]
+      symbol:
+        PrefixState:
+          meaning: TEXT[452]
+          shape:
+          - row: Br
+          dtype: fp32
+          retention: carry_forward (b,kh,a,s); t=-1..Tw(s)-1
+        MaxState:
+          meaning: TEXT[459]
+          shape:
+          - row: C
+          dtype: fp32
+          retention: carry_forward (b,kh,a,s); g=cLo-1..end
+    - step: TEXT[654]
+      name: TEXT[636]
+      math: TEXT[329]
+      symbol:
+        DenState:
+          meaning: TEXT[584]
+          shape:
+          - row: C
+          dtype: fp32
+          retention: carry_forward (b,kh,a,s); g=cLo-1..end
+        Prob8:
+          meaning: TEXT[585]
+          shape:
+          - row: C
+          - key: KeyGroup
+          dtype: fp8_e4m3fn
+          retention: keep_value (b,kh,a,s,g)
+      arithmetic:
+        approx: TEXT[193]
+    - step: TEXT[662]
+      name: TEXT[598]
+      math: TEXT[404]
+      symbol:
+        NumState:
+          meaning: TEXT[571]
+          shape:
+          - row: C
+          - channel: D
+          dtype: fp32
+          retention: carry_forward (b,kh,a,s); g=cLo-1..end
+        GroupPV:
+          meaning: TEXT[465]
+          shape:
+          - row: C
+          - channel: D
+          dtype: fp32
+          retention: keep_value (b,kh,a,s,g)
+        PartA:
+          meaning: TEXT[574]
+          shape:
+          - split: Ns
+          - row: R
+          - channel: D
+          dtype: fp32
+          retention: keep_value invocation
+        PartB:
+          meaning: TEXT[536]
+          shape:
+          - split: Ns
+          - row: R
+          dtype: fp32
+          retention: keep_value invocation
+        PartM:
+          meaning: TEXT[422]
+          shape:
+          - split: Ns
+          - row: R
+          dtype: fp32
+          retention: keep_value invocation
+        MTail:
+          meaning: TEXT[526]
+          shape:
+          - row: R
+          dtype: fp32
+          retention: keep_value invocation
+      arithmetic:
+        accumulate: TEXT[194]
+    - step: TEXT[661]
+      name: TEXT[612]
+      math: TEXT[348]
+      symbol:
+        MergeGroups:
+          meaning: TEXT[533]
+          binding: bind:design.tile_pipeline::MergeGroups
+        MergeWidth:
+          meaning: TEXT[553]
+          binding: bind:design.tile_pipeline::MergeWidth
+        Weight:
+          meaning: TEXT[521]
+          shape:
+          - split: Ns
+          dtype: fp32
+          retention: keep_value (r)
+        GroupA:
+          meaning: TEXT[556]
+          shape:
+          - merge: MergeGroups
+          - channel: D
+          dtype: fp32
+          retention: keep_value (r)
+        GroupB:
+          meaning: TEXT[563]
+          shape:
+          - merge: MergeGroups
+          - bundle: MergeWidth/32
+          dtype: fp32
+          retention: keep_value (r)
+        TotalA:
+          meaning: TEXT[441]
+          shape:
+          - channel: D
+          dtype: fp32
+          retention: keep_value (r)
+        TotalB:
+          meaning: TEXT[567]
+          shape: []
+          dtype: fp32
+          retention: keep_value (r)
+      arithmetic:
+        accumulate: TEXT[171]
+        approx: TEXT[165]
+    ledger:
+      baseline: TEXT[249]
+      footprint:
+      - item: TEXT[296]
+        change: TEXT[241]
+        by:
+        - TEXT[660]
+        - TEXT[651]
+        - TEXT[662]
+      matmul:
+      - item: TEXT[318]
+        change: TEXT[211]
+        by:
+        - TEXT[652]
+        - TEXT[660]
+        - TEXT[662]
+      depth:
+      - item: TEXT[313]
+        change: TEXT[317]
+        by:
+        - TEXT[651]
+        - TEXT[662]
+        - TEXT[661]
+      error:
+      - item: TEXT[277]
+        change: TEXT[242]
+        by:
+        - TEXT[660]
+        - TEXT[654]
+        - TEXT[662]
+        - TEXT[661]
+  work_schedule:
+    thesis: TEXT[1375]
+    flow:
+      launch:
+      - phase:
+        - group_max
+      - phase:
+        - split
+        start_after: group_max.launch_ready
+        protocol: pdl
+      - phase:
+        - TEXT[661]
+        start_after: split.launch_ready
+        protocol: pdl
+      handoff:
+        GroupMax:
+          producer: group_max
+          consumer:
+          - split
+          storage: global
+          ready: group_max.kernel_done
+          wait_at: split.maxima_ready
+        PartA:
+          producer: split
+          consumer:
+          - TEXT[661]
+          storage: global
+          ready: split.kernel_done
+          wait_at: combine.inputs_ready
+        PartB:
+          producer: split
+          consumer:
+          - TEXT[661]
+          storage: global
+          ready: split.kernel_done
+          wait_at: combine.inputs_ready
+        PartM:
+          producer: split
+          consumer:
+          - TEXT[661]
+          storage: global
+          ready: split.kernel_done
+          wait_at: combine.inputs_ready
+        MTail:
+          producer: split
+          consumer:
+          - TEXT[661]
+          storage: global
+          ready: split.kernel_done
+          wait_at: combine.inputs_ready
+    phase:
+      group_max:
+        describe: TEXT[1280]
+        decomposition:
+          strategy: TEXT[1341]
+          partition:
+            split:
+              size: Ngm
+              tile: 1
+            kvflat:
+              size: B*KH
+              tile: 1
+            query:
+              size: Sq
+              tile: Qph
+          worktile:
+            invariant:
+              q_tensor:
+                shape:
+                - head: G
+                - query: Qph
+                - channel: D
+                dtype: ref:contract.algorithm_requirement::q_tensor.dtype
+              sf_q:
+                shape:
+                - scale_row: Br
+                - scale_column: D/Block
+                dtype: ref:contract.algorithm_requirement::sf_q.dtype
+            iteration:
+              k_tensor:
+                shape:
+                - key: KeyGroup
+                - channel: D
+                dtype: ref:contract.algorithm_requirement::k_tensor.dtype
+                direction: ascending
+              sf_k:
+                shape:
+                - scale_row: KeyGroup
+                - scale_column: D/Block
+                dtype: ref:contract.algorithm_requirement::sf_k.dtype
+                direction: ascending
+          target:
+            single_tile:
+              GroupMax:
+                shape:
+                - group: count(WrittenG)
+                - row: U
+                dtype: ref:design.math_reshape::GroupMax.dtype
+        mapping:
+          worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: nx*ny*Ngm
+        schedule:
+          strategy: TEXT[1365]
+          worktile_order:
+          - by: split
+            direction: ascending
+          - by: kvflat
+            direction: ascending
+          - by: query
+            direction: ascending
+          worker_assignment:
+            preassigned:
+              start: worker_id
+              count: 1
+            refill: none
+            exit: assigned_done
+      split:
+        describe: TEXT[1265]
+        decomposition:
+          strategy: TEXT[1331]
+          partition:
+            split:
+              size: Ns
+              tile: 1
+            kvflat:
+              size: B*KH
+              tile: 1
+            query:
+              size: Sq
+              tile: Qph
+          worktile:
+            invariant:
+              q_tensor:
+                shape:
+                - head: G
+                - query: Qph
+                - channel: D
+                dtype: ref:contract.algorithm_requirement::q_tensor.dtype
+              sf_q:
+                shape:
+                - scale_row: Br
+                - scale_column: D/Block
+                dtype: ref:contract.algorithm_requirement::sf_q.dtype
+            iteration:
+              k_tensor:
+                shape:
+                - key: KeyGroup
+                - channel: D
+                dtype: ref:contract.algorithm_requirement::k_tensor.dtype
+                direction: ascending
+              v_tensor:
+                shape:
+                - key: KeyGroup
+                - channel: D
+                dtype: ref:contract.algorithm_requirement::v_tensor.dtype
+                direction: ascending
+              sf_k:
+                shape:
+                - scale_row: KeyGroup
+                - scale_column: D/Block
+                dtype: ref:contract.algorithm_requirement::sf_k.dtype
+                direction: ascending
+              sf_v:
+                shape:
+                - channel: D
+                - sequence_block: KeyGroup/Block
+                dtype: ref:contract.algorithm_requirement::sf_v.dtype
+                direction: ascending
+              GroupMax:
+                shape:
+                - group: 1
+                - row: U
+                dtype: ref:design.math_reshape::GroupMax.dtype
+                direction: ascending
+          target:
+            single_tile:
+              PartA:
+                shape:
+                - row: U
+                - channel: D
+                dtype: ref:design.math_reshape::PartA.dtype
+              PartB:
+                shape:
+                - row: U
+                dtype: ref:design.math_reshape::PartB.dtype
+              PartM:
+                shape:
+                - row: U
+                dtype: ref:design.math_reshape::PartM.dtype
+              MTail:
+                shape:
+                - row: TailRows
+                dtype: ref:design.math_reshape::MTail.dtype
+        mapping:
+          worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: nx*ny*Ns
+        schedule:
+          strategy: TEXT[1307]
+          worktile_order:
+          - by: split
+            direction: ascending
+          - by: kvflat
+            direction: ascending
+          - by: query
+            direction: ascending
+          worker_assignment:
+            preassigned:
+              start: worker_id
+              count: 1
+            refill: none
+            exit: assigned_done
+      combine:
+        describe: TEXT[1279]
+        decomposition:
+          strategy: TEXT[1342]
+          partition:
+            row:
+              size: R
+              tile: 1
+          worktile:
+            invariant:
+              MTail:
+                shape: []
+                dtype: ref:design.math_reshape::MTail.dtype
+            iteration:
+              PartA:
+                shape:
+                - channel: D
+                dtype: ref:design.math_reshape::PartA.dtype
+                direction: ascending
+              PartB:
+                shape: []
+                dtype: ref:design.math_reshape::PartB.dtype
+                direction: ascending
+              PartM:
+                shape: []
+                dtype: ref:design.math_reshape::PartM.dtype
+                direction: ascending
+          target:
+            single_tile:
+              O:
+                shape:
+                - channel: D
+                dtype: ref:contract.algorithm_requirement::O.dtype
+              LSE:
+                shape: []
+                dtype: ref:contract.algorithm_requirement::LSE.dtype
+            tile_reduction:
+              dimension: split
+              input:
+              - ref:design.math_reshape::PartA
+              - ref:design.math_reshape::PartB
+              - ref:design.math_reshape::PartM
+              - ref:design.math_reshape::MTail
+              output:
+              - ref:contract.algorithm_requirement::O
+              - ref:contract.algorithm_requirement::LSE
+              method: ref:design.math_reshape::combine
+        mapping:
+          worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: R
+        schedule:
+          worktile_order:
+          - by: row
+            direction: ascending
+          worker_assignment:
+            preassigned:
+              start: worker_id
+              count: 1
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: TEXT[686]
+    phase:
+      group_max:
+        domain:
+          g:
+          - cLo
+          - max(cLo,cHi+1)
+        resource:
+          Query:
+            space: SMEM
+            member_slot_shape:
+            - row: Br
+            - channel: D
+            dtype: fp8_e4m3fn
+            slot_count: 1
+          Key:
+            space: SMEM
+            member_slot_shape:
+            - key: KeyGroup
+            - channel: D
+            dtype: fp8_e4m3fn
+            slot_count: 3
+            view:
+              Key(g):
+                slot_index: (g-cLo)%RingUsed
+          KeyAtom:
+            space: SMEM
+            member_slot_shape:
+            - element: 512
+            dtype: uint8
+            slot_count: 3
+            view:
+              KeyAtom(g):
+                slot_index: (g-cLo)%RingUsed
+          TensorMemory:
+            space: TMEM
+            member_slot_shape:
+            - row: Br
+            - column: 256
+            dtype: fp32
+            slot_count: 1
+            view:
+              DotTile:
+                part:
+                  column:
+                  - 0
+                  - 128
+              QueryScale:
+                part:
+                  column:
+                  - 128
+                  - 136
+                dtype: uint8
+              KeyScale(g):
+                part:
+                  column:
+                  - ScaleCol(g)
+                  - ScaleCol(g)+8
+                dtype: uint8
+          QueryPrefetch:
+            space: register
+            member_slot_shape:
+            - element: Br*D+Br*(D/Block)
+            dtype: uint8
+            slot_count: 1
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:4]
+              verb:
+                setup: TEXT[1034]
+                prime: TEXT[1009]
+                prepare: TEXT[743]
+                start: TEXT[820]
+                prefetch: TEXT[991]
+                stage: TEXT[984]
+                score: TEXT[829]
+                reduce: TEXT[1012]
+                advance: TEXT[1093]
+                finish: TEXT[985]
+            pipe:
+              prologue:
+              - setup:Local
+              - prime:Inputs
+              - prepare:Query
+              - start:FirstQK
+              steady:
+              - repeat: g
+                steady:
+                - prefetch:FutureK(g)
+                - stage:Scales(g)
+                - score:DotTile(g)
+                - reduce:GroupMax(g)
+                - advance:NextQK(g)
+              epilogue:
+              - finish:Local
+      split:
+        domain:
+          g:
+          - cLo
+          - max(cLo,cHi+1)
+        milestone:
+          maxima_ready:
+          - Main/dependency:GroupMax@done
+        resource:
+          Query:
+            space: SMEM
+            member_slot_shape:
+            - row: Br
+            - channel: D
+            dtype: fp8_e4m3fn
+            slot_count: 1
+          Key:
+            space: SMEM
+            member_slot_shape:
+            - key: KeyGroup
+            - channel: D
+            dtype: fp8_e4m3fn
+            slot_count: 2
+            view:
+              Key(g):
+                slot_index: (g-cLo)%2
+          Value:
+            space: SMEM
+            member_slot_shape:
+            - key: KeyGroup
+            - channel: D
+            dtype: fp8_e4m3fn
+            slot_count: 2
+            view:
+              Value(g):
+                slot_index: (g-cLo)%2
+          KeyAtom:
+            space: SMEM
+            member_slot_shape:
+            - element: 512
+            dtype: uint8
+            slot_count: 2
+            view:
+              KeyAtom(g):
+                slot_index: (g-cLo)%2
+          ValueAtom:
+            space: SMEM
+            member_slot_shape:
+            - element: 512
+            dtype: uint8
+            slot_count: 2
+            view:
+              ValueAtom(g):
+                slot_index: (g-cLo)%2
+          TensorMemory:
+            space: TMEM
+            member_slot_shape:
+            - row: Br
+            - column: 256
+            dtype: fp32
+            slot_count: 1
+            view:
+              DotTile:
+                part:
+                  column:
+                  - 0
+                  - 128
+              GroupPV:
+                part:
+                  column:
+                  - 0
+                  - 128
+              QueryScale:
+                part:
+                  column:
+                  - 128
+                  - 136
+                dtype: uint8
+              KeyScale:
+                part:
+                  column:
+                  - 136
+                  - 144
+                dtype: uint8
+              UnitScale:
+                part:
+                  column:
+                  - 144
+                  - 152
+                dtype: uint8
+              ValueScale:
+                part:
+                  column:
+                  - 152
+                  - 160
+                dtype: uint8
+              Prob8:
+                part:
+                  column:
+                  - 192
+                  - 224
+                dtype: fp8_e4m3fn
+          QueryPrefetch:
+            space: register
+            member_slot_shape:
+            - element: Br*D+Br*(D/Block)
+            dtype: uint8
+            slot_count: 1
+          NumState:
+            space: register
+            member_slot_shape:
+            - row: Br
+            - channel: D
+            dtype: fp32
+            slot_count: 1
+          DenState:
+            space: register
+            member_slot_shape:
+            - row: Br
+            dtype: fp32
+            slot_count: 1
+          PrefixBatch:
+            space: register
+            member_slot_shape:
+            - row: Br
+            - group: 16
+            dtype: fp32
+            slot_count: 1
+          ScanRegisters:
+            space: register
+            member_slot_shape:
+            - row: Br
+            - column: 3
+            dtype: fp32
+            slot_count: 1
+            view:
+              PrefixState:
+                part:
+                  column:
+                  - 0
+                  - 1
+              MaxState:
+                part:
+                  column:
+                  - 0
+                  - 1
+              CurrentGroupMax:
+                part:
+                  column:
+                  - 1
+                  - 2
+              NextGroupMax:
+                part:
+                  column:
+                  - 2
+                  - 3
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:4]
+              verb:
+                setup: TEXT[1145]
+                prime: TEXT[919]
+                prepare: TEXT[813]
+                dependency: TEXT[781]
+                prefix: TEXT[1043]
+                prefetch: TEXT[911]
+                stage: TEXT[958]
+                qk: TEXT[1148]
+                probability: TEXT[1084]
+                pv: TEXT[1139]
+                accumulate: TEXT[885]
+                tail: TEXT[998]
+                write: TEXT[1017]
+                finish: TEXT[1141]
+            pipe:
+              prologue:
+              - setup:Local
+              - prime:Inputs
+              - prepare:Query
+              - dependency:GroupMax
+              - prefix:MaxState
+              steady:
+              - repeat: g
+                steady:
+                - prefetch:Next(g)
+                - stage:Operands(g)
+                - qk:DotTile(g)
+                - probability:Prob8(g)
+                - pv:GroupPV(g)
+                - accumulate:NumState(g)
+              epilogue:
+              - tail:MTail
+              - write:Partials
+              - finish:Local
+      combine:
+        milestone:
+          inputs_ready:
+          - Main/dependency:Partials@done
+        resource:
+          Weight:
+            space: SMEM
+            member_slot_shape:
+            - merge: MergeGroups
+            - split: MergeWidth
+            dtype: fp32
+            slot_count: 1
+          GroupA:
+            space: SMEM
+            member_slot_shape:
+            - merge: MergeGroups
+            - channel: D
+            dtype: fp32
+            slot_count: 1
+          GroupB:
+            space: SMEM
+            member_slot_shape:
+            - merge: MergeGroups
+            - bundle: MergeWidth/32
+            dtype: fp32
+            slot_count: 1
+          NumeratorBatch:
+            space: register
+            member_slot_shape:
+            - merge: MergeGroups
+            - channel: D
+            - split: 8
+            dtype: fp32
+            slot_count: 1
+          GroupAccumulator:
+            space: register
+            member_slot_shape:
+            - merge: MergeGroups
+            - channel: D
+            dtype: fp32
+            slot_count: 1
+          Totals:
+            space: register
+            member_slot_shape:
+            - channel: D
+            - column: 2
+            dtype: fp32
+            slot_count: 1
+            view:
+              TotalA:
+                part:
+                  column:
+                  - 0
+                  - 1
+              TotalB:
+                part:
+                  column:
+                  - 1
+                  - 2
+        role:
+          Main:
+            info:
+              execution_mode: serial
+              member: warp[0:16]
+              verb:
+                dependency: TEXT[790]
+                sum_a: TEXT[1094]
+                sum_b: TEXT[852]
+                write: TEXT[733]
+            pipe:
+              steady:
+              - dependency:Partials
+              - sum_a:GroupA
+              - sum_b:GroupB
+              - write:Output
+realization:
+  require:
+  - item:
+    - design.tile_pipeline::group_max
+    - design.tile_pipeline::split
+    choice: TEXT[1164]
+    reason: TEXT[1215]
+  - item: design.work_schedule::flow
+    choice: TEXT[1182]
+    reason: TEXT[1236]
+  prefer:
+  - item:
+    - design.tile_pipeline::group_max.TensorMemory
+    - design.tile_pipeline::split.TensorMemory
+    choice: TEXT[1194]
+    reason: TEXT[1233]

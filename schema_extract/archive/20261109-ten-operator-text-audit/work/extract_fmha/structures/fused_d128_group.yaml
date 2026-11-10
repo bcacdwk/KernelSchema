@@ -1,0 +1,561 @@
+meta_data:
+  name: mxfp8_qkv_attention
+  describe: TEXT[682]
+  source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+  version: 3
+  dispatch:
+    id: fused_d128_group
+    parent: fused_d128_key
+    when: TEXT[119]
+design:
+  math_reshape:
+    thesis: TEXT[663]
+    rewrite:
+    - step: TEXT[652]
+      name: TEXT[629]
+      math: TEXT[385]
+      symbol:
+        Br:
+          meaning: TEXT[482]
+          binding: bind:design.work_schedule::Br
+    - step: TEXT[660]
+      name: TEXT[647]
+      math: TEXT[381]
+      symbol:
+        Score:
+          meaning: TEXT[564]
+          shape:
+          - row: Br
+          - key: KeyGroup
+          dtype: fp32
+          retention: keep_value (b,kh,a,g)
+      arithmetic:
+        accumulate: TEXT[154]
+    - step: TEXT[654]
+      name: TEXT[641]
+      math: TEXT[382]
+      symbol:
+        MaxState:
+          meaning: TEXT[429]
+          shape:
+          - row: Br
+          dtype: fp32
+          retention: carry_forward (b,kh,a); g=cLo-1..cHi
+        DenState:
+          meaning: TEXT[549]
+          shape:
+          - row: Br
+          dtype: fp32
+          retention: carry_forward (b,kh,a); g=cLo-1..cHi
+        alpha:
+          meaning: TEXT[544]
+          shape:
+          - row: Br
+          dtype: fp32
+        Prob8:
+          meaning: TEXT[557]
+          shape:
+          - row: Br
+          - key: KeyGroup
+          dtype: fp8_e4m3fn
+          retention: keep_value (b,kh,a,g)
+      arithmetic:
+        approx: TEXT[163]
+    - step: TEXT[656]
+      name: TEXT[591]
+      math: TEXT[376]
+      symbol:
+        NumState:
+          meaning: TEXT[493]
+          shape:
+          - row: Br
+          - channel: D
+          dtype: fp32
+          retention: carry_forward (b,kh,a); g=cLo-1..cHi
+      arithmetic:
+        accumulate: TEXT[191]
+        approx: TEXT[153]
+    ledger:
+      baseline: TEXT[306]
+      footprint:
+      - item: TEXT[199]
+        change: TEXT[288]
+        by:
+        - TEXT[660]
+        - TEXT[654]
+        - TEXT[656]
+      matmul:
+      - item: TEXT[297]
+        change: TEXT[275]
+        by:
+        - TEXT[652]
+        - TEXT[660]
+        - TEXT[656]
+      depth:
+      - item: TEXT[320]
+        change: TEXT[262]
+        by:
+        - TEXT[652]
+        - TEXT[654]
+      error:
+      - item: TEXT[214]
+        change: TEXT[261]
+        by:
+        - TEXT[660]
+        - TEXT[654]
+        - TEXT[656]
+  work_schedule:
+    thesis: TEXT[1376]
+    flow:
+      launch:
+      - phase:
+        - main
+    phase:
+      main:
+        describe: TEXT[1262]
+        decomposition:
+          strategy: TEXT[1353]
+          partition:
+            kvflat:
+              size: B*KH
+              tile: 1
+            query:
+              size: Sq
+              tile: Qph
+          worktile:
+            invariant:
+              q_tensor:
+                shape:
+                - head: G
+                - query: Qph
+                - channel: D
+                dtype: ref:contract.algorithm_requirement::q_tensor.dtype
+              sf_q:
+                shape:
+                - scale_row: Br
+                - scale_column: D/Block
+                dtype: ref:contract.algorithm_requirement::sf_q.dtype
+            iteration:
+              k_tensor:
+                shape:
+                - key: KeyGroup
+                - channel: D
+                dtype: ref:contract.algorithm_requirement::k_tensor.dtype
+                direction: ascending
+              v_tensor:
+                shape:
+                - key: KeyGroup
+                - channel: D
+                dtype: ref:contract.algorithm_requirement::v_tensor.dtype
+                direction: ascending
+              sf_k:
+                shape:
+                - scale_row: KeyGroup
+                - scale_column: D/Block
+                dtype: ref:contract.algorithm_requirement::sf_k.dtype
+                direction: ascending
+              sf_v:
+                shape:
+                - channel: D
+                - sequence_block: KeyGroup/Block
+                dtype: ref:contract.algorithm_requirement::sf_v.dtype
+                direction: ascending
+          target:
+            single_tile:
+              O:
+                shape:
+                - head: G
+                - query: min(Qph,Sq-q0)
+                - channel: D
+                dtype: ref:contract.algorithm_requirement::O.dtype
+              LSE:
+                shape:
+                - head: G
+                - query: min(Qph,Sq-q0)
+                dtype: ref:contract.algorithm_requirement::LSE.dtype
+        mapping:
+          worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: B*KH*ceil_div(Sq,Qph)
+        schedule:
+          strategy: TEXT[1332]
+          worktile_order:
+          - by: kvflat
+            direction: ascending
+          - by: query
+            direction: ascending
+          worker_assignment:
+            preassigned:
+              start: worker_id
+              count: 1
+            refill: none
+            exit: assigned_done
+  tile_pipeline:
+    thesis: TEXT[695]
+    phase:
+      main:
+        domain:
+          g:
+          - cLo
+          - cHi+1
+        resource:
+          Query:
+            space: SMEM
+            member_slot_shape:
+            - row: Br
+            - channel: D
+            dtype: fp8_e4m3fn
+            slot_count: 1
+          Key:
+            space: SMEM
+            member_slot_shape:
+            - key: KeyGroup
+            - channel: D
+            dtype: fp8_e4m3fn
+            slot_count: 6
+            view:
+              Key(g):
+                slot_index: 3*((g-cLo)%2)+floor((g-cLo)/2)%3
+          Value:
+            space: SMEM
+            member_slot_shape:
+            - key: KeyGroup
+            - channel: D
+            dtype: fp8_e4m3fn
+            slot_count: 4
+            view:
+              Value(g):
+                slot_index: 2*((g-cLo)%2)+floor((g-cLo)/2)%2
+          KeyAtom:
+            space: SMEM
+            member_slot_shape:
+            - element: 512
+            dtype: uint8
+            slot_count: 6
+            view:
+              KeyAtom(g):
+                slot_index: 3*((g-cLo)%2)+floor((g-cLo)/2)%3
+          ValueAtom:
+            space: SMEM
+            member_slot_shape:
+            - element: 512
+            dtype: uint8
+            slot_count: 4
+            view:
+              ValueAtom(g):
+                slot_index: 2*((g-cLo)%2)+floor((g-cLo)/2)%2
+          TensorMemory:
+            space: TMEM
+            member_slot_shape:
+            - row: Br
+            - column: 512
+            dtype: fp32
+            slot_count: 1
+            view:
+              RawScore(g):
+                part:
+                  column:
+                  - 128*((g-cLo)%2)
+                  - 128*((g-cLo)%2)+128
+              NumState:
+                part:
+                  column:
+                  - 256
+                  - 384
+              QueryScale:
+                part:
+                  column:
+                  - 384
+                  - 392
+                dtype: uint8
+              KeyScale(g):
+                part:
+                  column:
+                  - 392+8*((g-cLo)%2)
+                  - 400+8*((g-cLo)%2)
+                dtype: uint8
+              UnitScale:
+                part:
+                  column:
+                  - 408
+                  - 416
+                dtype: uint8
+              ValueScale(g):
+                part:
+                  column:
+                  - 416+8*((g-cLo)%2)
+                  - 424+8*((g-cLo)%2)
+                dtype: uint8
+              Prob8(g):
+                part:
+                  column:
+                  - 448+32*((g-cLo)%2)
+                  - 480+32*((g-cLo)%2)
+                dtype: fp8_e4m3fn
+          QueryPrefetch:
+            space: register
+            member_slot_shape:
+            - element: Br*D+Br*(D/Block)
+            dtype: uint8
+            slot_count: 1
+          Scores:
+            space: register
+            member_slot_shape:
+            - row: Br
+            - key: KeyGroup
+            dtype: fp32
+            slot_count: 2
+            view:
+              Score(g):
+                slot_index: (g-cLo)%2
+          RowState:
+            space: register
+            member_slot_shape:
+            - stream: 2
+            - row: Br
+            - column: 3
+            dtype: fp32
+            slot_count: 1
+            view:
+              MaxState(g):
+                part:
+                  stream:
+                  - (g-cLo)%2
+                  - (g-cLo)%2+1
+                  column:
+                  - 0
+                  - 1
+              DenState(g):
+                part:
+                  stream:
+                  - (g-cLo)%2
+                  - (g-cLo)%2+1
+                  column:
+                  - 1
+                  - 2
+              alpha(g):
+                part:
+                  stream:
+                  - (g-cLo)%2
+                  - (g-cLo)%2+1
+                  column:
+                  - 2
+                  - 3
+              FinalMax:
+                part:
+                  column:
+                  - 0
+                  - 1
+              FinalDen:
+                part:
+                  column:
+                  - 1
+                  - 2
+          Exchange:
+            space: SMEM
+            member_slot_shape:
+            - block: 8
+            - row: Br
+            dtype: fp32
+            slot_count: 1
+            view:
+              MaxTransfer(g):
+                part:
+                  block:
+                  - (g-cLo)%2
+                  - (g-cLo)%2+1
+              DenTransfer(g):
+                part:
+                  block:
+                  - 2+2*((g-cLo)%2)+floor((g-cLo)/2)%2
+                  - 3+2*((g-cLo)%2)+floor((g-cLo)/2)%2
+              FinalMax:
+                part:
+                  block:
+                  - 6
+                  - 7
+              FinalDen:
+                part:
+                  block:
+                  - 7
+                  - 8
+        role:
+          Even:
+            info:
+              execution_mode: serial
+              member: warp[0:4]
+              verb:
+                setup: TEXT[802]
+                cold: TEXT[945]
+                prepare: TEXT[804]
+                publish: TEXT[796]
+                prime: TEXT[859]
+                stage: TEXT[822]
+                retire: TEXT[953]
+                read: TEXT[934]
+                lookahead: TEXT[1054]
+                maximum:
+                  execution_mode: async
+                  meaning: TEXT[993]
+                probability:
+                  execution_mode: async
+                  meaning: TEXT[831]
+                denominator:
+                  execution_mode: async
+                  meaning: TEXT[988]
+                rescale: TEXT[1147]
+                pv: TEXT[951]
+                stagev: TEXT[777]
+                join: TEXT[979]
+                broadcast: TEXT[794]
+                write: TEXT[1126]
+                finish: TEXT[1069]
+            pipe:
+              prologue:
+              - setup:Local
+              - cold:Inputs
+              - prepare:Query
+              - publish:Query
+              - prime:FirstQK
+              steady:
+              - repeat:
+                  j:
+                  - 0
+                  - ceil_div(Ng,2)
+                steady:
+                - stage:Ahead(j)
+                - retire:Own(j)
+                - read:Scores(j)
+                - lookahead:Next(j)
+                - maximum:State(j)
+                - probability:Tile(j)
+                - denominator:State(j)
+                - rescale:NumState(j)
+                - publish:Operands(j)
+                - pv:Group(j)
+                - stagev:Next(j)
+              epilogue:
+              - retire:LastPV
+              - join:Accumulator
+              - publish:Final
+              - broadcast:Final
+              - write:Output
+              - finish:Local
+            waits_for:
+              data:
+                maximum:State(j)@done:
+                - Odd/maximum:State(j-1)
+                denominator:State(j)@done:
+                - Odd/denominator:State(j-1)
+                rescale:NumState(j)@done:
+                - Odd/pv:Group(j-1)
+                publish:Operands(j)@done:
+                - probability:Tile(j)
+                - denominator:State(j)
+                broadcast:Final@done:
+                - Odd/publish:Final
+              sync:
+                prepare:Query@done:
+                - Odd/prepare:Query@issue
+                publish:Query@done:
+                - Odd/prepare:Query
+                join:Accumulator@done:
+                - Odd/retire:LastPV
+                finish:Local@done:
+                - Odd/write:Output
+          Odd:
+            info:
+              execution_mode: serial
+              member: warp[4:8]
+              verb:
+                setup: TEXT[802]
+                cold: TEXT[945]
+                prepare: TEXT[804]
+                publish: TEXT[796]
+                prime: TEXT[859]
+                stage: TEXT[822]
+                retire: TEXT[953]
+                read: TEXT[934]
+                lookahead: TEXT[1054]
+                maximum:
+                  execution_mode: async
+                  meaning: TEXT[993]
+                probability:
+                  execution_mode: async
+                  meaning: TEXT[831]
+                denominator:
+                  execution_mode: async
+                  meaning: TEXT[988]
+                rescale: TEXT[1147]
+                pv: TEXT[951]
+                stagev: TEXT[777]
+                join: TEXT[979]
+                broadcast: TEXT[794]
+                write: TEXT[1126]
+                finish: TEXT[1069]
+            pipe:
+              prologue:
+              - setup:Local
+              - cold:Inputs
+              - prepare:Query
+              - publish:Query
+              - prime:FirstQK
+              steady:
+              - repeat:
+                  j:
+                  - 0
+                  - floor(Ng/2)
+                steady:
+                - stage:Ahead(j)
+                - retire:Own(j)
+                - read:Scores(j)
+                - lookahead:Next(j)
+                - maximum:State(j)
+                - probability:Tile(j)
+                - denominator:State(j)
+                - rescale:NumState(j)
+                - publish:Operands(j)
+                - pv:Group(j)
+                - stagev:Next(j)
+              epilogue:
+              - retire:LastPV
+              - join:Accumulator
+              - publish:Final
+              - broadcast:Final
+              - write:Output
+              - finish:Local
+            waits_for:
+              data:
+                maximum:State(j)@done:
+                - Even/maximum:State(j)
+                denominator:State(j)@done:
+                - Even/denominator:State(j)
+                rescale:NumState(j)@done:
+                - Even/pv:Group(j)
+                publish:Operands(j)@done:
+                - probability:Tile(j)
+                - denominator:State(j)
+                broadcast:Final@done:
+                - Even/publish:Final
+              sync:
+                prepare:Query@done:
+                - Even/prepare:Query@issue
+                publish:Query@done:
+                - Even/prepare:Query
+                join:Accumulator@done:
+                - Even/retire:LastPV
+                finish:Local@done:
+                - Even/write:Output
+realization:
+  require:
+  - item: design.tile_pipeline::main.TensorMemory
+    choice: TEXT[1166]
+    reason: TEXT[1210]
+  - item: design.tile_pipeline::main
+    choice: TEXT[1200]
+    reason: TEXT[1237]
+  prefer:
+  - item: design.tile_pipeline::main
+    choice: TEXT[1185]
+    reason: TEXT[1208]

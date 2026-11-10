@@ -1,0 +1,378 @@
+--- root
++++ direct_qk
+@@ -3,195 +3,16 @@
+   describe: TEXT_UNIT_163
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/candidate/solution.py::Model.forward
+-  version: 11
++  version: 2
+   dispatch:
+-    when: TEXT_UNIT_51
+-contract:
+-  algorithm_requirement:
+-    constant:
+-      KeyDim:
+-        value: 128
+-        meaning: TEXT_UNIT_13
+-      ValueDim:
+-        value: 128
+-        meaning: TEXT_UNIT_22
+-      ChunkTokens:
+-        value: 64
+-        meaning: TEXT_UNIT_14
+-    input:
+-      q:
+-        meaning: TEXT_UNIT_27
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - key_head: H
+-        - key: KeyDim
+-        dtype: bf16
+-      k:
+-        meaning: TEXT_UNIT_24
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - key_head: H
+-        - key: KeyDim
+-        dtype: bf16
+-      v:
+-        meaning: TEXT_UNIT_20
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        - value: ValueDim
+-        dtype: bf16
+-      g:
+-        meaning: TEXT_UNIT_21
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        dtype: fp32
+-        range: TEXT_UNIT_28
+-      beta:
+-        meaning: TEXT_UNIT_10
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        dtype: fp32
+-        range:
+-        - 0
+-        - 1
+-      initial_state:
+-        meaning: TEXT_UNIT_11
+-        shape:
+-        - request: N
+-        - value_head: HV
+-        - value: ValueDim
+-        - key: KeyDim
+-        dtype: bf16
+-      output_final_state:
+-        meaning: TEXT_UNIT_25
+-        shape: []
+-        dtype: bool
+-      cu_seqlens:
+-        meaning: TEXT_UNIT_26
+-        shape:
+-        - boundary: N+1
+-        dtype: int32
+-        range: TEXT_UNIT_32
+-      chunk_indices:
+-        meaning: TEXT_UNIT_6
+-        shape:
+-        - chunk: C
+-        - coordinate: 2
+-        dtype: int32
+-        range: TEXT_UNIT_29
+-      chunk_offsets:
+-        meaning: TEXT_UNIT_15
+-        shape:
+-        - boundary: N+1
+-        dtype: int32
+-        range: TEXT_UNIT_30
+-      use_qk_l2norm_in_kernel:
+-        meaning: TEXT_UNIT_18
+-        shape: []
+-        dtype: bool
+-        range: TEXT_UNIT_31
+-      core_attn_out:
+-        meaning: TEXT_UNIT_19
+-        shape:
+-        - element: CoreCapacity
+-        dtype: bf16
+-        nullable: true
+-        default: None
+-    output:
+-      Out:
+-        meaning: TEXT_UNIT_9
+-        shape:
+-        - batch: 1
+-        - token: T
+-        - value_head: HV
+-        - value: ValueDim
+-        dtype: bf16
+-      FinalState:
+-        meaning: TEXT_UNIT_23
+-        shape:
+-        - request: N
+-        - value_head: HV
+-        - value: ValueDim
+-        - key: KeyDim
+-        dtype: fp32
+-        nullable: true
+-      CoreWritten:
+-        meaning: TEXT_UNIT_7
+-        shape:
+-        - element: T*HV*ValueDim
+-        dtype: bf16
+-        nullable: true
+-    compute:
+-    - name: packing
+-      math: TEXT_UNIT_3
+-      symbol:
+-        Boundary:
+-          meaning: TEXT_UNIT_12
+-          shape:
+-          - boundary: N+1
+-          dtype: int32
+-        Length:
+-          meaning: TEXT_UNIT_5
+-          shape:
+-          - request: N
+-          dtype: int32
+-    - name: query_key_values
+-      math: TEXT_UNIT_4
+-      symbol:
+-        Qn:
+-          meaning: TEXT_UNIT_17
+-          shape: ref:q.shape
+-          dtype: fp32
+-        Kn:
+-          meaning: TEXT_UNIT_8
+-          shape: ref:k.shape
+-          dtype: fp32
+-    - name: delta_recurrence
+-      math: TEXT_UNIT_2
+-      symbol:
+-        S:
+-          meaning: TEXT_UNIT_16
+-          shape: ref:initial_state.shape
+-          dtype: fp32
+-    - name: output_and_side_effect
+-      math: TEXT_UNIT_1
+-    golden_reference:
+-      source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/reference.py::Model.forward
+-      tolerance:
+-        Out: TEXT_UNIT_33
+-        FinalState: TEXT_UNIT_34
+-        CoreWritten: TEXT_UNIT_35
+-  hardware_specification:
+-    device: null
+-    arch: null
+-    execution:
+-      Unit: null
+-    feature:
+-      Mechanism: null
+-    stack:
+-      language: null
+-      toolchain: null
+-    wiki:
+-      hardware: null
+-      programming:
+-        language: null
+-      microbench: null
+-      sota:
+-        kernel: null
+-        schema: null
+-      profile: null
++    id: direct_qk
++    parent: root
++    when: TEXT_UNIT_50
+ design:
+   math_reshape:
+-    thesis: TEXT_UNIT_159
++    thesis: TEXT_UNIT_161
+     rewrite:
+     - step: TEXT_UNIT_97
+       name: Define the actual padded chunk inputs
+-      math: TEXT_UNIT_107
++      math: TEXT_UNIT_105
+       symbol:
+         B:
+@@ -204,7 +25,4 @@
+           meaning: TEXT_UNIT_137
+           binding: bind:design.work_schedule::HeadsPerPrep
+-        PRE0:
+-          meaning: TEXT_UNIT_119
+-          binding: bind:design.work_schedule::PRE0
+         Qc:
+           meaning: TEXT_UNIT_156
+@@ -213,5 +31,4 @@
+           - key: KeyDim
+           dtype: bf16
+-          retention: keep_value (slot,m)
+         Kc:
+           meaning: TEXT_UNIT_147
+@@ -220,5 +37,4 @@
+           - key: KeyDim
+           dtype: bf16
+-          retention: keep_value (slot,m)
+         Vc:
+           meaning: TEXT_UNIT_126
+@@ -309,5 +125,5 @@
+     - step: TEXT_UNIT_69
+       name: Carry FP32 state and separately round readout and update operands
+-      math: TEXT_UNIT_117
++      math: TEXT_UNIT_103
+       symbol:
+         R:
+@@ -367,7 +183,6 @@
+       footprint:
+       - item: TEXT_UNIT_76
+-        change: TEXT_UNIT_89
++        change: TEXT_UNIT_73
+         by:
+-        - TEXT_UNIT_97
+         - TEXT_UNIT_90
+         - TEXT_UNIT_81
+@@ -393,5 +208,5 @@
+         - TEXT_UNIT_69
+   work_schedule:
+-    thesis: TEXT_UNIT_314
++    thesis: TEXT_UNIT_313
+     flow:
+       launch:
+@@ -445,23 +260,9 @@
+           ready: prep.kernel_done
+           wait_at: chain.prep_ready
+-        Qc:
+-          producer: prep
+-          consumer:
+-          - TEXT_UNIT_69
+-          storage: global
+-          ready: prep.kernel_done
+-          wait_at: chain.prep_ready
+-        Kc:
+-          producer: prep
+-          consumer:
+-          - TEXT_UNIT_69
+-          storage: global
+-          ready: prep.kernel_done
+-          wait_at: chain.prep_ready
+     phase:
+       prep:
+-        describe: TEXT_UNIT_281
++        describe: TEXT_UNIT_278
+         decomposition:
+-          strategy: TEXT_UNIT_289
++          strategy: TEXT_UNIT_307
+           partition:
+             slot:
+@@ -527,14 +328,4 @@
+                 - token: B
+                 dtype: ref:design.math_reshape::Dl.dtype
+-              Qc:
+-                shape:
+-                - token: SaveRows
+-                - key: KeyDim
+-                dtype: ref:design.math_reshape::Qc.dtype
+-              Kc:
+-                shape:
+-                - token: SaveRows
+-                - key: KeyDim
+-                dtype: ref:design.math_reshape::Kc.dtype
+         mapping:
+           strategy: TEXT_UNIT_291
+@@ -544,5 +335,5 @@
+           worker_count: SU*HV/HeadsPerPrep
+         schedule:
+-          strategy: TEXT_UNIT_292
++          strategy: TEXT_UNIT_294
+           worktile_order:
+           - by: slot
+@@ -559,5 +350,5 @@
+         describe: TEXT_UNIT_275
+         decomposition:
+-          strategy: TEXT_UNIT_287
++          strategy: TEXT_UNIT_308
+           partition:
+             request:
+@@ -666,5 +457,5 @@
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT_UNIT_166
++    thesis: TEXT_UNIT_168
+     phase:
+       prep:
+@@ -773,7 +564,4 @@
+                 signal: TEXT_UNIT_248
+                 gram: TEXT_UNIT_212
+-                save_image:
+-                  execution_mode: async
+-                  meaning: TEXT_UNIT_237
+                 skeleton: TEXT_UNIT_201
+                 system: TEXT_UNIT_236
+@@ -787,5 +575,5 @@
+                 merge64_x: TEXT_UNIT_213
+                 publish_group: TEXT_UNIT_188
+-                drain_image: TEXT_UNIT_207
++                finish_prep: TEXT_UNIT_186
+             pipe:
+               prologue:
+@@ -797,5 +585,4 @@
+                 - signal:Launch
+                 - gram:Gm_F
+-                - save_image:KQImage(a)
+                 - skeleton:Ti
+                 - repeat: r
+@@ -809,9 +596,5 @@
+                   - merge64_x:Ti(r)
+                   - publish_group:Coefficients(r)
+-                - drain_image:KQImage(a)
+-            waits_for:
+-              data:
+-                drain_image:KQImage(a)@done:
+-                - save_image:KQImage(a)@done
++                - finish_prep:Prepared(a)
+       chain:
+         domain:
+@@ -960,11 +743,11 @@
+               member: warp[0:8]
+               verb:
+-                setup: TEXT_UNIT_197
+-                early_inputs: TEXT_UNIT_175
+-                join_prep: TEXT_UNIT_220
+-                prime: TEXT_UNIT_200
++                setup: TEXT_UNIT_217
++                early_inputs: TEXT_UNIT_184
++                join_prep: TEXT_UNIT_224
++                prime: TEXT_UNIT_204
+                 seed: TEXT_UNIT_172
+                 advance: TEXT_UNIT_185
+-                project: TEXT_UNIT_171
++                project: TEXT_UNIT_223
+                 rhs: TEXT_UNIT_244
+                 solve: TEXT_UNIT_214
+@@ -991,14 +774,14 @@
+   require:
+   - item: design.work_schedule::flow
+-    choice: TEXT_UNIT_257
++    choice: TEXT_UNIT_258
+     reason: TEXT_UNIT_268
+   - item:
+     - design.tile_pipeline::prep.KQImage
+     - design.tile_pipeline::chain.Stages
+-    choice: TEXT_UNIT_260
+-    reason: TEXT_UNIT_271
++    choice: TEXT_UNIT_263
++    reason: TEXT_UNIT_273
+   - item: design.work_schedule::flow
+-    choice: TEXT_UNIT_259
+-    reason: TEXT_UNIT_269
++    choice: TEXT_UNIT_264
++    reason: TEXT_UNIT_274
+   prefer:
+   - item:

@@ -1,0 +1,210 @@
+--- tcg_d128_flat_tma_xpose_narrow
++++ tcg_d128_flat_tma_xpose_wide
+@@ -2,11 +2,11 @@
+   name: mxfp8_qkv_attention
+   describe: TEXT[682]
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+-  version: 4
++  version: 2
+   dispatch:
+-    id: tcg_d128_flat_tma_xpose_narrow
+-    parent: tcg_d128_flat_tma_direct_narrow
+-    when: TEXT[134]
++    id: tcg_d128_flat_tma_xpose_wide
++    parent: tcg_d128_flat_tma_xpose_narrow
++    when: TEXT[125]
+ design:
+   math_reshape:
+     thesis: TEXT[679]
+@@ -93,7 +93,7 @@
+         approx: TEXT[193]
+     - step: TEXT[662]
+       name: TEXT[601]
+-      math: TEXT[393]
++      math: TEXT[398]
+       symbol:
+         NumState:
+           meaning: TEXT[571]
+@@ -110,7 +110,7 @@
+           dtype: fp32
+           retention: keep_value (b,kh,a,s,g)
+         PartA:
+-          meaning: TEXT[532]
++          meaning: TEXT[443]
+           shape:
+           - split: Ns
+           - row: R
+@@ -128,9 +128,26 @@
+         accumulate: TEXT[177]
+         approx: TEXT[155]
+     - step: TEXT[661]
+-      name: TEXT[595]
+-      math: TEXT[338]
++      name: TEXT[593]
++      math: TEXT[388]
+       symbol:
++        SP:
++          meaning: TEXT[451]
++          binding: bind:design.work_schedule::SP
++        MergeA:
++          meaning: TEXT[454]
++          shape:
++          - merge_group: SP
++          - channel: D
++          dtype: fp32
++          retention: keep_value (r)
++        MergeB:
++          meaning: TEXT[565]
++          shape:
++          - merge_group: SP
++          - segment: 4
++          dtype: fp32
++          retention: keep_value (r)
+         TotalA:
+           meaning: TEXT[441]
+           shape:
+@@ -162,21 +179,21 @@
+         - TEXT[662]
+       depth:
+       - item: TEXT[313]
+-        change: TEXT[210]
++        change: TEXT[268]
+         by:
+         - TEXT[651]
+         - TEXT[662]
+         - TEXT[661]
+       error:
+       - item: TEXT[277]
+-        change: TEXT[290]
++        change: TEXT[242]
+         by:
+         - TEXT[660]
+         - TEXT[654]
+         - TEXT[662]
+         - TEXT[661]
+   work_schedule:
+-    thesis: TEXT[1393]
++    thesis: TEXT[1384]
+     flow:
+       launch:
+       - phase:
+@@ -345,7 +362,7 @@
+       split:
+         describe: TEXT[1257]
+         decomposition:
+-          strategy: TEXT[1302]
++          strategy: TEXT[1356]
+           partition:
+             split:
+               size: Ns
+@@ -438,7 +455,7 @@
+       combine:
+         describe: TEXT[1247]
+         decomposition:
+-          strategy: TEXT[1311]
++          strategy: TEXT[1312]
+           partition:
+             row:
+               size: R
+@@ -492,7 +509,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[718]
++    thesis: TEXT[717]
+     phase:
+       group_max:
+         domain:
+@@ -777,7 +794,7 @@
+                 prime: TEXT[815]
+                 prepare:
+                   execution_mode: async
+-                  meaning: TEXT[1008]
++                  meaning: TEXT[908]
+                 dependency:
+                   execution_mode: async
+                   meaning: TEXT[888]
+@@ -790,8 +807,8 @@
+                 probability: TEXT[1082]
+                 pv: TEXT[1139]
+                 accumulate: TEXT[887]
+-                stage_partials: TEXT[729]
+-                write: TEXT[735]
++                stage_partials: TEXT[865]
++                write: TEXT[1091]
+                 finish: TEXT[1141]
+             pipe:
+               prologue:
+@@ -817,31 +834,45 @@
+               data:
+                 replay:Entrance:
+                 - dependency:Scan
+-              reuse:
+-                stage_partials:PartA:
+-                - prepare:Query
+               sync:
+                 stage:Operands(g)@done:
+                 - prepare:Query
+                 - replay:Entrance
+                 stage_partials:PartA@done:
++                - prepare:Query
+                 - replay:Entrance
+       combine:
+         milestone:
+           inputs_ready:
+           - Main/dependency:Partials@done
+         resource:
+-          DenParts:
++          MergeA:
+             space: SMEM
+             member_slot_shape:
+-            - split: 128
++            - merge_group: SP
++            - channel: D
++            dtype: fp32
++            slot_count: 1
++          MergeB:
++            space: SMEM
++            member_slot_shape:
++            - merge_group: SP
++            - segment: 4
+             dtype: fp32
+             slot_count: 1
+           NumeratorBatch:
+             space: register
+             member_slot_shape:
++            - merge_group: SP
+             - channel: D
+             - split: 8
++            dtype: fp32
++            slot_count: 1
++          LocalA:
++            space: register
++            member_slot_shape:
++            - merge_group: SP
++            - channel: D
+             dtype: fp32
+             slot_count: 1
+           Totals:
+@@ -866,17 +897,15 @@
+           Main:
+             info:
+               execution_mode: serial
+-              member: warp[0:4]
++              member: warp[0:4*SP]
+               verb:
+                 dependency: TEXT[1011]
+-                sum_a: TEXT[774]
+-                sum_b: TEXT[846]
+-                write: TEXT[884]
++                partials: TEXT[772]
++                write: TEXT[1154]
+             pipe:
+               steady:
+               - dependency:Partials
+-              - sum_a:TotalA
+-              - sum_b:TotalB
++              - partials:Merge
+               - write:Output
+ realization:
+   require:

@@ -1,0 +1,159 @@
+[40] t_1ae21abd8030ffa6 dispatch.md (1 uses)
+dispatch.md:10 dispatch.md
+| [probe_serial_packed](probe_serial_packed.yaml) | tc_packed | 串行 probe 后接受 packed 的全批次请求。 | 增加独立 probe、映射 host gate 和轮询选择；全批次 packed 在 caller stream 上等待 probe 完成后执行。 | P.dual=1，hidden 在提交 probe 前返回 false；串行 probe_begin 成功，实际 R 满足 0<R<=2.6。 |
+
+[41] t_2304aaf0197a9461 dispatch.md (1 uses)
+dispatch.md:20 dispatch.md
+## 覆盖缺口
+
+[42] t_32b044faa5d8348b dispatch.md (1 uses)
+dispatch.md:3 dispatch.md
+| 节点 | 直接父 | workload | 相对父差异 | 选择依据 |
+
+[43] t_422f8aef3863fda5 dispatch.md (1 uses)
+dispatch.md:8 dispatch.md
+| [probe_hidden_packed](probe_hidden_packed.yaml) | probe_serial_packed | 隐藏 probe 后继续 packed 余段的请求。 | 将 probe 放到 side stream；全批次注意力拆成 caller stream 的 packed 前缀和 side stream 的 packed 余段，保留 fork/join，余段不等待前缀完成。 | P.dual=1；hidden 前置检查及 fork/probe_begin 成功，K=N-8>=1、ceil_div(T,P.gt)>=2*K，且 0<R<=2.6；前缀与余段以 K*P.gt 为界。 |
+
+[44] t_4cae608ab09d4aa1 dispatch.md (1 uses)
+dispatch.md:11 dispatch.md
+| [tc_heads](tc_heads.yaml) | mma_direct | 单 query 的 head block 已能填满设备的 tcgen05 请求。 | 改用 cfg90 的 TMA gather4、TMEM 和 QIS2 双发射者 QK 分和；每 CTA 处理单 query 的 64 行 head block，直接归一化写回。 | 初始 P 为非 dual 的 cfg90 且 gt=1，对应 make_plan 的 tc_eligible 分支。 |
+
+[45] t_4e68f7cf72a00d05 dispatch.md (1 uses)
+dispatch.md:5 dispatch.md
+| [root](root.yaml) | 无 | 自动策略中需要 split-KV 的请求。 | 代表设计：mma.sync 在线注意力写 FP32 分块结果，再由独立 combine 归一化并写回 BF16。 | 初始 P 为非 dual 的 mma 配置且 splits>1；由 make_plan 的 CTA 并行度和工作区容量规则选择。 |
+
+[46] t_4fe9e5689d7c577a dispatch.md (1 uses)
+dispatch.md:9 dispatch.md
+| [probe_serial_mma](probe_serial_mma.yaml) | mma_direct | 串行 probe 后选择 mma 的全批次请求。 | 增加独立 probe 与 host 轮询；全批次 mma 在同一 caller stream 上接续 probe，不因统计不可用而删除 probe。 | P.dual=1，hidden 在提交 probe 前返回 false；串行 probe_begin 已提交 probe，但实际 R 不满足 0<R<=2.6，选择 P.alt_*。 |
+
+[47] t_7875020cff23f0cd dispatch.md (1 uses)
+dispatch.md:1 dispatch.md
+# 路径索引
+
+[48] t_7f9df6b7d9ff8767 dispatch.md (1 uses)
+dispatch.md:16 dispatch.md
+probe 的选择依据是本次有界轮询后实际读到的统计结果，轮询未齐仍可能接受 packed；已提交 probe 的工作和接续不因此消失。head 分块、KV chunk/split 数、输出维分片 DQ、ring 深度、combine 线程数及 packed 家族内的每 CTA query 数变化保留为节点参数；节点划分保留物化、生产者和计算提交集合的差异。
+
+[49] t_922f33c0c656e3f2 dispatch.md (1 uses)
+dispatch.md:6 dispatch.md
+| [mma_direct](mma_direct.yaml) | root | 不分 KV 的全批次 mma.sync 请求，包括未提交 probe 的回落。 | 去掉 split 物化与 combine；在 attention 内加 sink、归一化并写回 BF16，保留分块及 DQ 参数。 | 初始 P 非 dual、非 cfg90 且 splits=1；或 dual 隐藏路径未进入、串行 probe_begin 因 gate 不可用而未提交 probe，改用 P.alt_*。 |
+
+[50] t_9374b8371e3558ae dispatch.md (1 uses)
+dispatch.md:18 dispatch.md
+非 dual 的直接提交和成功图回放使用同一计算设计。内部录图先同步 caller stream；BeginCapture 失败在 dispatch 前返回，capture/实例化失败不执行录制的 kernel，图失败禁用缓存后接续同一 chosen plan 的直接 dispatch。纯录图不增加计算实例；外层图回放采用录制或显式更新后的选择、标量和绑定，张量内容在执行时读取，录制的 probe 不会在回放时重新选择后段类型。
+
+[51] t_a0ab965714ea3665 dispatch.md (1 uses)
+dispatch.md:12 dispatch.md
+| [tc_packed](tc_packed.yaml) | tc_heads | 低 head 数、可直接选择多 query 打包的请求。 | 多个 query 合用 64 行；新增按池组织的索引并集及成员标记，保留同 query 内重复次数，并在 gather 前复用 KV ring 构建索引。 | 初始 P 为非 dual 的 cfg90 且 gt>1；make_plan 在备选 mma 不分 KV 且 gt<=2.6 时免 probe，出厂策略下即 gt=2。 |
+
+[52] t_bb3390056beb0a24 dispatch.md (1 uses)
+dispatch.md:14 dispatch.md
+本索引对应 Model.forward 的出厂自动策略，包含未编入 tcgen05 时的 mma 回落。各节点条件在共享 Contract 全域独立求值，直接父仅表示设计派生来源；精确条件与版本以各 YAML 为准。
+
+[53] t_ce720dae23a43e52 dispatch.md (1 uses)
+dispatch.md:7 dispatch.md
+| [probe_hidden_mma](probe_hidden_mma.yaml) | probe_hidden_packed | 隐藏 probe 后选择 mma 余段的请求。 | 仅把余段换成 P.alt_* 的不分 KV mma.sync；已提交的 packed 前缀、side-stream probe 和最终 join 均保留。 | P.dual=1，满足 hidden 的资源、整批次、双波及 fork/probe_begin 门槛；实际 R 不满足 0<R<=2.6。 |
+
+[54] t_05176cf5bcdd9159 dispatch.when (1 uses)
+mma_direct:9 meta_data.dispatch.when
+Let W be the byte capacity of the actual workspace passed by Model.forward after its workspace identity cache or private scratch selection, and let N be dsv4::nsm_cached(). Let P be dsv4::make_plan(H,T,IndexWidth,W,0,0,N,true) in the fixed candidate/dsv4_kernel.cu, including its non-tcgen05 build fallback. P is the initial plan: cfg selects the configuration, splits the KV partitions, and dual indicates probe-gated packing; alt_* holds its unsplit mma alternative. Select exactly when the shipped automatic policy is active (force_cfg=0, force_s=0, Model.fast is false, normal non-diagnostic build and unchanged default extension switches), and either: (a) P.dual=0, P.cfg!=90 (TC_CFG_QIS2), and P.splits=1; or (b) P.dual=1, dual_dispatch_hidden returns false before any probe or packed attention is submitted, and the subsequent caller-stream probe_begin returns false because gate_pinned() or gate_mapped() is null. This returns ratio=-1 without submitting a probe and selects P.alt_* for the whole batch. In (b), the cached gate pointers are unavailable, so hidden dispatch returns before recording a fork event or enqueuing a side-stream wait. Let P_run=P in (a); in (b), P_run uses P.alt_cfg/alt_hb/alt_nb/alt_splits/alt_kc, with gt=1, dual=0 and ws_bytes=0. Both cases submit one unsplit attention kernel. Direct execution and execution of the corresponding recorded graph use this same selection. Pure capture only records work; replay uses the recorded host choice, scalars and bindings, with tensor contents read at execution.
+
+[55] t_6cd3fa590b2a6b23 dispatch.when (1 uses)
+probe_hidden_packed:10 meta_data.dispatch.when
+Let W be the byte capacity of the workspace actually passed by Model.forward following its identity cache or private scratch selection, and N=dsv4::nsm_cached(). Let P=dsv4::make_plan(H,T,IndexWidth,W,0,0,N,true) in the fixed source, including its compile-time fallback when tcgen05 is not built. P is the initial plan; dual denotes probe-gated packing, cfg the kernel, and gt queries per CTA. Select exactly when the shipped automatic policy is active (force_cfg=0, force_s=0, Model.fast is false, normal non-diagnostic build and unchanged default extension switches), P.dual=1, dual_dispatch_hidden passes its prechecks and successfully records the caller fork, queues the side-stream wait and submits probe_begin, and the actual R returned by probe_end satisfies 0<R<=fp32(2.6). The hidden prechecks require P.gt>1, P.splits=P.alt_splits=1, the original full input token range, available nonblocking side stream, fork/join events and mapped gate, and K=N-8>=1 with ceil_div(T,P.gt)>=2*K. The prefix owns [0,K*P.gt); the accepted packed remainder owns [K*P.gt,T). Both dispatches clear dual. P.gt starts at 64/H and halves until P.gt*IndexWidth<=2560 and ceil_div(T,P.gt)>=N, returning one if the result exceeds T. Dual packing requires the alternative allow_tc=false plan to have splits=1 and P.gt>2.6, so GT is 4 or 8. R is the FP32 mean, accumulated in FP64, of the positive values actually read from the eight mapped sample slots after the bounded poll. A timeout can still produce an accepted partial mean; selection uses observed R, not final samples. The extension returns directly after the hidden join is queued, without its private graph cache. External capture, if performed, fixes host selection at recording; replay executes the recorded kernels with recorded bindings and current device tensor contents, without rerunning host polling. Pure capture produces no GPU completion events.
+
+[56] t_96e978e7c8dfbbf3 dispatch.when (1 uses)
+probe_hidden_mma:10 meta_data.dispatch.when
+Let W be the byte capacity of the workspace actually passed by Model.forward following its identity cache or private scratch selection, and N=dsv4::nsm_cached(). Let P=dsv4::make_plan(H,T,IndexWidth,W,0,0,N,true) in the fixed source, including its compile-time fallback when tcgen05 is not built. P is the initial plan; dual denotes probe-gated packing, cfg the kernel, and gt queries per CTA. Select exactly when the shipped automatic policy is active (force_cfg=0, force_s=0, Model.fast is false, normal non-diagnostic build and unchanged default extension switches), P.dual=1, dual_dispatch_hidden passes its prechecks and successfully records the caller fork, queues the side-stream wait and submits probe_begin, and the actual R returned by probe_end does not satisfy 0<R<=fp32(2.6). The hidden prechecks require P.gt>1, P.splits=P.alt_splits=1, the original full input token range, available nonblocking side stream, fork/join events and mapped gate, and K=N-8>=1 with ceil_div(T,P.gt)>=2*K. The prefix owns [0,K*P.gt); the mma remainder owns [K*P.gt,T). Both dispatches clear dual. The remainder uses P.alt_cfg/alt_hb/alt_nb/alt_splits/alt_kc with gt=1 and ws_bytes=0; this does not re-plan the shorter range or change the packed prefix. P.gt starts at 64/H and halves until P.gt*IndexWidth<=2560 and ceil_div(T,P.gt)>=N, returning one if the result exceeds T. Dual packing requires the alternative allow_tc=false plan to have splits=1 and P.gt>2.6, so GT is 4 or 8. R is the FP32 mean, accumulated in FP64, of the positive values actually read from the eight mapped sample slots after the bounded poll. A timeout can still produce a partial mean; rejection uses observed R, not final samples. R=-1 (no positive observations) and R>fp32(2.6) both select this node. The extension returns directly after the hidden join is queued, without its private graph cache. External capture, if performed, fixes host selection at recording; replay executes the recorded kernels with recorded bindings and current device tensor contents, without rerunning host polling. Pure capture produces no GPU completion events.
+
+[57] t_a5b629321d9553cf dispatch.when (1 uses)
+probe_serial_packed:10 meta_data.dispatch.when
+Let W be the byte capacity of the workspace actually passed by Model.forward after its identity cache or private scratch selection, and N=dsv4::nsm_cached(). Let P=dsv4::make_plan(H,T,IndexWidth,W,0,0,N,true) in the fixed source, including its compile-time fallback when tcgen05 is not built. P is the initial plan; dual denotes probe-gated packing, cfg the kernel, and gt queries per CTA. Select exactly when the shipped automatic policy is active (force_cfg=0, force_s=0, Model.fast is false, normal non-diagnostic build and unchanged default extension switches), P.dual=1, dual_dispatch_hidden returns false before submitting any probe, the subsequent probe_begin on the caller stream succeeds, and the actual R returned by probe_end satisfies 0<R<=fp32(2.6). The hidden path can decline for unavailable side-stream/event resources, failed fork setup, or insufficient groups: with K=N-8 it requires K>=1 and ceil_div(T,P.gt)>=2*K. Gate unavailability also declines hidden execution, but this node requires the subsequent serial gate acquisition to succeed. P.gt starts at 64/H and halves until P.gt*IndexWidth<=2560 and ceil_div(T,P.gt)>=N, returning one if the result exceeds T. Dual packing requires the alternative allow_tc=false plan to have splits=1 and P.gt>2.6; hence GT is 4 or 8 here. R is the FP32 mean, accumulated in FP64, of the positive values actually read from the eight mapped sample slots after the bounded polling loop. A timeout can still produce an accepted partial mean. This selection uses that observed R, not a prediction from all final samples. The extension's private graph replay/capture is ineligible because the initial P.dual remains one. External capture, if performed, fixes the host selection at recording; execution uses the recorded probe and attention bindings and current device input contents, without rerunning the host poll.
+
+[58] t_b4c761c91c878391 dispatch.when (1 uses)
+probe_serial_mma:9 meta_data.dispatch.when
+Let W be the actual workspace byte capacity after Model.forward's identity cache or private scratch selection, and N be dsv4::nsm_cached(). Let P be dsv4::make_plan(H,T,IndexWidth,W,0,0,N,true) in candidate/dsv4_kernel.cu, including its compile-time fallback when tcgen05 is not built. P.dual denotes probe-gated packing; P.gt is its candidate query grouping, and P.alt_* is the unsplit mma alternative resolved with allow_tc=false. Select exactly when the shipped automatic policy is active (force_cfg=0, force_s=0, Model.fast is false, normal non-diagnostic build and unchanged default extension switches), P.dual=1, dual_dispatch_hidden returns false before submitting any probe or packed attention, the subsequent caller-stream probe_begin returns true and submits a probe, and the actual probe_end result R does not satisfy 0<R<=fp32(2.6). R is defined by probe_select below, including partial or unavailable observations after bounded polling. The whole batch then uses P.alt_cfg/alt_hb/alt_nb/alt_splits/alt_kc, with gt=1, dual=0 and ws_bytes=0. These resolve to cfg8 in this scope. For execution of an externally recorded graph, use the recorded host choice, scalars and bindings; device reads use current tensor contents. Pure capture records the two kernels and does not itself execute them or complete a probe.
+
+[59] t_ca0ce85467e62a74 dispatch.when (1 uses)
+tc_packed:10 meta_data.dispatch.when
+Let W be the byte capacity of the workspace actually passed by Model.forward following its identity cache or private scratch selection, and N=dsv4::nsm_cached(). Let P=dsv4::make_plan(H,T,IndexWidth,W,0,0,N,true) in the fixed source, including its compile-time fallback when tcgen05 is not built. P is the initial plan; cfg selects the kernel, gt the tokens per CTA, and dual denotes probe-gated packing. Select exactly when the shipped automatic policy is active (force_cfg=0, force_s=0, Model.fast is false, normal non-diagnostic build and unchanged default extension switches), P.dual=0, P.cfg=90, and P.gt>1. Here pack_gt starts at 64/H and halves until gt*IndexWidth<=2560 and ceil_div(T,gt)>=N; it returns one if gt exceeds T. Packing is selected only when the alternative make_plan with allow_tc=false has splits=1. The default threshold 2.6 admits gt=2 without a probe; larger factors use a different, dual path. Direct execution and execution of its recorded graph use this same selection. Pure capture records work; replay uses recorded host choices, scalars, tensor bindings and tensor maps, while device reads use the current tensor contents.
+
+[60] t_d84d78313c6e2529 dispatch.when (1 uses)
+tc_heads:9 meta_data.dispatch.when
+Let W be the byte capacity of the workspace actually passed by Model.forward after its identity cache or private scratch selection, and N=dsv4::nsm_cached(). Let P=dsv4::make_plan(H,T,IndexWidth,W,0,0,N,true) in the fixed source, including its compile-time fallback when tcgen05 is not built. P is the initial plan; cfg selects the kernel, gt the tokens per CTA, and dual denotes probe-gated packing. Select exactly when the shipped automatic policy is active (force_cfg=0, force_s=0, Model.fast is false, normal non-diagnostic build and unchanged default extension switches), P.dual=0, P.cfg=90, and P.gt=1. This is the tc_eligible branch: H>=64 and T*ceil_div(H,64)>=N in a tcgen05 build. Direct execution and execution of its recorded graph use this same selection. Pure capture records work; replay uses recorded host choices, scalars, tensor bindings and tensor maps, while device reads use the current tensor contents.
+
+[61] t_fd8bc943a1f428bb dispatch.when (1 uses)
+root:7 meta_data.dispatch.when
+Let W be the byte capacity of the actual workspace passed by Model.forward to the extension, including its workspace identity cache or private scratch selection. Let N be the actual value returned by dsv4::nsm_cached(). Let P be dsv4::make_plan(H, T, IndexWidth, W, 0, 0, N, true) in the fixed candidate/dsv4_kernel.cu, including its compile-time fallback when tcgen05 is not built. P is the initial plan, before overlap probing, graph replay, or token-range launches. P.dual denotes probe-gated packing, P.cfg selects the kernel configuration, and P.splits is the number of independent KV splits. Select exactly when the shipped automatic policy is active (force_cfg = 0, force_s = 0, Model.fast is false, normal non-diagnostic build and unchanged default extension switches), P.dual = 0, P.cfg != 90 (TC_CFG_QIS2), and P.splits > 1. This is mma.sync attention followed by a separate FP32 combine. Direct execution and execution of the corresponding recorded graph use this same selection; pure capture only records the plan. For replay, use the recorded plan and bindings, with tensor contents read at execution.
+
+[62] t_039e3cd562ad5488 math.arithmetic (1 uses)
+probe_serial_mma:136 design.math_reshape.rewrite[3].arithmetic.accumulate
+Scalar multiply/add expressions may contract under fast-math compilation; no bitwise equivalence to the FP32 reference is asserted.
+
+[63] t_054c925266ced2e4 math.arithmetic (3 uses)
+probe_hidden_mma:135 design.math_reshape.rewrite[1].arithmetic.approx; probe_hidden_packed:150 design.math_reshape.rewrite[1].arithmetic.approx; probe_serial_packed:149 design.math_reshape.rewrite[1].arithmetic.approx
+ProbeRatio division uses the shipped --use_fast_math build; unknown: no source-provided error bound. R follows the explicit FP64 host accumulation and final FP32 conversion.
+
+[64] t_1f2d1d93c0fd9bd7 math.arithmetic (1 uses)
+probe_hidden_mma:272 design.math_reshape.rewrite[5].arithmetic.accumulate
+Scalar multiply/add may contract under fast-math compilation; the specified reductions do not assert bitwise equivalence to the reference.
+
+[65] t_256335b092324da7 math.arithmetic (2 uses)
+mma_direct:95 design.math_reshape.rewrite[1].arithmetic.accumulate; root:235 design.math_reshape.rewrite[1].arithmetic.accumulate
+Scalar multiply/add expressions may contract under the shipped fast-math compilation; no bitwise equivalence to the FP32 reference is asserted.
+
+[66] t_395ded0bd074dd2b math.arithmetic (5 uses)
+probe_hidden_mma:187 design.math_reshape.rewrite[2].arithmetic.approx; probe_hidden_packed:228 design.math_reshape.rewrite[2].arithmetic.approx; probe_serial_packed:227 design.math_reshape.rewrite[2].arithmetic.approx; tc_heads:99 design.math_reshape.rewrite[1].arithmetic.approx; tc_packed:127 design.math_reshape.rewrite[1].arithmetic.approx
+E2 and division use the shipped --use_fast_math build; unknown: no source-provided error bound. The finite sentinel, clamp and maximum lag are retained without a magnitude guarantee for the full Contract domain.
+
+[67] t_82afdfcba8b5051f math.arithmetic (1 uses)
+probe_serial_mma:135 design.math_reshape.rewrite[3].arithmetic.approx
+E2 and FP32 division use the --use_fast_math build; unknown: no source-provided error bound. The finite maximum sentinel and clamp have no additional input-magnitude guarantee.
+
+[68] t_c457a00396cc9a94 math.arithmetic (1 uses)
+probe_serial_mma:85 design.math_reshape.rewrite[1].arithmetic.approx
+The device quotient uses the --use_fast_math build; unknown: no source-provided error bound.
+
+[69] t_cbba0514636641aa math.arithmetic (2 uses)
+mma_direct:94 design.math_reshape.rewrite[1].arithmetic.approx; root:234 design.math_reshape.rewrite[1].arithmetic.approx
+E2 and FP32 division use the --use_fast_math build; unknown: no source-provided error bound. The finite maximum sentinel and clamp are preserved without an additional input-magnitude guarantee.
+
+[70] t_d1d2abbbd3c54a77 math.arithmetic (5 uses)
+probe_hidden_mma:190 design.math_reshape.rewrite[2].arithmetic.accumulate; probe_hidden_packed:231 design.math_reshape.rewrite[2].arithmetic.accumulate; probe_serial_packed:229 design.math_reshape.rewrite[2].arithmetic.accumulate; tc_heads:100 design.math_reshape.rewrite[1].arithmetic.accumulate; tc_packed:129 design.math_reshape.rewrite[1].arithmetic.accumulate
+Scalar multiply/add expressions may contract under fast-math compilation. The half-latent addition and the specified sum grouping do not imply bitwise equivalence to the reference.
+
+[71] t_fd5594591d140aef math.arithmetic (1 uses)
+probe_hidden_mma:270 design.math_reshape.rewrite[5].arithmetic.approx
+E2 and FP32 division use the same fast-math build as online; unknown: no source-provided error bound. The finite sentinel and clamp have no additional magnitude guarantee.
+
+[72] t_0381cddafb86f89c math.ledger (2 uses)
+mma_direct:113 design.math_reshape.ledger.matmul[0].change; root:272 design.math_reshape.ledger.matmul[0].change
+2*H*count(J(t))*D -> (DQ+1)*Hp*C(t)*KC*D MACs per token, including invalid slots, padded heads and repeated QK across output partitions.
+
+[73] t_06311df5f243ef15 math.ledger (29 uses)
+mma_direct:111 design.math_reshape.ledger.footprint[0].by[0]; mma_direct:113 design.math_reshape.ledger.matmul[0].by[1]; mma_direct:115 design.math_reshape.ledger.error[0].by[0]; probe_hidden_mma:310 design.math_reshape.ledger.footprint[0].by[1]; probe_hidden_mma:322 design.math_reshape.ledger.matmul[0].by[1]; probe_hidden_mma:327 design.math_reshape.ledger.vector[0].by[0]; probe_hidden_mma:337 design.math_reshape.ledger.error[0].by[1]; probe_hidden_packed:275 design.math_reshape.ledger.footprint[0].by[1]; probe_hidden_packed:283 design.math_reshape.ledger.matmul[0].by[1]; probe_hidden_packed:287 design.math_reshape.ledger.vector[0].by[0]; probe_hidden_packed:297 design.math_reshape.ledger.error[0].by[1]; probe_serial_mma:152 design.math_reshape.ledger.footprint[0].by[0]; probe_serial_mma:154 design.math_reshape.ledger.matmul[0].by[1]; probe_serial_mma:158 design.math_reshape.ledger.error[0].by[0]; probe_serial_packed:271 design.math_reshape.ledger.footprint[0].by[1]; probe_serial_packed:279 design.math_reshape.ledger.matmul[0].by[1]; probe_serial_packed:283 design.math_reshape.ledger.vector[0].by[0]; probe_serial_packed:293 design.math_reshape.ledger.error[0].by[1]; root:269 design.math_reshape.ledger.footprint[0].by[0]; root:272 design.math_reshape.ledger.matmul[0].by[1]; root:276 design.math_reshape.ledger.error[0].by[0]; tc_heads:116 design.math_reshape.ledger.footprint[0].by[0]; tc_heads:118 design.math_reshape.ledger.matmul[0].by[1]; tc_heads:120 design.math_reshape.ledger.vector[0].by[0]; tc_heads:122 design.math_reshape.ledger.error[0].by[0]; tc_packed:163 design.math_reshape.ledger.footprint[0].by[1]; tc_packed:167 design.math_reshape.ledger.matmul[0].by[1]; tc_packed:171 design.math_reshape.ledger.vector[0].by[0]; tc_packed:177 design.math_reshape.ledger.error[0].by[1]
+online
+
+[74] t_063a65b9a799c22b math.ledger (3 uses)
+probe_hidden_mma:312 design.math_reshape.ledger.footprint[1].change; probe_hidden_packed:277 design.math_reshape.ledger.footprint[1].change; probe_serial_packed:273 design.math_reshape.ledger.footprint[1].change
++4*PS retained control bytes per invocation; the host consumes observations without materializing an attention matrix.
+
+[75] t_0b300ad3b2dd108c math.ledger (2 uses)
+mma_direct:113 design.math_reshape.ledger.matmul[0].item; root:272 design.math_reshape.ledger.matmul[0].item
+Padded and repeated contractions
+
+[76] t_0c3601c5fc13bb89 math.ledger (1 uses)
+probe_serial_mma:158 design.math_reshape.ledger.error[0].change
+HB*KC probabilities per chunk narrow FP32 -> BF16 for PV while the denominator retains FP32; base-2 fast exponentials, sentinel clamp, reduction grouping and FP32 scale casts add unbounded-in-source differences.
+
+[77] t_0d1f749575e41fc7 math.ledger (4 uses)
+probe_hidden_mma:293 design.math_reshape.ledger.traffic[0].item; probe_hidden_packed:261 design.math_reshape.ledger.traffic[0].item; probe_serial_packed:258 design.math_reshape.ledger.traffic[0].item; tc_packed:154 design.math_reshape.ledger.traffic[0].item
+Cache payload
+
+[78] t_1676c09a43020223 math.ledger (3 uses)
+probe_hidden_mma:298 design.math_reshape.ledger.traffic[1].change; probe_hidden_packed:266 design.math_reshape.ledger.traffic[1].change; probe_serial_packed:263 design.math_reshape.ledger.traffic[1].change
++4*sum_b Items(b) index bytes for usable samples and 4*PS published bytes per invocation; host polling adds at most 2000000*PS scalar reads and a PS-element final scan. These do not reuse attention data.
+
+[79] t_16a7d704259601ec math.ledger (5 uses)
+probe_hidden_mma:327 design.math_reshape.ledger.vector[0].item; probe_hidden_packed:285 design.math_reshape.ledger.vector[0].item; probe_serial_packed:281 design.math_reshape.ledger.vector[0].item; tc_heads:120 design.math_reshape.ledger.vector[0].item; tc_packed:169 design.math_reshape.ledger.vector[0].item
+QK partial merge

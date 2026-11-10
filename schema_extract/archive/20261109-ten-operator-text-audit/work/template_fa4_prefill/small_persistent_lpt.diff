@@ -1,0 +1,42 @@
+--- packed_persistent.yaml
++++ small_persistent_lpt.yaml
+@@ -5,11 +5,14 @@
+   version: 5
+   dispatch:
+-    id: packed_persistent
+-    parent: root
++    id: small_persistent_lpt
++    parent: packed_persistent
+     when: |
+       Use packaged defaults with no FA_HD256 environment overrides, under the root contract.
+       Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count.
+       C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000).
+-      Select exactly when not Split and 5<=B<=16.
++      nc=ceil((T+15*(B-1))/16); g=max(1,min(floor(SM/2),nc)); w=T*T/(4096*B).
++      qlo=min(max(1,T-(B-1)*Q),Q); A=w+T/256; F=max(0,min(qlo*(K-63-qlo),Q*(K-63-Q)))/2048.
++      PersistSmall=(ceil(nc/g)>=4 and (ceil(K/128)*g/w<=0.30 or (B*K-T)*8<=K or (K<=8*Q and ceil((K+15)/128)*g/(A+F)<=0.60))).
++      Select exactly when not Split, 2<=B<=4, PersistSmall, and not (B=4 and T=16384).
+ design:
+   math_reshape:
+@@ -65,10 +68,10 @@
+       - {item: Probability precision, change: '+1 E4M3FN rounding per PV multiplicand; denominator retains FP32 exponentials.', by: [online]}
+   work_schedule:
+-    thesis: Reuse a bounded grid of CTA pairs over folded query work; retain mapping and pipeline state across statically assigned tiles.
++    thesis: Front-load longer KV requests, fold their query tiles, and stride a bounded persistent grid over the resulting sequence; amortize request-map and pipeline setup.
+     flow:
+       launch: [{phase: [attention]}]
+     phase:
+       attention:
+-        describe: Final BF16 attention with a original-request-order flattened persistent schedule.
++        describe: Final BF16 attention with a small-batch LPT flattened persistent schedule.
+         decomposition:
+           strategy: |
+@@ -92,5 +95,7 @@
+         schedule:
+           strategy: |
+-            Keep input request order. Build the request-id/prefix map once per CTA; find each segment with a fixed four-step binary search of its prefix boundaries.
++            Order requests by descending L(b), using strict-greater compare-swaps on request IDs initially in input order.
++            Pair positions are (0,1) for B=2; (0,1),(1,2),(0,1) for B=3; (0,1),(2,3),(0,2),(1,3),(1,2) for B=4; ties are not generally stable.
++            Build this request-id/prefix map once per CTA; resolve each position by linear lookup.
+             Within a segment, ordinal x maps to m=2*x if x<ceil(C_b/2), otherwise m=2*(C_b-1-x)+1.
+           worktile_order: [{by: cluster_tile, direction: ascending}]

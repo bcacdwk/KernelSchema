@@ -1,0 +1,407 @@
+--- tc_split_flat_narrow
++++ tc_split_segmented_narrow
+@@ -2,14 +2,14 @@
+   name: mxfp8_qkv_attention
+   describe: TEXT[682]
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/fmha_tc.cuh::fmha_tc_kernel
+-  version: 3
++  version: 2
+   dispatch:
+-    id: tc_split_flat_narrow
+-    parent: tc_fused
+-    when: TEXT[121]
++    id: tc_split_segmented_narrow
++    parent: tc_split_flat_narrow
++    when: TEXT[115]
+ design:
+   math_reshape:
+-    thesis: TEXT[678]
++    thesis: TEXT[681]
+     rewrite:
+     - step: TEXT[652]
+       name: TEXT[602]
+@@ -78,9 +78,9 @@
+           dtype: fp32
+       arithmetic:
+         accumulate: TEXT[180]
+-    - step: TEXT[651]
+-      name: TEXT[617]
+-      math: TEXT[412]
++    - step: TEXT[657]
++      name: TEXT[590]
++      math: TEXT[341]
+       symbol:
+         BmCovered:
+           meaning: TEXT[516]
+@@ -98,25 +98,6 @@
+           - batch: B
+           - head: H
+           - query: Sq-Covered
+-          dtype: fp32
+-          retention: keep_value invocation
+-        ScanCarry:
+-          meaning: TEXT[523]
+-          shape:
+-          - row: R
+-          dtype: fp32
+-          retention: carry_forward invocation; g=-1..T-1
+-        ScanState:
+-          meaning: TEXT[460]
+-          shape:
+-          - key_group: T
+-          - row: R
+-          dtype: fp32
+-          retention: keep_value invocation
+-        MaxTail:
+-          meaning: TEXT[456]
+-          shape:
+-          - row: R
+           dtype: fp32
+           retention: keep_value invocation
+         OTemporary:
+@@ -132,6 +113,46 @@
+           - row: Br
+           dtype: fp32
+           retention: keep_value (b,kh,a,z)
++    - step: TEXT[655]
++      name: TEXT[594]
++      math: TEXT[344]
++      symbol:
++        Seg:
++          meaning: TEXT[488]
++          value: 16
++        SegmentMax:
++          meaning: TEXT[467]
++          shape:
++          - segment: Nseg
++          - row: R
++          dtype: fp32
++          retention: keep_value invocation
++    - step: TEXT[651]
++      name: TEXT[619]
++      math: TEXT[369]
++      symbol:
++        Sc:
++          meaning: TEXT[431]
++          value: 16
++        ScanCarry:
++          meaning: TEXT[523]
++          shape:
++          - row: R
++          dtype: fp32
++          retention: carry_forward invocation; g=-1..T-1
++        ScanState:
++          meaning: TEXT[460]
++          shape:
++          - key_group: T
++          - row: R
++          dtype: fp32
++          retention: keep_value invocation
++        MaxTail:
++          meaning: TEXT[456]
++          shape:
++          - row: R
++          dtype: fp32
++          retention: keep_value invocation
+     - step: TEXT[654]
+       name: TEXT[589]
+       math: TEXT[390]
+@@ -217,8 +238,10 @@
+       baseline: TEXT[198]
+       footprint:
+       - item: TEXT[296]
+-        change: TEXT[293]
++        change: TEXT[227]
+         by:
++        - TEXT[657]
++        - TEXT[655]
+         - TEXT[651]
+         - TEXT[658]
+       matmul:
+@@ -232,13 +255,19 @@
+       - item: TEXT[263]
+         change: TEXT[213]
+         by:
+-        - TEXT[651]
++        - TEXT[657]
+         - TEXT[658]
+         - TEXT[661]
++      - item: TEXT[256]
++        change: TEXT[206]
++        by:
++        - TEXT[655]
++        - TEXT[651]
+       depth:
+       - item: TEXT[292]
+-        change: TEXT[286]
++        change: TEXT[229]
+         by:
++        - TEXT[655]
+         - TEXT[651]
+         - TEXT[654]
+         - TEXT[658]
+@@ -248,19 +277,25 @@
+         change: TEXT[278]
+         by:
+         - TEXT[660]
++        - TEXT[657]
++        - TEXT[655]
+         - TEXT[651]
+         - TEXT[654]
+         - TEXT[658]
+         - TEXT[661]
+   work_schedule:
+-    thesis: TEXT[1374]
++    thesis: TEXT[1377]
+     flow:
+       launch:
+       - phase:
+         - group_max
+       - phase:
++        - segmax
++        start_after: group_max.kernel_done
++        protocol: pdl
++      - phase:
+         - TEXT[651]
+-        start_after: group_max.kernel_done
++        start_after: segmax.launch_ready
+         protocol: pdl
+       - phase:
+         - split
+@@ -273,9 +308,17 @@
+         BmCovered:
+           producer: group_max
+           consumer:
++          - segmax
+           - TEXT[651]
+           storage: global
+           ready: group_max.kernel_done
++        SegmentMax:
++          producer: segmax
++          consumer:
++          - TEXT[651]
++          storage: global
++          ready: segmax.kernel_done
++          wait_at: scan.inputs_ready
+         ScanState:
+           producer: TEXT[651]
+           consumer:
+@@ -303,7 +346,7 @@
+           ready: split.kernel_done
+     phase:
+       group_max:
+-        describe: TEXT[1271]
++        describe: TEXT[1241]
+         decomposition:
+           strategy: TEXT[1290]
+           partition:
+@@ -381,16 +424,69 @@
+               count: 1
+             refill: none
+             exit: assigned_done
++      segmax:
++        describe: TEXT[1266]
++        decomposition:
++          strategy: TEXT[1310]
++          partition:
++            segment:
++              size: Nseg
++              tile: 1
++            row:
++              size: R
++              tile: ScanBt
++          worktile:
++            invariant:
++              BmCovered:
++                shape:
++                - key_group: min(Seg,T-s*Seg)
++                - row: count(Cblock)
++                dtype: ref:design.math_reshape::BmCovered.dtype
++              PriorMax:
++                shape:
++                - key_group: min(Seg,T-s*Seg)
++                - row: count(Ublock)
++                dtype: ref:design.math_reshape::PriorMax.dtype
++          target:
++            single_tile:
++              SegmentMax:
++                shape:
++                - row: min(ScanBt,R-r0)
++                dtype: ref:design.math_reshape::SegmentMax.dtype
++        mapping:
++          worker:
++            unit: CTA
++            unit_count: 1
++          worker_count: Nseg*ceil_div(R,ScanBt)
++        schedule:
++          strategy: TEXT[1289]
++          worktile_order:
++          - by: TEXT[655]
++            direction: ascending
++          - by: row
++            direction: ascending
++          worker_assignment:
++            preassigned:
++              start: worker_id
++              count: 1
++            refill: none
++            exit: assigned_done
+       scan:
+-        describe: TEXT[1260]
++        describe: TEXT[1285]
+         decomposition:
+-          strategy: TEXT[1358]
++          strategy: TEXT[1360]
+           partition:
+             row:
+               size: R
+               tile: ScanBt
+           worktile:
+             iteration:
++              SegmentMax:
++                shape:
++                - segment: min(Sc,Nseg-sb)
++                - row: min(ScanBt,R-r0)
++                dtype: ref:design.math_reshape::SegmentMax.dtype
++                direction: ascending
+               BmCovered:
+                 shape:
+                 - key_group: 1
+@@ -594,7 +690,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[691]
++    thesis: TEXT[705]
+     phase:
+       group_max:
+         domain:
+@@ -688,29 +784,13 @@
+                 - record:BmCovered(g)
+               epilogue:
+               - write:TemporaryOutput
+-      scan:
+-        domain:
+-          j:
+-          - 0
+-          - Nb
++      segmax:
+         resource:
+-          ScanBatch:
++          SegmentBatch:
+             space: register
+             member_slot_shape:
+             - row: ScanBt
+-            - key_group: 64
+-            dtype: fp32
+-            slot_count: 1
+-            view:
+-              MaxBatch(j):
+-                part:
+-                  key_group:
+-                  - 0
+-                  - Len(j)
+-          ScanCarry:
+-            space: register
+-            member_slot_shape:
+-            - row: ScanBt
++            - key_group: Seg
+             dtype: fp32
+             slot_count: 1
+         role:
+@@ -719,20 +799,76 @@
+               member: warp[0:ScanBt/32]
+               execution_mode: serial
+               verb:
+-                entry: TEXT[1134]
+-                initialize: TEXT[838]
+-                load: TEXT[962]
+-                replay: TEXT[830]
+-                store: TEXT[747]
++                entry: TEXT[856]
++                load: TEXT[1033]
++                produce: TEXT[1042]
++            pipe:
++              prologue:
++              - entry:Protocol
++              steady:
++              - load:SegmentBatch
++              - produce:SegmentMax
++      scan:
++        domain:
++          c:
++          - 0
++          - Nc
++        milestone:
++          inputs_ready:
++          - Main/entry:Protocol@done
++        resource:
++          SummaryBatch:
++            space: register
++            member_slot_shape:
++            - row: ScanBt
++            - segment: Sc
++            dtype: fp32
++            slot_count: 1
++            view:
++              Summary(c): {}
++          JumpMask:
++            space: register
++            member_slot_shape:
++            - row: ScanBt
++            dtype: uint32
++            slot_count: 1
++          GroupBatch:
++            space: register
++            member_slot_shape:
++            - row: ScanBt
++            - key_group: Seg
++            dtype: fp32
++            slot_count: 1
++          ScanCarry:
++            space: register
++            member_slot_shape:
++            - row: ScanBt
++            dtype: fp32
++            slot_count: 1
++        role:
++          Main:
++            info:
++              member: warp[0:ScanBt/32]
++              execution_mode: serial
++              verb:
++                entry: TEXT[738]
++                initialize: TEXT[1037]
++                walk: TEXT[1025]
++                load: TEXT[902]
++                select: TEXT[769]
++                fill_walk: TEXT[760]
++                store: TEXT[918]
+             pipe:
+               prologue:
+               - entry:Protocol
+               - initialize:ScanCarry
++              - walk:FirstSegment
+               steady:
+-              - repeat: j
++              - repeat: c
+                 steady:
+-                - load:MaxBatch(j)
+-                - replay:ScanState(j)
++                - load:Summary(c)
++                - select:JumpMask(c)
++                - fill_walk:ScanState(c)
+               epilogue:
+               - store:MaxTail
+       split:
+@@ -988,7 +1124,8 @@
+     reason: TEXT[1226]
+   - item:
+     - design.work_schedule::flow
++    - design.tile_pipeline::segmax.Main
+     - design.tile_pipeline::scan.Main
+     - design.tile_pipeline::combine.Main
+-    choice: TEXT[1191]
+-    reason: TEXT[1211]
++    choice: TEXT[1169]
++    reason: TEXT[1220]

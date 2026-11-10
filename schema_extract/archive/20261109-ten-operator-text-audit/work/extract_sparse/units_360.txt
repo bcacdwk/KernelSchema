@@ -1,0 +1,159 @@
+[360] t_c4b29b7e56dd5caa realization.choice (2 uses)
+mma_direct:298 realization.require[0].choice; root:549 realization.require[0].choice
+Bind copy groups to cp.async.cg.shared.global 16-byte transfers, commit_group, wait_group and CTA __syncthreads at the stated publication/reuse boundaries; use mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 for QK/PV.
+
+[361] t_d404c52ac9560689 realization.choice (1 uses)
+root:557 realization.require[1].choice
+Model.forward caches workspace selection by argument identity; a non-CUDA or smaller-than-32-MiB workspace selects cached private scratch. dsv4_run allocates larger scratch if P.ws_bytes exceeds the selected capacity. The two-kernel flow uses the current CUDA stream, directly or through the process-wide single-entry CUDA Graph cache. Graph eligibility requires P.ws_bytes<=W in this node. Its key includes the ten tensor pointers, dimensions, scales, plan and extension switches. A changed key invalidates the old entry and submits directly. Repeating the last eligible key synchronizes the caller stream before capturing dispatch on a private stream, then instantiates and launches the graph on the caller stream. An executable key hit replays without that capture synchronization. Kernels read current input contents; the cache stores no numerical answers. Begin-capture failure returns before dispatch; failed capture or instantiation executes none of the recorded kernels. Graph failure disables graph use for the process and falls through to direct dispatch; it creates no additional completion guarantee.
+
+[362] t_d6c6133c3657c555 realization.choice (1 uses)
+probe_hidden_mma:1087 realization.require[5].choice
+Bind the fork and join to the cached cudaEventDisableTiming events and cudaEventRecord/cudaStreamWaitEvent. Use the cached cudaStreamNonBlocking side stream so the legacy default stream cannot introduce a prefix-to-probe or prefix-to-remainder barrier. The side stream, events and mapped gate persist across calls. Event waits queue device ordering, not a host completion wait; their reuse does not isolate gate contents between calls. Return out after successfully queuing the join.
+
+[363] t_e01cdc11a5d3e8b3 realization.choice (1 uses)
+probe_serial_packed:961 realization.require[5].choice
+Model.forward caches workspace selection by object identity, substituting private scratch for a non-CUDA or smaller-than-32-MiB buffer. P.ws_bytes=0 requires no larger allocation. Submit both kernels on the current CUDA stream; ordinary stream ordering implements probe.kernel_done before attention starts. Keep the accepted initial plan, including GT, when dispatching cfg90. The private graph cache tests initial P.dual, so it cannot capture or replay this path even though the host decision has completed. External graph capture records submissions without producing GPU completion events; an actual replay runs the recorded kernels and does not repeat host polling.
+
+[364] t_e0b4c49e210a1f59 realization.choice (2 uses)
+probe_hidden_mma:1098 realization.require[6].choice; probe_hidden_packed:1048 realization.require[6].choice
+Model.forward caches workspace selection by object identity, substituting private scratch for a non-CUDA or smaller-than-32-MiB buffer. P.ws_bytes=0 needs no further allocation. The successful hidden path returns before the extension's private graph machinery. External capture records the three submissions and event relationships; actual replay uses those bindings without repeating host polling.
+
+[365] t_ecd4e5bf7ba37c68 realization.choice (1 uses)
+mma_direct:306 realization.require[1].choice
+Model.forward caches workspace selection by argument identity; a non-CUDA or smaller-than-32-MiB buffer selects cached private scratch. P.ws_bytes=0 here, so dsv4_run needs no larger allocation and attention does not consume scratch. Submit on the current CUDA stream. The process-wide single-entry graph cache is eligible only when the initial P.dual=0, even if P_run.dual=0 after fallback. Its key includes tensor pointers, dimensions, scales, resolved plan and extension switches. A new key invalidates the entry and dispatches directly. Repeating the last eligible key synchronizes the caller stream before capturing dispatch on a private stream, then instantiates and launches the graph on the caller stream. An executable-key hit replays without that capture synchronization. The cache stores no numerical answers. Begin-capture failure returns before dispatch; failed capture or instantiation executes none of the recorded kernels. Graph failure disables graph use for the process and falls through to direct dispatch, without adding a completion guarantee.
+
+[366] t_f2bf364df458d219 realization.choice (4 uses)
+probe_hidden_mma:1053 realization.require[1].choice; probe_hidden_packed:1003 realization.require[1].choice; probe_serial_packed:928 realization.require[1].choice; tc_packed:623 realization.require[1].choice
+Build each pool's two-dimensional BF16 CUtensorMap with row stride 2*D, a 64-element-wide box and SWIZZLE_128B; pass maps by value to the kernel. Bind gather4 completion to mbarrier transaction bytes and the mixed-pool chunk's cp.async completion to cp.async.mbarrier.arrive. Preserve the separate membership publication and data-landing notifications.
+
+[367] t_00353f1316336401 realization.reason (1 uses)
+probe_hidden_mma:1057 realization.require[1].reason
+Both loader forms feed the same shared operand layout while membership becomes visible independently of transfer completion. Maps are bound to the current pool pointers for each launch.
+
+[368] t_01e313b7c33f6cdf realization.reason (2 uses)
+probe_hidden_mma:1104 realization.require[6].reason; probe_hidden_packed:1054 realization.require[6].reason
+Workspace identity participates in the initial plan, and capture must not be counted as an extra execution of the probe or attention.
+
+[369] t_133d62b307465ac2 realization.reason (3 uses)
+probe_hidden_mma:1084 realization.require[4].reason; probe_hidden_packed:1034 realization.require[4].reason; probe_serial_packed:958 realization.require[4].reason
+Mapped storage permits the bounded host decision without cudaStreamSynchronize. The actual observations, including partial results, determine this node.
+
+[370] t_1816a22bb157a3ce realization.reason (1 uses)
+probe_serial_mma:408 realization.require[1].reason
+The workspace binding feeds selection; mapped publication permits bounded host polling without a completion wait. Caller-stream ordering supplies the probe-to- attention dependency independently of which statistics host observed.
+
+[371] t_3940e5ed49a4aaf6 realization.reason (4 uses)
+probe_hidden_mma:1063 realization.require[2].reason; probe_hidden_packed:1013 realization.require[2].reason; probe_serial_packed:938 realization.require[2].reason; tc_packed:634 realization.require[2].reason
+A competing inserter must observe a complete canonical position, and same-query duplicates must remain private entries. The staged indices and asynchronous query copies must be retired before ring reuse or an empty-group return.
+
+[372] t_5765b1f198b9428b realization.reason (2 uses)
+tc_heads:480 realization.require[2].reason; tc_packed:650 realization.require[3].reason
+Workspace binding feeds selection despite unused device scratch. Graph capture and replay preserve the single-kernel computation and recorded tensor-map bindings while changing the host submission path.
+
+[373] t_8d1da99d7223fe50 realization.reason (1 uses)
+tc_packed:626 realization.require[1].reason
+Both loaders must feed the same shared operand layout while membership becomes visible independently of transfer completion. Captured maps must remain bound to the pool pointers used by that graph.
+
+[374] t_8ec687ef1050afed realization.reason (1 uses)
+probe_hidden_mma:1110 realization.require[7].reason
+The single ring slot cannot be read before copy completion or overwritten before all synchronous PV readers finish; shared publication also joins index, row-statistic and output producers.
+
+[375] t_ae28cbf50b3ab244 realization.reason (1 uses)
+probe_serial_packed:971 realization.require[5].reason
+Workspace identity still participates in selection. The stream, independently of host polling, closes the probe-to-attention execution dependency.
+
+[376] t_be03dc13b7dbc62e realization.reason (2 uses)
+probe_hidden_mma:1095 realization.require[5].reason; probe_hidden_packed:1045 realization.require[5].reason
+The nonblocking stream and event pair implement the declared fork/join while preserving overlap and caller-stream output visibility.
+
+[377] t_c4c7c33d2848fd22 realization.reason (3 uses)
+probe_hidden_mma:1073 realization.require[3].reason; probe_hidden_packed:1023 realization.require[3].reason; probe_serial_packed:947 realization.require[3].reason
+The count uses returned atomic membership bits; static probe storage avoids weakening the alignment required by attention operand descriptors.
+
+[378] t_cca429cd79a242f4 realization.reason (1 uses)
+root:572 realization.require[1].reason
+Scratch selection and graph eligibility determine the address used by both kernels. Capture preparation has an additional caller-stream completion boundary; successful replay retains the same producer-to-combine ordering over current input contents.
+
+[379] t_ce933053be2ea18a realization.reason (5 uses)
+probe_hidden_mma:1050 realization.require[0].reason; probe_hidden_packed:1000 realization.require[0].reason; probe_serial_packed:925 realization.require[0].reason; tc_heads:451 realization.require[0].reason; tc_packed:620 realization.require[0].reason
+Independent issuer groups preserve QK/PV overlap; the score-load shape supplies both key halves, and convergent accumulator access is required even when only some rows need rescaling.
+
+[380] t_e19c097658cbb728 realization.reason (1 uses)
+probe_serial_mma:392 realization.require[0].reason
+Copy completion and CTA visibility make gathered operands readable; synchronous matrix consumption lets the retirement barrier release the single KV slot.
+
+[381] t_e813f57d59df0506 realization.reason (2 uses)
+mma_direct:302 realization.require[0].reason; root:553 realization.require[0].reason
+Group-count waits make the current ring slot readable while later transfers continue; synchronous matrix consumption lets the PV barrier release the slot.
+
+[382] t_eab71beb07d5d419 realization.reason (1 uses)
+tc_heads:462 realization.require[1].reason
+Both loaders must feed the same shared operand layout while validity becomes visible independently of transfer completion. Captured maps must remain bound to the pool pointers used by that graph.
+
+[383] t_ef2fe64021093250 realization.reason (2 uses)
+probe_hidden_packed:1007 realization.require[1].reason; probe_serial_packed:932 realization.require[1].reason
+Both loaders feed the same shared operand layout while membership becomes visible independently of transfer completion. Maps are bound to the current pool pointers for each launch.
+
+[384] t_f11f1f543861e4e6 realization.reason (1 uses)
+mma_direct:321 realization.require[1].reason
+Workspace selection feeds the host plan despite unused device scratch. Graph eligibility and binding preserve the one-kernel flow; capture preparation adds a caller-stream completion boundary that ordinary replay does not require.
+
+[385] t_07f0d27911d7fb77 schedule.describe (2 uses)
+probe_serial_packed:350 design.work_schedule.phase.attention.describe; tc_packed:189 design.work_schedule.phase.attention.describe
+Build the packed union, gather its chunks, run QK/softmax/PV, and write complete query outputs.
+
+[386] t_396f7ecf5ca8d478 schedule.describe (1 uses)
+root:293 design.work_schedule.phase.attention.describe
+Gather, QK, online softmax and PV for one split; write its FP32 partial state.
+
+[387] t_51ff7a659f823b52 schedule.describe (1 uses)
+probe_serial_packed:307 design.work_schedule.phase.probe.describe
+Produce all sample ratios for the host's R calculation. The host first arms the mapped slots with -2, submits this kernel, then performs at most 2000000 poll passes, stopping when a pass finds no -2. It subsequently reads each slot once and evaluates probe's positive-only mean. In this node that mean accepts packing, so the host submits attention with the initial P parameters. The host may finish reading before probe.kernel_done; this does not release the device completion edge. There is no GPU reduction or GPU consumer of ProbeRatio, hence no inter-phase tensor handoff. ProbeCount follows probe's actual update order and can differ from the attention union count. The source also permits pending probe writes to race a later invocation's gate reset; selection uses the actual observed R.
+
+[388] t_5246602d5d2bb5a7 schedule.describe (1 uses)
+tc_heads:132 design.work_schedule.phase.attention.describe
+Gather, two-part QK, online softmax, PV and direct normalized BF16 writeback.
+
+[389] t_7a4634c4fe0d369a schedule.describe (1 uses)
+probe_serial_mma:208 design.work_schedule.phase.attention.describe
+Compute all heads and output columns for one token through an unsplit online recurrence.
+
+[390] t_9a1f2b5a1ae3d8d2 schedule.describe (1 uses)
+probe_hidden_packed:428 design.work_schedule.phase.remainder.describe
+Build packed unions and write outputs for the remaining groups on the side stream. After this kernel, record the join on the side stream and queue its wait on the caller stream behind prefix. The join covers remainder.kernel_done, which also follows probe.kernel_done; caller order covers prefix.kernel_done. Return does not block the host for either output producer. The join is an external completion boundary, not a fourth compute kernel or an output merge.
+
+[391] t_a5ebf24bf1af7b8a schedule.describe (1 uses)
+probe_hidden_mma:441 design.work_schedule.phase.remainder.describe
+Compute each remaining token independently using mma_gather, mma_online and mma_finalize on the side stream. Record join after this kernel and queue its wait on the caller stream behind prefix. The join covers remainder.kernel_done, which follows probe.kernel_done; caller order covers prefix.kernel_done. Return queues this completion boundary without blocking the host or merging values.
+
+[392] t_a91bb15eeabc0f0a schedule.describe (1 uses)
+probe_serial_mma:170 design.work_schedule.phase.probe.describe
+Compute and publish one overlap statistic per sampled group for host plan selection.
+
+[393] t_ad2f1aabc67cf4ac schedule.describe (2 uses)
+probe_hidden_mma:399 design.work_schedule.phase.prefix.describe; probe_hidden_packed:368 design.work_schedule.phase.prefix.describe
+Build packed unions and write all outputs for the first K full groups on the caller stream.
+
+[394] t_ba5795c46f82557f schedule.describe (1 uses)
+root:339 design.work_schedule.phase.combine.describe
+Merge all split vectors and statistics for one real output row.
+
+[395] t_bd0b4eabb2b5c146 schedule.describe (1 uses)
+mma_direct:125 design.work_schedule.phase.attention.describe
+Gather, QK, online softmax and PV over the complete key range; normalize and overwrite the BF16 output slice.
+
+[396] t_bfa6b2f72883142e schedule.describe (1 uses)
+probe_hidden_mma:355 design.work_schedule.phase.probe.describe
+The caller first records a fork after its prior work; the side stream waits for that fork before reading input tensors. The host arms the mapped slots with -2 and submits this full-batch probe to the side stream. It then submits prefix to the caller stream before polling at most 2000000 passes, stopping when a pass finds no -2. The final scan reads each slot once and computes probe's positive-only R. This node rejects packing and submits remainder using the stored P.alt_* parameters. Polling may finish before probe.kernel_done. Side-stream order still prevents remainder from starting before probe completion; prefix has no probe completion wait. ProbeRatio is consumed only by the host, not by either attention kernel, so no tensor handoff connects these phases. ProbeCount follows probe's actual update order and can differ from the attention union count. The source also permits pending probe writes to race a later gate reset; selection uses the actual observed R.
+
+[397] t_e4b968e3612bdcdb schedule.describe (1 uses)
+probe_hidden_packed:314 design.work_schedule.phase.probe.describe
+The caller first records a fork after its prior work; the side stream waits for that fork before reading input tensors. The host arms the mapped slots with -2 and submits this full-batch probe to the side stream. It then submits prefix to the caller stream before polling at most 2000000 passes, stopping when a pass finds no -2. The final scan reads each slot once and computes probe's positive-only R. This node accepts packing and submits remainder using the initial P parameters. Polling may finish before probe.kernel_done. Side-stream order still prevents remainder from starting before probe completion; prefix has no probe completion wait. ProbeRatio is consumed only by the host, not by either attention kernel, so no tensor handoff connects these phases. ProbeCount follows probe's actual update order and can differ from the attention union count. The source also permits pending probe writes to race a later gate reset; selection uses the actual observed R.
+
+[398] t_11a0fe7e8d5ab5f6 schedule.strategy (1 uses)
+probe_hidden_mma:401 design.work_schedule.phase.prefix.decomposition.strategy
+GT=P.gt in {4,8}, MR=64, KC=64, NG=ceil_div(T,GT) and K=N-PS, where N is the SM count used by the initial plan. The prefix retains P.cfg=90, splits=1, nb=1 and ws_bytes=0, and clears dual. H is 8 or 16 and GT*H<=MR. Prefix's local token coordinate equals the batch token coordinate and covers [0,K*GT), giving global groups grp in [0,K). Each group owns all H heads and D columns for GT tokens; this range ends on a complete group boundary. Resolve every token's request independently; prefix groups may cross request boundaries although probe samples exclude those groups. Nonempty unions traverse c=0..C(grp)-1; empty unions still write zeros. Padded matrix rows have no stores. The two attention phases share only read-only inputs, have disjoint outputs, no cross-phase KV/state reuse, no workspace partials and no combine.
+
+[399] t_29d3c32fe209daff schedule.strategy (1 uses)
+probe_hidden_mma:448 design.work_schedule.phase.remainder.decomposition.strategy
+Bind HB=P.alt_hb=16, KM=P.alt_kc=128, P.alt_cfg=8, P.alt_nb=1, P.alt_splits=1 and DQ=1. The alternative was planned for the full T: GT>=4 and NG>=N imply T>N, so neither the underfilled-grid narrow-ring rule nor the one-wave DQ expansion can apply. No smaller-tail re-planning occurs. Set chosen.gt=1, dual=0 and ws_bytes=0. The range's local token u maps to t=K*GT+u in [K*GT,T); the original full-batch pointers and T are retained. Each worktile scans c=0..CM(t)-1 and owns all H heads and D output columns. Invalid slots and padded heads keep their gather and matrix work; CM(t)>=1. The complete prefix and the nonempty remainder cover every output once.

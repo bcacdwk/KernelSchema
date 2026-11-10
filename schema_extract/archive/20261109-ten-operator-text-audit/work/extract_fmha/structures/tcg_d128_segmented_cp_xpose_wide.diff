@@ -1,0 +1,621 @@
+--- tcg_d128_segmented_cp_xpose_narrow
++++ tcg_d128_segmented_cp_xpose_wide
+@@ -4,37 +4,37 @@
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+   version: 1
+   dispatch:
+-    id: tcg_d128_segmented_cp_xpose_narrow
+-    parent: tcg_d128_segmented_tma_xpose_narrow
+-    when: TEXT[142]
++    id: tcg_d128_segmented_cp_xpose_wide
++    parent: tcg_d128_segmented_cp_xpose_narrow
++    when: TEXT[124]
+ design:
+   math_reshape:
+-    thesis: TEXT[666]
++    thesis: TEXT[677]
+     rewrite:
+     - step: TEXT[652]
+       name: TEXT[614]
+-      math: TEXT[340]
++      math: TEXT[361]
+       symbol:
+         Br:
+-          meaning: TEXT[512]
++          meaning: TEXT[514]
+           binding: bind:design.work_schedule::Br
+-        Ngm:
+-          meaning: TEXT[518]
+-          binding: bind:design.work_schedule::Ngm
+         Ns:
+           meaning: TEXT[495]
+           binding: bind:design.work_schedule::Ns
++        Ngm:
++          meaning: TEXT[496]
++          binding: bind:design.work_schedule::Ngm
+     - step: TEXT[660]
+-      name: TEXT[623]
+-      math: TEXT[383]
++      name: TEXT[596]
++      math: TEXT[328]
+       symbol:
+         DotTile:
+-          meaning: TEXT[527]
++          meaning: TEXT[541]
+           shape:
+           - row: Br
+           - key: KeyGroup
+           dtype: fp32
+-          retention: keep_value (evaluation,b,kh,a,s,g)
++          retention: keep_value (pass,b,kh,a,s,g)
+         GroupMax:
+           meaning: TEXT[436]
+           shape:
+@@ -43,10 +43,10 @@
+           dtype: fp32
+           retention: keep_value invocation
+       arithmetic:
+-        accumulate: TEXT[159]
++        accumulate: TEXT[178]
+     - step: TEXT[653]
+-      name: TEXT[609]
+-      math: TEXT[332]
++      name: TEXT[630]
++      math: TEXT[327]
+       symbol:
+         SegLen:
+           meaning: TEXT[438]
+@@ -55,79 +55,79 @@
+           meaning: TEXT[427]
+           value: 16
+         SegMax:
+-          meaning: TEXT[492]
++          meaning: TEXT[546]
+           shape:
+           - segment: Nseg
+           - row: R
+           dtype: fp32
+           retention: keep_value invocation
+     - step: TEXT[651]
+-      name: TEXT[613]
+-      math: TEXT[395]
++      name: TEXT[648]
++      math: TEXT[392]
+       symbol:
+         ScanState:
+-          meaning: TEXT[489]
++          meaning: TEXT[568]
+           shape: []
+           dtype: fp32
+           retention: carry_forward (r); g=-1..T-1
+         MState:
+-          meaning: TEXT[542]
++          meaning: TEXT[478]
+           shape:
+           - group: T
+           - row: R
+           dtype: fp32
+           retention: keep_value invocation
+         MTail:
+-          meaning: TEXT[471]
++          meaning: TEXT[507]
+           shape:
+           - row: R
+           dtype: fp32
+           retention: keep_value invocation
+     - step: TEXT[654]
+-      name: TEXT[621]
+-      math: TEXT[371]
++      name: TEXT[627]
++      math: TEXT[364]
+       symbol:
+         MaxState:
+-          meaning: TEXT[578]
++          meaning: TEXT[519]
+           shape:
+           - row: Br
+           dtype: fp32
+-          retention: carry_forward (b,kh,a,s); g=cLo-1..cHi
++          retention: carry_forward (b,kh,a,s); g=cLo-1..max(cLo-1,cHi)
+         DenState:
+-          meaning: TEXT[584]
++          meaning: TEXT[434]
+           shape:
+           - row: Br
+           dtype: fp32
+-          retention: carry_forward (b,kh,a,s); g=cLo-1..end
++          retention: carry_forward (b,kh,a,s); g=cLo-1..max(cLo-1,cHi)
+         Prob8:
+-          meaning: TEXT[585]
++          meaning: TEXT[503]
+           shape:
+           - row: Br
+           - key: KeyGroup
+           dtype: fp8_e4m3fn
+           retention: keep_value (b,kh,a,s,g)
+       arithmetic:
+-        approx: TEXT[193]
++        approx: TEXT[189]
+     - step: TEXT[662]
+-      name: TEXT[601]
+-      math: TEXT[398]
++      name: TEXT[606]
++      math: TEXT[337]
+       symbol:
+         NumState:
+-          meaning: TEXT[571]
++          meaning: TEXT[573]
+           shape:
+           - row: Br
+           - channel: D
+           dtype: fp32
+-          retention: carry_forward (b,kh,a,s); g=cLo-1..end
++          retention: carry_forward (b,kh,a,s); g=cLo-1..max(cLo-1,cHi)
+         GroupPV:
+-          meaning: TEXT[479]
++          meaning: TEXT[575]
+           shape:
+           - row: Br
+           - channel: D
+           dtype: fp32
+           retention: keep_value (b,kh,a,s,g)
+         PartA:
+-          meaning: TEXT[443]
++          meaning: TEXT[502]
+           shape:
+           - split: Ns
+           - row: R
+@@ -135,71 +135,84 @@
+           dtype: fp32
+           retention: keep_value invocation
+         PartB:
+-          meaning: TEXT[505]
++          meaning: TEXT[582]
+           shape:
+           - split: Ns
+           - row: R
+           dtype: fp32
+           retention: keep_value invocation
+       arithmetic:
+-        accumulate: TEXT[177]
+-        approx: TEXT[155]
++        accumulate: TEXT[167]
++        approx: TEXT[195]
+     - step: TEXT[661]
+-      name: TEXT[595]
+-      math: TEXT[375]
++      name: TEXT[599]
++      math: TEXT[339]
+       symbol:
++        MergeGroups:
++          meaning: TEXT[537]
++          binding: bind:design.work_schedule::MergeGroups
++        MergeA:
++          meaning: TEXT[570]
++          shape:
++          - interval: MergeGroups
++          - channel: D
++          dtype: fp32
++          retention: keep_value (r)
++        MergeB:
++          meaning: TEXT[442]
++          shape:
++          - interval: MergeGroups
++          - tree: 4
++          dtype: fp32
++          retention: keep_value (r)
+         TotalA:
+-          meaning: TEXT[441]
++          meaning: TEXT[515]
+           shape:
+           - channel: D
+           dtype: fp32
+           retention: keep_value (r)
+         TotalB:
+-          meaning: TEXT[567]
++          meaning: TEXT[522]
+           shape: []
+           dtype: fp32
+           retention: keep_value (r)
+       arithmetic:
+-        approx: TEXT[181]
++        approx: TEXT[187]
+     ledger:
+-      baseline: TEXT[249]
++      baseline: TEXT[309]
+       footprint:
+       - item: TEXT[296]
+-        change: TEXT[250]
++        change: TEXT[299]
+         by:
+         - TEXT[660]
+         - TEXT[653]
+         - TEXT[651]
+         - TEXT[662]
+       matmul:
+-      - item: TEXT[318]
+-        change: TEXT[211]
++      - item: TEXT[303]
++        change: TEXT[321]
+         by:
+         - TEXT[652]
+         - TEXT[660]
+         - TEXT[662]
+       depth:
+       - item: TEXT[313]
+-        change: TEXT[272]
++        change: TEXT[305]
+         by:
++        - TEXT[653]
+         - TEXT[651]
+         - TEXT[662]
+         - TEXT[661]
+-      vector:
+-      - item: TEXT[295]
+-        change: TEXT[220]
+-        by:
+-        - TEXT[653]
+       error:
+-      - item: TEXT[277]
+-        change: TEXT[290]
++      - item: TEXT[214]
++        change: TEXT[285]
+         by:
+         - TEXT[660]
+         - TEXT[654]
+         - TEXT[662]
+         - TEXT[661]
+   work_schedule:
+-    thesis: TEXT[1380]
++    thesis: TEXT[1381]
+     flow:
+       launch:
+       - phase:
+@@ -271,9 +284,9 @@
+           wait_at: combine.inputs_ready
+     phase:
+       group_max:
+-        describe: TEXT[1273]
++        describe: TEXT[1243]
+         decomposition:
+-          strategy: TEXT[1303]
++          strategy: TEXT[1319]
+           partition:
+             split:
+               size: Ngm
+@@ -288,8 +301,8 @@
+             invariant:
+               q_tensor:
+                 shape:
++                - query: Qph
+                 - head: G
+-                - query: Qph
+                 - channel: D
+                 dtype: ref:contract.algorithm_requirement::q_tensor.dtype
+               sf_q:
+@@ -323,7 +336,7 @@
+             unit_count: 1
+           worker_count: nx*ny*Ngm
+         schedule:
+-          strategy: TEXT[1365]
++          strategy: TEXT[1362]
+           worktile_order:
+           - by: split
+             direction: ascending
+@@ -338,9 +351,9 @@
+             refill: none
+             exit: assigned_done
+       segment_max:
+-        describe: TEXT[1240]
++        describe: TEXT[1282]
+         decomposition:
+-          strategy: TEXT[1287]
++          strategy: TEXT[1361]
+           partition:
+             segment:
+               size: Nseg
+@@ -368,7 +381,7 @@
+             unit_count: 1
+           worker_count: ceil_div(R,256)*Nseg
+         schedule:
+-          strategy: TEXT[1315]
++          strategy: TEXT[1343]
+           worktile_order:
+           - by: TEXT[655]
+             direction: ascending
+@@ -381,9 +394,9 @@
+             refill: none
+             exit: assigned_done
+       segmented_scan:
+-        describe: TEXT[1267]
++        describe: TEXT[1283]
+         decomposition:
+-          strategy: TEXT[1299]
++          strategy: TEXT[1318]
+           partition:
+             row:
+               size: R
+@@ -429,9 +442,9 @@
+             refill: none
+             exit: assigned_done
+       split:
+-        describe: TEXT[1257]
++        describe: TEXT[1277]
+         decomposition:
+-          strategy: TEXT[1356]
++          strategy: TEXT[1340]
+           partition:
+             split:
+               size: Ns
+@@ -446,8 +459,8 @@
+             invariant:
+               q_tensor:
+                 shape:
++                - query: Qph
+                 - head: G
+-                - query: Qph
+                 - channel: D
+                 dtype: ref:contract.algorithm_requirement::q_tensor.dtype
+               sf_q:
+@@ -507,7 +520,7 @@
+             unit_count: 1
+           worker_count: nx*ny*Ns
+         schedule:
+-          strategy: TEXT[1307]
++          strategy: TEXT[1305]
+           worktile_order:
+           - by: split
+             direction: ascending
+@@ -522,9 +535,9 @@
+             refill: none
+             exit: assigned_done
+       combine:
+-        describe: TEXT[1247]
++        describe: TEXT[1284]
+         decomposition:
+-          strategy: TEXT[1311]
++          strategy: TEXT[1334]
+           partition:
+             row:
+               size: R
+@@ -568,6 +581,7 @@
+             unit_count: 1
+           worker_count: R
+         schedule:
++          strategy: TEXT[1286]
+           worktile_order:
+           - by: row
+             direction: ascending
+@@ -578,7 +592,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[687]
++    thesis: TEXT[707]
+     phase:
+       group_max:
+         domain:
+@@ -643,22 +657,29 @@
+             - element: Br*D+Br*(D/Block)
+             dtype: uint8
+             slot_count: 1
++          MaxChunk:
++            space: register
++            member_slot_shape:
++            - row: Br
++            - key: 32
++            dtype: fp32
++            slot_count: 1
+         role:
+           Main:
+             info:
+               execution_mode: serial
+               member: warp[0:4]
+               verb:
+-                setup: TEXT[980]
+-                prime: TEXT[1125]
+-                prepare: TEXT[743]
+-                start: TEXT[841]
+-                prefetch: TEXT[770]
+-                stage: TEXT[752]
+-                score: TEXT[829]
+-                reduce: TEXT[817]
+-                advance: TEXT[1093]
+-                finish: TEXT[931]
++                setup: TEXT[909]
++                prime: TEXT[940]
++                prepare: TEXT[812]
++                start: TEXT[1150]
++                prefetch: TEXT[967]
++                stage: TEXT[923]
++                score: TEXT[1056]
++                reduce: TEXT[1128]
++                advance: TEXT[1020]
++                finish: TEXT[1146]
+             pipe:
+               prologue:
+               - setup:Local
+@@ -687,20 +708,28 @@
+             - group: SegLen
+             dtype: fp32
+             slot_count: 1
++          SegmentState:
++            space: register
++            member_slot_shape:
++            - row: SegRows
++            dtype: fp32
++            slot_count: 1
+         role:
+           Main:
+             info:
+               execution_mode: serial
+               member: warp[0:8]
+               verb:
+-                signal: TEXT[935]
+-                dependency: TEXT[776]
+-                produce: TEXT[886]
++                signal: TEXT[1036]
++                dependency: TEXT[1124]
++                reduce: TEXT[732]
++                write: TEXT[750]
+             pipe:
+               steady:
+               - signal:ReplayPermission
+               - dependency:GroupMax
+-              - produce:SegMax
++              - reduce:SegMax
++              - write:SegMax
+       segmented_scan:
+         milestone:
+           inputs_ready:
+@@ -732,10 +761,10 @@
+               execution_mode: serial
+               member: warp[0:ScanThreads/32]
+               verb:
+-                dependency: TEXT[762]
+-                signal: TEXT[928]
+-                scan: TEXT[1014]
+-                tail: TEXT[823]
++                dependency: TEXT[1079]
++                signal: TEXT[1075]
++                scan: TEXT[1106]
++                tail: TEXT[872]
+             pipe:
+               steady:
+               - dependency:ScanInputs
+@@ -850,6 +879,13 @@
+             - element: Br*D+Br*(D/Block)
+             dtype: uint8
+             slot_count: 1
++          ScoreChunk:
++            space: register
++            member_slot_shape:
++            - row: Br
++            - key: 32
++            dtype: fp32
++            slot_count: 1
+           NumState:
+             space: register
+             member_slot_shape:
+@@ -892,26 +928,26 @@
+               execution_mode: serial
+               member: warp[0:4]
+               verb:
+-                setup: TEXT[966]
+-                prime: TEXT[815]
++                setup: TEXT[1055]
++                prime: TEXT[722]
+                 prepare:
+                   execution_mode: async
+-                  meaning: TEXT[908]
++                  meaning: TEXT[836]
+                 dependency:
+                   execution_mode: async
+-                  meaning: TEXT[888]
++                  meaning: TEXT[1032]
+                 replay:
+                   execution_mode: async
+-                  meaning: TEXT[1015]
+-                prefetch: TEXT[987]
+-                stage: TEXT[1000]
+-                qk: TEXT[1148]
+-                probability: TEXT[1082]
+-                pv: TEXT[1139]
+-                accumulate: TEXT[887]
+-                stage_partials: TEXT[865]
+-                write: TEXT[1091]
+-                finish: TEXT[1141]
++                  meaning: TEXT[1142]
++                prefetch: TEXT[854]
++                stage: TEXT[806]
++                qk: TEXT[1052]
++                probability: TEXT[1060]
++                pv: TEXT[1030]
++                accumulate: TEXT[818]
++                stage_partials: TEXT[771]
++                write: TEXT[858]
++                finish: TEXT[942]
+             pipe:
+               prologue:
+               - setup:Local
+@@ -948,17 +984,33 @@
+           inputs_ready:
+           - Main/dependency:Partials@done
+         resource:
+-          DenParts:
++          MergeA:
+             space: SMEM
+             member_slot_shape:
+-            - split: 128
++            - interval: MergeGroups
++            - channel: D
++            dtype: fp32
++            slot_count: 1
++          MergeB:
++            space: SMEM
++            member_slot_shape:
++            - interval: MergeGroups
++            - tree: 4
+             dtype: fp32
+             slot_count: 1
+           NumeratorBatch:
+             space: register
+             member_slot_shape:
++            - interval: MergeGroups
+             - channel: D
+             - split: 8
++            dtype: fp32
++            slot_count: 1
++          IntervalSum:
++            space: register
++            member_slot_shape:
++            - interval: MergeGroups
++            - channel: D
+             dtype: fp32
+             slot_count: 1
+           Totals:
+@@ -983,31 +1035,31 @@
+           Main:
+             info:
+               execution_mode: serial
+-              member: warp[0:4]
++              member: warp[0:16]
+               verb:
+-                dependency: TEXT[1011]
+-                sum_a: TEXT[774]
+-                sum_b: TEXT[846]
+-                write: TEXT[884]
++                dependency: TEXT[1058]
++                partials: TEXT[719]
++                merge: TEXT[721]
++                write: TEXT[850]
+             pipe:
+               steady:
+               - dependency:Partials
+-              - sum_a:TotalA
+-              - sum_b:TotalB
++              - partials:MergePartials
++              - merge:Totals
+               - write:Output
+ realization:
+   require:
+   - item:
+     - design.tile_pipeline::group_max
+     - design.tile_pipeline::split
+-    choice: TEXT[1196]
+-    reason: TEXT[1216]
++    choice: TEXT[1186]
++    reason: TEXT[1232]
+   - item: design.work_schedule::flow
+-    choice: TEXT[1187]
+-    reason: TEXT[1229]
++    choice: TEXT[1171]
++    reason: TEXT[1222]
+   prefer:
+   - item:
+     - design.tile_pipeline::group_max.TensorMemory
+     - design.tile_pipeline::split.TensorMemory
+-    choice: TEXT[1194]
+-    reason: TEXT[1233]
++    choice: TEXT[1170]
++    reason: TEXT[1235]

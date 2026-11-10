@@ -1,0 +1,107 @@
+[400] t_2c723d01266648a8 schedule.strategy (1 uses)
+tc_packed:191 design.work_schedule.phase.attention.decomposition.strategy
+GT=P.gt=2, MR=64 and KC=64. The selected plan has splits=1, nb=1 and ws_bytes=0. Group grp owns tokens [grp*GT,min((grp+1)*GT,T)) and all H heads; H is 8, 16 or 32 here, so nrows<=MR. Groups may cross request boundaries; compute each token's metadata independently. Each nonempty group traverses c=0..C(grp)-1 over its realized union. A zero-entry union is still assigned work and writes zero output directly. All H sinks are shared across the group's queries. Padded matrix rows produce no output stores. Every real output element has one producer.
+
+[401] t_36e80c95f1ca1869 schedule.strategy (1 uses)
+probe_hidden_packed:370 design.work_schedule.phase.prefix.decomposition.strategy
+For all phases, GT=P.gt in {4,8}, MR=64, KC=64, NG=ceil_div(T,GT), and K=N-PS, where N is the SM count used by the initial plan. Both range launches retain P.cfg=90, splits=1, nb=1 and ws_bytes=0, and clear dual. The alternative is never submitted. H is 8 or 16 and GT*H<=MR. Prefix's local token coordinate equals the batch token coordinate and covers [0,K*GT), giving global groups grp in [0,K). Each group owns all H heads and D columns for its GT tokens. This range ends on a complete group boundary. For both attention phases, resolve each real token's request independently; groups may cross request boundaries although probe samples exclude those groups. A nonempty union traverses c=0..C(grp)-1; an empty union still writes zeros. All H sinks are shared across queries, and padded matrix rows produce no stores. The two phases have disjoint outputs, no cross-phase KV/state reuse, and no combine.
+
+[402] t_4355abb6b4f80dd1 schedule.strategy (1 uses)
+root:331 design.work_schedule.phase.attention.schedule.strategy
+Linear block index is (((t*S+s)*NB+hb)*DQ+dq). Adjacent dq CTAs request the same KV rows; this ordering creates reuse opportunities without a co-residency guarantee.
+
+[403] t_46d8ed8936013cbb schedule.strategy (1 uses)
+probe_hidden_packed:436 design.work_schedule.phase.remainder.decomposition.strategy
+Use the shared GT, MR, KC, NG and K fixed by prefix. The remainder partition's local token coordinate u maps to batch token K*GT+u, covering [K*GT,T). Its local group coordinate j maps to global grp=K+j. Each group owns all H heads and D columns for G=min(GT,T-grp*GT) real tokens, with a possible partial group only at the batch tail. The full-batch pointers and T remain unchanged; only the launch range and its group offset change. Resolve request crossings, iterate nonempty unions and handle empty unions exactly as prefix defines. Together the two partitions produce every real output element exactly once.
+
+[404] t_4ffd82837141e0e6 schedule.strategy (1 uses)
+tc_heads:161 design.work_schedule.phase.attention.schedule.strategy
+For block index worker_id, t*NB+hb=T*NB-1-worker_id. Reverse order can move longer causal rows earlier; it does not guarantee concurrent residency, balanced durations, or sharing between adjacent CTAs.
+
+[405] t_5e1e3c8bb632f158 schedule.strategy (1 uses)
+probe_serial_mma:210 design.work_schedule.phase.attention.decomposition.strategy
+HB=16 and KC=128: P.alt_cfg=8, alt_hb=16, alt_nb=1, alt_splits=1, alt_kc=128. T>N prevents the narrow-ring and DQ rewrites of this MMA plan. There is one head block with base head zero; r is the actual head for r<H. Worktile t traverses c=0..C(t)-1, computes padded HB by KC scores and accumulates HB by D values. Read sinks[0:H]; padded heads use online's sentinel. Every real output element has one producer. Neither kernel uses workspace scratch.
+
+[406] t_5f1200c1e81403fe schedule.strategy (1 uses)
+mma_direct:127 design.work_schedule.phase.attention.decomposition.strategy
+Use P_run defined in dispatch.when: HB=P_run.hb, KC=P_run.kc. DQ=2 for DQ2IX_CFG_5/DQ2IX_CFG_8, DQ=4 for DQ4IX_CFG_5/DQ4IX_CFG_8, and DQ=1 otherwise. P_run.splits=1 and P_run.gt=1 throughout this node. These are fixed host choices: make_plan resolves head/chunk geometry and scratch-capped splits from H,T,IndexWidth,W,N. Only cfg5/cfg8 gain DQ, using the largest power of two up to four whose CTA count fits N. Each worktile (t,hb,dq) traverses c=0..C(t)-1, computes HB by KC scores and row normalizers, but accumulates and writes only D/DQ output columns. Short rows still have C(t)>=1; invalid slots and padded heads retain gather and matrix work. Each real output element has one producer; scratch is unused by this kernel.
+
+[407] t_5fbd461725dc3b45 schedule.strategy (1 uses)
+probe_hidden_mma:477 design.work_schedule.phase.remainder.schedule.strategy
+For block index worker_id, t=K*GT+worker_id. The launch offset is added before token decoding; no prefix token is repeated.
+
+[408] t_6b4bd3d5ec17b343 schedule.strategy (1 uses)
+root:295 design.work_schedule.phase.attention.decomposition.strategy
+Use the initial plan P defined by meta_data.dispatch.when: HB=P.hb, KC=P.kc, S=P.splits, with 1<S<=128. DQ=2 or 4 for P.cfg DQ2IX_CFG_5/DQ2IX_CFG_8 or DQ4IX_CFG_5/DQ4IX_CFG_8 respectively, otherwise DQ=1. These are fixed host choices, not freely tunable parameters: make_plan resolves head/chunk geometry and scratch-capped splits from H,T,IndexWidth,W,N; only cfg5/cfg8 gain DQ, at the largest power of two up to four that still fits one wave. A worktile (t,hb,s,dq) traverses c0(t,s)..c1(t,s)-1. Shorter token rows can give empty splits despite the common launch S. It computes full HB by KC scores and normalizers but only D/DQ output columns; QK and gathers repeat across dq. Empty splits publish only sentinel statistics; their vector regions remain allocated with prior contents as defined by finalize.
+
+[409] t_73f60841b5f84acd schedule.strategy (1 uses)
+tc_heads:134 design.work_schedule.phase.attention.decomposition.strategy
+HB=64 and KC=64. The selected plan has gt=1, splits=1 and ws_bytes=0. Each worktile (t,hb) traverses c=0..C(t)-1 and owns every output column of its HB heads. All heads are real since H is 64 or 128 in this node. Invalid slots remain in the chunk computation; all-invalid indices do not remove the recurrence. The sink input block is sinks[hb*HB:hb*HB+HB]. Each output element has one producer; workspace is unused on device.
+
+[410] t_7a8dd94116cb204a schedule.strategy (1 uses)
+mma_direct:160 design.work_schedule.phase.attention.schedule.strategy
+Linear block index is ((t*NB+hb)*DQ+dq). Adjacent dq CTAs gather the same KV rows; this creates cache reuse opportunities without a co-residency guarantee.
+
+[411] t_9417612bd771d2f3 schedule.strategy (1 uses)
+probe_serial_packed:352 design.work_schedule.phase.attention.decomposition.strategy
+GT=P.gt in {4,8}, MR=64 and KC=64. The accepted initial plan has cfg=90, splits=1, nb=1 and ws_bytes=0; its alternative is never submitted. H is 8 or 16 and GT*H<=MR. Group grp owns tokens [grp*GT,min((grp+1)*GT,T)) and all H heads and D columns. The full batch is assigned once; no packed prefix or token-range remainder is submitted. Groups may cross request boundaries; resolve each real token independently, even though the probe excludes such sample groups. Each nonempty group traverses c=0..C(grp)-1. Empty unions still write their zero outputs. All H sinks are shared across the group's queries. Padded matrix rows produce no output stores; every real output element has one producer.
+
+[412] t_9b210d5cef4c8914 schedule.strategy (1 uses)
+probe_serial_mma:172 design.work_schedule.phase.probe.decomposition.strategy
+GT=P.gt is 4 or 8 in this node; pack_gt starts at 64/H and halves until GT*IndexWidth<=2560 and ceil_div(T,GT)>=N. The threshold eliminates GT=2 from probe-gated plans. This implies H in {8,16} and T>N. Worktile s uses probe_count's sampled GT-token group. Every one of the eight submitted worktiles writes a ratio; absent, partial or cross-request groups publish -1. Index slots are visited only for Usable(s). During eager submission or external graph recording, host initializes Gate, then after submitting or recording the probe polls at most 2000000 times. Each ascending scan stops at its first -2; polling ends when a scan finds none across all eight volatile reads. It performs probe_select's final scan and chooses the MMA alternative. Host polling does not establish device completion and may end with pending slots. Graph replay executes both recorded kernels without repeating host selection. Gate is process-cached mapped host storage; only its first eight FP32 words are used. ProbeRatio is written directly there, with no extra device copy. The source permits an outstanding probe to race a later invocation's reset. Attention reads none of these statistics; there is no device data handoff.
+
+[413] t_b2786c6c52097f61 schedule.strategy (1 uses)
+root:341 design.work_schedule.phase.combine.decomposition.strategy
+Launch T*Hp CTAs; the padded h>=H work is empty. CT=512 if T*Hp<N, otherwise CT=128, where N is the cached SM count in dispatch.when; G=CT/128. Each worktile folds all S splits of one (t,h). The four initial vector prefetches per group may include stale but allocated empty-split storage; zero weights discard those values. Later zero-weight addresses redirect to split zero, whose range is nonempty because Klen(t)>=1; their products still follow merge. Scratch is not cleared between calls; attention.kernel_done covers every producer of the vectors and statistics read here.
+
+[414] t_bb640adf0daa9a86 schedule.strategy (2 uses)
+probe_serial_packed:382 design.work_schedule.phase.attention.schedule.strategy; tc_packed:219 design.work_schedule.phase.attention.schedule.strategy
+For block index worker_id, grp=ceil_div(T,GT)-1-worker_id. Reverse group order does not imply simultaneous residency or any sharing between CTAs.
+
+[415] t_bd48dc1729c1c3b4 schedule.strategy (2 uses)
+probe_hidden_mma:432 design.work_schedule.phase.prefix.schedule.strategy; probe_hidden_packed:419 design.work_schedule.phase.prefix.schedule.strategy
+For block index worker_id, grp=K-1-worker_id. Reverse ordering is local to this range; each worker receives one full group.
+
+[416] t_c28db41fb6a80014 schedule.strategy (1 uses)
+probe_hidden_packed:453 design.work_schedule.phase.remainder.schedule.strategy
+For block index worker_id, grp=NG-1-worker_id. Descend only within the remainder range; no prefix work is reassigned or repeated.
+
+[417] t_ea1aca46a6d23885 schedule.strategy (1 uses)
+probe_serial_mma:236 design.work_schedule.phase.attention.schedule.strategy
+Each block index is its token index; each CTA traverses the whole selected key range independently.
+
+[418] t_f0df11dfa8d23400 schedule.strategy (3 uses)
+probe_hidden_mma:369 design.work_schedule.phase.probe.decomposition.strategy; probe_hidden_packed:328 design.work_schedule.phase.probe.decomposition.strategy; probe_serial_packed:320 design.work_schedule.phase.probe.decomposition.strategy
+PS=8. Sample b is the ascending sample coordinate; sg(b), Items(b) and usability are defined by probe. Set PG=0 for b>=NG, otherwise PG=min(GT,T-sg(b)*GT). All PS samples receive a worker, including out-of-range, cross-request and partial-tail samples; those still publish -1. A usable sample examines every selected slot of its PG tokens and publishes one scalar, with no KV access. The probe hash/membership state is private to its worktile and is not reused by attention.
+
+[419] t_8dde6f25e6466201 schedule.thesis (1 uses)
+probe_hidden_packed:299 design.work_schedule.thesis
+Fork after the caller's preceding work, run the full-batch probe on a side stream and a packed prefix on the caller stream, then submit the accepted packed remainder behind the probe. The remainder need not wait for the prefix. Queue a side-to-caller join after the remainder and behind the prefix, so subsequent caller work observes all output rows. One probe and two attention launches plus the event pair permit overlap without promising simultaneous residency.
+
+[420] t_940ced24b2cfe413 schedule.thesis (1 uses)
+root:278 design.work_schedule.thesis
+One CTA owns a token, head block, KV split and output-column slice. It reuses Q while scanning balanced contiguous chunk ranges; smaller head blocks and KV/D partitions increase work count at the cost of repeated gathers or QK. Attention completes before combine consumes the global FP32 partials and writes out.
+
+[421] t_a57165b0361320bc schedule.thesis (1 uses)
+tc_packed:179 design.work_schedule.thesis
+One CTA owns every head and output column of up to two consecutive queries. The group shares its union and gathered KV across matrix rows; reverse group order visits later tokens first. There is one direct-output kernel and no probe, split materialization, combine or device workspace use.
+
+[422] t_aa009490bbfccb9b schedule.thesis (1 uses)
+tc_heads:124 design.work_schedule.thesis
+One CTA computes one query and one 64-head block over all selected slots and all output columns. Reverse grid order visits later queries first; no split materialization or combine is needed, and KV is shared across all 64 heads.
+
+[423] t_ad3274fd12c8f8fe schedule.thesis (1 uses)
+probe_hidden_mma:343 design.work_schedule.thesis
+Fork after prior caller work, run the full-batch probe on the side stream and a packed prefix on the caller stream, then submit an unsplit mma remainder behind the probe. The remainder has no prefix-completion wait. A side-to-caller join queued behind the prefix makes later caller work observe both disjoint outputs.
+
+[424] t_bb14eed70ccec08b schedule.thesis (1 uses)
+mma_direct:117 design.work_schedule.thesis
+One CTA owns a token, head block and output-column slice, scanning every chunk before normalizing and writing its slice. Larger head blocks reuse KV across more heads; DQ increases work count by repeating gathers, QK and softmax.
+
+[425] t_d4b95f3bdd7db37f schedule.thesis (1 uses)
+probe_serial_packed:295 design.work_schedule.thesis
+Submit an independent sample-counting kernel, poll its mapped results on the host, then submit one full-batch packed attention kernel on the caller stream. The stream completion edge serializes their device work even if the poll times out early. Probe results select the plan but are not attention operands.
+
+[426] t_efe1ce1a6860e0e2 schedule.thesis (1 uses)
+probe_serial_mma:160 design.work_schedule.thesis
+Eight CTAs sample candidate query groups, then host polling chooses one full-batch attention launch on the same caller stream. Each attention CTA owns one token; probe latency precedes all attention work in this path.

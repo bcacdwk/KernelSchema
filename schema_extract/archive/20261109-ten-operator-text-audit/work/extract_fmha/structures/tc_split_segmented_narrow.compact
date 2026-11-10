@@ -1,0 +1,90 @@
+--- tc_split_flat_narrow
+
++++ tc_split_segmented_narrow
+
+@@ -1,7 +1,12 @@
+
+-math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"},"Qraw":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"ref:contract.algorithm_requirement::q_tensor.dtype"},"Kraw":{"shape":[{"key":"KeyGroup"},{"channel":"D"}],"dtype":"ref:contract.algorithm_requirement::k_tensor.dtype"},"Vraw":{"shape":[{"key":"KeyGroup"},{"channel":"D"}],"dtype":"ref:contract.algorithm_requirement::v_tensor.dtype"},"QueryScale":{"shape":[{"row":"Br"},{"channel_block":"D/Block"}],"dtype":"fp32","retention":"keep_value (b,kh,a,z)"},"KeyScale":{"shape":[{"key":"KeyGroup"},{"channel_block":"D/Block"}],"dtype":"fp32","retention":"keep_value (b,kh,a,z,g)"},"ValueScale":{"shape":[{"sequence_block":"KeyGroup/Block"},{"channel":"D"}],"dtype":"bf16","retention":"keep_value (b,kh,a,z,g)"},"Nm":{"binding":"bind:design.work_schedule::Nm"}}},{"step":"scores","symbol":{"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,z,g)"},"GroupMax":{"shape":[{"row":"Br"}],"dtype":"fp32"}}},{"step":"scan","symbol":{"BmCovered":{"shape":[{"key_group":"T"},{"batch":"B"},{"head":"H"},{"query":"Covered"}],"dtype":"fp32","retention":"keep_value invocation"},"PriorMax":{"shape":[{"key_group":"T"},{"batch":"B"},{"head":"H"},{"query":"Sq-Covered"}],"dtype":"fp32","retention":"keep_value invocation"},"ScanCarry":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"carry_forward invocation; g=-1..T-1"},"ScanState":{"shape":[{"key_group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"MaxTail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"OTemporary":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"bf16","retention":"keep_value (b,kh,a,z)"},"LseTemporary":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"keep_value (b,kh,a,z)"}}},{"step":"normalize","symbol":{"DenPart":{"shape":[{"row":"Br"},{"partial":4}],"dtype":"fp32","retention":"carry_forward (b,kh,a,z); g=cLo-1..gLast"},"E":{"shape":[{"row":"Br"},{"partial":4},{"component":2}],"dtype":"fp32"}}},{"step":"partial","symbol":{"Vbf":{"shape":[{"key":"KeyGroup"},{"channel":"D"}],"dtype":"bf16","retention":"keep_value (b,kh,a,z,g)"},"Pfrag":{"shape":[{"row":"Br"},{"key":16}],"dtype":"bf16"},"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,z); g=cLo-1..gLast"},"PartialA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartialB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"combine","symbol":{"SumA":{"shape":[{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward invocation; s=-1..PaddedNs-1"},"SumB":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"carry_forward invocation; s=-1..PaddedNs-1"}}}]
+-work_schedule.flow.launch=[{"phase":["group_max"]},{"phase":["scan"],"start_after":"group_max.kernel_done","protocol":"pdl"},{"phase":["split"],"start_after":"scan.kernel_done"},{"phase":["combine"],"start_after":"split.kernel_done","protocol":"pdl"}]
++math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"},"Qraw":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"ref:contract.algorithm_requirement::q_tensor.dtype"},"Kraw":{"shape":[{"key":"KeyGroup"},{"channel":"D"}],"dtype":"ref:contract.algorithm_requirement::k_tensor.dtype"},"Vraw":{"shape":[{"key":"KeyGroup"},{"channel":"D"}],"dtype":"ref:contract.algorithm_requirement::v_tensor.dtype"},"QueryScale":{"shape":[{"row":"Br"},{"channel_block":"D/Block"}],"dtype":"fp32","retention":"keep_value (b,kh,a,z)"},"KeyScale":{"shape":[{"key":"KeyGroup"},{"channel_block":"D/Block"}],"dtype":"fp32","retention":"keep_value (b,kh,a,z,g)"},"ValueScale":{"shape":[{"sequence_block":"KeyGroup/Block"},{"channel":"D"}],"dtype":"bf16","retention":"keep_value (b,kh,a,z,g)"},"Nm":{"binding":"bind:design.work_schedule::Nm"}}},{"step":"scores","symbol":{"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,z,g)"},"GroupMax":{"shape":[{"row":"Br"}],"dtype":"fp32"}}},{"step":"max_table","symbol":{"BmCovered":{"shape":[{"key_group":"T"},{"batch":"B"},{"head":"H"},{"query":"Covered"}],"dtype":"fp32","retention":"keep_value invocation"},"PriorMax":{"shape":[{"key_group":"T"},{"batch":"B"},{"head":"H"},{"query":"Sq-Covered"}],"dtype":"fp32","retention":"keep_value invocation"},"OTemporary":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"bf16","retention":"keep_value (b,kh,a,z)"},"LseTemporary":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"keep_value (b,kh,a,z)"}}},{"step":"segment","symbol":{"Seg":{"value":16},"SegmentMax":{"shape":[{"segment":"Nseg"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"scan","symbol":{"Sc":{"value":16},"ScanCarry":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"carry_forward invocation; g=-1..T-1"},"ScanState":{"shape":[{"key_group":"T"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"},"MaxTail":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"normalize","symbol":{"DenPart":{"shape":[{"row":"Br"},{"partial":4}],"dtype":"fp32","retention":"carry_forward (b,kh,a,z); g=cLo-1..gLast"},"E":{"shape":[{"row":"Br"},{"partial":4},{"component":2}],"dtype":"fp32"}}},{"step":"partial","symbol":{"Vbf":{"shape":[{"key":"KeyGroup"},{"channel":"D"}],"dtype":"bf16","retention":"keep_value (b,kh,a,z,g)"},"Pfrag":{"shape":[{"row":"Br"},{"key":16}],"dtype":"bf16"},"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a,z); g=cLo-1..gLast"},"PartialA":{"shape":[{"split":"Ns"},{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"keep_value invocation"},"PartialB":{"shape":[{"split":"Ns"},{"row":"R"}],"dtype":"fp32","retention":"keep_value invocation"}}},{"step":"combine","symbol":{"SumA":{"shape":[{"row":"R"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward invocation; s=-1..PaddedNs-1"},"SumB":{"shape":[{"row":"R"}],"dtype":"fp32","retention":"carry_forward invocation; s=-1..PaddedNs-1"}}}]
++work_schedule.flow.launch=[{"phase":["group_max"]},{"phase":["segmax"],"start_after":"group_max.kernel_done","protocol":"pdl"},{"phase":["scan"],"start_after":"segmax.launch_ready","protocol":"pdl"},{"phase":["split"],"start_after":"scan.kernel_done"},{"phase":["combine"],"start_after":"split.kernel_done","protocol":"pdl"}]
+ work_schedule.flow.handoff.BmCovered.producer="group_max"
+-work_schedule.flow.handoff.BmCovered.consumer=["scan"]
++work_schedule.flow.handoff.BmCovered.consumer=["segmax","scan"]
+ work_schedule.flow.handoff.BmCovered.storage="global"
+ work_schedule.flow.handoff.BmCovered.ready="group_max.kernel_done"
++work_schedule.flow.handoff.SegmentMax.producer="segmax"
++work_schedule.flow.handoff.SegmentMax.consumer=["scan"]
++work_schedule.flow.handoff.SegmentMax.storage="global"
++work_schedule.flow.handoff.SegmentMax.ready="segmax.kernel_done"
++work_schedule.flow.handoff.SegmentMax.wait_at="scan.inputs_ready"
+ work_schedule.flow.handoff.ScanState.producer="scan"
+@@ -49,4 +54,23 @@
+
+ work_schedule.phase.group_max.schedule.worker_assignment.exit="assigned_done"
++work_schedule.phase.segmax.decomposition.strategy="TEXT"
++work_schedule.phase.segmax.decomposition.partition.segment={"size":"Nseg","tile":1}
++work_schedule.phase.segmax.decomposition.partition.row={"size":"R","tile":"ScanBt"}
++work_schedule.phase.segmax.decomposition.worktile.invariant.BmCovered.shape=[{"key_group":"min(Seg,T-s*Seg)"},{"row":"count(Cblock)"}]
++work_schedule.phase.segmax.decomposition.worktile.invariant.BmCovered.dtype="ref:design.math_reshape::BmCovered.dtype"
++work_schedule.phase.segmax.decomposition.worktile.invariant.PriorMax.shape=[{"key_group":"min(Seg,T-s*Seg)"},{"row":"count(Ublock)"}]
++work_schedule.phase.segmax.decomposition.worktile.invariant.PriorMax.dtype="ref:design.math_reshape::PriorMax.dtype"
++work_schedule.phase.segmax.decomposition.target.single_tile.SegmentMax.shape=[{"row":"min(ScanBt,R-r0)"}]
++work_schedule.phase.segmax.decomposition.target.single_tile.SegmentMax.dtype="ref:design.math_reshape::SegmentMax.dtype"
++work_schedule.phase.segmax.mapping.worker={"unit":"CTA","unit_count":1}
++work_schedule.phase.segmax.mapping.worker_count="Nseg*ceil_div(R,ScanBt)"
++work_schedule.phase.segmax.schedule.strategy="TEXT"
++work_schedule.phase.segmax.schedule.worktile_order=[{"by":"segment","direction":"ascending"},{"by":"row","direction":"ascending"}]
++work_schedule.phase.segmax.schedule.worker_assignment.preassigned={"start":"worker_id","count":1}
++work_schedule.phase.segmax.schedule.worker_assignment.refill="none"
++work_schedule.phase.segmax.schedule.worker_assignment.exit="assigned_done"
+ work_schedule.phase.scan.decomposition.strategy="TEXT"
+ work_schedule.phase.scan.decomposition.partition.row={"size":"R","tile":"ScanBt"}
++work_schedule.phase.scan.decomposition.worktile.iteration.SegmentMax.shape=[{"segment":"min(Sc,Nseg-sb)"},{"row":"min(ScanBt,R-r0)"}]
++work_schedule.phase.scan.decomposition.worktile.iteration.SegmentMax.dtype="ref:design.math_reshape::SegmentMax.dtype"
++work_schedule.phase.scan.decomposition.worktile.iteration.SegmentMax.direction="ascending"
+ work_schedule.phase.scan.decomposition.worktile.iteration.BmCovered.shape=[{"key_group":1},{"row":"count(Cblock)"}]
+@@ -168,8 +192,26 @@
+
+ tile_pipeline.phase.group_max.role.Main.pipe.epilogue=["write:TemporaryOutput"]
+-tile_pipeline.phase.scan.domain.j=[0,"Nb"]
+-tile_pipeline.phase.scan.resource.ScanBatch.space="register"
+-tile_pipeline.phase.scan.resource.ScanBatch.member_slot_shape=[{"row":"ScanBt"},{"key_group":64}]
+-tile_pipeline.phase.scan.resource.ScanBatch.dtype="fp32"
+-tile_pipeline.phase.scan.resource.ScanBatch.slot_count=1
+-tile_pipeline.phase.scan.resource.ScanBatch.view.MaxBatch(j).part.key_group=[0,"Len(j)"]
++tile_pipeline.phase.segmax.resource.SegmentBatch.space="register"
++tile_pipeline.phase.segmax.resource.SegmentBatch.member_slot_shape=[{"row":"ScanBt"},{"key_group":"Seg"}]
++tile_pipeline.phase.segmax.resource.SegmentBatch.dtype="fp32"
++tile_pipeline.phase.segmax.resource.SegmentBatch.slot_count=1
++tile_pipeline.phase.segmax.role.Main.info.member="warp[0:ScanBt/32]"
++tile_pipeline.phase.segmax.role.Main.info.execution_mode="serial"
++tile_pipeline.phase.segmax.role.Main.info.verb={"entry":"TEXT","load":"TEXT","produce":"TEXT"}
++tile_pipeline.phase.segmax.role.Main.pipe.prologue=["entry:Protocol"]
++tile_pipeline.phase.segmax.role.Main.pipe.steady=["load:SegmentBatch","produce:SegmentMax"]
++tile_pipeline.phase.scan.domain.c=[0,"Nc"]
++tile_pipeline.phase.scan.milestone.inputs_ready=["Main/entry:Protocol@done"]
++tile_pipeline.phase.scan.resource.SummaryBatch.space="register"
++tile_pipeline.phase.scan.resource.SummaryBatch.member_slot_shape=[{"row":"ScanBt"},{"segment":"Sc"}]
++tile_pipeline.phase.scan.resource.SummaryBatch.dtype="fp32"
++tile_pipeline.phase.scan.resource.SummaryBatch.slot_count=1
++tile_pipeline.phase.scan.resource.SummaryBatch.view.Summary(c)={}
++tile_pipeline.phase.scan.resource.JumpMask.space="register"
++tile_pipeline.phase.scan.resource.JumpMask.member_slot_shape=[{"row":"ScanBt"}]
++tile_pipeline.phase.scan.resource.JumpMask.dtype="uint32"
++tile_pipeline.phase.scan.resource.JumpMask.slot_count=1
++tile_pipeline.phase.scan.resource.GroupBatch.space="register"
++tile_pipeline.phase.scan.resource.GroupBatch.member_slot_shape=[{"row":"ScanBt"},{"key_group":"Seg"}]
++tile_pipeline.phase.scan.resource.GroupBatch.dtype="fp32"
++tile_pipeline.phase.scan.resource.GroupBatch.slot_count=1
+ tile_pipeline.phase.scan.resource.ScanCarry.space="register"
+@@ -180,5 +222,5 @@
+
+ tile_pipeline.phase.scan.role.Main.info.execution_mode="serial"
+-tile_pipeline.phase.scan.role.Main.info.verb={"entry":"TEXT","initialize":"TEXT","load":"TEXT","replay":"TEXT","store":"TEXT"}
+-tile_pipeline.phase.scan.role.Main.pipe.prologue=["entry:Protocol","initialize:ScanCarry"]
+-tile_pipeline.phase.scan.role.Main.pipe.steady=[{"repeat":"j","steady":["load:MaxBatch(j)","replay:ScanState(j)"]}]
++tile_pipeline.phase.scan.role.Main.info.verb={"entry":"TEXT","initialize":"TEXT","walk":"TEXT","load":"TEXT","select":"TEXT","fill_walk":"TEXT","store":"TEXT"}
++tile_pipeline.phase.scan.role.Main.pipe.prologue=["entry:Protocol","initialize:ScanCarry","walk:FirstSegment"]
++tile_pipeline.phase.scan.role.Main.pipe.steady=[{"repeat":"c","steady":["load:Summary(c)","select:JumpMask(c)","fill_walk:ScanState(c)"]}]
+ tile_pipeline.phase.scan.role.Main.pipe.epilogue=["store:MaxTail"]

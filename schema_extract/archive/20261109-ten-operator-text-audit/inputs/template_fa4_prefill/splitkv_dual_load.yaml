@@ -1,0 +1,314 @@
+meta_data:
+  name: paged_causal_attention_prefill
+  describe: Compute right-aligned causal GQA from FP8 queries and an HND paged KV cache into the supplied BF16 output.
+  source: bcacdwk/KernelSchema@01fff90d714abc6e84904ea9c44523ba66d34a0e:kernel_wiki/aka-four-problems-20261019/fa4_prefill/aka_solution/solution.py::Model.forward
+  version: 4
+  dispatch:
+    id: splitkv_dual_load
+    parent: root
+    when: |
+      Use packaged defaults with no FA_HD256 environment overrides, under the root contract.
+      Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count.
+      C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000).
+      Select exactly when Split and (B>1 or K>=98304).
+design:
+  math_reshape:
+    thesis: Stream each contiguous KV split with lagged-max FP8 online attention, then combine normalized FP32 partials using their natural-log weights; scratch and a second launch buy KV parallelism.
+    rewrite:
+    - step: stream
+      name: Pack heads and stream page-backed score blocks
+      math: |
+        For request b and query block m, Qc[r,d]=query[cum_seq_lens_q[b]+16*m+floor(r/Hq),r%Hq,d], 0<=r<M, on valid query rows.
+        For 0<=i<N and 0<=k<Bk, j=Bk*sigma(i)+k and p=floor(j/Page).
+        Read page p when p*Page<L(b), otherwise this block's first page; Kc(i)[k,d] and Vc(i)[k,d] use kind 0 and 1 of kv_cache.
+        These are block views; no full-cache gather is materialized. Invalid rows and keys are excluded from results.
+        S(i,0)=mm32(Qc[:,0:128],transpose(Kc(i)[:,0:128])); S(i,1)=mma32(Qc[:,128:256],transpose(Kc(i)[:,128:256]),S(i,0)).
+        X(i)[r,k]=S(i,1)[r,k] if j in J(b,16*m+floor(r/Hq)), otherwise -inf.
+      symbol:
+        M: {meaning: Packed rows per worktile., binding: 'bind:design.work_schedule::M'}
+        Bk: {meaning: Keys per local iteration., binding: 'bind:design.work_schedule::Bk'}
+        Ssplit: {meaning: KV split count., binding: 'bind:design.work_schedule::Ssplit'}
+        N: {meaning: Local KV iteration count., binding: 'bind:design.work_schedule::N'}
+        sigma: {meaning: Local iteration to KV block map., binding: 'bind:design.work_schedule::sigma'}
+        Qc: {meaning: Packed query block., shape: [{row: M}, {channel: D}], dtype: fp8_e4m3fn, retention: 'keep_value (b,m,s)'}
+        Kc: {meaning: Page-backed key block., shape: [{key: Bk}, {channel: D}], dtype: fp8_e4m3fn}
+        Vc: {meaning: Page-backed value block., shape: [{key: Bk}, {channel: D}], dtype: fp8_e4m3fn}
+        S: {meaning: Raw score after a channel-half contraction., shape: [{row: M}, {key: Bk}], dtype: fp32}
+    - step: online
+      name: Lagged maximum and distinct denominator and numerator precision
+      math: |
+        For each split s and valid row independently, c=fp32(bmm1_scale*log2(e)), with the expression inside the cast evaluated in Python binary64.
+        Initialize mhat(-1)=-inf, ell(-1)=0, Y(-1)=0. For i=0..N-1, a=max(mhat(i-1),max_k X(i)[r,k]); safe=0 if a=-inf, otherwise a.
+        keep=(c*(mhat(i-1)-safe)>=-tau); mhat(i)=mhat(i-1) if keep, otherwise a; base=mhat(i-1) if keep, otherwise safe.
+        alpha(i)=1 if keep, otherwise exp2_fast(c*(mhat(i-1)-safe)); Stats(i)[r,:]=(mhat(i-1),base).
+        E(i)[r,k]=exp2_fast(fma32(c,X(i)[r,k],offset-c*base)); masked -inf maps to zero; P(i)=fp8_e4m3fn(E(i)).
+        ell(i)=alpha(i)*ell(i-1)+sum32_k E(i)[r,k].
+        For d in {0,1}, Y(i)[:,128*d:128*(d+1)]=mma32(P(i),Vc(i)[:,128*d:128*(d+1)],alpha(i)*Y(i-1)[:,128*d:128*(d+1)]).
+        For N>0, invell=1/ell(N-1) if ell is nonzero and not NaN, otherwise zero; Opart=fp32(Y(N-1)*invell).
+        LSEpart=fp32(bmm1_scale)*mhat(N-1)+log_fast(ell(N-1))-offset*ln(2) when ell is nonzero and not NaN, otherwise -inf.
+        For r=h+Hq*u and a=cum_seq_lens_q[b]+16*m+u, store valid rows to PartialO[s,a,h,:]=Opart[r,:] and PartialLSE[s,h,a]=LSEpart[r].
+        For N=0, write only PartialLSE=-inf for valid rows; PartialO is unspecified.
+      symbol:
+        tau: {meaning: Maximum lag in base-two score units., value: 4}
+        offset: {meaning: Base-two shift before probability narrowing., value: 4}
+        mhat: {meaning: Retained raw-score maximum., shape: [{row: M}], dtype: fp32, retention: 'carry_forward (b,m,s); i=-1..N-1'}
+        ell: {meaning: Denominator from unrounded exponentials., shape: [{row: M}], dtype: fp32, retention: 'carry_forward (b,m,s); i=-1..N-1'}
+        Y: {meaning: Numerator from FP8 probabilities., shape: [{row: M}, {channel: D}], dtype: fp32, retention: 'carry_forward (b,m,s); i=-1..N-1'}
+        P: {meaning: Value-product operand., shape: [{row: M}, {key: Bk}], dtype: fp8_e4m3fn}
+        Stats: {meaning: Previous maximum and guarded current base., shape: [{row: M}, {stat: 2}], dtype: fp32}
+        Opart: {meaning: Locally normalized split output., shape: [{row: M}, {channel: D}], dtype: fp32}
+        LSEpart: {meaning: Natural-log split normalizer., shape: [{row: M}], dtype: fp32}
+        PartialO: {meaning: Materialized split output., shape: [{split: Ssplit}, {token: TotalQ}, {head: Hq}, {channel: D}], dtype: fp32, retention: keep_value invocation}
+        PartialLSE: {meaning: Materialized split normalizer., shape: [{split: Ssplit}, {head: Hq}, {token: TotalQ}], dtype: fp32, retention: keep_value invocation}
+      arithmetic:
+        approx: 'exp2_fast and log_fast are native fast math on SM103 without polynomial substitution; unknown: standalone exp2, log and division error bounds are not supplied.'
+        accumulate: Seed both components of one FP32 pair with ell_previous*(alpha*0.5), seed three other pairs with zero, add four E fragments, merge (g0+g1)+(g2+g3), then add components.
+    - step: combine
+      name: Merge normalized partials by log normalizers
+      math: |
+        For every token a and head h, z=max_s PartialLSE[s,h,a]; safez=0 if z=-inf, otherwise z.
+        w_s=exp2_fast(PartialLSE[s,h,a]*log2(e)-safez*log2(e)); denom=sum32_s w_s.
+        invdenom=1/denom if denom is nonzero and not NaN, otherwise zero; Weights[s]=w_s*invdenom.
+        Facc(-1)=0; for s=0..Ssplit-1, Facc(s)=Facc(s-1)+Weights[s]*PartialO[s,a,h,:] if Weights[s]>0, otherwise Facc(s-1).
+        Zero-weight partials never enter arithmetic. Fblock=bf16(Facc(Ssplit-1)); store its valid slice into out_after and return out as output.
+      symbol:
+        Mc: {meaning: Rows per combine worktile., binding: 'bind:design.work_schedule::Mc'}
+        Dc: {meaning: Channels per combine worktile., binding: 'bind:design.work_schedule::Dc'}
+        Weights: {meaning: Normalized split weights for combine rows., shape: [{split: Ssplit}, {row: Mc}], dtype: fp32}
+        Facc: {meaning: Weighted split-output sum., shape: [{row: Mc}, {channel: Dc}], dtype: fp32, retention: 'carry_forward (b,row_block,channel_half); s=-1..Ssplit-1'}
+        Fblock: {meaning: Final combine output slice., shape: [{row: Mc}, {channel: Dc}], dtype: bf16}
+      arithmetic:
+        approx: Native fast exp2 and division have the unknown bounds stated in online.
+        accumulate: Warp max and sum over padded split slots determine weights; output accumulates positive-weight terms in ascending split order in FP32.
+    ledger:
+      baseline: Materialize FP32 scores and probabilities for every request and query head, each written and read once.
+      footprint:
+      - {item: Dense intermediates, change: '8*Hq*sum_b(Qlen(b)*L(b)) bytes -> M*(D+2) FP32 recurrent scalars per active worktile plus block-local values and 4*Ssplit*TotalQ*Hq*(D+1) bytes of reserved global partial capacity.', by: [stream, online]}
+      traffic:
+      - {item: Split partials, change: 'Up to +8*Ssplit*TotalQ*Hq*(D+1) logical bytes for one write/read per partial; empty splits leave O unwritten, and combine tiling may reread LSE.', by: [online, combine]}
+      error:
+      - {item: Probability precision, change: '+1 E4M3FN rounding per PV multiplicand; denominator retains FP32 exponentials.', by: [online]}
+  work_schedule:
+    thesis: Distribute contiguous KV splits over a rectangular CTA-pair grid, then launch independent eight-row combine CTAs after attention completes.
+    flow:
+      launch: [{phase: [attention]}, {phase: [combine], start_after: attention.kernel_done}]
+      handoff:
+        PartialO: {producer: attention, consumer: [combine], storage: global}
+        PartialLSE: {producer: attention, consumer: [combine], storage: global}
+    phase:
+      attention:
+        describe: Produce FP32 partial outputs and LSE with a rectangular static split-KV schedule.
+        decomposition:
+          strategy: |
+            M=256; Bk=128; Crect=ceil(TotalQ/16), independently for every request.
+            SMCount is the runtime multiprocessor count; C=BatchCount*Crect; G=max(1,floor(SMCount/2)); Kblocks=ceil(64*ceil(max_kv_len/64)/Bk).
+            Ssplit=min(floor(G/C),floor(Kblocks/2),floor(24000000/(TotalQ*Hq*D*4)),64); this dispatch guarantees Ssplit>=2.
+            Nfull=min(ceil(L(b)/Bk),ceil((L(b)-Qlen(b)+16*(m+1))/Bk)); span=ceil(ceil(L(b)/Bk)/Ssplit).
+            Split s owns [lo,hi), where lo=s*span, hi=min((s+1)*span,ceil(L(b)/Bk),Nfull); N=max(0,hi-lo); sigma(i)=lo+i.
+            Reject m>=ceil(Qlen(b)/16). A valid query tile with N=0 writes only -inf LSE and performs no operand traffic or pipeline waits.
+          partition: {split: {size: Ssplit, tile: 1}, request: {size: BatchCount, tile: 1}, query_cluster: {size: Crect, tile: 1}}
+          worktile:
+            invariant: {Qc: {shape: [{row: M}, {channel: D}], dtype: fp8_e4m3fn}}
+            iteration:
+              Kc: {shape: [{key: Bk}, {channel: D}], dtype: fp8_e4m3fn, direction: ascending}
+              Vc: {shape: [{key: Bk}, {channel: D}], dtype: fp8_e4m3fn, direction: ascending}
+          target:
+            single_tile: {PartialO: {shape: [{row: M}, {channel: D}], dtype: fp32}, PartialLSE: {shape: [{row: M}], dtype: fp32}}
+        mapping:
+          strategy: Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.
+          worker: {unit: CTA, unit_count: 2}
+          placement: {unit: cluster, unit_count: 1}
+          worker_count: BatchCount*Crect*Ssplit
+          member: [{row: [0, 128]}, {row: [128, 256]}]
+        schedule:
+          strategy: For ordinal x in [0,Crect), map to m=2*x if x<ceil(Crect/2), otherwise m=2*(Crect-1-x)+1; use grid coordinates directly, with query clusters fastest.
+          worktile_order: [{by: split, direction: ascending}, {by: request, direction: ascending}, {by: query_cluster, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+      combine:
+        describe: Reduce all splits into one final BF16 output slice.
+        decomposition:
+          strategy: |
+            Mc=8; Dc=128; Smax=32 if Ssplit<=32, otherwise 64; pad absent LSE slots with -inf.
+            A request-local row x maps to h=floor(x/Qlen(b)), q=x%Qlen(b), a=cum_seq_lens_q[b]+q; combine is head-major, attention is head-fast.
+            Read PartialO[s,a,h,d] and PartialLSE[s,h,a]; the combine interface takes a zero-copy [split,token,head] transpose of PartialLSE.
+            Launch TotalQ*Hq rows for each request; reject blocks beyond Qlen(b)*Hq and mask its final partial row block.
+          partition: {request: {size: BatchCount, tile: 1}, head_query: {size: TotalQ*Hq, tile: Mc}, channel: {size: D, tile: Dc}}
+          worktile:
+            invariant: {PartialLSE: {shape: [{split: Ssplit}, {row: Mc}], dtype: fp32}}
+            iteration: {PartialO: {shape: [{row: Mc}, {channel: Dc}], dtype: fp32, direction: ascending}}
+          target:
+            single_tile: {Fblock: {shape: [{row: Mc}, {channel: Dc}], dtype: bf16}}
+            tile_reduction: {dimension: split, input: [PartialO, PartialLSE], output: [Fblock], method: 'ref:design.math_reshape::combine'}
+        mapping: {worker: {unit: CTA, unit_count: 1}, worker_count: 'BatchCount*ceil(TotalQ*Hq/Mc)*ceil(D/Dc)'}
+        schedule:
+          worktile_order: [{by: request, direction: ascending}, {by: channel, direction: ascending}, {by: head_query, direction: ascending}]
+          worker_assignment: {preassigned: {start: worker_id, count: 1}, refill: none, exit: assigned_done}
+  tile_pipeline:
+    thesis: Independent K and V producers feed separate four-stage rings for each split; QK leads PV by one block while softmax and correction exchange numerator ownership. A separate cooperative kernel combines partials.
+    phase:
+      attention:
+        domain:
+          i: [0, N]
+          later: [1, 'max(1,N)']
+          active: [0, 'min(1,N)']
+          empty: [0, '1-min(1,N)']
+          d: [0, 2]
+        resource:
+          Query: {space: SMEM, member_slot_shape: [{row: 128}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 2, view: {'Qc(d)': {slot_index: d}}}
+          KeyRing: {space: SMEM, member_slot_shape: [{key: 64}, {channel: 128}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Kc(i,d)': {slot_index: '(2*i+d)%4'}}}
+          ValueRing: {space: SMEM, member_slot_shape: [{key: 128}, {channel: 64}], dtype: fp8_e4m3fn, slot_count: 4, view: {'Vc(i,d)': {slot_index: '(2*i+d)%4'}}}
+          ScoreProbability:
+            space: TMEM
+            member_slot_shape: [{row: 128}, {column: 128}]
+            dtype: fp32
+            slot_count: 2
+            view:
+              S(i,d): {slot_index: i%2}
+              P(i): {slot_index: i%2, part: {column: [0, 32]}, dtype: fp8_e4m3fn}
+              Stats(i): {slot_index: i%2, part: {column: [32, 34]}}
+          Y: {slot_count: 1, space: TMEM, member_slot_shape: [{row: 128}, {channel: D}], dtype: fp32}
+          Denominator: {slot_count: 1, space: SMEM, member_slot_shape: [{row: 128}], dtype: fp32, view: {'FinalSum(active)': {part: {row: [0, 128]}}}}
+          OutputStage: {slot_count: 1, space: SMEM, member_slot_shape: [{row: 128}, {channel: 128}], dtype: fp32, view: {'Opart(active,d)': {part: {channel: [0, 128]}}}}
+          OnlineState: {slot_count: 1, space: register, member_slot_shape: [{row: 128}, {state: 2}], dtype: fp32, view: {'mhat(i)': {part: {state: [0, 1]}}, 'ell(i)': {part: {state: [1, 2]}}}}
+        role:
+          LoadQK:
+            info:
+              member: warp[9:10]
+              execution_mode: async
+              register: 32
+              verb:
+                load: Q holds this member's rows for the KV traversal; each K half uses one page per member. Both members contribute to pair-wide readiness.
+            pipe:
+              repeat: active
+              steady:
+              - {repeat: d, steady: ['load:Qc(d)']}
+              - {repeat: 'i', steady: [{repeat: d, steady: ['load:Kc(i,d)']}]}
+            waits_for:
+              reuse:
+                load:Kc(i+2,d)@issue: ['MMA/qk:S(i,d)@done']
+          LoadV:
+            info:
+              member: warp[10:11]
+              execution_mode: async
+              register: 32
+              verb:
+                load: Each V half uses two page transfers per member; done covers both and contributes to pair-wide readiness independently of K.
+            pipe: {repeat: active, steady: [{repeat: i, steady: [{repeat: d, steady: ['load:Vc(i,d)']}]}]}
+            waits_for:
+              reuse: {'load:Vc(i+2,d)@issue': ['MMA/pv:Y(i,d)@done']}
+          MMA:
+            info:
+              member: CTA[0].warp[8:9]
+              execution_mode: async_ordered_completion
+              register: 32
+              verb:
+                qk: Issue one QK channel half; d=0 initializes S and d=1 completes it. Done returns K; last QK returns Q. Ordered pair products read earlier P before later QK overwrites its aliased slot.
+                pv: Issue one PV output half; i=0 initializes Y and later blocks use corrected Y. Done returns V; d=1 publishes Y and returns P, covering both CTAs.
+            pipe:
+              repeat: active
+              steady:
+              - {repeat: d, steady: ['qk:S(0,d)']}
+              - repeat: i[1:]
+                steady:
+                - {repeat: d, steady: ['qk:S(i,d)']}
+                - {repeat: d, steady: ['pv:Y(i-1,d)']}
+              - {repeat: d, steady: ['pv:Y(last(i),d)']}
+            waits_for:
+              data:
+                qk:S(i,d)@issue: ['LoadQK/load:Qc(d)@done', 'LoadQK/load:Kc(i,d)@done']
+                pv:Y(i,d)@issue: ['Softmax/publish:P(i)@done', 'LoadV/load:Vc(i,d)@done']
+                pv:Y(later,0)@issue: ['Correction/rescale:Y(later)@done']
+              reuse:
+                qk:S(i,0)@issue: ['Softmax/capture:S(i-2,1)@done']
+          Softmax:
+            info:
+              execution_mode: serial
+              member: warp[0:4]
+              register: 256
+              verb:
+                capture: Capture scores and return their slot; use the load-reduced maximum for the fully visible prefix, and recompute after masking the causal/tail suffix.
+                produce: Compute and store LSEpart into PartialLSE for valid rows after publishing FinalSum; correction can already stage Opart.
+                publish: Stats carries old maximum and base; P applies online with per-tile state reset; FinalSum publishes ell(N-1) after all blocks.
+            pipe:
+              repeat: active
+              steady:
+              - {repeat: 'i', steady: ['capture:S(i,1)', 'publish:Stats(i)', 'publish:P(i)', 'compute:ell(i)']}
+              - publish:FinalSum(active)
+              - produce:LSEpart
+            waits_for:
+              data: {'capture:S(i,1)@issue': ['MMA/qk:S(i,1)@done']}
+              reuse:
+                publish:Stats(i+2)@issue: ['Correction/capture:Stats(i)@done']
+          Correction:
+            info:
+              execution_mode: serial
+              member: warp[4:8]
+              register: 160
+              verb:
+                capture: Acknowledge first-block Stats without reading its payload; capture later Stats and final ell into registers before returning their slots.
+                rescale: Evaluate alpha from Stats and correct both Y halves after previous PV; a warp vote skips rewriting when no row has alpha<1, retaining the
+                  ownership handshake.
+                stage: Normalize one Y half into FP32 OutputStage; completion covers the correction group.
+                store: Coalesced stores write the split PartialO slice; completion ends OutputStage reads and includes the group barrier. EmptyLSE writes only PartialLSE=-inf
+                  without waiting on unused pipelines.
+            pipe:
+              steady:
+              - repeat: active
+                steady:
+                - capture:Stats(0)
+                - {repeat: 'i[1:]', steady: ['capture:Stats(i)', 'rescale:Y(i)']}
+                - capture:FinalSum(active)
+                - stage:Opart(active,0)
+                - store:Opart(active,0)
+                - stage:Opart(active,1)
+                - store:Opart(active,1)
+              - {repeat: empty, steady: ['store:EmptyLSE']}
+            waits_for:
+              data:
+                rescale:Y(later)@issue: ['MMA/pv:Y(later-1,1)@done']
+                stage:Opart(active,0)@issue: ['MMA/pv:Y(last(i),1)@done']
+                capture:Stats(i)@issue: ['Softmax/publish:Stats(i)@done']
+                capture:FinalSum(active)@issue: ['Softmax/publish:FinalSum(active)@done']
+      combine:
+        domain: {s: [0, Ssplit]}
+        resource:
+          LSEWeight: {slot_count: 1, space: SMEM, member_slot_shape: [{split: Smax}, {row: Mc}], dtype: fp32, view: {PartialLSE: {part: {split: [0, Ssplit]}}, Weights: {part: {split: [0, Ssplit]}}}}
+          LastValidSplit: {slot_count: 1, space: SMEM, member_slot_shape: [{row: Mc}], dtype: int32}
+          PartialRing: {space: SMEM, member_slot_shape: [{row: Mc}, {channel: Dc}], dtype: fp32, slot_count: 4, view: {'PartialO(s)': {slot_index: s%4}}}
+          Facc: {slot_count: 1, space: register, member_slot_shape: [{row: Mc}, {channel: Dc}], dtype: fp32}
+        role:
+          Main:
+            info:
+              member: warp[0:8]
+              execution_mode: async
+              verb:
+                load: Issue cp.async copies; PartialLSE includes -inf padding. The first three partial prefetches may read unspecified empty-split payloads; later
+                  copies skip splits beyond each thread-owned row group's last nonempty split.
+                publish:
+                  execution_mode: serial
+                  meaning: Wait for LSE copies and rendezvous the CTA; compute combine weights and per-row LastValidSplit, overwrite LSEWeight, then rendezvous before
+                    consuming the transposed weights.
+                accumulate:
+                  execution_mode: serial
+                  meaning: Wait for the current partial stage; initialize Facc before s=0 and apply combine. Each warp owns one row; skip nonpositive weights and
+                    iterations beyond its last valid split. Reads are thread-private, so no per-stage CTA barrier is needed.
+                store: {execution_mode: serial, meaning: Narrow Facc to BF16 and coalescently store its valid output slice.}
+            pipe:
+              repeat: s
+              prologue:
+              - load:PartialLSE
+              - {repeat: {p: [0, 'min(3,Ssplit)']}, steady: ['load:PartialO(p)']}
+              - publish:Weights
+              steady:
+              - {repeat: {p: ['min(s+3,Ssplit)', 'min(s+4,Ssplit)']}, steady: ['load:PartialO(p)']}
+              - accumulate:Facc(s)
+              epilogue: ['store:Fblock']
+            waits_for:
+              data: {'publish:Weights@issue': ['load:PartialLSE@done'], 'accumulate:Facc(s)@issue': ['load:PartialO(s)@done', 'publish:Weights@done']}
+              reuse: {'load:PartialO(s+4)@issue': ['accumulate:Facc(s)@done']}
+realization:
+  require:
+  - {item: 'design.tile_pipeline::attention.MMA', choice: Use two-CTA tcgen05 MMA with cumulative completion and earlier-PV-read-before-later-QK-write ordering., reason: Pair-wide operand returns and aliased score/probability storage depend on these guarantees.}
+  - {item: ['design.tile_pipeline::attention.LoadQK', 'design.tile_pipeline::attention.LoadV'], choice: Use native page-64 TMA for HND FP8 KV and descriptor views for Q., reason: Pair-wide transaction completion implements the declared operand handoffs.}
+  - {item: 'design.tile_pipeline::attention', choice: Launch 384 threads per CTA with setmaxnreg budgets and one contiguous 512-column TMEM allocation., reason: Idle warps relinquish registers and the score/numerator resources share one allocation lifetime.}
+  - {item: 'design.tile_pipeline::combine.Main', choice: Use cp.async commit/wait groups for the four-stage partial ring., reason: Three-stage prefetch overlaps copies and weighted accumulation while preserving thread-private stage readiness.}

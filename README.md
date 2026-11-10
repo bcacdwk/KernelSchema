@@ -2,18 +2,20 @@
 
 本仓库设计一套描述 GPU kernel **流水线设计**的 schema：用结构化的 YAML 帮助 Agent 思考、表达和交流一个 kernel 要算什么、数学上怎么改写、工作怎么分配到硬件、微流水线怎样推进计算与复用资源，以及实现时必须遵守的条件。schema 位于所有 GPU 编程语言之上，由 Planner 填写、Coder 据此实现、人类专家审阅；YAML 最终供 Agent 和人阅读，不会被编译。
 
+Kernel Schema 设计的核心出发点在于，压缩是智能的基础，对于语义、数学、算法的压缩本身对应着新的知识、关系和信息。真随机数的核心评判标准之一就是不可压缩性，这是源于对于熵的要求，因为随机噪声所包含的信息量是最多的。换言之，schema 的核心目的在于，以尽可能精简凝练、可以被组合表达的方式，最高程度的抽象一个 Kernel 所包含的核心信息。即，算子的压缩。
+
 本 README 是全局导引。任务入口指导工作，`schema_docs` 定义字段语义与设计表达，`schema_template` 提供共用的 YAML 操作与检查。检查器落实文档中可直接判断的结构与关联要求，不反向增加设计义务；示例也不代替规范。
 
 ## 任务入口
 
 执行具体任务时，先选择对应入口，再按当前问题进入规范、源码或资料：
 
-| 当前任务 | 入口 | 交付什么 |
-| --- | --- | --- |
-| 离线从已有 SOTA kernel 及相关材料提取 schema，或修正已有提取结果 | [提取 schema](EXTRACT_SCHEMA.md) | 忠实于选定实现、可追溯的 schema 与必要缺口说明 |
-| Planner 根据已完成的 Contract 设计新算子的 schema | [新建设计](DESIGN_SCHEMA.md) | 逐层完成数学改写、工作调度与微流水线的首版设计，以及未决判断 |
-| Planner 根据已有 schema 与 Coder 反馈迭代优化 | [优化设计](OPTIMIZE_SCHEMA.md) | 有依据的设计修订、影响范围及下一轮验证要求 |
-| Coder 根据 schema 从零实现，或按设计修改、优化 kernel | [实现 schema](IMPLEMENT_SCHEMA.md) | 对应设计版本的代码、验证结果及实现反馈 |
+| 当前任务                                                         | 入口                              | 交付什么                                                     |
+| ---------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------ |
+| 离线从已有 SOTA kernel 及相关材料提取 schema，或修正已有提取结果 | [提取 schema](EXTRACT_SCHEMA.md)   | 忠实于选定实现、可追溯的 schema 与必要缺口说明               |
+| Planner 根据已完成的 Contract 设计新算子的 schema                | [新建设计](DESIGN_SCHEMA.md)       | 逐层完成数学改写、工作调度与微流水线的首版设计，以及未决判断 |
+| Planner 根据已有 schema 与 Coder 反馈迭代优化                    | [优化设计](OPTIMIZE_SCHEMA.md)     | 有依据的设计修订、影响范围及下一轮验证要求                   |
+| Coder 根据 schema 从零实现，或按设计修改、优化 kernel            | [实现 schema](IMPLEMENT_SCHEMA.md) | 对应设计版本的代码、验证结果及实现反馈                       |
 
 一次任务选择当前工作对应的入口，通过产物与必要说明交接。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
 
@@ -49,14 +51,14 @@ Kernel Agent 有两个普遍问题：**难以优化**——无法判断结果是
 
 **分区。** 一份 plan 分为 Contract、Design、Realization 三部分、共六个子区，依次对应 `schema_docs/1–6`；此外开头有一段 `meta_data`（任务名、设计出处、dispatch 路径与修订号），不属于 Contract。
 
-| 区 | 子区 | 记录什么 | 修改权限 |
-| --- | --- | --- | --- |
-| Contract | [contract.algorithm_requirement](schema_docs/1.contract.algorithm_requirement.md) | 算法要求：从外部看，算子必须满足的输入、输出与数学关系 | Planner 与 Coder 都不能改 |
-| Contract | [contract.hardware_specification](schema_docs/2.contract.hardware_specification.md) | 硬件规格：目标设备的执行单元、核心能力与边界，已选的实现栈，以及完整规格与 microbench 的引用 | 同上 |
-| Design | [design.math_reshape](schema_docs/3.design.math_reshape.md) | 数学改写：为了在该硬件上实现，对计算本身做的改写 | 只有 Planner 能改，Coder 遵守 |
-| Design | [design.work_schedule](schema_docs/4.design.work_schedule.md) | 工作调度：计算如何分解、由谁执行、怎样分配与接续 | 同上 |
-| Design | [design.tile_pipeline](schema_docs/5.design.tile_pipeline.md) | 微流水线：worker 内执行角色的动作、依赖、片上资源及跨工作接续 | 同上 |
-| Realization | [realization](schema_docs/6.realization.md) | 实现交接：设计所依赖、但上面没有表达的实现条件，以及优先尝试的实现选择 | Planner 填写；Coder 仅可更新 `prefer[].feedback` |
+| 区          | 子区                                                                               | 记录什么                                                                                     | 修改权限                                           |
+| ----------- | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Contract    | [contract.algorithm_requirement](schema_docs/1.contract.algorithm_requirement.md)   | 算法要求：从外部看，算子必须满足的输入、输出与数学关系                                       | Planner 与 Coder 都不能改                          |
+| Contract    | [contract.hardware_specification](schema_docs/2.contract.hardware_specification.md) | 硬件规格：目标设备的执行单元、核心能力与边界，已选的实现栈，以及完整规格与 microbench 的引用 | 同上                                               |
+| Design      | [design.math_reshape](schema_docs/3.design.math_reshape.md)                         | 数学改写：为了在该硬件上实现，对计算本身做的改写                                             | 只有 Planner 能改，Coder 遵守                      |
+| Design      | [design.work_schedule](schema_docs/4.design.work_schedule.md)                       | 工作调度：计算如何分解、由谁执行、怎样分配与接续                                             | 同上                                               |
+| Design      | [design.tile_pipeline](schema_docs/5.design.tile_pipeline.md)                       | 微流水线：worker 内执行角色的动作、依赖、片上资源及跨工作接续                                | 同上                                               |
+| Realization | [realization](schema_docs/6.realization.md)                                         | 实现交接：设计所依赖、但上面没有表达的实现条件，以及优先尝试的实现选择                       | Planner 填写；Coder 仅可更新 `prefer[].feedback` |
 
 Design 三区按计算方式、工作组织和局部执行排列：`math_reshape` 先定下有哪些量、计算依赖、哪些量跨迭代携带、哪些中间量物化，`work_schedule` 与 `tile_pipeline` 再分别表达宏观工作组织和局部执行约束。优化收益取决于具体任务与证据，不由所在层级决定。
 

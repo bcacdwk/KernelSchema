@@ -1,0 +1,246 @@
+"meta_data":
+  "name": "nvfp4_fused_moe"
+  "describe": "Precomputed routed mixture of experts with prepared NVFP4 weights,\
+    \ gated activation, activation requantization and BF16 output."
+  "source": "SchemaExtractSource_c98aa54e58ac@ce1b7d5e8e7560b5c80abd87549bc2328c52df34:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward"
+  "version": 1
+  "dispatch":
+    "id": "no_scan_direct"
+    "parent": "direct"
+    "when": |
+      Let R=T*K. All implementation controls follow the frozen default scope.
+      Select exactly when Model.forward reaches full validated ABI construction
+      after its hot and identity-key caches miss, ensure_tables returns through
+      the already-ready device entry without submitting k_init_tables, and the
+      default MEGA gate chooses cfg=cfg2=92. This gate requires K=8, R<=8192,
+      R*H<=32000000, I mod 32=0, H mod 256=0,
+      4*(H+H/8+96)+64<=49152 bytes, and an empty route_hist at construction;
+      route_hist counts IDs in [0,E). The zero-probe eligibility test excludes
+      cfg=92, so moe_zero_probe is not called, zero_ok=false, and both ABI
+      zero flags are null.
+      moe_run returns zero through one caller-stream run_pipeline call or
+      graph_replay's ordinary full-graph arm. Any private-stream run_pipeline
+      in this request is capture-only after successful cudaStreamBeginCapture;
+      no extra uncaptured private-stream submission occurs. This includes eager
+      execution, ordinary replay, and caller-stream fallback after recording
+      without executing the private graph.
+      Rebuilding may reuse or allocate workspace independently of the ABI cache
+      miss. During outer capture the request is recorded, and computation events
+      arise only on execution. Recorded scalar choices and tensor bindings stay
+      fixed; device reads use execution-time contents, which may be empty,
+      masked or nonempty despite the construction-time empty histogram.
+"design":
+  "math_reshape":
+    "from_parent": "direct"
+  work_schedule:
+    thesis: 'Rebuild the ABI against existing format tables, obtain workspace and then submit one direct
+      kernel. Workspace creation establishes persistent zero state; an ABI cache miss can also reuse self-clean
+      workspace. The G cooperative CTAs retain direct execution: replicated route census, contiguous unit
+      intervals and last-arrival token finalization, trading repeated census and direct weight reads for
+      a single small-resource kernel.'
+    flow:
+      launch:
+      - phase:
+        - prelude
+        - direct
+        order: per_worker
+      handoff:
+        Census:
+          producer: prelude
+          consumer:
+          - direct
+          storage: tile_pipeline.phase.prelude.resource.Census
+    phase:
+      prelude:
+        describe: Zero route-less output rows and form a private current-route census in every CTA.
+        decomposition:
+          strategy: G=min(296,R*S), which is positive throughout this node. One worktile per replica w visits
+            tokens t=w,w+G,... below T; only n(t)=0 rows are written. Then every replica scans all R route
+            IDs to form its own Census. Nz(w)=count({t | 0<=t<T, t mod G=w, n(t)=0}) denotes the sparse
+            output-row count. This is replication, not a reduction of G different route subsets.
+          partition:
+            replica:
+              size: G
+              tile: 1
+          worktile:
+            invariant:
+              route_ids:
+                shape:
+                - token: T
+                - slot: K
+                dtype: int32
+          target:
+            single_tile:
+              Census:
+                shape: []
+                dtype: int32
+              Y:
+                shape:
+                - token: Nz(worker_id)
+                - hidden: H
+                dtype: bf16
+        mapping:
+          worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: G
+        schedule:
+          worktile_order:
+          - by: replica
+            direction: ascending
+          worker_assignment:
+            preassigned:
+              start: worker_id
+              count: 1
+            refill: none
+            exit: assigned_done
+      direct:
+        describe: Compute valid route chunks, atomically merge them, and finalize tokens at their last arrival.
+        decomposition:
+          strategy: 'Unit order is u=(t*K+k)*S+s with s fastest. Per=ceil_div(R*S,G). Q(w)=max(0,min(Per,R*S-w*Per))
+            and N(w)=Q(w) if M>0, otherwise zero. Worker w processes u=w*Per..w*Per+N(w)-1; local work index
+            v maps to u=w*Per+v. Invalid units visit their ID but perform no payload computation or ticket.
+            Each valid unit contains the full H reduction for B up/gate pairs, local QDQ, and B-channel
+            FC2 contributions across all H outputs. Cache X and n(t) through consecutive valid units of
+            the same token in this worker, reloading only at a new token. Prepared weight payloads and scales
+            stream directly from global memory for each unit. FC2 contributions merge by device FP32 atomic
+            addition into global RouteAccum, with one global Arrivals ticket per completed valid unit. The
+            last-ticket unit executes fc2_finalize for the whole token and resets its valid accumulator
+            rows and counter. Thus Partial and Y below are conditional targets: invalid units produce neither,
+            and non-last valid units only contribute Partial. No extra finalizer work is allocated. RouteAccum
+            has R*H FP32 elements and Arrivals has T int32 elements. Before publishing the new ABI, Model.forward
+            obtains workspace by the shape/configuration key. On a workspace miss, its caller-stream allocation
+            service zeros 2*E+T int32 entries (the final T entries are Arrivals; the first 2*E entries are
+            unused here) and all R*H FP32 RouteAccum entries. On a workspace hit, no allocation or reinitialization
+            occurs; ordered prior completion supplies the self-clean state. The current kernel follows these
+            services on the caller stream, directly or through ordinary graph replay. The recorded kernel
+            has no per-execution memset. Completion and ordered reuse protect the self-clean state; source
+            adds no cross-stream exclusion. ABI construction also retains unused route-map, activation and
+            BF16 route storage without evaluating or consuming their values on this path.'
+          partition:
+            unit:
+              size: R*S
+              tile: 1
+          worktile:
+            invariant:
+              Census:
+                shape: []
+                dtype: int32
+              route_ids:
+                shape:
+                - slot: K
+                dtype: int32
+              route_weights:
+                shape:
+                - slot: K
+                dtype: fp32
+              hidden_states:
+                shape:
+                - packed_hidden: H/2
+                dtype: uint8
+              hidden_states_scale:
+                shape:
+                - hidden_block: H/Block
+                dtype: fp8_e4m3fn
+              gemm1_alpha:
+                shape:
+                - expert: 1
+                dtype: fp32
+              gemm1_beta:
+                shape:
+                - expert: 1
+                dtype: fp32
+              gemm1_clamp_limit:
+                shape:
+                - expert: 1
+                dtype: fp32
+            iteration:
+              gemm1_weights:
+                shape:
+                - channel: 2*B
+                - packed_hidden: 256
+                dtype: uint8
+                direction: ascending
+              gemm1_weights_scale:
+                shape:
+                - channel: 2*B
+                - hidden_block: 32
+                dtype: fp8_e4m3fn
+                direction: ascending
+              gemm2_weights:
+                shape:
+                - hidden: min(2048,H)
+                - packed_intermediate: B/2
+                dtype: uint8
+                direction: ascending
+              gemm2_weights_scale:
+                shape:
+                - hidden: min(2048,H)
+                - intermediate_block: B/Block
+                dtype: fp8_e4m3fn
+                direction: ascending
+              RouteAccum:
+                shape:
+                - route: 1
+                - hidden: min(2048,H)
+                dtype: fp32
+                direction: ascending
+          target:
+            single_tile:
+              Partial:
+                shape:
+                - hidden: H
+                dtype: fp32
+              Y:
+                shape:
+                - hidden: H
+                dtype: bf16
+            tile_reduction:
+              dimension: unit
+              input: ref:design.math_reshape::Partial
+              output:
+              - ref:design.math_reshape::RouteAccum
+              - ref:contract.algorithm_requirement::Y
+              method: ref:design.math_reshape::fc2_finalize
+        mapping:
+          worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: G
+        schedule:
+          strategy: A worker with zero Census ends after its prelude; otherwise all units in its clipped
+            interval are visited, including masked no-payload units. Assigned completion includes any elected
+            finalization and scratch reset. Clamp data is read only when the nullable input is present.
+          worktile_order:
+          - by: unit
+            direction: ascending
+          worker_assignment:
+            preassigned:
+              start: min(worker_id*Per,R*S)
+              count: N(worker_id)
+            refill: none
+            exit: assigned_done
+  "tile_pipeline":
+    "from_parent": "direct"
+realization:
+  require:
+    - item: design.tile_pipeline::direct.Main
+      choice: Bind arrive's device publication and ticket protocol to per-thread __threadfence,
+        CTA __syncthreads and integer atomicAdd, with the source's last-arrival fence before
+        cooperative accumulator loads; use device-scope FP32 atomicAdd for RouteAccum.
+        Preserve publication-before-ticket and all-arrivals-before-consumption when lowering
+        these operations.
+      reason: Counter atomicity alone cannot publish other threads' partials, and the sole
+        finisher must consume every contributing CTA's completed additions.
+    - item: design.work_schedule::flow
+      choice: Publish the rebuilt ABI together with strong references to its caller tensors,
+        output, workspace and library; bind it to the current caller stream and keep the
+        pointer owners alive for cached execution.
+      reason: The cached raw ABI address and recorded tensor pointers do not own their storage;
+        the persistent scratch and execution-time input reads require those owners to survive.
+  prefer:
+    - item: design.math_reshape::fc1
+      choice: Use packed fma.rn.f32x2 for the independent even and odd FC1 sums, preserving
+        their separate FP32 rounding.
+      reason: The two independent accumulations share decoded inputs and can halve their
+        arithmetic instruction issue count.

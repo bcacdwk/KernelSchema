@@ -1,0 +1,171 @@
+--- fused_d128_key
+
++++ fused_d128_group
+
+@@ -1,2 +1,2 @@
+
+-math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"}}},{"step":"scores","symbol":{"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,g)"},"HalfMax":{"shape":[{"slice":2},{"row":"Br"}],"dtype":"fp32"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"DenSlice":{"shape":[{"slice":2},{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"DenFinal":{"shape":[{"row":"Br"}],"dtype":"fp32"},"Prob8":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,g)"}}},{"step":"value_output","symbol":{"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"}}}]
++math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"}}},{"step":"scores","symbol":{"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,g)"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"DenState":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"alpha":{"shape":[{"row":"Br"}],"dtype":"fp32"},"Prob8":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,g)"}}},{"step":"value_output","symbol":{"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"}}}]
+ work_schedule.flow.launch=[{"phase":["main"]}]
+@@ -40,4 +40,4 @@
+
+ tile_pipeline.phase.main.resource.Key.dtype="fp8_e4m3fn"
+-tile_pipeline.phase.main.resource.Key.slot_count=4
+-tile_pipeline.phase.main.resource.Key.view.Key(g)={"slot_index":"(g-cLo)%4"}
++tile_pipeline.phase.main.resource.Key.slot_count=6
++tile_pipeline.phase.main.resource.Key.view.Key(g)={"slot_index":"3*((g-cLo)%2)+floor((g-cLo)/2)%3"}
+ tile_pipeline.phase.main.resource.Value.space="SMEM"
+@@ -46,3 +46,3 @@
+
+ tile_pipeline.phase.main.resource.Value.slot_count=4
+-tile_pipeline.phase.main.resource.Value.view.Value(g)={"slot_index":"(g-cLo)%4"}
++tile_pipeline.phase.main.resource.Value.view.Value(g)={"slot_index":"2*((g-cLo)%2)+floor((g-cLo)/2)%2"}
+ tile_pipeline.phase.main.resource.KeyAtom.space="SMEM"
+@@ -50,4 +50,4 @@
+
+ tile_pipeline.phase.main.resource.KeyAtom.dtype="uint8"
+-tile_pipeline.phase.main.resource.KeyAtom.slot_count=4
+-tile_pipeline.phase.main.resource.KeyAtom.view.KeyAtom(g)={"slot_index":"(g-cLo)%4"}
++tile_pipeline.phase.main.resource.KeyAtom.slot_count=6
++tile_pipeline.phase.main.resource.KeyAtom.view.KeyAtom(g)={"slot_index":"3*((g-cLo)%2)+floor((g-cLo)/2)%3"}
+ tile_pipeline.phase.main.resource.ValueAtom.space="SMEM"
+@@ -56,3 +56,3 @@
+
+ tile_pipeline.phase.main.resource.ValueAtom.slot_count=4
+-tile_pipeline.phase.main.resource.ValueAtom.view.ValueAtom(g)={"slot_index":"(g-cLo)%4"}
++tile_pipeline.phase.main.resource.ValueAtom.view.ValueAtom(g)={"slot_index":"2*((g-cLo)%2)+floor((g-cLo)/2)%2"}
+ tile_pipeline.phase.main.resource.TensorMemory.space="TMEM"
+@@ -61,3 +61,3 @@
+
+ tile_pipeline.phase.main.resource.TensorMemory.slot_count=1
+-tile_pipeline.phase.main.resource.TensorMemory.view.RawScore(g).part.column=["128*(g%2)","128*(g%2)+128"]
++tile_pipeline.phase.main.resource.TensorMemory.view.RawScore(g).part.column=["128*((g-cLo)%2)","128*((g-cLo)%2)+128"]
+ tile_pipeline.phase.main.resource.TensorMemory.view.NumState.part.column=[256,384]
+@@ -65,3 +65,3 @@
+
+ tile_pipeline.phase.main.resource.TensorMemory.view.QueryScale.dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.KeyScale(g).part.column=["392+8*(g%2)","400+8*(g%2)"]
++tile_pipeline.phase.main.resource.TensorMemory.view.KeyScale(g).part.column=["392+8*((g-cLo)%2)","400+8*((g-cLo)%2)"]
+ tile_pipeline.phase.main.resource.TensorMemory.view.KeyScale(g).dtype="uint8"
+@@ -69,6 +69,6 @@
+
+ tile_pipeline.phase.main.resource.TensorMemory.view.UnitScale.dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale(g).part.column=["416+8*(g%2)","424+8*(g%2)"]
++tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale(g).part.column=["416+8*((g-cLo)%2)","424+8*((g-cLo)%2)"]
+ tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale(g).dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.Prob8.part.column=[448,480]
+-tile_pipeline.phase.main.resource.TensorMemory.view.Prob8.dtype="fp8_e4m3fn"
++tile_pipeline.phase.main.resource.TensorMemory.view.Prob8(g).part.column=["448+32*((g-cLo)%2)","480+32*((g-cLo)%2)"]
++tile_pipeline.phase.main.resource.TensorMemory.view.Prob8(g).dtype="fp8_e4m3fn"
+ tile_pipeline.phase.main.resource.QueryPrefetch.space="register"
+@@ -77,24 +77,92 @@
+
+ tile_pipeline.phase.main.resource.QueryPrefetch.slot_count=1
+-tile_pipeline.phase.main.resource.Score.space="register"
+-tile_pipeline.phase.main.resource.Score.member_slot_shape=[{"row":"Br"},{"key":"KeyGroup"}]
+-tile_pipeline.phase.main.resource.Score.dtype="fp32"
+-tile_pipeline.phase.main.resource.Score.slot_count=1
++tile_pipeline.phase.main.resource.Scores.space="register"
++tile_pipeline.phase.main.resource.Scores.member_slot_shape=[{"row":"Br"},{"key":"KeyGroup"}]
++tile_pipeline.phase.main.resource.Scores.dtype="fp32"
++tile_pipeline.phase.main.resource.Scores.slot_count=2
++tile_pipeline.phase.main.resource.Scores.view.Score(g)={"slot_index":"(g-cLo)%2"}
+ tile_pipeline.phase.main.resource.RowState.space="register"
+-tile_pipeline.phase.main.resource.RowState.member_slot_shape=[{"slice":2},{"row":"Br"},{"column":2}]
++tile_pipeline.phase.main.resource.RowState.member_slot_shape=[{"stream":2},{"row":"Br"},{"column":3}]
+ tile_pipeline.phase.main.resource.RowState.dtype="fp32"
+ tile_pipeline.phase.main.resource.RowState.slot_count=1
+-tile_pipeline.phase.main.resource.RowState.view.MaxState.part.column=[0,1]
+-tile_pipeline.phase.main.resource.RowState.view.DenSlice.part.column=[1,2]
+-tile_pipeline.phase.main.resource.RowState.view.DenFinal.part.column=[1,2]
++tile_pipeline.phase.main.resource.RowState.view.MaxState(g).part.stream=["(g-cLo)%2","(g-cLo)%2+1"]
++tile_pipeline.phase.main.resource.RowState.view.MaxState(g).part.column=[0,1]
++tile_pipeline.phase.main.resource.RowState.view.DenState(g).part.stream=["(g-cLo)%2","(g-cLo)%2+1"]
++tile_pipeline.phase.main.resource.RowState.view.DenState(g).part.column=[1,2]
++tile_pipeline.phase.main.resource.RowState.view.alpha(g).part.stream=["(g-cLo)%2","(g-cLo)%2+1"]
++tile_pipeline.phase.main.resource.RowState.view.alpha(g).part.column=[2,3]
++tile_pipeline.phase.main.resource.RowState.view.FinalMax.part.column=[0,1]
++tile_pipeline.phase.main.resource.RowState.view.FinalDen.part.column=[1,2]
+ tile_pipeline.phase.main.resource.Exchange.space="SMEM"
+-tile_pipeline.phase.main.resource.Exchange.member_slot_shape=[{"slice":2},{"row":"Br"}]
++tile_pipeline.phase.main.resource.Exchange.member_slot_shape=[{"block":8},{"row":"Br"}]
+ tile_pipeline.phase.main.resource.Exchange.dtype="fp32"
+ tile_pipeline.phase.main.resource.Exchange.slot_count=1
+-tile_pipeline.phase.main.resource.Exchange.view.HalfMax={}
+-tile_pipeline.phase.main.resource.Exchange.view.DenSlice={}
+-tile_pipeline.phase.main.role.Main.info.execution_mode="serial"
+-tile_pipeline.phase.main.role.Main.info.member="warp[0:8]"
+-tile_pipeline.phase.main.role.Main.info.verb={"setup":"TEXT","cold":"TEXT","prepare":"TEXT","prime":"TEXT","stage":"TEXT","atoms":"TEXT","retire":"TEXT","read":"TEXT","lookahead":"TEXT","advance":"TEXT","pv":"TEXT","drain":"TEXT","combine":"TEXT","write":"TEXT","finish":"TEXT"}
+-tile_pipeline.phase.main.role.Main.pipe.prologue=["setup:Local","cold:Inputs","prepare:Query","prime:FirstQK"]
+-tile_pipeline.phase.main.role.Main.pipe.steady=[{"repeat":"g","steady":["stage:Ahead(g)","atoms:Upcoming(g)","retire:Previous(g)","read:Score(g)","lookahead:Next(g)","advance:StateProb(g)","pv:NumState(g)"]}]
+-tile_pipeline.phase.main.role.Main.pipe.epilogue=["drain:LastPV","combine:DenFinal","write:Output","finish:Local"]
++tile_pipeline.phase.main.resource.Exchange.view.MaxTransfer(g).part.block=["(g-cLo)%2","(g-cLo)%2+1"]
++tile_pipeline.phase.main.resource.Exchange.view.DenTransfer(g).part.block=["2+2*((g-cLo)%2)+floor((g-cLo)/2)%2","3+2*((g-cLo)%2)+floor((g-cLo)/2)%2"]
++tile_pipeline.phase.main.resource.Exchange.view.FinalMax.part.block=[6,7]
++tile_pipeline.phase.main.resource.Exchange.view.FinalDen.part.block=[7,8]
++tile_pipeline.phase.main.role.Even.info.execution_mode="serial"
++tile_pipeline.phase.main.role.Even.info.member="warp[0:4]"
++tile_pipeline.phase.main.role.Even.info.verb.setup="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.cold="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.prepare="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.publish="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.prime="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.stage="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.retire="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.read="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.lookahead="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.maximum={"execution_mode":"async"}
++tile_pipeline.phase.main.role.Even.info.verb.probability={"execution_mode":"async"}
++tile_pipeline.phase.main.role.Even.info.verb.denominator={"execution_mode":"async"}
++tile_pipeline.phase.main.role.Even.info.verb.rescale="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.pv="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.stagev="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.join="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.broadcast="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.write="TEXT"
++tile_pipeline.phase.main.role.Even.info.verb.finish="TEXT"
++tile_pipeline.phase.main.role.Even.pipe.prologue=["setup:Local","cold:Inputs","prepare:Query","publish:Query","prime:FirstQK"]
++tile_pipeline.phase.main.role.Even.pipe.steady=[{"repeat":{"j":[0,"ceil_div(Ng,2)"]},"steady":["stage:Ahead(j)","retire:Own(j)","read:Scores(j)","lookahead:Next(j)","maximum:State(j)","probability:Tile(j)","denominator:State(j)","rescale:NumState(j)","publish:Operands(j)","pv:Group(j)","stagev:Next(j)"]}]
++tile_pipeline.phase.main.role.Even.pipe.epilogue=["retire:LastPV","join:Accumulator","publish:Final","broadcast:Final","write:Output","finish:Local"]
++tile_pipeline.phase.main.role.Even.waits_for.data.maximum:State(j)@done=["Odd/maximum:State(j-1)"]
++tile_pipeline.phase.main.role.Even.waits_for.data.denominator:State(j)@done=["Odd/denominator:State(j-1)"]
++tile_pipeline.phase.main.role.Even.waits_for.data.rescale:NumState(j)@done=["Odd/pv:Group(j-1)"]
++tile_pipeline.phase.main.role.Even.waits_for.data.publish:Operands(j)@done=["probability:Tile(j)","denominator:State(j)"]
++tile_pipeline.phase.main.role.Even.waits_for.data.broadcast:Final@done=["Odd/publish:Final"]
++tile_pipeline.phase.main.role.Even.waits_for.sync.prepare:Query@done=["Odd/prepare:Query@issue"]
++tile_pipeline.phase.main.role.Even.waits_for.sync.publish:Query@done=["Odd/prepare:Query"]
++tile_pipeline.phase.main.role.Even.waits_for.sync.join:Accumulator@done=["Odd/retire:LastPV"]
++tile_pipeline.phase.main.role.Even.waits_for.sync.finish:Local@done=["Odd/write:Output"]
++tile_pipeline.phase.main.role.Odd.info.execution_mode="serial"
++tile_pipeline.phase.main.role.Odd.info.member="warp[4:8]"
++tile_pipeline.phase.main.role.Odd.info.verb.setup="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.cold="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.prepare="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.publish="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.prime="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.stage="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.retire="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.read="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.lookahead="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.maximum={"execution_mode":"async"}
++tile_pipeline.phase.main.role.Odd.info.verb.probability={"execution_mode":"async"}
++tile_pipeline.phase.main.role.Odd.info.verb.denominator={"execution_mode":"async"}
++tile_pipeline.phase.main.role.Odd.info.verb.rescale="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.pv="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.stagev="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.join="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.broadcast="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.write="TEXT"
++tile_pipeline.phase.main.role.Odd.info.verb.finish="TEXT"
++tile_pipeline.phase.main.role.Odd.pipe.prologue=["setup:Local","cold:Inputs","prepare:Query","publish:Query","prime:FirstQK"]
++tile_pipeline.phase.main.role.Odd.pipe.steady=[{"repeat":{"j":[0,"floor(Ng/2)"]},"steady":["stage:Ahead(j)","retire:Own(j)","read:Scores(j)","lookahead:Next(j)","maximum:State(j)","probability:Tile(j)","denominator:State(j)","rescale:NumState(j)","publish:Operands(j)","pv:Group(j)","stagev:Next(j)"]}]
++tile_pipeline.phase.main.role.Odd.pipe.epilogue=["retire:LastPV","join:Accumulator","publish:Final","broadcast:Final","write:Output","finish:Local"]
++tile_pipeline.phase.main.role.Odd.waits_for.data.maximum:State(j)@done=["Even/maximum:State(j)"]
++tile_pipeline.phase.main.role.Odd.waits_for.data.denominator:State(j)@done=["Even/denominator:State(j)"]
++tile_pipeline.phase.main.role.Odd.waits_for.data.rescale:NumState(j)@done=["Even/pv:Group(j)"]
++tile_pipeline.phase.main.role.Odd.waits_for.data.publish:Operands(j)@done=["probability:Tile(j)","denominator:State(j)"]
++tile_pipeline.phase.main.role.Odd.waits_for.data.broadcast:Final@done=["Even/publish:Final"]
++tile_pipeline.phase.main.role.Odd.waits_for.sync.prepare:Query@done=["Even/prepare:Query@issue"]
++tile_pipeline.phase.main.role.Odd.waits_for.sync.publish:Query@done=["Even/prepare:Query"]
++tile_pipeline.phase.main.role.Odd.waits_for.sync.join:Accumulator@done=["Even/retire:LastPV"]
++tile_pipeline.phase.main.role.Odd.waits_for.sync.finish:Local@done=["Even/write:Output"]

@@ -1,0 +1,106 @@
+--- root
+
++++ fused_d128_key
+
+@@ -1,2 +1,2 @@
+
+-math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"}}},{"step":"scores","symbol":{"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,g)"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"DenState":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"Prob8":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,g)"}}},{"step":"value_output","symbol":{"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"}}}]
++math_reshape.rewrite=[{"step":"domain","symbol":{"Br":{"binding":"bind:design.work_schedule::Br"}}},{"step":"scores","symbol":{"Score":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp32","retention":"keep_value (b,kh,a,g)"},"HalfMax":{"shape":[{"slice":2},{"row":"Br"}],"dtype":"fp32"}}},{"step":"normalize","symbol":{"MaxState":{"shape":[{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"DenSlice":{"shape":[{"slice":2},{"row":"Br"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"},"DenFinal":{"shape":[{"row":"Br"}],"dtype":"fp32"},"Prob8":{"shape":[{"row":"Br"},{"key":"KeyGroup"}],"dtype":"fp8_e4m3fn","retention":"keep_value (b,kh,a,g)"}}},{"step":"value_output","symbol":{"NumState":{"shape":[{"row":"Br"},{"channel":"D"}],"dtype":"fp32","retention":"carry_forward (b,kh,a); g=cLo-1..cHi"}}}]
+ work_schedule.flow.launch=[{"phase":["main"]}]
+@@ -29,3 +29,3 @@
+
+ work_schedule.phase.main.schedule.worktile_order=[{"by":"kvflat","direction":"ascending"},{"by":"query","direction":"ascending"}]
+-work_schedule.phase.main.schedule.worker_assignment.preassigned={"start":"WorkId(worker_id)","count":1}
++work_schedule.phase.main.schedule.worker_assignment.preassigned={"start":"worker_id","count":1}
+ work_schedule.phase.main.schedule.worker_assignment.refill="none"
+@@ -33,3 +33,2 @@
+
+ tile_pipeline.phase.main.domain.g=["cLo","cHi+1"]
+-tile_pipeline.phase.main.domain.z=[0,2]
+ tile_pipeline.phase.main.resource.Query.space="SMEM"
+@@ -41,4 +40,4 @@
+
+ tile_pipeline.phase.main.resource.Key.dtype="fp8_e4m3fn"
+-tile_pipeline.phase.main.resource.Key.slot_count=2
+-tile_pipeline.phase.main.resource.Key.view.Key(g)={"slot_index":"(g-cLo)%2"}
++tile_pipeline.phase.main.resource.Key.slot_count=4
++tile_pipeline.phase.main.resource.Key.view.Key(g)={"slot_index":"(g-cLo)%4"}
+ tile_pipeline.phase.main.resource.Value.space="SMEM"
+@@ -46,4 +45,4 @@
+
+ tile_pipeline.phase.main.resource.Value.dtype="fp8_e4m3fn"
+-tile_pipeline.phase.main.resource.Value.slot_count=2
+-tile_pipeline.phase.main.resource.Value.view.Value(g)={"slot_index":"(g-cLo)%2"}
++tile_pipeline.phase.main.resource.Value.slot_count=4
++tile_pipeline.phase.main.resource.Value.view.Value(g)={"slot_index":"(g-cLo)%4"}
+ tile_pipeline.phase.main.resource.KeyAtom.space="SMEM"
+@@ -51,4 +50,4 @@
+
+ tile_pipeline.phase.main.resource.KeyAtom.dtype="uint8"
+-tile_pipeline.phase.main.resource.KeyAtom.slot_count=2
+-tile_pipeline.phase.main.resource.KeyAtom.view.KeyAtom(g)={"slot_index":"(g-cLo)%2"}
++tile_pipeline.phase.main.resource.KeyAtom.slot_count=4
++tile_pipeline.phase.main.resource.KeyAtom.view.KeyAtom(g)={"slot_index":"(g-cLo)%4"}
+ tile_pipeline.phase.main.resource.ValueAtom.space="SMEM"
+@@ -56,19 +55,19 @@
+
+ tile_pipeline.phase.main.resource.ValueAtom.dtype="uint8"
+-tile_pipeline.phase.main.resource.ValueAtom.slot_count=2
+-tile_pipeline.phase.main.resource.ValueAtom.view.ValueAtom(g)={"slot_index":"(g-cLo)%2"}
++tile_pipeline.phase.main.resource.ValueAtom.slot_count=4
++tile_pipeline.phase.main.resource.ValueAtom.view.ValueAtom(g)={"slot_index":"(g-cLo)%4"}
+ tile_pipeline.phase.main.resource.TensorMemory.space="TMEM"
+-tile_pipeline.phase.main.resource.TensorMemory.member_slot_shape=[{"row":"Br"},{"column":256}]
++tile_pipeline.phase.main.resource.TensorMemory.member_slot_shape=[{"row":"Br"},{"column":512}]
+ tile_pipeline.phase.main.resource.TensorMemory.dtype="fp32"
+ tile_pipeline.phase.main.resource.TensorMemory.slot_count=1
+-tile_pipeline.phase.main.resource.TensorMemory.view.ScoreHalf.part.column=[0,64]
+-tile_pipeline.phase.main.resource.TensorMemory.view.QueryScale.part.column=[64,72]
++tile_pipeline.phase.main.resource.TensorMemory.view.RawScore(g).part.column=["128*(g%2)","128*(g%2)+128"]
++tile_pipeline.phase.main.resource.TensorMemory.view.NumState.part.column=[256,384]
++tile_pipeline.phase.main.resource.TensorMemory.view.QueryScale.part.column=[384,392]
+ tile_pipeline.phase.main.resource.TensorMemory.view.QueryScale.dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.KeyScale.part.column=[72,80]
+-tile_pipeline.phase.main.resource.TensorMemory.view.KeyScale.dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.UnitScale.part.column=[80,88]
++tile_pipeline.phase.main.resource.TensorMemory.view.KeyScale(g).part.column=["392+8*(g%2)","400+8*(g%2)"]
++tile_pipeline.phase.main.resource.TensorMemory.view.KeyScale(g).dtype="uint8"
++tile_pipeline.phase.main.resource.TensorMemory.view.UnitScale.part.column=[408,416]
+ tile_pipeline.phase.main.resource.TensorMemory.view.UnitScale.dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale.part.column=[88,96]
+-tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale.dtype="uint8"
+-tile_pipeline.phase.main.resource.TensorMemory.view.NumState.part.column=[96,224]
+-tile_pipeline.phase.main.resource.TensorMemory.view.Prob8.part.column=[224,256]
++tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale(g).part.column=["416+8*(g%2)","424+8*(g%2)"]
++tile_pipeline.phase.main.resource.TensorMemory.view.ValueScale(g).dtype="uint8"
++tile_pipeline.phase.main.resource.TensorMemory.view.Prob8.part.column=[448,480]
+ tile_pipeline.phase.main.resource.TensorMemory.view.Prob8.dtype="fp8_e4m3fn"
+@@ -83,3 +82,3 @@
+
+ tile_pipeline.phase.main.resource.RowState.space="register"
+-tile_pipeline.phase.main.resource.RowState.member_slot_shape=[{"row":"Br"},{"column":2}]
++tile_pipeline.phase.main.resource.RowState.member_slot_shape=[{"slice":2},{"row":"Br"},{"column":2}]
+ tile_pipeline.phase.main.resource.RowState.dtype="fp32"
+@@ -87,8 +86,15 @@
+
+ tile_pipeline.phase.main.resource.RowState.view.MaxState.part.column=[0,1]
+-tile_pipeline.phase.main.resource.RowState.view.DenState.part.column=[1,2]
++tile_pipeline.phase.main.resource.RowState.view.DenSlice.part.column=[1,2]
++tile_pipeline.phase.main.resource.RowState.view.DenFinal.part.column=[1,2]
++tile_pipeline.phase.main.resource.Exchange.space="SMEM"
++tile_pipeline.phase.main.resource.Exchange.member_slot_shape=[{"slice":2},{"row":"Br"}]
++tile_pipeline.phase.main.resource.Exchange.dtype="fp32"
++tile_pipeline.phase.main.resource.Exchange.slot_count=1
++tile_pipeline.phase.main.resource.Exchange.view.HalfMax={}
++tile_pipeline.phase.main.resource.Exchange.view.DenSlice={}
+ tile_pipeline.phase.main.role.Main.info.execution_mode="serial"
+-tile_pipeline.phase.main.role.Main.info.member="warp[0:4]"
+-tile_pipeline.phase.main.role.Main.info.verb={"setup":"TEXT","prime":"TEXT","prepare":"TEXT","prefetch":"TEXT","land":"TEXT","qk":"TEXT","read_score":"TEXT","retire":"TEXT","advance":"TEXT","pv":"TEXT","drain":"TEXT","write":"TEXT","finish":"TEXT"}
+-tile_pipeline.phase.main.role.Main.pipe.prologue=["setup:Local","prime:Inputs","prepare:Query"]
+-tile_pipeline.phase.main.role.Main.pipe.steady=[{"repeat":"g","steady":["prefetch:Head(g)","land:Key(g)",{"repeat":"z","steady":["qk:ScoreHalf(g,z)","read_score:Score(g,z)"]},"retire:Previous(g)","prefetch:ValueNext(g)","land:Value(g)","advance:StateProb(g)","pv:NumState(g)"]}]
+-tile_pipeline.phase.main.role.Main.pipe.epilogue=["drain:LastPV","write:Output","finish:Local"]
++tile_pipeline.phase.main.role.Main.info.member="warp[0:8]"
++tile_pipeline.phase.main.role.Main.info.verb={"setup":"TEXT","cold":"TEXT","prepare":"TEXT","prime":"TEXT","stage":"TEXT","atoms":"TEXT","retire":"TEXT","read":"TEXT","lookahead":"TEXT","advance":"TEXT","pv":"TEXT","drain":"TEXT","combine":"TEXT","write":"TEXT","finish":"TEXT"}
++tile_pipeline.phase.main.role.Main.pipe.prologue=["setup:Local","cold:Inputs","prepare:Query","prime:FirstQK"]
++tile_pipeline.phase.main.role.Main.pipe.steady=[{"repeat":"g","steady":["stage:Ahead(g)","atoms:Upcoming(g)","retire:Previous(g)","read:Score(g)","lookahead:Next(g)","advance:StateProb(g)","pv:NumState(g)"]}]
++tile_pipeline.phase.main.role.Main.pipe.epilogue=["drain:LastPV","combine:DenFinal","write:Output","finish:Local"]

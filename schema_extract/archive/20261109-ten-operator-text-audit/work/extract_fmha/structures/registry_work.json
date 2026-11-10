@@ -1,0 +1,4918 @@
+[
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "v_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::v_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            },
+            "sf_v": {
+              "shape": [
+                {
+                  "channel": "D"
+                },
+                {
+                  "sequence_block": "KeyGroup/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_v.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "O": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "min(Qph,Sq-q0)"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::O.dtype"
+            },
+            "LSE": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "min(Qph,Sq-q0)"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::LSE.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "B*KH*ceil_div(Sq,Qph)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "WorkId(worker_id)",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        2,
+        "main"
+      ],
+      [
+        5,
+        "main"
+      ],
+      [
+        6,
+        "main"
+      ],
+      [
+        7,
+        "main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "v_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::v_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            },
+            "sf_v": {
+              "shape": [
+                {
+                  "channel": "D"
+                },
+                {
+                  "sequence_block": "KeyGroup/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_v.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "O": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "min(Qph,Sq-q0)"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::O.dtype"
+            },
+            "LSE": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "min(Qph,Sq-q0)"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::LSE.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "B*KH*ceil_div(Sq,Qph)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        3,
+        "main"
+      ],
+      [
+        4,
+        "main"
+      ],
+      [
+        8,
+        "main"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Nm",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query_tile": {
+            "size": "Ag",
+            "tile": 1
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "BmCovered": {
+              "shape": [
+                {
+                  "key_group": "count(Wgm)"
+                },
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "min(Qph,Sq-q0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::BmCovered.dtype"
+            },
+            "OTemporary": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "min(Qph,Sq-q0)"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::OTemporary.dtype"
+            },
+            "LseTemporary": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "min(Qph,Sq-q0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::LseTemporary.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "B*KH*Ag*Nm"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query_tile",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        9,
+        "group_max"
+      ],
+      [
+        10,
+        "group_max"
+      ],
+      [
+        11,
+        "group_max"
+      ],
+      [
+        12,
+        "group_max"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": "ScanBt"
+          }
+        },
+        "worktile": {
+          "iteration": {
+            "BmCovered": {
+              "shape": [
+                {
+                  "key_group": 1
+                },
+                {
+                  "row": "count(Cblock)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::BmCovered.dtype",
+              "direction": "ascending"
+            },
+            "PriorMax": {
+              "shape": [
+                {
+                  "key_group": 1
+                },
+                {
+                  "row": "count(Ublock)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PriorMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "ScanState": {
+              "shape": [
+                {
+                  "key_group": "T"
+                },
+                {
+                  "row": "min(ScanBt,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::ScanState.dtype"
+            },
+            "MaxTail": {
+              "shape": [
+                {
+                  "row": "min(ScanBt,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MaxTail.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "ceil_div(R,ScanBt)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        9,
+        "scan"
+      ],
+      [
+        10,
+        "scan"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Ns",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query_tile": {
+            "size": "Aq",
+            "tile": 1
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            },
+            "MaxTail": {
+              "shape": [
+                {
+                  "row": "Br"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MaxTail.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "v_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::v_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            },
+            "sf_v": {
+              "shape": [
+                {
+                  "channel": "D"
+                },
+                {
+                  "sequence_block": "KeyGroup/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_v.dtype",
+              "direction": "ascending"
+            },
+            "ScanState": {
+              "shape": [
+                {
+                  "key_group": "1+min(g,1)"
+                },
+                {
+                  "row": "Br"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::ScanState.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "PartialA": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "min(Qph,Sq-q0)"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartialA.dtype"
+            },
+            "PartialB": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "min(Qph,Sq-q0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartialB.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "B*KH*Aq*Ns"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query_tile",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        9,
+        "split"
+      ],
+      [
+        10,
+        "split"
+      ],
+      [
+        11,
+        "split"
+      ],
+      [
+        12,
+        "split"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "batch": {
+            "size": "B",
+            "tile": 1
+          },
+          "head": {
+            "size": "H",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": 1
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "PartialB": {
+              "shape": [
+                {
+                  "split": "Ns"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartialB.dtype"
+            },
+            "MaxTail": {
+              "shape": [],
+              "dtype": "ref:design.math_reshape::MaxTail.dtype"
+            }
+          },
+          "iteration": {
+            "PartialA": {
+              "shape": [
+                {
+                  "split": "min(8,Ns-s0)"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartialA.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "O": {
+              "shape": [
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::O.dtype"
+            },
+            "LSE": {
+              "shape": [],
+              "dtype": "ref:contract.algorithm_requirement::LSE.dtype"
+            }
+          },
+          "tile_reduction": {
+            "dimension": "split",
+            "input": [
+              "ref:design.math_reshape::PartialA",
+              "ref:design.math_reshape::PartialB"
+            ],
+            "output": [
+              "ref:contract.algorithm_requirement::O",
+              "ref:contract.algorithm_requirement::LSE"
+            ],
+            "method": "ref:design.math_reshape::combine"
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "R"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "batch",
+            "direction": "ascending"
+          },
+          {
+            "by": "head",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        9,
+        "combine"
+      ],
+      [
+        11,
+        "combine"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "batch": {
+            "size": "B",
+            "tile": 1
+          },
+          "head": {
+            "size": "H",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": 1
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "PartialB": {
+              "shape": [
+                {
+                  "split": "Ns"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartialB.dtype"
+            },
+            "MaxTail": {
+              "shape": [],
+              "dtype": "ref:design.math_reshape::MaxTail.dtype"
+            }
+          },
+          "iteration": {
+            "PartialA": {
+              "shape": [
+                {
+                  "split": "Nbatch(k)"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartialA.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "O": {
+              "shape": [
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::O.dtype"
+            },
+            "LSE": {
+              "shape": [],
+              "dtype": "ref:contract.algorithm_requirement::LSE.dtype"
+            }
+          },
+          "tile_reduction": {
+            "dimension": "split",
+            "input": [
+              "ref:design.math_reshape::PartialA",
+              "ref:design.math_reshape::PartialB"
+            ],
+            "output": [
+              "ref:contract.algorithm_requirement::O",
+              "ref:contract.algorithm_requirement::LSE"
+            ],
+            "method": "ref:design.math_reshape::combine"
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "R"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "batch",
+            "direction": "ascending"
+          },
+          {
+            "by": "head",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        10,
+        "combine"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "segment": {
+            "size": "Nseg",
+            "tile": 1
+          },
+          "row": {
+            "size": "R",
+            "tile": "ScanBt"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "BmCovered": {
+              "shape": [
+                {
+                  "key_group": "min(Seg,T-s*Seg)"
+                },
+                {
+                  "row": "count(Cblock)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::BmCovered.dtype"
+            },
+            "PriorMax": {
+              "shape": [
+                {
+                  "key_group": "min(Seg,T-s*Seg)"
+                },
+                {
+                  "row": "count(Ublock)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PriorMax.dtype"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "SegmentMax": {
+              "shape": [
+                {
+                  "row": "min(ScanBt,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::SegmentMax.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "Nseg*ceil_div(R,ScanBt)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "segment",
+            "direction": "ascending"
+          },
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        11,
+        "segmax"
+      ],
+      [
+        12,
+        "segmax"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": "ScanBt"
+          }
+        },
+        "worktile": {
+          "iteration": {
+            "SegmentMax": {
+              "shape": [
+                {
+                  "segment": "min(Sc,Nseg-sb)"
+                },
+                {
+                  "row": "min(ScanBt,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::SegmentMax.dtype",
+              "direction": "ascending"
+            },
+            "BmCovered": {
+              "shape": [
+                {
+                  "key_group": 1
+                },
+                {
+                  "row": "count(Cblock)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::BmCovered.dtype",
+              "direction": "ascending"
+            },
+            "PriorMax": {
+              "shape": [
+                {
+                  "key_group": 1
+                },
+                {
+                  "row": "count(Ublock)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PriorMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "ScanState": {
+              "shape": [
+                {
+                  "key_group": "T"
+                },
+                {
+                  "row": "min(ScanBt,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::ScanState.dtype"
+            },
+            "MaxTail": {
+              "shape": [
+                {
+                  "row": "min(ScanBt,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MaxTail.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "ceil_div(R,ScanBt)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        11,
+        "scan"
+      ],
+      [
+        12,
+        "scan"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "batch": {
+            "size": "B",
+            "tile": 1
+          },
+          "head": {
+            "size": "H",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": 1
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "PartialB": {
+              "shape": [
+                {
+                  "split": "Ns"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartialB.dtype"
+            },
+            "MaxTail": {
+              "shape": [],
+              "dtype": "ref:design.math_reshape::MaxTail.dtype"
+            }
+          },
+          "iteration": {
+            "PartialA": {
+              "shape": [
+                {
+                  "split": "min(8,sHi(sg)-s0)"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartialA.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "O": {
+              "shape": [
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::O.dtype"
+            },
+            "LSE": {
+              "shape": [],
+              "dtype": "ref:contract.algorithm_requirement::LSE.dtype"
+            }
+          },
+          "tile_reduction": {
+            "dimension": "split",
+            "input": [
+              "ref:design.math_reshape::PartialA",
+              "ref:design.math_reshape::PartialB"
+            ],
+            "output": [
+              "ref:contract.algorithm_requirement::O",
+              "ref:contract.algorithm_requirement::LSE"
+            ],
+            "method": "ref:design.math_reshape::combine"
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "R"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "batch",
+            "direction": "ascending"
+          },
+          {
+            "by": "head",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        12,
+        "combine"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Ngm",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": "count(WrittenG)"
+                },
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "nx*ny*Ngm"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        13,
+        "group_max"
+      ],
+      [
+        14,
+        "group_max"
+      ],
+      [
+        15,
+        "group_max"
+      ],
+      [
+        16,
+        "group_max"
+      ],
+      [
+        17,
+        "group_max"
+      ],
+      [
+        18,
+        "group_max"
+      ],
+      [
+        19,
+        "group_max"
+      ],
+      [
+        20,
+        "group_max"
+      ],
+      [
+        21,
+        "group_max"
+      ],
+      [
+        22,
+        "group_max"
+      ],
+      [
+        25,
+        "group_max"
+      ],
+      [
+        26,
+        "group_max"
+      ],
+      [
+        27,
+        "group_max"
+      ],
+      [
+        29,
+        "group_max"
+      ],
+      [
+        30,
+        "group_max"
+      ],
+      [
+        31,
+        "group_max"
+      ],
+      [
+        33,
+        "group_max"
+      ],
+      [
+        34,
+        "group_max"
+      ],
+      [
+        35,
+        "group_max"
+      ],
+      [
+        36,
+        "group_max"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": "ScanThreads"
+          }
+        },
+        "worktile": {
+          "iteration": {
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "MState": {
+              "shape": [
+                {
+                  "group": "T"
+                },
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MState.dtype"
+            },
+            "MTail": {
+              "shape": [
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MTail.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "ceil_div(R,ScanThreads)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        13,
+        "flat_scan"
+      ],
+      [
+        14,
+        "flat_scan"
+      ],
+      [
+        15,
+        "flat_scan"
+      ],
+      [
+        16,
+        "flat_scan"
+      ],
+      [
+        17,
+        "flat_scan"
+      ],
+      [
+        18,
+        "flat_scan"
+      ],
+      [
+        19,
+        "flat_scan"
+      ],
+      [
+        20,
+        "flat_scan"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Ns",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            },
+            "MTail": {
+              "shape": [
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MTail.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "v_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::v_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            },
+            "sf_v": {
+              "shape": [
+                {
+                  "channel": "D"
+                },
+                {
+                  "sequence_block": "KeyGroup/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_v.dtype",
+              "direction": "ascending"
+            },
+            "MState": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MState.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "PartA": {
+              "shape": [
+                {
+                  "row": "U"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype"
+            },
+            "PartB": {
+              "shape": [
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartB.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "nx*ny*Ns"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        13,
+        "split"
+      ],
+      [
+        14,
+        "split"
+      ],
+      [
+        15,
+        "split"
+      ],
+      [
+        16,
+        "split"
+      ],
+      [
+        17,
+        "split"
+      ],
+      [
+        18,
+        "split"
+      ],
+      [
+        19,
+        "split"
+      ],
+      [
+        20,
+        "split"
+      ],
+      [
+        29,
+        "split"
+      ],
+      [
+        30,
+        "split"
+      ],
+      [
+        31,
+        "split"
+      ],
+      [
+        33,
+        "split"
+      ],
+      [
+        34,
+        "split"
+      ],
+      [
+        35,
+        "split"
+      ],
+      [
+        36,
+        "split"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": 1
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "MTail": {
+              "shape": [],
+              "dtype": "ref:design.math_reshape::MTail.dtype"
+            }
+          },
+          "iteration": {
+            "PartA": {
+              "shape": [
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype",
+              "direction": "ascending"
+            },
+            "PartB": {
+              "shape": [],
+              "dtype": "ref:design.math_reshape::PartB.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "O": {
+              "shape": [
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::O.dtype"
+            },
+            "LSE": {
+              "shape": [],
+              "dtype": "ref:contract.algorithm_requirement::LSE.dtype"
+            }
+          },
+          "tile_reduction": {
+            "dimension": "split",
+            "input": [
+              "ref:design.math_reshape::PartA",
+              "ref:design.math_reshape::PartB"
+            ],
+            "output": [
+              "ref:contract.algorithm_requirement::O",
+              "ref:contract.algorithm_requirement::LSE"
+            ],
+            "method": "ref:design.math_reshape::combine"
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "R"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        13,
+        "combine"
+      ],
+      [
+        14,
+        "combine"
+      ],
+      [
+        15,
+        "combine"
+      ],
+      [
+        16,
+        "combine"
+      ],
+      [
+        17,
+        "combine"
+      ],
+      [
+        18,
+        "combine"
+      ],
+      [
+        19,
+        "combine"
+      ],
+      [
+        20,
+        "combine"
+      ],
+      [
+        29,
+        "combine"
+      ],
+      [
+        30,
+        "combine"
+      ],
+      [
+        31,
+        "combine"
+      ],
+      [
+        32,
+        "combine"
+      ],
+      [
+        33,
+        "combine"
+      ],
+      [
+        34,
+        "combine"
+      ],
+      [
+        35,
+        "combine"
+      ],
+      [
+        36,
+        "combine"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Ns",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "v_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::v_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            },
+            "sf_v": {
+              "shape": [
+                {
+                  "channel": "D"
+                },
+                {
+                  "sequence_block": "KeyGroup/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_v.dtype",
+              "direction": "ascending"
+            },
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "PartA": {
+              "shape": [
+                {
+                  "row": "U"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype"
+            },
+            "PartB": {
+              "shape": [
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartB.dtype"
+            },
+            "PartM": {
+              "shape": [
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartM.dtype"
+            },
+            "MTail": {
+              "shape": [
+                {
+                  "row": "TailRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MTail.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "nx*ny*Ns"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        21,
+        "split"
+      ],
+      [
+        22,
+        "split"
+      ],
+      [
+        25,
+        "split"
+      ],
+      [
+        26,
+        "split"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": 1
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "MTail": {
+              "shape": [],
+              "dtype": "ref:design.math_reshape::MTail.dtype"
+            }
+          },
+          "iteration": {
+            "PartA": {
+              "shape": [
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype",
+              "direction": "ascending"
+            },
+            "PartB": {
+              "shape": [],
+              "dtype": "ref:design.math_reshape::PartB.dtype",
+              "direction": "ascending"
+            },
+            "PartM": {
+              "shape": [],
+              "dtype": "ref:design.math_reshape::PartM.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "O": {
+              "shape": [
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::O.dtype"
+            },
+            "LSE": {
+              "shape": [],
+              "dtype": "ref:contract.algorithm_requirement::LSE.dtype"
+            }
+          },
+          "tile_reduction": {
+            "dimension": "split",
+            "input": [
+              "ref:design.math_reshape::PartA",
+              "ref:design.math_reshape::PartB",
+              "ref:design.math_reshape::PartM",
+              "ref:design.math_reshape::MTail"
+            ],
+            "output": [
+              "ref:contract.algorithm_requirement::O",
+              "ref:contract.algorithm_requirement::LSE"
+            ],
+            "method": "ref:design.math_reshape::combine"
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "R"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        21,
+        "combine"
+      ],
+      [
+        22,
+        "combine"
+      ],
+      [
+        23,
+        "combine"
+      ],
+      [
+        24,
+        "combine"
+      ],
+      [
+        25,
+        "combine"
+      ],
+      [
+        26,
+        "combine"
+      ],
+      [
+        27,
+        "combine"
+      ],
+      [
+        28,
+        "combine"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Ngm",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "query": "Qph"
+                },
+                {
+                  "head": "G"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": "count(WrittenG)"
+                },
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "nx*ny*Ngm"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        23,
+        "group_max"
+      ],
+      [
+        24,
+        "group_max"
+      ],
+      [
+        28,
+        "group_max"
+      ],
+      [
+        32,
+        "group_max"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Ns",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "query": "Qph"
+                },
+                {
+                  "head": "G"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "v_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::v_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            },
+            "sf_v": {
+              "shape": [
+                {
+                  "channel": "D"
+                },
+                {
+                  "sequence_block": "KeyGroup/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_v.dtype",
+              "direction": "ascending"
+            },
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "PartA": {
+              "shape": [
+                {
+                  "row": "U"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype"
+            },
+            "PartB": {
+              "shape": [
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartB.dtype"
+            },
+            "PartM": {
+              "shape": [
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartM.dtype"
+            },
+            "MTail": {
+              "shape": [
+                {
+                  "row": "TailRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MTail.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "nx*ny*Ns"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        23,
+        "split"
+      ],
+      [
+        24,
+        "split"
+      ],
+      [
+        28,
+        "split"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Ns",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "v_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::v_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            },
+            "sf_v": {
+              "shape": [
+                {
+                  "channel": "D"
+                },
+                {
+                  "sequence_block": "KeyGroup/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_v.dtype",
+              "direction": "ascending"
+            },
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "PartA": {
+              "shape": [
+                {
+                  "row": "U"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype"
+            },
+            "PartB": {
+              "shape": [
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartB.dtype"
+            },
+            "PartM": {
+              "shape": [
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartM.dtype"
+            },
+            "MTail": {
+              "shape": [
+                {
+                  "row": "TailRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MTail.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "nx*ny*Ns"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        27,
+        "split"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "segment": {
+            "size": "Nseg",
+            "tile": 1
+          },
+          "row": {
+            "size": "R",
+            "tile": "ScanThreads"
+          }
+        },
+        "worktile": {
+          "iteration": {
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "SegMax": {
+              "shape": [
+                {
+                  "segment": 1
+                },
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::SegMax.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "nr*Nseg"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "segment",
+            "direction": "ascending"
+          },
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        29,
+        "segment_max"
+      ],
+      [
+        30,
+        "segment_max"
+      ],
+      [
+        33,
+        "segment_max"
+      ],
+      [
+        34,
+        "segment_max"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": "ScanThreads"
+          }
+        },
+        "worktile": {
+          "iteration": {
+            "SegMax": {
+              "shape": [
+                {
+                  "segment": 1
+                },
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::SegMax.dtype",
+              "direction": "ascending"
+            },
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "MState": {
+              "shape": [
+                {
+                  "group": "T"
+                },
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MState.dtype"
+            },
+            "MTail": {
+              "shape": [
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MTail.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "nr"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        29,
+        "segmented_scan"
+      ],
+      [
+        30,
+        "segmented_scan"
+      ],
+      [
+        33,
+        "segmented_scan"
+      ],
+      [
+        34,
+        "segmented_scan"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "segment": {
+            "size": "Nseg",
+            "tile": 1
+          },
+          "row": {
+            "size": "R",
+            "tile": 256
+          }
+        },
+        "worktile": {
+          "iteration": {
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "SegRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "SegMax": {
+              "shape": [
+                {
+                  "row": "SegRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::SegMax.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "ceil_div(R,256)*Nseg"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "segment",
+            "direction": "ascending"
+          },
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        31,
+        "segment_max"
+      ],
+      [
+        32,
+        "segment_max"
+      ],
+      [
+        35,
+        "segment_max"
+      ],
+      [
+        36,
+        "segment_max"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": "ScanThreads"
+          }
+        },
+        "worktile": {
+          "iteration": {
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype",
+              "direction": "ascending"
+            },
+            "SegMax": {
+              "shape": [
+                {
+                  "segment": 1
+                },
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::SegMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "MState": {
+              "shape": [
+                {
+                  "group": "T"
+                },
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MState.dtype"
+            },
+            "MTail": {
+              "shape": [
+                {
+                  "row": "ScanRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MTail.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "ceil_div(R,ScanThreads)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        31,
+        "segmented_scan"
+      ],
+      [
+        32,
+        "segmented_scan"
+      ],
+      [
+        35,
+        "segmented_scan"
+      ],
+      [
+        36,
+        "segmented_scan"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Ns",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "query": "Qph"
+                },
+                {
+                  "head": "G"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            },
+            "MTail": {
+              "shape": [
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MTail.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "v_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::v_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            },
+            "sf_v": {
+              "shape": [
+                {
+                  "channel": "D"
+                },
+                {
+                  "sequence_block": "KeyGroup/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_v.dtype",
+              "direction": "ascending"
+            },
+            "MState": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::MState.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "PartA": {
+              "shape": [
+                {
+                  "row": "U"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype"
+            },
+            "PartB": {
+              "shape": [
+                {
+                  "row": "U"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartB.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "nx*ny*Ns"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        32,
+        "split"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Nm",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": "count(GMGroups)"
+                },
+                {
+                  "row": "VRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "Nm*B*KH*ceil_div(Sq,Qph)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        37,
+        "group_max"
+      ],
+      [
+        38,
+        "group_max"
+      ],
+      [
+        39,
+        "group_max"
+      ],
+      [
+        40,
+        "group_max"
+      ],
+      [
+        41,
+        "group_max"
+      ],
+      [
+        43,
+        "group_max"
+      ],
+      [
+        44,
+        "group_max"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": "ScanRows"
+          }
+        },
+        "worktile": {
+          "iteration": {
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "Mscan": {
+              "shape": [
+                {
+                  "group": "GCount"
+                },
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mscan.dtype"
+            },
+            "Mtail": {
+              "shape": [
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mtail.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "ceil_div(R,ScanRows)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        37,
+        "scan"
+      ],
+      [
+        38,
+        "scan"
+      ],
+      [
+        39,
+        "scan"
+      ],
+      [
+        40,
+        "scan"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Ns",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            },
+            "Mscan": {
+              "shape": [
+                {
+                  "group": "min(1,C)*min(1,l)"
+                },
+                {
+                  "row": "VRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mscan.dtype"
+            },
+            "Mtail": {
+              "shape": [
+                {
+                  "row": "min(1,C)*VRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mtail.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "v_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::v_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            },
+            "sf_v": {
+              "shape": [
+                {
+                  "channel": "D"
+                },
+                {
+                  "sequence_block": "KeyGroup/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_v.dtype",
+              "direction": "ascending"
+            },
+            "Mscan": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "VRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mscan.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "PartA": {
+              "shape": [
+                {
+                  "row": "VRows"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype"
+            },
+            "PartB": {
+              "shape": [
+                {
+                  "row": "VRows"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartB.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "Ns*B*KH*ceil_div(Sq,Qph)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        37,
+        "split"
+      ],
+      [
+        38,
+        "split"
+      ],
+      [
+        39,
+        "split"
+      ],
+      [
+        40,
+        "split"
+      ],
+      [
+        41,
+        "split"
+      ],
+      [
+        43,
+        "split"
+      ],
+      [
+        44,
+        "split"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": 1
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "Mtail": {
+              "shape": [
+                {
+                  "row": 1
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mtail.dtype"
+            }
+          },
+          "iteration": {
+            "PartA": {
+              "shape": [
+                {
+                  "split": "min(8,Ns-s0)"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype",
+              "direction": "ascending"
+            },
+            "PartB": {
+              "shape": [
+                {
+                  "split": "min(8,Ns-s0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartB.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "O": {
+              "shape": [
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::O.dtype"
+            },
+            "LSE": {
+              "shape": [],
+              "dtype": "ref:contract.algorithm_requirement::LSE.dtype"
+            }
+          },
+          "tile_reduction": {
+            "dimension": "split",
+            "input": [
+              "ref:design.math_reshape::PartA",
+              "ref:design.math_reshape::PartB"
+            ],
+            "output": [
+              "ref:contract.algorithm_requirement::O",
+              "ref:contract.algorithm_requirement::LSE"
+            ],
+            "method": "ref:design.math_reshape::output"
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "R"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        37,
+        "combine"
+      ],
+      [
+        38,
+        "combine"
+      ],
+      [
+        39,
+        "combine"
+      ],
+      [
+        41,
+        "combine"
+      ],
+      [
+        43,
+        "combine"
+      ],
+      [
+        44,
+        "combine"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": 1
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "Mtail": {
+              "shape": [
+                {
+                  "row": 1
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mtail.dtype"
+            },
+            "PartB": {
+              "shape": [
+                {
+                  "split": "Ns"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartB.dtype"
+            }
+          },
+          "iteration": {
+            "PartA": {
+              "shape": [
+                {
+                  "split": 1
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "O": {
+              "shape": [
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::O.dtype"
+            },
+            "LSE": {
+              "shape": [],
+              "dtype": "ref:contract.algorithm_requirement::LSE.dtype"
+            }
+          },
+          "tile_reduction": {
+            "dimension": "split",
+            "input": [
+              "ref:design.math_reshape::PartA",
+              "ref:design.math_reshape::PartB"
+            ],
+            "output": [
+              "ref:contract.algorithm_requirement::O",
+              "ref:contract.algorithm_requirement::LSE"
+            ],
+            "method": "ref:design.math_reshape::output"
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "R"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        40,
+        "combine"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "segment": {
+            "size": "Nseg",
+            "tile": 1
+          },
+          "row": {
+            "size": "R",
+            "tile": "ScanRows"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": "min(SegLen,GCount-f*SegLen)"
+                },
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "SegMax": {
+              "shape": [
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::SegMax.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "Nseg*ceil_div(R,ScanRows)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "segment",
+            "direction": "ascending"
+          },
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        41,
+        "segment_max"
+      ],
+      [
+        43,
+        "segment_max"
+      ],
+      [
+        44,
+        "segment_max"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": "ScanRows"
+          }
+        },
+        "worktile": {
+          "iteration": {
+            "SegMax": {
+              "shape": [
+                {
+                  "segment": "min(SegChunk,Nseg-f0)"
+                },
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::SegMax.dtype",
+              "direction": "ascending"
+            },
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "Mscan": {
+              "shape": [
+                {
+                  "group": "GCount"
+                },
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mscan.dtype"
+            },
+            "Mtail": {
+              "shape": [
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mtail.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "ceil_div(R,ScanRows)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        41,
+        "scan"
+      ],
+      [
+        43,
+        "scan"
+      ],
+      [
+        44,
+        "scan"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Nm",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": "count(GMGroups)"
+                },
+                {
+                  "row": "G*min(Qph,Sq-q0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "Nm*B*KH*ceil_div(Sq,Qph)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        42,
+        "group_max"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "segment": {
+            "size": "Nseg",
+            "tile": 1
+          },
+          "row": {
+            "size": "R",
+            "tile": "ScanRows"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": "min(SegLen,T-f*SegLen)"
+                },
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "SegMax": {
+              "shape": [
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::SegMax.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "Nseg*ceil_div(R,ScanRows)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "segment",
+            "direction": "ascending"
+          },
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        42,
+        "segment_max"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": "ScanRows"
+          }
+        },
+        "worktile": {
+          "iteration": {
+            "SegMax": {
+              "shape": [
+                {
+                  "segment": "min(SegChunk,Nseg-f0)"
+                },
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::SegMax.dtype",
+              "direction": "ascending"
+            },
+            "GroupMax": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::GroupMax.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "Mscan": {
+              "shape": [
+                {
+                  "group": "T"
+                },
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mscan.dtype"
+            },
+            "Mtail": {
+              "shape": [
+                {
+                  "row": "min(ScanRows,R-r0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mtail.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "ceil_div(R,ScanRows)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        42,
+        "scan"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "split": {
+            "size": "Ns",
+            "tile": 1
+          },
+          "kvflat": {
+            "size": "B*KH",
+            "tile": 1
+          },
+          "query": {
+            "size": "Sq",
+            "tile": "Qph"
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "q_tensor": {
+              "shape": [
+                {
+                  "head": "G"
+                },
+                {
+                  "query": "Qph"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::q_tensor.dtype"
+            },
+            "sf_q": {
+              "shape": [
+                {
+                  "scale_row": "Br"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_q.dtype"
+            },
+            "Mscan": {
+              "shape": [
+                {
+                  "group": "min(1,C)*min(1,l)"
+                },
+                {
+                  "row": "G*min(Qph,Sq-q0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mscan.dtype"
+            },
+            "Mtail": {
+              "shape": [
+                {
+                  "row": "G*min(Qph,Sq-q0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mtail.dtype"
+            }
+          },
+          "iteration": {
+            "k_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::k_tensor.dtype",
+              "direction": "ascending"
+            },
+            "v_tensor": {
+              "shape": [
+                {
+                  "key": "KeyGroup"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::v_tensor.dtype",
+              "direction": "ascending"
+            },
+            "sf_k": {
+              "shape": [
+                {
+                  "scale_row": "KeyGroup"
+                },
+                {
+                  "scale_column": "D/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_k.dtype",
+              "direction": "ascending"
+            },
+            "sf_v": {
+              "shape": [
+                {
+                  "channel": "D"
+                },
+                {
+                  "sequence_block": "KeyGroup/Block"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::sf_v.dtype",
+              "direction": "ascending"
+            },
+            "Mscan": {
+              "shape": [
+                {
+                  "group": 1
+                },
+                {
+                  "row": "G*min(Qph,Sq-q0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mscan.dtype",
+              "direction": "ascending"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "PartA": {
+              "shape": [
+                {
+                  "row": "G*min(Qph,Sq-q0)"
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype"
+            },
+            "PartB": {
+              "shape": [
+                {
+                  "row": "G*min(Qph,Sq-q0)"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartB.dtype"
+            }
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "Ns*B*KH*ceil_div(Sq,Qph)"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "split",
+            "direction": "ascending"
+          },
+          {
+            "by": "kvflat",
+            "direction": "ascending"
+          },
+          {
+            "by": "query",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        42,
+        "split"
+      ]
+    ]
+  },
+  {
+    "value": {
+      "decomposition": {
+        "partition": {
+          "row": {
+            "size": "R",
+            "tile": 1
+          }
+        },
+        "worktile": {
+          "invariant": {
+            "Mtail": {
+              "shape": [
+                {
+                  "row": 1
+                }
+              ],
+              "dtype": "ref:design.math_reshape::Mtail.dtype"
+            },
+            "PartA": {
+              "shape": [
+                {
+                  "split": "Ns"
+                },
+                {
+                  "row": 1
+                },
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartA.dtype"
+            },
+            "PartB": {
+              "shape": [
+                {
+                  "split": "Ns"
+                },
+                {
+                  "row": 1
+                }
+              ],
+              "dtype": "ref:design.math_reshape::PartB.dtype"
+            }
+          }
+        },
+        "target": {
+          "single_tile": {
+            "O": {
+              "shape": [
+                {
+                  "channel": "D"
+                }
+              ],
+              "dtype": "ref:contract.algorithm_requirement::O.dtype"
+            },
+            "LSE": {
+              "shape": [],
+              "dtype": "ref:contract.algorithm_requirement::LSE.dtype"
+            }
+          },
+          "tile_reduction": {
+            "dimension": "split",
+            "input": [
+              "ref:design.math_reshape::PartA",
+              "ref:design.math_reshape::PartB"
+            ],
+            "output": [
+              "ref:contract.algorithm_requirement::O",
+              "ref:contract.algorithm_requirement::LSE"
+            ],
+            "method": "ref:design.math_reshape::output"
+          }
+        }
+      },
+      "mapping": {
+        "worker": {
+          "unit": "CTA",
+          "unit_count": 1
+        },
+        "worker_count": "R"
+      },
+      "schedule": {
+        "worktile_order": [
+          {
+            "by": "row",
+            "direction": "ascending"
+          }
+        ],
+        "worker_assignment": {
+          "preassigned": {
+            "start": "worker_id",
+            "count": 1
+          },
+          "refill": "none",
+          "exit": "assigned_done"
+        }
+      }
+    },
+    "uses": [
+      [
+        42,
+        "combine"
+      ]
+    ]
+  }
+]

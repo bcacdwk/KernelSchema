@@ -1,0 +1,136 @@
+--- tcg_d128_flat_tma_xpose_narrow
++++ tcg_d128_flat_cp_xpose_narrow
+@@ -2,11 +2,11 @@
+   name: mxfp8_qkv_attention
+   describe: TEXT[682]
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+-  version: 4
++  version: 2
+   dispatch:
+-    id: tcg_d128_flat_tma_xpose_narrow
+-    parent: tcg_d128_flat_tma_direct_narrow
+-    when: TEXT[134]
++    id: tcg_d128_flat_cp_xpose_narrow
++    parent: tcg_d128_flat_tma_xpose_narrow
++    when: TEXT[133]
+ design:
+   math_reshape:
+     thesis: TEXT[679]
+@@ -93,7 +93,7 @@
+         approx: TEXT[193]
+     - step: TEXT[662]
+       name: TEXT[601]
+-      math: TEXT[393]
++      math: TEXT[398]
+       symbol:
+         NumState:
+           meaning: TEXT[571]
+@@ -110,7 +110,7 @@
+           dtype: fp32
+           retention: keep_value (b,kh,a,s,g)
+         PartA:
+-          meaning: TEXT[532]
++          meaning: TEXT[443]
+           shape:
+           - split: Ns
+           - row: R
+@@ -345,7 +345,7 @@
+       split:
+         describe: TEXT[1257]
+         decomposition:
+-          strategy: TEXT[1302]
++          strategy: TEXT[1356]
+           partition:
+             split:
+               size: Ns
+@@ -492,7 +492,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[718]
++    thesis: TEXT[700]
+     phase:
+       group_max:
+         domain:
+@@ -563,16 +563,16 @@
+               execution_mode: serial
+               member: warp[0:4]
+               verb:
+-                setup: TEXT[980]
+-                prime: TEXT[1125]
++                setup: TEXT[981]
++                prime: TEXT[1047]
+                 prepare: TEXT[743]
+-                start: TEXT[841]
+-                prefetch: TEXT[770]
+-                stage: TEXT[752]
++                start: TEXT[929]
++                prefetch: TEXT[977]
++                stage: TEXT[810]
+                 score: TEXT[829]
+                 reduce: TEXT[817]
+                 advance: TEXT[1093]
+-                finish: TEXT[931]
++                finish: TEXT[889]
+             pipe:
+               prologue:
+               - setup:Local
+@@ -773,25 +773,25 @@
+               execution_mode: serial
+               member: warp[0:4]
+               verb:
+-                setup: TEXT[966]
+-                prime: TEXT[815]
++                setup: TEXT[753]
++                prime: TEXT[742]
+                 prepare:
+                   execution_mode: async
+-                  meaning: TEXT[1008]
++                  meaning: TEXT[908]
+                 dependency:
+                   execution_mode: async
+                   meaning: TEXT[888]
+                 replay:
+                   execution_mode: async
+-                  meaning: TEXT[1015]
+-                prefetch: TEXT[987]
+-                stage: TEXT[1000]
++                  meaning: TEXT[922]
++                prefetch: TEXT[827]
++                stage: TEXT[1040]
+                 qk: TEXT[1148]
+                 probability: TEXT[1082]
+                 pv: TEXT[1139]
+                 accumulate: TEXT[887]
+-                stage_partials: TEXT[729]
+-                write: TEXT[735]
++                stage_partials: TEXT[865]
++                write: TEXT[1091]
+                 finish: TEXT[1141]
+             pipe:
+               prologue:
+@@ -817,14 +817,12 @@
+               data:
+                 replay:Entrance:
+                 - dependency:Scan
+-              reuse:
+-                stage_partials:PartA:
+-                - prepare:Query
+               sync:
+                 stage:Operands(g)@done:
+                 - prepare:Query
+                 - replay:Entrance
+                 stage_partials:PartA@done:
++                - prepare:Query
+                 - replay:Entrance
+       combine:
+         milestone:
+@@ -883,7 +881,7 @@
+   - item:
+     - design.tile_pipeline::group_max
+     - design.tile_pipeline::split
+-    choice: TEXT[1196]
++    choice: TEXT[1193]
+     reason: TEXT[1216]
+   - item: design.work_schedule::flow
+     choice: TEXT[1197]

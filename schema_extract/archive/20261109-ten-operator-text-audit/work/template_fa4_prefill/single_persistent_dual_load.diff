@@ -1,0 +1,31 @@
+--- packed_persistent.yaml
++++ single_persistent_dual_load.yaml
+@@ -5,11 +5,11 @@
+   version: 5
+   dispatch:
+-    id: packed_persistent
+-    parent: root
++    id: single_persistent_dual_load
++    parent: packed_persistent
+     when: |
+       Use packaged defaults with no FA_HD256 environment overrides, under the root contract.
+       Let B=BatchCount, T=TotalQ, Q=max_q_len, K=64*ceil(max_kv_len/64), SM=runtime multiprocessor count.
+       C=ceil(T/16)*B; G=max(1,floor(SM/2)); Split=(2*C<=G and ceil(K/128)>=16 and 2*T*16*256*4<=24000000).
+-      Select exactly when not Split and 5<=B<=16.
++      Select exactly when not Split, B=1, ceil(Q/8)>SM+floor(SM/2), and K>=98304.
+ design:
+   math_reshape:
+@@ -70,5 +70,5 @@
+     phase:
+       attention:
+-        describe: Final BF16 attention with a original-request-order flattened persistent schedule.
++        describe: Final BF16 attention with a single-request flattened persistent schedule.
+         decomposition:
+           strategy: |
+@@ -92,5 +92,5 @@
+         schedule:
+           strategy: |
+-            Keep input request order. Build the request-id/prefix map once per CTA; find each segment with a fixed four-step binary search of its prefix boundaries.
++            The request order is identity. Build the request-id/prefix map once per CTA; resolve each position by linear lookup.
+             Within a segment, ordinal x maps to m=2*x if x<ceil(C_b/2), otherwise m=2*(C_b-1-x)+1.
+           worktile_order: [{by: cluster_tile, direction: ascending}]

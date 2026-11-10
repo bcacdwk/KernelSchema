@@ -1,0 +1,159 @@
+[0] t_53637bf71aea4102 algorithm_contract.math (1 uses)
+root:101 contract.algorithm_requirement.compute[1].math
+Independently for each token t, find b with cum_seq_lens_q[b] <= t < cum_seq_lens_q[b+1]. Let visible = seq_lens[b] - (cum_seq_lens_q[b+1] - cum_seq_lens_q[b]) + t - cum_seq_lens_q[b] + 1. J(t) contains the slot indices j satisfying sparse_indices[t,j] >= 0 and either 0 <= j < min(visible, SW) or SW <= j < sparse_topk_lens[t]. In particular, unused SWA slots before column SW do not shift the start of the compressed segment; -1 invalidates a slot independently of lengths. For j in J(t), V[t,j,:] is the row sparse_indices[t,j] of swa_kv_cache when j < SW, otherwise the row of compressed_kv_cache. Set V[t,j,:] = 0 for other slots. Each slot contributes independently: repeated IDs retain their multiplicity, and SWA/compressed states are never deduplicated by logical token position. The same row supplies both K and V for every head.
+
+[1] t_7487228c6567ee34 algorithm_contract.math (1 uses)
+root:119 contract.algorithm_requirement.compute[2].math
+Token t and head h are independent, with 0 <= t < T and 0 <= h < H. Reference dot products, exponentials, reductions and normalization use FP32 tensors. Arithmetic and the final BF16 conversion are unclamped; overflow and invalid operations may produce infinities or NaNs. If J(t) is empty, out[t,h,d] = bf16(0) for all 0 <= d < D, without evaluating a softmax. Otherwise, for j in J(t), L[t,h,j] = bmm1_scale * sum_{d=0}^{D-1} query[t,h,d] * V[t,j,d]. Let m = max(max_{j in J(t)} L[t,h,j], sinks[h]). Let p_j = exp(L[t,h,j] - m) for j in J(t), and z = sum_{j in J(t)} p_j + exp(sinks[h]-m). For 0 <= d < D, out[t,h,d] = bf16((sum_{j in J(t)} p_j * V[t,j,d]) * (bmm2_scale / z)). There is one denominator over both caches. A sink contributes no value term. L is used only on J(t); its other slots are defined as -inf. Only output_buffer and workspace_buffer may be written. The entire output is overwritten on every call; all other inputs and their storage are preserved. Scratch contents are not returned or compared.
+
+[2] t_909fcefde83dd6f6 algorithm_contract.math (1 uses)
+root:63 contract.algorithm_requirement.compute[0].math
+1 <= B <= 32; H in {8,16,32,64,128}; 1 <= T <= 16384. For 0 <= b < B, let q_b = cum_seq_lens_q[b+1] - cum_seq_lens_q[b]. 1 <= q_b <= min(4096, seq_lens[b]); sum_b q_b = T; sum_b seq_lens[b] <= 1048576; max_q_len = max_b q_b. Both caches are contiguous HND tensors with one shared latent KV head, physically stored as [page, entry, latent]. Flatten the first two axes to address row i as [floor(i/page_size), i mod page_size, :], where page_size is SwaPageSize for SWA and CompPageSize for the compressed pool. Query, output and index/length tensors in the supplied caller are contiguous; tensor arguments reside on the same CUDA device. Physical page placement may be contiguous or scattered, independently of logical selection. A prepared call has a caller-side compression ratio r in {0,1,2,4,128} and sparse selection budget k in {512,1024}; these are not forward arguments. SwaPageSize in {128,256}; SwaPageSize is divisible by max(1,r); CompPageSize = SwaPageSize / max(1,r). If r = 0, compressed_kv_cache aliases swa_kv_cache and IndexWidth = SW. If r in {1,2,4}, IndexWidth = SW + k. If r = 128, IndexWidth = SW + max(SW, pow2ceil(max(1,floor(max_b(seq_lens[b])/r)))), where pow2ceil(x) is the smallest power of two at least x. Thus SW <= IndexWidth <= 8320 and IndexWidth is divisible by 4. The first SW slots encode the causal sliding window; compressed slots encode an already selected causal subset (all compressed positions for r=128). Score-related, local, strided, shared-prefix and random selections are supported; this core consumes the supplied IDs without reranking or reconstructing history. RoPE, selection, cache publication and output projection are outside this task. All numeric data inputs are finite; the old output_buffer contents are unrestricted. The valid task domain requires bmm1_scale = D^(-0.5) and bmm2_scale = 1.0; D^(-0.5) denotes the Python result of D ** (-0.5). Both scales and sinks must be explicitly supplied; sinks cannot be None. Scales are Python floats, not tensor scales. None denotes Python None. The supplied constructor uses a NaN-filled output_buffer and WorkspaceSize = 134217728 zero-initialized bytes. The bound caller requires output_buffer even though the reference also supports allocating an output.
+
+[3] t_044ae9bfd90b57c3 algorithm_contract.meaning (1 uses)
+root:54 contract.algorithm_requirement.input.max_q_len.meaning
+Maximum query length across requests.
+
+[4] t_1eb37f2023e5b50c algorithm_contract.meaning (1 uses)
+root:34 contract.algorithm_requirement.input.sparse_indices.meaning
+Physical row IDs in two separate pools; the first SW columns address SWA and the remaining columns address the compressed pool.
+
+[5] t_386083a2942fce5a algorithm_contract.meaning (1 uses)
+root:38 contract.algorithm_requirement.input.compressed_kv_cache.meaning
+Prepared compressed shared key/value pool; supplied even in the single-pool case.
+
+[6] t_3e7b439782d7a6a2 algorithm_contract.meaning (1 uses)
+root:53 contract.algorithm_requirement.input.cum_seq_lens_q.meaning
+Prefix offsets delimiting each request in the query token axis.
+
+[7] t_3fdcbbce665d64ae algorithm_contract.meaning (1 uses)
+root:42 contract.algorithm_requirement.input.output_buffer.meaning
+Caller argument out; required destination whose previous contents are ignored and whose object identity is preserved on return.
+
+[8] t_42845676767027a5 algorithm_contract.meaning (1 uses)
+root:47 contract.algorithm_requirement.input.bmm2_scale.meaning
+Python scalar multiplier on the normalized weighted value sum.
+
+[9] t_5203e99c344b0e32 algorithm_contract.meaning (1 uses)
+root:139 contract.algorithm_requirement.compute[2].symbol.L.meaning
+Scaled FP32 attention logits, with inactive slots masked by negative infinity.
+
+[10] t_59e25fa9bb6c3733 algorithm_contract.meaning (1 uses)
+root:56 contract.algorithm_requirement.input.swa_topk_lens.meaning
+Disabled separate SWA length override.
+
+[11] t_68f2c7d2d7088299 algorithm_contract.meaning (1 uses)
+root:27 contract.algorithm_requirement.constant.D.meaning
+Shared key and value latent dimension.
+
+[12] t_6c0a412e77cbf05e algorithm_contract.meaning (1 uses)
+root:117 contract.algorithm_requirement.compute[1].symbol.V.meaning
+Selected shared key/value latents indexed by query and physical slot, zero outside the valid slot set.
+
+[13] t_742dbe9f5cec26ca algorithm_contract.meaning (1 uses)
+root:32 contract.algorithm_requirement.input.workspace_buffer.meaning
+Writable scratch with no logical output value or required final contents.
+
+[14] t_75e5bea22ed93a36 algorithm_contract.meaning (1 uses)
+root:58 contract.algorithm_requirement.input.extra_sparse_topk_lens.meaning
+Disabled extra sparse length override.
+
+[15] t_7edb9f9411c8ed9a algorithm_contract.meaning (1 uses)
+root:46 contract.algorithm_requirement.input.bmm1_scale.meaning
+Python scalar multiplier on query-key dot products.
+
+[16] t_9c77fe8b72c5ccf0 algorithm_contract.meaning (1 uses)
+root:31 contract.algorithm_requirement.input.swa_kv_cache.meaning
+Prepared sliding-window shared key/value pool.
+
+[17] t_b071ee06da1e2fe9 algorithm_contract.meaning (1 uses)
+root:28 contract.algorithm_requirement.constant.SW.meaning
+Reserved sliding-window slots per query.
+
+[18] t_b9fb77e7032c817f algorithm_contract.meaning (1 uses)
+root:39 contract.algorithm_requirement.input.sparse_topk_lens.meaning
+Per-query exclusive end of the compressed slot interval, including the SW reserved slots.
+
+[19] t_bc87bf251fde3d9f algorithm_contract.meaning (1 uses)
+root:55 contract.algorithm_requirement.input.enable_pdl.meaning
+Unspecified launch preference in the selected caller, with no mathematical effect.
+
+[20] t_c672715739dd73c6 algorithm_contract.meaning (1 uses)
+root:60 contract.algorithm_requirement.output.out.meaning
+Attention result overwriting every element of output_buffer; the returned tensor is that same object.
+
+[21] t_cbd8d8e88d2a6c9e algorithm_contract.meaning (1 uses)
+root:52 contract.algorithm_requirement.input.kv_layout.meaning
+Cache layout selector for this callable.
+
+[22] t_da0619ee0511ad51 algorithm_contract.meaning (1 uses)
+root:49 contract.algorithm_requirement.input.sinks.meaning
+Per-head extra softmax logit with zero value, shared by all queries.
+
+[23] t_db334a5855ca27f0 algorithm_contract.meaning (1 uses)
+root:40 contract.algorithm_requirement.input.seq_lens.meaning
+Final context lengths of the requests, including their current query tokens.
+
+[24] t_e1513a31f3b7b807 algorithm_contract.meaning (1 uses)
+root:57 contract.algorithm_requirement.input.extra_sparse_indices.meaning
+Disabled extra sparse index pool.
+
+[25] t_e4939edf260d9421 algorithm_contract.meaning (1 uses)
+root:116 contract.algorithm_requirement.compute[1].symbol.J.meaning
+Function giving the valid selected slot set for a query token.
+
+[26] t_ec744c7aab5ffb51 algorithm_contract.meaning (1 uses)
+root:30 contract.algorithm_requirement.input.query.meaning
+Query latents for concatenated ragged requests.
+
+[27] t_17509f4ab36ba0af algorithm_contract.range (1 uses)
+root:53 contract.algorithm_requirement.input.cum_seq_lens_q.range
+Strictly increasing, starting at 0 and ending at T.
+
+[28] t_31f68b66c211ffa8 algorithm_contract.range (1 uses)
+root:54 contract.algorithm_requirement.input.max_q_len.range
+1 <= max_q_len <= 4096
+
+[29] t_5086d11b0be9c290 algorithm_contract.range (1 uses)
+root:40 contract.algorithm_requirement.input.seq_lens.range
+1 <= seq_lens[b] <= 1048576
+
+[30] t_57242d69630f9169 algorithm_contract.range (1 uses)
+root:46 contract.algorithm_requirement.input.bmm1_scale.range
+bmm1_scale = D^(-0.5)
+
+[31] t_a06d554ae02fcfc1 algorithm_contract.range (1 uses)
+root:37 contract.algorithm_requirement.input.sparse_indices.range
+Consumed IDs are -1 (invalid) or nonnegative in-bounds rows of the corresponding flattened pool; unconsumed slots are ignored.
+
+[32] t_dfb1cae99b01fe9f algorithm_contract.range (1 uses)
+root:39 contract.algorithm_requirement.input.sparse_topk_lens.range
+SW <= sparse_topk_lens[t] <= IndexWidth
+
+[33] t_e8267df39f2c1ae4 algorithm_contract.range (1 uses)
+root:52 contract.algorithm_requirement.input.kv_layout.range
+Only 'HND'.
+
+[34] t_fef2c3b6ba5cf44f algorithm_contract.range (1 uses)
+root:45 contract.algorithm_requirement.input.output_buffer.range
+Any BF16 bit pattern, including NaN and infinities.
+
+[35] t_958cf0ceb9f5c4ee contract.compute_name (1 uses)
+root:118 contract.algorithm_requirement.compute[2].name
+Joint softmax and output
+
+[36] t_aa55d60113a80863 contract.compute_name (1 uses)
+root:62 contract.algorithm_requirement.compute[0].name
+Domain and prepared cache interface
+
+[37] t_c5012a0f862e529b contract.compute_name (1 uses)
+root:100 contract.algorithm_requirement.compute[1].name
+Visible selected latents
+
+[38] t_f00c971fe1c390e2 contract.tolerance (1 uses)
+root:143 contract.algorithm_requirement.golden_reference.tolerance.out
+Source record for out compared with Model.forward: metadata.json declares default atol=0.01, rtol=0.05 and max_mismatch_fraction=0.0. CERTIFIED_BEST.json states that comparator/tolerances are unchanged but provides no comparator definition. The formula, relative-error basis, comparator arithmetic precision and NaN/Inf handling are unspecified. input.py declares out as the observable writeback; external comparator routing between that writeback and the return value is not provided. No relative_to value is inferred and the schema's default atol/rtol interpretation is not adopted. The returned tensor must be the supplied output_buffer object; return and writeback denote the same BF16 result, with input storage preserved.
+
+[39] t_0388393e299f901d dispatch.md (1 uses)
+dispatch.md:22 dispatch.md
+- 强制配置、注册 fast-call、诊断构建和修改扩展开关不在这棵出厂策略设计树内；共享 Contract 不据此缩小。 - 路由选中不保证运行前提满足：共享内存预算、opt-in 属性或 TMA tensor-map 编码失败会拒绝执行；源码没有为这些拒绝提供另一条算法 fallback。编译时未启用 tcgen05 的回落由现有 mma 节点覆盖。 - 保留源实现限制：DQ>1 对同一 m/l 地址存在非原子重复写；probe 超时可能与后续调用复用同一 host gate 缓冲发生竞争。计划不据此新增跨 CTA 或跨调用序列化，也不宣称这些源路径已获正确性保证。probe 已提交但轮询未齐的计算及 stream 接续仍属于所选节点。 - root 的 tolerance 保留外部验收器公式、相对误差基准、精度及检查路由未提供的来源记录；这些缺口不被当作数值保证，也不阻止当前设计提取。

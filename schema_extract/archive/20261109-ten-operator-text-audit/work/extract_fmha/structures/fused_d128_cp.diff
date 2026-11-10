@@ -1,0 +1,360 @@
+--- root
++++ fused_d128_cp
+@@ -2,286 +2,11 @@
+   name: mxfp8_qkv_attention
+   describe: TEXT[682]
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+-  version: 9
++  version: 2
+   dispatch:
+-    when: TEXT[143]
+-contract:
+-  algorithm_requirement:
+-    constant:
+-      Block:
+-        value: 32
+-        meaning: TEXT[15]
+-      ScaleRows:
+-        value: 128
+-        meaning: TEXT[17]
+-      ScaleCols:
+-        value: 4
+-        meaning: TEXT[28]
+-      KeyGroup:
+-        value: 128
+-        meaning: TEXT[12]
+-      ExponentBias:
+-        value: 127
+-        meaning: TEXT[45]
+-      ProbabilityMax:
+-        value: 448
+-        meaning: TEXT[9]
+-    input:
+-      q_tensor:
+-        meaning: TEXT[18]
+-        shape:
+-        - batch: B
+-        - head: H
+-        - query: Sq
+-        - channel: D
+-        dtype: fp8_e4m3fn
+-      k_tensor:
+-        meaning: TEXT[26]
+-        shape:
+-        - batch: B
+-        - kv_head: KH
+-        - key: Skv
+-        - channel: D
+-        dtype: fp8_e4m3fn
+-      v_tensor:
+-        meaning: TEXT[21]
+-        shape:
+-        - batch: B
+-        - kv_head: KH
+-        - key: Skv
+-        - channel: D
+-        dtype: fp8_e4m3fn
+-      sf_q:
+-        meaning: TEXT[32]
+-        shape:
+-        - scale_row: B*H*ScaleRows*ceil_div(Sq,ScaleRows)
+-        - scale_column: D/Block
+-        dtype: uint8
+-        range: TEXT[48]
+-      sf_k:
+-        meaning: TEXT[42]
+-        shape:
+-        - scale_row: B*KH*ScaleRows*ceil_div(Skv,ScaleRows)
+-        - scale_column: D/Block
+-        dtype: uint8
+-        range: TEXT[51]
+-      sf_v:
+-        meaning: TEXT[19]
+-        shape:
+-        - sequence_block: B*KH*ScaleCols*ceil_div(Skv,ScaleRows)
+-        - channel: D
+-        dtype: uint8
+-        range: TEXT[51]
+-      o_tensor:
+-        meaning: TEXT[25]
+-        shape:
+-        - batch: B
+-        - head: H
+-        - query: Sq
+-        - channel: D
+-        dtype: bf16
+-        range: TEXT[50]
+-      lse_tensor:
+-        meaning: TEXT[35]
+-        shape:
+-        - batch: B
+-        - head: H
+-        - query: Sq
+-        dtype: fp32
+-        nullable: true
+-        range: TEXT[47]
+-        default: None
+-      is_causal:
+-        meaning: TEXT[24]
+-        shape: []
+-        dtype: bool
+-        range: TEXT[52]
+-      window_left:
+-        meaning: TEXT[27]
+-        shape: []
+-        dtype: int64
+-        nullable: true
+-        range:
+-        - -1
+-        - 262143
+-        default: None
+-      seq_kv_lens:
+-        meaning: TEXT[6]
+-        shape:
+-        - batch: B
+-        dtype: int32
+-        nullable: true
+-        range: TEXT[49]
+-        default: None
+-      workspace:
+-        meaning: TEXT[40]
+-        shape:
+-        - byte: W
+-        dtype: uint8
+-      sinks:
+-        meaning: TEXT[13]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      seq_q_lens:
+-        meaning: TEXT[31]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      scale_softmax:
+-        meaning: TEXT[38]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      current_stream:
+-        meaning: TEXT[34]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      amax_o:
+-        meaning: TEXT[36]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      descale_q:
+-        meaning: TEXT[33]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      descale_k:
+-        meaning: TEXT[39]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      descale_v:
+-        meaning: TEXT[7]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      scale_o:
+-        meaning: TEXT[10]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      block_table:
+-        meaning: TEXT[20]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      block_table_v:
+-        meaning: TEXT[16]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      gate:
+-        meaning: TEXT[44]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-      sf_o:
+-        meaning: TEXT[5]
+-        shape: []
+-        dtype: python_none
+-        default: None
+-    output:
+-      O:
+-        meaning: TEXT[30]
+-        shape:
+-        - batch: B
+-        - head: H
+-        - query: Sq
+-        - channel: D
+-        dtype: bf16
+-      LSE:
+-        meaning: TEXT[23]
+-        shape:
+-        - batch: B
+-        - head: H
+-        - query: Sq
+-        dtype: fp32
+-        nullable: true
+-    compute:
+-    - name: TEXT[56]
+-      math: TEXT[1]
+-    - name: TEXT[53]
+-      math: TEXT[4]
+-      symbol:
+-        Qd:
+-          meaning: TEXT[43]
+-          shape: ref:q_tensor.shape
+-          dtype: fp32
+-        Kd:
+-          meaning: TEXT[8]
+-          shape: ref:k_tensor.shape
+-          dtype: fp32
+-        Vd:
+-          meaning: TEXT[29]
+-          shape: ref:v_tensor.shape
+-          dtype: fp32
+-    - name: TEXT[54]
+-      math: TEXT[2]
+-      symbol:
+-        S:
+-          meaning: TEXT[22]
+-          shape:
+-          - batch: B
+-          - head: H
+-          - query: Sq
+-          - key: Skv
+-          dtype: fp32
+-    - name: TEXT[55]
+-      math: TEXT[3]
+-      symbol:
+-        M:
+-          meaning: TEXT[11]
+-          shape:
+-          - batch: B
+-          - head: H
+-          - query: Sq
+-          dtype: fp32
+-        Z:
+-          meaning: TEXT[46]
+-          shape:
+-          - batch: B
+-          - head: H
+-          - query: Sq
+-          dtype: fp32
+-        N:
+-          meaning: TEXT[14]
+-          shape: ref:O.shape
+-          dtype: fp32
+-        P:
+-          meaning: TEXT[41]
+-          shape: ref:S.shape
+-          dtype: fp32
+-        Pq:
+-          meaning: TEXT[37]
+-          shape: ref:S.shape
+-          dtype: fp8_e4m3fn
+-    golden_reference:
+-      source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/problem/reference.py::Model.forward
+-      tolerance:
+-        O: TEXT[58]
+-        LSE: TEXT[57]
+-  hardware_specification:
+-    device: null
+-    arch: null
+-    execution:
+-      Unit: null
+-    feature:
+-      Mechanism: null
+-    stack:
+-      language: null
+-      toolchain: null
+-    wiki:
+-      hardware: null
+-      programming:
+-        language: null
+-      microbench: null
+-      sota:
+-        kernel: null
+-        schema: null
+-      profile: null
++    id: fused_d128_cp
++    parent: root
++    when: TEXT[129]
+ design:
+   math_reshape:
+     thesis: TEXT[680]
+@@ -462,7 +187,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[708]
++    thesis: TEXT[704]
+     phase:
+       main:
+         domain:
+@@ -603,18 +328,17 @@
+               execution_mode: serial
+               member: warp[0:4]
+               verb:
+-                setup: TEXT[1071]
+-                prime: TEXT[1026]
+-                prepare: TEXT[824]
+-                prefetch: TEXT[1049]
+-                land: TEXT[875]
+-                qk: TEXT[1104]
++                setup: TEXT[1066]
++                prime: TEXT[1113]
++                prepare: TEXT[779]
++                prefetch: TEXT[1109]
++                land: TEXT[757]
++                qk: TEXT[1136]
+                 read_score: TEXT[1002]
+-                retire: TEXT[1098]
++                retire: TEXT[972]
+                 advance: TEXT[906]
+-                pv: TEXT[1063]
+-                drain: TEXT[996]
+-                write: TEXT[1152]
++                pv: TEXT[915]
++                write: TEXT[835]
+                 finish: TEXT[795]
+             pipe:
+               prologue:
+@@ -624,25 +348,22 @@
+               steady:
+               - repeat: g
+                 steady:
+-                - prefetch:Head(g)
+-                - land:Key(g)
++                - prefetch:Next(g)
++                - land:Inputs(g)
+                 - repeat: z
+                   steady:
+                   - qk:ScoreHalf(g,z)
+                   - read_score:Score(g,z)
+-                - retire:Previous(g)
+-                - prefetch:ValueNext(g)
+-                - land:Value(g)
+                 - advance:StateProb(g)
+                 - pv:NumState(g)
++                - retire:NumState(g)
+               epilogue:
+-              - drain:LastPV
+               - write:Output
+               - finish:Local
+ realization:
+   require:
+   - item: design.tile_pipeline::main
+-    choice: TEXT[1192]
++    choice: TEXT[1174]
+     reason: TEXT[1231]
+   - item: design.tile_pipeline::main.TensorMemory
+     choice: TEXT[1162]

@@ -1,0 +1,168 @@
+--- direct_qk
++++ direct_qk_ordered
+@@ -5,7 +5,7 @@
+   version: 2
+   dispatch:
+-    id: direct_qk
+-    parent: root
+-    when: TEXT_UNIT_50
++    id: direct_qk_ordered
++    parent: direct_qk
++    when: TEXT_UNIT_52
+ design:
+   math_reshape:
+@@ -43,4 +43,14 @@
+           - value: ValueDim
+           dtype: bf16
++    - step: TEXT_UNIT_99
++      name: Materialize a stable longest-chain-first request order
++      math: TEXT_UNIT_108
++      symbol:
++        perm:
++          meaning: TEXT_UNIT_141
++          shape:
++          - request_rank: N
++          dtype: int32
++          retention: keep_value invocation
+     - step: TEXT_UNIT_90
+       name: Form decay-weighted BF16 triangular coefficients
+@@ -187,4 +197,8 @@
+         - TEXT_UNIT_90
+         - TEXT_UNIT_81
++      - item: TEXT_UNIT_67
++        change: TEXT_UNIT_80
++        by:
++        - TEXT_UNIT_99
+       matmul:
+       - item: TEXT_UNIT_62
+@@ -200,4 +214,8 @@
+         - TEXT_UNIT_81
+         - TEXT_UNIT_69
++      - item: TEXT_UNIT_100
++        change: TEXT_UNIT_82
++        by:
++        - TEXT_UNIT_99
+       error:
+       - item: TEXT_UNIT_68
+@@ -208,5 +226,5 @@
+         - TEXT_UNIT_69
+   work_schedule:
+-    thesis: TEXT_UNIT_313
++    thesis: TEXT_UNIT_311
+     flow:
+       launch:
+@@ -218,4 +236,11 @@
+         start_after: prep.launch_ready
+       handoff:
++        perm:
++          producer: prep
++          consumer:
++          - TEXT_UNIT_69
++          storage: global
++          ready: prep.kernel_done
++          wait_at: chain.prep_ready
+         Ti:
+           producer: prep
+@@ -262,7 +287,7 @@
+     phase:
+       prep:
+-        describe: TEXT_UNIT_278
++        describe: TEXT_UNIT_279
+         decomposition:
+-          strategy: TEXT_UNIT_307
++          strategy: TEXT_UNIT_298
+           partition:
+             slot:
+@@ -274,4 +299,8 @@
+           worktile:
+             invariant:
++              cu_seqlens:
++                shape:
++                - boundary: N+1
++                dtype: ref:contract.algorithm_requirement::cu_seqlens.dtype
+               q:
+                 shape:
+@@ -296,4 +325,8 @@
+           target:
+             single_tile:
++              perm:
++                shape:
++                - request_rank: OrderCount
++                dtype: ref:design.math_reshape::perm.dtype
+               Ti:
+                 shape:
+@@ -335,5 +368,5 @@
+           worker_count: SU*HV/HeadsPerPrep
+         schedule:
+-          strategy: TEXT_UNIT_294
++          strategy: TEXT_UNIT_286
+           worktile_order:
+           - by: slot
+@@ -350,7 +383,7 @@
+         describe: TEXT_UNIT_275
+         decomposition:
+-          strategy: TEXT_UNIT_308
++          strategy: TEXT_UNIT_302
+           partition:
+-            request:
++            request_rank:
+               size: N
+               tile: 1
+@@ -363,4 +396,8 @@
+           worktile:
+             invariant:
++              perm:
++                shape:
++                - request_rank: 1
++                dtype: ref:design.math_reshape::perm.dtype
+               initial_state:
+                 shape:
+@@ -437,5 +474,5 @@
+                 dtype: ref:contract.algorithm_requirement::FinalState.dtype
+         mapping:
+-          strategy: TEXT_UNIT_297
++          strategy: TEXT_UNIT_310
+           worker:
+             unit: CTA
+@@ -443,6 +480,7 @@
+           worker_count: ChainBlocks
+         schedule:
++          strategy: TEXT_UNIT_285
+           worktile_order:
+-          - by: request
++          - by: request_rank
+             direction: ascending
+           - by: value_head
+@@ -457,5 +495,5 @@
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT_UNIT_168
++    thesis: TEXT_UNIT_165
+     phase:
+       prep:
+@@ -561,6 +599,6 @@
+               verb:
+                 enter: TEXT_UNIT_194
+-                stage_inputs: TEXT_UNIT_198
+-                signal: TEXT_UNIT_248
++                stage_inputs: TEXT_UNIT_208
++                signal: TEXT_UNIT_225
+                 gram: TEXT_UNIT_212
+                 skeleton: TEXT_UNIT_201
+@@ -744,8 +782,7 @@
+               verb:
+                 setup: TEXT_UNIT_217
+-                early_inputs: TEXT_UNIT_184
+-                join_prep: TEXT_UNIT_224
++                join_prep: TEXT_UNIT_187
+                 prime: TEXT_UNIT_204
+-                seed: TEXT_UNIT_172
++                seed: TEXT_UNIT_182
+                 advance: TEXT_UNIT_185
+                 project: TEXT_UNIT_223
+@@ -757,5 +794,4 @@
+               prologue:
+               - setup:Resources
+-              - early_inputs:Inputs
+               - join_prep:Prepared
+               - prime:Stages

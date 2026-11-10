@@ -1,0 +1,105 @@
+--- fused_d256_tma
++++ fused_d256_cp
+@@ -4,9 +4,9 @@
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+   version: 2
+   dispatch:
+-    id: fused_d256_tma
+-    parent: root
+-    when: TEXT[128]
++    id: fused_d256_cp
++    parent: fused_d256_tma
++    when: TEXT[122]
+ design:
+   math_reshape:
+     thesis: TEXT[671]
+@@ -199,7 +199,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[701]
++    thesis: TEXT[712]
+     phase:
+       main:
+         domain:
+@@ -223,7 +223,7 @@
+             slot_count: 3
+             view:
+               Key(g):
+-                slot_index: (g-cLo)%3
++                slot_index: (g-cLo)%2
+           Value:
+             space: SMEM
+             member_slot_shape:
+@@ -301,8 +301,8 @@
+               ValueScale(g):
+                 part:
+                   column:
+-                  - 416+8*(g%3)
+-                  - 424+8*(g%3)
++                  - 416+8*(g%2)
++                  - 424+8*(g%2)
+                 dtype: uint8
+               Prob8:
+                 part:
+@@ -353,18 +353,14 @@
+               execution_mode: serial
+               member: warp[0:8]
+               verb:
+-                setup: TEXT[748]
++                setup: TEXT[751]
+                 prepare: TEXT[1086]
+-                prime: TEXT[916]
+-                start: TEXT[912]
+-                ahead: TEXT[1083]
+-                read_score: TEXT[957]
+-                retire: TEXT[1024]
+-                land: TEXT[1050]
+-                exchange: TEXT[1021]
++                prime: TEXT[821]
++                ahead: TEXT[1067]
++                qk: TEXT[819]
++                exchange: TEXT[826]
+                 advance: TEXT[1053]
+-                pv: TEXT[877]
+-                drain: TEXT[944]
++                pv: TEXT[758]
+                 fold: TEXT[898]
+                 write: TEXT[963]
+                 finish: TEXT[1010]
+@@ -373,31 +369,27 @@
+               - setup:Local
+               - prepare:Query
+               - prime:Inputs
+-              - start:FirstQK
+               steady:
+               - repeat: g
+                 steady:
+                 - ahead:Inputs(g)
+-                - read_score:Score(g)
+-                - retire:PreviousPV(g)
+-                - land:Operands(g)
++                - qk:Score(g)
+                 - exchange:GroupMax(g)
+                 - advance:StateProb(g)
+                 - pv:NumState(g)
+               epilogue:
+-              - drain:LastPV
+               - fold:DenFinal
+               - write:Output
+               - finish:Local
+ realization:
+   require:
+   - item: design.tile_pipeline::main
+-    choice: TEXT[1183]
+-    reason: TEXT[1238]
++    choice: TEXT[1163]
++    reason: TEXT[1212]
+   - item: design.tile_pipeline::main.TensorMemory
+     choice: TEXT[1199]
+     reason: TEXT[1206]
+   prefer:
+   - item: design.tile_pipeline::main
+-    choice: TEXT[1178]
++    choice: TEXT[1161]
+     reason: TEXT[1202]

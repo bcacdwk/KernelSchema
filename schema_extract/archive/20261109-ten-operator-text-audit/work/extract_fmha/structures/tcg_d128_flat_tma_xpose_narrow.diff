@@ -1,0 +1,269 @@
+--- tcg_d128_flat_tma_direct_narrow
++++ tcg_d128_flat_tma_xpose_narrow
+@@ -2,18 +2,18 @@
+   name: mxfp8_qkv_attention
+   describe: TEXT[682]
+   source: source@6e4ca91bd91d998cac99e8dadd83838e153c679d:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+-  version: 2
++  version: 4
+   dispatch:
+-    id: tcg_d128_flat_tma_direct_narrow
+-    parent: root
+-    when: TEXT[146]
++    id: tcg_d128_flat_tma_xpose_narrow
++    parent: tcg_d128_flat_tma_direct_narrow
++    when: TEXT[134]
+ design:
+   math_reshape:
+     thesis: TEXT[679]
+     rewrite:
+     - step: TEXT[652]
+       name: TEXT[614]
+-      math: TEXT[353]
++      math: TEXT[340]
+       symbol:
+         Br:
+           meaning: TEXT[512]
+@@ -26,7 +26,7 @@
+           binding: bind:design.work_schedule::Ns
+     - step: TEXT[660]
+       name: TEXT[623]
+-      math: TEXT[349]
++      math: TEXT[383]
+       symbol:
+         DotTile:
+           meaning: TEXT[527]
+@@ -68,24 +68,24 @@
+           retention: keep_value invocation
+     - step: TEXT[654]
+       name: TEXT[621]
+-      math: TEXT[324]
++      math: TEXT[371]
+       symbol:
+         MaxState:
+           meaning: TEXT[578]
+           shape:
+-          - row: C
++          - row: Br
+           dtype: fp32
+           retention: carry_forward (b,kh,a,s); g=cLo-1..cHi
+         DenState:
+           meaning: TEXT[584]
+           shape:
+-          - row: C
++          - row: Br
+           dtype: fp32
+           retention: carry_forward (b,kh,a,s); g=cLo-1..end
+         Prob8:
+           meaning: TEXT[585]
+           shape:
+-          - row: C
++          - row: Br
+           - key: KeyGroup
+           dtype: fp8_e4m3fn
+           retention: keep_value (b,kh,a,s,g)
+@@ -93,19 +93,19 @@
+         approx: TEXT[193]
+     - step: TEXT[662]
+       name: TEXT[601]
+-      math: TEXT[386]
++      math: TEXT[393]
+       symbol:
+         NumState:
+           meaning: TEXT[571]
+           shape:
+-          - row: C
++          - row: Br
+           - channel: D
+           dtype: fp32
+           retention: carry_forward (b,kh,a,s); g=cLo-1..end
+         GroupPV:
+-          meaning: TEXT[465]
+-          shape:
+-          - row: C
++          meaning: TEXT[479]
++          shape:
++          - row: Br
+           - channel: D
+           dtype: fp32
+           retention: keep_value (b,kh,a,s,g)
+@@ -125,11 +125,11 @@
+           dtype: fp32
+           retention: keep_value invocation
+       arithmetic:
+-        accumulate: TEXT[194]
++        accumulate: TEXT[177]
+         approx: TEXT[155]
+     - step: TEXT[661]
+       name: TEXT[595]
+-      math: TEXT[346]
++      math: TEXT[338]
+       symbol:
+         TotalA:
+           meaning: TEXT[441]
+@@ -343,7 +343,7 @@
+             refill: none
+             exit: assigned_done
+       split:
+-        describe: TEXT[1256]
++        describe: TEXT[1257]
+         decomposition:
+           strategy: TEXT[1302]
+           partition:
+@@ -436,7 +436,7 @@
+             refill: none
+             exit: assigned_done
+       combine:
+-        describe: TEXT[1272]
++        describe: TEXT[1247]
+         decomposition:
+           strategy: TEXT[1311]
+           partition:
+@@ -492,7 +492,7 @@
+             refill: none
+             exit: assigned_done
+   tile_pipeline:
+-    thesis: TEXT[699]
++    thesis: TEXT[718]
+     phase:
+       group_max:
+         domain:
+@@ -563,14 +563,14 @@
+               execution_mode: serial
+               member: warp[0:4]
+               verb:
+-                setup: TEXT[959]
++                setup: TEXT[980]
+                 prime: TEXT[1125]
+                 prepare: TEXT[743]
+                 start: TEXT[841]
+                 prefetch: TEXT[770]
+                 stage: TEXT[752]
+                 score: TEXT[829]
+-                reduce: TEXT[1012]
++                reduce: TEXT[817]
+                 advance: TEXT[1093]
+                 finish: TEXT[931]
+             pipe:
+@@ -632,33 +632,33 @@
+           scan_ready:
+           - Main/dependency:Scan@done
+         resource:
+-          Query:
++          OperandArena:
+             space: SMEM
+             member_slot_shape:
+-            - row: Br
+-            - channel: D
+-            dtype: fp8_e4m3fn
+-            slot_count: 1
+-          Key:
+-            space: SMEM
+-            member_slot_shape:
+-            - key: KeyGroup
+-            - channel: D
+-            dtype: fp8_e4m3fn
+-            slot_count: 2
++            - element: 5*Br*D
++            dtype: uint8
++            slot_count: 1
+             view:
++              Query:
++                part:
++                  element:
++                  - 0
++                  - Br*D
++                dtype: fp8_e4m3fn
+               Key(g):
+-                slot_index: (g-cLo)%2
+-          Value:
+-            space: SMEM
+-            member_slot_shape:
+-            - key: KeyGroup
+-            - channel: D
+-            dtype: fp8_e4m3fn
+-            slot_count: 2
+-            view:
++                part:
++                  element:
++                  - (1+(g-cLo)%2)*Br*D
++                  - (2+(g-cLo)%2)*Br*D
++                dtype: fp8_e4m3fn
+               Value(g):
+-                slot_index: (g-cLo)%2
++                part:
++                  element:
++                  - (3+(g-cLo)%2)*Br*D
++                  - (4+(g-cLo)%2)*Br*D
++                dtype: fp8_e4m3fn
++              PartA:
++                dtype: fp32
+           KeyAtom:
+             space: SMEM
+             member_slot_shape:
+@@ -773,18 +773,25 @@
+               execution_mode: serial
+               member: warp[0:4]
+               verb:
+-                setup: TEXT[1016]
++                setup: TEXT[966]
+                 prime: TEXT[815]
+-                prepare: TEXT[784]
+-                dependency: TEXT[844]
+-                replay: TEXT[894]
+-                prefetch: TEXT[787]
++                prepare:
++                  execution_mode: async
++                  meaning: TEXT[1008]
++                dependency:
++                  execution_mode: async
++                  meaning: TEXT[888]
++                replay:
++                  execution_mode: async
++                  meaning: TEXT[1015]
++                prefetch: TEXT[987]
+                 stage: TEXT[1000]
+                 qk: TEXT[1148]
+-                probability: TEXT[1112]
++                probability: TEXT[1082]
+                 pv: TEXT[1139]
+-                accumulate: TEXT[885]
+-                write: TEXT[1039]
++                accumulate: TEXT[887]
++                stage_partials: TEXT[729]
++                write: TEXT[735]
+                 finish: TEXT[1141]
+             pipe:
+               prologue:
+@@ -803,8 +810,22 @@
+                 - pv:GroupPV(g)
+                 - accumulate:NumState(g)
+               epilogue:
++              - stage_partials:PartA
+               - write:Partials
+               - finish:Local
++            waits_for:
++              data:
++                replay:Entrance:
++                - dependency:Scan
++              reuse:
++                stage_partials:PartA:
++                - prepare:Query
++              sync:
++                stage:Operands(g)@done:
++                - prepare:Query
++                - replay:Entrance
++                stage_partials:PartA@done:
++                - replay:Entrance
+       combine:
+         milestone:
+           inputs_ready:
+@@ -862,7 +883,7 @@
+   - item:
+     - design.tile_pipeline::group_max
+     - design.tile_pipeline::split
+-    choice: TEXT[1168]
++    choice: TEXT[1196]
+     reason: TEXT[1216]
+   - item: design.work_schedule::flow
+     choice: TEXT[1197]

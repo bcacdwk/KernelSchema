@@ -1,0 +1,2019 @@
+# extract_gdn: full open-text inventory
+
+These are exact-text groups, not proof of semantic equivalence across contexts.
+
+## t_379e13b46a309a0c | algorithm_contract.math | 731 chars | 1 declarations
+
+root:122 contract.algorithm_requirement.compute[3].math
+
+FinalState[n,h,:,:]=S[n,h,:,:](Length[n]) if output_final_state is true; otherwise FinalState=None. Return exactly (Out,FinalState), with fresh result storage for every call; initial_state is never updated in place. If core_attn_out is present, CoreWritten=flatten(Out) in token, value-head, value-channel order, written to core_attn_out[0:T*HV*ValueDim]; otherwise CoreWritten=None and no write region exists. Returned Out does not alias the caller buffer. Preserve the buffer suffix and all storage outside that prefix, including backing-storage guards. All other inputs and their backing storage are readonly. Internal workspace is not an external output. Projection, convolution, and output normalization are outside this task.
+
+## t_bcbd8e0982f4babc | algorithm_contract.math | 793 chars | 1 declarations
+
+root:104 contract.algorithm_requirement.compute[2].math
+
+Requests and value heads are independent. For 0 <= n < N and 0 <= h < HV, let m=floor(h/(HV/H)) be the contiguous group-mapped query/key head. S[n,h,:,:](0)=initial_state[n,h,:,:]. For 0 <= l < Length[n], t=Boundary[n]+l: a=exp(g[0,t,h]); delta[j]=beta[0,t,h]*(v[0,t,h,j] - a*sum_{d=0}^{KeyDim-1} S[n,h,j,d](l)*Kn[0,t,m,d]); S[n,h,j,d](l+1)=a*S[n,h,j,d](l)+delta[j]*Kn[0,t,m,d]; Out[0,t,h,j]=bf16(sum_{d=0}^{KeyDim-1} S[n,h,j,d](l+1)*Qn[0,t,m,d]/sqrt(KeyDim)). Here 0 <= j < ValueDim and 0 <= d < KeyDim. The residual uses the decayed incoming state; readout uses the updated state. State arithmetic, reductions and accumulation remain FP32 across all tokens, with RNE BF16 conversion only at Out, with no clipping (overflow rounds to signed infinity). No state checkpoint is narrowed to BF16.
+
+## t_db5cda7b25e7eb88 | algorithm_contract.math | 967 chars | 1 declarations
+
+root:73 contract.algorithm_requirement.compute[0].math
+
+All tensors are on the same CUDA device. Inputs are finite; floating ranges additionally constrain g and beta. Readonly tensor views may have nonzero storage offsets. core_attn_out must admit a flat view without copying. 1 <= N <= 32; 1 <= T <= 16384. H is in {2,4,8,16}, corresponding to TP = 16/H in {1,2,4,8}; the integer value/key head ratio HV/H is in {2,3,8}. Boundary = cu_seqlens. For request n, 0 <= n < N, Length[n]=Boundary[n+1]-Boundary[n] > 0, with sum_n Length[n]=T. Let c_n=ceil_div(Length[n],ChunkTokens), o_n=sum_{r=0}^{n-1} c_r for 0 <= n <= N, and C=o_N. chunk_offsets[n]=o_n for 0 <= n <= N, and chunk_indices[o_n+j]=[n,j] for 0 <= n < N and 0 <= j < c_n. The empty prefix sum is zero. These indices describe packing and do not change the mathematical result. None denotes Python None. When core_attn_out is present, its declared shape describes its flat view, CoreCapacity >= T*HV*ValueDim, and its values before the call do not affect attention.
+
+## t_edf02a4b128232f2 | algorithm_contract.math | 300 chars | 1 declarations
+
+root:94 contract.algorithm_requirement.compute[1].math
+
+Qn=q and Kn=k as supplied, without another normalization. Floating arithmetic is FP32; no intermediate BF16 narrowing is part of the reference requirement. The task supplies pre-normalized BF16 q/k with use_qk_l2norm_in_kernel=false, including near-zero queries/keys; exact unit norm is not required.
+
+## t_09248a108c9ea825 | algorithm_contract.meaning | 36 chars | 1 declarations
+
+root:92 contract.algorithm_requirement.compute[0].symbol.Length.meaning
+
+Positive token count of each request
+
+## t_16bdedcfd967a558 | algorithm_contract.meaning | 43 chars | 1 declarations
+
+root:51 contract.algorithm_requirement.input.chunk_indices.meaning
+
+Rows of request index and local chunk index
+
+## t_1a261d71fbf6f8ff | algorithm_contract.meaning | 109 chars | 1 declarations
+
+root:70 contract.algorithm_requirement.output.CoreWritten.meaning
+
+In-place active prefix of core_attn_out when supplied, otherwise Python None; not an additional tuple element
+
+## t_1fe052fa9e46bf90 | algorithm_contract.meaning | 51 chars | 1 declarations
+
+root:102 contract.algorithm_requirement.compute[1].symbol.Kn.meaning
+
+Supplied keys used without additional normalization
+
+## t_2c0882a09e62eea7 | algorithm_contract.meaning | 82 chars | 1 declarations
+
+root:68 contract.algorithm_requirement.output.Out.meaning
+
+Newly allocated attention result at tuple position 0; does not alias core_attn_out
+
+## t_3566c3ee40ecd21e | algorithm_contract.meaning | 27 chars | 1 declarations
+
+root:42 contract.algorithm_requirement.input.beta.meaning
+
+Per-token delta update gate
+
+## t_38e3b6c91fab5ad3 | algorithm_contract.meaning | 86 chars | 1 declarations
+
+root:43 contract.algorithm_requirement.input.initial_state.meaning
+
+Readonly incoming state in value-by-key orientation; zero and carried states are valid
+
+## t_3af6146b4cfab2a6 | algorithm_contract.meaning | 35 chars | 1 declarations
+
+root:91 contract.algorithm_requirement.compute[0].symbol.Boundary.meaning
+
+Effective packed request boundaries
+
+## t_4a2d3900374b2a6d | algorithm_contract.meaning | 23 chars | 1 declarations
+
+root:34 contract.algorithm_requirement.constant.KeyDim.meaning
+
+Query/key channel count
+
+## t_5fde156c3770db92 | algorithm_contract.meaning | 89 chars | 1 declarations
+
+root:36 contract.algorithm_requirement.constant.ChunkTokens.meaning
+
+Token span described by each input chunk-metadata row; not a required recurrence blocking
+
+## t_60c2b075d1919630 | algorithm_contract.meaning | 49 chars | 1 declarations
+
+root:56 contract.algorithm_requirement.input.chunk_offsets.meaning
+
+Prefix counts into chunk_indices for each request
+
+## t_8897d93f192f8da4 | algorithm_contract.meaning | 91 chars | 1 declarations
+
+root:120 contract.algorithm_requirement.compute[2].symbol.S.meaning
+
+Per-request state after l local tokens in value-by-key orientation; l is a recurrence index
+
+## t_931a811e0379de1c | algorithm_contract.meaning | 54 chars | 1 declarations
+
+root:101 contract.algorithm_requirement.compute[1].symbol.Qn.meaning
+
+Supplied queries used without additional normalization
+
+## t_967f4001c93e9264 | algorithm_contract.meaning | 76 chars | 1 declarations
+
+root:60 contract.algorithm_requirement.input.use_qk_l2norm_in_kernel.meaning
+
+Disable additional query/key normalization for the supplied queries and keys
+
+## t_99bdc7339c0675c6 | algorithm_contract.meaning | 91 chars | 1 declarations
+
+root:62 contract.algorithm_requirement.input.core_attn_out.meaning
+
+Optional caller buffer viewed as a flat sequence; its active prefix is an observable output
+
+## t_9d7faecd8f3b9e96 | algorithm_contract.meaning | 13 chars | 1 declarations
+
+root:40 contract.algorithm_requirement.input.v.meaning
+
+Packed values
+
+## t_9deb80f8213f7d74 | algorithm_contract.meaning | 33 chars | 1 declarations
+
+root:41 contract.algorithm_requirement.input.g.meaning
+
+Per-token natural-log state decay
+
+## t_a084c1228c98d645 | algorithm_contract.meaning | 19 chars | 1 declarations
+
+root:35 contract.algorithm_requirement.constant.ValueDim.meaning
+
+Value channel count
+
+## t_ac25b7f148c45518 | algorithm_contract.meaning | 88 chars | 1 declarations
+
+root:69 contract.algorithm_requirement.output.FinalState.meaning
+
+Newly allocated outgoing state at tuple position 1 when requested, otherwise Python None
+
+## t_adbdd6ba4206659a | algorithm_contract.meaning | 11 chars | 1 declarations
+
+root:39 contract.algorithm_requirement.input.k.meaning
+
+Packed keys
+
+## t_e68a5344698cca10 | algorithm_contract.meaning | 33 chars | 1 declarations
+
+root:44 contract.algorithm_requirement.input.output_final_state.meaning
+
+Whether to return the final state
+
+## t_f036937670e16713 | algorithm_contract.meaning | 25 chars | 1 declarations
+
+root:46 contract.algorithm_requirement.input.cu_seqlens.meaning
+
+Packed request boundaries
+
+## t_fedb446e62d0bcad | algorithm_contract.meaning | 14 chars | 1 declarations
+
+root:38 contract.algorithm_requirement.input.q.meaning
+
+Packed queries
+
+## t_02eb39959362154f | algorithm_contract.range | 6 chars | 1 declarations
+
+root:41 contract.algorithm_requirement.input.g.range
+
+g <= 0
+
+## t_73b13178e07ef9e9 | algorithm_contract.range | 36 chars | 1 declarations
+
+root:54 contract.algorithm_requirement.input.chunk_indices.range
+
+The ordered pairs defined in packing
+
+## t_803a1b0ca7373ead | algorithm_contract.range | 36 chars | 1 declarations
+
+root:59 contract.algorithm_requirement.input.chunk_offsets.range
+
+The prefix counts defined in packing
+
+## t_a83df26071e17ade | algorithm_contract.range | 5 chars | 1 declarations
+
+root:60 contract.algorithm_requirement.input.use_qk_l2norm_in_kernel.range
+
+false
+
+## t_abff9b065f153384 | algorithm_contract.range | 43 chars | 1 declarations
+
+root:49 contract.algorithm_requirement.input.cu_seqlens.range
+
+0 = cu_seqlens[0] < ... < cu_seqlens[N] = T
+
+## t_3648122cc029940b | contract.compute_name | 7 chars | 1 declarations
+
+root:72 contract.algorithm_requirement.compute[0].name
+
+packing
+
+## t_c2da00d6ed1dc388 | contract.compute_name | 22 chars | 1 declarations
+
+root:121 contract.algorithm_requirement.compute[3].name
+
+output_and_side_effect
+
+## t_ee443c4f4425e349 | contract.compute_name | 16 chars | 1 declarations
+
+root:103 contract.algorithm_requirement.compute[2].name
+
+delta_recurrence
+
+## t_ee556ff50a74fb93 | contract.compute_name | 16 chars | 1 declarations
+
+root:93 contract.algorithm_requirement.compute[1].name
+
+query_key_values
+
+## t_1b494a583734106e | contract.tolerance | 378 chars | 1 declarations
+
+root:136 contract.algorithm_requirement.golden_reference.tolerance.Out
+
+Compare candidate tuple position 0 with reference tuple position 0. Source record from problem/metadata.json correctness_tolerances.default: atol=0.01, rtol=0.05, max_mismatch_fraction=0.0. Error metric, relative-error baseline (relative_to), comparator arithmetic precision and NaN/Inf policy are unspecified in the supplied materials; no default comparison formula is assumed.
+
+## t_d9ea8547b986b836 | contract.tolerance | 413 chars | 1 declarations
+
+root:143 contract.algorithm_requirement.golden_reference.tolerance.FinalState
+
+Compare candidate tuple position 1 with reference tuple position 1 when output_final_state is true; both must be None otherwise. Source record from problem/metadata.json correctness_tolerances.default: atol=0.01, rtol=0.05, max_mismatch_fraction=0.0. Error metric, relative-error baseline (relative_to), comparator arithmetic precision and NaN/Inf policy are unspecified; no default comparison formula is assumed.
+
+## t_dfbae9b84e8c7d05 | contract.tolerance | 589 chars | 1 declarations
+
+root:150 contract.algorithm_requirement.golden_reference.tolerance.CoreWritten
+
+When present, the candidate-written active core_attn_out prefix corresponds to the reference-written prefix and is declared observable by input.py. Source record from problem/metadata.json correctness_tolerances.default: atol=0.01, rtol=0.05, max_mismatch_fraction=0.0. The external comparator's routing for this writeback, error metric, relative-error baseline (relative_to), arithmetic precision and NaN/Inf policy are not supplied; no default comparison formula is assumed. CoreWritten must be None in both executions when the buffer is None. The inactive storage must remain unchanged.
+
+## t_0119369a743f3224 | dispatch.md | 227 chars | 1 declarations
+
+dispatch.md:10 dispatch.md
+
+| [segmented_ordered](segmented_ordered.yaml) | segmented | 分段、请求排序、缓存 Q/K | 在分段双 pass 上增加 prep 生成的 perm；A/C 等待后按排序结果解析请求，保留分段传递和重跑。 | gdn_forward 3220–3250 选择 Gseg>1；3341–3347 分配 perm，依据重分块后的 chain_blocks；3320–3321 排除 kqtma。 |
+
+## t_189ed72692899c31 | dispatch.md | 178 chars | 1 declarations
+
+dispatch.md:5 dispatch.md
+
+| [root](root.yaml) | 无 | 非分段、无请求排序、缓存 Q/K 的 packed prefill | 代表路径：prep 物化系数和 Q/K 图像，再由一次 MODE0 chain 完成请求递推。 | gdn_forward 3220–3250 不分段；3320–3321 关闭 kqtma；3341–3347 不分配 perm。 |
+
+## t_2304aaf0197a9461 | dispatch.md | 7 chars | 1 declarations
+
+dispatch.md:18 dispatch.md
+
+## 覆盖缺口
+
+## t_32b044faa5d8348b | dispatch.md | 38 chars | 1 declarations
+
+dispatch.md:3 dispatch.md
+
+| 节点 | 直接父 | workload | 相对父差异 | 选择依据 |
+
+## t_33b8fd20e1ded9b9 | dispatch.md | 135 chars | 1 declarations
+
+dispatch.md:14 dispatch.md
+
+选择依次使用 host 的 VTT/分段决策、kqtma 和 perm 决策。分段重选 VTT 后再计算排序依据；L2 判定采用实际进程缓存值和本次请求的 workspace 字节数，不采用旧分配容量。六类覆盖这三项决策的合法组合，分段与 direct-Q/K 不并存。
+
+## t_7875020cff23f0cd | dispatch.md | 6 chars | 1 declarations
+
+dispatch.md:1 dispatch.md
+
+# 路径索引
+
+## t_904d875c17b70bcc | dispatch.md | 184 chars | 1 declarations
+
+dispatch.md:8 dispatch.md
+
+| [direct_qk_ordered](direct_qk_ordered.yaml) | direct_qk | 非分段、请求排序、直接读取 Q/K | 在直接读取 Q/K 的单链上增加 prep 生成的 perm；chain 等待后按排序结果解析请求。 | gdn_forward 3320–3321 启用 kqtma；3341–3347 分配 perm。 |
+
+## t_a48761088a67a2e7 | dispatch.md | 230 chars | 1 declarations
+
+dispatch.md:9 dispatch.md
+
+| [segmented](segmented.yaml) | root | 分段、无请求排序、缓存 Q/K | 改为 prep→MODE1 pass A→MODE2 pass C；prep 用 slot-fastest 排列，A 省去 Q/Qd 载荷并发布 FP32 分段传递量，C 组合入口状态并重跑输出。 | gdn_forward 3220–3250 选择 Gseg>1；3341–3347 不分配 perm；3320–3321 排除 kqtma。 |
+
+## t_a7a07c35680543e0 | dispatch.md | 517 chars | 1 declarations
+
+dispatch.md:20 dispatch.md
+
+- 路径覆盖限于共享 Contract：已提供 packed 元数据、BF16 初态且不再做 Q/K 归一化。入口的缺省元数据、额外归一化及 FP32 初态支持不扩张本任务范围。 - `get_vmap/get_kqmap` 编码失败直接报错，无备用路径；已有连续偏移视图不会因连续化而重新分配，不能据此承诺其对齐可用性。非连续 `core_attn_out` 被写入临时连续副本且不回写，未满足调用者可见前缀的 Contract 要求。 - root 的最终 mini-chunk 在 VTT=64、请求最终状态且末块占 stage 0 时，最终状态暂存可能覆盖其他 warp 尚在读取的 K 行；保留源码缺少读取退休保证的事实。进程共享 workspace 未提供跨 stream 事件或重入协议，不据同 stream 顺序推导并发安全；L2 缓存也没有设备键检查。 - 共享 Contract 的 tolerance 保留已知阈值及比较对象，但外部比较公式、相对基准、算术精度、NaN/Inf 策略和 core 检查路由仍缺失。root 已记录 BF16 窄化、近似指数和归约重排，无全域误差界；本索引不把路径覆盖当作数值保证。
+
+## t_b224a61ddb33db47 | dispatch.md | 161 chars | 1 declarations
+
+dispatch.md:12 dispatch.md
+
+入口为 `candidate/solution.py::Model.forward` → `candidate/gdn_kernel.cu::gdn_forward`；表内行号均指该固定 C++ 来源。`parent` 只指定设计复制来源，各节点在共享 Contract 全域独立选择；精确条件和版本以各 YAML 为准。
+
+## t_e05c248ba392a0c8 | dispatch.md | 197 chars | 1 declarations
+
+dispatch.md:6 dispatch.md
+
+| [cached_ordered](cached_ordered.yaml) | root | 非分段、请求排序、缓存 Q/K | prep 增加按 chunk 数稳定降序的 perm；chain 等待后解析请求，关闭 PRE0，保留单链和 Q/K 缓存。 | gdn_forward 3220–3250 不分段；3320–3321 关闭 kqtma；3341–3347 分配 perm。 |
+
+## t_ec1e7dc48655bf14 | dispatch.md | 157 chars | 1 declarations
+
+dispatch.md:16 dispatch.md
+
+VTT、NSTAGE、GQA 分组及 PRE0 保留为参数或局部索引域。PRE0 只在无排序的缓存 vt16 单链启用，prep 仍写首块 Q/K 图像。分段路径的弱衰减判定发生在已提交的 MODE2 内：segment 0 重跑整条请求，其他 segment CTA 提前退出；MODE1/2 两次提交仍然存在。
+
+## t_fe5c63a3e6f3dd44 | dispatch.md | 194 chars | 1 declarations
+
+dispatch.md:7 dispatch.md
+
+| [direct_qk](direct_qk.yaml) | root | 非分段、无请求排序、直接读取 Q/K | prep 不写全局 Q/K 图像；MODE0 chain 用输入 Q/K 的 TMA boxes，移除该缓存交接，保留系数交接。 | gdn_forward 3320–3321 启用 kqtma（必为非分段且 VTT≥32）；3341–3347 不分配 perm。 |
+
+## t_38bdc986ec4571b4 | dispatch.when | 1258 chars | 1 declarations
+
+cached_ordered:9 meta_data.dispatch.when
+
+Let SM be the positive multiProcessorCount returned by getCurrentDeviceProperties() in this gdn_forward call. Let LC be the actual process-static l2_bytes_cache value after its conditional query in this call; a nonzero cached value is reused without a device-key check. Let U=ceil_div(T,ChunkTokens)+N, A=floor((T+N*(ChunkTokens-1))/(N*ChunkTokens)), B16=(ValueDim/16)*HV*N, B32=(ValueDim/32)*HV*N, and B64=(ValueDim/64)*HV*N. Let segmented = (B16 <= SM) and ((2*B16 <= SM and A >= 32) or (2*B64 <= SM and A >= 192)). Let V=16 if B16 <= SM; otherwise V=64 if B32 > SM and (T >= 4096 or ceil_div(T,ChunkTokens) <= 2*N or 3*ceil_div(B64,SM) < 2*ceil_div(B32,SM)); otherwise V=32. V is the pre-segmentation tile and is unchanged when not segmented. Let ordered = (N >= 8) or (N >= 2 and (ValueDim/V)*HV*N > SM). Let direct_qk = (V >= 32) and (U*(11264*HV+32768*H)+512+2*T*H*KeyDim > LC). Here 11264 and 32768 are the source SLOT_BYTES and KSQB_BYTES. The byte expression is the nonsegmented requested workspace plus one query tensor, not the capacity of an older workspace allocation. Select exactly when not segmented and not direct_qk and ordered. These V-derived tests select only nonsegmented inputs. A is a metadata estimate, not a per-request length test.
+
+## t_4bfdeadc94a7d294 | dispatch.when | 1258 chars | 1 declarations
+
+direct_qk:9 meta_data.dispatch.when
+
+Let SM be the positive multiProcessorCount returned by getCurrentDeviceProperties() in this gdn_forward call. Let LC be the actual process-static l2_bytes_cache value after its conditional query in this call; a nonzero cached value is reused without a device-key check. Let U=ceil_div(T,ChunkTokens)+N, A=floor((T+N*(ChunkTokens-1))/(N*ChunkTokens)), B16=(ValueDim/16)*HV*N, B32=(ValueDim/32)*HV*N, and B64=(ValueDim/64)*HV*N. Let segmented = (B16 <= SM) and ((2*B16 <= SM and A >= 32) or (2*B64 <= SM and A >= 192)). Let V=16 if B16 <= SM; otherwise V=64 if B32 > SM and (T >= 4096 or ceil_div(T,ChunkTokens) <= 2*N or 3*ceil_div(B64,SM) < 2*ceil_div(B32,SM)); otherwise V=32. V is the pre-segmentation tile and is unchanged when not segmented. Let ordered = (N >= 8) or (N >= 2 and (ValueDim/V)*HV*N > SM). Let direct_qk = (V >= 32) and (U*(11264*HV+32768*H)+512+2*T*H*KeyDim > LC). Here 11264 and 32768 are the source SLOT_BYTES and KSQB_BYTES. The byte expression is the nonsegmented requested workspace plus one query tensor, not the capacity of an older workspace allocation. Select exactly when not segmented and direct_qk and not ordered. These V-derived tests select only nonsegmented inputs. A is a metadata estimate, not a per-request length test.
+
+## t_569be79718536814 | dispatch.when | 1262 chars | 1 declarations
+
+root:7 meta_data.dispatch.when
+
+Let SM be the positive multiProcessorCount returned by getCurrentDeviceProperties() in this gdn_forward call. Let LC be the actual process-static l2_bytes_cache value after its conditional query in this call; a nonzero cached value is reused without a device-key check. Let U=ceil_div(T,ChunkTokens)+N, A=floor((T+N*(ChunkTokens-1))/(N*ChunkTokens)), B16=(ValueDim/16)*HV*N, B32=(ValueDim/32)*HV*N, and B64=(ValueDim/64)*HV*N. Let segmented = (B16 <= SM) and ((2*B16 <= SM and A >= 32) or (2*B64 <= SM and A >= 192)). Let V=16 if B16 <= SM; otherwise V=64 if B32 > SM and (T >= 4096 or ceil_div(T,ChunkTokens) <= 2*N or 3*ceil_div(B64,SM) < 2*ceil_div(B32,SM)); otherwise V=32. V is the pre-segmentation tile and is unchanged when not segmented. Let ordered = (N >= 8) or (N >= 2 and (ValueDim/V)*HV*N > SM). Let direct_qk = (V >= 32) and (U*(11264*HV+32768*H)+512+2*T*H*KeyDim > LC). Here 11264 and 32768 are the source SLOT_BYTES and KSQB_BYTES. The byte expression is the nonsegmented requested workspace plus one query tensor, not the capacity of an older workspace allocation. Select exactly when not segmented and not direct_qk and not ordered. These V-derived tests select only nonsegmented inputs. A is a metadata estimate, not a per-request length test.
+
+## t_9b37f56d97d53cb1 | dispatch.when | 1254 chars | 1 declarations
+
+direct_qk_ordered:9 meta_data.dispatch.when
+
+Let SM be the positive multiProcessorCount returned by getCurrentDeviceProperties() in this gdn_forward call. Let LC be the actual process-static l2_bytes_cache value after its conditional query in this call; a nonzero cached value is reused without a device-key check. Let U=ceil_div(T,ChunkTokens)+N, A=floor((T+N*(ChunkTokens-1))/(N*ChunkTokens)), B16=(ValueDim/16)*HV*N, B32=(ValueDim/32)*HV*N, and B64=(ValueDim/64)*HV*N. Let segmented = (B16 <= SM) and ((2*B16 <= SM and A >= 32) or (2*B64 <= SM and A >= 192)). Let V=16 if B16 <= SM; otherwise V=64 if B32 > SM and (T >= 4096 or ceil_div(T,ChunkTokens) <= 2*N or 3*ceil_div(B64,SM) < 2*ceil_div(B32,SM)); otherwise V=32. V is the pre-segmentation tile and is unchanged when not segmented. Let ordered = (N >= 8) or (N >= 2 and (ValueDim/V)*HV*N > SM). Let direct_qk = (V >= 32) and (U*(11264*HV+32768*H)+512+2*T*H*KeyDim > LC). Here 11264 and 32768 are the source SLOT_BYTES and KSQB_BYTES. The byte expression is the nonsegmented requested workspace plus one query tensor, not the capacity of an older workspace allocation. Select exactly when not segmented and direct_qk and ordered. These V-derived tests select only nonsegmented inputs. A is a metadata estimate, not a per-request length test.
+
+## t_a8795424600ddb6b | dispatch.when | 671 chars | 1 declarations
+
+segmented_ordered:9 meta_data.dispatch.when
+
+Let SM be the positive multiProcessorCount returned by getCurrentDeviceProperties() in this gdn_forward call. Select exactly when N=8, T>=15880 and 2*(ValueDim/16)*HV*N<=SM. In the shared Contract domain these conditions are equivalent to segmented execution with a nonnull perm: the host average floor((T+63*N)/(64*N)) is 32, giving G=2 and VTT=16. Segmentation requires the pre-segmentation 16-wide grid to fit SM; the final chain_blocks=(ValueDim/VTT)*HV*N also fits, so sorting requires N>=8. With T<=16384, this excludes N>8 and the wide segmented arm's average>=192 condition. G>1 disables direct-Q/K and PRE0. The average does not bound individual request lengths.
+
+## t_cac0dd9d054af180 | dispatch.when | 767 chars | 1 declarations
+
+segmented:9 meta_data.dispatch.when
+
+Let SM be the positive multiProcessorCount returned by getCurrentDeviceProperties() in this gdn_forward call. Let A=floor((T+N*(ChunkTokens-1))/(N*ChunkTokens)), B16=(ValueDim/16)*HV*N and B64=(ValueDim/64)*HV*N. Let Gc=min(8,floor(SM/B16),floor(A/16)) when B16<=SM and 2*B16<=SM and A>=32, otherwise 0. Let W=min(8,floor(SM/B64),floor(A/32)); let Gw=W when B16<=SM and A>=192 and W>=2, otherwise 0. Let Wide=(Gw>=2 and (Gc<2 or 100*Gw>205*Gc)). Let G=Gw and VTT=64 when Wide, otherwise G=Gc and VTT=16. Select exactly when G>=2 and N<8. Segmented candidates have (ValueDim/VTT)*HV*N<=SM, making N<8 exactly the host's no-permutation test here. G>1 also disables direct-Q/K and PRE0. A is a metadata estimate, not a lower bound on an individual request's chunk count.
+
+## t_00e8bd554391841b | math.arithmetic | 138 chars | 6 declarations
+
+cached_ordered:97 design.math_reshape.rewrite[1].arithmetic.accumulate; direct_qk:98 design.math_reshape.rewrite[1].arithmetic.accumulate; direct_qk_ordered:107 design.math_reshape.rewrite[2].arithmetic.accumulate; root:236 design.math_reshape.rewrite[1].arithmetic.accumulate; segmented:89 design.math_reshape.rewrite[1].arithmetic.accumulate; segmented_ordered:97 design.math_reshape.rewrite[2].arithmetic.accumulate
+
+Gram and query-key products accumulate eight consecutive 16-key BF16 products in FP32; scan and rho-product grouping are as defined above.
+
+## t_0a02251bb70f815e | math.arithmetic | 283 chars | 4 declarations
+
+cached_ordered:168 design.math_reshape.rewrite[3].arithmetic.accumulate; direct_qk:169 design.math_reshape.rewrite[3].arithmetic.accumulate; direct_qk_ordered:178 design.math_reshape.rewrite[4].arithmetic.accumulate; root:307 design.math_reshape.rewrite[3].arithmetic.accumulate
+
+All mm32 products use BF16 operands and FP32 MMA accumulation, with increasing 16-wide reduction blocks except the explicit KS/QS split. Scalar multiply-add expressions retain the CUDA source evaluation and compiler contraction; they do not imply the reference's tokenwise summation.
+
+## t_1e93b58797d09db1 | math.arithmetic | 137 chars | 1 declarations
+
+segmented_ordered:156 design.math_reshape.rewrite[4].arithmetic.accumulate
+
+The second entry retains the source FP32 zero-plus-one-times-SegB(0) expression and compiler contraction, without BF16 transfer rounding.
+
+## t_5ee6fafa5696deaa | math.arithmetic | 169 chars | 6 declarations
+
+cached_ordered:96 design.math_reshape.rewrite[1].arithmetic.approx; direct_qk:97 design.math_reshape.rewrite[1].arithmetic.approx; direct_qk_ordered:106 design.math_reshape.rewrite[2].arithmetic.approx; root:235 design.math_reshape.rewrite[1].arithmetic.approx; segmented:88 design.math_reshape.rewrite[1].arithmetic.approx; segmented_ordered:96 design.math_reshape.rewrite[2].arithmetic.approx
+
+ex uses __expf, including positive rho and masked-upper arguments; unknown: no uniform error or overflow bound over the Contract domain. No clamp or fallback is present.
+
+## t_761a99466ae1c94e | math.arithmetic | 218 chars | 1 declarations
+
+segmented:149 design.math_reshape.rewrite[3].arithmetic.approx
+
+Composition propagates earlier SegB with scalar decay products, omitting key-dependent state-response factors; unknown: no uniform error bound or accuracy guarantee follows from the 0.001 test over the Contract domain.
+
+## t_dd4495f7b4ede231 | math.arithmetic | 256 chars | 2 declarations
+
+segmented:197 design.math_reshape.rewrite[4].arithmetic.accumulate; segmented_ordered:197 design.math_reshape.rewrite[5].arithmetic.accumulate
+
+All mm32 products use BF16 operands and FP32 MMA accumulation, with increasing 16-wide reduction blocks except the projection split. Scalar multiply-add expressions retain source evaluation and compiler contraction, not the reference's tokenwise summation.
+
+## t_e4680d7d8e25c92f | math.arithmetic | 142 chars | 1 declarations
+
+segmented:150 design.math_reshape.rewrite[3].arithmetic.accumulate
+
+Descending segment accumulation retains source scalar multiply-add expressions and compiler contraction, without extra BF16 transfer rounding.
+
+## t_0514af92f3ef7c85 | math.ledger | 18 chars | 6 declarations
+
+cached_ordered:176 design.math_reshape.ledger.matmul[0].item; direct_qk:177 design.math_reshape.ledger.matmul[0].item; direct_qk_ordered:187 design.math_reshape.ledger.matmul[0].item; root:315 design.math_reshape.ledger.matmul[0].item; segmented:208 design.math_reshape.ledger.matmul[0].item; segmented_ordered:211 design.math_reshape.ledger.matmul[0].item
+
+Block contractions
+
+## t_068eb57327a3cd9f | math.ledger | 15 chars | 2 declarations
+
+segmented:203 design.math_reshape.ledger.pass[0].item; segmented_ordered:203 design.math_reshape.ledger.pass[0].item
+
+State traversal
+
+## t_08aa25348385cb24 | math.ledger | 99 chars | 4 declarations
+
+cached_ordered:170 design.math_reshape.ledger.baseline; direct_qk:171 design.math_reshape.ledger.baseline; direct_qk_ordered:180 design.math_reshape.ledger.baseline; root:309 design.math_reshape.ledger.baseline
+
+Direct Contract token recurrence with one FP32 state and no saved chunk coefficients or Q/K images.
+
+## t_1f2436383fbd8b0d | math.ledger | 144 chars | 1 declarations
+
+segmented_ordered:211 design.math_reshape.ledger.matmul[0].change
+
+0 -> 5*B*KeyDim*VTT+3*10*16*16*VTT MACs per full chunk/head/value tile across A and C, plus 2*10*16*16*KeyDim per prep task and inverse products
+
+## t_2bd79a3681ec0911 | math.ledger | 5 chars | 8 declarations
+
+segmented:201 design.math_reshape.ledger.depth[0].by[1]; segmented:203 design.math_reshape.ledger.pass[0].by[1]; segmented:208 design.math_reshape.ledger.matmul[0].by[2]; segmented:210 design.math_reshape.ledger.error[0].by[3]; segmented_ordered:201 design.math_reshape.ledger.depth[0].by[1]; segmented_ordered:203 design.math_reshape.ledger.pass[0].by[1]; segmented_ordered:211 design.math_reshape.ledger.matmul[0].by[2]; segmented_ordered:213 design.math_reshape.ledger.error[0].by[3]
+
+chunk
+
+## t_33c866829129dd73 | math.ledger | 13 chars | 1 declarations
+
+direct_qk_ordered:185 design.math_reshape.ledger.footprint[1].item
+
+Request order
+
+## t_3d4bb15128e038dd | math.ledger | 14 chars | 6 declarations
+
+cached_ordered:180 design.math_reshape.ledger.error[0].item; direct_qk:181 design.math_reshape.ledger.error[0].item; direct_qk_ordered:192 design.math_reshape.ledger.error[0].item; root:319 design.math_reshape.ledger.error[0].item; segmented:210 design.math_reshape.ledger.error[0].item; segmented_ordered:213 design.math_reshape.ledger.error[0].item
+
+Numerical path
+
+## t_42b9791ac8e00b83 | math.ledger | 5 chars | 16 declarations
+
+cached_ordered:172 design.math_reshape.ledger.depth[0].by[2]; cached_ordered:176 design.math_reshape.ledger.matmul[0].by[2]; cached_ordered:178 design.math_reshape.ledger.vector[0].by[1]; cached_ordered:180 design.math_reshape.ledger.error[0].by[2]; direct_qk:173 design.math_reshape.ledger.depth[0].by[2]; direct_qk:177 design.math_reshape.ledger.matmul[0].by[2]; direct_qk:179 design.math_reshape.ledger.vector[0].by[1]; direct_qk:181 design.math_reshape.ledger.error[0].by[2]; direct_qk_ordered:182 design.math_reshape.ledger.depth[0].by[2]; direct_qk_ordered:187 design.math_reshape.ledger.matmul[0].by[2]; direct_qk_ordered:189 design.math_reshape.ledger.vector[0].by[1]; direct_qk_ordered:192 design.math_reshape.ledger.error[0].by[2]; root:311 design.math_reshape.ledger.depth[0].by[2]; root:315 design.math_reshape.ledger.matmul[0].by[2]; root:317 design.math_reshape.ledger.vector[0].by[1]; root:319 design.math_reshape.ledger.error[0].by[2]
+
+chain
+
+## t_44ec28cda2eb93a9 | math.ledger | 67 chars | 2 declarations
+
+segmented:206 design.math_reshape.ledger.footprint[1].change; segmented_ordered:207 design.math_reshape.ledger.footprint[2].change
+
+0 -> N*HV*(ValueDim/VTT)*G*(4*KeyDim*VTT+4) bytes of FP32 SegB/SegA
+
+## t_5455b90930cbfde2 | math.ledger | 16 chars | 2 declarations
+
+segmented:205 design.math_reshape.ledger.footprint[0].item; segmented_ordered:206 design.math_reshape.ledger.footprint[1].item
+
+Prepared handoff
+
+## t_5854d97109bbaabf | math.ledger | 15 chars | 2 declarations
+
+segmented:206 design.math_reshape.ledger.footprint[1].item; segmented_ordered:207 design.math_reshape.ledger.footprint[2].item
+
+Segment handoff
+
+## t_5be32541fe62c152 | math.ledger | 137 chars | 2 declarations
+
+direct_qk:175 design.math_reshape.ledger.footprint[0].change; direct_qk_ordered:184 design.math_reshape.ledger.footprint[0].change
+
+0 -> C*HV*(2*10*16*16*2+4*64*4) bytes of coefficients; no intermediate Q/K image; allocator upper bounds and unused capacity are separate
+
+## t_5c741f59b1542ddb | math.ledger | 159 chars | 1 declarations
+
+segmented_ordered:201 design.math_reshape.ledger.depth[0].change
+
+Length[n] -> max_z(m_z) pass-A transitions, then one FP32 entry-transfer step and max_z(m_z) pass-C transitions; weak decay instead uses c_n pass-C transitions
+
+## t_626b0e1f941a3fb3 | math.ledger | 103 chars | 4 declarations
+
+cached_ordered:172 design.math_reshape.ledger.depth[0].change; direct_qk:173 design.math_reshape.ledger.depth[0].change; direct_qk_ordered:182 design.math_reshape.ledger.depth[0].change; root:311 design.math_reshape.ledger.depth[0].change
+
+Length[n] -> c_n dependent state transitions per request and head, plus independent chunk preprocessing
+
+## t_62eeb86413e70e94 | math.ledger | 13 chars | 4 declarations
+
+cached_ordered:174 design.math_reshape.ledger.footprint[0].item; direct_qk:175 design.math_reshape.ledger.footprint[0].item; direct_qk_ordered:184 design.math_reshape.ledger.footprint[0].item; root:313 design.math_reshape.ledger.footprint[0].item
+
+Chunk handoff
+
+## t_65e449dc824ee64b | math.ledger | 126 chars | 2 declarations
+
+segmented:203 design.math_reshape.ledger.pass[0].change; segmented_ordered:203 design.math_reshape.ledger.pass[0].change
+
+One token recurrence -> one state-only and one readout traversal of c_n chunks per request/head/value tile, plus preprocessing
+
+## t_6d09fad8d05cc4fd | math.ledger | 112 chars | 2 declarations
+
+segmented:199 design.math_reshape.ledger.baseline; segmented_ordered:199 design.math_reshape.ledger.baseline
+
+Direct Contract token recurrence with one FP32 state and no saved coefficients, Q/K images or segment summaries.
+
+## t_71645a16ecd5c3a6 | math.ledger | 8 chars | 8 declarations
+
+segmented:201 design.math_reshape.ledger.depth[0].by[0]; segmented:203 design.math_reshape.ledger.pass[0].by[0]; segmented:206 design.math_reshape.ledger.footprint[1].by[0]; segmented:210 design.math_reshape.ledger.error[0].by[2]; segmented_ordered:201 design.math_reshape.ledger.depth[0].by[0]; segmented_ordered:203 design.math_reshape.ledger.pass[0].by[0]; segmented_ordered:207 design.math_reshape.ledger.footprint[2].by[0]; segmented_ordered:213 design.math_reshape.ledger.error[0].by[2]
+
+segments
+
+## t_79feb13e30abe6a3 | math.ledger | 29 chars | 1 declarations
+
+direct_qk_ordered:185 design.math_reshape.ledger.footprint[1].change
+
+0 -> 4*N bytes per invocation
+
+## t_8280173fa2d36e48 | math.ledger | 7 chars | 26 declarations
+
+cached_ordered:172 design.math_reshape.ledger.depth[0].by[1]; cached_ordered:174 design.math_reshape.ledger.footprint[0].by[2]; cached_ordered:176 design.math_reshape.ledger.matmul[0].by[1]; cached_ordered:178 design.math_reshape.ledger.vector[0].by[0]; cached_ordered:180 design.math_reshape.ledger.error[0].by[1]; direct_qk:173 design.math_reshape.ledger.depth[0].by[1]; direct_qk:175 design.math_reshape.ledger.footprint[0].by[1]; direct_qk:177 design.math_reshape.ledger.matmul[0].by[1]; direct_qk:179 design.math_reshape.ledger.vector[0].by[0]; direct_qk:181 design.math_reshape.ledger.error[0].by[1]; direct_qk_ordered:182 design.math_reshape.ledger.depth[0].by[1]; direct_qk_ordered:184 design.math_reshape.ledger.footprint[0].by[1]; direct_qk_ordered:187 design.math_reshape.ledger.matmul[0].by[1]; direct_qk_ordered:189 design.math_reshape.ledger.vector[0].by[0]; direct_qk_ordered:192 design.math_reshape.ledger.error[0].by[1]; root:311 design.math_reshape.ledger.depth[0].by[1]; root:313 design.math_reshape.ledger.footprint[0].by[2]; root:315 design.math_reshape.ledger.matmul[0].by[1]; root:317 design.math_reshape.ledger.vector[0].by[0]; root:319 design.math_reshape.ledger.error[0].by[1]; segmented:205 design.math_reshape.ledger.footprint[0].by[2]; segmented:208 design.math_reshape.ledger.matmul[0].by[1]; segmented:210 design.math_reshape.ledger.error[0].by[1]; segmented_ordered:206 design.math_reshape.ledger.footprint[1].by[2]; segmented_ordered:211 design.math_reshape.ledger.matmul[0].by[1]; segmented_ordered:213 design.math_reshape.ledger.error[0].by[1]
+
+inverse
+
+## t_8b240d6b18e8a011 | math.ledger | 106 chars | 1 declarations
+
+direct_qk_ordered:190 design.math_reshape.ledger.vector[1].change
+
+Added N integer chunk counts and O(N^2) stable insertion-sort comparisons/moves per invocation, with N<=32
+
+## t_8f6834887ef8cec8 | math.ledger | 165 chars | 4 declarations
+
+cached_ordered:180 design.math_reshape.ledger.error[0].change; direct_qk:181 design.math_reshape.ledger.error[0].change; direct_qk_ordered:192 design.math_reshape.ledger.error[0].change; root:319 design.math_reshape.ledger.error[0].change
+
+Added BF16 Gram/system/inverse/intermediate/state-operand rounding, approximate exponentials and regrouped scans/products; no supplied bound on combined output error
+
+## t_949e6b3553ec5bf7 | math.ledger | 69 chars | 2 declarations
+
+segmented:205 design.math_reshape.ledger.footprint[0].change; segmented_ordered:206 design.math_reshape.ledger.footprint[1].change
+
+0 -> C*HV*11264+C*H*32768 bytes of packed coefficients and Q/K images
+
+## t_a0615b64ecffc87a | math.ledger | 17 chars | 6 declarations
+
+cached_ordered:172 design.math_reshape.ledger.depth[0].item; direct_qk:173 design.math_reshape.ledger.depth[0].item; direct_qk_ordered:182 design.math_reshape.ledger.depth[0].item; root:311 design.math_reshape.ledger.depth[0].item; segmented:201 design.math_reshape.ledger.depth[0].item; segmented_ordered:201 design.math_reshape.ledger.depth[0].item
+
+State propagation
+
+## t_a326af576487371e | math.ledger | 168 chars | 1 declarations
+
+segmented_ordered:213 design.math_reshape.ledger.error[0].change
+
+Added BF16 operand/coefficient/inverse rounding, approximate exponentials, regrouped reductions and FP32 segment entry transfer; no supplied combined output-error bound
+
+## t_a4f8c666f1dce35c | math.ledger | 167 chars | 1 declarations
+
+segmented:210 design.math_reshape.ledger.error[0].change
+
+Added BF16 operand/coefficient/inverse rounding, approximate exponentials, regrouped reductions and scalar segment composition; no supplied combined output-error bound
+
+## t_a72b6edabf2c4172 | math.ledger | 19 chars | 1 declarations
+
+segmented_ordered:209 design.math_reshape.ledger.vector[0].item
+
+Request permutation
+
+## t_aa97778b1d7f3457 | math.ledger | 98 chars | 2 declarations
+
+cached_ordered:174 design.math_reshape.ledger.footprint[0].change; root:313 design.math_reshape.ledger.footprint[0].change
+
+0 -> C*HV*(2*10*16*16*2+4*64*4) + C*H*32768 bytes; allocator upper bounds and padding are separate
+
+## t_aff7dfed1ef3c029 | math.ledger | 12 chars | 22 declarations
+
+cached_ordered:172 design.math_reshape.ledger.depth[0].by[0]; cached_ordered:174 design.math_reshape.ledger.footprint[0].by[1]; cached_ordered:176 design.math_reshape.ledger.matmul[0].by[0]; cached_ordered:180 design.math_reshape.ledger.error[0].by[0]; direct_qk:173 design.math_reshape.ledger.depth[0].by[0]; direct_qk:175 design.math_reshape.ledger.footprint[0].by[0]; direct_qk:177 design.math_reshape.ledger.matmul[0].by[0]; direct_qk:181 design.math_reshape.ledger.error[0].by[0]; direct_qk_ordered:182 design.math_reshape.ledger.depth[0].by[0]; direct_qk_ordered:184 design.math_reshape.ledger.footprint[0].by[0]; direct_qk_ordered:187 design.math_reshape.ledger.matmul[0].by[0]; direct_qk_ordered:192 design.math_reshape.ledger.error[0].by[0]; root:311 design.math_reshape.ledger.depth[0].by[0]; root:313 design.math_reshape.ledger.footprint[0].by[1]; root:315 design.math_reshape.ledger.matmul[0].by[0]; root:319 design.math_reshape.ledger.error[0].by[0]; segmented:205 design.math_reshape.ledger.footprint[0].by[1]; segmented:208 design.math_reshape.ledger.matmul[0].by[0]; segmented:210 design.math_reshape.ledger.error[0].by[0]; segmented_ordered:206 design.math_reshape.ledger.footprint[1].by[1]; segmented_ordered:211 design.math_reshape.ledger.matmul[0].by[0]; segmented_ordered:213 design.math_reshape.ledger.error[0].by[0]
+
+coefficients
+
+## t_bca0297e8f986dd5 | math.ledger | 18 chars | 4 declarations
+
+cached_ordered:178 design.math_reshape.ledger.vector[0].item; direct_qk:179 design.math_reshape.ledger.vector[0].item; direct_qk_ordered:189 design.math_reshape.ledger.vector[0].item; root:317 design.math_reshape.ledger.vector[0].item
+
+Token contractions
+
+## t_c47abde4c5c76a3b | math.ledger | 66 chars | 1 declarations
+
+segmented_ordered:209 design.math_reshape.ledger.vector[0].change
+
+0 -> at most N*(N-1)/2 integer ordering comparisons per invocation
+
+## t_cf74358c3534da27 | math.ledger | 5 chars | 2 declarations
+
+segmented_ordered:205 design.math_reshape.ledger.footprint[0].by[0]; segmented_ordered:209 design.math_reshape.ledger.vector[0].by[0]
+
+order
+
+## t_d6f88b8da5a9045f | math.ledger | 163 chars | 1 declarations
+
+segmented:201 design.math_reshape.ledger.depth[0].change
+
+Length[n] -> max_z(m_z) pass-A transitions, then up to G-1 FP32 composition steps and max_z(m_z) pass-C transitions; weak decay instead uses c_n pass-C transitions
+
+## t_d874e968217e3b25 | math.ledger | 50 chars | 1 declarations
+
+segmented_ordered:205 design.math_reshape.ledger.footprint[0].change
+
+0 -> 4*N bytes of int32 permutation per invocation
+
+## t_db52ddf8668df07c | math.ledger | 198 chars | 4 declarations
+
+cached_ordered:178 design.math_reshape.ledger.vector[0].change; direct_qk:179 design.math_reshape.ledger.vector[0].change; direct_qk_ordered:189 design.math_reshape.ledger.vector[0].change; root:317 design.math_reshape.ledger.vector[0].change
+
+3*Length[n]*KeyDim*ValueDim tokenwise MACs -> chunk matrix contractions plus O(c_n*B*ValueDim+c_n*KeyDim*ValueDim) scalar gating/state scaling and the 8x8 substitution work; padded rows are executed
+
+## t_de3963279e4f311c | math.ledger | 7 chars | 4 declarations
+
+cached_ordered:174 design.math_reshape.ledger.footprint[0].by[0]; root:313 design.math_reshape.ledger.footprint[0].by[0]; segmented:205 design.math_reshape.ledger.footprint[0].by[0]; segmented_ordered:206 design.math_reshape.ledger.footprint[1].by[0]
+
+prepare
+
+## t_df129fc7ef0249de | math.ledger | 228 chars | 1 declarations
+
+segmented:208 design.math_reshape.ledger.matmul[0].change
+
+0 -> 5*B*KeyDim*VTT+3*10*16*16*VTT MACs per full chunk/head/value tile across A and C, plus 2*10*16*16*KeyDim per prep task and inverse products; mini chunks replace triangular solves/readout and full state updates by row-0 work
+
+## t_e237fc16d0cd387f | math.ledger | 14 chars | 2 declarations
+
+direct_qk_ordered:185 design.math_reshape.ledger.footprint[1].by[0]; direct_qk_ordered:190 design.math_reshape.ledger.vector[1].by[0]
+
+order_requests
+
+## t_eb5a9fd8670ebd0f | math.ledger | 16 chars | 2 declarations
+
+direct_qk_ordered:190 design.math_reshape.ledger.vector[1].item; segmented_ordered:205 design.math_reshape.ledger.footprint[0].item
+
+Request ordering
+
+## t_f34a148466ea38e7 | math.ledger | 252 chars | 4 declarations
+
+cached_ordered:176 design.math_reshape.ledger.matmul[0].change; direct_qk:177 design.math_reshape.ledger.matmul[0].change; direct_qk_ordered:187 design.math_reshape.ledger.matmul[0].change; root:315 design.math_reshape.ledger.matmul[0].change
+
+0 -> 3*B*KeyDim*ValueDim + 2*10*16*16*ValueDim MACs per full chain chunk/head, plus 2*10*16*16*KeyDim per preprocessing task and hierarchical inverse products; the L=1 VTT=64 branch removes the last two triangular products and full state-update product
+
+## t_1bba651fddefb599 | math.math | 1939 chars | 1 declarations
+
+segmented:153 design.math_reshape.rewrite[4].math
+
+For mode=A or an active mode=C, Count and StartChunk denote its chunk count and starting index from segments. Initialize R(0) to EntryA for A or SeedC for C, and Rh(0)=bf16(R(0)). For cl=0..Count-1, c=StartChunk+cl; use prepared chunk c and value columns jv=vt*VTT+j, 0<=j<VTT. KS=mm32(Kc,Rh(cl)); only C also computes QS=mm32(Qc,Rh(cl)). At VTT=16 each projection uses two FP32 accumulators over alternating 16-key blocks (0,2,4,6 and 1,3,5,7), then one FP32 add; VTT=64 uses one accumulator in increasing block order. Unless VTT=64 and L=1, evaluate Hrhs[i,j]=bf16(bc[i]*(Vc[i,jv]-Ai[i]*KS[i,j])); U=mm32(Ti,Hrhs), DU[i,j]=bf16(Dl[i]*U[i,j]); R(cl+1)=Ai[63]*R(cl)+mm32(Kc^T,DU). Only C forms Uh=bf16(U), Aout=mm32(Qd,Uh), and stores Out[0,t0+i,h,jv]=bf16((Ai[i]*0.08838834764831845)*QS[i,j]+Aout[i,j]) for i<L. DU originates from FP32 U, not Uh. Ti/Qd products visit the ten retained 16x16 tiles, including diagonal-tile masked entries. For VTT=64 and L=1, projections still cover all 64 rows, then U0[j]=bf16(bc[0]*(Vc[0,jv]-Ai[0]*KS[0,j])), DU0=bf16(Dl[0]*U0), R(cl+1)[d,j]=Ai[63]*R(cl)[d,j]+Kc[0,d]*DU0[j]. Only C stores Out[0,t0,h,jv]=bf16((Ai[0]*0.08838834764831845)*QS[0,j]+Qd[0,0]*U0[j]). This mini chunk skips full rhs/solve/readout/update matrix products. In both paths rebuild Rh(cl+1)=bf16(R(cl+1)), including the last unused snapshot. A has no QS, Uh, Aout or external output, while prep still forms all coefficients. If requested, FinalState[n,h,jv,d] is terminal R(Count)[d,j] from C's z=0 when weak, otherwise z=G-1; otherwise FinalState=None. If core_attn_out is supplied and contiguous, CoreWritten=flatten(Out). If noncontiguous, the candidate writes a contiguous temporary without copy-back: the caller's active prefix is unchanged, violating the Contract. When absent CoreWritten=None. The caller's suffix remains unchanged. Return fresh (Out,FinalState), without aliasing the caller buffer or mutating initial_state.
+
+## t_1c74d5c612056486 | math.math | 1792 chars | 2 declarations
+
+direct_qk:130 design.math_reshape.rewrite[3].math; direct_qk_ordered:139 design.math_reshape.rewrite[4].math
+
+For each (n,h), R(0)[d,j]=initial_state[n,h,j,d], Rh(0)=bf16(R(0)). For each chunk c, KS=mm32(Kc,Rh(c)), QS=mm32(Qc,Rh(c)). If VTT=32, each of KS and QS is formed by two FP32 accumulators over alternating 16-key blocks (0,2,4,6 and 1,3,5,7), then one FP32 add; VTT=64 uses one accumulator in increasing block order. Unless VTT=64 and L=1, evaluate the full path: Hrhs[i,j]=bf16(bc[i]*(Vc[i,j]-Ai[i]*KS[i,j])); U=mm32(Ti,Hrhs), Uh=bf16(U), DU[i,j]=bf16(Dl[i]*U[i,j]). Uh and DU both originate from U; DU does not use Uh. Aout=mm32(Qd,Uh). The Ti and Qd products visit only the ten retained 16x16 tiles, including masked elements inside diagonal tiles. Out[0,t0+i,h,j]=bf16((Ai[i]*0.08838834764831845)*QS[i,j]+Aout[i,j]) only for i<L. R(c+1)=Ai[63]*R(c)+mm32(Kc^T,DU). When VTT=64 and L=1, KS/QS are still computed for all 64 rows; then U0=bf16(bc[0]*(Vc[0,:]-Ai[0]*KS[0,:])), DU0=bf16(Dl[0]*U0), Out[0,t0,h,:]=bf16((Ai[0]*0.08838834764831845)*QS[0,:]+Qd[0,0]*U0), R(c+1)[d,j]=Ai[63]*R(c)[d,j]+Kc[0,d]*DU0[j]. This branch skips the full rhs/solve/readout/update matrix products. In both paths Rh(c+1)=bf16(R(c+1)), even on the final chunk, where it has no consumer. R(c) represents the chunk-boundary state after min(B*c,Length[n]) tokens, in transposed orientation relative to S. FinalState[n,h,j,d]=R(c_n)[d,j] if requested, else None. If core_attn_out is supplied and contiguous, CoreWritten=flatten(Out). If it is noncontiguous, the candidate writes a contiguous temporary without copy-back: the caller's active prefix remains unchanged, violating the Contract's CoreWritten requirement. When absent, CoreWritten=None. In either supplied case the caller's suffix is unchanged. Return (Out,FinalState) in fresh result storage, with no alias to core_attn_out and no mutation of initial_state.
+
+## t_2eb5fe8973c0b537 | math.math | 376 chars | 1 declarations
+
+segmented_ordered:33 design.math_reshape.rewrite[0].math
+
+Use c_n from Contract packing. Perm[r], 0<=r<N, is the request index at rank r after stably sorting requests by descending c_n; equal counts retain ascending input request index. Materialize this int32 array once per invocation. Both traversals use n=Perm[r] for request metadata, state, summaries and outputs; tokens and all external tensor coordinates remain in input order.
+
+## t_3351abbf2029d6d2 | math.math | 569 chars | 2 declarations
+
+direct_qk:45 design.math_reshape.rewrite[0].math; direct_qk_ordered:45 design.math_reshape.rewrite[0].math
+
+Use packing from the Contract; B=64, c=0..c_n-1, slot=o_n+c, t0=Boundary[n]+B*c, L=min(B,Length[n]-B*c), m=floor(h/(HV/H)). For i=0..63, Qc[i,:]=q[0,t0+i,m,:], Kc[i,:]=k[0,t0+i,m,:], Vc[i,:]=v[0,t0+i,h,:] when t0+i<T; use zero otherwise. Thus rows beyond this request can contain the next request's data. gc[i]=g[0,t0+i,h] and bc[i]=beta[0,t0+i,h] for i<L, zero otherwise. gc/bc are explicitly zero-filled, independently of Qc/Kc/Vc. Qc/Kc are input views read by both coefficient preparation and the state chain; no intermediate Q/K image is materialized between them.
+
+## t_3f047668b29504e5 | math.math | 1187 chars | 1 declarations
+
+segmented_ordered:128 design.math_reshape.rewrite[4].math
+
+G and VTT are supplied by work_schedule. For 0<=z<G define lo_z=floor(c_n*z/G), hi_z=floor(c_n*(z+1)/G), m_z=hi_z-lo_z. For each (n,h,vt), 0<=vt<ValueDim/VTT, local value column j maps to jv=vt*VTT+j. Pass A traverses m_z chunks starting at lo_z, from EntryA[d,j]=initial_state[n,h,jv,d] for z=0 and 0 otherwise. Its recurrence is chunk below. Set aprod(0)=1 and aprod(cl+1)=aprod(cl)*Ai[63] at each pass-A chunk. Materialize SegB(z)=the pass-A terminal R(m_z), SegA(z)=aprod(m_z) in FP32, including empty segments whose summaries are EntryA and 1. Initialize amax=SegA(0), then apply CUDA fmaxf with SegA(i) for i=1..G-1 in ascending order. weak=(amax>0.001), per (n,h,vt). If weak, only z=0 performs pass C, from SeedC=EntryA over all c_n chunks starting at 0. Other z have no pass-C recurrence or output. Otherwise every z performs pass C over its original [lo_z,hi_z). For z=0 set SeedC[d,j]=initial_state[n,h,jv,d]. The only other segment is z=1: initialize SeedC=0 and coef=1, then evaluate SeedC=SeedC+coef*SegB(0) in FP32. The descending intermediate segment loop is empty at G=2. SegB(1) is still materialized but never consumed; both SegA values are used only by the weak test.
+
+## t_539f9f2b01232178 | math.math | 547 chars | 1 declarations
+
+root:182 design.math_reshape.rewrite[0].math
+
+Use packing from the Contract; B=64, c=0..c_n-1, slot=o_n+c, t0=Boundary[n]+B*c, L=min(B,Length[n]-B*c), m=floor(h/(HV/H)). For i=0..63, Qc[i,:]=q[0,t0+i,m,:], Kc[i,:]=k[0,t0+i,m,:], Vc[i,:]=v[0,t0+i,h,:] when t0+i<T; use zero otherwise. Thus rows beyond this request can contain the next request's data. gc[i]=g[0,t0+i,h] and bc[i]=beta[0,t0+i,h] for i<L, zero otherwise. gc/bc are explicitly zero-filled, independently of Qc/Kc/Vc. Materialize Qc/Kc once per (slot,m), including the first chunk even when PRE0 gives that chunk no cache consumer.
+
+## t_55dc17762bf4fccb | math.math | 265 chars | 1 declarations
+
+direct_qk_ordered:64 design.math_reshape.rewrite[1].math
+
+For ranks r=0..N-1, perm[r] is the request index at position r after sorting n=0..N-1 by decreasing c_n, breaking ties by increasing n. Materialize perm once per invocation. All request subscripts of inputs, coefficients, Out and FinalState remain original indices.
+
+## t_6def1ff46e9f7a02 | math.math | 1509 chars | 1 declarations
+
+segmented_ordered:159 design.math_reshape.rewrite[5].math
+
+For mode=A or an active mode=C, Count and StartChunk denote its chunk count and starting index from segments. Initialize R(0) to EntryA for A or SeedC for C, and Rh(0)=bf16(R(0)). For cl=0..Count-1, c=StartChunk+cl; use prepared chunk c and value columns jv=vt*VTT+j, 0<=j<VTT. KS=mm32(Kc,Rh(cl)); only C also computes QS=mm32(Qc,Rh(cl)). Each projection uses two FP32 accumulators over alternating 16-key blocks (0,2,4,6 and 1,3,5,7), then one FP32 add. Evaluate Hrhs[i,j]=bf16(bc[i]*(Vc[i,jv]-Ai[i]*KS[i,j])); U=mm32(Ti,Hrhs), DU[i,j]=bf16(Dl[i]*U[i,j]); R(cl+1)=Ai[63]*R(cl)+mm32(Kc^T,DU). Only C forms Uh=bf16(U), Aout=mm32(Qd,Uh), and stores Out[0,t0+i,h,jv]=bf16((Ai[i]*0.08838834764831845)*QS[i,j]+Aout[i,j]) for i<L. DU originates from FP32 U, not Uh. Ti/Qd products visit the ten retained 16x16 tiles, including diagonal-tile masked entries. Rebuild Rh(cl+1)=bf16(R(cl+1)), including the last unused snapshot. A has no QS, Uh, Aout or external output, while prep still forms all coefficients. If requested, FinalState[n,h,jv,d] is terminal R(Count)[d,j] from C's z=0 when weak, otherwise z=G-1; otherwise FinalState=None. If core_attn_out is supplied and contiguous, CoreWritten=flatten(Out). If noncontiguous, the candidate writes a contiguous temporary without copy-back: the caller's active prefix is unchanged, violating the Contract. When absent CoreWritten=None. The caller's suffix remains unchanged. Return fresh (Out,FinalState), without aliasing the caller buffer or mutating initial_state.
+
+## t_87fb00e4ceb5a2be | math.math | 1387 chars | 4 declarations
+
+cached_ordered:100 design.math_reshape.rewrite[2].math; direct_qk:101 design.math_reshape.rewrite[2].math; direct_qk_ordered:110 design.math_reshape.rewrite[3].math; root:239 design.math_reshape.rewrite[2].math
+
+Initialize Ti to the identity. In each aligned 8x8 diagonal block, for every local column j, z[0]=1 and, for d=1..7, z[d]=-sum32_{q=0..d-1}(Sys[base+min(j+d,7),base+j+q]*z[q]), accumulated in ascending q. Store Ti[base+j+d,base+j]=bf16(z[d]) only when j+d<8; the other computed z values are discarded. Merge adjacent diagonal blocks at widths w=16,32,64. Let L21 be Sys's lower-left w/2 square and I1,I2 the already rounded diagonal inverse blocks. At w=32 use Z=bf16(mm32(I2,L21)), X=bf16(-mm32(Z,I1)); at w=64 use Y=bf16(mm32(L21,I1)), X=bf16(-mm32(I2,Y)). Set Ti's lower-left block to X. At w=16, for aligned block base, let J be Sys[base+16:base+24,base:base+8], with rows beyond 63 equal to zero. Let p=h mod HeadsPerPrep. P is zero if p<2; otherwise it is the already computed Ti[base+8:base+16,base:base+8] of head h-2. The retained results are Z=bf16(mm32([I2,0],[L21;J])) and X=bf16(-mm32([Z,0],[I1;P])), where comma/semicolon concatenate horizontally/vertically and each 0 is an 8x8 zero block. These are the source's padded 16-term contractions, including the zero-weight adjacent terms; zero times nonfinite is not elided. Each product also evaluates eight extra output rows that are discarded. Retain the diagonal blocks and zero upper triangle. Ti's padded columns 64..71 are zero throughout all head evaluations. Publish Ti on the same ten 16x16 tiles as Qd, per (slot,h).
+
+## t_9ea5f2ab02b405aa | math.math | 1332 chars | 1 declarations
+
+segmented_ordered:100 design.math_reshape.rewrite[3].math
+
+Initialize Ti to the identity. In each aligned 8x8 diagonal block, for every local column j, colinv[0]=1 and, for d=1..7, colinv[d]=-sum32_{q=0..d-1}(Sys[base+min(j+d,7),base+j+q]*colinv[q]), accumulated in ascending q. Store Ti[base+j+d,base+j]=bf16(colinv[d]) only when j+d<8; the other computed colinv values are discarded. Merge adjacent diagonal blocks at widths w=16,32,64. Let L21 be Sys's lower-left w/2 square and I1,I2 the already rounded diagonal inverse blocks. At w=32 use Z=bf16(mm32(I2,L21)), X=bf16(-mm32(Z,I1)); at w=64 use Y=bf16(mm32(L21,I1)), X=bf16(-mm32(I2,Y)). Set Ti's lower-left block to X. At w=16, for aligned block base, let J be Sys[base+16:base+24,base:base+8], with rows beyond 63 equal to zero. HeadsPerPrep is at most two in this node, so the retained results are Z=bf16(mm32([I2,0],[L21;J])) and X=bf16(-mm32([Z,0],[I1;0])), where comma/semicolon concatenate horizontally/vertically and each 0 is an 8x8 zero block. These are the source's padded 16-term contractions, including the zero-weight adjacent terms; zero times nonfinite is not elided. Each product also evaluates eight extra output rows that are discarded. Retain the diagonal blocks and zero upper triangle. Ti's padded columns 64..71 are zero throughout all head evaluations. Publish Ti on the same ten 16x16 tiles as Qd, per (slot,h).
+
+## t_a2d4e6a233f18791 | math.math | 541 chars | 2 declarations
+
+segmented:36 design.math_reshape.rewrite[0].math; segmented_ordered:44 design.math_reshape.rewrite[1].math
+
+Use packing from the Contract; B=64, c=0..c_n-1, slot=o_n+c, t0=Boundary[n]+B*c, L=min(B,Length[n]-B*c), m=floor(h/(HV/H)). For i=0..63, Qc[i,:]=q[0,t0+i,m,:], Kc[i,:]=k[0,t0+i,m,:], Vc[i,:]=v[0,t0+i,h,:] when t0+i<T; use zero otherwise. Thus rows beyond this request can contain the next request's data. gc[i]=g[0,t0+i,h] and bc[i]=beta[0,t0+i,h] for i<L, zero otherwise. gc/bc are explicitly zero-filled, independently of Qc/Kc/Vc. Materialize Qc/Kc once per (slot,m): Kc serves both traversals, while Qc serves only the readout traversal.
+
+## t_ae5142033e791349 | math.math | 1414 chars | 1 declarations
+
+segmented:92 design.math_reshape.rewrite[2].math
+
+Initialize Ti to the identity. In each aligned 8x8 diagonal block, for every local column j, colinv[0]=1 and, for d=1..7, colinv[d]=-sum32_{q=0..d-1}(Sys[base+min(j+d,7),base+j+q]*colinv[q]), accumulated in ascending q. Store Ti[base+j+d,base+j]=bf16(colinv[d]) only when j+d<8; the other computed colinv values are discarded. Merge adjacent diagonal blocks at widths w=16,32,64. Let L21 be Sys's lower-left w/2 square and I1,I2 the already rounded diagonal inverse blocks. At w=32 use Z=bf16(mm32(I2,L21)), X=bf16(-mm32(Z,I1)); at w=64 use Y=bf16(mm32(L21,I1)), X=bf16(-mm32(I2,Y)). Set Ti's lower-left block to X. At w=16, for aligned block base, let J be Sys[base+16:base+24,base:base+8], with rows beyond 63 equal to zero. Let hp=h mod HeadsPerPrep. P is zero if hp<2; otherwise it is the already computed Ti[base+8:base+16,base:base+8] of head h-2. The retained results are Z=bf16(mm32([I2,0],[L21;J])) and X=bf16(-mm32([Z,0],[I1;P])), where comma/semicolon concatenate horizontally/vertically and each 0 is an 8x8 zero block. These are the source's padded 16-term contractions, including the zero-weight adjacent terms; zero times nonfinite is not elided. Each product also evaluates eight extra output rows that are discarded. Retain the diagonal blocks and zero upper triangle. Ti's padded columns 64..71 are zero throughout all head evaluations. Publish Ti on the same ten 16x16 tiles as Qd, per (slot,h).
+
+## t_b4034f6da7263d23 | math.math | 1167 chars | 1 declarations
+
+segmented:121 design.math_reshape.rewrite[3].math
+
+G and VTT are supplied by work_schedule. For 0<=z<G define lo_z=floor(c_n*z/G), hi_z=floor(c_n*(z+1)/G), m_z=hi_z-lo_z. For each (n,h,vt), 0<=vt<ValueDim/VTT, local value column j maps to jv=vt*VTT+j. Pass A traverses m_z chunks starting at lo_z, from EntryA[d,j]=initial_state[n,h,jv,d] for z=0 and 0 otherwise. Its recurrence is chunk below. Set aprod(0)=1 and aprod(cl+1)=aprod(cl)*Ai[63] at each pass-A chunk. Materialize SegB(z)=the pass-A terminal R(m_z), SegA(z)=aprod(m_z) in FP32, including empty segments whose summaries are EntryA and 1. Initialize amax=SegA(0), then apply CUDA fmaxf with SegA(i) for i=1..G-1 in ascending order. weak=(amax>0.001), per (n,h,vt). If weak, only z=0 performs pass C, from SeedC=EntryA over all c_n chunks starting at 0. Other z have no pass-C recurrence or output. Otherwise every z performs pass C over its original [lo_z,hi_z). For z=0 set SeedC[d,j]=initial_state[n,h,jv,d]. For z>0 initialize SeedC=0 and coef=1; for i=z-1,z-2,...,1 evaluate SeedC=SeedC+coef*SegB(i), then coef=coef*SegA(i). Finally add coef*SegB(0) to SeedC. All composition arithmetic is FP32. SegA(0) participates in the test but not the composition.
+
+## t_d10f56fac662e3ab | math.math | 486 chars | 1 declarations
+
+cached_ordered:44 design.math_reshape.rewrite[0].math
+
+Use packing from the Contract; B=64, c=0..c_n-1, slot=o_n+c, t0=Boundary[n]+B*c, L=min(B,Length[n]-B*c), m=floor(h/(HV/H)). For i=0..63, Qc[i,:]=q[0,t0+i,m,:], Kc[i,:]=k[0,t0+i,m,:], Vc[i,:]=v[0,t0+i,h,:] when t0+i<T; use zero otherwise. Thus rows beyond this request can contain the next request's data. gc[i]=g[0,t0+i,h] and bc[i]=beta[0,t0+i,h] for i<L, zero otherwise. gc/bc are explicitly zero-filled, independently of Qc/Kc/Vc. Materialize Qc/Kc once per (slot,m) for every chunk.
+
+## t_dfc773a8379e7b57 | math.math | 1201 chars | 6 declarations
+
+cached_ordered:63 design.math_reshape.rewrite[1].math; direct_qk:64 design.math_reshape.rewrite[1].math; direct_qk_ordered:73 design.math_reshape.rewrite[2].math; root:202 design.math_reshape.rewrite[1].math; segmented:55 design.math_reshape.rewrite[1].math; segmented_ordered:63 design.math_reshape.rewrite[2].math
+
+Let ex(x) denote CUDA __expf(x). Obtain b[i] from gc by inclusive scans of each 32-element half: at offsets 1,2,4,8,16 add the previous round's element i-offset when it is in the same half. Then add the first half's total to every element of the second half. rho[0]=1; rho[j]=ex(b[j-1]-b[j]) for j=1..63. For every i and each a in {0,4,...,60}, evaluate E[i,a]=ex(b[i]-b[a]); E[i,a+r]=E[i,a+r-1]*rho[a+r] for r=1,2,3, even above the diagonal. On the ten 16x16 tiles floor(j/16)<=floor(i/16), compute Gm[i,j]=bf16(dot32(Kc[i,:],Kc[j,:])) and F[i,j]=dot32(Qc[i,:],Kc[j,:]); other tiles are not evaluated. Sys[i,j]=bf16((bc[i]*E[i,j])*Gm[i,j]) for i>j, Sys[i,i]=1, Sys[i,j]=0 for i<j. Sys columns 64..71 are zero for discarded column-solve evaluations. For each even a in the ten retained tiles, evaluate D0=ex(b[i]-b[a]); Qd[i,a]=bf16((F[i,a]*0.08838834764831845)*((i>=a)?D0:0)), Qd[i,a+1]=bf16((F[i,a+1]*0.08838834764831845)* ((i>=a+1)?D0*rho[a+1]:0)). Qd is zero on omitted upper tiles. Define Ai[i]=ex(b[i]), Dl[i]=ex(b[63]-b[i]). Materialize b,bc,Ai,Dl and Qd for every (slot,h), including all padded rows. b is still transferred to the chain although the state chain does not use it arithmetically.
+
+## t_f737d5543dcaadef | math.math | 1793 chars | 2 declarations
+
+cached_ordered:129 design.math_reshape.rewrite[3].math; root:268 design.math_reshape.rewrite[3].math
+
+For each (n,h), R(0)[d,j]=initial_state[n,h,j,d], Rh(0)=bf16(R(0)). For each chunk c, KS=mm32(Kc,Rh(c)), QS=mm32(Qc,Rh(c)). If VTT<=32, each of KS and QS is formed by two FP32 accumulators over alternating 16-key blocks (0,2,4,6 and 1,3,5,7), then one FP32 add; VTT=64 uses one accumulator in increasing block order. Unless VTT=64 and L=1, evaluate the full path: Hrhs[i,j]=bf16(bc[i]*(Vc[i,j]-Ai[i]*KS[i,j])); U=mm32(Ti,Hrhs), Uh=bf16(U), DU[i,j]=bf16(Dl[i]*U[i,j]). Uh and DU both originate from U; DU does not use Uh. Aout=mm32(Qd,Uh). The Ti and Qd products visit only the ten retained 16x16 tiles, including masked elements inside diagonal tiles. Out[0,t0+i,h,j]=bf16((Ai[i]*0.08838834764831845)*QS[i,j]+Aout[i,j]) only for i<L. R(c+1)=Ai[63]*R(c)+mm32(Kc^T,DU). When VTT=64 and L=1, KS/QS are still computed for all 64 rows; then U0=bf16(bc[0]*(Vc[0,:]-Ai[0]*KS[0,:])), DU0=bf16(Dl[0]*U0), Out[0,t0,h,:]=bf16((Ai[0]*0.08838834764831845)*QS[0,:]+Qd[0,0]*U0), R(c+1)[d,j]=Ai[63]*R(c)[d,j]+Kc[0,d]*DU0[j]. This branch skips the full rhs/solve/readout/update matrix products. In both paths Rh(c+1)=bf16(R(c+1)), even on the final chunk, where it has no consumer. R(c) represents the chunk-boundary state after min(B*c,Length[n]) tokens, in transposed orientation relative to S. FinalState[n,h,j,d]=R(c_n)[d,j] if requested, else None. If core_attn_out is supplied and contiguous, CoreWritten=flatten(Out). If it is noncontiguous, the candidate writes a contiguous temporary without copy-back: the caller's active prefix remains unchanged, violating the Contract's CoreWritten requirement. When absent, CoreWritten=None. In either supplied case the caller's suffix is unchanged. Return (Out,FinalState) in fresh result storage, with no alias to core_attn_out and no mutation of initial_state.
+
+## t_08b01bbf8e2a946d | math.meaning | 27 chars | 2 declarations
+
+segmented:193 design.math_reshape.rewrite[4].symbol.Uh.meaning; segmented_ordered:194 design.math_reshape.rewrite[5].symbol.Uh.meaning
+
+Pass-C BF16 readout operand
+
+## t_0c91ea47933315bc | math.meaning | 56 chars | 1 declarations
+
+root:196 design.math_reshape.rewrite[0].symbol.PRE0.meaning
+
+Read the first Q/K/V chunk directly before the prep wait
+
+## t_18aa84522206e4fa | math.meaning | 29 chars | 2 declarations
+
+segmented:190 design.math_reshape.rewrite[4].symbol.Rh.meaning; segmented_ordered:189 design.math_reshape.rewrite[5].symbol.Rh.meaning
+
+Rounded current-state operand
+
+## t_19dc7adffeefe93f | math.meaning | 49 chars | 6 declarations
+
+cached_ordered:125 design.math_reshape.rewrite[2].symbol.Ti.meaning; direct_qk:126 design.math_reshape.rewrite[2].symbol.Ti.meaning; direct_qk_ordered:135 design.math_reshape.rewrite[3].symbol.Ti.meaning; root:264 design.math_reshape.rewrite[2].symbol.Ti.meaning; segmented:117 design.math_reshape.rewrite[2].symbol.Ti.meaning; segmented_ordered:124 design.math_reshape.rewrite[3].symbol.Ti.meaning
+
+Hierarchically computed BF16 inverse coefficients
+
+## t_24b2f05d9cfda413 | math.meaning | 48 chars | 2 declarations
+
+segmented:146 design.math_reshape.rewrite[3].symbol.weak.meaning; segmented_ordered:153 design.math_reshape.rewrite[4].symbol.weak.meaning
+
+Scalar-decay test selecting a full-request rerun
+
+## t_2ffcebddab6876ac | math.meaning | 36 chars | 1 declarations
+
+segmented:195 design.math_reshape.rewrite[4].symbol.DU0.meaning
+
+BF16 single-row state update operand
+
+## t_30766d6f6bb4f491 | math.meaning | 43 chars | 6 declarations
+
+cached_ordered:89 design.math_reshape.rewrite[1].symbol.Qd.meaning; direct_qk:90 design.math_reshape.rewrite[1].symbol.Qd.meaning; direct_qk_ordered:99 design.math_reshape.rewrite[2].symbol.Qd.meaning; root:228 design.math_reshape.rewrite[1].symbol.Qd.meaning; segmented:81 design.math_reshape.rewrite[1].symbol.Qd.meaning; segmented_ordered:89 design.math_reshape.rewrite[2].symbol.Qd.meaning
+
+Rounded decay-weighted readout coefficients
+
+## t_43143c9e23ff9338 | math.meaning | 19 chars | 6 declarations
+
+cached_ordered:93 design.math_reshape.rewrite[1].symbol.Ai.meaning; direct_qk:94 design.math_reshape.rewrite[1].symbol.Ai.meaning; direct_qk_ordered:103 design.math_reshape.rewrite[2].symbol.Ai.meaning; root:232 design.math_reshape.rewrite[1].symbol.Ai.meaning; segmented:85 design.math_reshape.rewrite[1].symbol.Ai.meaning; segmented_ordered:93 design.math_reshape.rewrite[2].symbol.Ai.meaning
+
+Chunk-prefix decays
+
+## t_4eb39e1477d28ebb | math.meaning | 52 chars | 6 declarations
+
+cached_ordered:60 design.math_reshape.rewrite[0].symbol.Vc.meaning; direct_qk:61 design.math_reshape.rewrite[0].symbol.Vc.meaning; direct_qk_ordered:61 design.math_reshape.rewrite[0].symbol.Vc.meaning; root:199 design.math_reshape.rewrite[0].symbol.Vc.meaning; segmented:52 design.math_reshape.rewrite[0].symbol.Vc.meaning; segmented_ordered:60 design.math_reshape.rewrite[1].symbol.Vc.meaning
+
+Full value chunk including foreign or zero tail rows
+
+## t_590db5a7bff2742d | math.meaning | 20 chars | 2 declarations
+
+segmented:142 design.math_reshape.rewrite[3].symbol.G.meaning; segmented_ordered:149 design.math_reshape.rewrite[4].symbol.G.meaning
+
+Segments per request
+
+## t_6c8eb9cec82d2eb2 | math.meaning | 50 chars | 4 declarations
+
+cached_ordered:163 design.math_reshape.rewrite[3].symbol.U.meaning; direct_qk:164 design.math_reshape.rewrite[3].symbol.U.meaning; direct_qk_ordered:173 design.math_reshape.rewrite[4].symbol.U.meaning; root:302 design.math_reshape.rewrite[3].symbol.U.meaning
+
+FP32 solved updates before two separate narrowings
+
+## t_73849e75c4672401 | math.meaning | 24 chars | 6 declarations
+
+cached_ordered:91 design.math_reshape.rewrite[1].symbol.bc.meaning; direct_qk:92 design.math_reshape.rewrite[1].symbol.bc.meaning; direct_qk_ordered:101 design.math_reshape.rewrite[2].symbol.bc.meaning; root:230 design.math_reshape.rewrite[1].symbol.bc.meaning; segmented:83 design.math_reshape.rewrite[1].symbol.bc.meaning; segmented_ordered:91 design.math_reshape.rewrite[2].symbol.bc.meaning
+
+Zero-padded update gates
+
+## t_749c02eeb450dad0 | math.meaning | 70 chars | 1 declarations
+
+cached_ordered:57 design.math_reshape.rewrite[0].symbol.perm.meaning
+
+Stored scheduling permutation from request rank to original request ID
+
+## t_77a4335e43332c99 | math.meaning | 38 chars | 4 declarations
+
+cached_ordered:160 design.math_reshape.rewrite[3].symbol.R.meaning; direct_qk:161 design.math_reshape.rewrite[3].symbol.R.meaning; direct_qk_ordered:170 design.math_reshape.rewrite[4].symbol.R.meaning; root:299 design.math_reshape.rewrite[3].symbol.R.meaning
+
+Internal key-by-value FP32 chunk state
+
+## t_78f1b25502c80d18 | math.meaning | 45 chars | 4 declarations
+
+cached_ordered:161 design.math_reshape.rewrite[3].symbol.Rh.meaning; direct_qk:162 design.math_reshape.rewrite[3].symbol.Rh.meaning; direct_qk_ordered:171 design.math_reshape.rewrite[4].symbol.Rh.meaning; root:300 design.math_reshape.rewrite[3].symbol.Rh.meaning
+
+Rounded operand snapshot of the current state
+
+## t_8328c54b2dfdddcb | math.meaning | 47 chars | 6 declarations
+
+cached_ordered:87 design.math_reshape.rewrite[1].symbol.F.meaning; direct_qk:88 design.math_reshape.rewrite[1].symbol.F.meaning; direct_qk_ordered:97 design.math_reshape.rewrite[2].symbol.F.meaning; root:226 design.math_reshape.rewrite[1].symbol.F.meaning; segmented:79 design.math_reshape.rewrite[1].symbol.F.meaning; segmented_ordered:87 design.math_reshape.rewrite[2].symbol.F.meaning
+
+Unnarrowed query-key products on retained tiles
+
+## t_871d5da459b3e05d | math.meaning | 36 chars | 6 declarations
+
+cached_ordered:88 design.math_reshape.rewrite[1].symbol.Sys.meaning; direct_qk:89 design.math_reshape.rewrite[1].symbol.Sys.meaning; direct_qk_ordered:98 design.math_reshape.rewrite[2].symbol.Sys.meaning; root:227 design.math_reshape.rewrite[1].symbol.Sys.meaning; segmented:80 design.math_reshape.rewrite[1].symbol.Sys.meaning; segmented_ordered:88 design.math_reshape.rewrite[2].symbol.Sys.meaning
+
+Rounded unit lower triangular system
+
+## t_8e2fbff70690a9f5 | math.meaning | 45 chars | 2 declarations
+
+segmented:189 design.math_reshape.rewrite[4].symbol.R.meaning; segmented_ordered:188 design.math_reshape.rewrite[5].symbol.R.meaning
+
+Internal FP32 state for one segment traversal
+
+## t_9582e0e3127d6ab3 | math.meaning | 70 chars | 4 declarations
+
+cached_ordered:166 design.math_reshape.rewrite[3].symbol.DU0.meaning; direct_qk:167 design.math_reshape.rewrite[3].symbol.DU0.meaning; direct_qk_ordered:176 design.math_reshape.rewrite[4].symbol.DU0.meaning; root:305 design.math_reshape.rewrite[3].symbol.DU0.meaning
+
+BF16 decay-weighted single-row operand for the mini-chunk state update
+
+## t_985c5580fead173e | math.meaning | 59 chars | 6 declarations
+
+cached_ordered:56 design.math_reshape.rewrite[0].symbol.HeadsPerPrep.meaning; direct_qk:58 design.math_reshape.rewrite[0].symbol.HeadsPerPrep.meaning; direct_qk_ordered:58 design.math_reshape.rewrite[0].symbol.HeadsPerPrep.meaning; root:195 design.math_reshape.rewrite[0].symbol.HeadsPerPrep.meaning; segmented:49 design.math_reshape.rewrite[0].symbol.HeadsPerPrep.meaning; segmented_ordered:57 design.math_reshape.rewrite[1].symbol.HeadsPerPrep.meaning
+
+Contiguous value-head group sharing coefficient preparation
+
+## t_9da14c1597299de7 | math.meaning | 50 chars | 1 declarations
+
+segmented_ordered:190 design.math_reshape.rewrite[5].symbol.KS.meaning
+
+Key projection of the rounded incoming chunk state
+
+## t_a358ee79e6efeacd | math.meaning | 24 chars | 2 declarations
+
+segmented:143 design.math_reshape.rewrite[3].symbol.SegB.meaning; segmented_ordered:150 design.math_reshape.rewrite[4].symbol.SegB.meaning
+
+Pass-A segment end state
+
+## t_ab2db69439ee026f | math.meaning | 30 chars | 2 declarations
+
+segmented:144 design.math_reshape.rewrite[3].symbol.SegA.meaning; segmented_ordered:151 design.math_reshape.rewrite[4].symbol.SegA.meaning
+
+Pass-A product of chunk decays
+
+## t_b02d4f0e5001c47f | math.meaning | 42 chars | 1 declarations
+
+direct_qk_ordered:70 design.math_reshape.rewrite[1].symbol.perm.meaning
+
+Original request index at each sorted rank
+
+## t_b0b2ba40d2038dba | math.meaning | 48 chars | 6 declarations
+
+cached_ordered:126 design.math_reshape.rewrite[2].symbol.Y.meaning; direct_qk:127 design.math_reshape.rewrite[2].symbol.Y.meaning; direct_qk_ordered:136 design.math_reshape.rewrite[3].symbol.Y.meaning; root:265 design.math_reshape.rewrite[2].symbol.Y.meaning; segmented:118 design.math_reshape.rewrite[2].symbol.Y.meaning; segmented_ordered:125 design.math_reshape.rewrite[3].symbol.Y.meaning
+
+Rounded 32x32 intermediate of the width-64 merge
+
+## t_b37a2220c1113568 | math.meaning | 43 chars | 1 declarations
+
+segmented_ordered:41 design.math_reshape.rewrite[0].symbol.Perm.meaning
+
+Request index at each descending-chunk rank
+
+## t_b5b587826fcc9aba | math.meaning | 34 chars | 6 declarations
+
+cached_ordered:86 design.math_reshape.rewrite[1].symbol.Gm.meaning; direct_qk:87 design.math_reshape.rewrite[1].symbol.Gm.meaning; direct_qk_ordered:96 design.math_reshape.rewrite[2].symbol.Gm.meaning; root:225 design.math_reshape.rewrite[1].symbol.Gm.meaning; segmented:78 design.math_reshape.rewrite[1].symbol.Gm.meaning; segmented_ordered:86 design.math_reshape.rewrite[2].symbol.Gm.meaning
+
+BF16 Gram values on retained tiles
+
+## t_b63a581df494a886 | math.meaning | 37 chars | 6 declarations
+
+cached_ordered:54 design.math_reshape.rewrite[0].symbol.B.meaning; direct_qk:56 design.math_reshape.rewrite[0].symbol.B.meaning; direct_qk_ordered:56 design.math_reshape.rewrite[0].symbol.B.meaning; root:193 design.math_reshape.rewrite[0].symbol.B.meaning; segmented:47 design.math_reshape.rewrite[0].symbol.B.meaning; segmented_ordered:55 design.math_reshape.rewrite[1].symbol.B.meaning
+
+Chunk length of the triangular system
+
+## t_b6e8d93dece3ff0b | math.meaning | 51 chars | 6 declarations
+
+cached_ordered:92 design.math_reshape.rewrite[1].symbol.rho.meaning; direct_qk:93 design.math_reshape.rewrite[1].symbol.rho.meaning; direct_qk_ordered:102 design.math_reshape.rewrite[2].symbol.rho.meaning; root:231 design.math_reshape.rewrite[1].symbol.rho.meaning; segmented:84 design.math_reshape.rewrite[1].symbol.rho.meaning; segmented_ordered:92 design.math_reshape.rewrite[2].symbol.rho.meaning
+
+Adjacent decay ratios used by coefficient formation
+
+## t_c374798566dc95f1 | math.meaning | 50 chars | 6 declarations
+
+cached_ordered:59 design.math_reshape.rewrite[0].symbol.Kc.meaning; direct_qk:60 design.math_reshape.rewrite[0].symbol.Kc.meaning; direct_qk_ordered:60 design.math_reshape.rewrite[0].symbol.Kc.meaning; root:198 design.math_reshape.rewrite[0].symbol.Kc.meaning; segmented:51 design.math_reshape.rewrite[0].symbol.Kc.meaning; segmented_ordered:59 design.math_reshape.rewrite[1].symbol.Kc.meaning
+
+Full key chunk including foreign or zero tail rows
+
+## t_c58186f3307a43fe | math.meaning | 40 chars | 6 declarations
+
+cached_ordered:165 design.math_reshape.rewrite[3].symbol.DU.meaning; direct_qk:166 design.math_reshape.rewrite[3].symbol.DU.meaning; direct_qk_ordered:175 design.math_reshape.rewrite[4].symbol.DU.meaning; root:304 design.math_reshape.rewrite[3].symbol.DU.meaning; segmented:194 design.math_reshape.rewrite[4].symbol.DU.meaning; segmented_ordered:195 design.math_reshape.rewrite[5].symbol.DU.meaning
+
+BF16 decay-weighted state update operand
+
+## t_ce6b96704082f512 | math.meaning | 27 chars | 4 declarations
+
+cached_ordered:164 design.math_reshape.rewrite[3].symbol.Uh.meaning; direct_qk:165 design.math_reshape.rewrite[3].symbol.Uh.meaning; direct_qk_ordered:174 design.math_reshape.rewrite[4].symbol.Uh.meaning; root:303 design.math_reshape.rewrite[3].symbol.Uh.meaning
+
+BF16 readout update operand
+
+## t_d11ec177bb9cfd8c | math.meaning | 33 chars | 6 declarations
+
+cached_ordered:94 design.math_reshape.rewrite[1].symbol.Dl.meaning; direct_qk:95 design.math_reshape.rewrite[1].symbol.Dl.meaning; direct_qk_ordered:104 design.math_reshape.rewrite[2].symbol.Dl.meaning; root:233 design.math_reshape.rewrite[1].symbol.Dl.meaning; segmented:86 design.math_reshape.rewrite[1].symbol.Dl.meaning; segmented_ordered:94 design.math_reshape.rewrite[2].symbol.Dl.meaning
+
+Decays from each row to chunk end
+
+## t_d30424272c958b6f | math.meaning | 45 chars | 6 declarations
+
+cached_ordered:55 design.math_reshape.rewrite[0].symbol.VTT.meaning; direct_qk:57 design.math_reshape.rewrite[0].symbol.VTT.meaning; direct_qk_ordered:57 design.math_reshape.rewrite[0].symbol.VTT.meaning; root:194 design.math_reshape.rewrite[0].symbol.VTT.meaning; segmented:48 design.math_reshape.rewrite[0].symbol.VTT.meaning; segmented_ordered:56 design.math_reshape.rewrite[1].symbol.VTT.meaning
+
+Value channels assigned to one chain worktile
+
+## t_db1bab50ce300b25 | math.meaning | 28 chars | 2 declarations
+
+segmented:145 design.math_reshape.rewrite[3].symbol.aprod.meaning; segmented_ordered:152 design.math_reshape.rewrite[4].symbol.aprod.meaning
+
+Running pass-A decay product
+
+## t_e1d1496b504f891a | math.meaning | 46 chars | 2 declarations
+
+segmented:192 design.math_reshape.rewrite[4].symbol.U.meaning; segmented_ordered:193 design.math_reshape.rewrite[5].symbol.U.meaning
+
+FP32 solved updates before separate narrowings
+
+## t_e3d1e8d3ef82ec03 | math.meaning | 23 chars | 6 declarations
+
+cached_ordered:162 design.math_reshape.rewrite[3].symbol.Hrhs.meaning; direct_qk:163 design.math_reshape.rewrite[3].symbol.Hrhs.meaning; direct_qk_ordered:172 design.math_reshape.rewrite[4].symbol.Hrhs.meaning; root:301 design.math_reshape.rewrite[3].symbol.Hrhs.meaning; segmented:191 design.math_reshape.rewrite[4].symbol.Hrhs.meaning; segmented_ordered:192 design.math_reshape.rewrite[5].symbol.Hrhs.meaning
+
+Rounded chunk residuals
+
+## t_e67596e6ebbab5d8 | math.meaning | 33 chars | 6 declarations
+
+cached_ordered:90 design.math_reshape.rewrite[1].symbol.b.meaning; direct_qk:91 design.math_reshape.rewrite[1].symbol.b.meaning; direct_qk_ordered:100 design.math_reshape.rewrite[2].symbol.b.meaning; root:229 design.math_reshape.rewrite[1].symbol.b.meaning; segmented:82 design.math_reshape.rewrite[1].symbol.b.meaning; segmented_ordered:90 design.math_reshape.rewrite[2].symbol.b.meaning
+
+Computed inclusive log-decay scan
+
+## t_e9946c6088d19215 | math.meaning | 52 chars | 6 declarations
+
+cached_ordered:58 design.math_reshape.rewrite[0].symbol.Qc.meaning; direct_qk:59 design.math_reshape.rewrite[0].symbol.Qc.meaning; direct_qk_ordered:59 design.math_reshape.rewrite[0].symbol.Qc.meaning; root:197 design.math_reshape.rewrite[0].symbol.Qc.meaning; segmented:50 design.math_reshape.rewrite[0].symbol.Qc.meaning; segmented_ordered:58 design.math_reshape.rewrite[1].symbol.Qc.meaning
+
+Full query chunk including foreign or zero tail rows
+
+## t_ecbff79f00d244b9 | math.meaning | 59 chars | 1 declarations
+
+segmented_ordered:191 design.math_reshape.rewrite[5].symbol.QS.meaning
+
+Pass-C query projection of the rounded incoming chunk state
+
+## t_fe09a8e8cb5dc907 | math.meaning | 48 chars | 2 declarations
+
+segmented:147 design.math_reshape.rewrite[3].symbol.SeedC.meaning; segmented_ordered:154 design.math_reshape.rewrite[4].symbol.SeedC.meaning
+
+Incoming FP32 state for an active pass-C segment
+
+## t_0945530eb9b762f2 | math.name | 37 chars | 6 declarations
+
+cached_ordered:43 design.math_reshape.rewrite[0].name; direct_qk:44 design.math_reshape.rewrite[0].name; direct_qk_ordered:44 design.math_reshape.rewrite[0].name; root:181 design.math_reshape.rewrite[0].name; segmented:35 design.math_reshape.rewrite[0].name; segmented_ordered:43 design.math_reshape.rewrite[1].name
+
+Define the actual padded chunk inputs
+
+## t_2584cd746ce58345 | math.name | 48 chars | 6 declarations
+
+cached_ordered:62 design.math_reshape.rewrite[1].name; direct_qk:63 design.math_reshape.rewrite[1].name; direct_qk_ordered:72 design.math_reshape.rewrite[2].name; root:201 design.math_reshape.rewrite[1].name; segmented:54 design.math_reshape.rewrite[1].name; segmented_ordered:62 design.math_reshape.rewrite[2].name
+
+Form decay-weighted BF16 triangular coefficients
+
+## t_3783d94358e7e018 | math.name | 52 chars | 2 declarations
+
+segmented:152 design.math_reshape.rewrite[4].name; segmented_ordered:158 design.math_reshape.rewrite[5].name
+
+Apply the state recurrence and the readout traversal
+
+## t_438abe48541dcef7 | math.name | 54 chars | 1 declarations
+
+direct_qk_ordered:63 design.math_reshape.rewrite[1].name
+
+Materialize a stable longest-chain-first request order
+
+## t_479bfbea40f669ad | math.name | 40 chars | 1 declarations
+
+segmented_ordered:32 design.math_reshape.rewrite[0].name
+
+Materialize a stable request permutation
+
+## t_6a63a3866b08f7fc | math.name | 49 chars | 2 declarations
+
+segmented:120 design.math_reshape.rewrite[3].name; segmented_ordered:127 design.math_reshape.rewrite[4].name
+
+Form segment summaries and choose readout entries
+
+## t_c0b53873e3f4f075 | math.name | 74 chars | 6 declarations
+
+cached_ordered:99 design.math_reshape.rewrite[2].name; direct_qk:100 design.math_reshape.rewrite[2].name; direct_qk_ordered:109 design.math_reshape.rewrite[3].name; root:238 design.math_reshape.rewrite[2].name; segmented:91 design.math_reshape.rewrite[2].name; segmented_ordered:99 design.math_reshape.rewrite[3].name
+
+Hierarchical rounded inverse with different merge order at the final level
+
+## t_d58bf29ec4b51a38 | math.name | 65 chars | 4 declarations
+
+cached_ordered:128 design.math_reshape.rewrite[3].name; direct_qk:129 design.math_reshape.rewrite[3].name; direct_qk_ordered:138 design.math_reshape.rewrite[4].name; root:267 design.math_reshape.rewrite[3].name
+
+Carry FP32 state and separately round readout and update operands
+
+## t_48857c9a607fe610 | math.step | 7 chars | 6 declarations
+
+cached_ordered:98 design.math_reshape.rewrite[2].step; direct_qk:99 design.math_reshape.rewrite[2].step; direct_qk_ordered:108 design.math_reshape.rewrite[3].step; root:237 design.math_reshape.rewrite[2].step; segmented:90 design.math_reshape.rewrite[2].step; segmented_ordered:98 design.math_reshape.rewrite[3].step
+
+inverse
+
+## t_71fc1b6f59f2f1f7 | math.step | 5 chars | 1 declarations
+
+segmented_ordered:31 design.math_reshape.rewrite[0].step
+
+order
+
+## t_7b767d78cd5bd935 | math.step | 5 chars | 2 declarations
+
+segmented:151 design.math_reshape.rewrite[4].step; segmented_ordered:157 design.math_reshape.rewrite[5].step
+
+chunk
+
+## t_9e684ee3ce487284 | math.step | 8 chars | 2 declarations
+
+segmented:119 design.math_reshape.rewrite[3].step; segmented_ordered:126 design.math_reshape.rewrite[4].step
+
+segments
+
+## t_a124a0eb9e6dc4c1 | math.step | 14 chars | 1 declarations
+
+direct_qk_ordered:62 design.math_reshape.rewrite[1].step
+
+order_requests
+
+## t_c1c546a0750e507e | math.step | 5 chars | 4 declarations
+
+cached_ordered:127 design.math_reshape.rewrite[3].step; direct_qk:128 design.math_reshape.rewrite[3].step; direct_qk_ordered:137 design.math_reshape.rewrite[4].step; root:266 design.math_reshape.rewrite[3].step
+
+chain
+
+## t_c4e18a65a891966e | math.step | 12 chars | 6 declarations
+
+cached_ordered:61 design.math_reshape.rewrite[1].step; direct_qk:62 design.math_reshape.rewrite[1].step; direct_qk_ordered:71 design.math_reshape.rewrite[2].step; root:200 design.math_reshape.rewrite[1].step; segmented:53 design.math_reshape.rewrite[1].step; segmented_ordered:61 design.math_reshape.rewrite[2].step
+
+coefficients
+
+## t_f3c6de52dfd6ac7c | math.step | 7 chars | 6 declarations
+
+cached_ordered:42 design.math_reshape.rewrite[0].step; direct_qk:43 design.math_reshape.rewrite[0].step; direct_qk_ordered:43 design.math_reshape.rewrite[0].step; root:180 design.math_reshape.rewrite[0].step; segmented:34 design.math_reshape.rewrite[0].step; segmented_ordered:42 design.math_reshape.rewrite[1].step
+
+prepare
+
+## t_0d6c136936d45db6 | math.thesis | 341 chars | 2 declarations
+
+cached_ordered:35 design.math_reshape.thesis; root:173 design.math_reshape.thesis
+
+Replace the token recurrence by 64-token triangular solves and a chunk state chain. BF16 coefficient and operand planes enable matrix products while the carried state stays FP32; preprocessing, padded work and intermediate rounding are the costs. This records the compiled candidate's approximation, without an additional accuracy guarantee.
+
+## t_94d86f53f83167ae | math.thesis | 321 chars | 1 declarations
+
+segmented:27 design.math_reshape.thesis
+
+Use BF16 triangular chunk solves with FP32 state, then split requests into state-only segments and rerun for readout from composed entries. Shorter local chains cost a second traversal, FP32 summary storage and a scalar-transfer approximation; weak decay instead makes the readout traversal serial over the whole request.
+
+## t_d8aec61a268f9ce0 | math.thesis | 403 chars | 2 declarations
+
+direct_qk:35 design.math_reshape.thesis; direct_qk_ordered:35 design.math_reshape.thesis
+
+Replace the token recurrence by 64-token triangular solves and a chunk state chain. BF16 coefficient and operand planes enable matrix products while the carried state stays FP32; preprocessing, padded work and intermediate rounding are the costs. Reread Q/K from the inputs instead of retaining chunk images. This records the compiled candidate's approximation, without an additional accuracy guarantee.
+
+## t_e76b57e80a399d82 | math.thesis | 349 chars | 1 declarations
+
+segmented_ordered:24 design.math_reshape.thesis
+
+Use BF16 triangular chunk solves with FP32 state, then split requests into state-only segments and rerun for readout from composed entries. Stable request ordering changes work assignment without moving tokens. Two segments shorten local chains at the cost of a second traversal and FP32 summary storage; weak decay makes readout serial per request.
+
+## t_bf9b9687b1ef6fa4 | metadata.describe | 124 chars | 6 declarations
+
+cached_ordered:3 meta_data.describe; direct_qk:3 meta_data.describe; direct_qk_ordered:3 meta_data.describe; root:3 meta_data.describe; segmented:3 meta_data.describe; segmented_ordered:3 meta_data.describe
+
+Packed gated delta-rule attention with grouped query/key heads, BF16 Q/K/V and initial state, and optional FP32 final state.
+
+## t_2c17c76dfc81bbbe | pipeline.thesis | 311 chars | 1 declarations
+
+segmented:372 design.tile_pipeline.thesis
+
+Prep overlaps decay scans with Q/K arrival and retains image/F through its head loop. Both chain passes pipeline NSTAGE-1 future chunks; A omits Q-side traffic and C overlaps entry composition with priming. Loop-top joins retire shared reads. Final mini-chunk stage-0 retirement remains unguarded by the source.
+
+## t_33ae15c7196d77f9 | pipeline.thesis | 452 chars | 1 declarations
+
+direct_qk_ordered:319 design.tile_pipeline.thesis
+
+Preparation overlaps decay scans with Q/K arrival and reuses Gm/F through the head loop. The chain waits before resolving perm, then overlaps NSTAGE-1 future input and coefficient loads with a dependent state update; each stage is acquired before use and normally reclaimed at the next loop-top CTA join. Output staging reuses the dead rhs plane, and final-state staging reuses stage 0 with the source's exceptional mini-chunk retirement gap preserved.
+
+## t_797c3088e85dc29f | pipeline.thesis | 408 chars | 1 declarations
+
+root:434 design.tile_pipeline.thesis
+
+Preparation overlaps decay scans with Q/K arrival and keeps Q/K/F alive through the head loop. The chain overlaps NSTAGE-1 future chunk loads with a dependent state update; each stage is acquired before use and normally reclaimed at the next loop-top CTA join. Output staging reuses the dead rhs plane, and final-state staging reuses stage 0 with the source's exceptional mini-chunk retirement gap preserved.
+
+## t_a4a89556e7b3b164 | pipeline.thesis | 381 chars | 1 declarations
+
+cached_ordered:305 design.tile_pipeline.thesis
+
+Preparation overlaps decay scans with Q/K arrival and keeps Q/K/F alive through the head loop. The chain warms metadata before waiting for perm, then overlaps initial-state loading and dependent state updates with chunk transfers. Its NSTAGE ring is normally reclaimed at the next loop-top CTA join; final-state staging preserves the source's exceptional mini-chunk retirement gap.
+
+## t_b9f67f24c4b816fc | pipeline.thesis | 418 chars | 1 declarations
+
+direct_qk:295 design.tile_pipeline.thesis
+
+Preparation overlaps decay scans with Q/K arrival and reuses Gm/F through the head loop. The chain overlaps NSTAGE-1 future input and coefficient loads with a dependent state update; each stage is acquired before use and normally reclaimed at the next loop-top CTA join. Output staging reuses the dead rhs plane, and final-state staging reuses stage 0 with the source's exceptional mini-chunk retirement gap preserved.
+
+## t_cd2ac4fcff1b22b0 | pipeline.thesis | 343 chars | 1 declarations
+
+segmented_ordered:383 design.tile_pipeline.thesis
+
+Prep overlaps decay scans with Q/K arrival and retains image/F through its head loop. Both chain passes pipeline NSTAGE-1 future chunks; A omits Q-side traffic. Both passes wait before resolving requests, then overlap state initialization with priming. Loop-top joins retire shared reads; the final state reuses stage 0 after operand preloads.
+
+## t_00f45f9d80bf30a5 | pipeline.verb | 403 chars | 1 declarations
+
+segmented_ordered:550 design.tile_pipeline.phase.pass_a.role.Main.info.verb.warm
+
+Resolve r,h,vt,z without Perm. Read cu_seqlens[r], cu_seqlens[r+1], chunk_offsets[r] and the raw int32 at the allocated perm[r] address, summing into a discarded value to warm their cache lines. These addresses are in bounds. The pre-wait perm contents need not be initialized or belong to this invocation; they never select an address or control flow. This is not a read of the ready mathematical Perm.
+
+## t_042013b00c55b163 | pipeline.verb | 310 chars | 2 declarations
+
+cached_ordered:506 design.tile_pipeline.phase.chain.role.Main.info.verb.project; root:629 design.tile_pipeline.phase.chain.role.Main.info.verb.project
+
+Read current Qc/Kc and Rh into fragments and accumulate KS/QS. Warps form a 4-by-2 partition of the 64-by-VTT token/value result. At VTT<=32 the two parity accumulators stay separate until rhs consumes KS and finish_chunk consumes QS; QS remains live through the solve. b is present in the transfer but unused.
+
+## t_04930e4d95c45662 | pipeline.verb | 130 chars | 2 declarations
+
+direct_qk:470 design.tile_pipeline.phase.chain.role.Main.info.verb.seed; root:619 design.tile_pipeline.phase.chain.role.Main.info.verb.seed
+
+Store Rh from the prefetched R and join the CTA. Each warp owns one 16-key slice of R across all VTT values for the whole request.
+
+## t_05effc9cc2b2fb55 | pipeline.verb | 353 chars | 1 declarations
+
+cached_ordered:479 design.tile_pipeline.phase.chain.role.Main.info.verb.warm_metadata
+
+Before the PDL wait, read cu_seqlens[rank], cu_seqlens[rank+1], chunk_offsets[rank] and perm[rank], add them and discard the result. These in-bounds speculative reads warm index cache lines; the pre-wait perm bytes can be stale or uninitialized and never determine control, addresses or numerical outputs. No initial-state or chunk transfer occurs here.
+
+## t_0905ba8c3b279dc9 | pipeline.verb | 125 chars | 1 declarations
+
+segmented_ordered:475 design.tile_pipeline.phase.prep.role.Main.info.verb.skeleton
+
+Initialize inverse diagonal/upper triangle and system/inverse pad columns for all GroupWidth scratch sets, then join the CTA.
+
+## t_0be1de5e49da8118 | pipeline.verb | 404 chars | 1 declarations
+
+root:601 design.tile_pipeline.phase.chain.role.Main.info.verb.early_inputs
+
+Resolve the input-order request n and its input bounds and chunk offsets; these reads do not depend on prep. With PRE0, the single issuer arms stage 0 for all StageBytes and issues four input Q/K boxes and one V box before the PDL wait. Completion still requires the later coefficient copy. Load initial_state into R before waiting in every VTT case. With PRE0=false this action issues no chunk transfer.
+
+## t_1149e881c220498b | pipeline.verb | 97 chars | 6 declarations
+
+cached_ordered:407 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_y; direct_qk:387 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_y; direct_qk_ordered:416 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_y; root:529 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_y; segmented:466 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_y; segmented_ordered:483 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_y
+
+Form the final merge's Y in MergeScratch, then join the CTA to publish it to all merge consumers.
+
+## t_14e0a6a8d9c35b8c | pipeline.verb | 268 chars | 1 declarations
+
+segmented_ordered:576 design.tile_pipeline.phase.pass_a.role.Main.info.verb.update
+
+Update using preloaded Kc and DU. Advance aprod and R, then rebuild Rh, including the last unused snapshot. There is no trailing CTA join. Nonfinal reads retire at the next advance; final publication reads only each warp's own R registers and needs no additional join.
+
+## t_15504287b223b0e6 | pipeline.verb | 118 chars | 6 declarations
+
+cached_ordered:405 design.tile_pipeline.phase.prep.role.Main.info.verb.merge16; direct_qk:385 design.tile_pipeline.phase.prep.role.Main.info.verb.merge16; direct_qk_ordered:414 design.tile_pipeline.phase.prep.role.Main.info.verb.merge16; root:527 design.tile_pipeline.phase.prep.role.Main.info.verb.merge16; segmented:464 design.tile_pipeline.phase.prep.role.Main.info.verb.merge16; segmented_ordered:481 design.tile_pipeline.phase.prep.role.Main.info.verb.merge16
+
+Perform the four width-16 merges per head, keeping the rounded Z intermediate in registers, store Ti and join the CTA.
+
+## t_1a1f2f127a809107 | pipeline.verb | 289 chars | 2 declarations
+
+segmented:611 design.tile_pipeline.phase.pass_c.role.Main.info.verb.setup; segmented_ordered:634 design.tile_pipeline.phase.pass_c.role.Main.info.verb.setup
+
+Use pass_a's Pitch, StageBytes and Partials formulas with fresh resources and barriers. Initialize and release NSTAGE barriers, then join the CTA. The entry launch_dependents hint has no in-call successor. Instructions are issued per warp; only explicit CTA/warp joins synchronize members.
+
+## t_1ab70016cc0db02e | pipeline.verb | 283 chars | 1 declarations
+
+cached_ordered:489 design.tile_pipeline.phase.chain.role.Main.info.verb.prime
+
+Issue loads for c=0..min(NSTAGE-2,c_n-1). One issuer arms each stage for StageBytes, issues the Q/K image bulk copy, one 11264-byte coefficient/vector copy and one V box. Done is issue completion, not transfer completion; transfers overlap state initialization and later computation.
+
+## t_24e1f4dd3b1ac113 | pipeline.verb | 706 chars | 1 declarations
+
+segmented_ordered:660 design.tile_pipeline.phase.pass_c.role.Main.info.verb.finish_chunk
+
+Each warp follows its own instruction sequence without a CTA join between readout, state update, output sweep and final-state staging. Form valid BF16 Out rows in RhsOutput, update R from preloaded Kc and DU, rebuild Rh, then join the warp and sweep only its Out bytes into contiguous 16-byte Out and optional core stores. Nonfinal chunks have no trailing CTA join; the next advance retires shared reads before stage/temporary reuse. After the last chunk, when FinalRows>0, each warp immediately writes R to stage 0 at FP32 pitch VTT+1, then joins the CTA. Earlier operand preloads and joins retired overlapping stage reads. Global output stores may remain in flight; there is no separate store-drain wait.
+
+## t_293d03a7c2f1b95f | pipeline.verb | 195 chars | 1 declarations
+
+direct_qk_ordered:504 design.tile_pipeline.phase.chain.role.Main.info.verb.seed
+
+Load the resolved request's initial_state into R after prime has issued its transfers, store Rh and join the CTA. Each warp owns one 16-key slice of R across all VTT values for the whole request.
+
+## t_324f33863b781a6e | pipeline.verb | 990 chars | 1 declarations
+
+cached_ordered:369 design.tile_pipeline.phase.prep.role.Main.info.verb.stage_inputs
+
+In the sorting worktile, thread 0 initializes N request IDs and their chunk counts in two local arrays, then insertion sorts with a strict smaller-count comparison and stores perm in the workspace tail pad. Other worktiles do no sorting. No CTA join follows the sort: other warps can issue their gate copies while thread 0 sorts. Thread 0 then issues four Q/K TMA boxes. Threads 0..63 issue predicated g/beta copies for all HeadsPerPrep heads, committing one group per head. Warps 0..1 wait for their own copy groups and join warps 4..5 at a 128-thread subset barrier. Warps 4..5 can then compute b/rho without waiting for Q/K; the other warps acquire the Q/K transaction. The scan halves use 64-thread joins for the cross-half correction. For ratio 8 the local scans, corrections and rho writes are separate passes across heads; ratios 1/2/3 finish one head at a time. A CTA join completes this action before Gram work starts. perm stores need only be globally visible at prep.kernel_done.
+
+## t_329e1fd6e66f194e | pipeline.verb | 188 chars | 1 declarations
+
+direct_qk:455 design.tile_pipeline.phase.chain.role.Main.info.verb.early_inputs
+
+Resolve the input-order request n and its input bounds and chunk offsets; these reads do not depend on prep. Load initial_state into R before waiting. This action issues no chunk transfer.
+
+## t_33b721d3f1889d7e | pipeline.verb | 471 chars | 4 declarations
+
+cached_ordered:497 design.tile_pipeline.phase.chain.role.Main.info.verb.advance; direct_qk:471 design.tile_pipeline.phase.chain.role.Main.info.verb.advance; direct_qk_ordered:505 design.tile_pipeline.phase.chain.role.Main.info.verb.advance; root:620 design.tile_pipeline.phase.chain.role.Main.info.verb.advance
+
+For chunk c acquire stage c%NSTAGE with parity floor(c/NSTAGE)%2, then join the CTA. This makes current input bytes and the previous Rh rebuild readable, and retires all previous-chunk stage/RhsOutput reads. Only after this join issue c+NSTAGE-1, if it exists, into (c+NSTAGE-1)%NSTAGE with the same full-byte expectation and transfer recipe as prime. That future transfer stays in flight during the following compute actions. No cp.async wait-group is used by the chain.
+
+## t_34b03cc050e43585 | pipeline.verb | 186 chars | 2 declarations
+
+direct_qk:390 design.tile_pipeline.phase.prep.role.Main.info.verb.finish_prep; direct_qk_ordered:419 design.tile_pipeline.phase.prep.role.Main.info.verb.finish_prep
+
+The issuer executes the source's empty bulk-group wait before exit. No image transfer was committed, so this has no data effect; coefficient visibility still comes from prep.kernel_done.
+
+## t_35970046111980d6 | pipeline.verb | 566 chars | 1 declarations
+
+direct_qk_ordered:484 design.tile_pipeline.phase.chain.role.Main.info.verb.join_prep
+
+Before waiting, read cu_seqlens[r], cu_seqlens[r+1], chunk_offsets[r] and perm[r] at the assigned rank r, sum them into a discarded warm-up operand, and use none of these values for addressing or control. The pre-wait perm value is unspecified; no initialization or producer completion is assumed for this in-bounds speculative read. Execute the PDL dependency wait for prep grid completion, then reread perm[r] as n and resolve its input bounds and chunk offset. The wait's memory clobber prevents reuse of the speculative loads. No state or chunk load precedes it.
+
+## t_390c45cf5a1697ae | pipeline.verb | 320 chars | 5 declarations
+
+cached_ordered:409 design.tile_pipeline.phase.prep.role.Main.info.verb.publish_group; direct_qk:389 design.tile_pipeline.phase.prep.role.Main.info.verb.publish_group; direct_qk_ordered:418 design.tile_pipeline.phase.prep.role.Main.info.verb.publish_group; root:531 design.tile_pipeline.phase.prep.role.Main.info.verb.publish_group; segmented:468 design.tile_pipeline.phase.prep.role.Main.info.verb.publish_group
+
+Copy the packed Ti tiles and b/bc/Ai/Dl to global slots. If another head group follows, a CTA join retires these shared-memory reads before Systems/Inverses/MergeScratch can be reused; the final group omits that extra join. Done covers the shared reads and store issue; global completion is supplied by prep.kernel_done.
+
+## t_393cfcfaf94a82d1 | pipeline.verb | 265 chars | 2 declarations
+
+segmented:620 design.tile_pipeline.phase.pass_c.role.Main.info.verb.prime; segmented_ordered:644 design.tile_pipeline.phase.pass_c.role.Main.info.verb.prime
+
+Issue loads for cl=0..min(NSTAGE-2,Count-1). One issuer arms each stage for StageBytes, issues the complete Q/K image bulk copy, one 11264-byte coefficient/vector copy and one V box. Done covers issue, not arrival; transfers overlap the following state composition.
+
+## t_3971a4ca2a32d8e6 | pipeline.verb | 137 chars | 1 declarations
+
+segmented_ordered:642 design.tile_pipeline.phase.pass_c.role.Main.info.verb.resolve
+
+Read Perm[r] again after the wait, then resolve n and its segment bounds. State initialization remains deferred until seed after priming.
+
+## t_3b32726f18403952 | pipeline.verb | 116 chars | 6 declarations
+
+cached_ordered:404 design.tile_pipeline.phase.prep.role.Main.info.verb.solve8; direct_qk:384 design.tile_pipeline.phase.prep.role.Main.info.verb.solve8; direct_qk_ordered:413 design.tile_pipeline.phase.prep.role.Main.info.verb.solve8; root:526 design.tile_pipeline.phase.prep.role.Main.info.verb.solve8; segmented:463 design.tile_pipeline.phase.prep.role.Main.info.verb.solve8; segmented_ordered:480 design.tile_pipeline.phase.prep.role.Main.info.verb.solve8
+
+Independent columns perform the FP32 substitution in registers, narrow/store valid entries of Ti, then join the CTA.
+
+## t_3fc7ec6bca643464 | pipeline.verb | 207 chars | 6 declarations
+
+cached_ordered:403 design.tile_pipeline.phase.prep.role.Main.info.verb.readout_coeff.meaning; direct_qk:383 design.tile_pipeline.phase.prep.role.Main.info.verb.readout_coeff.meaning; direct_qk_ordered:412 design.tile_pipeline.phase.prep.role.Main.info.verb.readout_coeff.meaning; root:525 design.tile_pipeline.phase.prep.role.Main.info.verb.readout_coeff.meaning; segmented:462 design.tile_pipeline.phase.prep.role.Main.info.verb.readout_coeff.meaning; segmented_ordered:479 design.tile_pipeline.phase.prep.role.Main.info.verb.readout_coeff.meaning
+
+Issue Qd stores directly to global packed tiles from F and b/rho. These stores may remain in flight during the independent column solves; global completion is required at prep.kernel_done, not before solve8.
+
+## t_3fd28da8d0172041 | pipeline.verb | 199 chars | 1 declarations
+
+segmented_ordered:650 design.tile_pipeline.phase.pass_c.role.Main.info.verb.seed
+
+For z=1, form SeedC from SegB(0) directly into R registers; z=0 loads initial_state. Store Rh and join the CTA. State loads overlap priming. Each warp owns a 16-key slice of R across all VTT columns.
+
+## t_42884a0c4770fccf | pipeline.verb | 334 chars | 5 declarations
+
+cached_ordered:361 design.tile_pipeline.phase.prep.role.Main.info.verb.enter; direct_qk:351 design.tile_pipeline.phase.prep.role.Main.info.verb.enter; direct_qk_ordered:376 design.tile_pipeline.phase.prep.role.Main.info.verb.enter; root:490 design.tile_pipeline.phase.prep.role.Main.info.verb.enter; segmented:427 design.tile_pipeline.phase.prep.role.Main.info.verb.enter
+
+In parallel load chunk_offsets[N], cu_seqlens[0:N+1] and chunk_indices[min(slot,C-1)] into shared metadata; initialize the Q/K transaction barrier and publish both at one CTA join. Inactive slots trigger launch_dependents and return; their a domain is empty. GroupWidth=2 in Shared mode, otherwise 1; scratch sets are reused across r.
+
+## t_47b339bee5f0b80a | pipeline.verb | 421 chars | 1 declarations
+
+segmented_ordered:464 design.tile_pipeline.phase.prep.role.Main.info.verb.gram
+
+Six warps cover the lower 16x16 tile set. Shared preparation computes Gm and F in one reduction loop sharing K operand loads; independent-head preparation runs Gram then query-key loops. Gm is shared BF16, F stays FP32 in registers until every head in this worktile has published Qd. Entirely upper tiles are skipped; system construction still loads some unwritten upper Gm entries but its conditional never selects them.
+
+## t_4b8b900cdd01dc7f | pipeline.verb | 278 chars | 1 declarations
+
+segmented_ordered:544 design.tile_pipeline.phase.pass_a.role.Main.info.verb.setup
+
+Pitch=40; StageBytes=44032+128*VTT; Partials=2. Initialize NSTAGE barriers, release their initialization, and join the CTA. One issuer triggers launch_dependents, permitting C dispatch before A completion. Instructions are issued per warp; only explicit joins synchronize warps.
+
+## t_506f88e507dad112 | pipeline.verb | 361 chars | 2 declarations
+
+cached_ordered:471 design.tile_pipeline.phase.chain.role.Main.info.verb.setup; root:593 design.tile_pipeline.phase.chain.role.Main.info.verb.setup
+
+Pitch=40 for VTT<=32 and 72 otherwise; StageBytes=44032+128*VTT; Partials=2 for VTT<=32, else 1. Initialize NSTAGE transaction barriers, release their initialization, then join the CTA. The entry launch_dependents hint has no in-call successor in MODE=0. State/output instructions are issued per warp; only the explicit CTA/warp joins below synchronize members.
+
+## t_509c5a06f4e78c4d | pipeline.verb | 592 chars | 3 declarations
+
+direct_qk:359 design.tile_pipeline.phase.prep.role.Main.info.verb.stage_inputs; root:498 design.tile_pipeline.phase.prep.role.Main.info.verb.stage_inputs; segmented:435 design.tile_pipeline.phase.prep.role.Main.info.verb.stage_inputs
+
+One lane issues four Q/K TMA boxes. Threads 0..63 issue predicated g/beta copies for all HeadsPerPrep heads, committing one group per head. Warps 0..1 wait for their own copy groups and join warps 4..5 at a 128-thread subset barrier. Warps 4..5 can then compute b/rho without waiting for Q/K; the other warps acquire the Q/K transaction. The scan halves use 64-thread joins for the cross-half correction. For ratio 8 the local scans, corrections and rho writes are separate passes across heads; ratios 1/2/3 finish one head at a time. A CTA join completes this action before Gram work starts.
+
+## t_51b0f2f247d9e0af | pipeline.verb | 335 chars | 1 declarations
+
+segmented_ordered:438 design.tile_pipeline.phase.prep.role.Main.info.verb.enter
+
+In parallel load chunk_offsets[N], cu_seqlens[0:N+1] and chunk_indices[min(slot,C-1)] into shared metadata; initialize the Q/K transaction barrier and publish both at one CTA join. Inactive slots trigger launch_dependents and return; their a domain is empty. GroupWidth=HeadsPerPrep; the single head group uses one or two scratch sets.
+
+## t_5a594f61fed996eb | pipeline.verb | 386 chars | 1 declarations
+
+root:610 design.tile_pipeline.phase.chain.role.Main.info.verb.prime
+
+Issue loads for c=0..min(NSTAGE-2,c_n-1). One issuer arms each stage for StageBytes, issues the Q/K image bulk copy, one 11264-byte coefficient/vector copy and one V box. PRE0 chunk 0 issues only the coefficient copy, using the earlier expectation without a second arrival. Done is issue completion, not transfer completion; transfers overlap state initialization and later computation.
+
+## t_5dc69d4bef6c6b40 | pipeline.verb | 222 chars | 5 declarations
+
+cached_ordered:399 design.tile_pipeline.phase.prep.role.Main.info.verb.skeleton; direct_qk:379 design.tile_pipeline.phase.prep.role.Main.info.verb.skeleton; direct_qk_ordered:408 design.tile_pipeline.phase.prep.role.Main.info.verb.skeleton; root:521 design.tile_pipeline.phase.prep.role.Main.info.verb.skeleton; segmented:458 design.tile_pipeline.phase.prep.role.Main.info.verb.skeleton
+
+Initialize inverse diagonal/upper triangle and system/inverse pad columns once for all GroupWidth scratch sets, then join the CTA. Every later group overwrites all strict-lower entries; the skeleton is not reset per group.
+
+## t_607ff622ab290c63 | pipeline.verb | 108 chars | 1 declarations
+
+segmented_ordered:558 design.tile_pipeline.phase.pass_a.role.Main.info.verb.join_prep
+
+Wait for prep grid completion with the PDL dependency wait; valid Perm and prepared payload reads follow it.
+
+## t_63c7e9f450edbc78 | pipeline.verb | 227 chars | 2 declarations
+
+segmented:559 design.tile_pipeline.phase.pass_a.role.Main.info.verb.publish_transfer; segmented_ordered:582 design.tile_pipeline.phase.pass_a.role.Main.info.verb.publish_transfer
+
+Store SegB from R registers and let one thread store SegA from aprod, including empty segments. Done covers store issue; visibility is established by pass_a.kernel_done. No final-state store or separate store-drain wait occurs.
+
+## t_66389ae941f3ec17 | pipeline.verb | 403 chars | 2 declarations
+
+direct_qk:461 design.tile_pipeline.phase.chain.role.Main.info.verb.prime; direct_qk_ordered:495 design.tile_pipeline.phase.chain.role.Main.info.verb.prime
+
+Issue loads for c=0..min(NSTAGE-2,c_n-1). One issuer arms each stage for StageBytes, issues four 8192-byte Q/K input boxes, one 11264-byte coefficient/vector bulk copy and one V box. The full B-row Q/K and V boxes include foreign request rows or past-T zero fill as defined by math_reshape. Done is issue completion, not transfer completion; transfers overlap state initialization and later computation.
+
+## t_6b29e7fda25cd201 | pipeline.verb | 299 chars | 2 declarations
+
+segmented:543 design.tile_pipeline.phase.pass_a.role.Main.info.verb.advance; segmented_ordered:567 design.tile_pipeline.phase.pass_a.role.Main.info.verb.advance
+
+Acquire stage cl%NSTAGE at parity floor(cl/NSTAGE)%2 and join the CTA. This publishes current inputs and prior Rh, and retires previous-chunk stage/temporary reads. Then issue cl+NSTAGE-1 if it exists, with prime's recipe; its transfer overlaps following computation. No cp.async wait-group is used.
+
+## t_75c26895181e00b2 | pipeline.verb | 285 chars | 2 declarations
+
+segmented:627 design.tile_pipeline.phase.pass_c.role.Main.info.verb.advance; segmented_ordered:651 design.tile_pipeline.phase.pass_c.role.Main.info.verb.advance
+
+Acquire stage cl%NSTAGE at parity floor(cl/NSTAGE)%2, then join the CTA. This publishes current inputs and prior Rh, and retires previous stage/RhsOutput reads. Then issue cl+NSTAGE-1 if it exists with prime's recipe, overlapping subsequent computation. No cp.async wait-group is used.
+
+## t_7911b83a1469d70a | pipeline.verb | 164 chars | 4 declarations
+
+cached_ordered:410 design.tile_pipeline.phase.prep.role.Main.info.verb.drain_image; root:532 design.tile_pipeline.phase.prep.role.Main.info.verb.drain_image; segmented:469 design.tile_pipeline.phase.prep.role.Main.info.verb.drain_image; segmented_ordered:486 design.tile_pipeline.phase.prep.role.Main.info.verb.drain_image
+
+The issuer waits for the committed image bulk group to finish globally before kernel exit. This does not add a per-head image wait; KQImage has never been overlaid.
+
+## t_7ccba7b3a1e03128 | pipeline.verb | 821 chars | 1 declarations
+
+direct_qk_ordered:384 design.tile_pipeline.phase.prep.role.Main.info.verb.stage_inputs
+
+In the slot-0, first-head CTA, thread 0 computes and writes perm from shared request boundaries before issuing its Q/K boxes. Other CTAs do not write perm; independent warps can begin their g/beta copies while that thread sorts. One lane issues four Q/K TMA boxes. Threads 0..63 issue predicated g/beta copies for all HeadsPerPrep heads, committing one group per head. Warps 0..1 wait for their own copy groups and join warps 4..5 at a 128-thread subset barrier. Warps 4..5 can then compute b/rho without waiting for Q/K; the other warps acquire the Q/K transaction. The scan halves use 64-thread joins for the cross-half correction. For ratio 8 the local scans, corrections and rho writes are separate passes across heads; ratios 1/2/3 finish one head at a time. A CTA join completes this action before Gram work starts.
+
+## t_80bfb1cee58e8b77 | pipeline.verb | 71 chars | 1 declarations
+
+segmented_ordered:574 design.tile_pipeline.phase.pass_a.role.Main.info.verb.rhs
+
+Form Hrhs, preload Ti fragments and join the CTA; no output is written.
+
+## t_864c1ad990d745d0 | pipeline.verb | 201 chars | 1 declarations
+
+segmented:626 design.tile_pipeline.phase.pass_c.role.Main.info.verb.seed
+
+For z>0, compose SeedC from descending SegB/SegA directly into R registers; z=0 retains its prefetched input state. Store Rh and join the CTA. Each warp owns a 16-key slice of R across all VTT columns.
+
+## t_86f4648fde1eeb2a | pipeline.verb | 464 chars | 4 declarations
+
+cached_ordered:538 design.tile_pipeline.phase.chain.role.Main.info.verb.final_store; direct_qk:512 design.tile_pipeline.phase.chain.role.Main.info.verb.final_store; direct_qk_ordered:546 design.tile_pipeline.phase.chain.role.Main.info.verb.final_store; root:661 design.tile_pipeline.phase.chain.role.Main.info.verb.final_store
+
+If requested, transpose the staged state to [value,key] global order. Per thread prefetch one float4 into a register; in each of VTT/8 rounds load the next float4 before storing the current one. The last round has no next load and its subsequently assigned current value is unused. No worktile follows in this CTA, and no speculative future chunk remains. Shared/global retirement follows kernel completion; no extra store-drain operation is present in the source.
+
+## t_8b35714286a56a0c | pipeline.verb | 435 chars | 5 declarations
+
+cached_ordered:388 design.tile_pipeline.phase.prep.role.Main.info.verb.gram; direct_qk:371 design.tile_pipeline.phase.prep.role.Main.info.verb.gram; direct_qk_ordered:400 design.tile_pipeline.phase.prep.role.Main.info.verb.gram; root:510 design.tile_pipeline.phase.prep.role.Main.info.verb.gram; segmented:447 design.tile_pipeline.phase.prep.role.Main.info.verb.gram
+
+Six warps cover the lower 16x16 tile set. For Shared ratios 2/3, compute Gm and F in one reduction loop sharing K operand loads; ratio 8 and independent-head preparation run Gram then query-key loops. Gm is shared BF16, F stays FP32 in registers until every head in this worktile has published Qd. Entirely upper tiles are skipped; system construction still loads some unwritten upper Gm entries but its conditional never selects them.
+
+## t_8be7701909903d0e | pipeline.verb | 82 chars | 6 declarations
+
+cached_ordered:408 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_x; direct_qk:388 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_x; direct_qk_ordered:417 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_x; root:530 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_x; segmented:467 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_x; segmented_ordered:484 design.tile_pipeline.phase.prep.role.Main.info.verb.merge64_x
+
+Read Y and the diagonal Ti blocks, store the lower-left Ti block and join the CTA.
+
+## t_8cf578c02a37ac57 | pipeline.verb | 337 chars | 4 declarations
+
+cached_ordered:514 design.tile_pipeline.phase.chain.role.Main.info.verb.solve; direct_qk:488 design.tile_pipeline.phase.chain.role.Main.info.verb.solve; direct_qk_ordered:522 design.tile_pipeline.phase.chain.role.Main.info.verb.solve; root:637 design.tile_pipeline.phase.chain.role.Main.info.verb.solve
+
+On the full path compute U from Ti and Hrhs, separately store Uh and DU, preload Qd and transposed Kc fragments into registers, then join the CTA. This both publishes Uh/DU and retires every Hrhs read before output can overwrite RhsOutput. On a mini chunk this action performs no reads, writes or join, but retains its issue/done events.
+
+## t_9115155cc234a875 | pipeline.verb | 182 chars | 2 declarations
+
+segmented:446 design.tile_pipeline.phase.prep.role.Main.info.verb.signal; segmented_ordered:463 design.tile_pipeline.phase.prep.role.Main.info.verb.signal
+
+Issue the active CTA's launch_dependents trigger after the input join. The grid launch_ready event permits pass-A dispatch, but none of the coefficient payload is declared ready yet.
+
+## t_92366d6d261ce4e4 | pipeline.verb | 170 chars | 1 declarations
+
+cached_ordered:496 design.tile_pipeline.phase.chain.role.Main.info.verb.seed
+
+Load the resolved request's initial_state into R after prime, store Rh and join the CTA. Each warp owns one 16-key slice of R across all VTT values for the whole request.
+
+## t_94acb0f48ed0c9e5 | pipeline.verb | 359 chars | 2 declarations
+
+direct_qk:447 design.tile_pipeline.phase.chain.role.Main.info.verb.setup; direct_qk_ordered:476 design.tile_pipeline.phase.chain.role.Main.info.verb.setup
+
+Pitch=40 for VTT=32 and 72 otherwise; StageBytes=44032+128*VTT; Partials=2 for VTT=32, else 1. Initialize NSTAGE transaction barriers, release their initialization, then join the CTA. The entry launch_dependents hint has no in-call successor in MODE=0. State/output instructions are issued per warp; only the explicit CTA/warp joins below synchronize members.
+
+## t_94e0634d9324ccc2 | pipeline.verb | 187 chars | 1 declarations
+
+segmented:618 design.tile_pipeline.phase.pass_c.role.Main.info.verb.join_a
+
+Wait for pass-A grid completion with the PDL dependency wait. This makes SegB/SegA available and transitively establishes prep completion; no prepared payload or transfer is used earlier.
+
+## t_984e58f152af29a6 | pipeline.verb | 197 chars | 1 declarations
+
+segmented_ordered:641 design.tile_pipeline.phase.pass_c.role.Main.info.verb.join_a
+
+Wait for pass-A grid completion with the PDL dependency wait. This makes SegB/SegA available and transitively establishes prep completion; valid Perm, prepared payload and transfer reads follow it.
+
+## t_99a621ca26e8d9bd | pipeline.verb | 146 chars | 1 declarations
+
+root:609 design.tile_pipeline.phase.chain.role.Main.info.verb.join_prep
+
+Wait for prep grid completion with the PDL dependency wait after the input-only state/PRE0 work. No prepared payload is consumed before this wait.
+
+## t_9bc1b59097d74fa5 | pipeline.verb | 172 chars | 2 declarations
+
+segmented:549 design.tile_pipeline.phase.pass_a.role.Main.info.verb.project; segmented_ordered:573 design.tile_pipeline.phase.pass_a.role.Main.info.verb.project
+
+Compute KS from Kc and Rh using the math's accumulator split. Warps partition token/value results 4-by-2. Partials merge at rhs; b is transferred but arithmetically unused.
+
+## t_9f83f1e055986a90 | pipeline.verb | 369 chars | 2 declarations
+
+segmented:655 design.tile_pipeline.phase.pass_c.role.Main.info.verb.final_store; segmented_ordered:674 design.tile_pipeline.phase.pass_c.role.Main.info.verb.final_store
+
+When FinalRows>0, transpose staged state to [value,key] global order. Per thread prefetch one float4; each of VTT/8 rounds loads the next float4 before storing the current one, with no next load in the last round. Otherwise perform no reads/writes, retaining issue/done events. No next worktile or speculative future chunk remains; retirement follows kernel completion.
+
+## t_a04c146a5a7fc321 | pipeline.verb | 309 chars | 2 declarations
+
+direct_qk:480 design.tile_pipeline.phase.chain.role.Main.info.verb.project; direct_qk_ordered:514 design.tile_pipeline.phase.chain.role.Main.info.verb.project
+
+Read current Qc/Kc and Rh into fragments and accumulate KS/QS. Warps form a 4-by-2 partition of the 64-by-VTT token/value result. At VTT=32 the two parity accumulators stay separate until rhs consumes KS and finish_chunk consumes QS; QS remains live through the solve. b is present in the transfer but unused.
+
+## t_a1cac99f61dc0033 | pipeline.verb | 141 chars | 1 declarations
+
+direct_qk:460 design.tile_pipeline.phase.chain.role.Main.info.verb.join_prep
+
+Wait for prep grid completion with the PDL dependency wait after the input-only state work. No prepared payload is consumed before this wait.
+
+## t_a1f7614eeed2cf87 | pipeline.verb | 187 chars | 1 declarations
+
+direct_qk_ordered:399 design.tile_pipeline.phase.prep.role.Main.info.verb.signal
+
+Issue the active CTA's launch_dependents trigger after the input join. The grid launch_ready event permits chain dispatch; coefficient and perm visibility still requires prep.kernel_done.
+
+## t_a4b3e36c32a5f048 | pipeline.verb | 49 chars | 1 declarations
+
+segmented_ordered:658 design.tile_pipeline.phase.pass_c.role.Main.info.verb.rhs
+
+Form Hrhs, preload Ti fragments and join the CTA.
+
+## t_a6665522df77ba13 | pipeline.verb | 198 chars | 1 declarations
+
+segmented:551 design.tile_pipeline.phase.pass_a.role.Main.info.verb.solve
+
+On the full path compute U, store DU without Uh, preload transposed Kc fragments and join the CTA, publishing DU and retiring Hrhs reads. On a mini chunk this is a no-op retaining issue/done events.
+
+## t_af001b131c35ac90 | pipeline.verb | 1033 chars | 1 declarations
+
+segmented:636 design.tile_pipeline.phase.pass_c.role.Main.info.verb.finish_chunk
+
+Each warp follows its own instruction sequence without a CTA join between readout, state update, output sweep and final-state staging. On the full path form valid BF16 Out rows in RhsOutput, update R from preloaded Kc and DU, rebuild Rh, then join the warp and sweep only its Out bytes into contiguous 16-byte Out and optional core stores. On a mini chunk read Kc row 0 after the DU0 join, update R and rebuild Rh; rhs has already written Out/core. Nonfinal chunks have no trailing CTA join; the next advance retires shared reads before stage/temporary reuse. After the last chunk, when FinalRows>0, each warp immediately writes R to stage 0 at FP32 pitch VTT+1, then joins the CTA. Earlier joins/preloads retired overlapping full-path reads. In a final mini chunk with (Count-1)%NSTAGE=0, these writes can race other warps' outstanding Kc row-0 reads. The source supplies no retirement guarantee; combining this suffix in one action does not add one. Global output stores may remain in flight; there is no separate store-drain wait.
+
+## t_affb990ec6614688 | pipeline.verb | 110 chars | 1 declarations
+
+segmented_ordered:476 design.tile_pipeline.phase.prep.role.Main.info.verb.system
+
+Build Sys for the one or two heads using shared Gm and the precomputed per-head decay data, then join the CTA.
+
+## t_b34373bc5f486116 | pipeline.verb | 177 chars | 1 declarations
+
+segmented_ordered:659 design.tile_pipeline.phase.pass_c.role.Main.info.verb.solve
+
+Compute U, separately store Uh and DU, preload Qd and transposed Kc fragments, then join the CTA. This publishes Uh/DU and retires Hrhs reads before output overwrites RhsOutput.
+
+## t_b362bc3ab8cbaa86 | pipeline.verb | 216 chars | 2 declarations
+
+segmented:633 design.tile_pipeline.phase.pass_c.role.Main.info.verb.project; segmented_ordered:657 design.tile_pipeline.phase.pass_c.role.Main.info.verb.project
+
+Compute KS/QS from Kc/Qc and Rh with the math's accumulator split. Warps partition token/value results 4-by-2. KS partials merge at rhs; QS stays live through solve and merges at readout. b is transferred but unused.
+
+## t_b4929ae7613f6039 | pipeline.verb | 198 chars | 1 declarations
+
+segmented:634 design.tile_pipeline.phase.pass_c.role.Main.info.verb.rhs
+
+Form Hrhs, preload Ti fragments and join the CTA. On a VTT=64,L=1 mini chunk, row-0 owners instead form U0, directly write Out and optional core, place DU0 in RhsOutput row 0 and join to publish it.
+
+## t_ba89569f4b7fa14d | pipeline.verb | 158 chars | 1 declarations
+
+cached_ordered:487 design.tile_pipeline.phase.chain.role.Main.info.verb.join_prep
+
+Wait for prep grid completion with the PDL dependency wait. Only metadata warming and resource setup precede this wait; prepared values become usable at done.
+
+## t_bced4e5c345328f0 | pipeline.verb | 326 chars | 1 declarations
+
+segmented:527 design.tile_pipeline.phase.pass_a.role.Main.info.verb.setup
+
+Pitch=40 for VTT=16 and 72 for VTT=64; StageBytes=44032+128*VTT; Partials=2 for VTT=16, else 1. Initialize NSTAGE barriers, release their initialization, and join the CTA. One issuer triggers launch_dependents, permitting C dispatch before A completion. Instructions are issued per warp; only explicit joins synchronize warps.
+
+## t_c0394c1b6c6deed2 | pipeline.verb | 283 chars | 2 declarations
+
+segmented:536 design.tile_pipeline.phase.pass_a.role.Main.info.verb.prime; segmented_ordered:560 design.tile_pipeline.phase.pass_a.role.Main.info.verb.prime
+
+One issuer loads cl=0..min(NSTAGE-2,m_z-1). Per stage arm one expectation of 22528+128*VTT bytes, then issue three bulk copies (K image, packed Ti, b/bc/Ai/Dl) and one V box. Q/Qd regions are neither loaded nor read. Done covers issue, not arrival; empty segments issue no transfers.
+
+## t_c273b167b5780539 | pipeline.verb | 185 chars | 5 declarations
+
+cached_ordered:400 design.tile_pipeline.phase.prep.role.Main.info.verb.system; direct_qk:380 design.tile_pipeline.phase.prep.role.Main.info.verb.system; direct_qk_ordered:409 design.tile_pipeline.phase.prep.role.Main.info.verb.system; root:522 design.tile_pipeline.phase.prep.role.Main.info.verb.system; segmented:459 design.tile_pipeline.phase.prep.role.Main.info.verb.system
+
+Build Sys for the next one or two heads using shared Gm and the precomputed per-head decay data, then join the CTA. Scratch from the prior group is reusable only after its publish join.
+
+## t_c39b06852a11e287 | pipeline.verb | 267 chars | 4 declarations
+
+cached_ordered:398 design.tile_pipeline.phase.prep.role.Main.info.verb.save_image.meaning; root:520 design.tile_pipeline.phase.prep.role.Main.info.verb.save_image.meaning; segmented:457 design.tile_pipeline.phase.prep.role.Main.info.verb.save_image.meaning; segmented_ordered:474 design.tile_pipeline.phase.prep.role.Main.info.verb.save_image.meaning
+
+The designated image owner issues one committed shared-to-global bulk copy. Done denotes global completion; KQImage remains unchanged through the complete inverse/head loop and the drain action. Nonowners perform no transfer but retain the action's issue/done events.
+
+## t_c5f7f7ec6e6365cf | pipeline.verb | 1300 chars | 4 declarations
+
+cached_ordered:515 design.tile_pipeline.phase.chain.role.Main.info.verb.finish_chunk; direct_qk:489 design.tile_pipeline.phase.chain.role.Main.info.verb.finish_chunk; direct_qk_ordered:523 design.tile_pipeline.phase.chain.role.Main.info.verb.finish_chunk; root:638 design.tile_pipeline.phase.chain.role.Main.info.verb.finish_chunk
+
+Each warp follows its own instruction sequence without a CTA join between readout, state update, output sweep and entry into final-state staging. On the full path, form valid BF16 Out rows in RhsOutput from QS and Qd/Uh, compute the R update using preloaded Kc fragments and DU, and rebuild Rh. Then perform a warp join and sweep only that warp's staged Out bytes into contiguous 16-byte stores to Out and optional core. On the mini branch, Out was already written by rhs; read row-0 Kc after the DU0 join, perform the rank-1 R update and rebuild Rh, without the full-path readout or sweep. Nonfinal chunks have no trailing CTA join: the next advance retires the prior shared reads before stage/RhsOutput reuse. On the last chunk, if FinalState is requested, each warp immediately writes its R values to stage 0 at FP32 pitch VTT+1, then joins the CTA to publish the staged final state. Full-path overlapping K/Q/V reads were retired by earlier joins/preloads. In a final mini chunk with (c_n-1)%NSTAGE=0, stage-0 writes can race other warps' outstanding Kc row-0 reads; the source supplies no read-retirement guarantee. Keeping this suffix in one action does not order those reads before other warps' writes. Output global stores may still be in flight; the source adds no separate store-drain wait.
+
+## t_ca79ff1ae2340f1b | pipeline.verb | 137 chars | 1 declarations
+
+segmented:542 design.tile_pipeline.phase.pass_a.role.Main.info.verb.seed
+
+Narrow prefetched or zero R into Rh and join the CTA, even for empty segments. Each warp owns a 16-key slice of R across all VTT columns.
+
+## t_cce51a3b04c2f01e | pipeline.verb | 342 chars | 1 declarations
+
+segmented:552 design.tile_pipeline.phase.pass_a.role.Main.info.verb.update
+
+Compute the full update using preloaded Kc and DU, or read Kc row 0 after the DU0 join for the mini update. Advance aprod and R, then rebuild Rh, including the last unused snapshot. There is no trailing CTA join. Nonfinal reads retire at the next advance; final publication reads only each warp's own R registers and needs no additional join.
+
+## t_d34d683ec32d9cc4 | pipeline.verb | 174 chars | 1 declarations
+
+segmented:550 design.tile_pipeline.phase.pass_a.role.Main.info.verb.rhs
+
+Form Hrhs, preload Ti fragments and join the CTA. On a VTT=64,L=1 mini chunk, row-0 owners instead form U0 and place DU0 in RhsScratch row 0, then join; no output is written.
+
+## t_d815cfee0094c6ad | pipeline.verb | 196 chars | 2 declarations
+
+segmented:619 design.tile_pipeline.phase.pass_c.role.Main.info.verb.classify; segmented_ordered:643 design.tile_pipeline.phase.pass_c.role.Main.info.verb.classify
+
+Scan all G SegA values to evaluate weak and establish Run and Count. Weak z>0 workers return here; their run domain is empty, while setup, input resolution, wait and classify events have occurred.
+
+## t_db380e21fbeb20ab | pipeline.verb | 158 chars | 1 declarations
+
+cached_ordered:488 design.tile_pipeline.phase.chain.role.Main.info.verb.resolve_request
+
+Reload n=perm[rank] after the wait, then read the original request bounds and chunk offset. The wait's memory clobber prevents reuse of the speculative value.
+
+## t_dd832632a62dc490 | pipeline.verb | 350 chars | 4 declarations
+
+cached_ordered:507 design.tile_pipeline.phase.chain.role.Main.info.verb.rhs; direct_qk:481 design.tile_pipeline.phase.chain.role.Main.info.verb.rhs; direct_qk_ordered:515 design.tile_pipeline.phase.chain.role.Main.info.verb.rhs; root:630 design.tile_pipeline.phase.chain.role.Main.info.verb.rhs
+
+On the full path, form Hrhs in RhsOutput, preload packed Ti fragments and join the CTA to publish Hrhs. On the VTT=64, L=1 branch, only row-0 owners form U0, directly store Out and optional core, and place DU0 in RhsOutput row 0; a CTA join publishes DU0. The following solve action is a no-op on this branch; finish_chunk performs its rank-1 update.
+
+## t_e535c99ed4f8c92a | pipeline.verb | 229 chars | 1 declarations
+
+segmented_ordered:485 design.tile_pipeline.phase.prep.role.Main.info.verb.publish_group
+
+Copy the packed Ti tiles and b/bc/Ai/Dl to global slots. This is the only head group, with no later scratch reuse or extra CTA join. Done covers the shared reads and store issue; global completion is supplied by prep.kernel_done.
+
+## t_e8fc3374fb50c927 | pipeline.verb | 141 chars | 1 declarations
+
+segmented_ordered:559 design.tile_pipeline.phase.pass_a.role.Main.info.verb.resolve
+
+Read Perm[r] again after the wait, then resolve n and its chunk bounds. Initialize aprod; state loading is deferred until seed after priming.
+
+## t_ec7c7b28c45f17f9 | pipeline.verb | 282 chars | 1 declarations
+
+segmented:635 design.tile_pipeline.phase.pass_c.role.Main.info.verb.solve
+
+On the full path compute U, separately store Uh and DU, preload Qd and transposed Kc fragments, then join the CTA. This publishes Uh/DU and retires Hrhs reads before output overwrites RhsOutput. On a mini chunk the action has no reads, writes or join, but retains issue/done events.
+
+## t_ed0a026deede6d08 | pipeline.verb | 181 chars | 3 declarations
+
+cached_ordered:387 design.tile_pipeline.phase.prep.role.Main.info.verb.signal; direct_qk:370 design.tile_pipeline.phase.prep.role.Main.info.verb.signal; root:509 design.tile_pipeline.phase.prep.role.Main.info.verb.signal
+
+Issue the active CTA's launch_dependents trigger after the input join. The grid launch_ready event permits chain dispatch, but none of the coefficient payload is declared ready yet.
+
+## t_ed534ca480f0b9b6 | pipeline.verb | 180 chars | 1 declarations
+
+segmented:617 design.tile_pipeline.phase.pass_c.role.Main.info.verb.early_inputs
+
+Resolve the input-order request and segment bounds; prefetch initial_state into R for z=0. Other segments leave R unset until composition. No chunk transfer occurs before the wait.
+
+## t_f1f837006193869e | pipeline.verb | 221 chars | 1 declarations
+
+segmented_ordered:566 design.tile_pipeline.phase.pass_a.role.Main.info.verb.seed
+
+Load initial_state into R for z=0, otherwise zero R; narrow R into Rh and join the CTA, even for empty segments. Loads overlap the already issued stage transfers. Each warp owns a 16-key slice of R across all VTT columns.
+
+## t_f37a5f268e4de9e2 | pipeline.verb | 881 chars | 1 declarations
+
+segmented_ordered:446 design.tile_pipeline.phase.prep.role.Main.info.verb.stage_inputs
+
+In the Perm-owning CTA, thread 0 builds request indices and chunk counts from shared cu_seqlens, performs stable descending insertion sort and issues all Perm stores. Other threads and active worktiles do not sort or store Perm. No CTA join follows the sort: other warps can issue their gate copies while thread 0 sorts. Thread 0 then issues four Q/K TMA boxes. Threads 0..63 issue predicated g/beta copies for all HeadsPerPrep heads, committing one group per head. Warps 0..1 wait for their own copy groups and join warps 4..5 at a 128-thread subset barrier. Warps 4..5 can then compute b/rho without waiting for Q/K; the other warps acquire the Q/K transaction. The scan halves use 64-thread joins for the cross-half correction, finishing one head at a time. A CTA join completes this action before Gram work starts. Perm stores need only be globally visible at prep.kernel_done.
+
+## t_f9b79e34028fe602 | pipeline.verb | 164 chars | 1 declarations
+
+segmented:534 design.tile_pipeline.phase.pass_a.role.Main.info.verb.early_inputs
+
+Resolve input-order n,h,vt,z and chunk bounds. Load initial_state into R for z=0, otherwise zero R; initialize aprod. No chunk transfer occurs before the prep wait.
+
+## t_fa02c3b5a4ecdf2f | pipeline.verb | 97 chars | 1 declarations
+
+segmented:535 design.tile_pipeline.phase.pass_a.role.Main.info.verb.join_prep
+
+Wait for prep grid completion with the PDL dependency wait; all prepared payload reads follow it.
+
+## t_facd3d2ae7f8f240 | pipeline.verb | 100 chars | 6 declarations
+
+cached_ordered:406 design.tile_pipeline.phase.prep.role.Main.info.verb.merge32; direct_qk:386 design.tile_pipeline.phase.prep.role.Main.info.verb.merge32; direct_qk_ordered:415 design.tile_pipeline.phase.prep.role.Main.info.verb.merge32; root:528 design.tile_pipeline.phase.prep.role.Main.info.verb.merge32; segmented:465 design.tile_pipeline.phase.prep.role.Main.info.verb.merge32; segmented_ordered:482 design.tile_pipeline.phase.prep.role.Main.info.verb.merge32
+
+Perform the two width-32 merges per head using a register Z intermediate, store Ti and join the CTA.
+
+## t_ff73e67d0015c91c | pipeline.verb | 120 chars | 1 declarations
+
+segmented_ordered:575 design.tile_pipeline.phase.pass_a.role.Main.info.verb.solve
+
+Compute U, store DU without Uh, preload transposed Kc fragments and join the CTA, publishing DU and retiring Hrhs reads.
+
+## t_1381aaa4c081d085 | realization.choice | 345 chars | 2 declarations
+
+segmented:682 realization.require[2].choice; segmented_ordered:701 realization.require[2].choice
+
+Bind early launch to cudaLaunchAttributeProgrammaticStreamSerialization and griddepcontrol.launch_dependents; bind A's prep wait and C's pass-A completion wait to griddepcontrol.wait. Bind bulk/TMA stage completion to one mbarrier byte expectation per stage generation and its parity acquire; bind prep image drain to cp.async.bulk.wait_group 0.
+
+## t_42ad8658d4ea6627 | realization.choice | 240 chars | 2 declarations
+
+cached_ordered:556 realization.require[0].choice; root:679 realization.require[0].choice
+
+Provide dense kernel inputs for q, k, v, g, beta, initial_state, cu_seqlens, chunk_indices and chunk_offsets. The host preserves contiguous views and copies other readonly views before prep; it does not add Q/K normalization in this domain.
+
+## t_51c8487da230c114 | realization.choice | 349 chars | 2 declarations
+
+direct_qk:530 realization.require[0].choice; direct_qk_ordered:564 realization.require[0].choice
+
+Provide dense kernel inputs for q, k, v, g, beta, initial_state, cu_seqlens, chunk_indices and chunk_offsets. The host preserves contiguous views and copies other readonly views before prep; it does not add Q/K normalization in this domain. Preserved storage offsets are not realigned. Tensor-map encoding errors raise before prep, with no fallback.
+
+## t_684f453e96c00a08 | realization.choice | 327 chars | 2 declarations
+
+cached_ordered:562 realization.require[2].choice; root:685 realization.require[2].choice
+
+Bind early launch to cudaLaunchAttributeProgrammaticStreamSerialization and griddepcontrol.launch_dependents; bind prepared-data availability to griddepcontrol.wait. Bind bulk/TMA stage completion to one mbarrier byte expectation per stage generation and its parity acquire; bind prep image drain to cp.async.bulk.wait_group 0.
+
+## t_7d84387f20c07cd0 | realization.choice | 229 chars | 2 declarations
+
+cached_ordered:559 realization.require[1].choice; root:682 realization.require[1].choice
+
+Match the four 8192-byte SWIZZLE_128B Q/K subimages and keep prep-image and chain-stage bases congruent modulo 1024. Decode V's 128-byte swizzle at VTT=64 using the actual destination phase; VTT<=32 uses packed unswizzled V rows.
+
+## t_967cd744bd59d79a | realization.choice | 334 chars | 2 declarations
+
+segmented:676 realization.require[0].choice; segmented_ordered:695 realization.require[0].choice
+
+Provide dense kernel inputs for q, k, v, g, beta, initial_state, cu_seqlens, chunk_indices and chunk_offsets. The host preserves contiguous views and copies other readonly views before prep; it does not add Q/K normalization in this domain. Q/K/V tensor maps are built before prep; encoding failures raise an error without a fallback.
+
+## t_998062bb33afe4d0 | realization.choice | 123 chars | 6 declarations
+
+cached_ordered:566 realization.prefer[0].choice; direct_qk:540 realization.prefer[0].choice; direct_qk_ordered:574 realization.prefer[0].choice; root:689 realization.prefer[0].choice; segmented:686 realization.prefer[0].choice; segmented_ordered:705 realization.prefer[0].choice
+
+Represent each packed 16x16 tile as two 16-by-8 half-column blocks at 16-byte row pitch, with matching ldmatrix addressing.
+
+## t_aae70343b9490de9 | realization.choice | 281 chars | 2 declarations
+
+direct_qk:533 realization.require[1].choice; direct_qk_ordered:567 realization.require[1].choice
+
+Use four 8192-byte SWIZZLE_128B Q/K subimages, independently TMA-written into prep and chain storage with 1024-byte-aligned bases for the source's phase-zero addressing. Decode V's 128-byte swizzle at VTT=64 using the actual destination phase; VTT=32 uses packed unswizzled V rows.
+
+## t_bef704459206601d | realization.choice | 274 chars | 2 declarations
+
+direct_qk:536 realization.require[2].choice; direct_qk_ordered:570 realization.require[2].choice
+
+Bind early launch to cudaLaunchAttributeProgrammaticStreamSerialization and griddepcontrol.launch_dependents; bind prepared-data availability to griddepcontrol.wait. Bind bulk/TMA stage completion to one mbarrier byte expectation per stage generation and its parity acquire.
+
+## t_d30c4a5b57387190 | realization.choice | 154 chars | 1 declarations
+
+segmented_ordered:698 realization.require[1].choice
+
+Match the four 8192-byte SWIZZLE_128B Q/K subimages and keep prep-image and chain-stage bases congruent modulo 1024. VTT=16 uses packed unswizzled V rows.
+
+## t_f2a3fa5cdc0ec5f3 | realization.choice | 228 chars | 1 declarations
+
+segmented:679 realization.require[1].choice
+
+Match the four 8192-byte SWIZZLE_128B Q/K subimages and keep prep-image and chain-stage bases congruent modulo 1024. Decode V's 128-byte swizzle at VTT=64 using the actual destination phase; VTT=16 uses packed unswizzled V rows.
+
+## t_0b472cfa7a78ca22 | realization.reason | 148 chars | 1 declarations
+
+cached_ordered:560 realization.require[1].reason
+
+Prep TMA writes the swizzled image and the chain copies it verbatim; mismatched phases change the logical operands despite identical transfer sizes.
+
+## t_2f9f2869b058f593 | realization.reason | 162 chars | 6 declarations
+
+cached_ordered:557 realization.require[0].reason; direct_qk:531 realization.require[0].reason; direct_qk_ordered:565 realization.require[0].reason; root:680 realization.require[0].reason; segmented:677 realization.require[0].reason; segmented_ordered:696 realization.require[0].reason
+
+The tensor-map descriptors and linear indexing encode dense strides, so noncontiguous input views require this materialization to preserve their logical elements.
+
+## t_6cafdaee571777bc | realization.reason | 192 chars | 4 declarations
+
+cached_ordered:563 realization.require[2].reason; root:686 realization.require[2].reason; segmented:683 realization.require[2].reason; segmented_ordered:702 realization.require[2].reason
+
+These are the source mechanisms separating dispatch, payload availability and asynchronous-store completion; replacing them by launch order alone loses the declared overlap or data dependency.
+
+## t_812df03f96c0cf84 | realization.reason | 144 chars | 2 declarations
+
+segmented:680 realization.require[1].reason; segmented_ordered:699 realization.require[1].reason
+
+Prep TMA creates the swizzled image copied by both chain passes; mismatched phases change the logical operands despite identical transfer sizes.
+
+## t_90afb269982bd326 | realization.reason | 174 chars | 1 declarations
+
+root:683 realization.require[1].reason
+
+The bulk path copies an already swizzled image, while direct TMA produces that image in place; mismatched phases change the logical operands despite identical transfer sizes.
+
+## t_bf37f862d8739548 | realization.reason | 191 chars | 6 declarations
+
+cached_ordered:567 realization.prefer[0].reason; direct_qk:541 realization.prefer[0].reason; direct_qk_ordered:575 realization.prefer[0].reason; root:690 realization.prefer[0].reason; segmented:687 realization.prefer[0].reason; segmented_ordered:706 realization.prefer[0].reason
+
+This source layout preserves the ten-tile byte count while reducing the shared-bank conflicts of a plain 32-byte-row tile; it does not change the declared values or add an accuracy guarantee.
+
+## t_da3e3c931fceaaa9 | realization.reason | 177 chars | 2 declarations
+
+direct_qk:534 realization.require[1].reason; direct_qk_ordered:568 realization.require[1].reason
+
+Direct TMA produces swizzled operands in each phase; matching their address decoding to the actual destination phase preserves logical operands despite identical transfer sizes.
+
+## t_f815c7324fe54fe6 | realization.reason | 162 chars | 2 declarations
+
+direct_qk:537 realization.require[2].reason; direct_qk_ordered:571 realization.require[2].reason
+
+These are the source mechanisms separating dispatch from payload availability; replacing them by launch order alone loses the declared overlap or data dependency.
+
+## t_245088a7a1e13854 | schedule.describe | 97 chars | 4 declarations
+
+cached_ordered:257 design.work_schedule.phase.chain.describe; direct_qk:247 design.work_schedule.phase.chain.describe; direct_qk_ordered:268 design.work_schedule.phase.chain.describe; root:387 design.work_schedule.phase.chain.describe
+
+Traverse each request and write Out, the supplied core destination and the requested final state.
+
+## t_28753956d45cb3bb | schedule.describe | 78 chars | 2 declarations
+
+segmented:281 design.work_schedule.phase.pass_a.describe; segmented_ordered:293 design.work_schedule.phase.pass_a.describe
+
+Run each segment from its pass-A entry and publish its state and scalar decay.
+
+## t_573ec79fa3822798 | schedule.describe | 89 chars | 2 declarations
+
+segmented:318 design.work_schedule.phase.pass_c.describe; segmented_ordered:332 design.work_schedule.phase.pass_c.describe
+
+Test decay, compose active segment entries, and rerun to write Out, core and final state.
+
+## t_6579b3609bbd8066 | schedule.describe | 66 chars | 1 declarations
+
+direct_qk:202 design.work_schedule.phase.prep.describe
+
+Form rounded chunk coefficients without saving a global Q/K image.
+
+## t_d832a592e6336d0e | schedule.describe | 94 chars | 1 declarations
+
+direct_qk_ordered:216 design.work_schedule.phase.prep.describe
+
+Form rounded chunk coefficients and the request permutation without saving a global Q/K image.
+
+## t_efff7eafe61c5b5e | schedule.describe | 95 chars | 1 declarations
+
+cached_ordered:204 design.work_schedule.phase.prep.describe
+
+Form rounded chunk coefficients, save the shared Q/K image and produce the request permutation.
+
+## t_f19dd2b8933e821f | schedule.describe | 62 chars | 2 declarations
+
+root:341 design.work_schedule.phase.prep.describe; segmented:235 design.work_schedule.phase.prep.describe
+
+Form rounded chunk coefficients and save the shared Q/K image.
+
+## t_f3952b8ca0bbfc85 | schedule.describe | 77 chars | 1 declarations
+
+segmented_ordered:239 design.work_schedule.phase.prep.describe
+
+Form rounded chunk coefficients, save the shared Q/K image and generate Perm.
+
+## t_09e5d70363faeac2 | schedule.strategy | 219 chars | 1 declarations
+
+cached_ordered:301 design.work_schedule.phase.chain.schedule.strategy
+
+Ascending rank visits requests in the stored order. This is a static one-worktile-per-CTA assignment, with no dynamic queue or cross-worktile state reduction; rank order does not guarantee execution or completion order.
+
+## t_0e1bf94e48602cb6 | schedule.strategy | 1012 chars | 1 declarations
+
+cached_ordered:206 design.work_schedule.phase.prep.decomposition.strategy
+
+SU=ceil_div(T,B)+N is the launch/allocation slot upper bound; actual C=chunk_offsets[N]. Slots >= C do metadata setup then exit. Active=1 for slot<C and 0 otherwise. Shared=(SU*H>=SM), with SM from meta_data.dispatch.when. HeadsPerPrep=HV/H when Shared, otherwise 1. A valid worktile loads one Q/K head and computes Gm/F once, then processes HeadsPerPrep value heads. Shared heads traverse the system/inverse levels in groups of at most two; independent-head preparation processes one. chunk_indices[slot] supplies (n,c). Only Shared CTAs or the first value-head CTA in each Q/K group save Qc/Kc. SaveRows=B for that active owner and 0 otherwise. HeadRows=Active*HeadsPerPrep is the produced coefficient extent. The worktile at slot=0,value_head=0 also produces all N entries of perm. SortRows=N for that owner and 0 otherwise. perm ranks original request IDs by decreasing c_n, breaking ties by increasing n. Its 4*N bytes survive all chain reads and are rewritten on every ordered call without an extra kernel.
+
+## t_3206c5b60c55b451 | schedule.strategy | 155 chars | 1 declarations
+
+direct_qk_ordered:315 design.work_schedule.phase.chain.schedule.strategy
+
+Rank order follows perm, so larger chunk counts receive earlier work IDs and ties preserve input order; this does not impose CTA start or completion order.
+
+## t_4b5f3b20da034ac9 | schedule.strategy | 515 chars | 1 declarations
+
+direct_qk_ordered:256 design.work_schedule.phase.prep.schedule.strategy
+
+The current CUDA stream orders prep, chain and reuse of the grow-only workspace across calls. Every consumed handoff slot is rewritten. Requested workspace still reserves SU*(11264*HV+32768*H)+512 bytes, including the unused Q/K image region; direct reads remove its writes and reads, not its allocation. perm occupies 4*N bytes of the tail pad after that region and is rewritten once per call; retain it until all chain readers have finished. The source provides no cross-stream event, lock or reentrancy protocol.
+
+## t_4e33655ce93f1321 | schedule.strategy | 899 chars | 1 declarations
+
+root:389 design.work_schedule.phase.chain.decomposition.strategy
+
+VTT=V from meta_data.dispatch.when; ChainBlocks=(128/VTT)*HV*N. NSTAGE=3 for VTT=16, also for VTT=32 with A>=8; otherwise 2, using A from meta_data.dispatch.when. PRE0=(VTT=16). Request coordinate n is the input order. Each worktile visits c=0..c_n-1 with all 128 key channels and value slice [vt*VTT,(vt+1)*VTT). No chunk is an independent chain worktile. Each (slot,h) coefficient set has 128/VTT chain worktile readers; each (slot,m) Q/K image has (HV/H)*(128/VTT) readers across grouped value heads. PRE0 loads first-chunk Q/K directly from q/k, leaving the saved first image without a chain reader. Later chunks use saved images. OutputRows=Length[n]; CoreRows=Length[n] when the caller buffer is supplied and contiguous, else 0; FinalRows=VTT when final state is requested, else 0. A supplied noncontiguous core buffer instead receives stores into the host temporary described by math_reshape.
+
+## t_51eec7fdb133f2b5 | schedule.strategy | 181 chars | 1 declarations
+
+cached_ordered:297 design.work_schedule.phase.chain.mapping.strategy
+
+Grid (128/VTT,HV,N) maps x to value tile, y to value head and z to rank. Resolve rank through perm after prep completes; state, chunk slots and outputs remain indexed by original n.
+
+## t_597732355b9f9649 | schedule.strategy | 711 chars | 2 declarations
+
+root:343 design.work_schedule.phase.prep.decomposition.strategy; segmented:237 design.work_schedule.phase.prep.decomposition.strategy
+
+SU=ceil_div(T,B)+N is the launch/allocation slot upper bound; actual C=chunk_offsets[N]. Slots >= C do metadata setup then exit. Active=1 for slot<C and 0 otherwise. Shared=(SU*H>=SM), with SM from meta_data.dispatch.when. HeadsPerPrep=HV/H when Shared, otherwise 1. A valid worktile loads one Q/K head and computes Gm/F once, then processes HeadsPerPrep value heads. Shared heads traverse the system/inverse levels in groups of at most two; independent-head preparation processes one. chunk_indices[slot] supplies (n,c). Only Shared CTAs or the first value-head CTA in each Q/K group save Qc/Kc. SaveRows=B for that active owner and 0 otherwise. HeadRows=Active*HeadsPerPrep is the produced coefficient extent.
+
+## t_7276033fbe6f4a9d | schedule.strategy | 344 chars | 1 declarations
+
+segmented_ordered:295 design.work_schedule.phase.pass_a.decomposition.strategy
+
+G and VTT take the values defined by meta_data.dispatch.when. NSTAGE=3. Each worktile is one (r,h,vt,z), with n=Perm[r], traversing cl=0..m_z-1, c=lo_z+cl. InitialRows=VTT for z=0, otherwise 0; other entries are zeroed. A value slice owns the complete 128-key state. All G segments publish SegB/SegA, including empty segments. A loads no Qc/Qd.
+
+## t_74b9354f4122b4ca | schedule.strategy | 129 chars | 4 declarations
+
+cached_ordered:246 design.work_schedule.phase.prep.mapping.strategy; direct_qk:233 design.work_schedule.phase.prep.mapping.strategy; direct_qk_ordered:252 design.work_schedule.phase.prep.mapping.strategy; root:376 design.work_schedule.phase.prep.mapping.strategy
+
+Grid x is the Q/K group or independent value head; grid y is slot. All computation in a valid worktile belongs to its single CTA.
+
+## t_7adf026a547befb6 | schedule.strategy | 207 chars | 2 declarations
+
+cached_ordered:250 design.work_schedule.phase.prep.schedule.strategy; root:380 design.work_schedule.phase.prep.schedule.strategy
+
+The current CUDA stream orders prep, chain and reuse of the grow-only workspace across calls. Every consumed handoff slot is rewritten. The source provides no cross-stream event, lock or reentrancy protocol.
+
+## t_83c6d2ba4000e0ae | schedule.strategy | 113 chars | 1 declarations
+
+segmented:311 design.work_schedule.phase.pass_a.mapping.strategy
+
+Grid (ValueDim/VTT,HV,N*G) maps x to vt, y to h and z-coordinate to n*G+z. A and C create distinct CTA instances.
+
+## t_875969a8913fe874 | schedule.strategy | 376 chars | 1 declarations
+
+direct_qk:237 design.work_schedule.phase.prep.schedule.strategy
+
+The current CUDA stream orders prep, chain and reuse of the grow-only workspace across calls. Every consumed handoff slot is rewritten. Requested workspace still reserves SU*(11264*HV+32768*H)+512 bytes, including the unused Q/K image region; direct reads remove its writes and reads, not its allocation. The source provides no cross-stream event, lock or reentrancy protocol.
+
+## t_8f8f9821e0af740c | schedule.strategy | 809 chars | 1 declarations
+
+cached_ordered:259 design.work_schedule.phase.chain.decomposition.strategy
+
+VTT=V from meta_data.dispatch.when; ChainBlocks=(128/VTT)*HV*N. NSTAGE=3 for VTT=16, also for VTT=32 with A>=8; otherwise 2, using A from meta_data.dispatch.when. Request coordinate rank resolves to n=perm[rank]. Each worktile visits c=0..c_n-1 with all 128 key channels and value slice [vt*VTT,(vt+1)*VTT). No chunk is an independent chain worktile. Each (slot,h) coefficient set has 128/VTT chain worktile readers; each (slot,m) Q/K image has (HV/H)*(128/VTT) readers across grouped value heads. All chunks use saved images; PRE0 is disabled. OutputRows=Length[n]; CoreRows=Length[n] when the caller buffer is supplied and contiguous, else 0; FinalRows=VTT when final state is requested, else 0. A supplied noncontiguous core buffer instead receives stores into the host temporary described by math_reshape.
+
+## t_907dc124cf3208e0 | schedule.strategy | 958 chars | 1 declarations
+
+segmented_ordered:241 design.work_schedule.phase.prep.decomposition.strategy
+
+SU=ceil_div(T,B)+N is the launch/allocation slot upper bound; actual C=chunk_offsets[N]. Slots >= C do metadata setup then exit. Active=1 for slot<C and 0 otherwise. Shared=(SU*H>=SM), with SM from meta_data.dispatch.when. HeadsPerPrep=HV/H when Shared, otherwise 1. Here Shared can hold only at HV/H=2: selection requires SM>=128*HV, whereas SU<=264. Thus HeadsPerPrep is either two or one. A valid worktile loads one Q/K head and computes Gm/F once, then processes HeadsPerPrep value heads. Shared heads traverse the system/inverse levels in groups of at most two; independent-head preparation processes one. chunk_indices[slot] supplies (n,c). Only Shared CTAs or the first value-head CTA in each Q/K group save Qc/Kc. SaveRows=B for that active owner and 0 otherwise. HeadRows=Active*HeadsPerPrep is the produced coefficient extent. The worktile at slot=0,value_head=0 also produces all Perm. OrderRows=N for that owner, otherwise 0; C>0 makes it active.
+
+## t_a13ce0b3f22f19d0 | schedule.strategy | 75 chars | 2 declarations
+
+direct_qk:288 design.work_schedule.phase.chain.mapping.strategy; root:427 design.work_schedule.phase.chain.mapping.strategy
+
+Grid (128/VTT,HV,N) maps x to value tile, y to value head and z to request.
+
+## t_a2db368d264264e3 | schedule.strategy | 761 chars | 1 declarations
+
+direct_qk_ordered:218 design.work_schedule.phase.prep.decomposition.strategy
+
+SU=ceil_div(T,B)+N is the launch/allocation slot upper bound; actual C=chunk_offsets[N]. Slots >= C do metadata setup then exit. Active=1 for slot<C and 0 otherwise. Shared=(SU*H>=SM), with SM from meta_data.dispatch.when. HeadsPerPrep=HV/H when Shared, otherwise 1. A valid worktile loads one Q/K head and computes Gm/F once, then processes HeadsPerPrep value heads. Shared heads traverse the system/inverse levels in groups of at most two; independent-head preparation processes one. chunk_indices[slot] supplies (n,c). HeadRows=Active*HeadsPerPrep is the produced coefficient extent. The slot-0, first value-head worktile additionally produces all of perm by stable insertion sort using the Contract chunk counts. OrderCount=N for that worktile, otherwise 0.
+
+## t_a775c0d6a2e115e3 | schedule.strategy | 167 chars | 1 declarations
+
+segmented_ordered:328 design.work_schedule.phase.pass_a.schedule.strategy
+
+Ascending request_rank follows Perm's stable descending chunk order. This is a static grid assignment, not dynamic work claiming or a guarantee of CTA execution order.
+
+## t_bca28c54ff7457b4 | schedule.strategy | 1421 chars | 1 declarations
+
+segmented_ordered:334 design.work_schedule.phase.pass_c.decomposition.strategy
+
+Use G,VTT,NSTAGE from pass_a and the segments math. Scanning SegA gives Run=0 for weak and z>0, otherwise Run=1. Run=0 worktiles finish after this test without recurrence or output. Count=0 for Run=0, otherwise c_n when weak or m_z when not weak. StartChunk=0 when weak, otherwise lo_z; cl ascends over Count. An empty A segment publishes SegA=1 and forces weak, so every active C traversal is nonempty. InitialRows is as in pass_a. All workers scan both SegA entries. Only not-weak z=1 workers read SegB(0), before chunk computation; SegB(1) has no reader. TransferKeys=KeyDim for not-weak z=1, otherwise 0. OutputRows=min(Length[n],B*(StartChunk+Count))-B*StartChunk for active workers, otherwise 0. CoreRows=OutputRows for a supplied contiguous core, otherwise 0; noncontiguous core stores target the host temporary. FinalRows=VTT when output_final_state and Run=1 and (weak or z=G-1), otherwise 0. Each (slot,h) Ti/b/bc/Ai/Dl set has ValueDim/VTT worktile readers in each pass; Qd has that many only in C. Each (slot,m) Kc image has (HV/H)*(ValueDim/VTT) readers in each pass, while Qc has that many only in C. This includes the first chunk; no PRE0 bypass occurs. Segment partitioning or weak rerun assigns each chunk to one worktile per (h,vt) per pass, not G copies of that chunk. Prep storage survives both passes. SegB/SegA remain valid through every C read; no separate merge submission or scratch reset occurs.
+
+## t_c8795fd340be631d | schedule.strategy | 178 chars | 1 declarations
+
+segmented_ordered:324 design.work_schedule.phase.pass_a.mapping.strategy
+
+Grid (ValueDim/VTT,HV,N*G) maps x to vt, y to h and z-coordinate to r*G+z. Both passes resolve n=Perm[r] only after their predecessor wait. A and C create distinct CTA instances.
+
+## t_c888a4f97f895036 | schedule.strategy | 948 chars | 1 declarations
+
+direct_qk_ordered:270 design.work_schedule.phase.chain.decomposition.strategy
+
+VTT=V from meta_data.dispatch.when; ChainBlocks=(128/VTT)*HV*N. VTT is 32 or 64. NSTAGE=3 for VTT=32 with A>=8; otherwise 2, using A from meta_data.dispatch.when. Request-rank coordinate r resolves to n=perm[r]. Each worktile visits c=0..c_n-1 with all 128 key channels and value slice [vt*VTT,(vt+1)*VTT). No chunk is an independent chain worktile. Each (slot,h) coefficient set has 128/VTT chain worktile readers; each (slot,m) input Q/K view has (HV/H)*(128/VTT) chain readers across grouped value heads, in addition to its prep readers. Each perm[r] has HV*(128/VTT) chain worktile readers. All chunk transfers and initial_state reads follow the prep wait and request resolution. OutputRows=Length[n]; CoreRows=Length[n] when the caller buffer is supplied and contiguous, else 0; FinalRows=VTT when final state is requested, else 0. A supplied noncontiguous core buffer instead receives stores into the host temporary described by math_reshape.
+
+## t_cb081fd34fe68c3d | schedule.strategy | 129 chars | 2 declarations
+
+segmented:270 design.work_schedule.phase.prep.mapping.strategy; segmented_ordered:280 design.work_schedule.phase.prep.mapping.strategy
+
+Grid x is slot; grid y is the Q/K group or independent value head. All computation in a valid worktile belongs to its single CTA.
+
+## t_ceb30803e39f9813 | schedule.strategy | 1369 chars | 1 declarations
+
+segmented:320 design.work_schedule.phase.pass_c.decomposition.strategy
+
+Use G,VTT,NSTAGE from pass_a and the segments math. Scanning SegA gives Run=0 for weak and z>0, otherwise Run=1. Run=0 worktiles finish after this test without recurrence or output. Count=0 for Run=0, otherwise c_n when weak or m_z when not weak. StartChunk=0 when weak, otherwise lo_z; cl ascends over Count. An empty A segment publishes SegA=1 and forces weak, so every active C traversal is nonempty. InitialRows is as in pass_a. All workers scan all G SegA entries. Only not-weak z>0 workers read SegB(i), i=z-1..0 descending, before chunk computation. OutputRows=min(Length[n],B*(StartChunk+Count))-B*StartChunk for active workers, otherwise 0. CoreRows=OutputRows for a supplied contiguous core, otherwise 0; noncontiguous core stores target the host temporary. FinalRows=VTT when output_final_state and Run=1 and (weak or z=G-1), otherwise 0. Each (slot,h) Ti/b/bc/Ai/Dl set has ValueDim/VTT worktile readers in each pass; Qd has that many only in C. Each (slot,m) Kc image has (HV/H)*(ValueDim/VTT) readers in each pass, while Qc has that many only in C. This includes the first chunk; no PRE0 bypass occurs. Segment partitioning or weak rerun assigns each chunk to one worktile per (h,vt) per pass, not G copies of that chunk. Prep storage survives both passes. SegB/SegA remain valid through every C read; no separate merge submission or scratch reset occurs.
+
+## t_e41a9fe22a996e95 | schedule.strategy | 346 chars | 1 declarations
+
+segmented_ordered:284 design.work_schedule.phase.prep.schedule.strategy
+
+The current CUDA stream orders prep, pass A, pass C and reuse of the grow-only workspace across calls. Every consumed handoff slot is rewritten. Perm occupies 4*N bytes in the Q/K workspace tail, disjoint from images and SegB/SegA, and survives both passes' request lookups. The source provides no cross-stream event, lock or reentrancy protocol.
+
+## t_ee0970f905a8cfbf | schedule.strategy | 374 chars | 1 declarations
+
+segmented:283 design.work_schedule.phase.pass_a.decomposition.strategy
+
+G and VTT take the values defined by meta_data.dispatch.when. NSTAGE=3 for VTT=16 and 2 for VTT=64. Each worktile is one (n,h,vt,z), n in input order, traversing cl=0..m_z-1, c=lo_z+cl. InitialRows=VTT for z=0, otherwise 0; other entries are zeroed. A value slice owns the complete 128-key state. All G segments publish SegB/SegA, including empty segments. A loads no Qc/Qd.
+
+## t_f6c263da69eee568 | schedule.strategy | 586 chars | 1 declarations
+
+direct_qk:204 design.work_schedule.phase.prep.decomposition.strategy
+
+SU=ceil_div(T,B)+N is the launch/allocation slot upper bound; actual C=chunk_offsets[N]. Slots >= C do metadata setup then exit. Active=1 for slot<C and 0 otherwise. Shared=(SU*H>=SM), with SM from meta_data.dispatch.when. HeadsPerPrep=HV/H when Shared, otherwise 1. A valid worktile loads one Q/K head and computes Gm/F once, then processes HeadsPerPrep value heads. Shared heads traverse the system/inverse levels in groups of at most two; independent-head preparation processes one. chunk_indices[slot] supplies (n,c). HeadRows=Active*HeadsPerPrep is the produced coefficient extent.
+
+## t_f84572553e595477 | schedule.strategy | 872 chars | 1 declarations
+
+direct_qk:249 design.work_schedule.phase.chain.decomposition.strategy
+
+VTT=V from meta_data.dispatch.when; ChainBlocks=(128/VTT)*HV*N. VTT is 32 or 64. NSTAGE=3 for VTT=32 with A>=8; otherwise 2, using A from meta_data.dispatch.when. Request coordinate n is the input order. Each worktile visits c=0..c_n-1 with all 128 key channels and value slice [vt*VTT,(vt+1)*VTT). No chunk is an independent chain worktile. Each (slot,h) coefficient set has 128/VTT chain worktile readers; each (slot,m) input Q/K view has (HV/H)*(128/VTT) chain readers across grouped value heads, in addition to its prep readers. All chunk transfers follow the prep wait; initial_state is read before it. OutputRows=Length[n]; CoreRows=Length[n] when the caller buffer is supplied and contiguous, else 0; FinalRows=VTT when final state is requested, else 0. A supplied noncontiguous core buffer instead receives stores into the host temporary described by math_reshape.
+
+## t_f87ea42e00c04dc1 | schedule.strategy | 216 chars | 1 declarations
+
+segmented:274 design.work_schedule.phase.prep.schedule.strategy
+
+The current CUDA stream orders prep, pass A, pass C and reuse of the grow-only workspace across calls. Every consumed handoff slot is rewritten. The source provides no cross-stream event, lock or reentrancy protocol.
+
+## t_fc0b51ec170cb1d2 | schedule.strategy | 135 chars | 1 declarations
+
+direct_qk_ordered:311 design.work_schedule.phase.chain.mapping.strategy
+
+Grid (128/VTT,HV,N) maps x to value tile, y to value head and z to request rank; input, coefficient and output addresses use n=perm[z].
+
+## t_1f8859dcc39875ec | schedule.thesis | 495 chars | 1 declarations
+
+direct_qk_ordered:194 design.work_schedule.thesis
+
+Independent chunk/head preparation feeds one CTA per request, value head and VTT value channels. Each chain owns its whole request recurrence; wider value tiles reduce duplicated chunk traffic and worker count at the cost of a wider local state. Preparation also supplies perm so longer chains receive earlier work IDs, at the cost of sorting and post-wait request resolution. Coefficients and perm cross the phase boundary; each chain reads Q/K directly, with no cross-worktile state reduction.
+
+## t_2a25ee1e8ffeb722 | schedule.thesis | 353 chars | 1 declarations
+
+cached_ordered:182 design.work_schedule.thesis
+
+Independent chunk/head preparation feeds one CTA per request, value head and VTT value channels. A stable descending chunk-count permutation puts long chains first, at the cost of sorting and waiting for request identity. Each chain owns its whole request recurrence; wider value tiles reduce duplicated chunk traffic at the cost of a wider local state.
+
+## t_5311b63a0fbefa29 | schedule.thesis | 367 chars | 1 declarations
+
+direct_qk:183 design.work_schedule.thesis
+
+Independent chunk/head preparation feeds one CTA per request, value head and VTT value channels. Each chain owns its whole request recurrence; wider value tiles reduce duplicated chunk traffic and worker count at the cost of a wider local state. Only coefficients cross the prep/chain boundary; each chain reads Q/K directly. No cross-worktile state reduction occurs.
+
+## t_566d07d19b3170be | schedule.thesis | 287 chars | 1 declarations
+
+root:321 design.work_schedule.thesis
+
+Independent chunk/head preparation feeds one CTA per request, value head and VTT value channels. Each chain owns its whole request recurrence; wider value tiles reduce duplicated chunk traffic and worker count at the cost of a wider local state. No cross-worktile state reduction occurs.
+
+## t_7ac756d09059624c | schedule.thesis | 279 chars | 1 declarations
+
+segmented:212 design.work_schedule.thesis
+
+Slot-fastest prep feeds G segment workers per request/head/value tile. Pass A publishes FP32 summaries; pass C composes entries and reruns for all outputs. More segment parallelism costs two chain submissions and repeated input reads; weak decay serializes C within each request.
+
+## t_bf67e121cd488147 | schedule.thesis | 258 chars | 1 declarations
+
+segmented_ordered:215 design.work_schedule.thesis
+
+Slot-fastest prep also produces the request permutation. A and C assign longer requests first, each with two segment workers per head/value tile. Three submissions and repeated input reads buy segment parallelism; weak decay serializes C within each request.
