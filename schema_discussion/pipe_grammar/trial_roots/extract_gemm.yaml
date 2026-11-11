@@ -1,0 +1,57 @@
+experiment:
+  operator: extract_gemm
+  rules: pipe-control-v0.2
+  baseline: schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_gemm/root.yaml
+  kernel_sources:
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_gemm/solution.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_gemm/fp8gg_bind.cpp
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_gemm/fp8gg_umma.cu
+# This projection inherits the baseline context, contracts and all waits_for.
+tile_pipeline:
+  phase:
+    main:
+      domain:
+        t: worktile
+        q: [0, Q]
+        n: {flatten: [t, q]}
+        p: [0, "Q+2"]
+        d: [0, 8]
+      role:
+        Producer:
+          pipe:
+            - "initialize:Schedule"
+            - "for(n)":
+                - "load:Operands(n)"
+        Issuer:
+          pipe:
+            - "for(n)":
+                - "mma:A_pair(n)@B_pair(n)"
+        Epilogue:
+          pipe:
+            - "wait:Schedule"
+            - "for(t)":
+                - "prepare:Work(t)"
+                - "for(p[0:2])":
+                    - "prefetch_a:AS(t,p)"
+                - "prefetch_b:BS(t,0)"
+                - "for(n[t])":
+                    - "capture:Scales(n)"
+                    - "prefetch_b:BS(t,q+1)"
+                    - "acquire:DotPair(n)"
+                    - "read:Fragment(n,0)"
+                    - "for(d[0:7])":
+                        - "await:Fragment(n,d)"
+                        - "read:Fragment(n,d+1)"
+                        - "compute:Accum(n,d)"
+                    - "await:Fragment(n,7)"
+                    - "release:DotPair(n)"
+                    - "compute:Accum(n,7)"
+                    - "prefetch_a:AS(t,q+2)"
+                # prepare:Work fixes Full(t) for this entire worktile.
+                - "if(Full(t) == 1)":
+                    - "release:Staging(t,0)"
+                    - "publish:Output(t,0)"
+                    - "store:Output(t,0)"
+                - "if(Full(t) == 0)":
+                    - "store_tail:out(t,0)"
+            - "drain:Stores"

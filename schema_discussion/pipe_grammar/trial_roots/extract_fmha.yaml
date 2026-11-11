@@ -1,0 +1,35 @@
+experiment:
+  operator: extract_fmha
+  rules: pipe-control-v0.2
+  baseline: schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_fmha/root.yaml
+  kernel_sources:
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_fmha/solution.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_fmha/fmha_mxfp8_qkv.cu
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_fmha/fmha_tcg.cuh
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_fmha/fmha_tcg_ptx.cuh
+tile_pipeline:
+  phase:
+    main:
+      domain:
+        g: [cLo, "cHi+1"]
+        z: [0, 2]
+      role:
+        Main:
+          pipe:
+            - "setup:Local"
+            - "prime:Inputs"
+            - "prepare:Query"
+            - "for(g)":
+                - "prefetch:Head(g)"
+                - "land:Key(g)"
+                - "for(z)":
+                    - "qk:ScoreHalf(g,z)"
+                    - "read_score:Score(g,z)"
+                - "retire:Previous(g)"
+                - "prefetch:ValueNext(g)"
+                - "land:Value(g)"
+                - "advance:StateProb(g)"
+                - "pv:NumState(g)"
+            - "drain:LastPV"
+            - "write:Output"
+            - "finish:Local"

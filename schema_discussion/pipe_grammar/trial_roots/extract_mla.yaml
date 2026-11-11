@@ -1,0 +1,64 @@
+experiment:
+  operator: extract_mla
+  rules: pipe-control-v0.2
+  baseline: schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_mla/root.yaml
+  kernel_sources:
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_mla/solution.py
+
+tile_pipeline:
+  phase:
+    main:
+      domain:
+        w: worktile
+        t: [0, "N(w)"]
+        n: {flatten: [w, t]}
+      role:
+        Softmax:
+          pipe:
+            - "for(w)":
+                - "latch:Item(w)"
+                - "for(n[w,0:N(w)-1])":
+                    - "load:Scores(n)"
+                    - "publish:Alpha(n)"
+                    - "compute:Weights(n)"
+                    - "publish:P(n)"
+                - "request:Next(w)"
+                - "load:Scores(n[w,N(w)-1])"
+                - "publish:Alpha(n[w,N(w)-1])"
+                - "compute:Weights(n[w,N(w)-1])"
+                - "produce:Final(w)"
+                - "publish:P(n[w,N(w)-1])"
+                - "wait:Next(w)"
+        Correction:
+          pipe:
+            - "for(w)":
+                - "latch:Item(w)"
+                - "for(n[w,1:])":
+                    - "rescale:Y(n)"
+                - "store:OutputPrefix(w)"
+                - "release:OutputState(w)"
+                - "store:OutputTail(w)"
+                - "wait:Next(w)"
+        MMA:
+          pipe:
+            - "for(w)":
+                - "latch:Item(w)"
+                - "wait:QTile(w)"
+                - "qk:S(n[w,0])"
+                - "for(n[w,1:])":
+                    - "qk:S(n)"
+                    - "mma:P(n-1)@VTile(n-1)"
+                - "mma:P(n[w,N(w)-1])@VTile(n[w,N(w)-1])"
+                - "wait:Next(w)"
+        Loader:
+          pipe:
+            - "for(w)":
+                - "load:QTile(w)"
+                - "latch:Item(w)"
+                - "for(n[w])":
+                    - "load:KV(n)"
+                - "wait:Next(w)"
+        Queue:
+          pipe:
+            - "for(w)":
+                - "publish:Next(w)"

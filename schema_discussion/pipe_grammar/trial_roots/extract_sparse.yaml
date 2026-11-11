@@ -1,0 +1,34 @@
+experiment:
+  operator: extract_sparse
+  rules: pipe-control-v0.2
+  baseline: schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_sparse/root.yaml
+  kernel_sources:
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_sparse/solution.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_sparse/dsv4_kernel.cu
+tile_pipeline:
+  phase:
+    attention:
+      domain:
+        c: [c0, c1]
+      role:
+        Main:
+          pipe:
+            - "metadata:Work"
+            - "prepare:Work"
+            - "for(c)":
+                - "await:Gather(c)"
+                - "enqueue:Future(c)"
+                - "score:Scores(c)"
+                - "softmax:Prob(c)"
+                - "value:Acc(c-c0)"
+                - "retire:Gather(c)"
+            - "finish:Work"
+    combine:
+      domain: {}
+      role:
+        Merge:
+          pipe:
+            - "prime:Vectors"
+            - "normalize:Statistics"
+            - "fold:Vectors"
+            - "store:out"

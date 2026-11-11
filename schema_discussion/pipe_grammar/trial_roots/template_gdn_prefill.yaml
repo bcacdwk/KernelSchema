@@ -1,0 +1,97 @@
+experiment:
+  operator: template_gdn_prefill
+  rules: pipe-control-v0.2
+  baseline: schema_template/examples/gdn_prefill/root.yaml
+  kernel_sources:
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_gdn_prefill/solution.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_gdn_prefill/build_solution.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_gdn_prefill/gdn_prefill.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_gdn_prefill/gated_delta_net_chunked.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_gdn_prefill/gated_delta_net_tile_scheduler.py
+
+# Pipe projection: all omitted fields, including waits_for, inherit baseline.
+tile_pipeline:
+  phase:
+    index_cast:
+      domain: {}
+      role:
+        Convert:
+          pipe:
+            - "produce:Cu32"
+    gdn:
+      domain:
+        t: worktile
+        c: [0, Np]
+        p: [0, Np/2]
+        n: {flatten: [t, c]}
+      role:
+        Load:
+          pipe:
+            - "for(t)":
+                - "bound:QKV(t)"
+                - "for(n[t])":
+                    - "load:K(n)"
+                    - "load:Q(n)"
+                    - "load:V(n)"
+        MMA0:
+          pipe:
+            - "for(t)":
+                - "for(p)":
+                    - "matmul:KK(n[t,2*p])"
+                    - "matmul:KK(n[t,2*p+1])"
+                    - "matmul:QK(n[t,2*p])"
+                    - "matmul:QK(n[t,2*p+1])"
+        Inverse:
+          pipe:
+            - "for(t)":
+                - "for(p)":
+                    - "prepare:Pair(t,p)"
+                    - "capture:BetaPair(t,p)"
+                    - "for(j=0:2)":
+                        - "read:KK(n[t,2*p+j])"
+                        - "compute:A(n[t,2*p+j])"
+                    - "invert:Pair(t,p)"
+                    - "for(j=0:2)":
+                        - "publish:Tinv(n[t,2*p+j])"
+                    - "for(j=0:2)":
+                        - "read:QK(n[t,2*p+j])"
+                        - "publish:Bmat(n[t,2*p+j])"
+        MMA1:
+          pipe:
+            - "for(t)":
+                - "for(n[t])":
+                    - "matmul:KS(n)"
+                    - "matmul:QS(n)"
+                    - "matmul:U(n)"
+                    - "matmul:Y(n)"
+                    - "matmul:S(n)"
+        Recurrence:
+          pipe:
+            - "for(t)":
+                - "load:initial_state(t)"
+                - "for(n[t])":
+                    - "publish:StateOperand(n)"
+                    - "compute:Decay(n)"
+                    - "publish:R(n)"
+                    - "rescale:QS(n)"
+                    - "release:V(n)"
+                    - "read:U(n)"
+                    - "publish:Ubar(n)"
+                    - "publish:Udec(n)"
+                    - "publish:O(n)"
+                - "store:S_final(t)"
+        ScalarOutput:
+          pipe:
+            - "for(t)":
+                - "bound:Output(t)"
+                - "for(j=0:min(4,Np))":
+                    - "compute:GateRegs(n[t,j])"
+                    - "publish:Gate(n[t,j])"
+                    - "load:Beta(n[t,j])"
+                - "for(j=0:max(0,Np-4))":
+                    - "compute:GateRegs(n[t,j+4])"
+                    - "publish:Gate(n[t,j+4])"
+                    - "load:Beta(n[t,j+4])"
+                    - "store:O(n[t,j])"
+                - "for(j=max(0,Np-4):Np)":
+                    - "store:O(n[t,j])"

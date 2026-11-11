@@ -1,0 +1,58 @@
+# Pipe projection: all unlisted context is inherited from experiment.baseline.
+# In particular, keep dispatch, work scheduling, resources, membership,
+# execution modes, action contracts, milestones and inter-phase handoffs.
+experiment:
+  operator: extract_gdn
+  rules: pipe-control-v0.2
+  baseline: schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_gdn/root.yaml
+  kernel_sources:
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_gdn/solution.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_gdn/gdn_kernel.cu
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_gdn/gdn_common.cuh
+tile_pipeline:
+  phase:
+    prep:
+      domain:
+        r: [0, "ceil_div(HeadsPerPrep,GroupWidth)"]
+      role:
+        Main:
+          pipe:
+            - "enter:Metadata"
+            - "if(Active == 1)":
+                - "stage_inputs:KQ_Decays"
+                - "signal:Launch"
+                - "gram:Gm_F"
+                - "save_image:KQImage(0)"
+                - "skeleton:Ti"
+                - "for(r)":
+                    - "system:Sys(r)"
+                    - "readout_coeff:Qd(r)"
+                    - "solve8:Ti(r)"
+                    - "merge16:Ti(r)"
+                    - "merge32:Ti(r)"
+                    - "merge64_y:Y(r)"
+                    - "merge64_x:Ti(r)"
+                    - "publish_group:Coefficients(r)"
+                - "drain_image:KQImage(0)"
+          # Complete replacement. The target occurrence inherits the if above.
+          waits_for:
+            data:
+              "drain_image:KQImage(0)@done": ["save_image:KQImage(0)@done"]
+    chain:
+      domain:
+        c: [0, c_n]
+      role:
+        Main:
+          pipe:
+            - "setup:Resources"
+            - "early_inputs:Inputs"
+            - "join_prep:Prepared"
+            - "prime:Stages"
+            - "seed:R"
+            - "for(c)":
+                - "advance:Stage(c)"
+                - "project:KS_QS(c)"
+                - "rhs:Hrhs(c)"
+                - "solve:U(c)"
+                - "finish_chunk:Out_R(c)"
+            - "final_store:FinalState"

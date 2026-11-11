@@ -1,0 +1,59 @@
+experiment:
+  operator: template_fa4_prefill
+  rules: pipe-control-v0.2
+  baseline: schema_template/examples/fa4_prefill/root.yaml
+  kernel_sources:
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_fa4_prefill/solution.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_fa4_prefill/flash_attn/cute/interface.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_fa4_prefill/flash_attn/cute/sm100_hd256_2cta_fmha_forward.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_fa4_prefill/flash_attn/cute/tile_scheduler.py
+tile_pipeline:
+  phase:
+    attention:
+      domain:
+        i: [0, N]
+        later: [1, N]
+        d: [0, 2]
+      role:
+        LoadQK:
+          pipe:
+            - "load:Qc(0)"
+            - "load:Qc(1)"
+            - "for(i)":
+                - "load:Kc(i,0)"
+                - "load:Kc(i,1)"
+        LoadV:
+          pipe:
+            - "for(i)":
+                - "load:Vc(i,0)"
+                - "load:Vc(i,1)"
+        MMA:
+          pipe:
+            - "qk:S(0,0)"
+            - "qk:S(0,1)"
+            - "for(i[1:])":
+                - "qk:S(i,0)"
+                - "qk:S(i,1)"
+                - "pv:Y(i-1,0)"
+                - "pv:Y(i-1,1)"
+            - "pv:Y(last(i),0)"
+            - "pv:Y(last(i),1)"
+        Softmax:
+          pipe:
+            - "for(i)":
+                - "capture:S(i,1)"
+                - "publish:Stats(i)"
+                - "publish:P(i)"
+                - "compute:ell(i)"
+            - "publish:FinalSum"
+        Correction:
+          pipe:
+            - "capture:Stats(0)"
+            - "for(i[1:])":
+                - "capture:Stats(i)"
+                - "rescale:Y(i)"
+            - "capture:FinalSum"
+            - "stage:Oblock(0)"
+            - "store:Oblock(0)"
+            - "stage:Oblock(1)"
+            - "store:Oblock(1)"

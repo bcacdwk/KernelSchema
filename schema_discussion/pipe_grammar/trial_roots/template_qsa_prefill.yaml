@@ -1,0 +1,88 @@
+experiment:
+  operator: template_qsa_prefill
+  rules: pipe-control-v0.2
+  baseline: schema_template/examples/qsa_prefill/root.yaml
+  kernel_sources:
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_qsa_prefill/solution.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_qsa_prefill/qwen38_core_qsa_cutedsl/operator.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_qsa_prefill/qwen38_core_qsa_cutedsl/qsa_kernel.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_qsa_prefill/qwen38_core_qsa_cutedsl/qsa_preprocess.py
+
+# Math, scheduling, resources, execution modes, action contracts and waits_for
+# are inherited from the baseline. Source/contract differences are in the report.
+tile_pipeline:
+  phase:
+    preprocess:
+      domain: {}
+      role:
+        Main:
+          pipe:
+            - "build:Hash"
+            - "compact:Union_Count"
+    attention:
+      domain:
+        t: worktile
+        i: [0, "N(b)"]
+        n: {flatten: [t, i]}
+      role:
+        Scheduler:
+          pipe:
+            - "publish:Ticket0"
+            - "wait:Ticket0"
+            - "for(t)":
+                - "publish:Next(t)"
+                - "wait:Next(t)"
+        GatherK:
+          pipe:
+            - "accept:Ticket0"
+            - "for(t)":
+                - "for(n[t])":
+                    - "load:Kblk(n)"
+                - "accept:Next(t)"
+            - "drain:KeyRing"
+        GatherV:
+          pipe:
+            - "accept:Ticket0"
+            - "for(t)":
+                - "for(n[t])":
+                    - "load:Vblk(n)"
+                - "accept:Next(t)"
+            - "drain:ValueRing"
+        MMA:
+          pipe:
+            - "accept:Ticket0"
+            - "wait:Qblk0"
+            - "for(t)":
+                - "mma:Qblk(t)@Kblk(n[t,0])"
+                - "mma:Qblk(t)@Kblk(n[t,1])"
+                - "for(n[t,0:count(i)-2])":
+                    - "mma:Qblk(t)@Kblk(n+2)"
+                    - "mma:P(n)@Vblk(n)"
+                - "mma:P(n[t,last(i)-1])@Vblk(n[t,last(i)-1])"
+                - "mma:P(n[t,last(i)])@Vblk(n[t,last(i)])"
+                - "accept:Next(t)"
+        SoftmaxA:
+          pipe:
+            - "accept:Ticket0"
+            - "publish:Qblk0"
+            - "for(t)":
+                - "for(n[t])":
+                    - "publish:HalfMax_A(n)"
+                    - "publish:P_A(n)"
+                - "accept:Next(t)"
+                - "prefetch:Qnext(t)"
+                - "combine:Normalization_A(t)"
+                - "drain:Y_A(t)"
+                - "publish:Qnext(t)"
+                - "store:O_A_tail(t)"
+        SoftmaxB:
+          pipe:
+            - "accept:Ticket0"
+            - "for(t)":
+                - "for(n[t])":
+                    - "publish:HalfMax_B(n)"
+                    - "publish:P_B(n)"
+                - "accept:Next(t)"
+                - "combine:Normalization_B(t)"
+                - "drain:Y_B(t)"
+                - "store:O_B_tail(t)"

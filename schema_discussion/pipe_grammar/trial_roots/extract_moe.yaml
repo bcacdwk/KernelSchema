@@ -1,0 +1,236 @@
+experiment:
+  operator: extract_moe
+  rules: pipe-control-v0.2
+  baseline: schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_moe/root.yaml
+  kernel_sources:
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_moe/nvfp4_fast.c
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_moe/nvfp4_moe.cu
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_moe/nvfp4_moe_base.cu
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_moe/nvfp4_moe_d81.cu
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_moe/nvfp4_moe_j18.cu
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_moe/nvfp4_moe_t80.cu
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_moe/solution.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_moe/solution_base_host.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_moe/solution_d81.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_moe/solution_j18.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/extract_moe/solution_t80.py
+tile_pipeline:
+  phase:
+    count:
+      domain: {}
+      role:
+        Main:
+          pipe:
+            - "enter:Protocol"
+            - "produce:Counts"
+    scan:
+      domain: {}
+      role:
+        Main:
+          pipe:
+            - "enter:Protocol"
+            - "produce:TilePrefix"
+    scatter:
+      domain: {}
+      role:
+        Main:
+          pipe:
+            - "enter:Protocol"
+            - "produce:RoutePos"
+    gather:
+      domain: {t: worktile}
+      role:
+        Main:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "produce:GatherChunk(t)"
+    fc1:
+      domain:
+        t: worktile
+        i: [0, "H/BK"]
+        g: {flatten: [t, i]}
+        c: [0, 2]
+      role:
+        AProducer:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "prime:APrefetch(t)"
+                - "for(g[t])":
+                    - "publish:AScale(g)"
+            - "retire:TensorStorage"
+        BProducer:
+          pipe:
+            - "enter:Protocol"
+            - "for(g)":
+                - "load:PayloadPair(g)"
+                - "stage:BScale(g)"
+            - "retire:TensorStorage"
+        MMA:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "if(t > 0 and Hoist == 0)":
+                    - "wait:Drain(t,0)"
+                - "for(g[t])":
+                    - "prepare:ScaleTM(g)"
+                    - "mma:PayloadA(g)@PayloadB(g)"
+            - "retire:TensorStorage"
+          waits_for:
+            data:
+              "prepare:ScaleTM(g)":
+                - "AProducer/publish:AScale(g)"
+                - "BProducer/load:PayloadPair(g)"
+                - "BProducer/stage:BScale(g)"
+            reuse:
+              "wait:Drain(t,0)@done":
+                - "Epilogue/release:Accumulator(t-1)"
+                - "Epilogue0/release:Accumulator(t-1)"
+                - "Epilogue1/release:Accumulator(t-1)"
+                - "Epilogue2/release:Accumulator(t-1)"
+              "mma:PayloadA(g[t,0])@PayloadB(g[t,0])":
+                - "Epilogue/release:Accumulator(t-1)"
+                - "Epilogue0/release:Accumulator(t-1)"
+                - "Epilogue1/release:Accumulator(t-1)"
+                - "Epilogue2/release:Accumulator(t-1)"
+        Epilogue:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "drain:Fragment(t,0)"
+                - "emit:ActQ(t,0)"
+                - "drain:Fragment(t,1)"
+                - "release:Accumulator(t)"
+                - "emit:ActQ(t,1)"
+            - "retire:TensorStorage"
+        Epilogue0:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "drain:Fragment(t,0)"
+                - "emit:ActQ(t,0)"
+                - "drain:Fragment(t,1)"
+                - "release:Accumulator(t)"
+                - "emit:ActQ(t,1)"
+            - "retire:TensorStorage"
+        Epilogue1:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "drain:Fragment(t,0)"
+                - "emit:ActQ(t,0)"
+                - "drain:Fragment(t,1)"
+                - "release:Accumulator(t)"
+                - "emit:ActQ(t,1)"
+            - "retire:TensorStorage"
+        Epilogue2:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "drain:Fragment(t,0)"
+                - "emit:ActQ(t,0)"
+                - "drain:Fragment(t,1)"
+                - "release:Accumulator(t)"
+                - "emit:ActQ(t,1)"
+            - "retire:TensorStorage"
+    fc2:
+      domain:
+        t: worktile
+        i: [0, "I/BK"]
+        g: {flatten: [t, i]}
+        c: [0, 2]
+      role:
+        AProducer:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "prime:APrefetch(t)"
+                - "for(g[t])":
+                    - "publish:AScale(g)"
+            - "retire:TensorStorage"
+        BProducer:
+          pipe:
+            - "enter:Protocol"
+            - "for(g)":
+                - "load:PayloadPair(g)"
+                - "stage:BScale(g)"
+            - "retire:TensorStorage"
+        MMA:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "if(t > 0 and Hoist == 0)":
+                    - "wait:Drain(t,0)"
+                - "for(g[t])":
+                    - "prepare:ScaleTM(g)"
+                    - "mma:PayloadA(g)@PayloadB(g)"
+            - "retire:TensorStorage"
+          waits_for:
+            data:
+              "prepare:ScaleTM(g)":
+                - "AProducer/publish:AScale(g)"
+                - "BProducer/load:PayloadPair(g)"
+                - "BProducer/stage:BScale(g)"
+            reuse:
+              "wait:Drain(t,0)@done":
+                - "Epilogue/release:Accumulator(t-1)"
+                - "Epilogue0/release:Accumulator(t-1)"
+                - "Epilogue1/release:Accumulator(t-1)"
+                - "Epilogue2/release:Accumulator(t-1)"
+              "mma:PayloadA(g[t,0])@PayloadB(g[t,0])":
+                - "Epilogue/release:Accumulator(t-1)"
+                - "Epilogue0/release:Accumulator(t-1)"
+                - "Epilogue1/release:Accumulator(t-1)"
+                - "Epilogue2/release:Accumulator(t-1)"
+        Epilogue:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "drain:Fragment(t,0)"
+                - "emit:RouteResult(t,0)"
+                - "drain:Fragment(t,1)"
+                - "release:Accumulator(t)"
+                - "emit:RouteResult(t,1)"
+            - "finish:BulkStores"
+            - "retire:TensorStorage"
+        Epilogue0:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "drain:Fragment(t,0)"
+                - "emit:RouteResult(t,0)"
+                - "drain:Fragment(t,1)"
+                - "release:Accumulator(t)"
+                - "emit:RouteResult(t,1)"
+            - "finish:BulkStores"
+            - "retire:TensorStorage"
+        Epilogue1:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "drain:Fragment(t,0)"
+                - "emit:RouteResult(t,0)"
+                - "drain:Fragment(t,1)"
+                - "release:Accumulator(t)"
+                - "emit:RouteResult(t,1)"
+            - "finish:BulkStores"
+            - "retire:TensorStorage"
+        Epilogue2:
+          pipe:
+            - "enter:Protocol"
+            - "for(t)":
+                - "drain:Fragment(t,0)"
+                - "emit:RouteResult(t,0)"
+                - "drain:Fragment(t,1)"
+                - "release:Accumulator(t)"
+                - "emit:RouteResult(t,1)"
+            - "finish:BulkStores"
+            - "retire:TensorStorage"
+    finalize:
+      domain: {}
+      role:
+        Main:
+          pipe:
+            - "enter:Protocol"
+            - "produce:Y"

@@ -1,0 +1,141 @@
+experiment:
+  operator: template_fa4_decode
+  rules: pipe-control-v0.2
+  baseline: schema_template/examples/fa4_decode/root.yaml
+  kernel_sources:
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_fa4_decode/solution.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_fa4_decode/qoder_greenfield_decode_attention/__init__.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_fa4_decode/qoder_greenfield_decode_attention/operator.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_fa4_decode/qoder_greenfield_decode_attention/gqa_decode_paged.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_fa4_decode/qoder_greenfield_decode_attention/gqa_decode.py
+    - schema_discussion/pipe_grammar/trial_roots/sources/template_fa4_decode/qoder_greenfield_decode_attention/mask.py
+
+# Pipe projection: all omitted phase/role fields inherit the baseline.
+# Each waits_for below replaces the corresponding role's entire table.
+tile_pipeline:
+  phase:
+    partial:
+      domain:
+        i: [0, N_r]
+        single: [0, "min(1,N_r)*max(0,2-N_r)"]
+        head: [0, "min(2,N_r)"]
+        corr: [0, "max(0,N_r-2)"]
+        corr_prefix: [0, "max(0,N_r-3)"]
+        corr_final: ["max(0,N_r-3)", "max(0,N_r-2)"]
+        tail: ["max(0,N_r-2)", N_r]
+        u: [0, 4]
+      role:
+        LoadK:
+          pipe:
+            - "prepare:Startup"
+            - "if(N_r > 0)":
+                - "load:Qpack"
+            - "for(i)":
+                - "advance:PageIndex(i)"
+                - "load:Kblk(i)"
+                - "yield_turn:K(i)"
+        LoadV:
+          pipe:
+            - "for(i)":
+                - "load:Vblk(i)"
+                - "yield_turn:V(i)"
+            - "store:output_tile"
+        Score:
+          pipe:
+            - "for(i)":
+                - "score:ScoreBlock(i)"
+                - "yield_turn:Score(i)"
+            - "release:K_reads"
+            - "store:Mpartial"
+            - "wait:FinalSum"
+            - "store:Lpartial"
+            - "launch:combine"
+        Value:
+          pipe:
+            - "for(i)":
+                - "accumulate:Y(i)"
+                - "yield_turn:Value(i)"
+                - "release_p:P_pair(i)"
+            - "release:V_reads"
+            - "retire:TMEM"
+          waits_for:
+            data:
+              "accumulate:Y(i)@issue": ["Correction/zero:Y(0)@done", "Softmax/publish:P_pair(i)@done"]
+              "accumulate:Y(i+2)@issue": ["Correction/rescale:Y(i)@done"]
+              "retire:TMEM@issue": ["LoadK/prepare:Startup@done"]
+              "accumulate:Y(i)@done": ["LoadV/load:Vblk(i)@done"]
+              "yield_turn:Value(i)@done": ["LoadV/load:Vblk(i)@done"]
+            reuse:
+              "retire:TMEM@issue": ["Correction/capture:Y(tail)@done"]
+            sync:
+              "accumulate:Y(i)@issue": ["Score/yield_turn:Score(min(i+Lead,N_r-1))@done"]
+        Softmax:
+          pipe:
+            - "initialize:Statistic"
+            - "prepare:EmptySum"
+            - "for(i)":
+                - "read:ScoreBlock(i)"
+                - "publish_max:m(i)"
+                - "publish:P_pair(i)"
+                - "publish:ExponentialSum(i)"
+          waits_for:
+            data:
+              "read:ScoreBlock(i)@issue": ["Score/score:ScoreBlock(i)@done"]
+              "prepare:EmptySum@issue": ["LoadK/prepare:Startup@done"]
+            reuse:
+              "publish_max:m(i+4)@issue": ["Value/release_p:P_pair(i)@done"]
+              "publish:ExponentialSum(i+2)@issue": ["Correction/read:ExponentialSum(i)@done"]
+            sync:
+              "publish_max:m(0)@issue": ["Correction/zero:Y(0)@done"]
+              "publish_max:m(i+1)@issue": ["Correction/read:m(i)@done"]
+        Correction:
+          pipe:
+            # 0 identifies the one initialization of both parities.
+            - "if(N_r > 0)":
+                - "zero:Y(0)"
+            - "for(head)":
+                - "read:m(head)"
+            - "for(corr_prefix)":
+                - "read:ExponentialSum(corr_prefix)"
+                - "read:m(corr_prefix+2)"
+                - "rescale:Y(corr_prefix)"
+                - "update:Lbase(corr_prefix+2)"
+            - "for(corr_final)":
+                - "read:ExponentialSum(corr_final)"
+                - "read:m(corr_final+2)"
+            - "publish:FinalMaximum"
+            - "for(corr_final)":
+                - "rescale:Y(corr_final)"
+                - "update:Lbase(corr_final+2)"
+            - "for(tail)":
+                - "read:ExponentialSum(tail)"
+            - "publish:FinalSum"
+            - "for(tail)":
+                - "capture:Y(tail)"
+            - "publish:Ostage"
+          waits_for:
+            data:
+              "publish:FinalMaximum@issue": ["LoadK/prepare:Startup@done"]
+              "rescale:Y(corr)@issue": ["Value/accumulate:Y(corr)@done"]
+              "capture:Y(tail)@issue": ["Value/accumulate:Y(tail)@done"]
+              "read:m(i)@issue": ["Softmax/publish_max:m(i)@done"]
+              "read:ExponentialSum(i)@issue": ["Softmax/publish:ExponentialSum(i)@done"]
+              "read:ExponentialSum(single)@issue": ["Softmax/prepare:EmptySum@done"]
+              "zero:Y(0)@issue": ["LoadK/prepare:Startup@done"]
+            reuse:
+              "publish:Ostage@issue": ["Score/release:K_reads@done", "Value/release:V_reads@done"]
+            sync:
+              "capture:Y(tail)@issue": ["Score/wait:FinalSum@done"]
+    combine:
+      domain: {}
+      role:
+        Main:
+          pipe:
+            - "wait:partial_input"
+            - "load:PartialStatistic"
+            - "zero:Numerator"
+            - "compute:split_weight"
+            - "for(r=0:SplitCount)":
+                - "load:Opartial(r)"
+                - "compute:Numerator(r)"
+            - "produce:output"
