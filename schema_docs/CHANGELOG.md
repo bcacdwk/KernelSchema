@@ -1,0 +1,85 @@
+# schema_docs 修改记录
+
+## 2026-11-11
+
+本轮改动只涉及 `schema_docs/` 下的规则文档，不改动仓库其余目录。
+
+### 1. `3.design.math_reshape.md`：去掉 `rewrite[].step`，`ledger` 下沉
+
+- 删除 `rewrite[].step` 字段。`rewrite[]` 现在是 `name / math / symbol? / arithmetic? / ledger?`，与 Contract 的 `compute[]` 保持同一风格；列表顺序改为“按先定义、后使用排列，只表示定义关系”，不再有步骤 ID。
+- `ledger` 从区域级下沉到每条 `rewrite`，与 `math`、`symbol`、`arithmetic` 平级，仍然可选。
+- `ledger` 只保留 `baseline / gain / cost` 三个字段，各写一行、不超过 150 字符；原来的 `<resource>[].item / change / by` 全部删除。`ledger` 出现时 `baseline` 必填，`gain`、`cost` 按需填写，某一侧没有值得记录的变化就省略。
+- 删除“账本资源键”一节（`matmul / vector / transcendental / traffic / footprint / depth / pass / comm / error` 封闭集合）。`gain`、`cost` 改为自由文本，计量约定（MAC、字节、元素、物化量、遍历趟数等）保留在“账本”一节；新增误差来源改记在 `cost`。
+- 同步更新：核心思想的区域说明、设计着眼点表的“落在哪里”列、固定结构与扩展边界表、`unknown:` 的适用范围，以及账本示例（改为单条 rewrite 的 `baseline / gain / cost`）。
+
+### 2. `4.design.work_schedule.md` / `5.design.tile_pipeline.md`：单 phase、单 role 统一叫 `MAIN`
+
+- `4` 的「名称与顺序」加一句：整个区域只有一个 phase 时，phase ID 统一写 `MAIN`，不另起算子名。
+- `5` 的「成员与名称」加一句：一个 phase 内只有一个 role 时，role ID 统一写 `MAIN`；phase ID 沿用 `work_schedule`，单 phase 时同样是 `MAIN`。
+- 同步改掉文档里受影响的示例：`4` 的最小 `flow`（`attention` → `MAIN`）、`5` 的单 role 示例与跨 phase 交接示例（`Main` → `MAIN`）、`6` 的 `design.tile_pipeline::main.MMA` → `MAIN.MMA`。
+
+### 3. `6.realization.md`：`feedback` 提为与 `require` 平级的 Coder 专区
+
+- `prefer[].feedback` 取消，改为顶层分组 `realization.feedback[]`，排在 `forbid` 之后。
+- 条目字段为 `item / choice / evidence`：`item` 指向被替代的那条 `prefer` 所约束的同一个上游对象，`evidence` 仍是单个固定版本的实验记录引用。
+- `require / prefer / forbid` 的字段和写法不变，仍由 Designer（Planner）填写；`feedback` 是本区唯一由 Coder 填写的分组，只针对 `prefer` 提替代，不为 `require` / `forbid` 提供豁免，也不改变任何一组的约束强度。
+- 新增一个 `feedback` 条目的 YAML 示例；`0.common.md` 的字段索引同步改为 `realization.feedback[].evidence`。
+
+### 4. `5.design.tile_pipeline.md`：动词表、pipe 语法、依赖记法与资源字段的整体改写
+
+本轮只改 `schema_docs/`。`schema_template/`、模板检查脚本、`kernel_wiki/`、`schema_wiki/`、`schema_extract/` 及各目录 README 尚未跟进，需要另行迁移。
+
+#### 4.1 基础动词：八词封闭表，`info.verb` → `info.using_verb`
+
+- 动作词收敛为四类二分的八个基础动词：`compute` / `matmul`（数值计算）、`load` / `store`（搬运访存）、`await` / `signal`（顺序同步）、`acquire` / `release`（资源占用）。原通用表的 `publish` / `produce` / `zero` / `mma` / `wait` 全部取消，并在文中写明各自的归宿。
+- `info.verb` 改名 `info.using_verb`，**必填**，结构为 `using_verb.<verb>.<noun>: {execution_mode, describe}`。它是白名单：pipe 中每个动作必须唯一匹配一个已声明的 `(verb, noun)`。原「`info.verb` 是补充，不是白名单」一句删除。
+- `meaning` 改名 `describe`。noun 声明键只写基名，矩阵乘的 `A@B` 整体作一个键；同一 `(role, verb, noun)` 只允许一种固定参数个数。
+- 新增易错点清单：发布类动作按内容归入 `compute` 或 `store`；搬运的完成协议（事务字节计数预告一类）纳入搬运动作的完成保证，不单列为 `signal`；「已发射且源已读完」不是 `store` 的 done，需要时拆成 `store` + `release`。
+
+#### 4.2 执行模式：三值改名并下沉到 noun
+
+- `serial` / `async` / `async_ordered_completion` 改名为 `serial` / `async_unordered` / `async_ordered`。
+- `info.execution_mode` 从 role 删除，`verb` 级覆盖写法也删除。模式只声明在 noun 条目上，无默认、无继承。
+- 明确 `async_ordered` 中的 ordered **只指 `done` 的累积覆盖**，不指发起顺序；累积完成跨 noun、跨 verb、跨循环与 worktile 接续，中间的 `serial` 不重置该序列。新增一条约束：两个引擎各自有序不等于共同有序，没有共同保证用 `async_unordered`。
+
+#### 4.3 pipe：有序列表 + `for` / `if` / `while`
+
+- 取消 `repeat` / `prologue` / `steady` / `epilogue`。`pipe` 改为非空有序列表，每项是动作字符串或只有单个键的控制节点。
+- 控制结构只有三种：`for`（域名、切片、`n[t]` 窗口、局部范围 `j=0:2`）、`if`（当前位置判断一次，两个 `if` 无隐式配对）、`while(r, condition)`（局部轮次编号，先判断后执行）。
+- `while` 写入规范，同时写明验证代价：有限展开的检查工具无法展开动态 `while`，使用它的设计必须另附有限执行见证说明轮次上界，否则按「未验证」处理。
+- 补入索引作用域规则：循环索引不泄漏到兄弟项，内层不得重绑外层索引，遍历 flatten 域须与外层坐标一致，`count/last` 不适用于动态域与 `while` 轮次。
+- 原「空域不删除 prologue/epilogue」「动作不存在 ≠ 动作无数据可处理」等语义按新语法改写保留。
+
+#### 4.4 依赖：`waits_for` → `waiting`，新事件记法
+
+- 字段改名 `waiting`；三类分类键 `data` / `reuse` / `sync` 改名 `prepared` / `released` / `allowed`，值改为**非空字符串列表**。
+- 每条规则写成 `"{issue B} ← [{done A}, {done C}]"`：两端时点必须显式写出，无位置默认值；单前驱也保留 `[]`。
+- 动作引用改为 `Role[member]::verb:noun(indices)`。`::` 分隔角色，`@` 只保留在 `matmul:A@B` 的动作内部。
+- 新增四种 `issue`/`done` 组合的含义表。
+- **成员省略规则变更**：省略成员下标一律指当前 worker 成员，不再按双方 role 的布局自动取「对方全部实例」；跨成员必须写明编号或 `[*]`。
+- `milestone` 没有当前 role / member 上下文，所列事件必须写成完整形式并显式给出 `Role[selector]` 与时点。
+
+#### 4.5 默认依赖：取消同名数据边推导
+
+- 删除「消费动作的对象名与某个 `load`/`publish` 完全相同且来源唯一时默认等待其 done」这条规则。**唯一的默认依赖是 role 内按各动作的 `execution_mode` 推进。**
+- 理由：noun 是 role 局部名称，不具备全局对象身份；按名字推导会连错对象，误加的边还可能成环或等待当前分支下并不存在的事件。
+- 配套要求：每个 noun 的 `describe` 必须逐项列明跨动作输入的值、版本／区域／副本及来源动作与成员；Reviewer 按「输入完整性 → 从就绪到实际读取的安全保证」两步核对，允许由执行模式、`waiting` 传递路径或明确绑定的原语保证覆盖。
+- 对十个算子 baseline 的实测：真正需要补写的跨 role 边共约 9 条（MLA 6、FA4 decode 1、GDN 1、QSA 1），其中 8 条左侧是原 `wait:` 动作（新词 `await`），显式写本就符合该动词的定义。
+
+#### 4.6 资源：字段改名、新增 `total_size`、`view` 保留
+
+- 字段改名：`slot_count` → `depth`，`space` → `location`，`member_slot_shape` → `shape`。五个必填字段按 `depth / location / shape / dtype / total_size` 的顺序书写，没有 `view` 时整条写一行。
+- 新增 `total_size`：这块分配在一个 worker 内的总占用，等于 `depth × 单槽字节数 × 持有成员数`，**统一以字节记**（整数或整数表达式）。省略 `member` 时持有成员数是 worker 的全部成员数，不是 warp 数。它是派生校验值，须与其余字段构成的等式一致；`view` 条目不重复计入；多 CTA 的合计不能直接对照单 SM 容量。
+- `view` **保留** `slot_index? / part? / dtype?` 三个子字段。原计划删除 `view`、由 `depth` 加 `released` 边表达槽轮转，经语料核对后撤回：1510 个带索引的 view 条目中 350 个是复合或条件表达式（`(c-c0)%Stages`、`(g-cLo)%(D==128 ? 2 : 3)`），434 个（29%）的轮转索引不是键的最后一个实参（`S(i,d) → i%2`、`Kc(i,d) → (2*i+d)%4`），当前 FA4 模板同一文件内即有三种不同映射。版本到槽的映射是不可推导的设计选择。
+- 文中明确 **`slot_index` 不设任何默认推导**，`depth > 1` 时必填，`depth: 1` 时省略。`slot_index` 与 `part` 的端点可引用 view 键上的形参及已定义量，但不创建循环、不改变索引作用域。
+- 删除「多槽资源必须登记视图并明确槽位」的强制要求（改由 `slot_index` 的填写条件表达），并补入「一块分配只登记一个 resource，`total_size` 只计一次，视图不新增分配」。
+- 保留两条原有语义并加强措辞：共用存储本身不产生数据边、发布或同步，覆盖安全只能由 `released` 边或写明的原语顺序保证；新分配不代表内容已清零。FA4 的 S/P 共用示例补充说明选中的是每行后半段，不是整块连续的后 32 KiB。
+
+#### 4.7 其他同步改动
+
+- 核心思想的四类信息表：「索引与重复」→「索引与控制」，「依赖与发布」→「依赖与同步」。
+- 设计着眼点表的「落在哪里」列全部换成新字段名。
+- 结构轮廓、主体字段表、role 字段表、固定结构与扩展边界表按新结构重写；扩展边界表新增「封闭取值」一行，覆盖八个动词、三种模式、三个分类键和三种控制结构。
+- 「与上下游的职责边界」一节为 `total_size` 开明例外，说明它是「能推出的数量不另设字段」这条原则的唯一例外及其理由。
+- 全部示例改写：单 role 最小示例、两段独立循环、递推 chunk、FA4 的 S/P 共用、多槽 `ScoreProbability`、两槽缓冲的 `prepared`/`released` 边、QSA 的 `done ← issue` 边、跨 phase 交接的 milestone、条件等待示例（原 `q: [0, "min(1,t)*(1-Hoist)"]` 的 0/1 假域改用 `if`）。
+- `3.design.math_reshape.md`：`pipe.repeat` 的层数 → `tile_pipeline` 的循环结构，不再引用已删除的字段名，也不绑定具体 pipe 语法。
