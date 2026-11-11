@@ -1,0 +1,706 @@
+{
+  "study_id": "while_review_07_sssp_bound",
+  "created_utc": "2026-11-11T14:11:20.715850+00:00",
+  "method": "METHOD.md",
+  "report": "reports/07_sssp_bound.md",
+  "source_manifest": "sources/03_sources.json",
+  "independence": {
+    "report_03_section_D_read_for_location": true,
+    "prior_unresolved_judgment_not_assumed": true,
+    "subagents_spawned": false
+  },
+  "scope": {
+    "gpu_run": false,
+    "compiled": false,
+    "external_downloaded_code_executed": false,
+    "original_sources_or_formal_docs_modified": false,
+    "complete_gpu_schema_normalization": false,
+    "arbitrary_cuda_memory_model_behaviors_proved": false
+  },
+  "execution_contract": [
+    "Finite static graph, valid source and node IDs, nonnegative integer weights.",
+    "Every executed candidate addition, i increment, and curdelta increment is representable.",
+    "Complete processing of the fixed edge domain selected by the source for the ready frontier.",
+    "Linearizable atomicMin; ordinary distance reads follow monotone decreases; sequential source rereads do not increase.",
+    "No observations older than the preceding completed wave barrier; collective count observations agree.",
+    "Sufficient queue capacity, completed reservation and payload publication, no lost notifications.",
+    "Dedup preserves one representative of every deferred vertex; no external work injection.",
+    "Shortest-path correctness for the original graph additionally requires complete coverage of its needed edges; termination applies to the fixed actually scanned graph."
+  ],
+  "bounds": {
+    "outer_epochs": "V",
+    "inner_waves_per_outer": "V",
+    "stored_finite_distance": "H = min((V-1)*Wmax, INF-1)",
+    "optional_outer_bound": "min(V, 1 + ceil(H / DELTA))",
+    "required_existing_metadata_for_primary_bounds": [
+      "graph.nnodes"
+    ],
+    "weight_scan_required_for_primary_bounds": false,
+    "bounds_include_last_notification_drain": true,
+    "each_primary_bound_individually_tight": true,
+    "product_bound_simultaneously_tight_claimed": false,
+    "no_normal_budget_exhaustion_state_added": true
+  },
+  "proof_invariants": [
+    "Every actual finite stored label has a simple-path witness; nonnegative cycles cannot give a strict improvement.",
+    "Scanning an edge in a wave establishes its Bellman inequality relative to the wave-entry source label.",
+    "Every successful atomic decrease is notified; every notification target decreased somewhere in that wave, though that atomic may have failed.",
+    "Every successful update to a value at most delta is notified into re; re may also contain an above-delta target after classification rereads a decreased source.",
+    "At epoch entry all dirty sources are in the initial frontier; at wave boundaries Dirty is contained in frontier union deferred.",
+    "Actual epoch transform d_next <= T(d_entry), using the original worklist schedule; after V-1 epochs values are final, then at most one drain epoch.",
+    "For clipped low labels D, all dirty low sources are in retry frontier and D_next <= T_delta(D); low values settle within V-1 waves.",
+    "Once low values settle, any further re notification would imply a target low decrease or a source low decrease; therefore wave V empties re."
+  ],
+  "refuted_shortcuts": [
+    "Each enqueue is a successful atomicMin.",
+    "Every node in re has d[node] <= delta.",
+    "The outer loop waits for curdelta to reach the deferred distance.",
+    "V-1 already includes final frontier processing.",
+    "The two V bounds imply at most V waves in the entire execution."
+  ],
+  "event_projection": {
+    "explicit_count_loads": true,
+    "preserves_all_barriers": true,
+    "preserves_queue_role_swaps_and_counter_slots": true,
+    "preserves_dedup_even_when_empty": true,
+    "preserves_i_curdelta_and_final_state": true,
+    "inactive_for_tails_emit_no_design_actions": true,
+    "only_extra_control_is_ready_cached_boolean_guards": true,
+    "source_may_retain_while_implementation": true,
+    "not_a_new_scheduler_or_synchronous_bellman_ford": true,
+    "complete_cross_role_schema_validation": false
+  },
+  "judgment": {
+    "supports_current_core_removal_for_this_case": true,
+    "requires_unbounded_while_under_contract": false,
+    "while_can_improve_readability": true,
+    "universal_removability_proved": false,
+    "previous_unresolved_bound_for_this_case_resolved_under_contract": true
+  },
+  "source_refs": [
+    {
+      "repo": "IntelligentSoftwareSystems/Galois",
+      "commit": "b67f94206a8c47fd414446621f6633a31c49fd98",
+      "upstream_path": "lonestar/analytics/gpu/sssp/sssp.cu",
+      "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/sssp/sssp.cu",
+      "retrieval_url": "https://api.github.com/repos/IntelligentSoftwareSystems/Galois/contents/lonestar/analytics/gpu/sssp/sssp.cu?ref=b67f94206a8c47fd414446621f6633a31c49fd98",
+      "local_path": "sources/03_galois/lonestar/analytics/gpu/sssp/sssp.cu",
+      "sha256": "966ad1fa15ab6bf14e3273e4e4dc33bdf843ec03067873122962446d64ad6fe1",
+      "git_blob_sha": "cdd89d4247590c74bc89b3ecb8772eb90651d83d",
+      "bytes": 15786
+    },
+    {
+      "repo": "IntelligentSoftwareSystems/Galois",
+      "commit": "b67f94206a8c47fd414446621f6633a31c49fd98",
+      "upstream_path": "libgpu/include/pipe.h",
+      "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/libgpu/include/pipe.h",
+      "retrieval_url": "https://api.github.com/repos/IntelligentSoftwareSystems/Galois/contents/libgpu/include/pipe.h?ref=b67f94206a8c47fd414446621f6633a31c49fd98",
+      "local_path": "sources/03_galois/libgpu/include/pipe.h",
+      "sha256": "3c9300aad416e54bf4805acbb06b70eb787037caac772a0bd9ed47e60a4bcf30",
+      "git_blob_sha": "f013f68a11b127c8e817a48d30b7d85e66c67379",
+      "bytes": 4602
+    },
+    {
+      "repo": "IntelligentSoftwareSystems/Galois",
+      "commit": "b67f94206a8c47fd414446621f6633a31c49fd98",
+      "upstream_path": "libgpu/include/worklist.h",
+      "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/libgpu/include/worklist.h",
+      "retrieval_url": "https://api.github.com/repos/IntelligentSoftwareSystems/Galois/contents/libgpu/include/worklist.h?ref=b67f94206a8c47fd414446621f6633a31c49fd98",
+      "local_path": "sources/03_galois/libgpu/include/worklist.h",
+      "sha256": "d41df1170895b5ceeb10cf4186e199e524465a9faa7a871a246e6e9c37299eff",
+      "git_blob_sha": "7758ca65e716c2f61fadf83e64137840ccbb11c4",
+      "bytes": 18021
+    },
+    {
+      "repo": "IntelligentSoftwareSystems/Galois",
+      "commit": "b67f94206a8c47fd414446621f6633a31c49fd98",
+      "upstream_path": "lonestar/analytics/gpu/sssp/support.cu",
+      "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/sssp/support.cu",
+      "retrieval_url": "https://api.github.com/repos/IntelligentSoftwareSystems/Galois/contents/lonestar/analytics/gpu/sssp/support.cu?ref=b67f94206a8c47fd414446621f6633a31c49fd98",
+      "local_path": "sources/03_galois/lonestar/analytics/gpu/sssp/support.cu",
+      "sha256": "841a26e07ed063c62156142a602779aae1a5fef7d0c3212515cd8343bb7d3719",
+      "git_blob_sha": "6dd709d755bfd789b0a23122ccaf3a633d0493ca",
+      "bytes": 1197
+    }
+  ],
+  "model_script": {
+    "path": "scripts/07_sssp_bound_model.py",
+    "sha256": "1d913b901f302348bdb29e114b00a79670c39bc21f7e7b19b8f8f9f2d2c27595",
+    "command": "python schema_discussion/pipe_grammar/while_review/scripts/07_sssp_bound_model.py --exact --random-cases 3000"
+  },
+  "cpu_model": {
+    "gpu_run": false,
+    "model": "coherent three-stage edge tasks",
+    "limitations": [
+      "CPU model, not GPU memory-model verification",
+      "finite enumeration does not prove a universal bound",
+      "unbounded queue storage in algorithm model",
+      "Only the specified three-stage model is enumerated; no coverage claim for all CUDA executions"
+    ],
+    "witnesses": [
+      {
+        "id": "zero_edge_requires_two_inner_waves",
+        "vertices": 2,
+        "edges": [
+          [
+            0,
+            1,
+            0
+          ]
+        ],
+        "delta": 1,
+        "waves": [
+          2
+        ],
+        "final": {
+          "distances": [
+            0,
+            0
+          ],
+          "i": 1,
+          "curdelta": 1,
+          "roles": [
+            0,
+            1,
+            2
+          ],
+          "slots": [
+            1,
+            1,
+            1
+          ],
+          "counters": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ]
+          ],
+          "payload": [
+            [
+              0
+            ],
+            [],
+            [
+              1
+            ]
+          ]
+        },
+        "reads": {
+          "outer": 2,
+          "inner": 3
+        }
+      },
+      {
+        "id": "positive_edge_requires_two_outer_epochs",
+        "vertices": 2,
+        "edges": [
+          [
+            0,
+            1,
+            1
+          ]
+        ],
+        "delta": 1,
+        "waves": [
+          1,
+          1
+        ],
+        "final": {
+          "distances": [
+            0,
+            1
+          ],
+          "i": 2,
+          "curdelta": 2,
+          "roles": [
+            0,
+            1,
+            2
+          ],
+          "slots": [
+            1,
+            0,
+            1
+          ],
+          "counters": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ]
+          ],
+          "payload": [
+            [
+              0
+            ],
+            [
+              1
+            ],
+            [
+              1
+            ]
+          ]
+        },
+        "reads": {
+          "outer": 3,
+          "inner": 4
+        }
+      },
+      {
+        "id": "huge_weight_does_not_wait_for_threshold",
+        "vertices": 2,
+        "edges": [
+          [
+            0,
+            1,
+            1000000000
+          ]
+        ],
+        "delta": 1,
+        "waves": [
+          1,
+          1
+        ],
+        "final": {
+          "distances": [
+            0,
+            1000000000
+          ],
+          "i": 2,
+          "curdelta": 2,
+          "roles": [
+            0,
+            1,
+            2
+          ],
+          "slots": [
+            1,
+            0,
+            1
+          ],
+          "counters": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ]
+          ],
+          "payload": [
+            [
+              0
+            ],
+            [
+              1
+            ],
+            [
+              1
+            ]
+          ]
+        },
+        "reads": {
+          "outer": 3,
+          "inner": 4
+        }
+      },
+      {
+        "id": "parallel_zero_edges_can_duplicate_notification",
+        "vertices": 2,
+        "edges": [
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ]
+        ],
+        "delta": 1,
+        "waves": [
+          2
+        ],
+        "final": {
+          "distances": [
+            0,
+            0
+          ],
+          "i": 1,
+          "curdelta": 1,
+          "roles": [
+            0,
+            1,
+            2
+          ],
+          "slots": [
+            1,
+            1,
+            1
+          ],
+          "counters": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              2,
+              0
+            ]
+          ],
+          "payload": [
+            [
+              0
+            ],
+            [],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "reads": {
+          "outer": 2,
+          "inner": 3
+        }
+      },
+      {
+        "id": "classification_reread_graph",
+        "vertices": 4,
+        "edges": [
+          [
+            0,
+            1,
+            2
+          ],
+          [
+            0,
+            2,
+            1
+          ],
+          [
+            2,
+            1,
+            0
+          ],
+          [
+            1,
+            3,
+            0
+          ]
+        ],
+        "delta": 1,
+        "waves": [
+          1,
+          3,
+          1
+        ],
+        "final": {
+          "distances": [
+            0,
+            1,
+            1,
+            1
+          ],
+          "i": 3,
+          "curdelta": 3,
+          "roles": [
+            2,
+            1,
+            0
+          ],
+          "slots": [
+            1,
+            1,
+            0
+          ],
+          "counters": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "payload": [
+            [
+              3
+            ],
+            [
+              3,
+              2
+            ],
+            [
+              3,
+              2
+            ]
+          ]
+        },
+        "reads": {
+          "outer": 4,
+          "inner": 8
+        }
+      }
+    ],
+    "above_threshold_retry_witness": {
+      "delta": 1,
+      "entry": [
+        0,
+        2,
+        1,
+        2147483647
+      ],
+      "frontier": [
+        1,
+        2
+      ],
+      "output": [
+        [
+          0,
+          1,
+          1,
+          2
+        ],
+        [
+          1,
+          3
+        ],
+        []
+      ],
+      "trace": [
+        {
+          "edge": [
+            1,
+            3,
+            0
+          ],
+          "stage": "guard",
+          "candidate": 2,
+          "destination_before": 2147483647,
+          "destination_after": 2147483647
+        },
+        {
+          "edge": [
+            1,
+            3,
+            0
+          ],
+          "stage": "atomic",
+          "candidate": 2,
+          "destination_before": 2147483647,
+          "destination_after": 2
+        },
+        {
+          "edge": [
+            2,
+            1,
+            0
+          ],
+          "stage": "guard",
+          "candidate": 1,
+          "destination_before": 2,
+          "destination_after": 2
+        },
+        {
+          "edge": [
+            2,
+            1,
+            0
+          ],
+          "stage": "atomic",
+          "candidate": 1,
+          "destination_before": 2,
+          "destination_after": 1
+        },
+        {
+          "edge": [
+            2,
+            1,
+            0
+          ],
+          "stage": "classify",
+          "candidate": 1,
+          "destination_before": 1,
+          "destination_after": 1,
+          "queue": "re"
+        },
+        {
+          "edge": [
+            1,
+            3,
+            0
+          ],
+          "stage": "classify",
+          "candidate": 1,
+          "destination_before": 2,
+          "destination_after": 2,
+          "queue": "re"
+        }
+      ]
+    },
+    "failed_atomic_still_enqueues_witness": {
+      "output": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          1
+        ],
+        []
+      ],
+      "trace": [
+        {
+          "edge": [
+            0,
+            1,
+            0
+          ],
+          "stage": "guard",
+          "candidate": 0,
+          "destination_before": 2147483647,
+          "destination_after": 2147483647
+        },
+        {
+          "edge": [
+            0,
+            1,
+            0
+          ],
+          "stage": "guard",
+          "candidate": 0,
+          "destination_before": 2147483647,
+          "destination_after": 2147483647
+        },
+        {
+          "edge": [
+            0,
+            1,
+            0
+          ],
+          "stage": "atomic",
+          "candidate": 0,
+          "destination_before": 2147483647,
+          "destination_after": 0
+        },
+        {
+          "edge": [
+            0,
+            1,
+            0
+          ],
+          "stage": "atomic",
+          "candidate": 0,
+          "destination_before": 0,
+          "destination_after": 0
+        },
+        {
+          "edge": [
+            0,
+            1,
+            0
+          ],
+          "stage": "classify",
+          "candidate": 0,
+          "destination_before": 0,
+          "destination_after": 0,
+          "queue": "re"
+        },
+        {
+          "edge": [
+            0,
+            1,
+            0
+          ],
+          "stage": "classify",
+          "candidate": 0,
+          "destination_before": 0,
+          "destination_after": 0,
+          "queue": "re"
+        }
+      ]
+    },
+    "targeted_exact_interleavings": {
+      "classification_reread_graph": {
+        "max_inner": 3,
+        "max_outer": 3,
+        "macro_states": 8,
+        "micro_states": 50,
+        "terminal_states": 2,
+        "max_single_wave_pushes": 2
+      },
+      "parallel_zero_edges": {
+        "max_inner": 2,
+        "max_outer": 1,
+        "macro_states": 3,
+        "micro_states": 14,
+        "terminal_states": 1,
+        "max_single_wave_pushes": 2
+      }
+    },
+    "random_protocol_comparison": {
+      "cases": 3000,
+      "max_vertices": 12,
+      "seed": 20261111,
+      "max_observed_outer": 8,
+      "max_observed_inner": 6,
+      "full_modeled_trace_and_state_equal": true
+    },
+    "exhaustive_three_vertex_search": {
+      "graphs": 728,
+      "weights": [
+        0,
+        1
+      ],
+      "deltas": [
+        1,
+        2
+      ],
+      "self_edges": false,
+      "parallel_edges": false,
+      "all_model_microstage_interleavings": true,
+      "complete": true,
+      "graph_parameter_cases": 1456,
+      "macro_states": 3616,
+      "micro_states": 22520,
+      "terminal_states": 1456,
+      "max_inner": 3,
+      "max_outer": 3,
+      "max_single_wave_pushes": 2
+    }
+  },
+  "parent_review_clarification": "The model groups the guard reads and classification/enqueue stages; its exhaustive search is not a claimed overapproximation of all CUDA executions."
+}

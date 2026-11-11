@@ -1,6 +1,6 @@
 # 十个 root 的简单控制流试写
 
-本轮使用唯一规则 **pipe-control-v0.2**：有序列表加 `for(...)`、`if(...)`、`while(...)`，每个控制节点的内容直接是列表。旧试写和旧试行规则已替换；十个 root 分别由十个全新、max effort 的子代理对照原始 YAML 与固定 Kernel 源码重新编写。
+本目录保留 **pipe-control-v0.2 的历史试写与验证记录**。当时试行语法包含 while，但十个 root 的实际 pipe 均只使用有序列表、for 和 if；它们由十个全新、max effort 的子代理对照原始 YAML 与固定 Kernel 源码编写。现行规范已移除 while，只保留 for/if；以下旧字段、检查器及通过记录不作为现行规范的验收。
 
 [Pipe 规则](../README.md#pipe-规则) · [输入与源码清单](manifest.json) · [统一验证结果](validation.json)
 
@@ -19,13 +19,13 @@
 | 提取 FMHA | [YAML](extract_fmha.yaml) | [说明](extract_fmha.md) | 2 / 0 / 0 |
 | 提取 MoE | [YAML](extract_moe.yaml) | [说明](extract_moe.md) | 19 / 2 / 0 |
 
-**十个 root 均可按现有动作粒度表达，共 84 个 for、7 个 if。** 没有使用 while：已定义的有序工作序列与局部遍历已经足够，底层等待轮询和既有动作内部实现未被人为提升。while 的语义保留在规则中，并有独立控制检查，不以这十个 root 冒充对所有反馈循环的验证。
+**十个 root 均可按现有动作粒度表达，共 84 个 for、7 个 if。** 没有使用 while：已定义的有序工作序列与局部遍历已经足够，底层等待轮询和既有动作内部实现未被人为提升。while 的历史语义和必要性分析另存于[独立研究](../while_review/README.md)，不再属于现行 pipe 语法。
 
 建议先看三个例子：FA4 prefill 用五个 for 和直接首尾动作呈现各角色的职责；GEMM 保留工作／产品／分片的真实层次，把末片读取、提前归还、最后计算直接排在一起；MoE 用两个 if 表达可选等待，没有为它们再登记 q 的门控域。GEMM 的两个互斥 if 使用整份工作期间保持不变的 Full(t)，不依赖隐式分支配对。
 
 条件相关的依赖随目标动作的发生域实例化。FA4 decode 删除 active 域，替换 Value、Softmax、Correction 的依赖；提取 GDN 删除 a 域，替换 prep.Main 的依赖；MoE 替换两个 MMA 的依赖。消去的控制索引使用实际值 0 保留原事件身份。目标不存在时没有等待实例；窗口内目标存在却缺前驱仍报错，拼错角色、名称和签名也不被掩盖。
 
-统一检查通过：
+该轮记录的检查结果：
 
 - 21 个 phase、58 个 role 完整覆盖；输入、规则和源码散列保持一致。
 - 53 组局部参数、323 条角色动作轨迹与原 root 同序、同身份。
@@ -34,7 +34,7 @@
 
 参数见 [cases.json](cases.json)。其中有用于语法展开的抽象范围，说明中明确区分局部分片几何与完整 host dispatch 的可达性。验证不执行动作实现或 GPU，不证明一般终止性、全部运行时并发或数值正确性；原有源码与旧契约的差异也保留在各说明中。
 
-从仓库根目录重跑：
+以下为旧试写版本的复现命令；源码、规则散列与检查器须使用该轮对应版本，不能直接用它验收现行规范：
 
 ```bash
 python schema_discussion/pipe_grammar/tools/check_trial_roots.py --write-report

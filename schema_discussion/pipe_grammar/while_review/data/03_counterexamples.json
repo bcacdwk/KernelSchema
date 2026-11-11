@@ -1,0 +1,859 @@
+{
+  "study_id": "while_review_03_counterexamples",
+  "created_utc": "2026-11-11T13:37:04.097652+00:00",
+  "method": "METHOD.md",
+  "report": "reports/03_counterexamples.md",
+  "source_manifest": "sources/03_sources.json",
+  "independence": {
+    "reports_01_02_read": false,
+    "subagents_spawned": false
+  },
+  "scope": {
+    "gpu_run": false,
+    "compiled": false,
+    "external_downloaded_code_executed": false,
+    "original_sources_or_formal_docs_modified": false,
+    "all_external_code_fixed_commit": true
+  },
+  "joint_worker_condition": "CG/BFS/SSSP 的 MAIN[*] 仅在把合作 grid 登记为一个多 CTA worker 后成立；while/for/if 均不提供驻留保证、跨 worker 寻址或隐式同步。",
+  "conclusions": {
+    "reasonable_algorithms_can_have_feedback": true,
+    "real_cross_action_current_scope_candidates": [
+      "cg_cooperative",
+      "persistent_bfs",
+      "persistent_delta_sssp"
+    ],
+    "clean_current_scope_for_if_inadequacy_example_found": false,
+    "cannot_splice_evidence": "Gamma 无 cap 但属 compute 内，CG 有跨动作交接但有 cap，不能拼成不存在的同一实现。",
+    "decision_limit": "支持 while 有时更自然；不证明删除它必然无法表达某个已核实的当前 pipe 算子。"
+  },
+  "candidates": [
+    {
+      "id": "cg_cooperative",
+      "category": "adaptive_convergence",
+      "report_section": "A",
+      "input_contract": "源码生成对称严格对角占优正定三对角 CSR；N=1048576，x0=0，rhs=1，tol=1e-5；需合作启动和 managed memory。不声称覆盖所有 CSR/NaN。",
+      "output_and_failure": "近似 x 与残差平方；r1<=tol² 或已执行 10000 轮退出。host 仅 sqrt(r1)<tol 判 PASS，等于 tol 会 device 退出而 host FAIL。硬件不支持则 waive。",
+      "termination": {
+        "actual_cap": 10000,
+        "bound_kind": "real_source_budget",
+        "basis": "真实 cap 限制轮数，仍需 collective 完成；不用精确算术 N 步 CG 理论证明浮点终止。"
+      },
+      "source_refs": [
+        {
+          "local_path": "sources/03_cuda_samples/cpp/4_CUDA_Libraries/conjugateGradientMultiBlockCG/conjugateGradientMultiBlockCG.cu",
+          "lines": [
+            262,
+            341
+          ],
+          "purpose": "device solver",
+          "url": "https://github.com/NVIDIA/cuda-samples/blob/0ec046d5e99d7214cc8e9fbac2cc1e66f3019878/cpp/4_CUDA_Libraries/conjugateGradientMultiBlockCG/conjugateGradientMultiBlockCG.cu#L262-L341",
+          "sha256": "6dc0afd278dee9c445a97a52fc651ecb53c6ba91a26c7863579a0bd45298fe4e",
+          "repo": "NVIDIA/cuda-samples",
+          "commit": "0ec046d5e99d7214cc8e9fbac2cc1e66f3019878"
+        },
+        {
+          "local_path": "sources/03_cuda_samples/cpp/4_CUDA_Libraries/conjugateGradientMultiBlockCG/conjugateGradientMultiBlockCG.cu",
+          "lines": [
+            53,
+            85
+          ],
+          "purpose": "SPD input generation",
+          "url": "https://github.com/NVIDIA/cuda-samples/blob/0ec046d5e99d7214cc8e9fbac2cc1e66f3019878/cpp/4_CUDA_Libraries/conjugateGradientMultiBlockCG/conjugateGradientMultiBlockCG.cu#L53-L85",
+          "sha256": "6dc0afd278dee9c445a97a52fc651ecb53c6ba91a26c7863579a0bd45298fe4e",
+          "repo": "NVIDIA/cuda-samples",
+          "commit": "0ec046d5e99d7214cc8e9fbac2cc1e66f3019878"
+        },
+        {
+          "local_path": "sources/03_cuda_samples/cpp/4_CUDA_Libraries/conjugateGradientMultiBlockCG/conjugateGradientMultiBlockCG.cu",
+          "lines": [
+            404,
+            478
+          ],
+          "purpose": "host inputs and cooperative launch",
+          "url": "https://github.com/NVIDIA/cuda-samples/blob/0ec046d5e99d7214cc8e9fbac2cc1e66f3019878/cpp/4_CUDA_Libraries/conjugateGradientMultiBlockCG/conjugateGradientMultiBlockCG.cu#L404-L478",
+          "sha256": "6dc0afd278dee9c445a97a52fc651ecb53c6ba91a26c7863579a0bd45298fe4e",
+          "repo": "NVIDIA/cuda-samples",
+          "commit": "0ec046d5e99d7214cc8e9fbac2cc1e66f3019878"
+        },
+        {
+          "local_path": "sources/03_cuda_samples/cpp/4_CUDA_Libraries/conjugateGradientMultiBlockCG/conjugateGradientMultiBlockCG.cu",
+          "lines": [
+            483,
+            528
+          ],
+          "purpose": "result/failure",
+          "url": "https://github.com/NVIDIA/cuda-samples/blob/0ec046d5e99d7214cc8e9fbac2cc1e66f3019878/cpp/4_CUDA_Libraries/conjugateGradientMultiBlockCG/conjugateGradientMultiBlockCG.cu#L483-L528",
+          "sha256": "6dc0afd278dee9c445a97a52fc651ecb53c6ba91a26c7863579a0bd45298fe4e",
+          "repo": "NVIDIA/cuda-samples",
+          "commit": "0ec046d5e99d7214cc8e9fbac2cc1e66f3019878"
+        },
+        {
+          "local_path": "sources/03_cuda_samples/cpp/4_CUDA_Libraries/conjugateGradientMultiDeviceCG/conjugateGradientMultiDeviceCG.cu",
+          "lines": [
+            197,
+            257
+          ],
+          "purpose": "primitive-internal polling",
+          "url": "https://github.com/NVIDIA/cuda-samples/blob/0ec046d5e99d7214cc8e9fbac2cc1e66f3019878/cpp/4_CUDA_Libraries/conjugateGradientMultiDeviceCG/conjugateGradientMultiDeviceCG.cu#L197-L257",
+          "sha256": "a2c6ce43ab62c9a9b92b506cfe4035fa82dec30264df6c85e3a2dd655bc134f1",
+          "repo": "NVIDIA/cuda-samples",
+          "commit": "0ec046d5e99d7214cc8e9fbac2cc1e66f3019878"
+        },
+        {
+          "local_path": "sources/03_cuda_samples/cpp/4_CUDA_Libraries/conjugateGradientMultiDeviceCG/conjugateGradientMultiDeviceCG.cu",
+          "lines": [
+            354,
+            445
+          ],
+          "purpose": "multi-device retains cap",
+          "url": "https://github.com/NVIDIA/cuda-samples/blob/0ec046d5e99d7214cc8e9fbac2cc1e66f3019878/cpp/4_CUDA_Libraries/conjugateGradientMultiDeviceCG/conjugateGradientMultiDeviceCG.cu#L354-L445",
+          "sha256": "a2c6ce43ab62c9a9b92b506cfe4035fa82dec30264df6c85e3a2dd655bc134f1",
+          "repo": "NVIDIA/cuda-samples",
+          "commit": "0ec046d5e99d7214cc8e9fbac2cc1e66f3019878"
+        }
+      ],
+      "pipe_scope": "conditional_whole_grid_worker",
+      "cross_action_feedback": true,
+      "actions": [
+        "方向与 grid 交接",
+        "SpMV",
+        "leader 清 dot 存储",
+        "部分归约与 grid 完成",
+        "显式读取分母",
+        "更新 x/r",
+        "旧读者完成再复用 dot",
+        "残差归约、grid 完成、显式读取条件"
+      ],
+      "while_form": "while(r,residual2>tol2 and r<10000): 原动作列表；完整片段与代表 waiting 见报告 A。",
+      "for_if": {
+        "form": "for(r=0:10000): if(residual2>tol2): 同一 body",
+        "status": "appropriate",
+        "added_state": "无需新 Alive，false 后 residual2 不再更新；若观察 k，仅在活跃 body 更新既有 k。",
+        "empty_iterations": "最多 10000-K 次纯 guard，不得增加 barrier。",
+        "event_trace": "相同数值结果下活跃前缀、轮次、复用和交接可保持。",
+        "observation": "直接实现可能延后 kernel 返回、event 时间与 CTA/资源寿命；未测量，声明式 pipe 不必实际发射全部 guard。",
+        "readability": "多一层 if；while 更直观，for/if 仍简短。"
+      },
+      "scheduler_escape": "无实际外部收敛轮次流，不能虚构 until-converged 域。",
+      "compute_escape": "整个 Solve 会隐藏 p/Ax 发布、dot 复用与跨 CTA 完成；单次 dot 内 warp reduction 可内封。",
+      "conclusion": {
+        "reasonable_feedback": true,
+        "while_natural": true,
+        "for_if_inadequacy_demonstrated": false
+      }
+    },
+    {
+      "id": "gamma_rejection",
+      "category": "random_acceptance",
+      "report_section": "B",
+      "input_contract": "公共 Gamma 正 concentration/rate，采用有限正 concentration、rate=1 的普通数值范围；内部 alpha=0 特判不扩张公共接口。",
+      "output_and_failure": "各元素 Gamma 样本；CUDA/Python 按 dtype tiny 裁剪；无 MaxAttempts 耗尽失败分支。",
+      "termination": {
+        "actual_cap": null,
+        "bound_kind": "no_source_cap",
+        "basis": "理想独立随机变量模型下正接受概率、几乎必然终止；每个有限预算仍可能全部拒绝。",
+        "limitation": "未穷举真实 Philox seed/state，也未证明每个 seed 的最坏尝试界；philox_cuda_state(10) 不是十次 cap。"
+      },
+      "source_refs": [
+        {
+          "local_path": "sources/03_pytorch/torch/distributions/gamma.py",
+          "lines": [
+            37,
+            40
+          ],
+          "purpose": "public constraints",
+          "url": "https://github.com/pytorch/pytorch/blob/157115e6506269aa62dbb2ef50f3a4a21fa5bd6d/torch/distributions/gamma.py#L37-L40",
+          "sha256": "2ac1aef6154109f62fca5c5874a63a04d1aac3912d44a5f9a93d03bdaa3c19f5",
+          "repo": "pytorch/pytorch",
+          "commit": "157115e6506269aa62dbb2ef50f3a4a21fa5bd6d"
+        },
+        {
+          "local_path": "sources/03_pytorch/torch/distributions/gamma.py",
+          "lines": [
+            88,
+            100
+          ],
+          "purpose": "public call and clamp",
+          "url": "https://github.com/pytorch/pytorch/blob/157115e6506269aa62dbb2ef50f3a4a21fa5bd6d/torch/distributions/gamma.py#L88-L100",
+          "sha256": "2ac1aef6154109f62fca5c5874a63a04d1aac3912d44a5f9a93d03bdaa3c19f5",
+          "repo": "pytorch/pytorch",
+          "commit": "157115e6506269aa62dbb2ef50f3a4a21fa5bd6d"
+        },
+        {
+          "local_path": "sources/03_pytorch/aten/src/ATen/native/cuda/Distributions.cpp",
+          "lines": [
+            51,
+            55
+          ],
+          "purpose": "host CUDA entry",
+          "url": "https://github.com/pytorch/pytorch/blob/157115e6506269aa62dbb2ef50f3a4a21fa5bd6d/aten/src/ATen/native/cuda/Distributions.cpp#L51-L55",
+          "sha256": "94f772c7a589f2ce54f2e0f727c90f6056881d372a298b81f952336698ca6e82",
+          "repo": "pytorch/pytorch",
+          "commit": "157115e6506269aa62dbb2ef50f3a4a21fa5bd6d"
+        },
+        {
+          "local_path": "sources/03_pytorch/aten/src/ATen/native/cuda/Distributions.cu",
+          "lines": [
+            92,
+            122
+          ],
+          "purpose": "thread-local sampler and store",
+          "url": "https://github.com/pytorch/pytorch/blob/157115e6506269aa62dbb2ef50f3a4a21fa5bd6d/aten/src/ATen/native/cuda/Distributions.cu#L92-L122",
+          "sha256": "cef5ee8525ae2fd2e6a68eca69eeaf1b0a479cc8b7668c4d81f8cd92acf18719",
+          "repo": "pytorch/pytorch",
+          "commit": "157115e6506269aa62dbb2ef50f3a4a21fa5bd6d"
+        },
+        {
+          "local_path": "sources/03_pytorch/aten/src/ATen/native/cuda/Distributions.cu",
+          "lines": [
+            170,
+            180
+          ],
+          "purpose": "RNG reservation and launch",
+          "url": "https://github.com/pytorch/pytorch/blob/157115e6506269aa62dbb2ef50f3a4a21fa5bd6d/aten/src/ATen/native/cuda/Distributions.cu#L170-L180",
+          "sha256": "cef5ee8525ae2fd2e6a68eca69eeaf1b0a479cc8b7668c4d81f8cd92acf18719",
+          "repo": "pytorch/pytorch",
+          "commit": "157115e6506269aa62dbb2ef50f3a4a21fa5bd6d"
+        },
+        {
+          "local_path": "sources/03_pytorch/aten/src/ATen/native/Distributions.h",
+          "lines": [
+            114,
+            142
+          ],
+          "purpose": "actual rejection loop",
+          "url": "https://github.com/pytorch/pytorch/blob/157115e6506269aa62dbb2ef50f3a4a21fa5bd6d/aten/src/ATen/native/Distributions.h#L114-L142",
+          "sha256": "7134912f1397a90e451787b3c3bdfff126737b059b8c9a60927ef1b566ac6770",
+          "repo": "pytorch/pytorch",
+          "commit": "157115e6506269aa62dbb2ef50f3a4a21fa5bd6d"
+        }
+      ],
+      "pipe_scope": "compute_internal",
+      "cross_action_feedback": false,
+      "actions": [
+        "load AlphaTile",
+        "compute GammaTile（线程局部拒绝采样）",
+        "store GammaTile"
+      ],
+      "while_form": "人为细化为 while(a,not Accepted): PositiveProposal, Acceptance；缺少实际独立发布/复用边界，非推荐 pipe。",
+      "for_if": {
+        "form": "proposal 层 for(a=0:B)+if(not Accepted)",
+        "status": "no_B_at_local_algorithm_layer_but_unneeded_in_pipe",
+        "added_state": "若外提需 Accepted/已接受样本；留在 compute 不新增 pipe 状态。",
+        "empty_iterations": "不得在接受后继续推进 RNG 填满 B。",
+        "event_trace": "新增预算失败改变语义；返回未接受 proposal 改分布；无限续批恢复反馈。",
+        "observation": "需区分分布相同、逐 seed 复现、RNG 消耗；无实际跨 role 观察。",
+        "readability": "单 compute 更符合真实设计粒度。"
+      },
+      "scheduler_escape": "源码 for(;;) 是反馈，不是当前 ordered-domain for；until-accepted 是伪域。",
+      "compute_escape": "正当：不存在独立候选发布、归还、全网格接受归约或跨 role 握手。",
+      "conclusion": {
+        "reasonable_feedback": true,
+        "while_natural": false,
+        "for_if_inadequacy_demonstrated": false
+      }
+    },
+    {
+      "id": "persistent_bfs",
+      "category": "dynamic_frontier",
+      "report_section": "C",
+      "input_contract": "预期有限 CSR 与合法 source；强论据限小出度有根有向树、可表示计数、足够队列及可运行 grid barrier，避开源码 non-CAS 重复发现竞争。",
+      "output_and_failure": "最短无权距离及 INF；无迭代预算失败状态；不认证旧 benchmark 对任意图的竞争/容量安全。",
+      "termination": {
+        "actual_cap": null,
+        "bound_kind": "natural_input_bound",
+        "derived_bound": "非空 source/frontier 处理轮次 <= eccentricity(source)+1 <= |V|；路径末叶处理计一轮，|V|-1 不够。",
+        "basis": "正确逐层 BFS 推进距离层；有根树每节点仅一个父节点。"
+      },
+      "source_refs": [
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/bfs/bfs.cu",
+          "lines": [
+            305,
+            325
+          ],
+          "purpose": "persistent device loop",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/bfs/bfs.cu#L305-L325",
+          "sha256": "495291ea15108c5c8cbb493c77b2b81a035e172ac9c818c4e78ee04c18eb0630",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/bfs/bfs.cu",
+          "lines": [
+            326,
+            361
+          ],
+          "purpose": "host wrapper/launch/source frontier",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/bfs/bfs.cu#L326-L361",
+          "sha256": "495291ea15108c5c8cbb493c77b2b81a035e172ac9c818c4e78ee04c18eb0630",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/bfs/bfs.cu",
+          "lines": [
+            189,
+            195
+          ],
+          "purpose": "non-CAS distance and insertion limits",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/bfs/bfs.cu#L189-L195",
+          "sha256": "495291ea15108c5c8cbb493c77b2b81a035e172ac9c818c4e78ee04c18eb0630",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/libgpu/include/worklist.h",
+          "lines": [
+            223,
+            287
+          ],
+          "purpose": "counter slots, real nitems load, reserve/store",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/libgpu/include/worklist.h#L223-L287",
+          "sha256": "d41df1170895b5ceeb10cf4186e199e524465a9faa7a871a246e6e9c37299eff",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/libgpu/include/pipe.h",
+          "lines": [
+            46,
+            70
+          ],
+          "purpose": "queue rotation is explicit",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/libgpu/include/pipe.h#L46-L70",
+          "sha256": "3c9300aad416e54bf4805acbb06b70eb787037caac772a0bd9ed47e60a4bcf30",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/bfs/support.cu",
+          "lines": [
+            1,
+            47
+          ],
+          "purpose": "options/output",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/bfs/support.cu#L1-L47",
+          "sha256": "147a008125b4432c5f7498ad95556d77ee246e7bb93cca81c4ad52d8ce6a5cbc",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        }
+      ],
+      "pipe_scope": "conditional_whole_grid_worker",
+      "cross_action_feedback": true,
+      "actions": [
+        "清备用 counter",
+        "ExpandAndAppend 写下一 frontier",
+        "翻 consumed counter",
+        "grid barrier",
+        "交换 in/out",
+        "推进 LEVEL",
+        "显式读取新 Count",
+        "最终 collective 与 LEVEL store"
+      ],
+      "while_form": "load Count; while(r,Count>0): 上列每轮动作；最后 wait AllExited 和 leader store，详见报告 C。",
+      "for_if": {
+        "form": "for(r=0:V): if(Count>0): 原 body；保留相同收尾",
+        "status": "appropriate_for_valid_level_BFS_family",
+        "added_state": "无需 Alive；Count=0 后不再更新；LEVEL/slot 仅活跃轮更新。",
+        "empty_iterations": "最多 |V|-K guard，不得 swap、推进 LEVEL 或运行 body barrier。",
+        "event_trace": "活跃前缀、slot parity、LEVEL、barrier 和最终 store 可相同。",
+        "observation": "直接实现可能延后返回与资源寿命；声明式成本不是已测量的必然成本。",
+        "readability": "增加一层 if，但有自然数学上界。"
+      },
+      "scheduler_escape": "内层已形成 frontier 的元素是域；外层由同一 ExpandAndAppend+gb.Sync+advance2 产生，改名外部轮次流会隐藏反馈。",
+      "compute_escape": "per-frontier 大小合理；把整个 BFS 内封会隐藏真实队列发布、消费完成和复用。",
+      "conclusion": {
+        "reasonable_feedback": true,
+        "while_natural": true,
+        "for_if_inadequacy_demonstrated": false
+      }
+    },
+    {
+      "id": "persistent_delta_sssp",
+      "category": "dynamic_relaxation_worklist",
+      "report_section": "D",
+      "input_contract": "预期非负权有限图、合法 source、距离和 curdelta 可表示、2*nedges 队列足够、global barrier 可完成；无普遍竞争/容量证明。",
+      "output_and_failure": "最短距离/INF；无 MaxIter 失败；负环、溢出、容量不足不能当正常成功输入。",
+      "termination": {
+        "actual_cap": null,
+        "bound_kind": "appropriate_bound_unresolved",
+        "basis": "预期严格距离改善、有限非负路径和完整 frontier 处理；并发可产生重复通知。",
+        "limitation": "未证明此 in/re/out、阈值、就地更新、去重调度的 V×V 界；不能直接套普通同步 BF 的 |V|-1 sweep，也不采用整数有限状态巨界。"
+      },
+      "source_refs": [
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/sssp/sssp.cu",
+          "lines": [
+            344,
+            378
+          ],
+          "purpose": "nested persistent feedback",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/sssp/sssp.cu#L344-L378",
+          "sha256": "966ad1fa15ab6bf14e3273e4e4dc33bdf843ec03067873122962446d64ad6fe1",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/sssp/sssp.cu",
+          "lines": [
+            379,
+            431
+          ],
+          "purpose": "host launch and queues",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/sssp/sssp.cu#L379-L431",
+          "sha256": "966ad1fa15ab6bf14e3273e4e4dc33bdf843ec03067873122962446d64ad6fe1",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/sssp/sssp.cu",
+          "lines": [
+            237,
+            248
+          ],
+          "purpose": "atomicMin and re/out generation",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/sssp/sssp.cu#L237-L248",
+          "sha256": "966ad1fa15ab6bf14e3273e4e4dc33bdf843ec03067873122962446d64ad6fe1",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/sssp/sssp.cu",
+          "lines": [
+            34,
+            63
+          ],
+          "purpose": "marks/grid/publish dedup",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/sssp/sssp.cu#L34-L63",
+          "sha256": "966ad1fa15ab6bf14e3273e4e4dc33bdf843ec03067873122962446d64ad6fe1",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/sssp/support.cu",
+          "lines": [
+            1,
+            32
+          ],
+          "purpose": "positive DELTA option",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/sssp/support.cu#L1-L32",
+          "sha256": "841a26e07ed063c62156142a602779aae1a5fef7d0c3212515cd8343bb7d3719",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        }
+      ],
+      "pipe_scope": "conditional_whole_grid_worker",
+      "cross_action_feedback": true,
+      "actions": [
+        "relax 写 re/out",
+        "grid 后提升 re 并读 inner count",
+        "排空后提升 out",
+        "marks/grid/代表节点发布",
+        "grid 后提升 unique queue",
+        "advance delta/read outer count"
+      ],
+      "while_form": "外层 while(OuterCount>0) 内含 while(InnerCount>0)；全部条件显式 load，骨架及缺省细节见报告 D。",
+      "for_if": {
+        "form": "有经证明的 B_outer/B_inner 后两层 for+原 Count guard，并完整保留外层 compaction。",
+        "status": "conditional_on_unproven_appropriate_bounds",
+        "added_state": "未必需大状态机，可复用 Count；仍需保持每层条件语义。",
+        "empty_iterations": "可能两级空尾。",
+        "event_trace": "用同步 BF 替换不保留该 relaxation、队列和去重轨迹。",
+        "observation": "delta 算术、pending re/out、打印 i 和资源寿命需保留。",
+        "readability": "while 清楚区分两种耗尽；for 界需要额外证明。"
+      },
+      "scheduler_escape": "re/out 都在本设计中生成，不能仅靠 worklist 名称变外部域。",
+      "compute_escape": "整包会隐藏 marks/代表项发布与多次 grid/queue reuse 边界。",
+      "conclusion": {
+        "reasonable_feedback": true,
+        "while_natural": true,
+        "for_if_inadequacy_demonstrated": false,
+        "additional_proof_required": true
+      }
+    },
+    {
+      "id": "delaunay_refinement",
+      "category": "dynamic_task_regeneration",
+      "report_section": "E",
+      "input_contract": "初始 .node/.ele/.poly 网格和边界，需几何条件、容量、cavity/boundary 足够；MINANGLE=30，maxfactor 容量参数；无普遍几何终止证明。",
+      "output_and_failure": "细化网格与坏三角形计数；容量 assert 非正常收敛，断言关闭不保证安全失败；verify_mesh 留 Delaunay property TODO。",
+      "termination": {
+        "actual_cap": null,
+        "bound_kind": "capacity_limits_without_proven_round_bound",
+        "basis": "成功插点/删 cavity，冲突重投，新坏三角形再生；完整几何/公平进展证明未完成。",
+        "limitation": "maxfactor=20 不是 MaxIter；有限内存本身不等于合适轮次界。"
+      },
+      "source_refs": [
+        {
+          "local_path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/dmr.cu",
+          "lines": [
+            68,
+            175
+          ],
+          "purpose": "device finite worklist and ownership/commit",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/scientific/gpu/delaunayrefinement/dmr.cu#L68-L175",
+          "sha256": "987c23be57cce9cf955fd7329b27576a1273a4df0cc0a804a851542884ea416d",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/dmr.cu",
+          "lines": [
+            176,
+            259
+          ],
+          "purpose": "actual feedback is host loop",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/scientific/gpu/delaunayrefinement/dmr.cu#L176-L259",
+          "sha256": "987c23be57cce9cf955fd7329b27576a1273a4df0cc0a804a851542884ea416d",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/main.inc",
+          "lines": [
+            2,
+            42
+          ],
+          "purpose": "host caller/output",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/scientific/gpu/delaunayrefinement/main.inc#L2-L42",
+          "sha256": "023eeca80b308ed78f616e63b3430abee61847d0175adfb3d9157aff75900d12",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/dmrggc.inc",
+          "lines": [
+            77,
+            98
+          ],
+          "purpose": "verification TODO/loader assumptions",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/scientific/gpu/delaunayrefinement/dmrggc.inc#L77-L98",
+          "sha256": "5f75aa88a5246a8832c38036a755cb4e6bc2ec78a58857a662a8586ef9f77793",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/dmrggc.inc",
+          "lines": [
+            280,
+            329
+          ],
+          "purpose": "capacity assertions",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/scientific/gpu/delaunayrefinement/dmrggc.inc#L280-L329",
+          "sha256": "5f75aa88a5246a8832c38036a755cb4e6bc2ec78a58857a662a8586ef9f77793",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/meshfiles.h",
+          "lines": [
+            90,
+            106
+          ],
+          "purpose": "maxfactor allocation",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/scientific/gpu/delaunayrefinement/meshfiles.h#L90-L106",
+          "sha256": "dfc933df3be363fd464c58467119b76255a784c566c67c85026adf095223806c",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/dmr.h",
+          "lines": [
+            23,
+            34
+          ],
+          "purpose": "MINANGLE/capacity ratio",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/scientific/gpu/delaunayrefinement/dmr.h#L23-L34",
+          "sha256": "b6db8425f8a2ac5813514f75224be6aa63937a933ccd8e8e48e1db159b0893c8",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        }
+      ],
+      "pipe_scope": "host_repeated_launches_outside_role_pipe",
+      "cross_action_feedback": true,
+      "actions": [
+        "cavity/两阶段 ownership+grid",
+        "插点修改拓扑/删除 cavity",
+        "grid 后 repush",
+        "host 读尺寸",
+        "另 launch check_triangles",
+        "队列交换及新计数"
+      ],
+      "while_form": "无对应当前单 phase 的合法直接片段；真实 host while 反复 launch refine/check 并读取 count。",
+      "for_if": {
+        "form": "只在 host 层，证明 B 后 for(round=0:B)+if(cached_count>0) 保留所有提交/同步/日志。",
+        "status": "no_bound_verified_and_wrong_scope_for_pipe_necessity",
+        "added_state": "若有合适界可复用缓存 count。",
+        "empty_iterations": "不得为了填 B 发射空 kernel。",
+        "event_trace": "新预算失败或新融合 persistent kernel 都改变现有证据对象。",
+        "observation": "容量失败、几何、拓扑增长与诊断日志均须明确。",
+        "readability": "host while 自然；融合设计需新的实现和证明。"
+      },
+      "scheduler_escape": "真实调度可管理重投，但必须保留 mesh commit 互斥、发布和全局终止。",
+      "compute_escape": "会隐藏拓扑发布及 ownership，且无法修复 host/pipe 层级差别。",
+      "conclusion": {
+        "reasonable_feedback": true,
+        "while_natural": null,
+        "for_if_inadequacy_demonstrated": false,
+        "current_scope_rejection": true
+      }
+    },
+    {
+      "id": "random_priority_mis",
+      "category": "randomized_graph_negative_control",
+      "report_section": "F",
+      "input_contract": "预期有限无向图及有效 priority/id 总序；旧实现 unsigned prio/int max_prio 的细节未独立认证。",
+      "output_and_failure": "maximal independent set 标记及真实活跃 STEPS；无独立 MaxIter API。",
+      "termination": {
+        "actual_cap": null,
+        "bound_kind": "natural_input_bound_for_intended_ordering",
+        "derived_bound": "每个非空剩余集的全局最大 (priority,id) 至少被选中，至多 |V| 轮。",
+        "limitation": "priority 只在循环前生成一次，不是每轮重新抽签的零进展重试。"
+      },
+      "source_refs": [
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/independentset/mis.cu",
+          "lines": [
+            19,
+            41
+          ],
+          "purpose": "RNG generation",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/independentset/mis.cu#L19-L41",
+          "sha256": "0fedebde5ace4a15292cfc99f7708316e73bc893888f1735ff5fccfe547bb691",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/independentset/mis.cu",
+          "lines": [
+            66,
+            104
+          ],
+          "purpose": "selection and ID tie break",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/independentset/mis.cu#L66-L104",
+          "sha256": "0fedebde5ace4a15292cfc99f7708316e73bc893888f1735ff5fccfe547bb691",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/independentset/mis.cu",
+          "lines": [
+            105,
+            150
+          ],
+          "purpose": "drop/publish remaining",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/independentset/mis.cu#L105-L150",
+          "sha256": "0fedebde5ace4a15292cfc99f7708316e73bc893888f1735ff5fccfe547bb691",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        },
+        {
+          "local_path": "sources/03_galois/lonestar/analytics/gpu/independentset/mis.cu",
+          "lines": [
+            152,
+            191
+          ],
+          "purpose": "host loop/one-time RNG/counter",
+          "url": "https://github.com/IntelligentSoftwareSystems/Galois/blob/b67f94206a8c47fd414446621f6633a31c49fd98/lonestar/analytics/gpu/independentset/mis.cu#L152-L191",
+          "sha256": "0fedebde5ace4a15292cfc99f7708316e73bc893888f1735ff5fccfe547bb691",
+          "repo": "IntelligentSoftwareSystems/Galois",
+          "commit": "b67f94206a8c47fd414446621f6633a31c49fd98"
+        }
+      ],
+      "pipe_scope": "host_repeated_launches_outside_role_pipe",
+      "cross_action_feedback": true,
+      "actions": [
+        "一次 priority 生成",
+        "mark winners",
+        "drop 选中点及邻居",
+        "发布剩余队列",
+        "交换/读取数量"
+      ],
+      "while_form": "真实 host while: launch mark/drop、swap、STEPS++；无单 phase 直接片段。",
+      "for_if": {
+        "form": "host for(r=0:V)+if(count>0) 保留 mark/drop",
+        "status": "natural_bound_for_intended_algorithm",
+        "added_state": "无需新 Alive，STEPS 仅活跃轮更新。",
+        "empty_iterations": "可能 |V|-K host guard。",
+        "event_trace": "保持原 priority、kernel 交接和 queue swap。",
+        "observation": "不能重新抽 RNG 或把 STEPS 换成 B。",
+        "readability": "host while 自然，但不支持 pipe 必要性。"
+      },
+      "scheduler_escape": "剩余点本地产生，但已有有限上界。",
+      "compute_escape": "排除此候选不需要封装大动作。",
+      "conclusion": {
+        "reasonable_feedback": true,
+        "while_natural": null,
+        "for_if_inadequacy_demonstrated": false,
+        "current_scope_rejection": true
+      }
+    }
+  ],
+  "verification": {
+    "source_file_count": 25,
+    "all_source_sha256_verified": true,
+    "all_git_blob_sha_verified": true,
+    "all_bytes_verified": true,
+    "all_reference_line_ranges_exist": true,
+    "report_relative_links_checked": true,
+    "checks": [
+      {
+        "path": "sources/03_cuda_samples/cpp/4_CUDA_Libraries/conjugateGradientMultiBlockCG/conjugateGradientMultiBlockCG.cu",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_cuda_samples/cpp/4_CUDA_Libraries/conjugateGradientMultiBlockCG/README.md",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_cuda_samples/cpp/4_CUDA_Libraries/conjugateGradientMultiDeviceCG/conjugateGradientMultiDeviceCG.cu",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_pytorch/aten/src/ATen/native/Distributions.h",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_pytorch/aten/src/ATen/native/cuda/Distributions.cu",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_pytorch/LICENSE",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/LICENSE.txt",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/dmr.cu",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/dmrggc.inc",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/main.inc",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/README.md",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/dmr.h",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/analytics/gpu/bfs/bfs.cu",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/analytics/gpu/bfs/README.md",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/analytics/gpu/sssp/sssp.cu",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/libgpu/include/pipe.h",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/libgpu/include/worklist.h",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/libgpu/include/lockarray.h",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/analytics/gpu/independentset/mis.cu",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/analytics/gpu/independentset/README.md",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/analytics/gpu/bfs/support.cu",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/analytics/gpu/sssp/support.cu",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_galois/lonestar/scientific/gpu/delaunayrefinement/meshfiles.h",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_pytorch/torch/distributions/gamma.py",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      },
+      {
+        "path": "sources/03_pytorch/aten/src/ATen/native/cuda/Distributions.cpp",
+        "sha256_match": true,
+        "git_blob_match": true,
+        "bytes_match": true
+      }
+    ],
+    "gpu_or_general_equivalence_verified": false,
+    "limits": "机械核验只覆盖文件完整性和引用；未证明任意 GPU 并发、数值正确性、普遍终止或 exact SSSP 调度界。",
+    "report_relative_link_count": 23,
+    "illustrative_yaml_blocks_syntax_parsed": 9,
+    "illustrative_yaml_formal_schema_validated": false
+  }
+}
