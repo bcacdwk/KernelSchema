@@ -1,5 +1,26 @@
 # schema_docs 修改记录
 
+## 2026-11-12
+
+### View：part 更名为 region
+
+- `view.<value>.part` 更名为 `region`，表示槽内的位置与覆盖范围；同步第 5 篇的结构、字段说明及示例，区间形式、坐标单位和省略语义不变。
+
+### View：区域绑定与数值定义
+
+- `view` 仅保留 `slot_index / part`，取消 `dtype` 及省略时继承父类型的数值解释。父 `storage.dtype` 仍必填，用于容量和 `part` 坐标；数值类型与转换沿用当前 Design 的值或输入输出定义，必要本地格式在已有动作或 realization 绑定中定义一次。
+- `part` 省略表示整槽的保守占用与冲突范围，不表示填满或访问全部字节。已有交接支持整槽先后复用时可省精确位置；子区并存、部分数据仍存活和部分覆盖时保留区域约束，不以额外全组等待改变重叠。
+- 同步第 5 篇的结构、字段、绑定说明及两个 S/P 示例，保留逐 view 槽映射和容量一次计账。算子实例、模板与检查工具后续另行迁移。
+
+### Phase 公共定义：storage / index / event
+
+- `tile_pipeline.phase` 下的 `resource / domain / milestone` 更名为 `storage / index / event`，分别记录片上存储区域、有序索引和供跨 phase 引用的已有事件集合。同步修改第 5 篇的结构、字段表、正文及示例，第 4 篇的存储路径和事件引用说明；对外仍使用 `<phase_id>.<event_name>`。
+- 存储按设计区域列账，互不重叠的区域可分列，API 如何合并申请由实现决定；共用字节通过同一 storage 的 view 表达并只计一次。保留 `slot_index / part / dtype` 与必填 `total_size`，容量包含设计所依赖的分配粒度；影响驻留的额外预留或实际申请量由 realization 说明。
+- index 允许单 role 登记 worktile/flatten 序列；纯局部范围和条件使用 for/if。view 形参或局部实参不再单独触发公共索引登记，动态端点在实际遍历前须已定义并就绪。
+- event 定义为已有事件的引用集合，明确形参代入、role/member 和 worker 实例身份，以及跨 phase 的值、版本和区域匹配。事件存在性沿用 pipe，空工作序列不删除循环外入口动作；默认交接或已有关系足够时不重复登记别名。
+- 事件集合用于 ready/start_after 时要求全部前驱满足；用于 wait_at 时，就绪条件分别约束每个消费事件。wait_at 按消费者覆盖，未被点名的消费者保留默认入口等待。
+- 上述语义直接融入字段定义，正文不保留改名历史或研究过程；调查依据见[六算子研究记录](../schema_discussion/phase_grammar/README.md)。本次只修改规范文档，算子实例、模板与检查工具后续另行迁移。
+
 ## 2026-11-11
 
 第 1–4 节记录本日首轮仅涉及 `schema_docs/` 的改动；后续决定追加记录，保留首轮决策的历史背景。
