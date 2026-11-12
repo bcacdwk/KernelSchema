@@ -2,6 +2,21 @@
 
 ## 2026-11-12
 
+### 对象说明：meaning 与角色 describe
+
+- 第 4 篇的 `partition.<dimension>`、`worktile.invariant.<value>`、`worktile.iteration.<value>`、`target.single_tile.<value>` 增加必填 `meaning`，分别说明本层工作坐标、输入块及结果的含义，沿用上游数学定义。
+- 第 5 篇的 `storage.<storage_id>` 增加必填 `meaning`，说明存储区域用途；`role.<role_id>.info` 增加必填 `describe`，概括角色职责。noun 的 `execution_mode / describe` 保持不变。
+- `index.<index_name>` 统一为 `meaning / definition` 映射，两项必填；`definition` 沿用半开范围、`worktile` 或 `{flatten: [...]}` 三种域定义。遍历、切片、连续编号与索引作用域语义不变。
+- 新增说明均为简短、非空的英文字符串，放在各条目属性首位；同步结构、字段表、条目顺序、正文与示例，包括第 3 篇的调度数据块示例。
+
+### Flow：启动绑定、调用边界与交接默认
+
+- 删除 `flow.launch[].protocol`，同步第 4 篇的结构、字段表与开放取值。保留 `launch_ready`，由第 5 篇的动作契约说明触发条件与参与范围，第 6 篇绑定具体启动机制及所需保证。
+- 明确计算请求的入口与输出交付约定，不增加内部独立提交之间的顺序，也不要求 host 阻塞。外部供给和调用前提由相关 phase 的 `schedule.strategy` 简明记录；外部准备及共享状态不从计算入口推导同步。
+- 片上交接先按 worker 匹配对应存储副本；`wait_at` 可引用空工作集合下仍存在的入口事件，循环外消费范围由动作 `describe` 给出。第 4、5 篇的交接说明保持一致。
+- 收紧 `initialize`：只补本次交接版本尚缺的消费初值，沿用入口已给定或数学定义保留的初态，区分首次初始化与本次补值。保留显式 `storage` 和已有接续粒度。
+- 明确各层依赖共同成立，已有前驱覆盖的 `ready/wait_at` 可省略，相同 handoff 属性可用现有 YAML alias 复用。通用正文移除录图与失败恢复的案例展开，保留实际提交原则。
+
 ### View：part 更名为 region
 
 - `view.<value>.part` 更名为 `region`，表示槽内的位置与覆盖范围；同步第 5 篇的结构、字段说明及示例，区间形式、坐标单位和省略语义不变。

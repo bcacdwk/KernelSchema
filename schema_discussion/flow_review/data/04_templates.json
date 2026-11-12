@@ -1,0 +1,1334 @@
+{
+  "review": "04_templates",
+  "scope": "Four template trees, 21 frozen YAML files; selected extracted nodes provide supplementary counterexamples.",
+  "current_rules": "schema_discussion/flow_review/rules",
+  "syntax_note": "Raw snapshots retain legacy pipeline resource/milestone names and non-MAIN single-phase IDs; they are evidence, not the current syntax definition.",
+  "summary": {
+    "template_files": 21,
+    "topology_counts": {
+      "completion_two_kernel": 5,
+      "single_kernel": 13,
+      "pdl_two_kernel": 3
+    },
+    "files_with_multi_phase_launch": 0,
+    "handoff_entries": 16,
+    "handoff_field_instances": {
+      "producer": 16,
+      "consumer": 16,
+      "storage": 16,
+      "ready": 9,
+      "wait_at": 9
+    },
+    "all_current_templates_byte_match": true
+  },
+  "files": [
+    {
+      "operator": "template_gdn_prefill",
+      "node": "m64_single_sequence",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_gdn_prefill/m64_single_sequence.yaml",
+      "snapshot_sha256": "283f427f132b04f6d73b596588d370b7165468f0979c40e9c2cca44ae4332d50",
+      "current_template": "schema_template/examples/gdn_prefill/m64_single_sequence.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        86,
+        86
+      ],
+      "topology": "completion_two_kernel",
+      "phase_count": 2,
+      "launch_count": 2,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "index_cast"
+            ]
+          },
+          {
+            "phase": [
+              "gdn"
+            ],
+            "start_after": "index_cast.kernel_done"
+          }
+        ]
+      },
+      "workers": {
+        "index_cast": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": 1
+        },
+        "gdn": {
+          "strategy": "P=min(B*HV*(DV/64),num_sm), with num_sm queried at runtime. For B=1, linear id=2*h+row_half; the recorded 148-SM run gives 64 CTAs, one worktile each.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "P"
+        }
+      }
+    },
+    {
+      "operator": "template_gdn_prefill",
+      "node": "root",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_gdn_prefill/root.yaml",
+      "snapshot_sha256": "627c6903f282014c2134dd2ad6a057ccf73eb8401cb9811cbbfe9300677dcdcd",
+      "current_template": "schema_template/examples/gdn_prefill/root.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        151,
+        152
+      ],
+      "topology": "completion_two_kernel",
+      "phase_count": 2,
+      "launch_count": 2,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "index_cast"
+            ]
+          },
+          {
+            "phase": [
+              "gdn"
+            ],
+            "start_after": "index_cast.kernel_done"
+          }
+        ],
+        "handoff": {
+          "Cu32": {
+            "producer": "index_cast",
+            "consumer": [
+              "gdn"
+            ],
+            "storage": "global"
+          }
+        }
+      },
+      "workers": {
+        "index_cast": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": 1
+        },
+        "gdn": {
+          "strategy": "P=min(B*HV*(DV/64),num_sm), with num_sm queried at runtime; linear id=b*(2*HV)+2*h+row_half. The source L20D run records num_sm=148.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "P"
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_prefill",
+      "node": "packed_persistent",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_prefill/packed_persistent.yaml",
+      "snapshot_sha256": "722ef641af14b403166dbc5bbe5b0f96c3475aec8e8ed25630a5fc8e834a5799",
+      "current_template": "schema_template/examples/fa4_prefill/packed_persistent.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        69,
+        69
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "strategy": "SMCount is the runtime multiprocessor count; rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 2
+          },
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "worker_count": "ceil(min(SMCount,2*Cpad)/2)",
+          "member": [
+            {
+              "row": [
+                0,
+                128
+              ]
+            },
+            {
+              "row": [
+                128,
+                256
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_prefill",
+      "node": "rect_joint_load",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_prefill/rect_joint_load.yaml",
+      "snapshot_sha256": "3b9cfd1f92554e957b3d1bb312d4d3a08209b7d8236144f220e7a314d0214c94",
+      "current_template": "schema_template/examples/fa4_prefill/rect_joint_load.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        69,
+        69
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "strategy": "Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 2
+          },
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "worker_count": "BatchCount*Crect",
+          "member": [
+            {
+              "row": [
+                0,
+                128
+              ]
+            },
+            {
+              "row": [
+                128,
+                256
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_prefill",
+      "node": "root",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_prefill/root.yaml",
+      "snapshot_sha256": "7f6f2be1689b11812942a378aef04cd0f720d8a3b9d6d4343473fbcaac75e63f",
+      "current_template": "schema_template/examples/fa4_prefill/root.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        144,
+        144
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "strategy": "Member list entry a is CTA rank a, for a=0,1. Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 2
+          },
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "worker_count": "BatchCount*Crect",
+          "member": [
+            {
+              "row": [
+                0,
+                128
+              ]
+            },
+            {
+              "row": [
+                128,
+                256
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_prefill",
+      "node": "single_persistent_dual_load",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_prefill/single_persistent_dual_load.yaml",
+      "snapshot_sha256": "cb15991cf9d6c8d71512f48d9398ed3f4832cfaa36031eee8a073bcdb57e42c9",
+      "current_template": "schema_template/examples/fa4_prefill/single_persistent_dual_load.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        69,
+        69
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "strategy": "SMCount is the runtime multiprocessor count; rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 2
+          },
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "worker_count": "ceil(min(SMCount,2*Cpad)/2)",
+          "member": [
+            {
+              "row": [
+                0,
+                128
+              ]
+            },
+            {
+              "row": [
+                128,
+                256
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_prefill",
+      "node": "single_persistent_joint_load",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_prefill/single_persistent_joint_load.yaml",
+      "snapshot_sha256": "8001c223ed4171c00254e88ac6c2e4b56ec2074501b6995f312425d51f1565ab",
+      "current_template": "schema_template/examples/fa4_prefill/single_persistent_joint_load.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        69,
+        69
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "strategy": "SMCount is the runtime multiprocessor count; rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 2
+          },
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "worker_count": "ceil(min(SMCount,2*Cpad)/2)",
+          "member": [
+            {
+              "row": [
+                0,
+                128
+              ]
+            },
+            {
+              "row": [
+                128,
+                256
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_prefill",
+      "node": "small_persistent_lpt",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_prefill/small_persistent_lpt.yaml",
+      "snapshot_sha256": "fed6bd1754681676437767f929aac9abcce768e4760b33d28792dfbf7e807884",
+      "current_template": "schema_template/examples/fa4_prefill/small_persistent_lpt.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        72,
+        72
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "strategy": "SMCount is the runtime multiprocessor count; rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 2
+          },
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "worker_count": "ceil(min(SMCount,2*Cpad)/2)",
+          "member": [
+            {
+              "row": [
+                0,
+                128
+              ]
+            },
+            {
+              "row": [
+                128,
+                256
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_prefill",
+      "node": "small_persistent_shared_rescale",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_prefill/small_persistent_shared_rescale.yaml",
+      "snapshot_sha256": "3f30b84451e853b322ab401d7366c29cd1a1182e7c4aaefbee9b78fc9b7eef56",
+      "current_template": "schema_template/examples/fa4_prefill/small_persistent_shared_rescale.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        72,
+        72
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "strategy": "SMCount is the runtime multiprocessor count; rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 2
+          },
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "worker_count": "ceil(min(SMCount,2*Cpad)/2)",
+          "member": [
+            {
+              "row": [
+                0,
+                128
+              ]
+            },
+            {
+              "row": [
+                128,
+                256
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_prefill",
+      "node": "small_static_lpt",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_prefill/small_static_lpt.yaml",
+      "snapshot_sha256": "16dfd7f7f81d9e916bd5c375f3b07eeb00418d5b90dc26552c53ddf529ca2ed3",
+      "current_template": "schema_template/examples/fa4_prefill/small_static_lpt.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        72,
+        72
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "strategy": "Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 2
+          },
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "worker_count": "Cpad",
+          "member": [
+            {
+              "row": [
+                0,
+                128
+              ]
+            },
+            {
+              "row": [
+                128,
+                256
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_prefill",
+      "node": "small_static_shared_rescale",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_prefill/small_static_shared_rescale.yaml",
+      "snapshot_sha256": "a2cef4bcc5e91877ec27a94c64c2382d252fedf5470b93e672882188d67da0fc",
+      "current_template": "schema_template/examples/fa4_prefill/small_static_shared_rescale.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        72,
+        72
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "strategy": "Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 2
+          },
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "worker_count": "Cpad",
+          "member": [
+            {
+              "row": [
+                0,
+                128
+              ]
+            },
+            {
+              "row": [
+                128,
+                256
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_prefill",
+      "node": "splitkv_dual_load",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_prefill/splitkv_dual_load.yaml",
+      "snapshot_sha256": "e3aac5655314e659675a2f00262b648e34c147c08321167deaf5a703737e6559",
+      "current_template": "schema_template/examples/fa4_prefill/splitkv_dual_load.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        94,
+        97
+      ],
+      "topology": "completion_two_kernel",
+      "phase_count": 2,
+      "launch_count": 2,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          },
+          {
+            "phase": [
+              "combine"
+            ],
+            "start_after": "attention.kernel_done"
+          }
+        ],
+        "handoff": {
+          "PartialO": {
+            "producer": "attention",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global"
+          },
+          "PartialLSE": {
+            "producer": "attention",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global"
+          }
+        }
+      },
+      "workers": {
+        "attention": {
+          "strategy": "Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 2
+          },
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "worker_count": "BatchCount*Crect*Ssplit",
+          "member": [
+            {
+              "row": [
+                0,
+                128
+              ]
+            },
+            {
+              "row": [
+                128,
+                256
+              ]
+            }
+          ]
+        },
+        "combine": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "BatchCount*ceil(TotalQ*Hq/Mc)*ceil(D/Dc)"
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_prefill",
+      "node": "splitkv_joint_load",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_prefill/splitkv_joint_load.yaml",
+      "snapshot_sha256": "a7e25ce9ef742921ea1721a8b513ab29d6c0cfa26d28d31bd25448e146fac07b",
+      "current_template": "schema_template/examples/fa4_prefill/splitkv_joint_load.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        94,
+        97
+      ],
+      "topology": "completion_two_kernel",
+      "phase_count": 2,
+      "launch_count": 2,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          },
+          {
+            "phase": [
+              "combine"
+            ],
+            "start_after": "attention.kernel_done"
+          }
+        ],
+        "handoff": {
+          "PartialO": {
+            "producer": "attention",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global"
+          },
+          "PartialLSE": {
+            "producer": "attention",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global"
+          }
+        }
+      },
+      "workers": {
+        "attention": {
+          "strategy": "Rank a supplies K tokens [64*a,64*(a+1)) per channel half and V columns [128*d+64*a,128*d+64*(a+1)) for d=0,1.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 2
+          },
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "worker_count": "BatchCount*Crect*Ssplit",
+          "member": [
+            {
+              "row": [
+                0,
+                128
+              ]
+            },
+            {
+              "row": [
+                128,
+                256
+              ]
+            }
+          ]
+        },
+        "combine": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "BatchCount*ceil(TotalQ*Hq/Mc)*ceil(D/Dc)"
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_decode",
+      "node": "q1_cluster",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_decode/q1_cluster.yaml",
+      "snapshot_sha256": "e5a13bebcac095df90f5a9afcd00602782b377b853bee86d5341b4a3b27d3e57",
+      "current_template": "schema_template/examples/fa4_decode/q1_cluster.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        118,
+        117
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": "SplitCount"
+          },
+          "worker_count": "worktile_count",
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "strategy": "Cluster member r, 0<=r<SplitCount, owns exactly the striped split r; query operands are separately loaded by each member."
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_decode",
+      "node": "q1_direct",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_decode/q1_direct.yaml",
+      "snapshot_sha256": "c714669362e83adac3e8c03726ddda41ba3d98997619949cc65b3154e7e82bb4",
+      "current_template": "schema_template/examples/fa4_decode/q1_direct.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        71,
+        70
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "worktile_count"
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_decode",
+      "node": "q1_global",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_decode/q1_global.yaml",
+      "snapshot_sha256": "84ea5fd2d5451e9b16664773d7bc9e611d876d6bb49528d835cdeb8501fb3596",
+      "current_template": "schema_template/examples/fa4_decode/q1_global.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        130,
+        136
+      ],
+      "topology": "pdl_two_kernel",
+      "phase_count": 2,
+      "launch_count": 2,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "partial"
+            ]
+          },
+          {
+            "phase": [
+              "combine"
+            ],
+            "start_after": "partial.launch_ready",
+            "protocol": "pdl"
+          }
+        ],
+        "handoff": {
+          "Mpartial": {
+            "producer": "partial",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global",
+            "ready": "partial.kernel_done",
+            "wait_at": "combine.read_partial"
+          },
+          "Lpartial": {
+            "producer": "partial",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global",
+            "ready": "partial.kernel_done",
+            "wait_at": "combine.read_partial"
+          },
+          "Opartial": {
+            "producer": "partial",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global",
+            "ready": "partial.kernel_done",
+            "wait_at": "combine.read_partial"
+          }
+        }
+      },
+      "workers": {
+        "partial": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "worktile_count"
+        },
+        "combine": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "worktile_count"
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_decode",
+      "node": "q4_cluster",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_decode/q4_cluster.yaml",
+      "snapshot_sha256": "1a4888de239d9fe8bbad0b8bf8bf96ef8b54e0c4ca45d702acd9d2fe85441c8b",
+      "current_template": "schema_template/examples/fa4_decode/q4_cluster.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        117,
+        116
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": "SplitCount"
+          },
+          "worker_count": "worktile_count",
+          "placement": {
+            "unit": "cluster",
+            "unit_count": 1
+          },
+          "strategy": "Cluster member r, 0<=r<SplitCount, owns exactly the striped split r; query operands are separately loaded by each member."
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_decode",
+      "node": "q4_compact",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_decode/q4_compact.yaml",
+      "snapshot_sha256": "7f5c6300162e93833a69c4e81e396894cc7311603f4cf545ab87af28dc573848",
+      "current_template": "schema_template/examples/fa4_decode/q4_compact.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        129,
+        135
+      ],
+      "topology": "pdl_two_kernel",
+      "phase_count": 2,
+      "launch_count": 2,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "partial"
+            ]
+          },
+          {
+            "phase": [
+              "combine"
+            ],
+            "start_after": "partial.launch_ready",
+            "protocol": "pdl"
+          }
+        ],
+        "handoff": {
+          "Mpartial": {
+            "producer": "partial",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global",
+            "ready": "partial.kernel_done",
+            "wait_at": "combine.read_partial"
+          },
+          "Lpartial": {
+            "producer": "partial",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global",
+            "ready": "partial.kernel_done",
+            "wait_at": "combine.read_partial"
+          },
+          "Opartial": {
+            "producer": "partial",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global",
+            "ready": "partial.kernel_done",
+            "wait_at": "combine.read_partial"
+          }
+        }
+      },
+      "workers": {
+        "partial": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "worktile_count"
+        },
+        "combine": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "worktile_count"
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_decode",
+      "node": "q4_direct",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_decode/q4_direct.yaml",
+      "snapshot_sha256": "998e22efa64c1d4c706f97b4bd4776090462b07a54c7b5b347c58f291e52478e",
+      "current_template": "schema_template/examples/fa4_decode/q4_direct.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        71,
+        70
+      ],
+      "topology": "single_kernel",
+      "phase_count": 1,
+      "launch_count": 1,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "attention"
+            ]
+          }
+        ]
+      },
+      "workers": {
+        "attention": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "worktile_count"
+        }
+      }
+    },
+    {
+      "operator": "template_fa4_decode",
+      "node": "root",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_decode/root.yaml",
+      "snapshot_sha256": "2668785d221bed6e3757f257590f4e6b2608c3e9fb7e1eea1609cb985b778f77",
+      "current_template": "schema_template/examples/fa4_decode/root.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        207,
+        213
+      ],
+      "topology": "pdl_two_kernel",
+      "phase_count": 2,
+      "launch_count": 2,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "partial"
+            ]
+          },
+          {
+            "phase": [
+              "combine"
+            ],
+            "start_after": "partial.launch_ready",
+            "protocol": "pdl"
+          }
+        ],
+        "handoff": {
+          "Mpartial": {
+            "producer": "partial",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global",
+            "ready": "partial.kernel_done",
+            "wait_at": "combine.read_partial"
+          },
+          "Lpartial": {
+            "producer": "partial",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global",
+            "ready": "partial.kernel_done",
+            "wait_at": "combine.read_partial"
+          },
+          "Opartial": {
+            "producer": "partial",
+            "consumer": [
+              "combine"
+            ],
+            "storage": "global",
+            "ready": "partial.kernel_done",
+            "wait_at": "combine.read_partial"
+          }
+        }
+      },
+      "workers": {
+        "partial": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "worktile_count"
+        },
+        "combine": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "worktile_count"
+        }
+      }
+    },
+    {
+      "operator": "template_qsa_prefill",
+      "node": "root",
+      "snapshot": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_qsa_prefill/root.yaml",
+      "snapshot_sha256": "9d36b006a339be7969dddfdcd40c1d94fc403d9f0153cc0624db8e2ec4015686",
+      "current_template": "schema_template/examples/qsa_prefill/root.yaml",
+      "current_matches_snapshot": true,
+      "flow_lines": [
+        152,
+        155
+      ],
+      "topology": "completion_two_kernel",
+      "phase_count": 2,
+      "launch_count": 2,
+      "flow": {
+        "launch": [
+          {
+            "phase": [
+              "preprocess"
+            ]
+          },
+          {
+            "phase": [
+              "attention"
+            ],
+            "start_after": "preprocess.kernel_done"
+          }
+        ],
+        "handoff": {
+          "Union": {
+            "producer": "preprocess",
+            "consumer": [
+              "attention"
+            ],
+            "storage": "global"
+          },
+          "Count": {
+            "producer": "preprocess",
+            "consumer": [
+              "attention"
+            ],
+            "storage": "global"
+          }
+        }
+      },
+      "workers": {
+        "preprocess": {
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "worktile_count"
+        },
+        "attention": {
+          "strategy": "SMCount is queried from device properties.",
+          "worker": {
+            "unit": "CTA",
+            "unit_count": 1
+          },
+          "worker_count": "min(SMCount,worktile_count)"
+        }
+      }
+    }
+  ],
+  "supplemental_same_kernel_per_worker_nodes": [
+    "extract_moe/direct",
+    "extract_moe/no_scan_direct",
+    "extract_moe/init_no_scan_direct"
+  ],
+  "uncovered_by_templates": [
+    "All four order values",
+    "On-chip cross-phase handoff",
+    "initialize field",
+    "Local producer publication event",
+    "One handoff value with multiple consumer phases",
+    "Multiple start_after predecessors",
+    "Per-consumer wait_at overrides"
+  ],
+  "not_established_by_supplemental_review": [
+    "Real need for nested sequential/concurrent phase composition",
+    "First-publication streaming between different kernels",
+    "One mathematical value simultaneously handed off through local and global storage"
+  ],
+  "source_probes": [
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_moe/direct.yaml",
+      "lines": [
+        183,
+        285
+      ],
+      "supports": "One prelude worktile per worker followed by multiple direct worktiles; Census stays on chip.",
+      "sha256": "00e13393c531dfb1dab74446c59cd9be6058d63f1b76880308879c8e85f4d943",
+      "bytes": 26142
+    },
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_nvfp4_moe.cu",
+      "lines": [
+        1946,
+        1985
+      ],
+      "supports": "CTA-local census then unit loop; no grid barrier.",
+      "sha256": "cf0b42e2e4809cf71b2442f1b64285da4cc0a69214f43eb82efbdac938978f6f",
+      "bytes": 523608
+    },
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_gdn/gdn_kernel.cu",
+      "lines": [
+        1977,
+        2020
+      ],
+      "supports": "PDL-independent barrier setup and direct input prefetch precede producer completion wait.",
+      "sha256": "1817841153fb05dae9acf9f9a9700d00aea67d9de2d40a4c00c90e924f994191",
+      "bytes": 183688
+    },
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_gdn/gdn_kernel.cu",
+      "lines": [
+        2176,
+        2224
+      ],
+      "supports": "Initial state register load precedes griddepcontrol.wait.",
+      "sha256": "1817841153fb05dae9acf9f9a9700d00aea67d9de2d40a4c00c90e924f994191",
+      "bytes": 183688
+    },
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_gdn/gdn_kernel.cu",
+      "lines": [
+        3254,
+        3274
+      ],
+      "supports": "Cached physical workspace across calls; current-call writes of consumed slots; current stream.",
+      "sha256": "1817841153fb05dae9acf9f9a9700d00aea67d9de2d40a4c00c90e924f994191",
+      "bytes": 183688
+    },
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_input.py",
+      "lines": [
+        80,
+        87
+      ],
+      "supports": "Scratch zeroed at input construction.",
+      "sha256": "8958c3b642719c2af51bc77f93d5eb15417aea28df5f7c03d64096f90292554c",
+      "bytes": 3053
+    },
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_operator.py",
+      "lines": [
+        227,
+        254
+      ],
+      "supports": "Workspace slicing shares allocation without reset.",
+      "sha256": "248cf0b8552435fb714bbc544b43203647cece357b577600e5e58f4447b2d1c7",
+      "bytes": 28587
+    },
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_gqa_decode.py",
+      "lines": [
+        502,
+        529
+      ],
+      "supports": "Selected warp-parallel combine reads numerator payload even with zero weight.",
+      "sha256": "999172d4360eeb12fec0062552e04928ad30b846ac3d5e782dc220c0e98d555f",
+      "bytes": 22634
+    },
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_prefill/flash_fwd_combine.py",
+      "lines": [
+        627,
+        639
+      ],
+      "supports": "Unspecified payload can be prefetched while nonpositive weights skip arithmetic use.",
+      "sha256": "9b90f83bf404dcb864a757b4ae303542fb4f4e2f138181e0d6ea62e7a1f6735c",
+      "bytes": 31483
+    },
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/operator.py",
+      "lines": [
+        104,
+        115
+      ],
+      "supports": "Cached scheduler ticket initialized on cache miss.",
+      "sha256": "7974691ae47738ed6d572a0f9d998d6f5d75e9100e17cb76bbbe970172246073",
+      "bytes": 6927
+    },
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/operator.py",
+      "lines": [
+        152,
+        160
+      ],
+      "supports": "Host launch base advances without resetting device counter.",
+      "sha256": "7974691ae47738ed6d572a0f9d998d6f5d75e9100e17cb76bbbe970172246073",
+      "bytes": 6927
+    },
+    {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_gdn_prefill/source/aka_solution/solution.py",
+      "lines": [
+        808,
+        812
+      ],
+      "supports": "Int64-to-int32 copy still called before single-sequence core.",
+      "sha256": "e216c76d8c434233cba9042be79500438a522da13cc42090281cc138ae427c69",
+      "bytes": 101807
+    }
+  ],
+  "verification": "Static YAML parsing, byte comparisons, and source reading only; no GPU correctness or performance measurement."
+}

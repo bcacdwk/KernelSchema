@@ -1,0 +1,12 @@
+flow:
+  launch:
+    - {phase: [group_max]}
+    - {phase: [scan], start_after: group_max.kernel_done}
+    - {phase: [split], start_after: scan.kernel_done}
+    - {phase: [combine], start_after: split.kernel_done}
+  handoff:
+    BmCovered: {producer: group_max, consumer: [scan], storage: global}
+    ScanState: {producer: scan, consumer: [split], storage: global}
+    MaxTail: {producer: scan, consumer: [split, combine], storage: global}
+    PartialA: {producer: split, consumer: [combine], storage: global}
+    PartialB: {producer: split, consumer: [combine], storage: global}
