@@ -1,0 +1,1501 @@
+{
+  "id": "05_state_contract",
+  "date": "2026-11-12",
+  "report": "schema_discussion/language_compression/review_20261112/reports/05_state_contract.md",
+  "authority": {
+    "inputs": "schema_discussion/language_compression/review_20261112/inputs.json",
+    "rules": "schema_discussion/language_compression/review_20261112/rules",
+    "corpus": {
+      "path": "schema_discussion/flow_review/corpus.json",
+      "sha256": "cf9f2f24d2a71ec561ec507042b3c150b4041951e85e62165cd9474f2accaa30"
+    },
+    "rule_hash_checks": [
+      {
+        "path": "schema_discussion/language_compression/review_20261112/rules/0.common.md",
+        "sha256": "09727043ca1adf8557915e8bf50bc241f175df3fb6d493722058fcfa7c3bd85e",
+        "matches_inputs": true
+      },
+      {
+        "path": "schema_discussion/language_compression/review_20261112/rules/1.contract.algorithm_requirement.md",
+        "sha256": "c8db3030e03950fa3970ebf7a0920f5d9c2efd946f1c8b2dd5842e2a5b3a582f",
+        "matches_inputs": true
+      },
+      {
+        "path": "schema_discussion/language_compression/review_20261112/rules/2.contract.hardware_specification.md",
+        "sha256": "88e2411eafec85bfa1ad3b9a0080133b8cd8a10aaa6c96dca4f4cdc36004fad6",
+        "matches_inputs": true
+      },
+      {
+        "path": "schema_discussion/language_compression/review_20261112/rules/3.design.math_reshape.md",
+        "sha256": "83f14a5d7f9c7c74382f56f16d35b90cc26ae2ba93ffab017895616a2acf285a",
+        "matches_inputs": true
+      },
+      {
+        "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+        "sha256": "af484da8e747c5f2bb97c8f6e11e69408db8dcb9ef7e8e518a3b5c57ce406e5d",
+        "matches_inputs": true
+      },
+      {
+        "path": "schema_discussion/language_compression/review_20261112/rules/5.design.tile_pipeline.md",
+        "sha256": "d7885b0dba4f3a82a6dac1e1c9bf55f72d51b5da339122fc33d74648bf66b0d6",
+        "matches_inputs": true
+      },
+      {
+        "path": "schema_discussion/language_compression/review_20261112/rules/6.realization.md",
+        "sha256": "5ef063397ada132a32d36ee9df9924ac647f367a6434b5b5346efb0894d08ebc",
+        "matches_inputs": true
+      }
+    ]
+  },
+  "verdict": {
+    "original_row": "modify",
+    "no_new_module": "retain",
+    "algorithm_state_in_existing_io": "already_implemented_retain",
+    "strategy_only_order_and_write_set": "narrow; also preserve necessary object, initial-state and observed-content semantics in their existing owners",
+    "unconditional_cache_capacity_deletion": "withdraw; active access and supported key memory/cost facts survive, ordinary allocation/eviction process does not",
+    "formal_fields_added": 0,
+    "formal_fields_removed": 0,
+    "closed_vocabulary_values_added": 0,
+    "genuine_rule_additions": [],
+    "instance_changes_only": true
+  },
+  "minimum_contract": [
+    "Shared object and relevant scope",
+    "Initial state or incoming property relied upon",
+    "Current writes and actual read range",
+    "Current/prior/actually-observed value source",
+    "Last access including in-flight operations",
+    "Next-reuse premise or honest source limitation"
+  ],
+  "minimum_contract_is_not_a_new_mandatory_per_object_schema": true,
+  "cases": [
+    {
+      "id": "gdn_algorithm_state",
+      "class": "current_rule_already_covers",
+      "objects": [
+        "initial_state",
+        "FinalState",
+        "core_attn_out",
+        "Out"
+      ],
+      "decision": "Retain caller state and observable alias/write relations in existing Contract; do not introduce a state module.",
+      "field_paths": [
+        "contract.algorithm_requirement.input.initial_state",
+        "contract.algorithm_requirement.output.FinalState",
+        "contract.algorithm_requirement.compute[output_and_side_effect].math"
+      ],
+      "minimum": "Readonly BF16 incoming state; optional fresh FP32 outgoing state; core destination prefix written in place; Out does not alias that destination.",
+      "effects_if_removed": {
+        "numeric_or_version": "Incoming versus outgoing state and fresh versus in-place output would become ambiguous.",
+        "work": "unchanged",
+        "legal_access": "Allowed caller write prefix and preserved guards could be lost.",
+        "key_memory": "unchanged",
+        "reuse": "unchanged",
+        "parallelism_or_overlap": "unchanged"
+      },
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_gdn/root.yaml",
+          "lines": [
+            43,
+            44
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_gdn/root.yaml",
+          "lines": [
+            67,
+            70
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_gdn/root.yaml",
+          "lines": [
+            103,
+            131
+          ]
+        }
+      ],
+      "rule_refs": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/1.contract.algorithm_requirement.md",
+          "lines": [
+            43,
+            44
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/1.contract.algorithm_requirement.md",
+          "lines": [
+            269,
+            279
+          ]
+        }
+      ],
+      "new_fields": 0,
+      "new_rules": 0
+    },
+    {
+      "id": "gdn_shared_scratch",
+      "class": "short_existing_definition",
+      "objects": [
+        "ws_cache",
+        "prep handoff values"
+      ],
+      "decision": "Keep shared backing scope, per-call rewrite and ordered reuse. Delete allocation and destructor narrative; conditionally retain high-water capacity only when it supports a relevant memory/cost comparison.",
+      "field_paths": [
+        "design.work_schedule.phase.prep.schedule.strategy",
+        "design.work_schedule.flow.handoff"
+      ],
+      "minimum": "Calls using one shared workspace execute in order on one CUDA stream. Prep rewrites all handoff regions consumed by chain. The source supplies no cross-stream/reentrant exclusion.",
+      "effects_if_removed": {
+        "numeric_or_version": "May admit stale or concurrently overwritten prep data.",
+        "work": "unchanged",
+        "legal_access": "unchanged",
+        "key_memory": "Sharing versus independent allocations changes storage identity; exact unused reservation has no established core necessity.",
+        "reuse": "The cross-call order protecting the shared backing would be lost.",
+        "parallelism_or_overlap": "Keep the existing PDL dependencies; do not add a whole-call host barrier."
+      },
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_gdn/root.yaml",
+          "lines": [
+            379,
+            383
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_gdn/gdn_kernel.cu",
+          "lines": [
+            3254,
+            3274
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_gdn/direct_qk_ordered.yaml",
+          "lines": [
+            255,
+            264
+          ]
+        }
+      ],
+      "rule_refs": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            191,
+            191
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            264,
+            266
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            315,
+            315
+          ]
+        }
+      ],
+      "new_fields": 0,
+      "new_rules": 0
+    },
+    {
+      "id": "fa4_prior_payload",
+      "class": "keep_semantics_shorten_without_reset",
+      "objects": [
+        "workspace_buffer",
+        "Opartial",
+        "Mpartial",
+        "Lpartial"
+      ],
+      "decision": "Retain first-use preparation, finite old values and the active/empty write distinction. Do not replace it with per-call initialize: 0.",
+      "field_paths": [
+        "contract.algorithm_requirement.input.workspace_buffer",
+        "design.math_reshape.rewrite[materialize].math",
+        "design.math_reshape.rewrite[materialize].symbol.Opartial",
+        "design.math_reshape.rewrite[normalize].math",
+        "design.work_schedule.phase.partial.schedule.strategy"
+      ],
+      "minimum": "Opartial is a view of supplied scratch. Active splits overwrite it; empty splits leave finite existing content. Combine reads every nominal payload, including zero-weight empty slots. First isolated preparation zeros otherwise untouched slots.",
+      "effects_if_removed": {
+        "numeric_or_version": "0 times NaN or infinity can contaminate output; finite old content is numerically irrelevant only under the stated property.",
+        "work": "Per-call clearing adds writes; skipping empty loads changes the source evaluation path.",
+        "legal_access": "Read extent includes all nominal Opartial slots, not just active outputs.",
+        "key_memory": "unchanged",
+        "reuse": "First-use zeroing is not a proof for arbitrary later shape/view rebindings.",
+        "parallelism_or_overlap": "unchanged"
+      },
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_decode/root.yaml",
+          "lines": [
+            27,
+            27
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_decode/root.yaml",
+          "lines": [
+            161,
+            185
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_input.py",
+          "lines": [
+            83,
+            87
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_gqa_decode_paged.py",
+          "lines": [
+            1138,
+            1150
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_gqa_decode.py",
+          "lines": [
+            475,
+            529
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_operator.py",
+          "lines": [
+            227,
+            254
+          ]
+        }
+      ],
+      "rule_refs": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/3.design.math_reshape.md",
+          "lines": [
+            104,
+            108
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            295,
+            295
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            317,
+            326
+          ]
+        }
+      ],
+      "new_fields": 0,
+      "new_rules": 0
+    },
+    {
+      "id": "qsa_ticket_base",
+      "class": "scheduler_state_existing_refill",
+      "objects": [
+        "device ticket",
+        "host base",
+        "workspace entry"
+      ],
+      "decision": "Retain the short counter/base protocol in refill and the serialized eager reuse premise in strategy. Do not add algorithm inputs/outputs.",
+      "field_paths": [
+        "design.work_schedule.phase.attention.schedule.strategy",
+        "design.work_schedule.phase.attention.schedule.worker_assignment.refill.atomic_counter",
+        "design.work_schedule.phase.attention.schedule.worker_assignment.exit"
+      ],
+      "minimum": "A shared device ticket and host base start at zero. Claims use signed-int32 ticket-minus-base. Each of P workers stops at its first terminal claim; W+P claims advance the device ticket and next host base without a device reset.",
+      "effects_if_removed": {
+        "numeric_or_version": "The launch could use the wrong relative ticket version.",
+        "work": "Wrong base can skip all work or duplicate work; per-call reset adds a different operation.",
+        "legal_access": "unchanged",
+        "key_memory": "unchanged",
+        "reuse": "The pair must refer to the same workspace entry across serialized eager calls.",
+        "parallelism_or_overlap": "Keep existing one-ticket lookahead and terminal acknowledgements; no new drain is imposed."
+      },
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_qsa_prefill/root.yaml",
+          "lines": [
+            187,
+            193
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/operator.py",
+          "lines": [
+            99,
+            116
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/operator.py",
+          "lines": [
+            152,
+            160
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/qsa_kernel.py",
+          "lines": [
+            320,
+            334
+          ]
+        }
+      ],
+      "limits": [
+        "The statement is not a proof of replay safety: recording a host base does not replay its host update."
+      ],
+      "rule_refs": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            213,
+            223
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            248,
+            248
+          ]
+        }
+      ],
+      "new_fields": 0,
+      "new_rules": 0
+    },
+    {
+      "id": "mla_queue",
+      "class": "scheduler_state_existing_refill",
+      "objects": [
+        "private uint32 queue"
+      ],
+      "decision": "Keep first zero and last-pop reset, separate from caller Workspace. No new state module is needed.",
+      "field_paths": [
+        "design.work_schedule.phase.main.schedule.worker_assignment.refill.atomic_queue",
+        "design.work_schedule.phase.main.schedule.worker_assignment.exit"
+      ],
+      "minimum": "Initial counter zero; successful refill maps pop p to Item=P+p. Total W pops include one terminal per CTA. Pop W-1 resets the word for the next ordered launch.",
+      "effects_if_removed": {
+        "numeric_or_version": "unchanged",
+        "work": "Wrong initial/next counter changes assigned work or termination; a generic every-call clear changes the operation count.",
+        "legal_access": "unchanged",
+        "key_memory": "The private queue is not the caller Workspace.",
+        "reuse": "Reset and subsequent ordered launch form the reuse contract.",
+        "parallelism_or_overlap": "unchanged"
+      },
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_mla/root.yaml",
+          "lines": [
+            343,
+            353
+          ]
+        },
+        {
+          "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+          "lines": [
+            1450,
+            1483
+          ]
+        },
+        {
+          "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+          "lines": [
+            1730,
+            1736
+          ]
+        }
+      ],
+      "rule_refs": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            213,
+            223
+          ]
+        }
+      ],
+      "new_fields": 0,
+      "new_rules": 0
+    },
+    {
+      "id": "mla_geometry",
+      "class": "current_definition_plus_short_external_premise",
+      "objects": [
+        "Geo",
+        "shared d_table"
+      ],
+      "decision": "Keep current metadata semantics, shared table identity and whole-grid upload readiness; remove growth and allocation process details unless independently justified.",
+      "field_paths": [
+        "design.work_schedule.phase.main.decomposition.strategy",
+        "design.work_schedule.phase.main.schedule.strategy",
+        "realization.require"
+      ],
+      "minimum": "The shared Geo buffer contains this call's complete table before main starts, preserving the existing table order. Recording fixes bindings while actual execution reads table contents.",
+      "effects_if_removed": {
+        "numeric_or_version": "Reusing stale numerical metadata changes row mappings.",
+        "work": "Table order and current work geometry determine work assignment.",
+        "legal_access": "Current table extent and object identity determine metadata reads.",
+        "key_memory": "unchanged",
+        "reuse": "Upload-to-main readiness alone does not establish old-main-to-next-upload safety for arbitrary overlapping calls.",
+        "parallelism_or_overlap": "Changing grid-start waiting to a late read wait changes overlap/residency."
+      },
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_mla/root.yaml",
+          "lines": [
+            113,
+            115
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_mla/root.yaml",
+          "lines": [
+            298,
+            299
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_mla/root.yaml",
+          "lines": [
+            321,
+            338
+          ]
+        },
+        {
+          "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+          "lines": [
+            1638,
+            1681
+          ]
+        },
+        {
+          "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+          "lines": [
+            1719,
+            1728
+          ]
+        },
+        {
+          "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+          "lines": [
+            1895,
+            1898
+          ]
+        },
+        {
+          "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+          "lines": [
+            2010,
+            2011
+          ]
+        }
+      ],
+      "rule_refs": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            264,
+            266
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/3.design.math_reshape.md",
+          "lines": [
+            145,
+            157
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/6.realization.md",
+          "lines": [
+            157,
+            168
+          ]
+        }
+      ],
+      "new_fields": 0,
+      "new_rules": 0
+    },
+    {
+      "id": "moe_neutral_reset",
+      "class": "design_state_existing_math_and_strategy",
+      "objects": [
+        "RouteAccum",
+        "Arrivals",
+        "Model._scratch entry"
+      ],
+      "decision": "Retain initial neutral state, last-consumer reset, unchanged invalid rows and ordered shared-entry reuse. Remove the Python allocation/cache construction walkthrough.",
+      "field_paths": [
+        "design.math_reshape.rewrite[fc2_finalize].math",
+        "design.math_reshape.rewrite[fc2_finalize].symbol.RouteAccum",
+        "design.math_reshape.rewrite[fc2_finalize].symbol.Arrivals",
+        "design.work_schedule.phase.direct.schedule.strategy"
+      ],
+      "minimum": "New workspace supplies R*H FP32 zeros and T counter zeros. The last-arrival finalizer reads valid rows, resets those rows, then resets its token counter; unaccessed rows remain unchanged. Completed ordered calls preserve zero state even when route contents change.",
+      "effects_if_removed": {
+        "numeric_or_version": "Nonzero old accumulators alter reductions; stale counters alter the last-arrival decision.",
+        "work": "Every-call full memset differs from self-cleaning only consumed rows.",
+        "legal_access": "Invalid-route rows are not read/reset; these ranges must not be expanded silently.",
+        "key_memory": "Keep live array shapes; dead allocations only conditionally matter to a quantified memory budget.",
+        "reuse": "ABI cache identity is distinct from shared scratch identity and neutral-state validity.",
+        "parallelism_or_overlap": "unchanged"
+      },
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_moe/init_no_scan_direct.yaml",
+          "lines": [
+            140,
+            169
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_moe/init_no_scan_direct.yaml",
+          "lines": [
+            285,
+            300
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_solution.py",
+          "lines": [
+            917,
+            975
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_solution.py",
+          "lines": [
+            1506,
+            1510
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_nvfp4_moe.cu",
+          "lines": [
+            2201,
+            2256
+          ]
+        }
+      ],
+      "rule_refs": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/3.design.math_reshape.md",
+          "lines": [
+            104,
+            108
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            191,
+            191
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/5.design.tile_pipeline.md",
+          "lines": [
+            185,
+            200
+          ]
+        }
+      ],
+      "new_fields": 0,
+      "new_rules": 0
+    },
+    {
+      "id": "moe_tables_ready",
+      "class": "design_constants_and_external_control_state",
+      "objects": [
+        "E2Table",
+        "ScaleTable",
+        "ScalePairTable",
+        "Model._tables_ready"
+      ],
+      "decision": "Keep internal table values/retention and ready publication condition; do not promote them into Contract state. Delete set/dictionary process detail.",
+      "field_paths": [
+        "design.math_reshape.rewrite[format_tables].math",
+        "design.math_reshape.rewrite[format_tables].symbol",
+        "design.work_schedule.phase.direct.schedule.strategy",
+        "realization.require"
+      ],
+      "minimum": "Format constants persist for the loaded device module. Ready means table construction has completed under the declared publication boundary. It does not prove scratch is clean. The source publishes the per-Model device-ready marker after full-device host synchronization.",
+      "effects_if_removed": {
+        "numeric_or_version": "Uninitialized or incorrectly bound lookup tables alter values.",
+        "work": "Ready controls whether initialization work executes.",
+        "legal_access": "unchanged",
+        "key_memory": "unchanged",
+        "reuse": "Table lifetime and workspace lifetime are separate.",
+        "parallelism_or_overlap": "Replacing full-device host sync with tables.kernel_done changes host continuation timing."
+      },
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_moe/init_no_scan_direct.yaml",
+          "lines": [
+            41,
+            63
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_nvfp4_moe.cu",
+          "lines": [
+            116,
+            122
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_nvfp4_moe.cu",
+          "lines": [
+            149,
+            159
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_solution.py",
+          "lines": [
+            1005,
+            1016
+          ]
+        }
+      ],
+      "rule_refs": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/3.design.math_reshape.md",
+          "lines": [
+            96,
+            108
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            266,
+            266
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/6.realization.md",
+          "lines": [
+            9,
+            13
+          ]
+        }
+      ],
+      "new_fields": 0,
+      "new_rules": 0
+    },
+    {
+      "id": "sparse_gate_and_moe_mirror",
+      "class": "observed_state_and_source_limitation",
+      "objects": [
+        "shared mapped gate",
+        "R",
+        "MoE HostObserved"
+      ],
+      "decision": "Retain actual observation semantics and the absent cross-call writer completion guarantee; remove the 64-float capacity detail when only PS=8 slots are accessed and no material cost is established.",
+      "field_paths": [
+        "design.math_reshape.rewrite[probe].math",
+        "design.math_reshape.rewrite[probe].symbol.R",
+        "design.work_schedule.phase.probe.schedule.strategy",
+        "realization.require"
+      ],
+      "minimum": "One host/device mapped object holds PS sample slots. Host writes sentinel, performs bounded volatile polls, then separately reads ordinary FP32 values and averages only positive observations. Poll/scan completion is not GPU-writer completion or proof of a current-request snapshot.",
+      "effects_if_removed": {
+        "numeric_or_version": "Sparse R is an observed control value, not the mean of all final current GPU samples; MoE old HostObserved=1 may select an invalid shortcut.",
+        "work": "Changing observed R or Clean affects selected GPU work; waiting for all samples changes host work/timing.",
+        "legal_access": "Keep PS active slots and mapped alias; the other 56 source slots have no shown access.",
+        "key_memory": "Removing the 56 spare-float detail loses no established key memory cost.",
+        "reuse": "A later host reset can race a pending previous GPU writer; no generation/lock is inferred.",
+        "parallelism_or_overlap": "Do not replace the bounded observation with a global completion wait."
+      },
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_sparse/probe_hidden_packed.yaml",
+          "lines": [
+            124,
+            151
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_sparse/probe_hidden_packed.yaml",
+          "lines": [
+            314,
+            326
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_sparse/probe_hidden_packed.yaml",
+          "lines": [
+            1025,
+            1035
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_sparse/dsv4_kernel.cu",
+          "lines": [
+            5561,
+            5614
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_moe/verify_only.yaml",
+          "lines": [
+            136,
+            158
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_nvfp4_moe.cu",
+          "lines": [
+            9471,
+            9489
+          ]
+        }
+      ],
+      "rule_refs": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/3.design.math_reshape.md",
+          "lines": [
+            73,
+            85
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            266,
+            266
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/5.design.tile_pipeline.md",
+          "lines": [
+            185,
+            200
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/6.realization.md",
+          "lines": [
+            9,
+            13
+          ]
+        }
+      ],
+      "new_fields": 0,
+      "new_rules": 0
+    }
+  ],
+  "capacity_decisions": [
+    {
+      "id": "gdn_unused_image",
+      "decision": "conditional_keep_or_delete",
+      "not_proven_core": true,
+      "source_fact": "Direct Q/K reads retain the Q/K image reservation while removing its reads/writes.",
+      "keep_if": "A comparison concerns actual peak/reserved global memory or a measured cost that depends on this reservation.",
+      "delete_if": "Only the active kernel dataflow and reuse are being represented, and no memory/cost dependence is established.",
+      "must_preserve": "Actual perm and handoff access ranges, their shared identity and lifetime.",
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_gdn/direct_qk_ordered.yaml",
+          "lines": [
+            257,
+            264
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_gdn/gdn_kernel.cu",
+          "lines": [
+            3254,
+            3272
+          ]
+        }
+      ],
+      "effects_of_safe_deletion": {
+        "numeric_or_version": "unchanged",
+        "work": "unchanged",
+        "legal_access": "unchanged",
+        "key_memory": "Exact dormant reservation is intentionally outside the supported core claim; do not claim equal measured peak memory.",
+        "reuse": "unchanged",
+        "parallelism_or_overlap": "unchanged"
+      }
+    },
+    {
+      "id": "qsa_tail_backing",
+      "decision": "keep_actual_access_not_exact_slack",
+      "source_fact": "Unconditional raw nibble-word loads precede masking; source allocates 128 extra int32 words.",
+      "not_proven_core": "The exact 128-word extra padding: fixed template last block has 6 rows while MaxE reserves 10 rows.",
+      "must_preserve": "Backing legally encloses the actually rounded raw load interval; unused raw bits do not become initialized mathematical values.",
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/operator.py",
+          "lines": [
+            99,
+            107
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/qsa_kernel.py",
+          "lines": [
+            475,
+            488
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/qsa_kernel.py",
+          "lines": [
+            885,
+            914
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_qsa_prefill/root.yaml",
+          "lines": [
+            175,
+            175
+          ]
+        }
+      ],
+      "effects_of_safe_deletion": {
+        "numeric_or_version": "unchanged",
+        "work": "unchanged",
+        "legal_access": "Keep enclosing load interval; dropping a surplus amount is not dropping real access bounds.",
+        "key_memory": "unchanged",
+        "reuse": "unchanged",
+        "parallelism_or_overlap": "unchanged"
+      }
+    },
+    {
+      "id": "fa4_extra_m_region",
+      "decision": "current_entry_compatibility_only",
+      "source_fact": "Slicer reserves O,L,M plus one additional m region that this root path does not consume.",
+      "must_preserve": "Actual O/L/M read extents and any retained current-entry compatibility requirement.",
+      "not_proven_core": "The extra unused m reservation as a first-order kernel resource design.",
+      "evidence": [
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_operator.py",
+          "lines": [
+            230,
+            254
+          ]
+        },
+        {
+          "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_decode/root.yaml",
+          "lines": [
+            443,
+            446
+          ]
+        }
+      ],
+      "effects_of_safe_deletion": {
+        "numeric_or_version": "unchanged",
+        "work": "unchanged",
+        "legal_access": "Removing current-entry size compatibility is a separate interface decision; actual payload extents cannot be deleted.",
+        "key_memory": "unchanged",
+        "reuse": "unchanged",
+        "parallelism_or_overlap": "unchanged"
+      }
+    },
+    {
+      "id": "mla_growth",
+      "decision": "delete_process_details",
+      "source_fact": "Pinned and device table buffers grow using 2*items+4096 capacity.",
+      "must_preserve": "Current Geo extent, current metadata, shared backing, readiness and valid reuse premise.",
+      "not_proven_core": "Exact over-allocation and growth algorithm without a specific memory/cost dependence.",
+      "evidence": [
+        {
+          "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+          "lines": [
+            1719,
+            1728
+          ]
+        }
+      ],
+      "effects_of_safe_deletion": {
+        "numeric_or_version": "unchanged",
+        "work": "unchanged",
+        "legal_access": "unchanged",
+        "key_memory": "Does not preserve exact allocator footprint, which has not been shown to be a core design condition.",
+        "reuse": "unchanged",
+        "parallelism_or_overlap": "unchanged"
+      }
+    }
+  ],
+  "safe_shortening": {
+    "evidence": {
+      "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_gdn/root.yaml",
+      "lines": [
+        379,
+        383
+      ]
+    },
+    "field": "design.work_schedule.phase.prep.schedule.strategy",
+    "before": "The current CUDA stream orders prep, chain and reuse of the grow-only workspace across calls. Every consumed handoff slot is rewritten. The source provides no cross-stream event, lock or reentrancy protocol.",
+    "after": "One grow-only workspace is reused by calls ordered on the same CUDA stream. Prep rewrites every consumed handoff slot; cross-stream or reentrant reuse has no source guarantee.",
+    "normalized_characters_before": 207,
+    "normalized_characters_after": 175,
+    "legality": "current schedule.strategy string; not new syntax",
+    "effects": {
+      "numeric_or_version": "unchanged",
+      "work": "unchanged",
+      "legal_access": "unchanged",
+      "key_memory": "unchanged",
+      "reuse": "unchanged",
+      "parallelism_or_overlap": "unchanged"
+    },
+    "scope": "single field only, no extrapolated corpus-wide savings"
+  },
+  "rule_deduplication": [
+    {
+      "candidate": "Represent algorithm initial/final state using existing input/output; do not expose private scratch as outputs.",
+      "existing": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/1.contract.algorithm_requirement.md",
+          "lines": [
+            43,
+            44
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/1.contract.algorithm_requirement.md",
+          "lines": [
+            269,
+            269
+          ]
+        }
+      ],
+      "action": "already_covered_no_rule_change"
+    },
+    {
+      "candidate": "Define state initialization, untouched regions, consumers and terminal relation.",
+      "existing": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/3.design.math_reshape.md",
+          "lines": [
+            104,
+            108
+          ]
+        }
+      ],
+      "action": "already_covered_no_rule_change"
+    },
+    {
+      "candidate": "Place shared-state preparation/reuse premises on relevant schedule.strategy.",
+      "existing": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            191,
+            191
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            264,
+            266
+          ]
+        }
+      ],
+      "action": "already_covered_no_rule_change"
+    },
+    {
+      "candidate": "Do not confuse first-use preparation with per-version initialize; retain through outstanding accesses.",
+      "existing": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            295,
+            295
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            315,
+            326
+          ]
+        }
+      ],
+      "action": "already_covered_no_rule_change"
+    },
+    {
+      "candidate": "Name action inputs with versions/ranges; express irreducible named-action dependencies structurally.",
+      "existing": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/5.design.tile_pipeline.md",
+          "lines": [
+            185,
+            200
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/5.design.tile_pipeline.md",
+          "lines": [
+            500,
+            507
+          ]
+        }
+      ],
+      "action": "already_covered_no_rule_change"
+    },
+    {
+      "candidate": "Delete allocator/process details without discarding necessary initial state or compatibility.",
+      "existing": [
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/4.design.work_schedule.md",
+          "lines": [
+            408,
+            408
+          ]
+        },
+        {
+          "path": "schema_discussion/language_compression/review_20261112/rules/6.realization.md",
+          "lines": [
+            157,
+            168
+          ]
+        }
+      ],
+      "action": "already_covered_no_rule_change"
+    }
+  ],
+  "structural_gap_assessment": {
+    "new_module_necessity_demonstrated": false,
+    "reason": "The examined distinguishing facts fit short definitions with clear existing owners; neither retention alone nor noun names are mistaken for physical identity. No example forces a process-wide allocator/owner model.",
+    "not_claimed": "Automatic compositional checking of all cross-request races or correctness of the frozen kernels."
+  },
+  "source_limitations_not_language_requirements": [
+    "GDN supplies no general cross-stream/reentrant workspace exclusion.",
+    "MLA upload-to-main readiness alone is not evidence of old-main-to-next-upload safety under arbitrary overlapping requests.",
+    "Sparse bounded polling/final scan may finish while old GPU writes remain outstanding.",
+    "MoE HostObserved can come from an earlier execution; a CPU sentinel reset does not order old GPU writes.",
+    "FA4 first isolated zeroing alone does not establish finite payloads after every possible shape/view reuse."
+  ],
+  "actual_read_scope": {
+    "surveys": [
+      {
+        "path": "schema_extract/archive/six-operators/20261109-methodology-review/SCHEMA_VERBOSITY.md",
+        "read": "lines 1-100 plus targeted search excerpts about state, source limitations and reuse"
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/README.md",
+        "read": "lines 1-35 and 85-107"
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/SCHEMA_DISCUSSION.md",
+        "read": "lines 184-224 and targeted state searches"
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/SCHEMA_LANGUAGE_GAPS.md",
+        "read": "lines 70-116 and targeted state searches"
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/gap_review/boundary_review.md",
+        "read": "full 146-line report as locator only; its old rule-gap labels not treated as current authority"
+      }
+    ],
+    "rules": "DOC0 common identity/extensions; DOC1 full; DOC2 fields/core boundary; DOC3 full; DOC4 work/flow/state sections; DOC5 action-description, execution, index, storage and dependency sections; DOC6 full.",
+    "yamls": [
+      {
+        "operator": "extract_gdn",
+        "node": "direct_qk_ordered",
+        "category": "approved",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_gdn/direct_qk_ordered.yaml",
+        "sha256": "0b1cf9dc5831e08469db932c311f27f0cf9c7485e87c8302961fbabec2401f13",
+        "matches_corpus": true,
+        "read_mode": "targeted state-related excerpts, not a complete operator audit"
+      },
+      {
+        "operator": "extract_gdn",
+        "node": "root",
+        "category": "approved",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_gdn/root.yaml",
+        "sha256": "29bd61d4b6658b4c9f8205a8e5d4590c2ab0483de83298ceb56f9f0d346ec3a2",
+        "matches_corpus": true,
+        "read_mode": "targeted state-related excerpts, not a complete operator audit"
+      },
+      {
+        "operator": "template_fa4_decode",
+        "node": "root",
+        "category": "template",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_fa4_decode/root.yaml",
+        "sha256": "2668785d221bed6e3757f257590f4e6b2608c3e9fb7e1eea1609cb985b778f77",
+        "matches_corpus": true,
+        "read_mode": "targeted state-related excerpts, not a complete operator audit"
+      },
+      {
+        "operator": "template_qsa_prefill",
+        "node": "root",
+        "category": "template",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/template_qsa_prefill/root.yaml",
+        "sha256": "9d36b006a339be7969dddfdcd40c1d94fc403d9f0153cc0624db8e2ec4015686",
+        "matches_corpus": true,
+        "read_mode": "targeted state-related excerpts, not a complete operator audit"
+      },
+      {
+        "operator": "extract_mla",
+        "node": "root",
+        "category": "approved",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_mla/root.yaml",
+        "sha256": "ca4a71d1b6a460822f4967257d6374ddae17c12b827c3bef8717cba990e4898f",
+        "matches_corpus": true,
+        "read_mode": "targeted state-related excerpts, not a complete operator audit"
+      },
+      {
+        "operator": "extract_moe",
+        "node": "init_no_scan_direct",
+        "category": "approved",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_moe/init_no_scan_direct.yaml",
+        "sha256": "fcc71a957e2da4ee9506a109cba476236ec0ec425af7050556e119d2ff18e16a",
+        "matches_corpus": true,
+        "read_mode": "targeted state-related excerpts, not a complete operator audit"
+      },
+      {
+        "operator": "extract_moe",
+        "node": "verify_only",
+        "category": "approved",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_moe/verify_only.yaml",
+        "sha256": "5de24b406f1beb7eb32891d4fdaec6831403ad3fca3fe12357c42f06c3bbcd72",
+        "matches_corpus": true,
+        "read_mode": "targeted state-related excerpts, not a complete operator audit"
+      },
+      {
+        "operator": "extract_sparse",
+        "node": "probe_hidden_packed",
+        "category": "approved",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/inputs/extract_sparse/probe_hidden_packed.yaml",
+        "sha256": "1a6780795c61c533272af484b9aeb16daea6ee115cdc96c9eb36a2c6c52b6277",
+        "matches_corpus": true,
+        "read_mode": "targeted state-related excerpts, not a complete operator audit"
+      }
+    ],
+    "source_semantic_excerpts": [
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_gdn/gdn_kernel.cu",
+        "lines": [
+          3170,
+          3315
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_operator.py",
+        "lines": [
+          227,
+          254
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_gqa_decode.py",
+        "lines": [
+          475,
+          529
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_gqa_decode_paged.py",
+        "lines": [
+          1094,
+          1152
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_gqa_decode_paged.py",
+        "lines": [
+          1345,
+          1410
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/operator.py",
+        "lines": [
+          65,
+          161
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/qsa_kernel.py",
+        "lines": [
+          320,
+          351
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/qsa_kernel.py",
+        "lines": [
+          427,
+          494
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/qsa_kernel.py",
+        "lines": [
+          752,
+          816
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/qsa_kernel.py",
+        "lines": [
+          880,
+          921
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/qsa_preprocess.py",
+        "lines": [
+          130,
+          193
+        ]
+      },
+      {
+        "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+        "lines": [
+          1450,
+          1483
+        ]
+      },
+      {
+        "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+        "lines": [
+          1638,
+          1686
+        ]
+      },
+      {
+        "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+        "lines": [
+          1707,
+          1738
+        ]
+      },
+      {
+        "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+        "lines": [
+          1885,
+          1904
+        ]
+      },
+      {
+        "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+        "lines": [
+          2006,
+          2014
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_solution.py",
+        "lines": [
+          917,
+          980
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_solution.py",
+        "lines": [
+          1003,
+          1019
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_solution.py",
+        "lines": [
+          1495,
+          1515
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_solution.py",
+        "lines": [
+          1574,
+          1590
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_nvfp4_moe.cu",
+        "lines": [
+          116,
+          123
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_nvfp4_moe.cu",
+        "lines": [
+          149,
+          165
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_nvfp4_moe.cu",
+        "lines": [
+          2190,
+          2260
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_nvfp4_moe.cu",
+        "lines": [
+          9468,
+          9507
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_sparse/dsv4_kernel.cu",
+        "lines": [
+          5556,
+          5628
+        ]
+      },
+      {
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_sparse/dsv4_kernel.cu",
+        "lines": [
+          6144,
+          6197
+        ]
+      }
+    ],
+    "additional_search_only": "Source-entry signatures, FA4 input zeros, queue/table/counter identifiers and source allocation sizes were searched; searches are not counted as full semantic audits.",
+    "source_hash_checks": [
+      {
+        "operator": "extract_gdn",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_gdn/source.py",
+        "sha256": "97e6d774d3c6b4573b990067f4b08c23365b2736ccf0e99a6633582ca09d1c00",
+        "matches_recorded_identity": true,
+        "source_ref": "6e4ca91bd91d998cac99e8dadd83838e153c679d"
+      },
+      {
+        "operator": "extract_gdn",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_gdn/gdn_kernel.cu",
+        "sha256": "1817841153fb05dae9acf9f9a9700d00aea67d9de2d40a4c00c90e924f994191",
+        "matches_recorded_identity": true,
+        "source_ref": "6e4ca91bd91d998cac99e8dadd83838e153c679d"
+      },
+      {
+        "operator": "extract_gdn",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_gdn/gdn_common.cuh",
+        "sha256": "9a14b973b7b1ac72859bc914c98a8f3dbd1999bd0fbacc68001fad77d725c9c4",
+        "matches_recorded_identity": true,
+        "source_ref": "6e4ca91bd91d998cac99e8dadd83838e153c679d"
+      },
+      {
+        "operator": "extract_mla",
+        "path": "schema_discussion/phase_grammar/sources/kernel/extract_mla/solution.py",
+        "sha256": "78cb2427001cd23d296e907f40f28c9743ba46471eb17ee80a38d584bf45dff8",
+        "matches_recorded_identity": true,
+        "source_ref": "228934a2253bde4d6f0c4463dd77aeada1bf07a8"
+      },
+      {
+        "operator": "extract_moe",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_solution.py",
+        "sha256": "0a71613fe4beec9314570cf128f2d455e91adf7182467c261a36ac11e45f0688",
+        "matches_recorded_identity": true,
+        "source_ref": "ce1b7d5e8e7560b5c80abd87549bc2328c52df34"
+      },
+      {
+        "operator": "extract_moe",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_moe/source_nvfp4_moe.cu",
+        "sha256": "cf0b42e2e4809cf71b2442f1b64285da4cc0a69214f43eb82efbdac938978f6f",
+        "matches_recorded_identity": true,
+        "source_ref": "ce1b7d5e8e7560b5c80abd87549bc2328c52df34"
+      },
+      {
+        "operator": "extract_sparse",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_sparse/solution.py",
+        "sha256": "2411a8fd28e09be34b14fa103ee616d8b6c3e2f2177d7f22b1089b9e0e491525",
+        "matches_recorded_identity": true,
+        "source_ref": "6e4ca91bd91d998cac99e8dadd83838e153c679d"
+      },
+      {
+        "operator": "extract_sparse",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/extract_sparse/dsv4_kernel.cu",
+        "sha256": "c9389387d35bd26954754a5ae13e2d202df06fc9799a77fddfb0654306909eb2",
+        "matches_recorded_identity": true,
+        "source_ref": "6e4ca91bd91d998cac99e8dadd83838e153c679d"
+      },
+      {
+        "operator": "template_fa4_decode",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_operator.py",
+        "sha256": "248cf0b8552435fb714bbc544b43203647cece357b577600e5e58f4447b2d1c7",
+        "matches_recorded_identity": true,
+        "source_ref": "01fff90d714abc6e84904ea9c44523ba66d34a0e"
+      },
+      {
+        "operator": "template_fa4_decode",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_gqa_decode.py",
+        "sha256": "999172d4360eeb12fec0062552e04928ad30b846ac3d5e782dc220c0e98d555f",
+        "matches_recorded_identity": true,
+        "source_ref": "01fff90d714abc6e84904ea9c44523ba66d34a0e"
+      },
+      {
+        "operator": "template_fa4_decode",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_gqa_decode_paged.py",
+        "sha256": "ec930c32758ea4f34e2df9fefa2de90f3ef345dc11fa66948fef74ae016fbe92",
+        "matches_recorded_identity": true,
+        "source_ref": "01fff90d714abc6e84904ea9c44523ba66d34a0e"
+      },
+      {
+        "operator": "template_fa4_decode",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_fa4_decode/source_input.py",
+        "sha256": "8958c3b642719c2af51bc77f93d5eb15417aea28df5f7c03d64096f90292554c",
+        "matches_recorded_identity": true,
+        "source_ref": "01fff90d714abc6e84904ea9c44523ba66d34a0e"
+      },
+      {
+        "operator": "template_qsa_prefill",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/operator.py",
+        "sha256": "7974691ae47738ed6d572a0f9d998d6f5d75e9100e17cb76bbbe970172246073",
+        "matches_recorded_identity": true,
+        "source_ref": "01fff90d714abc6e84904ea9c44523ba66d34a0e"
+      },
+      {
+        "operator": "template_qsa_prefill",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/qsa_kernel.py",
+        "sha256": "f5232531709cea8de34e90a0aa578e8e3d580feddf31ab20cdab63361de80b8c",
+        "matches_recorded_identity": true,
+        "source_ref": "01fff90d714abc6e84904ea9c44523ba66d34a0e"
+      },
+      {
+        "operator": "template_qsa_prefill",
+        "path": "schema_extract/archive/20261109-ten-operator-text-audit/work/template_qsa_prefill/qsa_preprocess.py",
+        "sha256": "7dc7f3f54d19a37fb99068d95b9017885fefaede9ab01406badf65f1c2acd66a",
+        "matches_recorded_identity": true,
+        "source_ref": "01fff90d714abc6e84904ea9c44523ba66d34a0e"
+      }
+    ],
+    "source_hash_check_is_not_semantic_read": true,
+    "not_read": [
+      "partner report",
+      "other review_20261112 reports"
+    ],
+    "no_gpu_run": true,
+    "no_subagents_spawned": true,
+    "excluded_topics": [
+      "branch reuse",
+      "inheritance changes",
+      "root/dispatch design"
+    ]
+  },
+  "formal_files_modified": false,
+  "validation": {
+    "report_lines": 130,
+    "report_in_requested_120_160_range": true,
+    "report_links_and_evidence_valid": true,
+    "fixed_input_and_source_hashes_match": true,
+    "json_parseable": true,
+    "errors": []
+  }
+}
