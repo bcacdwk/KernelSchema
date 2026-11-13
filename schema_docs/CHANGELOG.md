@@ -2,6 +2,13 @@
 
 ## 2026-11-12
 
+### 说明文字与示例精简
+
+- 公共约定明确说明文字只补对象、作用与设计依据，沿用已有字段、公式和引用，使用常见术语与明确名称。
+- 区分 `meaning / describe / thesis / strategy` 的职责；`math` 聚焦公式，`range / default` 保留有效域与默认值表达，`prefer` 以具体成本为依据。
+- 动作输入仍须完整、可唯一确定；`describe` 只补上游及已声明关系未确定的部分，消除逐项重复列写的要求。
+- 精简各章示例，去掉句末句点和装饰性引号，保留 YAML 必需引号。移除 ledger 的字符数与行数限制、storage 的强制单行要求；数量限制与统一排版留给后续工具。
+
 ### 对象说明：meaning 与角色 describe
 
 - 第 4 篇的 `partition.<dimension>`、`worktile.invariant.<value>`、`worktile.iteration.<value>`、`target.single_tile.<value>` 增加必填 `meaning`，分别说明本层工作坐标、输入块及结果的含义，沿用上游数学定义。
