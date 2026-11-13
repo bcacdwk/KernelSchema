@@ -2,6 +2,14 @@
 
 ## 2026-11-13
 
+### 预分配工作编号步长：step 更名为 stride
+
+- `worker_assignment.preassigned.step` 更名为 `stride`，与工作单元 `step` 区分；等差分配序列语义不变。
+
+### 工作组织单位：phase 更名为 step
+
+- `work_schedule.phase`、`tile_pipeline.phase` 与 `flow.launch[].phase` 更名为 `step`，同步 ID、字段路径、正文、示例及锚点；工作组织、并发、提交与交接语义不变。
+
 ### 文本字段的填写重点
 
 - `unknown` 点明具体信息缺口及受影响的判断；三类 `strategy` 只补结构与上游未表达的关键关系或条件。
