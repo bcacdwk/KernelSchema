@@ -1,25 +1,25 @@
 # Schema 示例
 
-本目录保存按现行规范维护的完整任务。日常使用同一个[作者检查入口](../README.md#4-检查与处理反馈)；传入任一节点都会检查所在任务的全部 YAML。
+本目录保留既有提取与规范化案例，YAML 和 PNG 未随具体设计与变体目录方法迁移，也未按新规则验收。实例仍含旧节点、配置与引用结构；使用前核对[执行器对齐说明](../../schema_extract/EXECUTOR_ALIGNMENT.md)与下述历史范围。当前[工具检查入口](../README.md#4-检查与处理反馈)按其支持的协议检查所在任务的全部 YAML，结果不构成新规范的合规证明。
 
 ## 第一批四个任务
 
-以下任务从 `aka-four-problems-20261020` 提取结果复制并规范化。[来源快照](https://github.com/bcacdwk/KernelSchema/tree/e8605fd9107dec1339cc4593c01049cea4570b0d/schema_wiki/aka-four-problems-20261020) 固定在现行字段迁移前；原 wiki 目录已在 `448ab85` 从当前树移除，可查阅[移除前版本](https://github.com/bcacdwk/KernelSchema/tree/3d64ad35900a0e6a66d6f93da34108fbceba0daf/schema_wiki/aka-four-problems-20261020)。本页的旧源码与测量记录也固定到该提交，保留历史依据。节点集合、dispatch 条件、算法、精度路径、分块和缓冲容量沿用来源，微流水线按现行规范明确动作身份、完成保证、依赖与空分支。
+以下任务从 `aka-four-problems-20261020` 提取结果复制并做过规范化。[来源快照](https://github.com/bcacdwk/KernelSchema/tree/e8605fd9107dec1339cc4593c01049cea4570b0d/schema_wiki/aka-four-problems-20261020) 固定在当时字段迁移前；原 wiki 目录已在 `448ab85` 从当前树移除，可查阅[移除前版本](https://github.com/bcacdwk/KernelSchema/tree/3d64ad35900a0e6a66d6f93da34108fbceba0daf/schema_wiki/aka-four-problems-20261020)。本页的旧源码与测量记录也固定到该提交，保留历史依据。节点集合、dispatch 条件、算法、精度路径、分块和缓冲容量沿用来源，此前规范化明确了动作身份、完成保证、依赖与空分支。
 
-| 任务入口 | YAML 节点数 | 当前表达与核对范围 |
+| 任务入口 | YAML 节点数 | 既有表达与历史核对范围 |
 | --- | --- | --- |
 | [FA4 prefill](fa4_prefill/dispatch.md) | 11 | 补实硬件摘要和实现环境；显式登记 Stats、FinalSum 的生产者及成员依赖，明确累积完成保证，规范 combine 尾部预取的空区间。 |
 | [FA4 decode](fa4_decode/dispatch.md) | 7 | 明确必传 `None` 输入和库容量；交接引用实际等待完成；分别表达轮次放行、操作数到达和结果完成，保留空分支动作及 no-op 保证。 |
 | [QSA prefill](qsa_prefill/dispatch.md) | 1 | 补实环境与 TMEM 容量；明确 ticket 交接、延迟 gather 发布及空 worker 的 drain 行为，保留未验证事项。 |
 | [GDN prefill](gdn_prefill/dispatch.md) | 2 | 还原前置类型转换提交；补实环境与 TMEM 容量；统一具名乘积及角色引用，显式登记 U 的生产者。 |
 
-共 21 个 YAML 节点，各算子目录保留自己的 `dispatch.md`、YAML 和同名 PNG。四份 `dispatch.md` 与来源快照一致；生成命令及验证边界见本页，节点关系、选择条件和修订号以 YAML 为准。
+共 21 个 YAML 节点，各算子目录保留自己的 `dispatch.md`、YAML 和同名 PNG。四份 `dispatch.md` 沿用来源快照；生成命令及验证边界见本页，节点关系、选择条件和修订号以 YAML 为准。其中 FA4 prefill 的 11 份仍超过[现行完整设计上限](../../schema_docs/0.common.md#文件与共享-contract)，不能作为新规则的合规示例。
 
 本批 L20D 的融合 GDN 与之前 B200 上的多阶段示例具有不同的任务要求和数值路径；这里保留的是本批原有的两条设计，不从另一示例移植算法。
 
 ## 生成 PNG
 
-需要 Python 3.10+、PyYAML 和 Graphviz 的 `dot`。从仓库根目录执行下面的命令，即可重建全部 21 张图：
+以下保留旧结构实例的绘图命令，需匹配[当前工具协议](../tools/README.md)及实际来源；本轮没有重跑或更新图片。需要 Python 3.10+、PyYAML 和 Graphviz 的 `dot`，从仓库根目录运行：
 
 ```sh
 python3 schema_template/tools/pipeline_graph.py schema_template/examples/fa4_prefill/root.yaml --all --set N=4 --set Ssplit=6 --worktiles 2
@@ -33,7 +33,7 @@ python3 schema_template/tools/pipeline_graph.py schema_template/examples/qsa_pre
 
 这些整数是明确选定的展示规模，不是新增的设计参数或真实 workload：prefill 展示环复用与跨工作接续，decode 展示短 split 的阶段关系，GDN 展示标量环及两份工作。QSA 的 `N(b)=4` 是缩小的示意展开，真实任务要求至少 32 个 union tile。生成器不猜测缺失取值、不按算子名称选择配置，也不从旧 PNG 读取生成参数。
 
-图中保留 phase、role、动作、依赖类型和展示取值，没有实测时间尺度。PNG 内保存来源文件名、内容指纹和生成取值，不再产生旁置配置或图报告；当前 YAML 与图片是否对应，由回归测试核对。
+图中保留旧结构的 phase、role、动作、依赖类型和展示取值，没有实测时间尺度。PNG 内保存来源文件名、内容指纹和生成取值，不产生旁置配置或图报告；YAML 与图片的对应关系属于原工具回归的核对范围，不证明新方法已迁移。
 
 ## 规范化依据
 
@@ -69,4 +69,4 @@ GDN 的 `cu_seqlens.to(torch.int32)` 仍是计时范围内的独立提交。其[
 
 这些缺口在相应设计说明中保留。显式动作和依赖表达已有实现的顺序，不为消除未决事项增加同步或替换数值路径；库容量仍需追踪到实际定义。
 
-算子已经真实跑过 GPU；当前算子和 schema 都不需要 GPU 正确性验收。示例规范化与工具回归核对 schema 表达、结构及关联。
+来源算子的既有 GPU 记录保留各自实验范围；本轮文档更新不新增 GPU 验收。此前示例规范化与工具回归只核对其规则范围内的表达、结构及关联，不能代替新规范审阅或后续实现任务的验收。

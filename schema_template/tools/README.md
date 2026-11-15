@@ -1,10 +1,14 @@
 # 检查器维护
 
-日常创建、提取、修改和检查 schema 见[作者入口](../README.md)；本篇只说明检查器实现、依赖、测试和规则维护，规范以 [schema_docs](../../schema_docs/0.common.md) 为准。检查器服务于填写和阅读，不把 plan 当作待编译的程序。
+日常创建、提取、修改和检查 schema 见[作者入口](../README.md)；本篇描述当前检查器的实际实现与冻结协议，以及依赖、测试和规则维护。现行方法以 [schema_docs](../../schema_docs/0.common.md) 为准，与工具的对接范围见[执行器对齐说明](../../schema_extract/EXECUTOR_ALIGNMENT.md)。检查器服务于填写和阅读，不把 plan 当作待编译的程序。
+
+当前 [design_resolution.py](design_resolution.py) 仍解析 `dispatch.parent` 与单字段 `{from_parent: <直接父ID>}`：非 root 未写 parent 时取 root，引用只能指向直接父的同名完整区；parent 本身不隐式带入 Design，root 三区须本地，父链必须无环。本页的解析、有效视图、检查与绘图能力都在这个协议内，尚不支持现行 `from` 的多来源内容图。
+
+差异也涉及整份结构：[structure.py](rules/structure.py) 仍使用 `phase`、`preassigned.step`、`domain / resource / milestone`、role 的 `info.execution_mode / verb`、`pipe.prologue / steady / epilogue / repeat` 和 `waits_for` 等字段，[starter.yaml](../starter.yaml) 沿用相应旧骨架。当前检查成功不能证明实例符合现行字段、具体设计集合或 dispatch 格式；旧提取计划与 Runner 的调用协议见 [extract tools](../../schema_extract/tools/README.md)。
 
 新增拒绝条件前，先说明它防止了什么阅读歧义、遗漏或引用冲突。不能只因实现方便而限制设计表达，也不能仅因检查器已有某个限制，就把它补成规范。设计取舍和无法直接判定的数学事实留给审阅。
 
-字段规则只接受现行名称和枚举值，不设置旧字段别名、版本回退或自动改写。更名时同时更新规范、模板、现行实例和测试；测试应明确拒绝旧名，即使同一条目也填写了新名。输入中的自定义对象名不受这项字段限制。
+当前机器规则只接受该实现已声明的字段名称和枚举值，不提供别名、版本回退或自动改写。字段迁移需要同步核对规范、模板、实例和测试，以及冻结运行的规则身份；只改文档不会扩大解析器的接受范围。输入中的自定义对象名不受固定字段名称限制。
 
 ## 目录与职责
 
@@ -49,7 +53,7 @@ tools/
 
 输入文件名决定节点 ID，所在目录决定任务范围；文件符号链接不使检查切换到目标文件的任务目录。无论传入 root 还是派生节点，都会检查同目录直属的全部 `.yaml / .yml`。共享 Contract 和显式同名整区引用只构造内存有效视图，不写回 raw。引入名称在使用节点的跨区上下文中解析，metadata/when/version/realization 保持节点本地。
 
-上述为普通创作模式。显式 `--standalone` 调用 `schema.validate_standalone_file`，只读取一个正式生成的阅读视图：文件自带 Contract，原 `dispatch.id/parent` 保留为身份与出处，不作为外部依赖读取。字段结构先照常验证，再在检查副本中使用本地根身份解析关系；原始数据和文件不改写。生成规则见[单文件阅读视图](../../schema_docs/0.common.md#单文件阅读视图)。
+上述为当前协议的普通创作模式。显式 `--standalone` 调用 `schema.validate_standalone_file`，只读取一个正式生成的阅读视图：文件自带 Contract，原 `dispatch.id/parent` 保留为身份与出处，不作为外部依赖读取。字段结构先照常验证，再在检查副本中使用本地根身份解析关系；原始数据和文件不改写。现行方法对阅读视图的定义见 [common](../../schema_docs/0.common.md#单文件阅读视图)，当前输出与调用仍受本页协议约束。
 
 ### 共用解析与有效视图
 
@@ -106,7 +110,7 @@ Contract 输入输出按[nullable 与 None](../../schema_docs/1.contract.algorit
 
 ## 硬件占位豁免
 
-当前仓库未启用目录级硬件豁免。提取任务显式运行 `check_yaml.py --skip-hardware`，保留原始硬件占位并跳过整个硬件区及依赖硬件的检查；算法、工作分配、动作、索引、成员数量和其他引用照常检查。不传该选项时执行完整检查。
+当前仓库未启用目录级硬件豁免。提取任务显式运行 `check_yaml.py --skip-hardware`，保留文件中的硬件内容并跳过整个硬件区及依赖硬件的检查；算法、工作分配、动作、索引、成员数量和其他引用照常检查。[P1 的最小 execution 登记](../../schema_extract/phases/01_contract.md#第-3-段硬件占位)由人工核对来源，该参数不验证登记是否充分。不传该选项时执行完整检查。
 
 [check_policy.py](check_policy.py) 保留可选目录策略的兼容读取及对应测试；现行提取流程不依赖这项配置。`--skip-hardware` 的操作与 Python API 见[作者入口](../README.md#4-检查与处理反馈)。
 
@@ -150,4 +154,4 @@ PY
 
 ## 示例状态
 
-维护的任务、规范化依据和未决项见[示例索引](../examples/README.md)。现有示例测试自动遍历各任务目录，通过作者入口检查全部节点并验证文件未被改写。
+已有案例、历史规范化依据和未决项见[示例索引](../examples/README.md)。现有示例测试自动遍历各任务目录，通过当前工具入口检查全部节点并验证文件未被改写；它没有验收现行具体设计集合与变体目录规则。

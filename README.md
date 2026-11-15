@@ -12,14 +12,14 @@ Kernel Schema 设计的核心出发点在于，压缩是智能的基础，对于
 
 | 当前任务                                                         | 入口                              | 交付什么                                                     |
 | ---------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------ |
-| 离线从已有 SOTA kernel 及相关材料提取 schema，或修正已有提取结果 | [提取 schema](EXTRACT_SCHEMA.md)   | 忠实于选定实现、可追溯的 schema 与必要缺口说明               |
-| Planner 根据已完成的 Contract 设计新算子的 schema                | [新建设计](DESIGN_SCHEMA.md)       | 逐层完成数学改写、工作调度与微流水线的首版设计，以及未决判断 |
+| 离线从已有 SOTA kernel 及相关材料提取 schema，或修正已有提取结果 | [提取 schema](EXTRACT_SCHEMA.md)   | 忠实于选定实现、可追溯的具体完整设计、变体目录与必要缺口说明 |
+| Planner 根据已完成的 Contract 设计新算子的 schema                | [新建设计](DESIGN_SCHEMA.md)       | 逐层完成的首版具体设计、必要目录记录及未决判断               |
 | Planner 根据已有 schema 与 Coder 反馈迭代优化                    | [优化设计](OPTIMIZE_SCHEMA.md)     | 有依据的设计修订、影响范围及下一轮验证要求                   |
 | Coder 根据 schema 从零实现，或按设计修改、优化 kernel            | [实现 schema](IMPLEMENT_SCHEMA.md) | 对应设计版本的代码、验证结果及实现反馈                       |
 
 一次任务选择当前工作对应的入口，通过产物与必要说明交接。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
 
-Schema Extract `2.5.0` 自动完成六阶段提取、独立审阅、返工、依赖并发和发布，并支持 Design 显式整区引用、完整来源身份和有效视图。旧全本地 YAML 仍合法；旧 frozen run 按原规则恢复，采用新语义须经正式 semantic revision/maintenance 及适用性审阅，不能作为 compatible runtime 修复，历史产物不自动转换。操作与验证范围见[现行提取指南](schema_extract/README.md)。
+Schema Extract `2.5.0` 的六阶段自动提取、独立审阅、返工、依赖并发、引用解析与发布按其冻结协议运行。本文档的具体设计与 `from` 方法尚待执行器对接，使用命令前先读[执行器对齐说明](schema_extract/EXECUTOR_ALIGNMENT.md)；旧运行按原身份与规则解释，历史产物不自动转换。操作与验证范围见[提取指南](schema_extract/README.md)。
 
 交付需核对具体目标与版本：`ready` 表示终审通过，`published: true` 表示已发布到原输出目录；另行 `export` 以对应的 `exports[].status=published` 记录和目标 `.extraction/receipt.json` 为准。记录与回执中的 checkpoint、规则、批准及文件摘要须对应本次交付，旧 export 不证明当前修订已交付。[开始试用](schema_extract/README.md#开始一次试用) · [输出目录](schema_wiki/README.md) · [恢复与交付](schema_extract/README.md#恢复与交付)
 
@@ -29,7 +29,7 @@ Schema Extract `2.5.0` 自动完成六阶段提取、独立审阅、返工、依
 
 - **Planner**：做设计的 Agent 或人，唯一能修改 Design 区。
 - **Coder**：按 Contract 已选的实现栈把设计实现成代码的 Agent（如 AKA）。
-- **schema**：既指这套描述语言（分区与字段规则），也指针对某个计算任务填好的设计实例；后者也叫 **plan**。Agent 直接编写和修改 YAML，供审阅与实现。一份 plan 对应一个 **dispatch**，描述该路径的流水线设计，可以包含多次计算 kernel 提交。
+- **schema**：既指这套描述语言（分区与字段规则），也指针对某个计算任务填好的设计实例；一份完整 YAML 也叫 **plan**。每份 plan 表达一套具体已选设计，可以包含多次计算 kernel 提交；任务的 `dispatch.md` 组织完整设计和变体记录，身份与数量规则见 [common](schema_docs/0.common.md#派生节点与-dispatch)。
 - **template**：`schema_template` 提供待填写骨架与统一检查入口；内部机器规则检查字段、必填条件和可校验关系。
 - **wiki / microbench**：完整的硬件资料、指令手册，以及吞吐与延时的实测结果；schema 只引用，不抄录。
 
@@ -47,9 +47,9 @@ Kernel Agent 有两个普遍问题：**难以优化**——无法判断结果是
 
 ## 2 schema 是什么
 
-**角色。** 两份 Contract 定义算法任务、硬件能力与任务已选环境，不随 Design 的选择增删。Planner 在此基础上做设计，只有它能改 Design 区；Coder 在固定的硬件、算法与设计下逐代实现，只能在 `realization.prefer[].feedback` 中附带有实验证据的替代反馈；人类专家随时介入、把握方向，只审阅 YAML 形式的 plan，不介入代码。协作方式介于 vibe coding 与全自动 loop 之间。
+**角色。** 两份 Contract 定义算法任务、硬件能力与任务已选环境，不随 Design 的选择增删。Planner 在此基础上做设计，只有它能改 Design 区；Coder 在固定的硬件、算法与设计下逐代实现，只能在 `realization.prefer[].feedback` 中附带有实验证据的替代反馈；人类专家随时介入、把握方向，审阅 YAML 及目录中的设计记录，不介入代码。协作方式介于 vibe coding 与全自动 loop 之间。
 
-**分区。** 一份 plan 分为 Contract、Design、Realization 三部分、共六个子区，依次对应 `schema_docs/1–6`；此外开头有一段 `meta_data`（任务名、设计出处、dispatch 路径与修订号），不属于 Contract。
+**分区。** 一份完整有效 plan 分为 Contract、Design、Realization 三部分、共六个子区，依次对应 `schema_docs/1–6`；此外开头有一段 `meta_data`（任务名、设计出处、完整设计身份与范围、修订号），不属于 Contract。共享 Contract 与 Design 的本地定义或整区引用遵循 [common](schema_docs/0.common.md#文件与共享-contract)。
 
 | 区          | 子区                                                                               | 记录什么                                                                                     | 修改权限                                           |
 | ----------- | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------- |
@@ -81,13 +81,13 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 ├── DESIGN_SCHEMA.md     从已完成的 Contract 逐层设计新算子
 ├── OPTIMIZE_SCHEMA.md   判断实现反馈，逐层迭代已有设计
 ├── IMPLEMENT_SCHEMA.md  将 schema 落实为 kernel，验证并反馈
-├── schema_extract/      新版 P1–P6 Runner、依赖并发、恢复、旧稿重审、原子发布与维护台账
+├── schema_extract/      P1–P6 方法、Runner、执行器对齐说明、恢复与发布
 ├── schema_template/     共用的 YAML 操作与检查
 │   ├── README.md        创建、修订、检查与交付
-│   ├── starter.yaml     待填写骨架，复制为新任务的 root.yaml
-│   ├── check_yaml.py    唯一日常检查入口，接收一个 YAML 路径
+│   ├── starter.yaml     既有骨架，支持范围见模板说明
+│   ├── check_yaml.py    当前检查入口，接收一个 YAML 路径
 │   ├── tools/           检查器、有限流水线图工具、维护说明与测试
-│   └── examples/        按现行规范维护的案例；README 说明状态与缺口
+│   └── examples/        已有案例；README 说明历史核对范围与缺口
 ├── schema_docs/         公共约定与六个区的字段规则、设计指导及局部示例
 │   ├── 0.common.md
 │   ├── 1.contract.algorithm_requirement.md
@@ -119,7 +119,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 2. 按上方分区表依次读第 1–6 篇：先 Contract，再 Design，最后 Realization。各篇的“核心思想”与设计指导解释如何思考，字段表和结构轮廓用于查阅，局部片段解释具体用法，不组成完整算子。
 3. 选择一个任务入口，把规范用于具体工作；用[模板说明](schema_template/README.md)完成文件操作与检查。
 
-**查阅案例与来源：** 学习现行写法时先看[示例索引及状态](schema_template/examples/README.md)；追溯或修改某份设计时读 `schema_wiki` 的任务目录，核对源码时进入对应 `kernel_wiki` 批次与任务说明。[Kernel Wiki](kernel_wiki/README.md)现收录 L20D 的 44 个算子实现，提供[分类总索引](kernel_wiki/CATALOG.md)、[精度／阶段／来源检索](kernel_wiki/FACETS.md)与[验证状态说明](kernel_wiki/EVIDENCE.md)。案例与实验的适用范围需要核实，完整实例不是开始工作的前提。
+**查阅案例与来源：** 先从[示例索引及状态](schema_template/examples/README.md)确认案例采用的规则及历史核对范围；追溯或修改某份设计时读 `schema_wiki` 的任务目录，核对源码时进入对应 `kernel_wiki` 批次与任务说明。[Kernel Wiki](kernel_wiki/README.md)现收录 L20D 的 44 个算子实现，提供[分类总索引](kernel_wiki/CATALOG.md)、[精度／阶段／来源检索](kernel_wiki/FACETS.md)与[验证状态说明](kernel_wiki/EVIDENCE.md)。案例与实验的适用范围需要核实，完整实例不是开始工作的前提。
 
 旧规范仅在追溯时查阅 `schema_docs/archived`；维护规范或检查器时，再读 [tools/README.md](schema_template/tools/README.md)。
 
@@ -127,11 +127,12 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 
 **已有：** 提取、新建设计、优化设计和实现四个任务入口，公共约定与六个分区文档，YAML 填写骨架、统一 Python 检查入口及检查器正反例测试；`kernel_wiki` 的 44 个算子与对应的 `schema_wiki` 输出目录。使用方法与校验边界见[模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
 
-独立的[微流水线图工具](schema_template/README.md#微流水线图)按明确给出的展示规模展开各 phase 的动作和依赖，检查重复动作、悬空引用、成员匹配与依赖环，并在每份 YAML 旁生成同名 PNG。它不解析文字契约，也不证明跨 phase 活性或全部存储复用安全。
+独立的[微流水线图工具](schema_template/README.md#微流水线图)在其支持的协议内按展示规模展开各工作阶段的动作和依赖，检查重复动作、悬空引用、成员匹配与依赖环，并在每份 YAML 旁生成同名 PNG。它不解析文字契约，也不证明跨工作阶段的活性或全部存储复用安全。
 
 **TODO：**
 
-- **案例核对与验收**：按实际任务逐一核对已有 YAML，补齐资料与设计缺口；已规范化的案例及其状态见[示例索引](schema_template/examples/README.md)，数值及性能验收另行进行。
+- **执行器对接**：解析、目录、调用与冻结运行的待办集中见[执行器对齐说明](schema_extract/EXECUTOR_ALIGNMENT.md)，文档更新不表示工具已经支持新方法。
+- **案例核对与验收**：按实际任务逐一核对已有 YAML，补齐资料与设计缺口；已有案例及其状态见[示例索引](schema_template/examples/README.md)，数值及性能验收按相应任务执行。
 - **更多转写与精简**：转写更多 SOTA kernel，收敛到最小交集原语。
-- **检查器与评估器**：在现有结构、具名关系及有限 phase 内依赖检查之上，继续完善资源记账、跨 phase 与更大规模的合法性和活性分析，以及尽量保序的性能估算。
-- **提取范围**：算子已经真实跑过 GPU；当前算子和 schema 都不需要 GPU 正确性验收。[Schema Extract](schema_extract/README.md)完全忽略 GPU 验收与实测。
+- **检查器与评估器**：在现有结构、具名关系及有限工作阶段内依赖检查之上，继续完善资源记账、跨工作阶段与更大规模的合法性和活性分析，以及尽量保序的性能估算。
+- **提取范围**：当前固定实现的 [Schema Extract](schema_extract/README.md) 任务不新增 GPU 正确性验收或实测；普通设计与实现任务仍按各自验收要求执行。

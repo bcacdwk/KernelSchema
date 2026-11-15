@@ -1,19 +1,19 @@
 # Schema Extract：Supervisor 手册
 
-入口 [extract.py](extract.py) 从固定 kernel 提取 schema，Runner 推进写作、独立审阅、返工与发布。本页说明操作；[提取总览](../EXTRACT_SCHEMA.md)定义 P1–P6，[工具协议](tools/README.md)说明回执与执行门禁。
+少量具体完整设计与目录记录的方法见[提取总览](../EXTRACT_SCHEMA.md)，方法与当前工具的实施边界集中在[执行器对齐说明](EXECUTOR_ALIGNMENT.md)。本页记录现有 [extract.py](extract.py) 的实际操作，按各 run 登记的 source/rules/executor 解释；[工具协议](tools/README.md)说明当前回执与执行门禁。
 
-本目录顶层保留现行操作、审阅、阶段和工具说明。已完成的设计、六算子试用/恢复/暂停记录统一从[历史归档](archive/README.md)进入；查看六项成果与过程时直接打开[六算子档案](archive/six-operators/README.md)。来源限定材料继续放在 `inputs/`，复用问题与决定按 `issues/` 维护，正式结果由 [Schema Wiki](../schema_wiki/README.md)导航。
+本目录顶层保留方法、审阅、操作和工具说明。已完成的设计、六算子试用/恢复/暂停记录统一从[历史归档](archive/README.md)进入；查看六项成果与过程时直接打开[六算子档案](archive/six-operators/README.md)。来源限定材料继续放在 `inputs/`，复用问题与决定按 `issues/` 维护，正式结果由 [Schema Wiki](../schema_wiki/README.md)导航。
 
 ## 开始一次试用
 
-需要 Python 3.10+、PyYAML、Git 和已配置 provider 的 Codex CLI。从仓库根目录执行：
+下列命令运行当前执行器实际支持的协议；采用新方法前先核对[执行器对齐说明](EXECUTOR_ALIGNMENT.md)，手工推演按其中的[阶段结论边界](EXECUTOR_ALIGNMENT.md#手工推演与阶段结论)进行。运行需要 Python 3.10+、PyYAML、Git 和已配置 provider 的 Codex CLI。从仓库根目录执行：
 
 ```sh
 python3 schema_extract/extract.py extract --id bf16_gemm --output schema_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_gemm --background
 python3 schema_extract/extract.py status RUN_UUID
 ```
 
-第一条返回 run UUID、固定输入身份和后台启动结果；后续用该 UUID 查询和恢复。`status` 只读，`resume RUN_UUID` 在前台执行到交付或停止。**`ready` 表示终审通过，`published: true` 表示已发布到原输出目录。** 交付包含 `root.yaml`、计划内全部派生 YAML、中文 `dispatch.md` 和 `.extraction/receipt.json`。
+第一条返回 run UUID、固定输入身份和后台启动结果；后续用该 UUID 查询和恢复。`status` 只读，`resume RUN_UUID` 在前台执行到交付或停止。**`ready` 表示终审通过，`published: true` 表示已发布到原输出目录。** 交付包含 `root.yaml`、计划内全部节点 YAML、中文 `dispatch.md` 和 `.extraction/receipt.json`。
 
 批准表示忠实表达固定实现及其限制，来源缺项按[统一边界](../EXTRACT_SCHEMA.md#来源缺项与验收边界)处理。提取不承担 GPU 验收或复现未提供的外部验收器。
 
@@ -103,7 +103,7 @@ Supervisor 在既定任务语义和授权内主动决定预算追加、故障恢
 
 Runner 唯一写状态、派发、检查、合入和发布。extract worker 只写本次许可产物，reviewer 按 [REVIEW.md](REVIEW.md)独立审阅；两者都不启动子代理，框架问题提交 `framework_candidates` 交 Supervisor 处理。先判断能否按既有规则修正产物，规则确有缺口才组织维护。
 
-常规提取按 P1–P6 推进；已批准的依赖解锁下一阶段或子节点。连续修订临时执行有限维护待办，完成后回到实际剩余工作，最终仍由 P6 交付。会话创建、续用和退修裁决的规则集中在[工具协议](tools/README.md#角色与会话)。
+当前 Runner 按绑定的 P1–P6 协议推进，已批准的依赖解锁下一阶段或节点。连续修订临时执行有限维护待办，完成后回到实际剩余工作，最终仍由 P6 交付。会话创建、续用和退修裁决的规则集中在[工具协议](tools/README.md#角色与会话)。
 
 ## 状态阅读
 
@@ -143,7 +143,7 @@ python3 schema_extract/extract.py revise status RUN_UUID
 
 请求登记即拦新派发和发布；在途调用按原上下文和截止时间结算，安全排空后才把计划绑定到实际稿件与批准。无独立评估时返回 `awaiting_evaluation` 与计划路径。Supervisor 评估完整差异及问题，逐范围选择 `keep/review/patch/reextract`；旧批准的真实性与当前适用性分别核验，只有有据采纳才继续有效，依据不足先 review。计划格式与维护动作见[维护协议](tools/README.md#多任务控制与维护接续)。
 
-完整候选可直接交 Reviewer；未完成草稿保留内容并继续原作者工作。P5 优先使用自己的 raw，只刷新只读祖先；父变化产生复核候选，不自动转换引用或用父 Design 覆盖孩子。P4 换父另记录 identity_migration，必须由 worker 在合法字段范围内显式迁移 parent/ref 或落地完整区域，再按新来源独立重审；维护缺 scope 时报告并修订范围，不自动扩权。维护后的批准仍覆盖本阶段有效全文，最终交付仍需当前上下文的 P6。这里的 CLI `continue` 用于修订规则/适用性；worker 回执 `decision=continue` 仅保存本步骤草稿并续写。
+完整候选可直接交 Reviewer，未完成草稿保留内容并继续原作者工作。维护保留本节点 raw，按明确文件/字段处理，缺少权限时报告并修订范围；来源刷新、旧父关系迁移和引用处理的实际规则见[合入与计划修订](tools/README.md#并行合入与计划修订)。维护后的批准仍覆盖本阶段有效全文，最终交付需当前上下文的 P6。这里的 CLI `continue` 用于修订规则/适用性；worker 回执 `decision=continue` 仅保存本步骤草稿并续写。
 
 采纳后仅在原运行意图仍有效且无新控制时接续后台任务；暂停任务只登记，之后由 Supervisor 显式恢复。活动维护结束或安全 paused/cancelled 且调用全部结清后，可通过 `revise request` 追加替代修订。相同目标、范围、问题证据和动作不因换请求 ID 获得新机会，原调用、时间、退修、P6 starts 和单次决定均保留。
 
@@ -155,11 +155,11 @@ python3 schema_extract/extract.py revise status RUN_UUID
 
 发布原子重命名完整已审目录及回执。目标须不存在，或仅含一个零字节普通 `.gitkeep`；其他目录（包括空目录）、文件及链接均报告冲突。同一完整结果可幂等重放；export 另行交付，不改变原输出位置。v1 兼容导入用 `import-legacy --help`：原任务与调用须确认终止，来源绑定原快照；导入稿留作证据，从 P1 重审，旧用量单列，本次使用新建预算。
 
-普通发布/export 保留原始引用树与完整计划文件集合，standalone 是另行生成的交付。普通 P5 可按当前实际来源图定点重开非 root provider，先保存请求稿，目标取得新独立批准后按父先子后恢复受影响后代；兄弟和 P1–P4 保留进度，P6 当前资格失效但计数和预算不重置。资格、证据及循环约束见[P5](phases/05_branch.md)。
+普通发布/export 保留 raw 与完整计划文件集合，standalone 是另行生成的视图。当前普通 P5 的非 root provider 修复资格、证据、恢复及预算规则见[工具协议](tools/README.md#普通-p5-的-provider-修复)，不从方法阶段页推断额外调用能力。
 
 ## 单文件阅读视图
 
-需要把一个节点交给只拿到单份 YAML 的读者时，在当前规则适用的任务上使用：
+需要把一个节点交给只拿到单份 YAML 的读者时，使用与该任务格式匹配的规则/工具版本：
 
 ```sh
 python3 schema_extract/extract.py standalone path/to/task/branch.yaml --output path/to/views/branch
@@ -173,9 +173,9 @@ python3 schema_extract/extract.py standalone /path/to/task/node.yaml --output /p
 python3 /path/to/frozen/rules/schema_template/check_yaml.py --standalone --skip-hardware /path/to/views/node/node.yaml
 ```
 
-当前规则下，生成器先用选定 rules 的公共解析/检查入口完整检查创作任务，取得有效 Design 和 root Contract，再单独检查导出的全部本地单文件。节点自己的 metadata、when、version 和 realization 保留；id/parent 留作原身份与派生出处，移开创作目录后也可独立读取与检查。只读 `check_yaml.py --show-effective` 的未验证输出不能替代该流程。
+现有生成器通过选定规则树的解析/检查入口完整检查创作任务，取得该版本支持的有效 Design 与 root Contract，再单独检查导出的全本地单文件。节点自己的 metadata、when、version、realization 和原身份信息保留；视图仍是原设计的阅读副本。只读 `check_yaml.py --show-effective` 的未验证输出不能替代此流程。
 
-当前规则在任务外输出目录保存原文件名 YAML 和 `schema_extract.standalone.v2` 的 `.source.json`：raw source、root、全部实际中间引用与 provider 文件 SHA256、三区域 origins、effective_identity 和交付文件摘要。生成前与生成/校验后发布前复核全部来源；即使 child 字节未变，provider 或中间链漂移也拒绝发布。相同内容可复用，已有冲突内容和原始任务树保留。视图保持原选择范围，不产生新的 P6 批准；发现语义问题须修订创作源并重审，再生成视图。`--repo` 选择的旧冻结规则若没有新的公共解析 API，则将整个导出交给该规则树自带的旧 exporter，保留原验证及 `schema_extract.standalone.v1` 来源回执语义，不由当前 resolver 偷换语义；所选规则树须含对应的完整冻结工具。
+视图输出位于任务外，保留原文件名和来源回执；相同内容可复用，冲突内容与原始任务保留。来源摘要、生成前后核验、`schema_extract.standalone.v2` 及旧规则 exporter 的准确行为见[冻结解析与派生产物](tools/README.md#冻结解析与派生产物)。所选规则树须含对应完整工具；视图不扩展适用范围，也不产生新 P6 批准。语义问题须回创作源修订并重审，再重新生成。
 
 ## 同线程持久提醒
 
@@ -210,8 +210,8 @@ audit 退出 `0` 表示读取或可得证据检查完成，仍须看 unavailable
 
 ## 验证边界
 
-P3/P5/P6 的完成、批准与退修由 Runner 自动执行冻结检查器，放行须 `--skip-hardware` 退出 0；1 是产物诊断，2 是工具/环境问题。P1/P2/P4 使用阶段门禁。结构通过仍须独立语义审阅。
+现有执行协议在 P3/P5/P6 的完成、批准与退修时由 Runner 自动执行绑定的冻结检查器，放行须 `--skip-hardware` 退出 0；1 是产物诊断，2 是工具/环境问题。P1/P2/P4 使用该版本的阶段门禁。结构通过仍须独立语义审阅，工具的适用范围见[执行器对齐说明](EXECUTOR_ALIGNMENT.md)。
 
-实际检查证据在 `attempts/ATTEMPT_UUID/check.json` 和 `validated.json`，P5 合入另有 `merge_check.json`。合入检查按[工具协议](tools/README.md#并行合入与计划修订)在受控目录取有效节点、候选及祖先闭包；维护父候选的 raw SHA 变化时，先排除后代再取闭包，即使其状态尚未失效。完整 merged raw 树保留，待迁移或重审的旧稿不计有效。回执 `checks` 只记录模型亲自执行的命令，空列表不代表 Runner 漏检。最终 P6、ready 和发布仍要求整树完整有效，交付回执绑定同一完整文件集合。
+实际检查证据在 `attempts/ATTEMPT_UUID/check.json` 和 `validated.json`，P5 合入另有 `merge_check.json`。合入检查集合、候选变化与依赖处理见[工具协议](tools/README.md#并行合入与计划修订)；保留 raw 不代表旧稿已获当前批准。回执 `checks` 只记录模型亲自执行的命令，空列表不代表 Runner 漏检。最终 P6、ready 和发布要求当前计划完整有效，交付回执绑定同一完整文件集合。
 
 维护验证方法见[离线验证](tools/README.md#离线验证)。历史设计、试用、算子审阅、恢复与暂停记录见[归档索引](archive/README.md)；它们不作为当前 run 已通过的证据。

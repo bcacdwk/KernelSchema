@@ -8,7 +8,7 @@
 
 开始前需要任务要求和目标硬件条件：输入输出与数学定义、参考入口和误差判据、目标设备、已选实现栈及相应资料。还需从任务说明取得实际 workload 和优化目标；当前规范尚未确定它们的字段格式，不自行增加字段。
 
-当前已有 kernel 的提取流程例外：`contract.hardware_specification` 只保留 starter 原样占位，不搜索、填写、检查或审阅硬件资料。提取固定使用下述 `--skip-hardware`，不要把硬件缺口作为提取问题。普通设计／检查的默认行为不变。
+当前已有 kernel 的提取流程例外：按 [P1](../schema_extract/phases/01_contract.md#第-3-段硬件占位)在既有 `hardware_specification.execution` 中最小登记给定材料明确的执行者与层级，其余硬件字段保留 starter 占位，不展开硬件资料。提取固定使用下述 `--skip-hardware`，登记来源由人工核对，不把尚未整理的硬件资料作为提取前置。普通设计／检查的默认行为不变。
 
 新建设计接收已经完成的 Contract，在其上填写 Design；提取任务按固定材料建立共享 Contract，并可保留[来源未提供的外部验收定义](../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)；优化任务使用原有 Contract。三者都不因当前设计选择而改写前提。
 
@@ -18,36 +18,38 @@ Contract 使用任务给定或经任务方确认的内容；转录已确认的�
 
 ### 2 创建文件或进入已有任务
 
-新任务使用独立目录，按[任务身份规则](../schema_docs/0.common.md#单份-plan-与元数据)命名，并按[索引规则](../schema_docs/0.common.md#选择条件与索引)建立 `dispatch.md`。已有含 Contract 的 `root.yaml` 时保留它，补入后续设计；需要新建文件时可复制骨架，再接入给定或按任务确认的 Contract。下面的 `path/to/task` 替换为实际目录；catalog 算子使用 [schema_wiki 导航](../schema_wiki/README.md)给出的镜像路径，其他任务也可以位于仓库之外。从仓库根目录复制骨架，不覆盖已有文件：
+新任务使用独立目录，按[任务身份规则](../schema_docs/0.common.md#单份-plan-与元数据)命名，并按[索引规则](../schema_docs/0.common.md#选择条件与索引)建立 `dispatch.md`。已有含 Contract 的 `root.yaml` 时保留它，补入后续设计；新文件按现行分区规则建立，接入给定或按任务确认的 Contract。catalog 算子使用 [schema_wiki 导航](../schema_wiki/README.md)给出的镜像路径，其他任务也可以位于仓库之外。
+
+现有 [starter.yaml](starter.yaml) 仍保留旧结构，本轮没有迁移；适用范围见[执行器对齐说明](../schema_extract/EXECUTOR_ALIGNMENT.md)。如需取它作为编辑参考，可从仓库根目录复制到新位置，不覆盖已有文件；`path/to/task` 替换为实际目录：
 
 ```sh
 mkdir -p path/to/task
 cp -n schema_template/starter.yaml path/to/task/root.yaml
 ```
 
-[starter.yaml](starter.yaml) 是编辑起点，不是完整字段清单或默认设计。按任务重命名 `Input / Output / Dimension / main / Main` 等名称并维护引用，将 `null` 换成真实内容；步骤、phase、launch、role 和对象条目均按设计增删。骨架中的 `version: 1` 是新文件的起始修订号，不是已有文件的重置值。
+复制骨架不能直接得到符合现行规范的草稿。使用时先按各篇结构轮廓调整旧结构，再按任务命名输入、输出、工作维度、step、role 和对象，维护引用并将 `null` 换成真实内容；骨架不是完整字段清单或默认设计。`version: 1` 是新文件的起始修订号，不是已有文件的重置值。
 
 不能只替换占位值就认为完成：按各篇“填写条件”补齐适用字段，没有内容的可选字段直接省略。例如提取设计需要登记真实的 `meta_data.source`；选择 `refill: none` 时还需补上骨架未列出的 `preassigned`。`Dimension` 表示待确定的独立工作维度；整个任务只有一份工作时，使用 `partition: {}` 并省略 `worktile_order`，见[工作分解](../schema_docs/4.design.work_schedule.md#工作分解)与[工作分配](../schema_docs/4.design.work_schedule.md#工作排列与分配)。
 
-已有任务先读 root 的共享 Contract、目标节点的完整有效 Design 和本地 realization，以及各节点独立的选择条件，再确定影响范围。按下节固定规则和全部来源后读取有效视图，不把不同来源时点的原文与展开片段混作设计输入。同一路径的设计改进在原文件修订，不重新复制 starter。遇到新的 workload，先考虑能否完善已有设计；能由同一份 Design 的参数或公式表达的变化留在原节点，例如同一套公式覆盖 cluster 成员数 4、8、16 时，不按成员数拆分。
+已有任务先读 root 的共享 Contract、目标节点的完整有效 Design 和本地 realization，以及各节点独立的选择条件，再确定影响范围。按下节固定规则和全部来源后读取有效内容，不把不同来源时点的原文与展开片段混作设计输入。同一设计的演进在原文件修订；其他配置的参数、局部变化与已知组合按 [common](../schema_docs/0.common.md#参数变化与结构变化)记录，不重新复制 starter 或给每个取值建立节点。
 
-确实需要并存路径时，为新的 `<id>.yaml` 按[节点规则](../schema_docs/0.common.md#派生节点与-dispatch)设置本地元数据、直接父、起始版本和独立选择条件，不保存 `contract`。三个 Design 区域分别选择完整本地定义或 `{from_parent: <直接父ID>}`；不继承父 realization 和反馈。提取 Runner 对首次无稿节点从父元数据模板建立三区域引用，已有草稿、重试和曾批准稿始终保留自己的 raw，不自动转换。同步核对实际设计出处与选择依据，维护 `dispatch.md`。先识别真实差异再选择共享表达，不为压缩文本增加节点或自动换父。
+确实需要并存且有独特完整设计价值的方案时，为新的 `<id>.yaml` 按[节点规则](../schema_docs/0.common.md#文件与共享-contract)设置本地元数据、起始版本和独立 `when`，不保存 `contract`。三个 Design 区域中相同的完整区域直接 `from`，其余完整本地定义，自己的必要 realization 独立填写。同步核对实际设计出处、选择范围及当前完整集合，维护 `dispatch.md`；不为共享或保存配置组合制造完整身份。
 
 ### 3 填写与修订
 
 新文件先落实 `meta_data`；root 保留给定或按任务确认的两份 Contract，派生节点使用共享 Contract。按[提取](../schema_extract/phases/03_root.md#节点逐段方法)、[新建](../DESIGN_SCHEMA.md#2-先完成数学改写)或[优化](../OPTIMIZE_SCHEMA.md#2-找到本轮值得改变的决定)流程逐段形成 Design：先核对数学改写，再落实工作调度和微流水线；需要回改上层时，依次复查受影响的下游。未进入的分区可以暂留未完成，完整交付前再落实全部适用内容。
 
-修改时先改决定的唯一定义，再沿引用检查受影响的下游：数学值、shape、dtype 或寿命的变化可能影响分块、资源和实现约束；phase、role、动作或资源改名时核对 flow、handoff、milestone、waits_for 与 realization 的引用。共享 Contract 经任务方确认发生变化后，要审阅所有节点是否仍符合它，不能只修当前节点。Coder 追加替代反馈时按[反馈规则](../schema_docs/6.realization.md#有证据的替代反馈)保留原选择与理由；涉及 Design 的变化交给 Planner。
+修改时先改决定的唯一定义，再沿引用检查受影响的下游：数学值、shape、dtype 或寿命的变化可能影响分块、资源和实现约束；step、role、动作或存储改名时核对 flow、handoff、event、waiting 与 realization 的引用。共享 Contract 经任务方确认发生变化后，要审阅所有节点是否仍符合它，不能只修当前节点。Coder 追加替代反馈时按[反馈规则](../schema_docs/6.realization.md#有证据的替代反馈)保留原选择与理由；涉及 Design 的变化交给 Planner。
 
-只改变引用区域的一部分时，先用下面的有效视图读取本节点展开内容，把整个区域落为本地定义后再改；不能在 `from_parent` 旁追加字段。共享定义变化后，使用节点重新核对独立选择域、当前参数绑定和跨区组合；不能自动拿父正文覆盖，子原文未改时不增加其版本。改变直接父时，由有权限的 worker 显式迁移 parent 和每个区域，选择引用新父或从旧 checkpoint 落地整个旧区域，再按新依赖独立重审。
+只改变引用区域的一部分时，按固定来源读取本节点的整个有效区域，完整本地化后再改；不能在 `from` 旁追加字段。更换来源时核对该整区在当前上下文是否相同且适用，保持实际引用图合法。共享定义变化后，复核实际使用者的 `when`、当前参数绑定、跨区组合及依赖该基线的目录记录；使用节点原文未改时不增加其版本。引用、目录借鉴与实际来源的关系见 [common](../schema_docs/0.common.md#design-整区引用)。
 
 按[版本规则](../schema_docs/0.common.md#单份-plan-与元数据)更新实际改动文件的修订号，结合 diff 核对历史递增；检查器只检查它是否为正整数。改动内容由 diff 给出，设计意图仍写在所属 `thesis` 或实现选择的 `reason` 中。
 
-实现、优化与实验记录须固定所用规则、各 raw 文件的原始版本和完整来源身份：来源 manifest 覆盖 root、自身及三个区域的所有实际引用链，包括中间转发者与最终本地 provider，记录真实文件名与 raw SHA256；effective identity 同时绑定该 manifest 和区域来源链。下节有效视图提供这两项。同一仓库的 `repository@ref:path` 固定引用可以覆盖整个来源闭包，不能只固定节点与 root。节点与 root 的字节、版本不变时，中间来源变化仍可改变有效设计；版本号相同不证明设计未变，effective identity 也不承诺语义等价。沿用任务沟通和已有实验记录保存这些信息及实际实现、输入、环境和参数，不增加 schema 字段；父节点反馈或旧实验不能自动作为当前有效设计的证据。
+实现、优化与实验记录须固定所用规则、各 raw 文件的原始版本和完整来源身份：来源 manifest 覆盖 root、自身及三个区域的所有实际引用链，包括中间转发者与最终本地 provider，记录真实文件名与 raw SHA256；effective identity 同时绑定该 manifest 和区域来源链。工具能提供的视图与身份格式见下节支持范围。同一仓库的 `repository@ref:path` 固定引用可以覆盖整个来源闭包，不能只固定节点与 root。节点与 root 的字节、版本不变时，中间来源变化仍可改变有效设计；版本号相同不证明设计未变，effective identity 也不承诺语义等价。沿用任务沟通和已有实验记录保存这些信息及实际实现、输入、环境和参数，不增加 schema 字段；来源设计的反馈或旧实验不能自动作为当前有效设计的证据。
 
 ### 4 检查与处理反馈
 
-日常编写与修订只需运行下面这一个入口。它自动完成 YAML 语法、字段和已实现的关联检查，无需逐个调用 `tools/` 下的模块，也无需阅读检查器源码。需要 Python 3.10+ 和 PyYAML，从仓库根目录运行：
+先核对[执行器对齐说明](../schema_extract/EXECUTOR_ALIGNMENT.md)：下列命令描述当前工具实际支持的协议，不能据其结果声称现行 `from`、具体设计集合或目录规则已获工具验收；具体字段与解析范围见 [tools](tools/README.md)。在支持范围内，日常编写与修订使用同一个入口完成 YAML 语法、字段和已实现的关联检查，无需逐个调用内部模块。需要 Python 3.10+ 和 PyYAML，从仓库根目录运行：
 
 ```sh
 python3 schema_template/check_yaml.py path/to/task/root.yaml
@@ -59,7 +61,7 @@ python3 schema_template/check_yaml.py path/to/task/root.yaml
 python3 schema_template/check_yaml.py --skip-hardware path/to/task/root.yaml
 ```
 
-`--skip-hardware` 只影响内存中的检查视图，不改写文件，返回的任务仍保留原始硬件占位；YAML 文件本身仍须可解析，非硬件结构和关联照常检查。Python API 对应 `schema.validate_file(..., skip_hardware=True)` 或 `validate_directory(..., skip_hardware=True)`。当前仓库不启用目录硬件豁免，不传参数时执行完整检查。
+`--skip-hardware` 只影响内存中的检查视图，不改写文件，返回的任务保留文件中的硬件内容；YAML 文件本身仍须可解析，非硬件结构和关联照常检查。Python API 对应 `schema.validate_file(..., skip_hardware=True)` 或 `validate_directory(..., skip_hardware=True)`。当前仓库不启用目录硬件豁免，不传参数时执行完整检查。
 
 只想查看引用展开结果、辅助阅读或落地整区时，使用只读入口；它允许尚未完成的本地正文和 when，但拒绝非法身份、引用或环：
 
@@ -69,7 +71,7 @@ python3 -B schema_template/check_yaml.py --show-effective path/to/task/node.yaml
 
 stdout 返回 `kernel_schema.effective_view.v1` JSON，包括 `validation: not_run`、保留精确数值的 `effective_yaml`、来源 provider/chain、实际来源文件 SHA256 和 `effective_identity`。有效 YAML 含 root Contract、本节点元数据/Realization 和展开的三个 Design 区域；成功只表示可以解析，不表示完整检查或批准。证据须回到真实 raw 文件，不能引用该视图的虚拟行号。
 
-对正式生成、已展开共享 Contract 和 Design 引用的[单文件阅读视图](../schema_docs/0.common.md#单文件阅读视图)，显式使用下面的入口；此模式只读取该文件，保留元数据中的原节点身份，父节点只作出处记录。普通创作节点仍使用上面的全目录检查。
+对按当前工具协议正式生成、已展开共享 Contract 和 Design 引用的单文件阅读视图，显式使用下面的入口；此模式只读取该文件，保留元数据中的原节点身份与出处。普通创作节点仍使用上面的全目录检查；现行方法的视图含义见 [common](../schema_docs/0.common.md#单文件阅读视图)。
 
 ```sh
 python3 schema_template/check_yaml.py --standalone --skip-hardware path/to/view/node.yaml
@@ -87,17 +89,17 @@ Python API 为 `schema.validate_standalone_file(...)`。文件必须自带完整
 
 ### 5 交付
 
-交付任务目录中的原始 `root.yaml`、存在的派生节点，以及按[索引规则](../schema_docs/0.common.md#选择条件与索引)维护的 `dispatch.md`。派生文件依赖共享 Contract 和实际 Design 引用链，普通发布保留 raw 树，不自动展开或去重；需脱离原树时另外生成 standalone。源码、硬件资料和实验记录保留在各自实际位置，通过规定的引用定位，不复制进 YAML。
+交付任务目录中的原始 `root.yaml`、全部当前完整设计，以及按[索引规则](../schema_docs/0.common.md#选择条件与索引)维护的 `dispatch.md`。交付前核对完整集合的数量与独特价值、每份设计的具体选择和目录记录的实际基线；保留 raw 文件、共享 Contract 和实际 Design 来源，独立阅读视图另存。源码、硬件资料和实验记录保留在各自实际位置，通过规定的引用定位，不复制进 YAML。
 
 任务冻结时，将准备阶段用 tag 或 branch 定位的硬件与编程等 wiki 资料解析到 commit，按 Contract 修改权限确认后填回原 `ref`；引用更新也按版本规则修订 root，并重跑同一检查命令。核对设计出处、参考入口及实验记录均指向实际对象和所声明的版本，而不只是字符串格式合法。
 
-上段硬件／编程 wiki 冻结要求不适用于显式 `--skip-hardware` 的当前提取流程；其硬件占位原样保留、该区收尾跳过。仍须核对非硬件的设计来源、参考入口和实际引用的实验记录。
+上段硬件／编程 wiki 冻结要求不适用于显式 `--skip-hardware` 的当前提取流程；其余硬件占位原样保留，`execution` 的最小登记按 P1 核对来源。仍须核对设计来源、参考入口和实际引用的实验记录。
 
 交付时简要说明改动范围、schema 检查结果及仍未解决的资料或设计问题，无需新增固定报告文件或 YAML 状态字段。计算或设计仍无法确定时交付草稿；固定实现已忠实提取、仅保留上述外部验收来源缺口时，可按提取流程审阅并发布。缺口随产物保留，不宣称相应验收保证，也不能直接作为新任务的完整验收授权。
 
 ## 微流水线图
 
-有限展开与绘图是按需使用的功能，不是日常检查后的必跑步骤。需要检查具体动作实例或查看依赖图时，运行：
+有限展开与绘图是按需使用的功能，不是日常检查后的必跑步骤。以下用法受[当前工具支持范围](../schema_extract/EXECUTOR_ALIGNMENT.md)约束；需要检查其支持的动作实例或查看依赖图时，运行：
 
 ```sh
 python3 schema_template/tools/pipeline_graph.py path/to/task/root.yaml --set N=4 --worktiles 2
@@ -127,6 +129,6 @@ python3 schema_template/tools/pipeline_graph.py path/to/task/root.yaml --skip-ha
 
 固定结构的未知字段会被拒绝，但 `thesis / describe / strategy / math` 等正文通常只检查其值为非空文本，不解释其中的条件，也不核对它是否与结构声明矛盾。例如，结构列出某个 launch，正文却说该提交或完成事件不存在，不能指望字段检查自动拦截；这种未经规范定义的解释仍须在语义审阅中指出并修正，检查通过不授予用正文改写结构的权限。
 
-通过 `check_yaml.py` 表示结构及已实现的关联检查通过，不证明数学等价、表达式正确、数值正确、资源可行、存储复用安全、活性或性能。该入口不展开完整动作实例，动作引用通过也不证明每个索引处的动作存在；有限展开使用上面的[微流水线图工具](#微流水线图)。任务索引、dispatch 条件的互斥与覆盖、外部资料、修改权限、修订历史和实验依据仍需审阅；实际实现是否满足数值、执行约束及性能目标，需要相应运行证据。
+通过 `check_yaml.py` 表示结构及已实现的关联检查通过，不证明数学等价、表达式正确、数值正确、资源可行、存储复用安全、活性或性能。该入口不展开完整动作实例，动作引用通过也不证明每个索引处的动作存在；有限展开使用上面的[微流水线图工具](#微流水线图)。完整设计的独特价值、目录记录、`when` 的实际范围、外部资料、修改权限、修订历史和实验依据仍需审阅；实际实现是否满足数值、执行约束及性能目标，需要相应运行证据。
 
 wiki 占位和 `unknown:` 仍是待解决的缺口，不能靠猜测补齐，也不能把结构通过称为资料或设计已验收。[examples](examples/README.md) 仅作可选参考，不是学习规范的前提。维护检查器时再读 [tools/README.md](tools/README.md)。

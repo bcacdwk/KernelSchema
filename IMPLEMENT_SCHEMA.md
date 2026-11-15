@@ -6,7 +6,9 @@
 
 ## 1 确认任务、设计与实现起点
 
-先用任务的 `dispatch.md` 定位路径，读取任务要求、root 的共享 Contract、目标节点的完整有效 Design（effective）和本地 realization，再按当前节点的选择条件及其缺省规则核对适用范围。Design 每区只有显式写成单字段 `{from_parent: <直接父ID>}` 时，才沿直接父的同名整区引用链展开；`parent` 本身不产生隐式继承。Contract 统一取同目录 root，`when` 和 realization 仍属于当前节点。文件关系与选择条件见 [common](schema_docs/0.common.md#派生节点与-dispatch)。
+先用任务的 `dispatch.md` 定位本次明确选定的设计，读取任务要求、root 的共享 Contract、目标节点的完整有效 Design（effective）和本地 realization，再按当前节点的 `when` 及其缺省规则核对适用范围。按 [common 的整区规则](schema_docs/0.common.md#design-整区引用)沿 `from` 读取实际内容来源，在当前节点上下文解释绑定；Contract 统一取同目录 root，`when` 和 realization 仍属于当前节点。
+
+目录用于理解方案与差异，不自动选择配置、修改 YAML 或授予 Coder 改动 Design 的权限。本次任务选择参数、局部变化或组合时，须明确具体选择、必要联动与适用范围；涉及 Design 的决定仍由 Planner 承担。已明确且授权的局部实验按任务范围实施和验证，不要求先将每条笔记整理为完整算子；只有任务要求交付完整 schema 时，才按 [common 的完整设计规则](schema_docs/0.common.md#局部记录与完整方案)整理。关键设计决定未定时按第 4 节反馈。
 
 固定本次采用的规则与全部实际来源：保留各 raw 文件的原始版本，以及覆盖 root、自身和三区域所有实际引用链（含中间转发者与最终本地 provider）的来源 manifest 和 effective identity，获取方式见[有效视图入口](schema_template/README.md#4-检查与处理反馈)。同一仓库的固定 ref 可以锁定整个来源闭包；即使节点与 root 的字节、版本均未变，中间来源变化仍可改变有效设计，版本号相同不能证明设计未变。完整有效视图须由同一组固定规则和来源解析；原文用于修改与证据定位，不能将不同来源时点的原文和展开片段混作实现输入。
 
@@ -29,7 +31,7 @@
 | --- | --- |
 | 计算与数值路径 | 保持有效分支、初末状态、物化与携带状态、精度转换、归约及近似选择；将逻辑访问落实为契约允许的布局和地址。输入域与默认精度查 [DOC 1](schema_docs/1.contract.algorithm_requirement.md#常量输入输出与数学步骤)及其[数学约定](schema_docs/1.contract.algorithm_requirement.md#数学表达与参考精度)，改写的精度语义查 [DOC 3](schema_docs/3.design.math_reshape.md#精度与辅助运算)。 |
 | 工作组织与提交 | 按 work_schedule 实现分块、worker 组成、工作排列、分配、接续与退出，让预处理、主计算和合并都有执行者。多个 step 按[提交与接续](schema_docs/4.design.work_schedule.md#step-的提交与接续)落实启动依赖，按[数据交接](schema_docs/4.design.work_schedule.md#跨-step-数据交接)安排生产消费区域及存储寿命；不能由源码排列推定设备完成顺序。 |
-| 微流水线 | 保持 role 职责和动作承诺的完成、可见性保证。把显式 waits_for、[role 顺序](schema_docs/5.design.tile_pipeline.md#role-内的顺序)和[默认依赖](schema_docs/5.design.tile_pipeline.md#默认的依赖)一起落实为发射、等待、发布与释放点；按[资源视图](schema_docs/5.design.tile_pipeline.md#视图)核对物理范围、槽位及覆盖时机。存在循环或持久 worker 时，检查首轮、稳态、末轮、跨工作接续和退出，索引边界查 [DOC 5](schema_docs/5.design.tile_pipeline.md#跨工作接续与索引边界)。 |
+| 微流水线 | 保持 role 职责和动作承诺的完成、可见性保证。把显式 waiting、[动作顺序与完成](schema_docs/5.design.tile_pipeline.md#执行模式)和[默认依赖](schema_docs/5.design.tile_pipeline.md#默认的依赖)一起落实为发射、等待、发布与释放点；按[资源视图](schema_docs/5.design.tile_pipeline.md#视图)核对物理范围、槽位及覆盖时机。存在循环或持久 worker 时，检查首轮、稳态、末轮、跨工作接续和退出，索引边界查 [DOC 5](schema_docs/5.design.tile_pipeline.md#跨工作接续与索引边界)。 |
 
 异步或复用关系难以落实时，可以选一个缓冲展开几轮。例如，设计已确定 `X(n)` 放在双槽缓冲的 `n%2` 槽，就分别找到代码中“`X(n)` 完成并可读”和“它的全部读者已结束访问”的保证：前者允许消费，后者才允许 `X(n+2)` 覆盖。再检查第一轮如何开始、最后一轮如何收尾。这个局部追踪只用于解决当前疑点，不要求每个任务另写事件图或映射表。
 
@@ -65,7 +67,7 @@
 
 反馈应让接手者能复核：给出触发输入或执行条件、观察或推导、相关代码与证据、受阻部分和需要澄清的决定；有助于定位时附最小反例或局部执行关系。区分观察、归因与建议，说明模型假设及未核实之处。阻碍出现后继续不依赖该问题的实现或验证，不以猜测掩盖缺口。
 
-只有满足 [DOC 6 的替代反馈条件](schema_docs/6.realization.md#有证据的替代反馈)时，才追加 `prefer[].feedback`，保留原 choice 与 reason，引用真实实验记录；一般问题和未形成实验依据的建议留在任务沟通中。实验记录绑定具体有效设计的规则与完整来源身份，以及实现、输入、环境和参数，不能自动沿用父节点的反馈。修改反馈后按模板[维护版本](schema_template/README.md#3-填写与修订)并[检查任务](schema_template/README.md#4-检查与处理反馈)。任一本地或上游来源改变后，重新核对来源 manifest 和 effective identity，复查受影响的代码、测试及旧证据的适用范围。
+只有满足 [DOC 6 的替代反馈条件](schema_docs/6.realization.md#有证据的替代反馈)时，才追加 `prefer[].feedback`，保留原 choice 与 reason，引用真实实验记录；一般问题和未形成实验依据的建议留在任务沟通中。实验记录绑定具体有效设计的规则与完整来源身份，以及实现、输入、环境和参数，不能自动沿用来源设计或其他节点的反馈。修改反馈后按模板[维护版本](schema_template/README.md#3-填写与修订)并[检查任务](schema_template/README.md#4-检查与处理反馈)。任一本地或上游来源改变后，重新核对来源 manifest 和 effective identity，复查受影响的代码、测试及旧证据的适用范围。
 
 ## 5 交付可定位的实现与结论
 

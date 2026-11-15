@@ -1,6 +1,8 @@
 # Schema Extract：工具维护与回执协议
 
-[Supervisor 手册](../README.md)说明命令、参数和恢复操作；[REVIEW.md](../REVIEW.md)定义共同审阅方法，六张阶段页定义提取内容与权限。版本在 [__init__.py](__init__.py)，本页随执行器冻结到 run 的 `rules/`。
+本页描述当前 Python 实际接受的工具与回执协议；冻结 run 以其登记版本为准。目标提取方法与当前实现的对应关系，以及[手工推演与阶段结论](../EXECUTOR_ALIGNMENT.md#手工推演与阶段结论)，见执行器对齐说明；本页的旧计划、父关系及字段不能作为新方法的格式要求。
+
+[Supervisor 手册](../README.md)说明命令、参数和恢复操作。阶段语义按该次冻结材料解释，字段编码以本页、本次冻结的 `response.schema.json` 和实际实现为准。版本在 [__init__.py](__init__.py)，本页随执行器冻结到 run 的 `rules/`。
 
 ## 角色与会话
 
@@ -32,7 +34,7 @@ Reviewer 初始输入保留当前规范、产物、计划和固定源码入口�
 | `source_evidence` | category/path/line_start/line_end/quote_offset/note；note 说明证据支持的结论 |
 | `artifact_evidence` | 同样的定位字段，无 category；引用实际读取的当前产物 |
 | `checks/checks_note` | 仅记亲自执行的命令与退出码；交 Runner 检查时使用空列表并说明 |
-| 阶段字段 | comparisons、plan、revision_scope/affected_nodes 等按阶段页填写；无框架建议时 `framework_candidates=[]` |
+| 阶段字段 | `comparisons`、`plan`、`revision_scope/affected_nodes` 见本页对应小节及本次 `response.schema.json`；无框架建议时 `framework_candidates=[]` |
 
 [receipts.py](receipts.py)的 `normalize_response` 根据已登记调用和实际字节生成 `receipt.v2`，填写身份、文件清单、差异、SHA-256 和精确引文。模型只填写提案字段。P5 只提交本节点 YAML，root/祖先可作为证据；其他阶段覆盖该次工作目录。原 `response.json` 与 `result.response` 保持一致，规范化结果另存 `receipt.json`。Reviewer workspace 与起始依赖字节一致，裁决产物另记摘要；合法草稿只提供恢复进度。
 
@@ -55,6 +57,16 @@ python3 -B EXECUTOR/schema_extract/tools/reading.py --root SOURCE --path input.p
 EXECUTOR/SOURCE 分别使用调用列出的 executor_root/source_root；产物取证则将 `--root` 指向当前 workspace。返回真实片段、文件摘要和 next_cursor；续读保持起止行并传 `--cursor`，长行可续读。`--max-bytes` 默认 6000，可选 1024..24000。取证加 `--evidence --end-line N`，可用 `--quote-offset N` 预览：行号从 1 开始，最多 12 行；offset 是所选行以换行符连接后的字符偏移，从 0 开始，工具最多取 320 字符。工具不替模型选依据或补证。
 
 P2/P3/P4 reviewer 批准时提供最多 20 个非空行、1200 字符的 handoff，仅写已定事项、理由、关键入口、缺口和下一步。Runner 保存 `handoff.md` 并附身份；其他阶段无交接时用空串。
+
+### P1 的 comparisons
+
+以下是 [comparators.py](comparators.py) 接受的旧协议编码，逐输出语义核对仍是 P1 的审阅职责。绑定的验收 JSON 若在具名输出的 `tolerance` 中明确声明 `relative_to`，提案使用 `comparisons: [{output, source_output, evidence}]`：`output` 指当前 YAML 的 `golden_reference.tolerance` 键，`source_output` 指验收记录的 `name` 或 `outputs` 键，`evidence` 从 0 索引本次 `source_evidence`。没有这类声明时使用 `comparisons: []`。
+
+输出映射例如 `out → Y`、`input.state[*] → State`；若来源输出与 Contract 已同名，绑定同名判据。仅 `input.state[0]`、`input.state[1]` 这类已知状态族可用 `input.state[*]` 汇总，不同基准或阈值仍各需声明锚点。`output[0]`、`output[1]` 等返回位置及其他下标保留各自完整名称，即使阈值相同也分别绑定和取证。
+
+证据的 category 为 `acceptance`，文件与行范围须覆盖该输出的实际声明；`quote_offset` 生成的引文必须包含 `"relative_to": "candidate"` 等对应声明，不能只引用 JSON 开头。worker/reviewer 独立选择自己的锚点。每项映射对应唯一的 `output/source_output` 对，不能漏掉任何明确声明。
+
+YAML 判据显式保留来源基准。Runner 核对 `relative_to`、可识别标准公式的比较对象与直接可核对的阈值；自由公式和输出映射仍须独立语义审阅。单独的 `relative_to` 不提供缺失的公式、运算精度或 NaN/Inf 政策，不新增 schema 字段来补造验收事实。
 
 ## 退修与裁决
 
@@ -84,9 +96,39 @@ P5 只合入候选自己的 raw，完整 merged 树保留全部计划稿件；�
 
 重开依据固定来源新发现；来源明确的转录错误或当前产物的规范表达错误可用已读源码，issues.kind 分别为 transcription/schema_conformance，scope 与 artifact_evidence 定位错误，规范错误另指明条款。同一问题和固定证据只重开一次。上游重开时旧 P5 调用可结束并暂存，P4 批准后按依赖判定保留或失效；删除后再加同 ID 仍沿用原计数、版本与已用裁决，历史记录保存在 `plan_history`。
 
-P4 门禁核对表格与结构化 plan、父关系、来源、覆盖缺口和链接；必要说明可放表格与唯一覆盖缺口节之间。P6 准入要求当前计划集合等于有效已合入集合，且 P1–P4 批准仍有效，草稿不计完成数。
+P4 门禁核对表格与结构化 plan、父关系、来源、覆盖缺口和链接，准确格式见下文的[确定性索引](#p4-的确定性索引)。P6 准入要求当前计划集合等于有效已合入集合，且 P1–P4 批准仍有效，草稿不计完成数。
 
-P4 的 plan 保持 `id/file/parent/workload/difference/selection/evidence` 七字段；difference 比较有效 Design，先保留真实差异再选择共享，不自动换父追求压缩。`install_plan` 对换父节点记录 `identity_migration`（old/new parent、old checkpoint、plan revision、reason），保留 raw、版本和审批历史，并使旧新相关后代失效。换父节点必须交 worker，start_node 刷新新祖先而不 retarget；旧 checkpoint 在 workspace 外只读供恢复。worker 显式改 parent/ref 或落地完整区，在新依赖下独立批准后清迁移标记。maintenance 沿封存字段权限，不自动扩大 scope；所有计数和已用决定保留。
+P4 的 plan 精确使用 `id/file/parent/workload/difference/selection/evidence` 七字段。ID 与文件名唯一，文件为 `<id>.yaml`；唯一根的 id 为 `root`、file 为 `root.yaml`，parent 为空字符串。其他 parent 必须存在，整个单父树无环且全部可达。`workload/difference/selection` 为非空文字，difference 比较有效 Design；各条 evidence 引用本次源码索引且至少含 host 依据。worker/reviewer 的节点语义一致，源码证据分别编号。先保留真实差异再选择共享，不自动换父追求压缩。
+
+`install_plan` 对换父节点记录 `identity_migration`（old/new parent、old checkpoint、plan revision、reason），保留 raw、版本和审批历史，并使旧新相关后代失效。换父节点必须交 worker，start_node 刷新新祖先而不 retarget；旧 checkpoint 在 workspace 外只读供恢复。worker 显式改 parent/ref 或落地完整区，在新依赖下独立批准后清迁移标记。maintenance 沿封存字段权限，不自动扩大 scope；所有计数和已用决定保留。
+
+### P4 的确定性索引
+
+[artifacts.py](artifacts.py) 的 `index_prefix/validate_index` 使用以下固定前缀。这是旧协议的计划投影，不是 common 的正式目录格式。各行逐项取自上文 plan：root 首行，其余按 ID 排序；节点列由 id/file 生成，直接父列的 root 为 `无`。workload、difference、selection 单元格中的 `\`、`|` 分别转义为 `\\`、`\|`，CRLF 先归一为换行，再将换行写成 `<br>`。
+
+```markdown
+# 路径索引
+
+| 节点 | 直接父 | workload | 相对父差异 | 选择依据 |
+| --- | --- | --- | --- | --- |
+| [root](root.yaml) | 无 | plan.root.workload | plan.root.difference | plan.root.selection |
+
+## 覆盖缺口
+
+据本次固定源码核实的缺口和影响；没有已知缺口时明确说明。
+```
+
+前缀表格须逐字匹配，表后空一行；后文恰有一个带自身正文的 `## 覆盖缺口` 节。表格与该节之间可以放说明，节前段落、其他章节、注释或围栏示例不能代替它的正文。全文 YAML 链接集合必须等于 plan 文件集合。P4 可暂缺未来计划文件；最终 `require_files` 检查要求实有 YAML 集合与 plan 完全一致，身份和 parent 相符。
+
+门禁还核对已审 root 身份；计划多于一个节点或 root 显式带 dispatch 时，root 的 `when` 必须非空。root 身份/代表问题回 P2，root Design/when 问题回 P3，P4 不越权修改 root，也不要求未来文件通过完整检查。
+
+### P6 的限定写范围
+
+旧协议的 `revision_scope` 使用 `[{path, fields}]`，`fields` 为明确的点分字段路径；`affected_nodes` 列当前计划内唯一的受影响节点 ID。退修须给出范围，并包含每个申请修改的 YAML 节点；实际修改的节点也必须列入。worker 原样返回 reviewer 的授权范围，仅随实际内容修订版本，不新增或删除文件。
+
+`dispatch.md` 的 fields 精确使用 `["*"]`。非 root YAML 只允许 `design`、`realization`、`meta_data.source`、`meta_data.dispatch.when` 及其下属字段，不用通配字段或空路径。root 的修改不能经本字段补丁进行；共享 Contract、root Design/when、代表选择或树/parent 变化分别走上文[上游重开](#并行合入与计划修订)。
+
+Runner 将受影响后代加入 `pending_rechecks`，批准或签收的 `affected_nodes` 须覆盖全部待复核节点。字段范围限制改稿，不代替全目录审阅和最终检查；代际、合入和失效仍按上文协议，裁决与独立签收见[退修与裁决](#退修与裁决)。P6 没有普通 P5 的 provider 重开入口。
 
 ### 普通 P5 的 provider 修复
 
@@ -123,7 +165,7 @@ Runner 先保存请求者通过身份、权限和证据门禁的合法 raw，再
 
 严格 standalone 使用 `validate_resolved_file` 完整检查，复用有效文档与 origins，再独立完整检查本地单文件。`.source.json` 为 `schema_extract.standalone.v2`，记录 root/child/实际引用链完整 manifest、origins、effective_identity 和 view 摘要，生成前及生成/校验后发布前复查所有来源。原始树不变，输出在任务外，相同内容可复用；普通发布仍保留 raw 树。有效 stdout 视图明确 validation:not_run，不代替导出检查。选择不具备新 API 的旧 rules 时，整个导出路由到同一规则树内的旧 frozen exporter，使用独立进程与该树的 PYTHONPATH，保留原完整检查和回执；不实现另一套 resolver 或用当前规则解释旧输入。
 
-规范、阶段页、解析/检查器及执行器一同冻结，恢复沿用登记的规则和执行语义。引用语言、依赖或审批含义改变须经正式语义修订和适用性审阅，不能作为兼容执行器修复；历史 checkpoint、receipt 和预算不改写。全本地 YAML 仍合法，整区引用不能隐藏真实提交、生产消费或事件差异。
+规范、阶段页、解析/检查器及执行器一同冻结，恢复沿用登记的规则和执行语义。引用语言、依赖或审批含义改变须经正式语义修订和适用性审阅，不能作为兼容执行器修复；历史 checkpoint、receipt 和预算不改写。在绑定规则内，全本地 YAML 仍合法，整区引用不能隐藏真实提交、生产消费或事件差异。
 
 ## 写入与完整性
 
@@ -266,6 +308,6 @@ python3 -B -m unittest discover -s schema_extract/tools/tests
 python3 -B -m unittest discover -s schema_template/tools/tests -t schema_template
 ```
 
-测试使用本地合成输入和可执行替身，不调用真实模型，`tools/tests` 不进入冻结清单。已有 YAML 用 `schema_template/check_yaml.py --skip-hardware` 检查；质量仍须独立语义审阅。
+测试使用本地合成输入和可执行替身，不调用真实模型，`tools/tests` 不进入冻结清单。已有 YAML 用与其格式匹配的规则/工具版本执行 `schema_template/check_yaml.py --skip-hardware`；质量仍须独立语义审阅。
 
 `review_eval` 默认使用[六算子 Reviewer 验证材料](../archive/six-operators/20261104-review-cases/README.md)，可用 `--suite` 选择其他材料。评测会调用真实 CLI，记录规范/提示身份、输入、结果和用量；与离线测试分别报告，模拟回执通过不能证明模型已识别语义问题。
