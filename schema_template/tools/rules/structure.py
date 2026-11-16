@@ -1,23 +1,71 @@
-"""Field shapes in schema_docs 0–6; named relations live in the other rule modules."""
+"""Current field spelling and shapes from DOC0–6; relations stay in sibling modules."""
 from __future__ import annotations
 
 from functools import partial
 import re
 
-from ..pipeline_syntax import parse_members
+from ..pipeline_syntax import (
+    VERBS, PipelineSyntaxError, parse_action, parse_event,
+    _group_end, parse_members, parse_pipe, parse_waiting, split_top,
+)
 from .common import EXECUTION_MODES
 from .hardware import hardware_rule
 from .values import (
-    attribute, binding, constant, enum, identifier, input_range, integer,
-    known_text, literal, named, node_id, number, one_or_many, pair, predicate,
-    record, reference, reference_list, reject, repository, scalar, sequence,
-    shape, source, text,
+    attribute, binding, constant, enum, expression_text, hardware_identity, identifier, input_range, integer, known_text, literal,
+    named, node_id, number, one_or_many, pair, predicate, record, reference,
+    reference_list, reject, repository, scalar, sequence, shape, source, step_id, text,
 )
 
-# Contract: schema_docs/1 and 2.
+
+def _syntax(parser):
+    def check(value, path, errors):
+        if not isinstance(value, str):
+            text(value, path, errors)
+            return
+        try:
+            parser(value, path=path)
+        except PipelineSyntaxError as error:
+            reject(errors, error.path, error.message)
+    check.string_paths = ((),)
+    return check
+
+
+def _formal_name(value, path, errors):
+    """view and Event keys name one object and optional distinct formal indices."""
+    if not isinstance(value, str):
+        text(value, path, errors)
+        return
+    try:
+        operand = parse_action("compute:" + value, path=path).operands[0]
+    except PipelineSyntaxError as error:
+        reject(errors, error.path, error.message)
+        return
+    for argument in operand.args:
+        identifier(argument, path, errors)
+    if len(set(operand.args)) != len(operand.args):
+        reject(errors, path, "formal indices must be distinct")
+
+
+def identities(rule, label):
+    entries = named(rule, key=step_id)
+
+    def check(value, path, errors):
+        entries(value, path, errors)
+        if isinstance(value, dict) and len(value) == 1 and "MAIN" not in value:
+            reject(errors, path, f"a single {label} must use MAIN")
+    check.field_paths = entries.field_paths
+    check.string_paths = entries.string_paths
+    check.literal_types = entries.literal_types
+    check.value_cases = entries.value_cases
+    return check
+
+
+# Contract.
 nullable = predicate(lambda value: type(value) is bool, "a boolean")
+nullable.literal_types = (((), bool),)
 output = record({"meaning": text, "shape": shape, "dtype": attribute("dtype", context="io")},
                 {"nullable": nullable})
+# range/default keep their documented value types; text budgets are separate.
 input_value = record(
     {"meaning": text, "shape": shape, "dtype": attribute("dtype", context="io")},
     {"nullable": nullable, "range": input_range, "default": scalar},
@@ -27,206 +75,349 @@ contract_symbol = record({
     "shape": attribute("shape", context="contract_symbol"),
     "dtype": attribute("dtype", context="contract_symbol"),
 })
-compute = record({"name": text, "math": text}, {"symbol": named(contract_symbol)})
+compute = record({"Name": text, "Math": text}, {"Symbol": named(contract_symbol)})
 golden_reference = record(
-    {"source": partial(repository, entry=True), "tolerance": named(text)},
-    {"gap": text},
+    {"Source": partial(repository, entry=True, fixed=True), "Tolerance": named(text)},
+    {"Gap": text},
 )
 algorithm = record(
-    {"input": named(input_value), "output": named(output),
-     "compute": sequence(compute), "golden_reference": golden_reference},
-    {"constant": named(record({"value": constant, "meaning": text}))},
+    {"Input": named(input_value), "Output": named(output),
+     "Compute": sequence(compute), "Golden_reference": golden_reference},
+    {"Constant": named(record({"value": constant, "meaning": text}))},
 )
 hardware = hardware_rule()
-incomplete_hardware = hardware_rule(allow_missing=True)
 
-# Mathematical definitions and their ledger: schema_docs/3.
-retention = predicate(
-    lambda value: isinstance(value, str) and re.fullmatch(r"(?:carry_forward|keep_value)\s+\S.*", value),
-    "carry_forward or keep_value followed by the logical instance",
-)
+# Mathematical decisions and per-entry ledger.
+def retention(value, path, errors):
+    if not isinstance(value, str):
+        text(value, path, errors)
+        return
+    match = re.match(r"(?:carry_forward|keep_value)\s+", value)
+    if match is None:
+        reject(errors, path, "expected carry_forward or keep_value followed by the logical instance")
+        return
+    instance = value[match.end():]
+    if instance.startswith("invocation"):
+        rest = instance[len("invocation"):].strip()
+    elif instance.startswith("(") and (end := _group_end(instance, 0)) is not None:
+        coordinates = split_top(instance[1:end], ",")
+        for coordinate in coordinates or [""]:
+            expression_text(coordinate, path, errors, integer=True)
+        rest = instance[end + 1:].strip()
+    else:
+        reject(errors, path, "retention instance must be invocation or a parenthesized index group")
+        return
+    if rest:
+        iteration = re.fullmatch(r";\s*([a-z_][a-z0-9_]*)\s*=\s*(.+?)\.\.(.+)", rest)
+        if iteration is None or (parts := split_top(rest, ";")) is None or len(parts) != 2:
+            reject(errors, path, "retention may only append an iteration range such as ; i=0..count-1")
+            return
+        identifier(iteration[1], path, errors)
+        for endpoint in iteration.group(2, 3):
+            integer()(endpoint, path, errors)
+
+
+retention.string_paths = ((),)
+
+
 math_symbol = record(
     {"meaning": text},
     {"shape": attribute("shape", context="math"), "dtype": attribute("dtype", context="math"),
      "binding": binding, "value": literal, "retention": retention},
 )
-arithmetic = record({}, {"approx": text, "accumulate": text})
-rewrite = record({"step": text, "name": text, "math": text},
-                 {"symbol": named(math_symbol), "arithmetic": arithmetic})
-ledger_entry = record({"item": text, "change": known_text, "by": sequence(text, unique=True)})
-RESOURCES = ("matmul", "vector", "transcendental", "traffic", "footprint", "depth", "pass", "comm", "error")
-ledger = record({"baseline": text}, {resource: sequence(ledger_entry) for resource in RESOURCES})
-math_reshape = record({"thesis": text, "rewrite": sequence(rewrite)}, {"ledger": ledger})
 
-# Work decomposition, assignment and handoff: schema_docs/4.
-unit_count = record({"unit": text, "unit_count": integer(1)})
-data_block = record({"shape": shape, "dtype": attribute("dtype")})
+
+def ledger_text(value, path, errors):
+    if value is not None:
+        known_text(value, path, errors)
+
+
+ledger_text.string_paths = ((),)  # The source repairer always preserves null.
+
+
+arithmetic = record({}, {"Approx": text, "Accumulate": text})
+ledger = record({"Baseline": ledger_text}, {"Gain": ledger_text, "Cost": ledger_text})
+rewrite = record({"Name": text, "Math": text},
+                 {"Symbol": named(math_symbol), "Arithmetic": arithmetic, "Ledger": ledger})
+math_reshape = record({"Thesis": text, "Rewrite": sequence(rewrite)})
+
+# Work definitions and submission.
+unit_count = record({"unit": hardware_identity, "unit_count": integer(1)})
+data_block = record({"meaning": text, "shape": shape, "dtype": attribute("dtype")})
 region = pair(integer(0))
 direction = enum("ascending", "descending")
-partition_dimension = record({"size": integer(0), "tile": integer(1)},
+partition_dimension = record({"meaning": text, "size": integer(0), "tile": integer(1)},
                              {"range": pair(integer(0), nullable_upper=True)})
-invariant_block = record({"shape": shape, "dtype": attribute("dtype")}, {"offset": sequence(integer())})
-iteration_block = record({"shape": shape, "dtype": attribute("dtype"), "direction": direction})
-worktile = record({}, {"invariant": named(invariant_block), "iteration": named(iteration_block)})
+invariant_block = record(
+    {"meaning": text, "shape": shape, "dtype": attribute("dtype")},
+    {"offset": sequence(integer())},
+)
+iteration_block = record({
+    "meaning": text, "shape": shape, "dtype": attribute("dtype"), "direction": direction,
+})
+worktile = record({}, {"Invariant": named(invariant_block), "Iteration": named(iteration_block)})
 tile_reduction = record({
     "dimension": identifier, "input": reference_list, "output": reference_list, "method": reference,
 })
-target = record({"single_tile": named(data_block)}, {"tile_reduction": tile_reduction})
-decomposition = record({"partition": named(partition_dimension, empty=True), "target": target},
-                       {"strategy": text, "worktile": worktile})
-mapping = record({"worker": unit_count, "worker_count": integer(1)},
-                 {"strategy": text, "placement": unit_count, "member": sequence(named(region))})
-preassigned = record({"start": integer(0)}, {"step": integer(1), "count": integer(0)})
+target = record({"Single_tile": named(data_block)}, {"Tile_reduction": tile_reduction})
+decomposition = record({"Partition": named(partition_dimension, empty=True), "Target": target},
+                       {"Strategy": text, "Worktile": worktile})
+mapping = record({"Worker": unit_count, "Worker_count": integer(1)},
+                 {"Strategy": text, "Placement": unit_count, "Member": sequence(named(region))})
+preassigned = record({"start": integer(0)}, {"stride": integer(1), "count": integer(0)})
+no_refill = enum("none")
 
 
 def refill(value, path, errors):
-    (enum("none") if isinstance(value, str) else named(text))(value, path, errors)
+    (no_refill if isinstance(value, str) else named(text))(value, path, errors)
+
+
+refill.string_paths = named(text).string_paths
+refill.value_cases = no_refill.value_cases
 
 
 def initialize(value, path, errors):
     (reference if isinstance(value, str) else number)(value, path, errors)
 
 
-worker_assignment = record({"refill": refill, "exit": reference_list}, {"preassigned": preassigned})
+worker_assignment = record({"Refill": refill, "Exit": reference_list}, {"Preassigned": preassigned})
 worktile_order = record({"by": one_or_many(identifier, unique=True), "direction": direction},
                        {"group": integer(1)})
-schedule = record({"worker_assignment": worker_assignment},
-                  {"strategy": text, "worktile_order": sequence(worktile_order)})
-work_phase = record({
-    "describe": text, "decomposition": decomposition, "mapping": mapping, "schedule": schedule,
+schedule = record({"Worker_assignment": worker_assignment},
+                  {"Strategy": text, "Worktile_order": sequence(worktile_order)})
+work_step = record({
+    "Describe": text, "Decomposition": decomposition, "Mapping": mapping, "Schedule": schedule,
 })
-schedule_event = predicate(
-    lambda value: isinstance(value, str) and re.fullmatch(
-        r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*(?:\([^\r\n]+\))?", value),
-    "phase.milestone event reference",
-)
-events_or_one = one_or_many(schedule_event)
+
+
+def schedule_event(value, path, errors):
+    if not isinstance(value, str):
+        text(value, path, errors)
+        return
+    owner, separator, target = value.partition(".")
+    if not separator or not target:
+        reject(errors, path, "expected STEP.event or STEP.event(arguments)")
+        return
+    step_id(owner, path, errors)
+    try:
+        parse_action("compute:" + target, path=path)
+    except PipelineSyntaxError as error:
+        reject(errors, error.path, error.message)
+
+
+schedule_event.string_paths = ((),)
+events_or_one = one_or_many(schedule_event, unique=True)
 launch = record(
-    {"phase": sequence(identifier, unique=True)},
-    {"order": enum("per_worktile", "per_worker", "all", "concurrent"),
-     "start_after": events_or_one, "protocol": text},
+    {"step": sequence(step_id, unique=True)},
+    {"order": enum("per_worktile", "per_worker", "all", "concurrent"), "start_after": events_or_one},
 )
-storage = predicate(
-    lambda value: isinstance(value, str) and (value == "global" or re.fullmatch(
-        r"tile_pipeline\.phase\.[A-Za-z_][A-Za-z0-9_]*\.resource\.[A-Za-z_][A-Za-z0-9_]*", value)),
-    "global or tile_pipeline.phase.<phase>.resource.<resource>",
-)
+
+
+def storage_reference(value, path, errors):
+    if not isinstance(value, str):
+        text(value, path, errors)
+    elif value != "global" and not re.fullmatch(
+            r"Tile_pipeline\.Step\.[A-Z_][A-Z0-9_]*\.Storage\.[a-z_][a-z0-9_]*", value):
+        reject(errors, path, "expected global or Tile_pipeline.Step.<STEP>.Storage.<storage>")
+    elif value != "global":
+        parts = value.split(".")
+        step_id(parts[2], path, errors)
+        identifier(parts[4], path, errors)
+
+
+storage_reference.string_paths = ((),)
+
+
 handoff = record(
-    {"producer": identifier, "consumer": sequence(identifier, unique=True), "storage": storage},
+    {"producer": step_id, "consumer": sequence(step_id, unique=True), "storage": storage_reference},
     {"initialize": initialize, "ready": events_or_one, "wait_at": events_or_one},
 )
-flow = record({"launch": sequence(launch)}, {"handoff": named(handoff)})
-work_schedule = record({"thesis": text, "phase": named(work_phase), "flow": flow})
+flow = record({"Launch": sequence(launch)}, {"Handoff": named(handoff)})
+work_schedule = record({"Thesis": text, "Step": identities(work_step, "step"), "Flow": flow})
 
-# Worker-local pipeline: schema_docs/5.
+# Worker-local pipeline.
+flatten_domain = record({"flatten": sequence(identifier, unique=True)})
+worktile_domain = enum("worktile")
+
+
 def domain(value, path, errors):
     if isinstance(value, list):
         pair(integer())(value, path, errors)
     elif isinstance(value, dict):
-        record({"flatten": sequence(identifier, unique=True)})(value, path, errors)
+        flatten_domain(value, path, errors)
     else:
-        enum("worktile")(value, path, errors)
+        worktile_domain(value, path, errors)
 
 
-def repeat(value, path, errors):
-    if isinstance(value, dict):
-        named(domain)(value, path, errors)
-        if len(value) != 1:
-            reject(errors, path, "repeat defines one local domain")
-    else:
-        predicate(
-            lambda item: isinstance(item, str) and re.fullmatch(
-                r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\r\n]+\])?", item),
-            "a domain name or domain slice",
-        )(value, path, errors)
+domain.field_paths = flatten_domain.field_paths
+domain.value_cases = worktile_domain.value_cases
 
 
 def pipe(value, path, errors):
-    def action(item, location, diagnostics):
-        (pipe if isinstance(item, dict) else text)(item, location, diagnostics)
-    record({}, {"repeat": repeat, "prologue": sequence(action),
-                "steady": sequence(action), "epilogue": sequence(action)})(value, path, errors)
-    if isinstance(value, dict) and value and not any(value.get(r) for r in ("prologue", "steady", "epilogue")):
-        reject(errors, path, "a role needs actions; repeat alone does not describe any work")
-
-
-execution_mode = enum(*EXECUTION_MODES)
+    try:
+        parse_pipe(value, path=path)
+    except PipelineSyntaxError as error:
+        reject(errors, error.path, error.message)
 
 
 def member(value, path, errors):
+    if not isinstance(value, str):
+        text(value, path, errors)
+        return
     parts = parse_members(value)
     if parts is None:
         reject(errors, path, "expected unit[index] or unit[start:end] member path")
         return
-    for _, lower, upper in parts:
+    for unit, lower, upper in parts:
+        hardware_identity(unit, path, errors)
         integer(0)(lower, path, errors)
         if upper is not None:
             integer(0)(upper, path, errors)
 
 
-value_pattern = predicate(
-    lambda value: isinstance(value, str) and re.fullmatch(
-        r"[A-Za-z_][A-Za-z0-9_]*(?:\([^\r\n]+\))?", value),
-    "a value name, optionally with indices",
+member.string_paths = ((),)
+
+
+view = record({}, {"slot_index": integer(0), "region": named(region)}, empty=True)
+storage = record(
+    {"meaning": text, "depth": integer(1), "location": hardware_identity, "shape": shape,
+     "dtype": attribute("dtype", context="storage"), "total_size": integer(0)},
+    {"member": one_or_many(integer(0, expression=False), unique=True), "view": named(view, key=_formal_name)},
 )
-view = record({}, {"slot_index": integer(0), "part": named(region), "dtype": attribute("dtype")}, empty=True)
-resource = record(
-    {"space": text, "member_slot_shape": shape, "dtype": attribute("dtype"), "slot_count": integer(1)},
-    {"member": one_or_many(integer(0, expression=False), unique=True),
-     "view": named(view, key=value_pattern)},
-)
-verb_detail = record({"meaning": text, "execution_mode": execution_mode})
+noun_detail = record({"execution_mode": enum(*EXECUTION_MODES), "describe": text})
 
 
-def verb_contract(value, path, errors):
-    (text if isinstance(value, str) else verb_detail)(value, path, errors)
-
-
-role_info = record({"member": member, "execution_mode": execution_mode},
-                   {"register": integer(1, expression=False), "verb": named(verb_contract)})
-edges = record({}, {kind: named(sequence(text), key=text) for kind in ("data", "reuse", "sync")})
-role = record({"info": role_info, "pipe": pipe}, {"waits_for": edges})
-pipeline_phase = record({"role": named(role)},
-                        {"domain": named(domain), "resource": named(resource),
-                         "milestone": named(sequence(text), key=value_pattern)})
-tile_pipeline = record({"thesis": text, "phase": named(pipeline_phase)})
-
-# Implementation handoff: schema_docs/6.
-choice = record({"item": reference_list, "choice": text, "reason": text})
-feedback = record({"choice": text, "evidence": repository})
-preference = record({"item": reference_list, "choice": text, "reason": text}, {"feedback": feedback})
-realization = record({}, {"require": sequence(choice), "prefer": sequence(preference), "forbid": sequence(choice)})
-
-
-# Task and plan identity: schema_docs/0.
-def design_region(local_rule):
+def _noun_key(verb):
     def check(value, path, errors):
-        if isinstance(value, dict) and "from_parent" in value:
-            if set(value) != {"from_parent"}:
-                reject(errors, path, "from_parent must be the only field; references and local fields cannot be mixed")
-            node_id(value["from_parent"], path + ".from_parent", errors)
-        else:
-            local_rule(value, path, errors)
+        if not isinstance(value, str):
+            text(value, path, errors)
+            return
+        try:
+            action = parse_action(verb + ":" + value, path=path)
+        except PipelineSyntaxError as error:
+            reject(errors, error.path, error.message)
+            return
+        if any(operand.args for operand in action.operands):
+            reject(errors, path, "Using_verb declares noun bases; arguments belong at action use sites")
     return check
 
 
-def validate_task(task, *, allow_missing_hardware=False, allow_parent_regions=False):
+using_verb = record({}, {verb: named(noun_detail, key=_noun_key(verb)) for verb in sorted(VERBS)})
+role_info = record({"Describe": text, "Member": member, "Using_verb": using_verb},
+                   {"Register": integer(1, expression=False)})
+waiting = record({}, {kind: sequence(_syntax(parse_waiting))
+                      for kind in ("Prepared", "Released", "Allowed")})
+role = record({"Info": role_info, "Pipe": pipe}, {"Waiting": waiting})
+
+
+def alias_event(value, path, errors):
+    if not isinstance(value, str):
+        text(value, path, errors)
+        return
+    try:
+        event = parse_event(value, path=path)
+    except PipelineSyntaxError as error:
+        reject(errors, error.path, error.message)
+        return
+    if event.role is None or event.member is None:
+        reject(errors, path, "Event aliases must explicitly name the event time, ROLE and member selection")
+
+
+alias_event.string_paths = ((),)
+
+
+pipeline_step = record({"Role": identities(role, "role")},
+                       {"Index": named(record({"meaning": text, "definition": domain})),
+                        "Storage": named(storage),
+                        "Event": named(sequence(alias_event), key=_formal_name)})
+tile_pipeline = record({"Thesis": text, "Step": identities(pipeline_step, "step")})
+
+# Implementation handoff.
+choice = record({"Item": reference_list, "Choice": text, "Reason": text})
+feedback = record({"Item": reference_list, "Choice": text, "Evidence": partial(repository, fixed=True)})
+realization = record({}, {"Require": sequence(choice), "Prefer": sequence(choice),
+                          "Forbid": sequence(choice), "Feedback": sequence(feedback)})
+
+
+def design_region(local_rule, *, allow_from):
+    def check(value, path, errors):
+        if isinstance(value, dict) and "from" in value:
+            record({"from": node_id})(value, path, errors)
+            if not allow_from:
+                reject(errors, path + ".from", "this region must be local")
+        else:
+            local_rule(value, path, errors)
+    check.field_paths = tuple(
+        (parent, fields + ("from",) if not parent else fields)
+        for parent, fields in local_rule.field_paths
+    )
+    check.string_paths = local_rule.string_paths + (("from",),)
+    check.literal_types = local_rule.literal_types
+    check.value_cases = local_rule.value_cases
+    return check
+
+
+def _plan_rule(*, contract_owner, needs_dispatch, skip_hardware, allow_from):
+    dispatch = record({"when": text, **({"id": node_id} if not contract_owner else {})},
+                      {"id": node_id} if contract_owner else {})
+    metadata = record(
+        {"Name": text, "Describe": text, "Version": integer(1, expression=False),
+         **({"Dispatch": dispatch} if needs_dispatch else {})},
+        {"Source": source, **({"Dispatch": dispatch} if not needs_dispatch else {})},
+    )
+    regions = {"Math_reshape": math_reshape, "Work_schedule": work_schedule, "Tile_pipeline": tile_pipeline}
+    design = record({region: design_region(rule, allow_from=allow_from and not contract_owner)
+                     for region, rule in regions.items()})
+    required = {"META_DATA": metadata, "DESIGN": design}
+    if contract_owner:
+        required["CONTRACT"] = (
+            record({"Algorithm_requirement": algorithm},
+                   {"Hardware_specification": lambda value, path, errors: None})
+            if skip_hardware else
+            record({"Algorithm_requirement": algorithm, "Hardware_specification": hardware})
+        )
+    return record(required, {"REALIZATION": realization})
+
+
+# One current field table, derived from the validators above. Paths omit the
+# task ID: None selects a named mapping key and int a list position. The union
+# of local/from fields describes spelling only; design_region enforces shape.
+_document_rule = _plan_rule(contract_owner=True, needs_dispatch=False,
+                            skip_hardware=False, allow_from=True)
+CANONICAL_FIELDS = _document_rule.field_paths
+STRING_FIELDS = _document_rule.string_paths
+# Only strict integer/boolean leaves authorize removal of scalar quotes.
+LITERAL_TYPES = _document_rule.literal_types
+# Only scalar values at these leaf paths are eligible for case normalization;
+# union containers such as Refill mappings and Index ranges retain their shape.
+CANONICAL_VALUES = _document_rule.value_cases
+
+
+def validate_task(task, *, skip_hardware=False, allow_from=False, standalone=False):
+    """Check raw/effective fields, or a single independent delivery document.
+
+    skip_hardware ignores the entire Hardware_specification value without
+    changing input data. standalone requires its own Contract and local regions;
+    Dispatch.id remains the delivery identity, independent of its filename.
+    """
     errors = []
+    if not isinstance(task, dict) or not task:
+        reject(errors, "root", "expected at least one task document")
+        return errors
+    if standalone and len(task) != 1:
+        reject(errors, next(iter(task)), "standalone validation accepts one document")
+        return errors
+    if not standalone:
+        if "root" not in task:
+            reject(errors, next(iter(task)), "a task needs root with the shared Contract")
+        if len(task) > 10:
+            reject(errors, "root" if "root" in task else next(iter(task)),
+                   "a task may contain at most 10 complete YAML designs, including root")
     for name, plan in task.items():
-        node_id(name, name, errors)
-        dispatch = record({"when": text, **({"id": node_id} if name != "root" else {})},
-                          {"parent": node_id, **({"id": node_id} if name == "root" else {})})
-        metadata = record({"name": text, "describe": text, "version": integer(1, expression=False),
-                           **({"dispatch": dispatch} if name != "root" else {})},
-                          {"source": source, **({"dispatch": dispatch} if name == "root" else {})})
-        regions = {"math_reshape": math_reshape, "work_schedule": work_schedule, "tile_pipeline": tile_pipeline}
-        if allow_parent_regions:
-            regions = {name: design_region(rule) for name, rule in regions.items()}
-        required = {"meta_data": metadata, "design": record(regions)}
-        if name == "root":
-            required["contract"] = (
-                record({"algorithm_requirement": algorithm}, {"hardware_specification": incomplete_hardware})
-                if allow_missing_hardware else
-                record({"algorithm_requirement": algorithm, "hardware_specification": hardware}))
-        record(required, {"realization": realization})(plan, name, errors)
+        if not standalone:
+            node_id(name, name, errors)
+        contract_owner = name == "root" or standalone
+        needs_dispatch = not standalone and (name != "root" or len(task) > 1)
+        _plan_rule(contract_owner=contract_owner, needs_dispatch=needs_dispatch,
+                   skip_hardware=skip_hardware, allow_from=allow_from)(plan, name, errors)
     return errors

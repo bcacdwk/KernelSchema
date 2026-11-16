@@ -1,4 +1,4 @@
-"""Event identity, provenance and graph diagnostics."""
+"""Step-local event identity, source provenance and cycle diagnostics."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -6,21 +6,11 @@ from graphlib import CycleError, TopologicalSorter
 
 
 class GraphError(ValueError):
-    """The supplied finite pipeline cannot be expanded unambiguously."""
+    """A definite counterexample in the supplied finite pipeline sample."""
 
 
 class ExpansionError(GraphError):
-    """Missing sample values or a tool limit; not a rejection of schema syntax."""
-
-
-@dataclass(frozen=True)
-class BoundEvent:
-    role: str
-    members: tuple[int, ...]
-    template: str
-    action: str
-    event: str
-    fixed: bool
+    """Missing values, unsupported evaluation or a tool limit: not completed."""
 
 
 @dataclass
@@ -33,29 +23,37 @@ class Operation:
     path: str
     context: dict[str, int]
 
-    def event(self, event: str) -> str:
-        return self.id + "@" + event
+    def event(self, time: str) -> str:
+        if time not in {"issue", "done"}:
+            raise ValueError("an action event time is issue or done")
+        return self.id + "@" + time
 
 
 @dataclass
-class PhaseGraph:
-    phase: str
+class StepGraph:
+    step: str
     operations: dict[str, Operation] = field(default_factory=dict)
     edges: dict[tuple[str, str, str], set[str]] = field(default_factory=dict)
+    edge_paths: dict[tuple[str, str, str], set[str]] = field(default_factory=dict)
     boundaries: list[dict] = field(default_factory=list)
-    milestones: dict[str, list[str]] = field(default_factory=dict)
+    events: dict[str, list[str]] = field(default_factory=dict)
     cycle: list[str] = field(default_factory=list)
 
-    def add(self, source: str, target: str, kind: str, reason: str) -> None:
-        self.edges.setdefault((source, target, kind), set()).add(reason)
+    def add(self, source: str, target: str, kind: str, reason: str, path: str = "") -> None:
+        key = (source, target, kind)
+        self.edges.setdefault(key, set()).add(reason)
+        if path:
+            self.edge_paths.setdefault(key, set()).add(path)
         if len(self.edges) > 100000:
             raise ExpansionError("event edge limit exceeded (100000); use a smaller sample")
 
     def check(self) -> None:
-        predecessors = {op.event(event): set() for op in self.operations.values()
-                        for event in ("issue", "done")}
+        predecessors = {op.event(time): set() for op in self.operations.values() for time in ("issue", "done")}
         for source, target, _ in self.edges:
+            if source not in predecessors or target not in predecessors:
+                raise GraphError(f"edge names an absent event: {source} -> {target}")
             predecessors[target].add(source)
+        self.cycle = []
         try:
             tuple(TopologicalSorter(predecessors).static_order())
         except CycleError as error:
@@ -63,9 +61,15 @@ class PhaseGraph:
 
     def report(self) -> dict:
         return {
-            "phase": self.phase, "acyclic": not self.cycle, "cycle": self.cycle,
-            "operations": [asdict(op) for op in self.operations.values()],
-            "edges": [{"from": a, "to": b, "kind": kind, "reasons": sorted(reasons)}
-                      for (a, b, kind), reasons in sorted(self.edges.items())],
-            "boundary_skips": self.boundaries, "milestones": self.milestones,
+            "step": self.step,
+            "scope": "given sample, one representative worker, local step events; no cross-step liveness proof",
+            "acyclic": not self.cycle,
+            "cycle": list(self.cycle),
+            "actions": [{**asdict(op), "issue": op.event("issue"), "done": op.event("done")}
+                        for op in self.operations.values()],
+            "events": {name: list(events) for name, events in self.events.items()},
+            "edges": [{"from": source, "to": target, "kind": kind,
+                       "reasons": sorted(reasons), "paths": sorted(self.edge_paths.get((source, target, kind), ()))}
+                      for (source, target, kind), reasons in sorted(self.edges.items())],
+            "boundary_skips": list(self.boundaries),
         }

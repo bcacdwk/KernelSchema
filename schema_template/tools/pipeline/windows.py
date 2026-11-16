@@ -1,201 +1,162 @@
-"""Declared action-index windows, independent of generated action coverage."""
+"""Exact declared action windows, independent of emitted action coverage.
+
+The bounded projection enumerates complete declared index domains, ignoring
+for selections and if conditions. It never takes a min/max of emitted actions
+or intersects producer/consumer logs. Missing in-window predecessors remain
+errors; only a recoverable variable displacement beyond a domain may be skipped.
+"""
 from __future__ import annotations
 
-import ast
 from collections import defaultdict
 from dataclasses import dataclass
-from enum import Enum
 
-from ..pipeline_syntax import parse_action
-from .actions import operands
-from .expressions import Domains, LIMIT, tree, variables
+from ..pipeline_syntax import ActionDeclaration
+from .actions import arguments, instantiate, parsed
 from .coordinates import recover
-from .model import ExpansionError
-
-
-class RangeExpression(ast.NodeTransformer):
-    """A flat coordinate or last(d) refers to d's whole declared window."""
-    def __init__(self, domains):
-        self.domains = domains
-
-    def visit_Subscript(self, node):
-        if (isinstance(node.value, ast.Name)
-                and isinstance(self.domains.definitions.get(node.value.id), dict)):
-            return ast.Name(id=node.value.id, ctx=ast.Load())
-        return self.generic_visit(node)
-
-    def visit_Call(self, node):
-        if (isinstance(node.func, ast.Name) and node.func.id == "last" and len(node.args) == 1
-                and isinstance(node.args[0], ast.Name)):
-            return ast.Name(id=node.args[0].id, ctx=ast.Load())
-        return self.generic_visit(node)
+from .expressions import Boundary, Domains, LIMIT, shifted, tree, variables
+from .model import ExpansionError, GraphError
 
 
 @dataclass
 class Window:
-    expression: ast.AST
+    declaration: ActionDeclaration
     domains: Domains
-    position: tuple[int, int]
-    other_arguments: list[tuple[tuple[int, int], ast.AST]]
-
-
-class WindowMatch(Enum):
-    REQUIRED = "an unshifted reference still requires an actual action"
 
 
 class IndexWindows:
     def __init__(self):
-        self.pipe = defaultdict(list)
-        self.reference = defaultdict(list)
+        self.declarations = defaultdict(list)
         self.cache = {}
         self.steps = 0
+
+    def register(self, role: str, declaration: ActionDeclaration, domains: Domains):
+        self.declarations[(role, declaration.action.family)].append(Window(declaration, domains))
 
     def step(self):
         self.steps += 1
         if self.steps > 100000:
-            raise ExpansionError("combined index-window expansion limit exceeded (100000); use a smaller sample")
+            raise ExpansionError("declared index-window expansion limit exceeded (100000); use a smaller sample")
 
-    def register(self, role, action, domains, *, reference=False):
-        try:
-            arguments = {(oi, ai): tree(value) for oi, (_, args) in enumerate(operands(action)[1])
-                         for ai, value in enumerate(args)}
-        except ExpansionError:
-            # An inactive pipe branch need not be evaluated for this sample.
-            # Active actions and references still fail at integer substitution.
-            return
-        for position, argument in arguments.items():
-            # Bare references connect a literal/unrolled action to a declared
-            # domain. A shifted reference alone cannot establish its own window.
-            if reference and not isinstance(argument, ast.Name):
-                continue
-            expression = RangeExpression(domains).visit(tree(ast.unparse(argument)))
-            if not variables(expression) & domains.definitions.keys():
-                continue
-            key = (role, parse_action(action), position)
-            collection = self.reference if reference else self.pipe
-            collection[key].append(Window(expression, domains, position,
-                [(pos, node) for pos, node in arguments.items() if pos != position]))
+    def values(self, window: Window):
+        key = id(window)
+        if key not in self.cache:
+            values = {}
+            for env in window.domains.contexts(set(window.declaration.bound)):
+                self.step()
+                action = instantiate(window.declaration.action, window.domains, env)
+                values.setdefault(action, []).append(env)
+                if len(values) > LIMIT:
+                    raise ExpansionError(f"declared action window exceeds {LIMIT} entries")
+            self.cache[key] = values
+        return self.cache[key]
 
-    def target_contexts(self, window, concrete, env, needed, require_context_shift):
-        domains = window.domains
-        arguments = [(window.expression, int(concrete[window.position]))]
-        for position, expression in window.other_arguments:
-            normalized = RangeExpression(domains).visit(tree(ast.unparse(expression)))
-            arguments.append((normalized, int(concrete[position])))
-        if not needed:
-            if require_context_shift:
-                yield WindowMatch.REQUIRED
-                return
-            for position, expression in window.other_arguments:
-                if not variables(expression) & domains.definitions.keys():
-                    if domains.integer(ast.unparse(expression), env) != int(concrete[position]):
-                        return
-            yield dict(env)
+    def validate_fixed(self, role: str, action, domains: Domains, env: dict):
+        """A displaced coordinate cannot hide an invalid independent constant."""
+        action = parsed(action)
+        fixed = []
+        for position, expression in arguments(action):
+            if not variables(tree(expression)) & domains.definitions.keys():
+                fixed.append((position, domains.integer(expression, env)))
+        if not fixed:
             return
-        context = recover(arguments, domains, env, needed, partial=True)
-        if context is None:
-            return
-        represented = set().union(*(domains.coordinates(name) for expression, _ in arguments
-                                    for name in variables(expression) & domains.definitions.keys()))
-        missing = needed - context.keys()
-        if missing & represented:
-            raise ExpansionError("cannot uniquely recover action-index coordinates: "
-                                 + ", ".join(sorted(missing & represented)))
-        if require_context_shift and not any(name in env and name in context and context[name] != env[name]
-                                             for name in needed):
-            yield WindowMatch.REQUIRED
-            return
-        # Coordinates omitted from the action identity quantify declaration
-        # contexts. Enumerate their complete domains, never the emitted actions.
-        if not self.outer_exists(domains, needed & context.keys(), context):
-            yield None
-            return
-        found = False
-        for i, candidate in enumerate(domains.contexts(missing, context)):
-            self.step()
-            if i >= LIMIT:
-                raise ExpansionError("action-index declaration contexts exceed expansion limit")
-            found = True
-            yield candidate
-        if missing and not found:
-            yield None
+        windows = self.declarations[(role, action.family)]
+        possibilities = defaultdict(set)
+        for window in windows:
+            for concrete in self.values(window):
+                for position, value in arguments(concrete):
+                    possibilities[position].add(int(value))
+        for position, value in fixed:
+            if possibilities[position] and value not in possibilities[position]:
+                raise GraphError(f"fixed index {value} does not identify a declared {role}/{action.verb}:{action.noun} action")
 
-    def outer_exists(self, domains, needed, context):
-        pending, checked = set(needed), set()
-        while pending:
-            ready = [name for name in pending if domains.dependencies(name) & needed <= checked]
-            if not ready:
-                raise ExpansionError("cannot order action-index outer coordinates")
-            name = min(ready)
-            self.step()
-            if not any(entry[name] == context[name] for entry in domains.entries(name, context)):
+    def empty_target(self, role: str, action, coordinate) -> bool:
+        """Prove the target's declaration has no item at this outer coordinate.
+
+        An empty queried index alone does not remove an unrelated action. Each
+        applicable declaration must bind that index (directly or via flatten),
+        and its own domain must be empty in the referenced work's context.
+        """
+        for window in self.declarations[(role, action.family)]:
+            if coordinate.name not in window.declaration.bound:
                 return False
-            checked.add(name)
-            pending.remove(name)
+            if window.domains.entries(coordinate.name, coordinate.context):
+                return False
         return True
 
-    def bounds(self, window, concrete, env, *, require_context_shift=False):
-        domains = window.domains
-        names = variables(window.expression) & domains.definitions.keys()
-        dependencies = set().union(*(domains.dependencies(name) for name in names))
-        varying = names - dependencies
-        unbound = set().union(*(domains.coordinates(name) for name in varying))
-        needed = dependencies - unbound
-        bounds = []
-        for context in self.target_contexts(window, concrete, env, needed, require_context_shift):
-            if context is WindowMatch.REQUIRED:
-                return WindowMatch.REQUIRED
-            if context is None or not self.outer_exists(domains, needed, context):
-                bounds.append((0, -1))
-                continue
-            seed = {name: context[name] for name in needed}
-            key = (id(window), tuple(sorted(seed.items())))
-            if key not in self.cache:
-                values = []
-                for i, bound in enumerate(domains.contexts(varying, seed)):
-                    self.step()
-                    if i >= LIMIT:
-                        raise ExpansionError("action index window exceeds expansion limit; use a smaller sample")
-                    values.append(domains.integer(ast.unparse(window.expression), bound))
-                self.cache[key] = (min(values), max(values)) if values else (0, -1)
-            bounds.append(self.cache[key])
-        return (min(bound[0] for bound in bounds), max(bound[1] for bound in bounds)) if bounds else None
+    def missing(self, role: str, action, concrete: str, domains: Domains, env: dict, *, target=False):
+        """Return only for an inactive target; raise for missing predecessors.
 
-    def outside(self, role, template, concrete, domains, env):
-        values = {(oi, ai): value for oi, (_, args) in enumerate(operands(concrete)[1])
-                  for ai, value in enumerate(args)}
-        unknown, incomplete = [], []
-        for oi, (_, args) in enumerate(operands(template)[1]):
-            for ai, argument in enumerate(args):
-                node = tree(argument)
-                if not variables(node) & domains.definitions.keys():
-                    continue  # Fixed missing references are always errors.
-                unshifted = isinstance(node, ast.Name)
-                key = (role, parse_action(template), (oi, ai))
-                sources = self.pipe[key] or self.reference[key]
-                if not sources:
-                    if not unshifted:
-                        unknown.append(argument)
+        The caller has already checked family/signature/member and the actual
+        event lookup. A concrete value in this full declaration window but not
+        in the pipe's occurrence set can be skipped only on the target side.
+        """
+        action = parsed(action)
+        windows = self.declarations[(role, action.family)]
+        any_context = False
+        for window in windows:
+            values = self.values(window)
+            any_context |= bool(values)
+            if concrete in values:
+                if target:
+                    return
+                raise GraphError(f"missing predecessor inside its declared index window: {role}/{concrete}")
+        if target and not any_context:
+            return  # The target's declared loop itself has no items.
+        given = dict(arguments(concrete))
+        displaced = {position for position, value in arguments(action) if shifted(tree(value), domains)}
+        if not displaced:
+            raise GraphError(f"fixed or unshifted event does not exist: {role}/{concrete}")
+        self.validate_fixed(role, action, domains, env)
+        uncertain, boundaries = [], []
+        for window in windows:
+            declaration, local = window.declaration, window.domains
+            equations = [(tree(expression), int(given[position]))
+                         for position, expression in arguments(declaration.action)]
+            needed = set(declaration.bound)
+            try:
+                recovered = recover(equations, local, {}, needed, partial=True)
+            except ExpansionError as error:
+                uncertain.append(error)
+                continue
+            if recovered is None:
+                continue
+            # Test solved coordinates before their children. An absent outer
+            # coordinate may make an inner domain undefined, but does not hide
+            # a separate fixed-index error (validated above).
+            pending = set(recovered) & local.definitions.keys()
+            checked, outside, unavailable = set(), [], set()
+            while pending:
+                ready = [name for name in pending if local.dependencies(name) <= recovered.keys()
+                         and not (local.dependencies(name) & pending)]
+                if not ready:
+                    if any(local.dependencies(name) & unavailable for name in pending):
+                        break
+                    uncertain.append(ExpansionError("cannot recover the outer coordinates of " + concrete))
+                    break
+                name = min(ready, key=lambda item: (not isinstance(local.definitions.get(item), dict), item))
+                pending.remove(name)
+                if local.dependencies(name) & unavailable:
+                    unavailable.add(name)
                     continue
-                bounds, uncertain, required = [], False, False
-                for source in sources:
-                    try:
-                        bound = self.bounds(source, values, env, require_context_shift=unshifted)
-                    except ExpansionError as error:
-                        incomplete.append(error)
-                        uncertain = True
-                        continue
-                    if bound is WindowMatch.REQUIRED:
-                        required = True
-                    elif bound is not None:
-                        bounds.append(bound)
-                if bounds and not uncertain and not required:
-                    lo, hi = min(b[0] for b in bounds), max(b[1] for b in bounds)
-                    if not lo <= int(values[(oi, ai)]) <= hi:
-                        return True
-        if incomplete:
-            raise incomplete[0]
-        if unknown:
-            raise ExpansionError(f"cannot determine declared index window for {role}/{template}: "
-                                 f"{', '.join(unknown)}; no unshifted domain binding is available")
-        return False
+                self.step()
+                entries = local.entries(name, recovered)
+                if not any(item[name] == recovered[name] for item in entries):
+                    positions = {position for position, expression in arguments(declaration.action)
+                                 if any(name in local.coordinates(variable)
+                                        for variable in variables(tree(expression)) & local.definitions.keys())}
+                    if not positions or not positions <= displaced:
+                        outside = []
+                        break
+                    outside.append(f"{name}={recovered[name]} outside its declared domain")
+                    unavailable.update(local.coordinates(name))
+                checked.add(name)
+            if outside:
+                boundaries.append("; ".join(outside))
+            elif needed - recovered.keys():
+                uncertain.append(ExpansionError("cannot uniquely recover action-index coordinates: "
+                                                + ", ".join(sorted(needed - recovered.keys()))))
+        if uncertain:
+            raise uncertain[0]
+        if boundaries:
+            raise Boundary(f"{role}/{concrete}: {boundaries[0]}")
+        raise GraphError(f"event does not identify an action in its declared window: {role}/{concrete}")

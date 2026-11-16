@@ -1,6 +1,6 @@
 # 提取方法与执行器对齐
 
-当前 Markdown 定义少量具体完整设计、规范的 `dispatch.md` 与整区 `from`。现有 Python Runner、checker、starter、计划和回执尚未完成对接，**不能用当前工作树的 CLI 端到端运行这套新方法**。本页是本轮实施状态的唯一入口；更新方法文档不等于更新执行能力。
+当前 Markdown 定义少量具体完整设计、规范的 `dispatch.md` 与整区 `from`。Template 的 checker、starter、只读 API 和统一作者 CLI 已对齐当前字段；Extract 的 Python Runner、计划、权限和回执仍待对接，**不能用当前 Extract CLI 端到端运行这套新方法**。本页记录两者的实际边界，Template 检查通过不等于提取执行器已经可用。
 
 ## 方法规范
 
@@ -14,11 +14,11 @@
 
 ## 当前执行器
 
-以下差异已通过只读代码核实。本轮没有修改这些实现，也没有迁移现有算子或重新批准旧示例。
+Template 本轮已完成当前格式与工具更新。下列 Extract 差异仍未对接；本轮未修改 Runner、现有算子、冻结运行或批准状态。
 
 | 范围 | 当前实现事实 | 待对接的方法职责 |
 | --- | --- | --- |
-| 解析、检查与创建 | [resolver](../schema_template/tools/design_resolution.py) 和[字段检查](../schema_template/tools/rules/structure.py)仍使用 `parent/from_parent`，引用限定为直接父同名区；[starter](../schema_template/starter.yaml)还含 `phase`、`pipe.steady` 等旧结构。 | `from` 的实际内容引用图、使用上下文绑定、现行字段和 starter；修改引用名称不足以完成对接。 |
+| Template 解析、检查与创建 | [resolver](../schema_template/tools/design_resolution.py)、[字段检查](../schema_template/tools/rules/structure.py)和 [starter](../schema_template/starter.yaml)已采用当前格式；覆盖整区 `from` DAG、实际来源链、使用节点绑定、raw 文本预算和 dispatch 最小检查。默认作者 CLI 会统一规范化整个任务及其引用；规范化库可只返回内存候选。 | Extract 使用匹配的严格只读校验 API，或显式调用 `check_yaml.py FILE --read-only --skip-hardware` 预览并检查规范化候选；适配候选/实际来源的区别、诊断与来源身份。 |
 | P1 执行单元登记 | [artifacts.py](tools/artifacts.py) 的 `validate_changes` 仍要求整个硬件区与冻结 starter 相同，`_without_p1_fields` 也保留硬件区作受保护内容。 | P1 在现有 `execution` 中最小登记有据执行单元，其余硬件保持占位；当前门禁尚不接受这项流程权限。 |
 | 目录与计划 | [artifacts.py](tools/artifacts.py)的 `validate_plan/index_prefix/validate_index` 要求七字段 plan、唯一根单父树和确定性的父表及覆盖缺口节。 | 有限完整集合、common 的记录格式、拟议内容与实际正文的区分。 |
 | 调用、权限与证据 | [stages.py](tools/stages.py)按直接父批准解锁 P5；[artifacts.py](tools/artifacts.py)限制旧阶段写范围；[receipts.py](tools/receipts.py)按旧结论与依赖收集证据。 | P2/P3/P4 的批准对象与写权限、P5 实际来源依赖、普通记录的集中收尾和按影响返回。 |
@@ -34,10 +34,10 @@
 
 后续代码工作须分别完成并验证：
 
-1. 对齐 `from` 解析、整体引用图、使用上下文、raw/effective 来源身份、诊断、独立视图及 starter，并明确旧语法的冻结解释边界。
+1. 接入 Template 已提供的当前字段、`from`、raw/effective 来源身份、诊断和独立视图接口；将外部检查调用改为 `--read-only --skip-hardware`，避免默认排版越过阶段写权限。冻结运行仍使用其登记的规则与执行器。
 2. 解除七字段计划和直接父表的耦合，支持有限完整集合与正式记录；实现数量、文件和链接等可检查项。独特设计价值、局部差异是否闭合仍由人工审阅。
 3. 对接阶段批准对象和写权限，包括 P1 的执行单元最小登记、实际内容依赖、P5 新事实的目录收尾及定点返回，保持 Worker/Reviewer 分离、有效全文审阅和受限写入。
 4. 按实际定义、使用者及共享 Contract 处理合入、修改影响与复核；保留 raw、历史批准和原预算。普通记录增补不要求全部重开，重大选择变化也不能降格为局部编辑。
 5. 对齐冻结能力、旧 run 可恢复性、语义采用和发布回执，再用结构正反例、旧运行回归及独立语义案例验证。
 
-本页不预设新的命令、JSON 字段、状态或自动迁移策略。上述对接完成前，现有 checker 通过不能证明新方法已可执行。
+本页记录已有 Template 接口及 Extract 待对接事实，不改变 Runner 命令、JSON 字段、状态或冻结规则。上述对接完成前，Template checker 通过不能证明提取方法已可端到端执行。

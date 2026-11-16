@@ -25,17 +25,17 @@ Supervisor 在授权目标内决定来源、输出、预算、恢复和必要维
 
 | 段 | schema 内容 | 方法与规范 |
 | --- | --- | --- |
-| 1 | meta_data | [P1 元数据](schema_extract/phases/01_contract.md#第-1-段元数据) · [公共约定](schema_docs/0.common.md) |
-| 2 | contract.algorithm_requirement | [P1 算法要求](schema_extract/phases/01_contract.md#第-2-段算法要求) · [算法规范](schema_docs/1.contract.algorithm_requirement.md) |
-| 3 | contract.hardware_specification | [P1 执行单元与硬件占位](schema_extract/phases/01_contract.md#第-3-段硬件占位)；执行单元按已有字段登记，其余保留 starter 占位 |
-| 4 | design.math_reshape | [P3 数学改写](schema_extract/phases/03_root.md#第-4-段数学改写) · [数学规范](schema_docs/3.design.math_reshape.md) |
-| 5 | design.work_schedule | [P3 工作调度](schema_extract/phases/03_root.md#第-5-段工作调度) · [调度规范](schema_docs/4.design.work_schedule.md) |
-| 6 | design.tile_pipeline | [P3 微流水线](schema_extract/phases/03_root.md#第-6-段微流水线) · [流水线规范](schema_docs/5.design.tile_pipeline.md) |
-| 7 | realization | [P3 实现交接](schema_extract/phases/03_root.md#第-7-段实现交接) · [实现交接规范](schema_docs/6.realization.md) |
+| 1 | META_DATA | [P1 元数据](schema_extract/phases/01_contract.md#第-1-段元数据) · [公共约定](schema_docs/0.common.md) |
+| 2 | CONTRACT.Algorithm_requirement | [P1 算法要求](schema_extract/phases/01_contract.md#第-2-段算法要求) · [算法规范](schema_docs/1.contract.algorithm_requirement.md) |
+| 3 | CONTRACT.Hardware_specification | [P1 执行单元与硬件占位](schema_extract/phases/01_contract.md#第-3-段硬件占位)；执行单元按已有字段登记，其余保留 starter 占位 |
+| 4 | DESIGN.Math_reshape | [P3 数学改写](schema_extract/phases/03_root.md#第-4-段数学改写) · [数学规范](schema_docs/3.design.math_reshape.md) |
+| 5 | DESIGN.Work_schedule | [P3 工作调度](schema_extract/phases/03_root.md#第-5-段工作调度) · [调度规范](schema_docs/4.design.work_schedule.md) |
+| 6 | DESIGN.Tile_pipeline | [P3 微流水线](schema_extract/phases/03_root.md#第-6-段微流水线) · [流水线规范](schema_docs/5.design.tile_pipeline.md) |
+| 7 | REALIZATION | [P3 实现交接](schema_extract/phases/03_root.md#第-7-段实现交接) · [实现交接规范](schema_docs/6.realization.md) |
 
 每段保留影响计算、写入边界、调度与同步的事实，已有定义直接引用。P2 先建立机制概览；写正文时围绕当前问题深入源码，能写清本段就保存，再按具体疑点回查。复杂段可跨函数、跨层、分轮完成。前提有误时修正唯一定义并复核真实使用者，返回分工见 [REVIEW](schema_extract/REVIEW.md#发现问题与批准)。
 
-写作和审阅依据本任务适用规则，按已有字段与合法扩展表达；规范不适配时提供具体条款、反例和影响，由 Supervisor 处理。规则一致性的判断见 [REVIEW.md](schema_extract/REVIEW.md)，旧稿和检查器接受不能替代依据。
+写作和审阅依据本任务适用规则，按已有字段与合法扩展表达。填写后通过[统一检查入口](schema_template/README.md#4-检查与处理反馈)取得可确定写法的规范化反馈，精简超长正文并处理需判断的问题；当前提取调用保留只读边界。规范不适配时提供具体条款、反例和影响，由 Supervisor 处理。规则一致性的判断见 [REVIEW.md](schema_extract/REVIEW.md)，旧稿和检查器接受不能替代依据。
 
 reviewer 独立阅读本阶段已完成的有效全文，包括共享和未改内容，再核对固定源码。同一当前来源定义可读一次，每个使用节点的范围、绑定、数值、接口、寿命与 Realization 仍全覆盖。P4 读完整 root，P5 审本节点完整设计，P6 审全部最终设计及记录；历史批准和交接不补足正文。单文件[阅读视图](schema_docs/0.common.md#单文件阅读视图)与 raw 创作目录分开，工具操作见[手册](schema_extract/README.md#单文件阅读视图)。
 
@@ -43,7 +43,7 @@ reviewer 独立阅读本阶段已完成的有效全文，包括共享和未改�
 
 分别核实输入构造、reference、baseline 与固定实现，来源固定到实际字节；设计证据保留文件、行号和短引文。已有 schema 只辅助阅读，事实回查源码，表达依据本任务规则。[来源与证据](schema_docs/0.common.md#来源与证据) · [三种冻结身份](schema_extract/README.md#输入与输出)
 
-固定实现提取不要求 GPU 正确性验收或实测，也不把它们列为待办；已有测试和测量只按实际覆盖范围保留。硬件区按 [P1](schema_extract/phases/01_contract.md#第-3-段硬件占位)仅登记给定材料明确的执行单元，其余保持占位，不开展硬件资料、能力或容量调查。适用检查沿用 `--skip-hardware` 政策，有据登记由 worker/reviewer 对照来源核实。检查只证明所用工具实际覆盖的结构与关联门禁通过，源码语义仍须独立审阅。这些豁免不改变普通设计、实现或优化任务自己的验收要求。[检查边界](schema_template/README.md#校验边界)
+固定实现提取不要求 GPU 正确性验收或实测，也不把它们列为待办；已有测试和测量只按实际覆盖范围保留。硬件区按 [P1](schema_extract/phases/01_contract.md#第-3-段硬件占位)仅登记给定材料明确的执行单元，其余保持占位，不开展硬件资料、能力或容量调查。适用检查显式使用 `--read-only --skip-hardware`，有据登记由 worker/reviewer 对照来源核实。检查只证明所用工具实际覆盖的结构与关联门禁通过，源码语义仍须独立审阅。这些豁免不改变普通设计、实现或优化任务自己的验收要求。[检查边界](schema_template/README.md#校验边界)
 
 缺项是否阻塞，取决于当前阶段是否必须猜测计算、数值或设计。仅缺外部验收器定义而当前提取可确定时，在对应 tolerance 保留[来源记录](schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)，说明限制后可继续；关键事实不明则阻塞具体范围，已知事实写错或遗漏则退修。可用材料仍须读取，不无限追索未提供的外部验收器；P6 复核缺口未被用作保证。具体判定见[来源缺项](schema_extract/REVIEW.md#来源缺项)。
 

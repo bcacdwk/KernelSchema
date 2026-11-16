@@ -1,106 +1,254 @@
-"""Work scheduling: launch dependencies, shared workers and data handoffs."""
+"""Submission dependencies, shared-worker constraints and explicit handoffs."""
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
+import re
 from typing import Any
 
-from .common import CheckContext, as_list, indexed_values
-from .values import literal_integer
+from ..diagnostics import field_path
+from ..pipeline_syntax import EventRef, Operand, literal_integer, parse_action, parse_event, parse_pipe
+from .common import CheckContext, as_list, concrete_conflict, indexed_values, role_member_range
+
+
+def consumer_waits(handoff: dict) -> dict[str, tuple[str, ...] | None]:
+    """Per-consumer wait locations; None retains that consumer's default entry.
+
+    One consumer's wait_at alias never removes another consumer's default wait.
+    Raw references are retained here; validation expands each alias separately.
+    """
+    grouped = {consumer: [] for consumer in handoff["consumer"]}
+    for reference in as_list(handoff.get("wait_at", [])):
+        consumer = reference.split(".", 1)[0]
+        if consumer in grouped:
+            grouped[consumer].append(reference)
+    return {consumer: tuple(references) if references else None for consumer, references in grouped.items()}
+
+
+def _substitute(event: EventRef, formals: tuple[str, ...], arguments: tuple[str, ...], path: str) -> EventRef:
+    replacements = dict(zip(formals, arguments))
+
+    def expression(value):
+        if value is None or not replacements:
+            return value
+
+        def replacement(match):
+            value = replacements[match[0]]
+            return value if re.fullmatch(r"[a-z_][a-z0-9_]*|[+-]?\d+", value) else "(" + value + ")"
+
+        pattern = r"\b(?:" + "|".join(map(re.escape, replacements)) + r")\b"
+        return re.sub(pattern, replacement, value)
+
+    operands = tuple(Operand(operand.name, tuple(expression(arg) for arg in operand.args))
+                     for operand in event.action.operands)
+    action = replace(event.action, path=path, operands=operands)
+    return replace(event, path=path, member=expression(event.member), action=action)
+
+
+def _work_count(definition: dict) -> int | None:
+    total = 1
+    for part in definition["Decomposition"]["Partition"].values():
+        size, tile = literal_integer(part["size"]), literal_integer(part["tile"])
+        if size is None or tile is None:
+            return None
+        total *= (size + tile - 1) // tile
+    return total
+
+
+def _preassigned_range(definition: dict) -> range | None:
+    pre = definition["Schedule"]["Worker_assignment"].get("Preassigned")
+    if pre is None:
+        return None
+    start = literal_integer(pre["start"])
+    if start is None:
+        return None
+    if "count" in pre:
+        count = literal_integer(pre["count"])
+        return range(start, start + count) if count is not None else None
+    stride, total = literal_integer(pre["stride"]), _work_count(definition)
+    return range(start, total, stride) if stride is not None and total is not None else None
+
+
+def _preassignment_conflict(first, second):
+    left, right = _preassigned_range(first), _preassigned_range(second)
+    if left is not None and right is not None:
+        return left != right
+    a = first["Schedule"]["Worker_assignment"].get("Preassigned")
+    b = second["Schedule"]["Worker_assignment"].get("Preassigned")
+    # Different count/stride forms can describe the same sequence. Unknown
+    # expressions, dynamic assignment and body-defined pairing remain for review.
+    return a is not None and b is not None and set(a) == set(b) and concrete_conflict(a, b)
+
+
+def _coordinates(definition):
+    return {name: {"size": part["size"], "tile": part["tile"]}
+            for name, part in definition["Decomposition"]["Partition"].items()}
 
 
 def validate(check: CheckContext, plan: dict[str, Any], path: str) -> None:
-    work = plan["design"]["work_schedule"]
-    pipe = plan["design"]["tile_pipeline"]["phase"]
-    launches = work["flow"]["launch"]
-    owner = {p: i for i, launch in enumerate(launches) for p in launch["phase"]}
-    graph = defaultdict(list)
+    work = plan["DESIGN"]["Work_schedule"]
+    pipe = plan["DESIGN"]["Tile_pipeline"]["Step"]
+    launches = work["Flow"]["Launch"]
+    owner = {step: i for i, launch in enumerate(launches) for step in launch["step"]}
+    aliases, families, members = {}, {}, {}
+    for step, definition in pipe.items():
+        aliases[step], families[step], members[step] = {}, {}, {}
+        for key, events in definition.get("Event", {}).items():
+            location = field_path(f"{path}.DESIGN.Tile_pipeline.Step.{step}.Event", key)
+            formal = parse_action("compute:" + key, path=location).operands[0]
+            aliases[step][formal.name] = (formal.args, tuple(parse_event(event, path=f"{location}[{i}]")
+                                                            for i, event in enumerate(events)))
+        for role, body in definition["Role"].items():
+            location = f"{path}.DESIGN.Tile_pipeline.Step.{step}.Role.{role}.Pipe"
+            families[step][role] = {declaration.action.signature
+                                   for declaration in parse_pipe(body["Pipe"], path=location).actions()}
+            members[step][role] = role_member_range(body, work["Step"][step]["Mapping"])
 
-    def event(ref: str, p: str, participants: set[str] | None = None) -> tuple[str, str] | None:
-        phase, milestone = ref.split(".", 1)
-        if not check.require(phase in pipe, p, f"unknown event phase {phase}"):
+    def event(reference, location, participants=None):
+        step, name = reference.split(".", 1)
+        if not check.require(step in pipe and step in owner, location,
+                             f"event source step {step} is not a submitted step"):
             return None
         if participants is not None:
-            check.require(phase in participants, p, "event belongs to the wrong handoff participant")
-        if milestone not in {"kernel_done", "launch_ready"}:
-            identity = milestone.split("(", 1)[0]
-            check.require(any(m.split("(", 1)[0] == identity for m in pipe[phase].get("milestone", {})),
-                         p, f"undefined milestone {ref}")
-        return phase, milestone
+            check.require(step in participants, location, "event belongs to the wrong Handoff participant")
+        call = parse_action("compute:" + name, path=location).operands[0]
+        if call.name in {"kernel_done", "launch_ready"}:
+            if not check.require(not call.args, location, "built-in launch events have no indices"):
+                return None
+            return step, call.name, None
+        if not check.require(call.name in aliases[step], location, f"undefined Event alias {step}.{call.name}"):
+            return None
+        formals, definitions = aliases[step][call.name]
+        if not check.require(len(formals) == len(call.args), location,
+                             f"Event alias {step}.{call.name} expects {len(formals)} arguments, got {len(call.args)}"):
+            return None
+        expanded = tuple(_substitute(definition, formals, call.args, location) for definition in definitions)
+        count = literal_integer(work["Step"][step]["Mapping"]["Worker"]["unit_count"])
+        for occurrence in expanded:
+            role = occurrence.role
+            if not check.require(role in families[step], location, f"Event alias names an unknown role {role}"):
+                continue
+            check.require(occurrence.action.signature in families[step][role], location,
+                          f"Event alias does not match a Pipe action signature in {step}.{role}")
+            selection = members[step][role]
+            if selection is not None:
+                check.require(bool(selection), location, "Event alias selects a role with no worker members")
+            member = literal_integer(occurrence.member)
+            if member is not None:
+                check.require(member >= 0 and (count is None or member < count), location,
+                              "Event member is outside Worker.unit_count")
+                if selection is not None:
+                    check.require(member in selection, location,
+                                  f"role {role} has no worker member {member}")
+        return step, call.name, expanded
 
+    graph = defaultdict(list)
     for i, launch in enumerate(launches):
-        p = f"{path}.design.work_schedule.flow.launch[{i}]"
-        for ref, rp in indexed_values(launch.get("start_after", []), p + ".start_after"):
-            result = event(ref, rp)
-            if result:
-                phase, milestone = result
-                check.require(owner[phase] != i, rp, "a launch cannot wait for its own event before starting")
-                if milestone == "kernel_done":
-                    graph[i].append(owner[phase])
-                if milestone == "launch_ready":
-                    check.require("protocol" in launch, p + ".protocol", "launch_ready requires an explicit launch protocol")
-        if len(launch["phase"]) > 1 and launch["order"] != "concurrent":
-            first = work["phase"][launch["phase"][0]]
-            resources = set()
-            for pid in launch["phase"]:
-                current = work["phase"][pid]
-                for field in ("worker", "worker_count", "placement"):
-                    a, b = first["mapping"].get(field), current["mapping"].get(field)
-                    check.require(not concrete_conflict(a, b),
-                                 p, "sequential phases have incompatible worker mappings")
-                for name in pipe[pid].get("resource", {}):
-                    check.require(name not in resources, p, f"shared-worker resource {name} is defined more than once")
-                    resources.add(name)
+        location = f"{path}.DESIGN.Work_schedule.Flow.Launch[{i}]"
+        for reference, rp in indexed_values(launch.get("start_after", []), location + ".start_after"):
+            resolved = event(reference, rp)
+            if resolved is not None:
+                source, _, _ = resolved
+                if check.require(owner[source] != i, rp, "a launch cannot wait for an event from its own submission before starting"):
+                    # All three event forms originate in this source submission;
+                    # renaming the event cannot remove the launch prerequisite.
+                    graph[i].append(owner[source])
+        if len(launch["step"]) > 1 and launch["order"] != "concurrent":
+            first = work["Step"][launch["step"][0]]
+            storages = set()
+            for step in launch["step"]:
+                current = work["Step"][step]
+                for field in ("Worker", "Worker_count", "Placement"):
+                    a, b = first["Mapping"].get(field), current["Mapping"].get(field)
+                    check.require(not concrete_conflict(a, b), location,
+                                  "sequential steps have incompatible shared-worker mappings")
+                for name in pipe[step].get("Storage", {}):
+                    check.require(name not in storages, f"{path}.DESIGN.Tile_pipeline.Step.{step}.Storage.{name}",
+                                  f"shared-worker Storage {name} must be declared once")
+                    storages.add(name)
                 if launch["order"] == "per_worktile":
-                    pairs = [(first["decomposition"]["partition"], current["decomposition"]["partition"]),
-                             (first["schedule"].get("worktile_order"), current["schedule"].get("worktile_order")),
-                             (first["schedule"]["worker_assignment"].get("preassigned"),
-                              current["schedule"]["worker_assignment"].get("preassigned"))]
-                    for a, b in pairs:
-                        check.require(not concrete_conflict(a, b), p, "per_worktile requires matching coordinates, order and preassignment")
-    check.acyclic(graph, path + ".design.work_schedule.flow.launch")
+                    check.require(not concrete_conflict(_coordinates(first), _coordinates(current)), location,
+                                  "per_worktile requires matching work coordinates")
+                    check.require(not concrete_conflict(first["Schedule"].get("Worktile_order"),
+                                                        current["Schedule"].get("Worktile_order")), location,
+                                  "per_worktile requires matching logical work order")
+                    check.require(not _preassignment_conflict(first, current), location,
+                                  "per_worktile requires matching preassigned work sequences")
+    check.acyclic(graph, path + ".DESIGN.Work_schedule.Flow.Launch",
+                  {i: f"{path}.DESIGN.Work_schedule.Flow.Launch[{i}].start_after" for i in graph})
 
-    for name, handoff in work["flow"].get("handoff", {}).items():
-        p = path + ".design.work_schedule.flow.handoff." + name
+    for name, handoff in work["Flow"].get("Handoff", {}).items():
+        location = field_path(path + ".DESIGN.Work_schedule.Flow.Handoff", name)
         producer, consumers = handoff["producer"], handoff["consumer"]
-        for ref, rp in indexed_values(handoff.get("ready", []), p + ".ready"):
-            event(ref, rp, {producer})
-        for ref, rp in indexed_values(handoff.get("wait_at", []), p + ".wait_at"):
-            event(ref, rp, set(consumers))
+        ready = []
+        for reference, rp in indexed_values(handoff.get("ready", []), location + ".ready"):
+            resolved = event(reference, rp, {producer})
+            if resolved is not None:
+                ready.append(resolved)
+        for reference, rp in indexed_values(handoff.get("wait_at", []), location + ".wait_at"):
+            resolved = event(reference, rp, set(consumers))
+            if resolved is None:
+                continue
+            _, _, occurrences = resolved
+            if not check.require(occurrences is not None, rp, "wait_at must name a local Event alias, not a built-in launch event"):
+                continue
+            for occurrence in occurrences:
+                verb = occurrence.action.verb
+                valid = ((occurrence.time == "done" and verb in {"await", "acquire"}) or
+                         (occurrence.time == "issue" and verb in {"compute", "matmul", "load", "store"}))
+                check.require(valid, rp, "wait_at targets a waiting action's done or a consuming action's issue")
+
+        for consumer, waits in consumer_waits(handoff).items():
+            submission = owner[consumer]
+            launch = launches[submission]
+            if waits is None and submission == owner[producer] and launch.get("order") in {"per_worktile", "per_worker", "all"}:
+                nonempty = _work_count(work["Step"][consumer])
+                if nonempty is not None and nonempty > 0:
+                    check.require(launch["step"].index(producer) < launch["step"].index(consumer), location,
+                                  f"default entry wait for consumer {consumer} cannot depend on a later sequential step")
+            if submission == owner[producer] and any(kind == "kernel_done" for _, kind, _ in ready):
+                nonempty = _work_count(work["Step"][consumer])
+                if waits is not None or nonempty is not None and nonempty > 0:
+                    check.require(False, location + ".ready",
+                                  f"consumer {consumer} cannot wait for completion of its own kernel")
+
         if handoff["storage"] != "global":
-            _, _, rp, _, rn = handoff["storage"].split(".")
-            check.require(rp in pipe and rn in pipe.get(rp, {}).get("resource", {}), p + ".storage", "undefined resource")
-            participants = [producer, *consumers, rp]
-            if all(x in owner for x in participants):
-                submit = owner[producer]
-                check.require(all(owner[x] == submit for x in participants) and launches[submit].get("order") != "concurrent",
-                             p + ".storage", "local storage requires the same worker instance within one launch")
-    for pid, phase in work["phase"].items():
-        p = path + ".design.work_schedule.phase." + pid
-        for dim, part in phase["decomposition"]["partition"].items():
+            _, _, storage_step, _, storage_name = handoff["storage"].split(".")
+            exists = storage_step in pipe and storage_name in pipe.get(storage_step, {}).get("Storage", {})
+            if check.require(exists, location + ".storage", "undefined Tile_pipeline Storage"):
+                participants = [producer, *consumers, storage_step]
+                check.require(all(owner[step] == owner[producer] for step in participants), location + ".storage",
+                              "cross-kernel handoff cannot preserve a worker-local Storage identity")
+                # Concurrent workers keep distinct identities. Whether a declared
+                # region is accessible across them requires the actual storage,
+                # visibility and lifetime guarantees; concurrency alone is not a
+                # blanket rejection or proof of accessibility.
+
+    for step, definition in work["Step"].items():
+        location = f"{path}.DESIGN.Work_schedule.Step.{step}"
+        partitions = definition["Decomposition"]["Partition"]
+        for name, part in partitions.items():
             if "range" in part:
-                check.interval(part["range"], f"{p}.decomposition.partition.{dim}.range")
-        for i, member in enumerate(phase["mapping"].get("member", [])):
-            for dimension, region in member.items():
-                check.interval(region, f"{p}.mapping.member[{i}].{dimension}")
-
-
-def concrete_conflict(a: Any, b: Any, field: str | None = None) -> bool:
-    """Detect definite disagreements, leaving symbolic equivalence to review."""
-    if a == b:
-        return False
-    if a is None or b is None:
-        return True
-    if field == "by":
-        return as_list(a) != as_list(b)
-    if field in {"unit", "direction"}:
-        return a != b
-    if isinstance(a, dict) and isinstance(b, dict):
-        return set(a) != set(b) or any(concrete_conflict(a[k], b[k], k) for k in a)
-    if isinstance(a, list) and isinstance(b, list):
-        return len(a) != len(b) or any(concrete_conflict(x, y, field) for x, y in zip(a, b))
-    left, right = literal_integer(a), literal_integer(b)
-    if left is not None and right is not None:
-        return left != right
-    if isinstance(a, str) or isinstance(b, str):
-        return False
-    return a != b
+                rp = field_path(location + ".Decomposition.Partition", name) + ".range"
+                check.interval(part["range"], rp)
+                size = literal_integer(part["size"])
+                lo, hi = map(literal_integer, part["range"])
+                if size is not None:
+                    check.require((lo is None or size >= lo) and (hi is None or size <= hi), rp,
+                                  "literal Partition.size lies outside its declared range")
+        for i, member in enumerate(definition["Mapping"].get("Member", [])):
+            for dimension, bounds in member.items():
+                check.interval(bounds, field_path(f"{location}.Mapping.Member[{i}]", dimension))
+        assignment = definition["Schedule"]["Worker_assignment"]
+        pre = assignment.get("Preassigned")
+        if pre is not None and "count" in pre:
+            start, count, total = literal_integer(pre["start"]), literal_integer(pre["count"]), _work_count(definition)
+            if start is not None and count is not None and total is not None and count > 0:
+                check.require(start + count <= total, location + ".Schedule.Worker_assignment.Preassigned",
+                              "the explicit preassigned sequence exceeds the worktile range")
+        reduction = definition["Decomposition"]["Target"].get("Tile_reduction")
+        if reduction is not None:
+            dimensions = {name for definition in work["Step"].values()
+                          for name in definition["Decomposition"]["Partition"]}
+            check.require(reduction["dimension"] in dimensions, location + ".Decomposition.Target.Tile_reduction.dimension",
+                          "Tile_reduction must name a dimension partitioned by a producing step")

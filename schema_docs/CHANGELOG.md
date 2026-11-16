@@ -1,5 +1,28 @@
 # schema_docs 修改记录
 
+## 2026-11-16
+
+### 全任务自动规范化
+
+- `check_yaml` 先统一可确定的字段/标识大小写、定义与消费者引用、必要引号、普通说明末句号和布局，再执行字段、预算与关联检查；warning 汇总实际修改，超长内容仍需作者精简。
+- 默认整任务同步，`--all` 只扩展图范围；只读预览明确标记候选，库检查保持只读。写回比较原始摘要、保留权限，无变化不重写，最终诊断与 PNG 使用重新读取的来源。
+- 作者入口收拢为填写设计后运行检查；维护测试覆盖跨文件 `from`、单 Step/Role 的 `MAIN`、混合缺引号、精确值和发布失败。字段使用 `Architecture`、`Mapping.Member`、三处 `Thesis`、`Arithmetic.Approx / Accumulate`、`Ledger.Baseline / Gain / Cost`，其余已定小写属性保持原样。
+- Storage entry 自动使用固定两行：名字及 meaning/depth/location/shape 在首行，dtype/total_size/member/view 在第二行；只读与默认入口共用候选，正文、类型和共享关系保真，DOC5 示例同步。
+
+### 文本形式与调度紧凑排版
+
+- 补齐自取单名、类型和硬件身份、结构化数值、Stack、retention、内部引用及材料摘要的字段预算，保留既定 `300/2`；数值、引用和仓库相对路径使用明确形式，合法 Unicode 数学与真实名称保留。
+- Mapping 的 Worker/Placement、Worktile_order、Preassigned 和 Refill 使用紧凑记录；exit 列表按已定短列表条件行内，其余展开，保持类型、顺序、值与必要引号。
+- 文件入口核对可确定的本地仓库修订路径，纯快照 API 保持零 I/O。DOC0–6 与工具说明同步，并补充合成回归。
+
+### Template 当前格式与统一工具入口
+
+- DOC0–6、starter 和工具统一规范字段拼写与具名标识；落实同任务整区 `from`、实际来源链和使用节点绑定，保留精确 raw/effective 及只读导出接口。
+- 新增按字段的文本预算、必要引号与源样式诊断、保真幂等排版和 dispatch 最小检查。`check_yaml.py` 默认检查全任务并排版所选文件，提供 `--all`、`--read-only`、`--graph png/check` 及专用只读视图模式。
+- 默认格式清理会删除可准确识别的普通说明末句号并给出修正 warning，保留其余字符及换行；不确定文本和不安全共享用途保留，只读入口不写回，版本不递增。
+- 有限图采用有序 `for/if`、三种动作模式与显式 issue/done 等待；PNG 记录最终来源与样本，展开、来源或发布失败时保留旧图。维护测试使用当前格式的合成任务。
+- `schema_template/examples/` 的 YAML、dispatch、README 与 PNG 留待下一轮更新；wiki、Extract 脚本和运行状态未改。Extract 的新只读检查调用及其余待对接职责见执行器对齐说明。
+
 ## 2026-11-15
 
 ### Design 与 Extract 的方案推进
@@ -183,3 +206,70 @@
 - 从正式规范移除 `while` 的定义、示例及专属作用域／验证条款；结构轮廓、正文与封闭取值统一为有序列表加 `for`、`if`。
 - 增加兜底提示：未来 Agent 如确需 while，须先声明具体需求并提出 issue，讨论是否纳入；在此之前只使用 for 和 if。
 - 同步讨论页的当前控制规则，旧 `pipe-control-v0.2` 试写与检查结果标为历史记录；while 的研究与证明单独保留，不作为另一套可用语法。本次不迁移旧检查器、算子或 Kernel 源码。
+
+# 字符限制预设（prompt的草稿初版）：
+
+我们对于整个schema的文本进行如下规定和约束：
+
+所有的文本字符段（字符串属性），yaml的所有内容都不使用单/双引号包裹（不出现），报warning明确建议去掉；除非是文字中的引号。句尾不需要句号/点号。
+文本段之外，整个schema不使用任何单双引号，全部。直接写字段内容即可。
+不得通过创造非传统、不常见的缩写、概念和符号来躲避字数限制。
+应当主动控制文本量。
+
+文本长度，超长度限制直接报错并指出此处上限，报error要求精简，删除重复/已有/赘余表达和词语，只留关键内容/补充信息。
+
+所有的“describe”不能超过150个字符（注意都是字符更准确，而不是Word）都只能有1行
+所有的“name”不能超过50个字符，在一行内
+所有的“math”不能超过1000个字符，不能超过10行，说清楚凝练简洁的核心数学公式，而不是写文字语言描述
+所有的“meaning”不得超过50个字符，在一行内
+所有的“thesis”不得超过300个字符，不能超过2行，要强调的是关键的设计考虑，而不是复述/概括已有内容
+
+对于提行：所有的entry都应当在一行内。对于entry的定义，它的典型特点是：这并不是“我们schema定义的字段”，而是“填充命名得到的”，比如说，constant、input、output、symbol里面的自己出现的条目，以及，类似于flow里面的launch、handoff的条目，worktile里面的invariant、iteration、single_tile、tile_reduction里面的每个条目等，或者pipeline里面的resource等等。
+我觉得可以认为但凡是在已有的规定字段中新产生各种新的子条目，那么每个条目都应当是一行，而不是多行展开。
+而我们的schema里面的定义的字段，除了像dtype/shape这种显然在行内的，比如virtual_isa、prologue、steady这种就应该单独提行而不是放在一起。这个地方对于提行与否，我们完全可以逐个的来讨论，你如果有任何拿不准的，问我即可，我们确定一轮应该都敲定下来哪些必须要提行/单独一行/和别人在一行内。
+如果，出现了我们的字段只有一个条目的情况，比如说，现在的reuse（也就是release）只有一个条目，那就应该把那个条目放到字段的同一行，而不是提行。但是如果这个字段下面有我们已经定义的字段，比如说pipe就应该单独提行，而不能把pipe和别的放在一起。换句话说，我们能确定出来哪些是独立成行的，哪些不是。
+
+我在想或许这件事情，完全不需要去检查，而是通过类似于那种代码风格规范是不是就能一键转换？也省得和Agent说，我们加上这个换行转换就好，相当于有一个专门的那种检查小脚本，只看排版格式并且自动处理。
+（文字长度这种都算在“检查”里面）
+
+例外是，对于step的名字和role的名字（比如MAIN），必须使用全大写。metadata、contract、design、realization，固定使用全大写。
+所有的字段中，schema已经给出的字段（注意是字段，而不是动作项这种，也不是meaning/value这种属性项，这些保留小写），统一用首字母大写+小写（这个是可以直接检查的，我们的字段都是固定的）。任何自己定义的字段、条目、名称都约定必须使用全小写。方便看出来类型（注意，value、字符串这些不受约束，就是自己起的字段/条目应该是小写的，而填写的东西不需要约定）
+（这个或许也可以一键转换，而避免让worker/reviewer费心关注）
+
+而且现在schema docs自己的例子就应当遵循这些格式要求
+
+0）metadata里面：
+dispatch.when不得超过 500个字符，不得超过5行，建议越短越明确的表达出和其他的独特性最好
+
+1）contract.algorithm里面：
+constant/input/output/symbols里面的每个entry（变量）必须是1行
+range、default必要时再写，不传达信息时直接省去。不得是字符串，现在字符串明显让Agent随意发挥
+tolerance和gap：每个output的对象不能超过100个字符，不能超过1行
+
+2）contract.hardware里面：
+device、arch不能超过50个字符，不超过1行
+stack（language..三个）、wiki（hardware/programming的4个，microbench，sota的两个，profile）里面的每个子项，必须是1行。就比如说，stack.lang是一行，wiki.programming.virtual_isa正好一行，不多不少。
+execution和feature的每个子项必须是一行，不超过100字符，不超过1行
+
+3）design.reshape里面：
+symbols里面的每个entry必须是一行
+arithmetic的approx和accumulate这两个，都只能是一行，不超过150字符
+ledger的baseline，gain，cost，这三个。每个最多1行，每个最多150字符，可以为空
+unknown:<reason></reason>最多1行，150字符
+
+4）design.schedule里面：
+decomposition、schedule、mapping，里面的strategy，不能超过150个字符，不超过1行，不要在里面把内容叙述一遍，而是只点出重点要点和补充的信息
+refill.<mechanism></mechanism> 不能超过150个字符，不超过1行
+
+5）design.pipeline里面：
+using_verb的每个entry的describe不超过150字符，不超过1行
+这里我看了一下似乎没有别的地方有别的潜在字符串需要管理了？
+
+6）realization里面：
+item、choice、reason应当都是不得超过300个字符，不能超过2行，要强调的是真正核心不可替代的东西
+`realization.require` 只固定必要兼容条件；有具体成本理由的选择放 `prefer`，其余删除
+`feedback.choice` 不能超过150个字符，不超过1行
+
+我们需要把这些都收束起来进行约定。我们不需要显式的告诉Agent让他来做这个事情，我之后会在prompt里面提醒，并且会在检测脚本中加入文本限制，他撞墙了自己删即可。不用体现在docs里面。
+
+对于其他类型的，比如列表，定位符，等等，不是字符串属性的，我们就按照原来的来做。

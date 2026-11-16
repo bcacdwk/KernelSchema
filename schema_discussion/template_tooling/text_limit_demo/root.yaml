@@ -1,0 +1,475 @@
+META_DATA:
+  name: Synthetic causal attention text budget layout demo
+  describe: Synthetic attention layout sample with set worker structure, explicit data handoffs and full text budgets; all testing.invalid references are fixtures
+  source: bcacdwk/KernelSchema@31ee257327620ee67e7c280019564a9033daa75d:schema_template/examples/fa4_prefill/root.yaml
+  version: 1
+  Dispatch:
+    id: root
+    when: |-
+      This fixed layout sample covers one sequence with 1 <= query_count <= 128 and key_count >= max(2,query_count)
+      The key range is split into two nonempty parts, each traversed with the same 32 key local block size
+      The first launch reserves one full three CTA cluster for its producer and paired attention worker
+      Inputs, shared scratch and per invocation ready flags live through the final merge completion
+      All testing.invalid sources are synthetic fixtures; no numerical validation or speedup is claimed
+CONTRACT:
+  Algorithm_requirement:
+    Constant:
+      head_dim: {value: 64, meaning: 'Channels shared by all query, key and value inputs'}
+      minimum_finite_input_value_allowed_for_query_key_and_value_tensor_elements_in_the_synthetic_attention_contract_before_scaling_or_matrix_multiplication: {value: -8, meaning: Lower numeric operand bound prior to score scaling}
+      maximum_finite_input_value_allowed_for_query_key_and_value_tensor_elements_in_the_synthetic_attention_contract_before_scaling_or_matrix_multiplication: {value: 8, meaning: Upper numeric operand bound prior to score scaling}
+      default_exact_attention_score_scale_applied_to_query_key_dot_products_before_the_causal_mask_and_row_normalization_in_the_synthetic_attention_contract: {value: 0.125, meaning: Default score scale for the selected channel count}
+      default_exact_zero_bias_value_used_to_fill_every_query_position_when_the_optional_bias_argument_is_omitted_from_the_synthetic_attention_reference_call: {value: 0, meaning: Default bias value used for every active query row}
+    Input:
+      q: {meaning: Query vectors supplied in the unmodified row order, shape: [{query: query_count}, {channel: head_dim}], dtype: bf16, nullable: false, range: [minimum_finite_input_value_allowed_for_query_key_and_value_tensor_elements_in_the_synthetic_attention_contract_before_scaling_or_matrix_multiplication, maximum_finite_input_value_allowed_for_query_key_and_value_tensor_elements_in_the_synthetic_attention_contract_before_scaling_or_matrix_multiplication]}
+      k: {meaning: Key vectors forming the masked causal score matrix, shape: [{key: key_count}, {channel: head_dim}], dtype: bf16, nullable: false, range: [，, maximum_finite_input_value_allowed_for_query_key_and_value_tensor_elements_in_the_synthetic_attention_contract_before_scaling_or_matrix_multiplication]}
+      v: {meaning: Value vectors combined by their normalized weights, shape: [{key: key_count}, {channel: head_dim}], dtype: bf16, nullable: false, range: [minimum_finite_input_value_allowed_for_query_key_and_value_tensor_elements_in_the_synthetic_attention_contract_before_scaling_or_matrix_multiplication, maximum_finite_input_value_allowed_for_query_key_and_value_tensor_elements_in_the_synthetic_attention_contract_before_scaling_or_matrix_multiplication]}
+      scale: {meaning: Score multiplier applied before each normalization, shape: [], dtype: fp32, nullable: false, range: '0 < scale <= 1 and abs(scale * sum_{d = 0}^{head_dim - 1} q[r,d] * k[j,d]) <= 80 for all integers r,j with 0 <= r < query_count and 0 <= j < key_count', default: default_exact_attention_score_scale_applied_to_query_key_dot_products_before_the_causal_mask_and_row_normalization_in_the_synthetic_attention_contract}
+      bias: {meaning: Optional row bias whose whole object may be absent, shape: [{query: query_count}], dtype: fp32, nullable: true, range: [minimum_finite_input_value_allowed_for_query_key_and_value_tensor_elements_in_the_synthetic_attention_contract_before_scaling_or_matrix_multiplication, maximum_finite_input_value_allowed_for_query_key_and_value_tensor_elements_in_the_synthetic_attention_contract_before_scaling_or_matrix_multiplication], default: default_exact_zero_bias_value_used_to_fill_every_query_position_when_the_optional_bias_argument_is_omitted_from_the_synthetic_attention_reference_call}
+    Output:
+      out: {meaning: Normalized attention values in the input row order, shape: [{query: query_count}, {channel: head_dim}], dtype: bf16, nullable: false}
+      row_bias: {meaning: Returned bias copy preserving whole object absence, shape: [{query: query_count}], dtype: fp32, nullable: true}
+    Compute:
+      - name: Causal attention and optional row bias propagation
+        math: |-
+          For integers r, j, d: 0 <= r < query_count, 0 <= j < key_count, 0 <= d < head_dim
+          query_count <= key_count; key_count >= 2; query_count and key_count are positive; all input tensors use their declared axis order
+          visible(r) = {j in integers | 0 <= j < key_count and j <= key_count - query_count + r}
+          score[r,j] = scale * sum_{d=0}^{head_dim-1} q[r,d] * k[j,d] for j in visible(r)
+          maximum[r] = max_{j in visible(r)} score[r,j]; exponential[r,j] = exp(score[r,j] - maximum[r])
+          total[r] = sum_{j in visible(r)} exponential[r,j]; probability[r,j] = exponential[r,j] / total[r]
+          out[r,d] = bf16(sum_{j in visible(r)} probability[r,j] * v[j,d])
+          None denotes whole-object absence; row_bias = None when bias is None
+          When bias is present, row_bias[r] = bias[r] for 0 <= r < query_count; bias does not alter the attention scores
+          FP32 and RNE apply to all arithmetic before the final BF16 output conversion; score[r,j] = -inf and probability[r,j] = 0 for j outside visible(r); omitted bias uses the scalar default
+        Symbol:
+          visible: {meaning: Causal key set for every valid attention query row, shape: not_applicable, dtype: not_applicable}
+          score: {meaning: Scaled query key products on visible key positions, shape: [{query: query_count}, {key: key_count}], dtype: fp32}
+          probability: {meaning: Normalized weights for each visible causal key set, shape: 'ref:score.shape', dtype: 'ref:score.dtype'}
+    Golden_reference:
+      source: testing.invalid/text-limit@layout-v1:reference/attention.py::reference
+      Tolerance:
+        out: atol=0.02, rtol=0.02; compare finite BF16 outputs after FP32 conversion over every query and channel
+        row_bias: These objects must be None together; otherwise require exact FP32 equality over every query position
+      gap: Synthetic reference assumes contiguous inputs; copy strided inputs before comparing identical values
+  Hardware_specification:
+    device: NVIDIA B200 SXM GPU with 180 GB local HBM3e memory
+    arch: NVIDIA Blackwell SM100 GPU instruction set version
+    Execution:
+      warp: A group of 32 SIMT threads in one CTA, sharing instruction issue while using the parent SM resources
+      CTA: A cooperative group of warps placed on one SM, sharing local shared memory and block synchronization
+      cluster: A group of CTAs co-scheduled on one GPU processing cluster, allowing communication among member CTAs
+    Feature:
+      SMEM: Shared storage is valid for its owning CTA lifetime; cluster peers can read it while that CTA exists
+      TMEM: Tensor memory stores tensor operation operands and results separately from the regular shared memory
+      register: Thread registers use this SM register file; aggregate allocation can limit the number of active CTAs
+      asynchronous_execution: Asynchronous copies and matrix operations require their defined completion and visibility guarantees
+    Stack:
+      Language: CUDA C++ 13.0
+      Template: CUTLASS 4.2.1
+      Toolchain: NVIDIA CUDA Toolkit 13.0 nvcc
+    Wiki:
+      Hardware: testing.invalid/text-limit@layout-v1:hardware/B200_SXM.md
+      Programming:
+        Language: testing.invalid/text-limit@layout-v1:programming/cuda_cpp.md
+        Template: testing.invalid/text-limit@layout-v1:programming/cutlass.md
+        Virtual_isa: testing.invalid/text-limit@layout-v1:programming/ptx.md
+        Machine_isa: testing.invalid/text-limit@layout-v1:programming/sm100.md
+      Microbench: testing.invalid/text-limit@layout-v1:microbench/index.md
+      Sota:
+        Kernel: testing.invalid/text-limit@layout-v1:examples/kernels.md
+        Schema: testing.invalid/text-limit@layout-v1:examples/schemas.md
+      Profile: testing.invalid/text-limit@layout-v1:profile/index.md
+DESIGN:
+  Math_reshape:
+    thesis: |-
+      Pack query rows once and split the causal key interval into two independent parts, retaining online maxima, sums and numerators for a final weighted merge
+      This keeps this score matrix private to every tile while exposing partial work, at the cost of saved states and a separate final result reduction
+    Rewrite:
+      - name: Prepare packed query rows and retain optional bias
+        math: |-
+          rows and parts are fixed by their Symbol values; bk and iteration_count are provided by Work_schedule for the chosen partition
+          For 0 <= r < rows and 0 <= d < head_dim, packed_query[r,d] = q[r,d] when r < query_count
+          For query_count <= r < rows, packed_query[r,d] = 0; padded rows never contribute to visible output
+          For 0 <= r < query_count, visible_end(r) = key_count - query_count + r + 1
+          part_start(s) = s * ceil_div(key_count,parts); part_end(s) = min(key_count,(s+1)*ceil_div(key_count,parts))
+          For s in {0,1}, key_index(s,i,j) = part_start(s) + i*bk + j with 0 <= j < bk
+          valid(r,s,i,j) = r < query_count and key_index(s,i,j) < min(part_end(s),visible_end(r))
+          key_block(s,i)[j,d] = k[key_index(s,i,j),d] when key_index(s,i,j) < part_end(s), otherwise 0
+          value_block(s,i)[j,d] = v[key_index(s,i,j),d] on the same valid key range, otherwise 0; s in {0,1}, i >= 0, 0 <= j < bk
+          row_bias follows Contract.Compute; bias_present = 0 if bias is None, otherwise 1; 0 <= d < head_dim; 0 <= s < parts; bk >= 1
+        Symbol:
+          rows: {meaning: Padded query row count in this fixed layout sample, value: 128}
+          parts: {meaning: Independent key partitions combined for each query, value: 2}
+          bk: {meaning: Key block size supplied by this work decomposition, binding: 'bind:DESIGN.Work_schedule::bk'}
+          iteration_count: {meaning: Number of key blocks visited in each key partition, binding: 'bind:DESIGN.Work_schedule::iteration_count'}
+          packed_query: {meaning: Padded query rows retained for this attention work, shape: [{query: 128}, {channel: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::q.dtype', retention: keep_value invocation}
+          key_block: {meaning: Active key block with zero values beyond its range, shape: [{key: 32}, {channel: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::k.dtype'}
+          value_block: {meaning: Current value block matching this active key block, shape: [{key: 32}, {channel: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::v.dtype'}
+        Ledger:
+          baseline: Read this original query for every independent key partition and form identical padded rows separately, without retaining a shared packed query tensor
+          gain: Query input bytes 2*query_count*head_dim*2 -> query_count*head_dim*2 bytes per invocation before partition consumers read the shared packed query data
+          cost: Packed query payload 0 -> rows*head_dim*2 bytes per invocation; the padded rows stay zero and require storage even though they produce no valid output
+      - name: Stream score tiles into stable partial row results
+        math: |-
+          For each key partition s and valid query r, initialize running_max(-1)[r] = -inf and running_sum(-1)[r] = 0
+          running_value(-1)[r,d] = 0; iterate i = 0..iteration_count(s)-1 in increasing key order
+          scores(s,i) = mm32(packed_query, key_block(s,i)ᵀ); x[j] = scale*scores(s,i)[r,j] if valid(r,s,i,j), else -inf
+          m = max(running_max(i-1)[r],max_j x[j]); safe = 0 if m = -inf, otherwise m
+          alpha = 0 if running_max(i-1)[r] = -inf, otherwise exp(running_max(i-1)[r]-safe)
+          weights(s,i)[r,j] = exp(x[j]-safe) when valid(r,s,i,j), otherwise 0; packed_weights(s,i) = bf16(weights(s,i))
+          running_max(i)[r] = m; running_sum(i)[r] = alpha*running_sum(i-1)[r] + sum32_j weights(s,i)[r,j]
+          running_value(i) = mma32(packed_weights(s,i),value_block(s,i),alpha*running_value(i-1)) for every row
+          partial_max[s,r] = running_max(iteration_count(s)-1)[r]; partial_sum[s,r] = running_sum(iteration_count(s)-1)[r]
+          partial_value[s,r,d] = running_value(iteration_count(s)-1)[r,d]; s in {0,1}; 0 <= r < query_count; 0 <= d < head_dim
+        Symbol:
+          scores: {meaning: Tile query key products before masking and scaling, shape: [{query: 128}, {key: 32}], dtype: fp32}
+          packed_weights: {meaning: Rounded exponential weights used in value products, shape: [{query: 128}, {key: 32}], dtype: bf16}
+          running_max: {meaning: Maximum retained after this current key block ends, shape: [{query: 128}], dtype: fp32, retention: carry_forward (s); i=-1..iteration_count(s)-1}
+          running_sum: {meaning: Exponential sum retained across the key iterations, shape: [{query: 128}], dtype: fp32, retention: carry_forward (s); i=-1..iteration_count(s)-1}
+          running_value: {meaning: Weighted values retained across the key iterations, shape: [{query: 128}, {channel: head_dim}], dtype: fp32, retention: carry_forward (s); i=-1..iteration_count(s)-1}
+          partial_max: {meaning: Final maximum saved for every independent key part, shape: [{part: 2}, {query: 128}], dtype: fp32, retention: keep_value invocation}
+          partial_sum: {meaning: Final row sums saved for this cross part reduction, shape: [{part: 2}, {query: 128}], dtype: fp32, retention: keep_value invocation}
+          partial_value: {meaning: Final numerators retained for the cross part merge, shape: [{part: 2}, {query: 128}, {channel: head_dim}], dtype: fp32, retention: keep_value invocation}
+        Arithmetic:
+          approx: 'Apply the device exponential approximation for weights and rescaling; unknown: the synthetic layout fixture provides no measured or proven error bound'
+          accumulate: Within each key block, sum weights with a balanced binary tree; multiply partial row sums by alpha once before adding this new key block total in FP32
+        Ledger:
+          baseline: Materialize full FP32 score and probability matrices for every query and key position, then perform one value product with the full normalized weights
+          gain: Dense intermediate payload 8*query_count*key_count -> 0 bytes globally per invocation; only block values and the explicitly held partial states remain
+          cost: Saved state 0 -> parts*rows*(head_dim+2)*4 bytes per invocation; BF16 weights and device exponentials introduce extra rounding and approximation error
+      - name: Merge saved partial states into normalized outputs
+        math: |-
+          partial_attention_numerator_after_online_exponential_rescaling_and_value_accumulation_for_one_query_row_and_key_partition_with_the_channel_order_preserved_until_the_final_cross_partition_weighted_reduction_produces_the_normalized_output_without_recomputing_any_saved_contribution = partial_value
+          For 0 <= r < query_count, merged_max[r] = max_{s=0}^{parts-1} partial_max[s,r]
+          merge_weight[s,r] = 0 if partial_max[s,r] = -inf, otherwise exp(partial_max[s,r]-merged_max[r])
+          merged_sum[r] = sum32_{s=0}^{parts-1} merge_weight[s,r]*partial_sum[s,r]
+          merged_value[r,d] = sum32_{s=0}^{parts-1} merge_weight[s,r]*partial_value[s,r,d]
+          out[r,d] = bf16(merged_value[r,d]/merged_sum[r]) for 0 <= d < head_dim
+          Zero partial row sums contribute zero; every valid row has a visible key
+          merge_state maps the saved partial states to out by these formulas
+          When bias is None, row_bias is None; otherwise row_bias[r] = bias[r] for all valid rows
+          Padded rows create no tensor writes; query_count <= r < rows defines padding
+        Symbol:
+          partial_attention_numerator_after_online_exponential_rescaling_and_value_accumulation_for_one_query_row_and_key_partition_with_the_channel_order_preserved_until_the_final_cross_partition_weighted_reduction_produces_the_normalized_output_without_recomputing_any_saved_contribution: {meaning: Saved partial numerators for this output reduction, shape: 'ref:partial_value.shape', dtype: 'ref:partial_value.dtype', binding: 'ref:partial_value'}
+          merge_state: {meaning: Weighted merge function using saved partial states}
+        Ledger:
+          baseline: Use all causal keys in a single online attention recurrence and normalize each final row directly, without storing or reweighting independent partials
+          gain: Longest recurrence key_count/bk -> ceil_div(key_count,parts)/bk block updates per query row before this final merge, ignoring whole block tail padding
+          cost: Merge arithmetic 0 -> parts*rows*(head_dim+2) weighted FP32 contributions per invocation, and partial state reads and all the final BF16 output writes
+  Work_schedule:
+    thesis: |-
+      Use one preparation worker beside a paired attention worker, keeping both in one cluster so query publication can overlap independent worker setup
+      A second launch merges the saved partial states following producer completion, trading extra storage and submission work for a shortened local recurrence
+    Step:
+      PREPARE:
+        describe: Prepare the padded query tensor and retain the optional bias output so concurrent attention workers can reuse one visible query version for both parts
+        Decomposition:
+          strategy: rows = 128; active_rows = query_count; the preparation work covers the full query range and writes only valid rows after padded storage initialization
+          Partition: {query: {meaning: Query row index processed by this preparation work, size: query_count, tile: 128}}
+          Worktile:
+            Invariant:
+              q: {meaning: Input query rows read once for every packed tensor, shape: [{query: 128}, {channel: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::q.dtype', offset: [0, 0]}
+              bias: {meaning: Optional input bias read if this tensor is present, shape: [{query: 128}], dtype: 'ref:CONTRACT.Algorithm_requirement::bias.dtype', offset: [0]}
+          Target:
+            Single_tile:
+              packed_query: {meaning: Packed query rows prepared for attention consumers, shape: [{query: 128}, {channel: head_dim}], dtype: 'ref:DESIGN.Math_reshape::packed_query.dtype'}
+              row_bias: {meaning: Preserved input bias returned for the current rows, shape: [{query: 128}], dtype: 'ref:CONTRACT.Algorithm_requirement::row_bias.dtype'}
+        Mapping:
+          strategy: One CTA prepares the shared query tensor; its worker occupies the first CTA in a cluster whose remaining two CTAs form the concurrent attention worker
+          Worker:
+            unit: CTA
+            unit_count: 1
+          worker_count: 1
+          Placement:
+            unit: cluster
+            unit_count: 1
+        Schedule:
+          strategy: The packed query storage and ready flag are initialized before this launch; the flag begins unset and marks this invocation until all readers complete
+          Worktile_order:
+            - by: query
+              direction: ascending
+          Worker_assignment:
+            Preassigned:
+              start: 0
+              count: 1
+            Refill: none
+            exit: assigned_done
+      ATTENTION:
+        describe: Compute stable online attention states for separate key partitions, sharing packed query rows while separate load and compute roles reuse shared slots
+        Decomposition:
+          strategy: bk = 32; iteration_count(s) = ceil_div(part_end(s)-part_start(s),bk); each worktile covers all padded query rows and one of the two separate key parts
+          Partition: {part: {meaning: Independent causal key part forming partial states, size: 2, tile: 1, range: [2, 2]}}
+          Worktile:
+            Invariant: {packed_query: {meaning: Packed query tensor unchanged during the key scans, shape: [{query: 128}, {channel: head_dim}], dtype: 'ref:DESIGN.Math_reshape::packed_query.dtype', offset: [0, 0]}}
+            Iteration:
+              key_block: {meaning: Key tile streamed through the current partial scan, shape: [{key: 32}, {channel: head_dim}], dtype: 'ref:DESIGN.Math_reshape::key_block.dtype', direction: ascending}
+              value_block: {meaning: Value tile paired with the streamed input key tile, shape: [{key: 32}, {channel: head_dim}], dtype: 'ref:DESIGN.Math_reshape::value_block.dtype', direction: ascending}
+          Target:
+            Single_tile:
+              partial_max: {meaning: Final maxima for one separate causal key partition, shape: [{query: 128}], dtype: 'ref:DESIGN.Math_reshape::partial_max.dtype'}
+              partial_sum: {meaning: Final row sums for a separate causal key partition, shape: [{query: 128}], dtype: 'ref:DESIGN.Math_reshape::partial_sum.dtype'}
+              partial_value: {meaning: Final weighted values for one causal key partition, shape: [{query: 128}, {channel: head_dim}], dtype: 'ref:DESIGN.Math_reshape::partial_value.dtype'}
+        Mapping:
+          strategy: Two CTAs split the query rows evenly and share one key partition; both CTAs stay in the same cluster as the preparation worker until query publication
+          Worker:
+            unit: CTA
+            unit_count: 2
+          worker_count: 1
+          Placement:
+            unit: cluster
+            unit_count: 1
+          member: [{query: [0, 64]}, {query: [64, 128]}]
+        Schedule:
+          strategy: The first partition is preassigned; a shared counter starts at one and assigns the second partition after the prior work has drained its local buffers
+          Worktile_order:
+            - by: part
+              group: 2
+              direction: ascending
+            - by: part
+              direction: ascending
+          Worker_assignment:
+            Preassigned:
+              start: 0
+              count: 1
+            Refill:
+              atomic_counter: The LOAD role atomically increments a counter initialized to one; a result below parts assigns the next partition, otherwise it saves the final ticket
+            exit:
+              - assigned_done
+              - terminal_ticket
+      MERGE:
+        describe: Combine the held maxima, denominators and numerators for both key partitions, normalize each valid query row and write the final BF16 attention output
+        Decomposition:
+          strategy: The step consumes both complete partial states for each valid query row; rows beyond query_count are excluded before any normalization or output store
+          Partition: {query: {meaning: Query rows with separate saved states to normalize, size: query_count, tile: 128}}
+          Worktile:
+            Iteration:
+              partial_max: {meaning: Saved maxima read when merging the active key part, shape: [{query: 128}], dtype: 'ref:DESIGN.Math_reshape::partial_max.dtype', direction: ascending}
+              partial_sum: {meaning: Saved row sums read when merging the key partition, shape: [{query: 128}], dtype: 'ref:DESIGN.Math_reshape::partial_sum.dtype', direction: ascending}
+              partial_value: {meaning: Saved values read when merging the active key part, shape: [{query: 128}, {channel: head_dim}], dtype: 'ref:DESIGN.Math_reshape::partial_value.dtype', direction: ascending}
+          Target:
+            Single_tile: {out: {meaning: Normalized output rows produced by the final merge, shape: [{query: 128}, {channel: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}}
+            Tile_reduction: {dimension: part, input: ['DESIGN.Math_reshape::partial_max', 'DESIGN.Math_reshape::partial_sum', 'DESIGN.Math_reshape::partial_attention_numerator_after_online_exponential_rescaling_and_value_accumulation_for_one_query_row_and_key_partition_with_the_channel_order_preserved_until_the_final_cross_partition_weighted_reduction_produces_the_normalized_output_without_recomputing_any_saved_contribution'], output: 'CONTRACT.Algorithm_requirement::out', method: 'DESIGN.Math_reshape::merge_state'}
+        Mapping:
+          strategy: A two CTA worker merges the same row halves as the producers; the new launch creates new worker resources and reads only globally saved partial values
+          Worker:
+            unit: CTA
+            unit_count: 2
+          worker_count: 1
+          Placement:
+            unit: cluster
+            unit_count: 1
+          member: [{query: [0, 64]}, {query: [64, 128]}]
+        Schedule:
+          strategy: Wait for this full first launch before reading partial states; this new worker follows this natural query order and never reuses data from other calls
+          Worktile_order:
+            - by: query
+              direction: ascending
+          Worker_assignment:
+            Preassigned:
+              start: 0
+              stride: 1
+            Refill: none
+            exit: assigned_done
+    Flow:
+      Launch:
+        - {step: [PREPARE, ATTENTION], order: concurrent}
+        - {step: [MERGE], start_after: ATTENTION.kernel_done}
+      Handoff:
+        packed_query: {producer: PREPARE, consumer: [ATTENTION], storage: global, initialize: 0, ready: PREPARE.query_ready, wait_at: ATTENTION.query_wait}
+        partial_max: {producer: ATTENTION, consumer: [MERGE], storage: global}
+        partial_sum: {producer: ATTENTION, consumer: [MERGE], storage: global}
+        partial_value: {producer: ATTENTION, consumer: [MERGE], storage: global}
+  Tile_pipeline:
+    thesis: |-
+      A dedicated load role overlaps independent key and value copies with the compute role, using two input slots and explicit dependencies for each reused region
+      Ordered matrix completion covers earlier products, while row updates and partition publication must remain serial to preserve the online state
+    Step:
+      PREPARE:
+        Event:
+          query_ready: ['{done MAIN[0]::store:query_ready}']
+        Role:
+          MAIN:
+            Info:
+              describe: Pack valid query rows and copy an optional bias vector, and publish the query version after all writes are visible to the two attention worker members
+              member: warp[0:4]
+              register: 64
+              Using_verb:
+                compute:
+                  packed_query: {execution_mode: serial, describe: Read q from the contract input and write valid rows of global packed_query; the padded rows preserve the initialization supplied by the shared handoff}
+                  row_bias: {execution_mode: serial, describe: Read this present bias input and copy it to row_bias without changing FP32 values; absence is handled by this contract and creates no device copy work}
+                store: {query_ready: {execution_mode: serial, describe: Publish the invocation ready flag with release ordering after packed_query writes; the attention worker acquires the version before reading query rows}}
+            Pipe:
+              - compute:packed_query
+              - if(bias_present == 1):
+                  - compute:row_bias
+              - store:query_ready
+      ATTENTION:
+        Index:
+          t: {meaning: Worker local order of active key partition tickets, definition: worktile}
+          i: {meaning: Ordered key block iterations in this assigned part, definition: [0, iteration_count(t)]}
+          n: {meaning: Continuous key tile index over scheduled worktiles, definition: {flatten: [t, i]}}
+        Event:
+          query_wait: ['{done LOAD[*]::await:query}']
+        Storage:
+          query_rows:
+            meaning: Current query row half reused during this key scan
+            depth: 1
+            location: SMEM
+            shape: [{query: 64}, {channel: 64}]
+            dtype: bf16
+            total_size: 16384
+            View: {packed_query: {region: {query: [0, 64]}}}
+          input_slots:
+            meaning: Two local slots for concurrent key and value loads
+            depth: 2
+            location: SMEM
+            shape: [{key: 32}, {channel: 128}]
+            dtype: bf16
+            total_size: 32768
+            View:
+              key_block(n): {slot_index: n%2, region: {channel: [0, 64]}}
+              value_block(n): {slot_index: n%2, region: {channel: [64, 128]}}
+          score_weights:
+            meaning: Shared score buffer reused then by rounded weights
+            depth: 1
+            location: TMEM
+            shape: [{query: 64}, {key: 32}]
+            dtype: fp32
+            total_size: 16384
+            View:
+              scores(n): {region: {key: [0, 32]}}
+              packed_weights(n): {region: {key: [16, 32]}}
+          row_state:
+            meaning: Maximum and denominator states saved for every row
+            depth: 1
+            location: register
+            shape: [{query: 64}, {state: 2}]
+            dtype: fp32
+            total_size: 1024
+            View:
+              running_max(i): {region: {state: [0, 1]}}
+              running_sum(i): {region: {state: [1, 2]}}
+          running_value: {meaning: Online weighted values saved for this current part, depth: 1, location: TMEM, shape: [{query: 64}, {channel: 64}], dtype: fp32, total_size: 32768}
+          partition_ticket: {meaning: Leader ticket sent to both members before new work, depth: 1, location: SMEM, shape: [{element: 2}], dtype: int32, total_size: 8, member: 0}
+        Role:
+          LOAD:
+            Info:
+              describe: Supply query, key and value tiles, obtain partition tickets and return used tile slots while the compute role advances the online attention recurrence
+              member: warp[0:1]
+              register: 40
+              Using_verb:
+                compute: {ticket: {execution_mode: serial, describe: The leader fetches the next partition counter and broadcasts its value to both members; valid tickets recover s and termination is recorded on failure}}
+                load:
+                  query: {execution_mode: serial, describe: Copy this member query rows from global packed_query into query_rows; done covers this complete copy and makes these rows readable by its compute role}
+                  key_block: {execution_mode: async_unordered, describe: 'Load key_block(t,i) from contract k into input_slots.key_block(n); zero the invalid key tail and make the complete local key operand visible when done'}
+                  value_block: {execution_mode: async_unordered, describe: 'Load value_block(t,i) from contract v into input_slots.value_block(n); zero invalid tail elements and make this shared value operand visible when done'}
+                await:
+                  query: {execution_mode: serial, describe: Acquire the query ready flag from PREPARE after independent setup; done makes its global packed_query version visible to both attention worker members}
+                  next_part: {execution_mode: serial, describe: 'Wait for the computation role to finish all accesses for part t before publishing the next partition ticket, including the last terminal ticket record'}
+                signal:
+                  ticket: {execution_mode: serial, describe: Publish the accepted partition index and its iteration count to the compute role in both members; the notification identifies one shared work instance}
+                  terminal: {execution_mode: serial, describe: Publish the terminal ticket after the counter rejects another partition; both member compute roles observe this signal before ending their worker work}
+                acquire: {input_slot: {execution_mode: serial, describe: Acquire this version of input_slots before issuing its key and value transfers; first use has no old readers and later use obeys the release condition}}
+                release: {input_slot: {execution_mode: async_unordered, describe: Return this member's use of this input_slots version after this compute role has finished all reads and in flight products that could access its bytes}}
+            Pipe:
+              - await:query
+              - load:query
+              - for(t):
+                  - signal:ticket(t)
+                  - for(n[t]):
+                      - acquire:input_slot(n)
+                      - load:key_block(n)
+                      - load:value_block(n)
+                      - release:input_slot(n)
+                  - await:next_part(t)
+                  - compute:ticket(t)
+              - signal:terminal
+            Waiting:
+              Released:
+                - '{issue acquire:input_slot(n+2)} ← [{done COMPUTE::matmul:values(n)}]'
+                - '{done release:input_slot(n)} ← [{done COMPUTE::matmul:values(n)}]'
+              Allowed: ['{done await:next_part(t)} ← [{done COMPUTE::signal:part_done(t)}]']
+          COMPUTE:
+            Info:
+              describe: Form score blocks, update row statistics and weighted values, then publish partial states while retaining the input slot and recurrent state lifetimes
+              member: warp[1:5]
+              register: 168
+              Using_verb:
+                compute:
+                  initialize: {execution_mode: serial, describe: Initialize running_max to negative infinity and running_sum and running_value to zero for the accepted partition; the action never reads any old state}
+                  weights: {execution_mode: serial, describe: Read completed scores(n) from score_weights and update running_max and running_sum within row_state; write packed_weights(n) into this same score slot}
+                  partials: {execution_mode: serial, describe: 'Read the complete running_value and row_state for part t and write partial_value, partial_max and partial_sum for the member row half to global memory'}
+                matmul:
+                  scores: {execution_mode: async_ordered, describe: 'Read query_rows and input_slots.key_block(n), writing scores(n) into score_weights; done covers the key reads and score visibility to this member role'}
+                  values: {execution_mode: async_ordered, describe: 'Read packed_weights(n) in score_weights and input_slots.value_block(n), update running_value, and finish all operand reads before this result is ready'}
+                await:
+                  ticket: {execution_mode: serial, describe: 'Observe the LOAD role partition publication for this worktile, then use the same accepted partition coordinate and iteration count in both CTA members'}
+                  terminal: {execution_mode: serial, describe: Wait for this LOAD role terminal notification after the last accepted partition; done confirms that no further work ticket will arrive for this worker}
+                signal: {part_done: {execution_mode: serial, describe: 'Notify the LOAD role that this member''s partial state stores are done and all local inputs are released, allowing the next accepted partition to begin'}}
+            Pipe:
+              - for(t):
+                  - await:ticket(t)
+                  - compute:initialize(t)
+                  - for(n[t]):
+                      - matmul:scores(n)
+                      - compute:weights(n)
+                      - matmul:values(n)
+                  - compute:partials(t)
+                  - signal:part_done(t)
+              - await:terminal
+            Waiting:
+              Prepared:
+                - '{done await:ticket(t)} ← [{done LOAD::signal:ticket(t)}]'
+                - '{issue matmul:scores(n)} ← [{done LOAD::load:key_block(n)}, {done LOAD::load:query}]'
+                - '{issue compute:weights(n)} ← [{done matmul:scores(n)}]'
+                - '{issue matmul:values(n)} ← [{done LOAD::load:value_block(n)}]'
+                - '{issue compute:partials(t)} ← [{done matmul:values(last(n[t]))}]'
+              Released: ['{issue matmul:scores(n+1)} ← [{done matmul:values(n)}]']
+              Allowed: ['{done await:terminal} ← [{done LOAD::signal:terminal}]']
+      MERGE:
+        Storage:
+          merge_rows: {meaning: Saved partial states read by the last merge worker, depth: 1, location: SMEM, shape: [{part: 2}, {query: 64}, {element: 66}], dtype: fp32, total_size: 67584}
+          output_rows: {meaning: Normalized output rows staged for this final write, depth: 1, location: SMEM, shape: [{query: 64}, {channel: 64}], dtype: bf16, total_size: 16384}
+        Role:
+          MAIN:
+            Info:
+              describe: Load held partial states, perform their weighted reduction and store final normalized query rows using fresh local resources after the producer launch
+              member: warp[0:4]
+              register: 96
+              Using_verb:
+                compute: {out: {execution_mode: serial, describe: 'Apply merge_state to merge_rows for valid rows, writing normalized BF16 values to output_rows while leaving padded query rows beyond the output domain'}}
+                load: {partials: {execution_mode: serial, describe: 'Read whole partial_max, partial_sum and partial_value from global storage for both key partitions into merge_rows after this producer launch completes'}}
+                store: {out: {execution_mode: serial, describe: Write valid BF16 output_rows into contract out with the original query and channel order; done makes every written result visible to later caller work}}
+            Pipe:
+              - load:partials
+              - compute:out
+              - store:out
+REALIZATION:
+  Require:
+    - item: ['DESIGN.Math_reshape::partial_attention_numerator_after_online_exponential_rescaling_and_value_accumulation_for_one_query_row_and_key_partition_with_the_channel_order_preserved_until_the_final_cross_partition_weighted_reduction_produces_the_normalized_output_without_recomputing_any_saved_contribution']
+      choice: |-
+        Use cluster cooperative execution for this concurrent producer and paired consumer, with release publication and acquire observation of this query flag
+        Reserve the complete three CTA cluster together so the consumer cannot prevent the producer from making progress while either participant is waiting
+      reason: |-
+        This first launch contains a producer worker and a distinct paired consumer whose query handoff can occur before this full launch finishes
+        Their shared version and progress guarantees require an explicit compatible execution mechanism, since launch order and ordinary stores alone do not provide them
+  Prefer:
+    - item: DESIGN.Math_reshape::partial_attention_numerator_after_online_exponential_rescaling_and_value_accumulation_for_one_query_row_and_key_partition_with_the_channel_order_preserved_until_the_final_cross_partition_weighted_reduction_produces_the_normalized_output_without_recomputing_any_saved_contribution
+      choice: |-
+        Use paired FP32 operations for independent numerator channels during the final weighted merge, preserving each channel operation and rounding order
+        Keep the existing worker members, saved state inputs and output conversion so this instruction choice can be compared without changing the chosen design
+      reason: |-
+        The merge applies this same scalar weight to adjacent independent numerator channels, so paired instructions may reduce issue work without more traffic
+        This opportunity depends on generated code and register use; this example records an implementation preference without claiming any measured speedup
+  Forbid:
+    - item: DESIGN.Math_reshape::partial_attention_numerator_after_online_exponential_rescaling_and_value_accumulation_for_one_query_row_and_key_partition_with_the_channel_order_preserved_until_the_final_cross_partition_weighted_reduction_produces_the_normalized_output_without_recomputing_any_saved_contribution
+      choice: |-
+        Generate a separate fully unrolled merge kernel for every possible runtime query count within this supported range, even when this mathematical work is unchanged
+        This rejected code generation policy must remain distinct from the required masking of valid query rows inside this selected shared kernel
+      reason: |-
+        Specializing every row count would create many function bodies for this same two part merge and expand compilation work and this resulting code image
+        The fixed tile and valid row mask already describe the required work, so this extra implementation branching has no established benefit in this sample
+  Feedback:
+    - item: ['DESIGN.Math_reshape::partial_attention_numerator_after_online_exponential_rescaling_and_value_accumulation_for_one_query_row_and_key_partition_with_the_channel_order_preserved_until_the_final_cross_partition_weighted_reduction_produces_the_normalized_output_without_recomputing_any_saved_contribution']
+      choice: 'Synthetic alternative only: use scalar FP32 operations instead of this paired merge preference; this cited fixture contains no actual benchmark result'
+      evidence: testing.invalid/text-limit@layout-v1:synthetic/paired_merge_comparison.md

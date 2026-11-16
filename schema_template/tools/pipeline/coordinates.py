@@ -4,7 +4,7 @@ from __future__ import annotations
 import ast
 from fractions import Fraction
 
-from .expressions import Domains, referenced_domains, variables
+from .expressions import Domains, merge_coordinates, referenced_domains, variables
 from .model import ExpansionError
 
 
@@ -79,15 +79,13 @@ def recover(arguments: list[tuple[ast.AST, int]], domains: Domains, env: dict,
         row = rows[row_index]
         if all(not value for i, value in enumerate(row[:-1]) if i != column):
             if row[-1].denominator != 1:
-                raise ExpansionError(f"cannot recover an integer action coordinate {names[column]}")
+                return None  # An exact rational inverse is not an integer action.
             context[names[column]] = int(row[-1])
     for name in names:
         if name in context and isinstance(domains.definitions[name], dict):
             entry = next((entry for entry in domains.entries(name, context) if entry[name] == context[name]), None)
             if entry is not None:
-                if any(key in context and context[key] != value for key, value in entry.items()):
-                    return None
-                context.update(entry)
+                context = merge_coordinates(context, entry)
     missing = needed - context.keys()
     if missing and not partial:
         raise ExpansionError(f"cannot uniquely recover action-index coordinates: {', '.join(sorted(missing))}")

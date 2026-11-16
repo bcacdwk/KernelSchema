@@ -1,4 +1,4 @@
-"""Explicit whole-region derivation, with raw sources and bounded effective views."""
+"""Whole-region from resolution, source chains and independent effective views."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,9 +12,8 @@ from .diagnostics import Diagnostic, format_diagnostics
 from .errors import CapacityError, SchemaError, ToolError, bounded
 from .rules.values import node_id
 
-REGIONS = ("math_reshape", "work_schedule", "tile_pipeline")
-# Across one task, allow 100 times the parser's unchanged per-file limit.
-# Copies, origin chain entries and dependency records all consume this budget.
+REGIONS = ("Math_reshape", "Work_schedule", "Tile_pipeline")
+MAX_DESIGNS = 10
 MAX_RESOLVED_UNITS = 10_000_000
 
 
@@ -38,6 +37,7 @@ class ResolvedTask:
     documents: dict[str, yaml_source.Document]
 
     def source_manifest(self, node: str) -> dict[str, str]:
+        """Root, self and actual region chains, not all reachable provider regions."""
         return dict(sorted((self.source_files[name].name, self.source_hashes[name])
                            for name in self.dependency_nodes[node]))
 
@@ -45,23 +45,27 @@ class ResolvedTask:
         return {region: self.origins[node][region].as_dict() for region in sorted(REGIONS)}
 
     def effective_identity(self, node: str) -> str:
-        identity = {"format": "kernel_schema.design_resolution.v1", "node": node,
-                    "source_manifest": self.source_manifest(node), "origins": self.origins_dict(node)}
+        identity = {"node": node, "source_manifest": self.source_manifest(node),
+                    "origins": self.origins_dict(node)}
         encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def effective_document(self, node: str) -> dict:
-        """Independent view with the root Contract, suitable for reading/export."""
+        """Independent delivery view with root Contract and this node's metadata."""
         plan = dict(self.effective_task[node])
-        if "contract" in self.effective_task["root"]:
-            plan["contract"] = self.effective_task["root"]["contract"]
-        budget = _Budget()
-        budget.charge(_units(plan))
+        if "CONTRACT" in self.effective_task["root"]:
+            plan["CONTRACT"] = self.effective_task["root"]["CONTRACT"]
+        _Budget().charge(_units(plan))
         return _clone(plan)
 
     def diagnostic_source(self, node: str, path: str) -> tuple[str, str, RegionOrigin | None]:
+        contract = f"{node}.CONTRACT"
+        if node != "root" and (path == contract or path.startswith(contract + ".") or path.startswith(contract + "[")):
+            return "root", "root" + path[len(node):], None
         for region, origin in self.origins[node].items():
-            prefix = f"{node}.design.{region}"
+            prefix = f"{node}.DESIGN.{region}"
+            if path == prefix + ".from":
+                return node, path, None
             if path == prefix or path.startswith(prefix + ".") or path.startswith(prefix + "["):
                 return origin.provider, origin.provider + path[len(node):], origin
         return node, path, None
@@ -78,7 +82,7 @@ class _Budget:
 
 
 def _units(value) -> int:
-    """Count before allocating a copy; raw YAML has already rejected cycles."""
+    """Count before allocating; yaml_source has already rejected recursive aliases."""
     count, pending = 0, [value]
     while pending:
         item = pending.pop()
@@ -93,17 +97,14 @@ def _units(value) -> int:
 
 
 def _clone(value):
-    """Iterative, alias-free copy of the ordinary values accepted by yaml_source."""
+    """Iterative alias-free copy retaining scalar types and mapping order."""
     result = [None]
     pending = [(result, 0, value)]
     while pending:
         parent, key, item = pending.pop()
         if isinstance(item, dict):
-            child = {}
+            child = dict.fromkeys(item)
             parent[key] = child
-            # Preserve source insertion order as well as scalar types.
-            for name in item:
-                child[name] = None
             pending.extend((child, name, part) for name, part in item.items())
         elif isinstance(item, list):
             child = [None] * len(item)
@@ -116,26 +117,29 @@ def _clone(value):
 
 def task_files(directory: Path) -> dict[str, Path]:
     if not directory.is_dir():
-        raise SchemaError(f"{directory}: pass a YAML task directory.")
+        raise SchemaError(f"{directory}: pass a YAML task directory")
     files = {}
     for file in sorted(directory.iterdir()):
         if file.suffix not in {".yaml", ".yml"}:
             continue
         if not file.is_file():
-            raise SchemaError(f"{file}: expected a YAML file.")
+            raise SchemaError(f"{file}: expected a YAML file")
         errors = []
         node_id(file.stem, "<file>", errors)
         if errors:
             raise SchemaError(f"{file}: {errors[0].message}")
         if file.stem in files:
-            raise SchemaError(f"{file}: duplicate node ID {file.stem}; also defined by {files[file.stem]}.")
+            raise SchemaError(f"{file}: duplicate node ID {file.stem}; also defined by {files[file.stem]}")
         files[file.stem] = file
     if "root" not in files:
-        raise SchemaError(f"{directory}: missing root.yaml (or root.yml); a task needs one shared Contract.")
+        raise SchemaError(f"{directory}: missing root.yaml (or root.yml); a task needs one shared Contract")
+    if len(files) > MAX_DESIGNS:
+        raise SchemaError(f"{directory}: at most {MAX_DESIGNS} complete YAML designs, including root, are allowed; found {len(files)}")
     return files
 
 
 def read_directory(directory: Path) -> tuple[dict, dict]:
+    """Read each current task file once; callers can reuse the final snapshot."""
     files = task_files(directory)
     documents = {}
     for name, path in files.items():
@@ -143,123 +147,125 @@ def read_directory(directory: Path) -> tuple[dict, dict]:
             documents[name] = yaml_source.load(path, name)
         except yaml_source.ReadError as error:
             raise SchemaError(str(error)) from error
-        except yaml_source.DependencyError as error:
+        except (yaml_source.DependencyError, OSError) as error:
             raise ToolError(str(error)) from error
     return files, documents
 
 
+@bounded
 def resolve_documents(files: dict, documents: dict) -> ResolvedTask:
-    """Resolve a single read snapshot; full validation checks raw shapes first."""
+    """Resolve one read snapshot without approving unfinished local region content.
+
+    Reference edges from all three regions form one node DAG. A region imports
+    only its same-named content, so references inside that content bind later in
+    each consumer's full effective context.
+    """
+    if files.keys() != documents.keys():
+        raise ToolError("source files and parsed documents must name the same snapshot nodes")
+    if "root" not in documents:
+        raise SchemaError("a task needs root with the shared Contract")
+    if len(documents) > MAX_DESIGNS:
+        raise SchemaError(f"at most {MAX_DESIGNS} complete YAML designs, including root, are allowed; found {len(documents)}")
     raw = {name: document.value for name, document in documents.items()}
-    errors, parents, references = [], {}, {}
+    errors, references, edges = [], {}, {name: [] for name in raw}
 
     def fail(path, message, *, missing=False):
         errors.append(Diagnostic(path, message, missing))
 
     for name, plan in raw.items():
-        meta = plan.get("meta_data")
+        node_id(name, name, errors)
+        if not isinstance(plan, dict):
+            fail(name, "expected one plan mapping")
+            continue
+        meta = plan.get("META_DATA")
         if not isinstance(meta, dict):
-            fail(name + ".meta_data", "expected a metadata mapping", missing=meta is None)
+            fail(name + ".META_DATA", "expected a metadata mapping", missing="META_DATA" not in plan)
             meta = {}
-        dispatch = meta.get("dispatch", {})
+        dispatch = meta.get("Dispatch", {})
         if not isinstance(dispatch, dict):
-            fail(name + ".meta_data.dispatch", "expected a dispatch mapping")
+            fail(name + ".META_DATA.Dispatch", "expected a Dispatch mapping")
             dispatch = {}
         identity = dispatch.get("id", "root")
-        node_id(identity, name + ".meta_data.dispatch.id", errors)
+        node_id(identity, name + ".META_DATA.Dispatch.id", errors)
         if identity != name:
-            fail(name + ".meta_data.dispatch.id", "dispatch.id must match the YAML filename",
+            fail(name + ".META_DATA.Dispatch.id", "Dispatch.id must match the YAML filename",
                  missing="id" not in dispatch)
-        parent = dispatch.get("parent", "root")
-        if name == "root":
-            if "parent" in dispatch:
-                fail(name + ".meta_data.dispatch.parent", "root has no parent")
-        else:
-            node_id(parent, name + ".meta_data.dispatch.parent", errors)
-            if isinstance(parent, str):
-                if parent not in raw:
-                    fail(name + ".meta_data.dispatch.parent", f"unknown parent {parent}")
-                else:
-                    parents[name] = parent
-        design = plan.get("design")
+        design = plan.get("DESIGN")
         if not isinstance(design, dict):
-            fail(name + ".design", "expected a Design mapping", missing="design" not in plan)
+            fail(name + ".DESIGN", "expected a DESIGN mapping", missing="DESIGN" not in plan)
             continue
         for region in REGIONS:
-            value, path = design.get(region), f"{name}.design.{region}"
+            value, path = design.get(region), f"{name}.DESIGN.{region}"
             if not isinstance(value, dict):
-                fail(path, "expected a local region mapping or {from_parent: <direct parent ID>}",
-                     missing=region not in design)
+                fail(path, "expected a local region mapping or {from: id}", missing=region not in design)
                 continue
-            if "from_parent" not in value:
+            if "from" not in value:
                 continue
-            if set(value) != {"from_parent"}:
-                fail(path, "from_parent must be the only field; references and local fields cannot be mixed")
-            target = value["from_parent"]
-            node_id(target, path + ".from_parent", errors)
+            if set(value) != {"from"}:
+                fail(path, "from must be the only field; a local definition and a reference cannot be mixed")
+            target = value["from"]
+            node_id(target, path + ".from", errors)
             if name == "root":
-                fail(path + ".from_parent", "root Design regions must be local; root cannot use from_parent")
-            elif target != parent:
-                fail(path + ".from_parent", "from_parent must name this node's direct parent " + repr(parent))
+                fail(path + ".from", "root DESIGN regions must be local")
+            if not isinstance(target, str) or target not in raw:
+                fail(path + ".from", f"unknown source design {target!r}")
+                continue
             references[name, region] = target
+            edges[name].append((target, path + ".from"))
     if errors:
         raise SchemaError(format_diagnostics(errors, files, documents))
 
-    # Parent order and cycle detection are iterative even for very deep trees.
-    order, done = ["root"], {"root"}
-    for start in raw:
-        trail, active, current = [], {}, start
-        while current not in done:
-            if current in active:
-                cycle = trail[active[current]:] + [current]
-                fail(current + ".meta_data.dispatch.parent", "cycle: " + " -> ".join(cycle))
-                raise SchemaError(format_diagnostics(errors, files, documents))
-            active[current] = len(trail)
-            trail.append(current)
-            current = parents[current]
-        order.extend(reversed(trail))
-        done.update(trail)
+    order, active, done = [], [], set()
+
+    def visit(name):
+        active.append(name)
+        for target, path in edges[name]:
+            if target in active:
+                cycle = active[active.index(target):] + [target]
+                fail(path, "cross-region source cycle: " + " -> ".join(cycle))
+            elif target not in done:
+                visit(target)
+        active.pop()
+        done.add(name)
+        order.append(name)
+
+    for name in raw:
+        if name not in done:
+            visit(name)
+    if errors:
+        raise SchemaError(format_diagnostics(errors, files, documents))
 
     budget, origins, dependencies, effective = _Budget(), {}, {}, {}
     region_sizes = {}
     for name in order:
-        budget.charge(1)
         origins[name] = {}
-        required = set()
-        for member in ("root", name):
-            if member not in required:
-                budget.charge(1)
-                required.add(member)
+        required = {"root", name}
         design = {}
         for region in REGIONS:
-            parent = references.get((name, region))
-            inherited = origins[parent][region] if parent else None
-            length = len(inherited.chain) + 1 if inherited else 1
-            budget.charge(1 + length)
-            origin = RegionOrigin(inherited.provider, (name,) + inherited.chain) if inherited else RegionOrigin(name, (name,))
+            source_node = references.get((name, region))
+            inherited = origins[source_node][region] if source_node is not None else None
+            origin = (RegionOrigin(inherited.provider, (name,) + inherited.chain)
+                      if inherited else RegionOrigin(name, (name,)))
             origins[name][region] = origin
-            for member in origin.chain:
-                if member not in required:
-                    budget.charge(1)
-                    required.add(member)
-            design[region] = raw[origin.provider]["design"][region]
+            budget.charge(1 + len(origin.chain))
+            required.update(origin.chain)
+            design[region] = raw[origin.provider]["DESIGN"][region]
             key = (origin.provider, region)
             if key not in region_sizes:
                 region_sizes[key] = _units(design[region])
-        # Retain unknown raw Design fields in read-only draft views; full raw
-        # shape validation rejects them before resolution is reached.
-        design.update((key, value) for key, value in raw[name]["design"].items() if key not in REGIONS)
-        local = {key: value for key, value in raw[name].items() if key != "design"}
+        # A draft preview retains unknown fields for the author to correct;
+        # validation checks raw structure before calling this resolver.
+        design.update((key, value) for key, value in raw[name]["DESIGN"].items() if key not in REGIONS)
+        local = {key: value for key, value in raw[name].items() if key != "DESIGN"}
         size = _units(local) + 1 + sum(region_sizes[origin.provider, region]
                                       for region, origin in origins[name].items())
         size += sum(_units(value) for key, value in design.items() if key not in REGIONS)
-        budget.charge(size)
-        local["design"] = design
+        budget.charge(size + len(required))
+        local["DESIGN"] = design
         effective[name] = _clone(local)
         dependencies[name] = frozenset(required)
-    # Preserve the old directory iteration order for callers of validate_*.
     return ResolvedTask(raw, {name: effective[name] for name in raw}, origins, dependencies,
-                        files, {name: doc.source_sha256 for name, doc in documents.items()}, documents)
+                        dict(files), {name: doc.source_sha256 for name, doc in documents.items()}, dict(documents))
 
 
 @bounded
@@ -271,7 +277,7 @@ def resolve_directory(directory: str | Path) -> ResolvedTask:
 
 @bounded
 def effective_yaml(resolved: ResolvedTask, node: str) -> str:
-    """Emit readable YAML and verify Decimal values and scalar types survive."""
+    """Emit an independent view and verify exact scalar values survive."""
     import yaml
 
     class Dumper(yaml.SafeDumper):
@@ -284,8 +290,7 @@ def effective_yaml(resolved: ResolvedTask, node: str) -> str:
         return dumper.represent_scalar("tag:yaml.org,2002:float", text)
 
     Dumper.add_representer(Decimal, decimal_value)
-    # PyYAML's default YAML 1.1 resolver disagrees with our core scalar reader
-    # on spellings such as "1e3". Quoting strings avoids changing their type.
+    # PyYAML's own resolver differs from yaml_source for e.g. 1e3.
     Dumper.add_representer(str, lambda dumper, value: dumper.represent_scalar(
         "tag:yaml.org,2002:str", value, style='"'))
     value = resolved.effective_document(node)
@@ -295,7 +300,7 @@ def effective_yaml(resolved: ResolvedTask, node: str) -> str:
     while pending:
         before, after = pending.pop()
         if type(before) is not type(after) or before != after:
-            raise ToolError("effective YAML output did not preserve raw scalar values and types")
+            raise ToolError("effective YAML output did not preserve scalar values and types")
         if isinstance(before, dict):
             pending.extend((item, after[key]) for key, item in before.items())
         elif isinstance(before, list):

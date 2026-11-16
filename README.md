@@ -4,7 +4,7 @@
 
 Kernel Schema 设计的核心出发点在于，压缩是智能的基础，对于语义、数学、算法的压缩本身对应着新的知识、关系和信息。真随机数的核心评判标准之一就是不可压缩性，这是源于对于熵的要求，因为随机噪声所包含的信息量是最多的。换言之，schema 的核心目的在于，以尽可能精简凝练、可以被组合表达的方式，最高程度的抽象一个 Kernel 所包含的核心信息。即，算子的压缩。
 
-本 README 是全局导引。任务入口指导工作，`schema_docs` 定义字段语义与设计表达，`schema_template` 提供共用的 YAML 操作与检查。检查器落实文档中可直接判断的结构与关联要求，不反向增加设计义务；示例也不代替规范。
+本 README 是全局导引。任务入口指导工作，`schema_docs` 定义字段语义与设计表达，`schema_template` 提供共用的 YAML 操作与检查。填写设计后运行 `check_yaml`，工具自动规范化可确定的写法并报告修改，超长或需判断的问题按反馈处理。检查器落实文档中可直接判断的结构与关联要求，不反向增加设计义务；示例也不代替规范。
 
 ## 任务入口
 
@@ -47,20 +47,20 @@ Kernel Agent 有两个普遍问题：**难以优化**——无法判断结果是
 
 ## 2 schema 是什么
 
-**角色。** 两份 Contract 定义算法任务、硬件能力与任务已选环境，不随 Design 的选择增删。Planner 在此基础上做设计，只有它能改 Design 区；Coder 在固定的硬件、算法与设计下逐代实现，只能在 `realization.prefer[].feedback` 中附带有实验证据的替代反馈；人类专家随时介入、把握方向，审阅 YAML 及目录中的设计记录，不介入代码。协作方式介于 vibe coding 与全自动 loop 之间。
+**角色。** 两份 Contract 定义算法任务、硬件能力与任务已选环境，不随 Design 的选择增删。Planner 在此基础上做设计，只有它能改 Design 区；Coder 在固定的硬件、算法与设计下逐代实现，只能在 `REALIZATION.Feedback[]` 中附带有实验证据的替代反馈；人类专家随时介入、把握方向，审阅 YAML 及目录中的设计记录，不介入代码。协作方式介于 vibe coding 与全自动 loop 之间。
 
-**分区。** 一份完整有效 plan 分为 Contract、Design、Realization 三部分、共六个子区，依次对应 `schema_docs/1–6`；此外开头有一段 `meta_data`（任务名、设计出处、完整设计身份与范围、修订号），不属于 Contract。共享 Contract 与 Design 的本地定义或整区引用遵循 [common](schema_docs/0.common.md#文件与共享-contract)。
+**分区。** 一份完整有效 plan 分为 Contract、Design、Realization 三部分、共六个子区，依次对应 `schema_docs/1–6`；此外开头有一段 `META_DATA`（任务名、设计出处、完整设计身份与范围、修订号），不属于 Contract。共享 Contract 与 Design 的本地定义或整区引用遵循 [common](schema_docs/0.common.md#文件与共享-contract)。
 
 | 区          | 子区                                                                               | 记录什么                                                                                     | 修改权限                                           |
 | ----------- | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| Contract    | [contract.algorithm_requirement](schema_docs/1.contract.algorithm_requirement.md)   | 算法要求：从外部看，算子必须满足的输入、输出与数学关系                                       | Planner 与 Coder 都不能改                          |
-| Contract    | [contract.hardware_specification](schema_docs/2.contract.hardware_specification.md) | 硬件规格：目标设备的执行单元、核心能力与边界，已选的实现栈，以及完整规格与 microbench 的引用 | 同上                                               |
-| Design      | [design.math_reshape](schema_docs/3.design.math_reshape.md)                         | 数学改写：为了在该硬件上实现，对计算本身做的改写                                             | 只有 Planner 能改，Coder 遵守                      |
-| Design      | [design.work_schedule](schema_docs/4.design.work_schedule.md)                       | 工作调度：计算如何分解、由谁执行、怎样分配与接续                                             | 同上                                               |
-| Design      | [design.tile_pipeline](schema_docs/5.design.tile_pipeline.md)                       | 微流水线：worker 内执行角色的动作、依赖、片上资源及跨工作接续                                | 同上                                               |
-| Realization | [realization](schema_docs/6.realization.md)                                         | 实现交接：设计所依赖、但上面没有表达的实现条件，以及优先尝试的实现选择                       | Planner 填写；Coder 仅可更新 `prefer[].feedback` |
+| Contract    | [CONTRACT.Algorithm_requirement](schema_docs/1.contract.algorithm_requirement.md)   | 算法要求：从外部看，算子必须满足的输入、输出与数学关系                                       | Planner 与 Coder 都不能改                          |
+| Contract    | [CONTRACT.Hardware_specification](schema_docs/2.contract.hardware_specification.md) | 硬件规格：目标设备的执行单元、核心能力与边界，已选的实现栈，以及完整规格与 microbench 的引用 | 同上                                               |
+| Design      | [DESIGN.Math_reshape](schema_docs/3.design.math_reshape.md)                         | 数学改写：为了在该硬件上实现，对计算本身做的改写                                             | 只有 Planner 能改，Coder 遵守                      |
+| Design      | [DESIGN.Work_schedule](schema_docs/4.design.work_schedule.md)                       | 工作调度：计算如何分解、由谁执行、怎样分配与接续                                             | 同上                                               |
+| Design      | [DESIGN.Tile_pipeline](schema_docs/5.design.tile_pipeline.md)                       | 微流水线：worker 内执行角色的动作、依赖、片上资源及跨工作接续                                | 同上                                               |
+| Realization | [REALIZATION](schema_docs/6.realization.md)                                         | 实现交接：设计所依赖、但上面没有表达的实现条件，以及优先尝试的实现选择                       | Planner 填写；Coder 仅可更新 `Feedback[]` |
 
-Design 三区按计算方式、工作组织和局部执行排列：`math_reshape` 先定下有哪些量、计算依赖、哪些量跨迭代携带、哪些中间量物化，`work_schedule` 与 `tile_pipeline` 再分别表达宏观工作组织和局部执行约束。优化收益取决于具体任务与证据，不由所在层级决定。
+Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape` 先定下有哪些量、计算依赖、哪些量跨迭代携带、哪些中间量物化，`Work_schedule` 与 `Tile_pipeline` 再分别表达宏观工作组织和局部执行约束。优化收益取决于具体任务与证据，不由所在层级决定。
 
 通用 YAML 写法、元数据与任务组织见[公共约定](schema_docs/0.common.md)。
 
@@ -84,10 +84,10 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 ├── schema_extract/      P1–P6 方法、Runner、执行器对齐说明、恢复与发布
 ├── schema_template/     共用的 YAML 操作与检查
 │   ├── README.md        创建、修订、检查与交付
-│   ├── starter.yaml     既有骨架，支持范围见模板说明
-│   ├── check_yaml.py    当前检查入口，接收一个 YAML 路径
-│   ├── tools/           检查器、有限流水线图工具、维护说明与测试
-│   └── examples/        已有案例；README 说明历史核对范围与缺口
+│   ├── starter.yaml     当前字段的待填写骨架
+│   ├── check_yaml.py    统一规范化、检查与按需绘图入口
+│   ├── tools/           只读规则、有限图模块、维护说明与测试
+│   └── examples/        已有案例，本轮未改，后续用新工具整理
 ├── schema_docs/         公共约定与六个区的字段规则、设计指导及局部示例
 │   ├── 0.common.md
 │   ├── 1.contract.algorithm_requirement.md
@@ -127,7 +127,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`math_reshape
 
 **已有：** 提取、新建设计、优化设计和实现四个任务入口，公共约定与六个分区文档，YAML 填写骨架、统一 Python 检查入口及检查器正反例测试；`kernel_wiki` 的 44 个算子与对应的 `schema_wiki` 输出目录。使用方法与校验边界见[模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
 
-独立的[微流水线图工具](schema_template/README.md#微流水线图)在其支持的协议内按展示规模展开各工作阶段的动作和依赖，检查重复动作、悬空引用、成员匹配与依赖环，并在每份 YAML 旁生成同名 PNG。它不解析文字契约，也不证明跨工作阶段的活性或全部存储复用安全。
+统一入口的[微流水线图选项](schema_template/README.md#微流水线图)在其支持的协议内按展示规模展开各工作阶段的动作和依赖，检查重复动作、悬空引用、成员匹配与依赖环，并在请求的 YAML 旁生成同名 PNG。它不解析文字契约，也不证明跨工作阶段的活性或全部存储复用安全。
 
 **TODO：**
 

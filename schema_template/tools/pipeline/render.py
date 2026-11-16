@@ -9,14 +9,14 @@ import subprocess
 from graphlib import CycleError, TopologicalSorter
 import textwrap
 
-from .model import PhaseGraph
+from .model import StepGraph
 
 COLORS = ["#e5f0fa", "#e6f2eb", "#fcebdc", "#f6e4ed", "#eee7f8", "#e3f1f1"]
-PHASE_COLORS = [("#365b7d", "#f0f5fa"), ("#3e6967", "#eff7f5")]
+STEP_COLORS = [("#365b7d", "#f0f5fa"), ("#3e6967", "#eff7f5")]
 STYLES = {
-    "execute": ("#617b91", "solid"), "program": ("#9aa8ba", "dashed"),
-    "completion": ("#b3c3d6", "dotted"), "data": ("#315a7d", "solid"),
-    "reuse": ("#b97923", "dashed"), "sync": ("#8761b2", "dashed"),
+    "execute": ("#617b91", "solid"), "pipe": ("#9aa8ba", "dashed"),
+    "ordered": ("#718eaa", "dotted"), "Prepared": ("#315a7d", "solid"),
+    "Released": ("#b97923", "dashed"), "Allowed": ("#8761b2", "dashed"),
 }
 
 
@@ -28,7 +28,7 @@ def quote(value) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
-def display_members(graph: PhaseGraph) -> set[str]:
+def display_members(graph: StepGraph) -> set[str]:
     """Fold only identical member neighborhoods, and only if the quotient is a DAG.
 
     The checked event graph always keeps every member. Asymmetric inter-member
@@ -57,12 +57,12 @@ def display_members(graph: PhaseGraph) -> set[str]:
     return folded
 
 
-def dot_text(title: str, graphs: list[PhaseGraph], samples: dict, notes=()) -> str:
-    status = "DEPENDENCY CYCLE" if any(graph.cycle for graph in graphs) else "Acyclic sample"
-    label = title + "\n" + status + " · Representative event graph · NO TIME SCALE\n"
-    label += "Blue: data / completion   Gray dashed: program   Dotted: ordered completion\n"
-    label += "Orange: reuse   Purple: sync   Red: dependency cycle\nPhases checked independently · identical members folded for display"
-    label += "\nIllustration parameters; no cross-phase or resource-safety proof."
+def dot_text(title: str, graphs: list[StepGraph], samples: dict, notes=()) -> str:
+    status = "DEPENDENCY CYCLE" if any(graph.cycle for graph in graphs) else "Acyclic"
+    label = title + "\n" + status + " · Sample local events · NO TIME SCALE\n"
+    label += "One representative worker per step · identical members folded\n"
+    label += "Blue: Prepared   Orange: Released   Purple: Allowed   Red: dependency cycle\n"
+    label += "Gray dashed: Pipe order   Dotted: async_ordered completion   Solid gray: issue → done"
     for note in notes:
         label += "\n" + textwrap.fill(note, 100)
     lines = ["digraph Pipeline {",
@@ -73,19 +73,19 @@ def dot_text(title: str, graphs: list[PhaseGraph], samples: dict, notes=()) -> s
              ' margin="0.09,0.06", color="#b6c7d5"];',
              'edge [arrowsize=0.55];']
     for pi, graph in enumerate(graphs):
-        sample = samples[graph.phase]
+        sample = samples[graph.step]
         description = ", ".join(f"{k}={v}" for k, v in sorted(sample["parameters"].items()))
-        border, background = PHASE_COLORS[pi % len(PHASE_COLORS)]
-        phase_title = html.escape(f"PHASE {pi + 1} / {len(graphs)} · {graph.phase}")
+        border, background = STEP_COLORS[pi % len(STEP_COLORS)]
+        step_title = html.escape(f"STEP {pi + 1} / {len(graphs)} · {graph.step}")
         sample_label = html.escape(f"worktiles={sample['worktiles']} | {description}")
-        phase_label = (
+        step_label = (
             '<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="0">'
             f'<TR><TD BGCOLOR="{border}" ALIGN="LEFT" CELLPADDING="10">'
-            f'<FONT COLOR="white" POINT-SIZE="18"><B>{phase_title}</B></FONT></TD></TR>'
+            f'<FONT COLOR="white" POINT-SIZE="18"><B>{step_title}</B></FONT></TD></TR>'
             f'<TR><TD ALIGN="LEFT" CELLPADDING="8"><FONT COLOR="#526477" POINT-SIZE="11">'
             f'{sample_label}</FONT></TD></TR></TABLE>'
         )
-        lines.append(f'subgraph cluster_phase_{pi} {{ label=<{phase_label}>; labeljust=l; labelloc=t; '
+        lines.append(f'subgraph cluster_step_{pi} {{ label=<{step_label}>; labeljust=l; labelloc=t; '
                      f'color={quote(border)}; fillcolor={quote(background)}; '
                      'style="rounded,filled"; penwidth=2.4; margin=24;')
         folded = display_members(graph)
@@ -97,7 +97,11 @@ def dot_text(title: str, graphs: list[PhaseGraph], samples: dict, notes=()) -> s
         for source, target, kind in graph.edges:
             if kind != "execute":
                 if source.endswith("@issue"):
-                    separate.add(source.rsplit("@", 1)[0])
+                    source_op = graph.operations[source.rsplit("@", 1)[0]]
+                    redundant_serial_order = (kind == "pipe" and source_op.execution_mode == "serial"
+                                              and (source_op.event("done"), target, "pipe") in graph.edges)
+                    if not redundant_serial_order:
+                        separate.add(source_op.id)
                 if target.endswith("@done"):
                     separate.add(target.rsplit("@", 1)[0])
         separate.update(event.rsplit("@", 1)[0] for event in graph.cycle)
@@ -128,14 +132,17 @@ def dot_text(title: str, graphs: list[PhaseGraph], samples: dict, notes=()) -> s
                 events = ("issue", "done") if split else ("done",)
                 for event in events:
                     node = event_id(event)
-                    suffix = "\n" + ("ISSUE" if event == "issue" else "DONE") if split else ""
+                    suffix = "\n" + ("ISSUE" if event == "issue" else "DONE") if split else "\nISSUE → DONE"
                     tip = op.path + "\n" + json.dumps(op.context, sort_keys=True)
                     lines.append(f"{quote(node)} [label={quote(op.action + suffix)}, fillcolor={quote(color)}, tooltip={quote(tip)}];")
                 if first:
                     lines.append(f'{anchor} -> {quote(visual[op.event("issue")])} [style=invis, weight=100];')
                     first = False
             lines.append("}")
-        lines.append("{rank=same; " + "; ".join(anchors) + ";}")
+        if anchors:
+            lines.append("{rank=same; " + "; ".join(anchors) + ";}")
+        else:
+            lines.append(f'empty_{pi} [label="No actions in this sample", fillcolor="white"];')
         for left, right in zip(anchors, anchors[1:]):
             lines.append(f'{left} -> {right} [style=invis, weight=100];')
         cycle_edges = set(zip(graph.cycle, graph.cycle[1:]))
@@ -155,15 +162,15 @@ def dot_text(title: str, graphs: list[PhaseGraph], samples: dict, notes=()) -> s
             tip = kind + "\n" + "\n".join(sorted(reasons))
             lines.append(f"{quote(src)} -> {quote(dst)} [color={quote(color)}, style={quote(style)}, penwidth={width}, tooltip={quote(tip)}];")
         # Invisible edges arrange panels and columns only; they never enter the
-        # audited event graph or imply a cross-phase synchronization.
-        end = f"phase_end_{pi}"
+        # audited event graph or imply a cross-step synchronization.
+        end = f"step_end_{pi}"
         lines.append(f'{end} [shape=point, width=0, style=invis];')
         outgoing = {visual[a] for a, b, _ in graph.edges if visual[a] != visual[b]}
         for node in sorted(set(visual.values()) - outgoing):
             lines.append(f'{quote(node)} -> {end} [style=invis, weight=0];')
         lines.append("}")
         if pi and anchors:
-            lines.append(f'phase_end_{pi-1} -> {anchors[0]} [style=invis, minlen=5];')
+            lines.append(f'step_end_{pi-1} -> {anchors[0]} [style=invis, minlen=5];')
     lines.append("}")
     return "\n".join(lines) + "\n"
 
@@ -171,12 +178,14 @@ def dot_text(title: str, graphs: list[PhaseGraph], samples: dict, notes=()) -> s
 def graphviz(dot: str) -> bytes:
     executable = shutil.which("dot")
     if executable is None:
-        raise RenderError("Graphviz 'dot' is required for PNG; install Graphviz or use --check-only")
+        raise RenderError("Graphviz 'dot' is required for PNG; install Graphviz or use --graph check")
     try:
         result = subprocess.run([executable, "-Tpng"], input=dot.encode("utf-8"),
                                 capture_output=True, timeout=60)
     except subprocess.TimeoutExpired as error:
         raise RenderError("Graphviz exceeded 60 seconds; reduce the sample size") from error
+    except OSError as error:
+        raise RenderError(f"Graphviz could not run: {error}") from error
     if result.returncode:
         raise RenderError("Graphviz failed: " + result.stderr.decode("utf-8", errors="replace").strip())
     return result.stdout

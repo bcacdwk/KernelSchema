@@ -65,56 +65,79 @@ def stamp(data: bytes, information: dict) -> bytes:
 
 
 class GraphOutput:
-    def begin(self, source: Path, *, all_nodes: bool) -> None:
-        sources = {source}
-        if all_nodes:
-            sources.update(path for path in source.parent.iterdir() if path.suffix in {".yaml", ".yml"})
-            for path in source.parent.glob("*.png"):
-                name = owner(path)
-                if name is not None:
-                    sources.add(source.parent / name)
-        conflicts = [path.with_suffix(".png") for path in sorted(sources)
-                     if (path.with_suffix(".png").exists() or path.with_suffix(".png").is_symlink())
-                     and owner(path.with_suffix(".png")) != path.name]
+    def preflight(self, sources) -> None:
+        """Check requested destinations, without deleting or scanning old PNGs."""
+        destinations = {}
+        conflicts = []
+        for source in sorted({Path(source) for source in sources}):
+            destination = source.with_suffix(".png")
+            previous = destinations.get(destination)
+            if previous is not None and previous != source:
+                raise RenderError(f"{destination}: multiple YAML sources have the same PNG destination; PNG not updated")
+            destinations[destination] = source
+            if destination.is_symlink() or destination.exists() and owner(destination) != source.name:
+                conflicts.append(destination)
         if conflicts:
-            raise OSError("output conflicts with PNG files not generated for these YAML files: "
-                          + ", ".join(str(path) for path in conflicts))
-        for path in sorted(sources):
-            path.with_suffix(".png").unlink(missing_ok=True)
+            raise RenderError("PNG not updated: destinations are not owned by these YAML sources: "
+                              + ", ".join(map(str, conflicts)))
 
     def write(self, source: Path, graphs: list, samples: dict, notes: list[str], *, source_sha256: str,
               source_manifest: dict[str, str] | None = None, effective_identity: str | None = None,
               origins: dict | None = None) -> Path:
-        manifest = dict(source_manifest) if source_manifest is not None else {source.name: source_sha256}
-        if manifest.get(source.name) != source_sha256:
-            raise RenderError(f"{source}: source manifest does not match the checked source")
+        """Render and atomically replace only after ownership and source checks.
 
-        def unchanged():
-            for name, digest in manifest.items():
-                if Path(name).name != name or Path(name).suffix not in {".yaml", ".yml"}:
-                    raise RenderError(f"{source}: invalid source manifest filename {name!r}")
-                dependency = source.parent / name
-                try:
-                    current = hashlib.sha256(dependency.read_bytes()).hexdigest()
-                except OSError as error:
-                    raise RenderError(f"{dependency}: source changed after checking; rerun checking and rendering") from error
-                if current != digest:
-                    raise RenderError(f"{dependency}: source changed after checking; rerun checking and rendering")
-
-        unchanged()
-        title = source.parent.name + " / " + source.stem
-        image = graphviz(dot_text(title, graphs, samples, notes))
-        information = {"kind": "pipeline_graph", "source": source.name, "source_sha256": source_sha256,
-                       "source_manifest": manifest, "effective_identity": effective_identity, "origins": origins or {},
-                       "samples": samples, "notes": notes, "acyclic": all(not graph.cycle for graph in graphs)}
+        All requested analyses must complete before callers publish any PNGs.
+        Cyclic but complete samples may be published with a red diagnosis.
+        Failures leave the previous destination in place, without a state file.
+        """
+        source = Path(source)
         try:
-            image = stamp(image, information)
-        except ValueError as error:
-            raise RenderError(f"Graphviz returned an invalid PNG: {error}") from error
-        destination = source.with_suffix(".png")
-        with TemporaryDirectory(prefix=".pipeline-", dir=source.parent) as temporary:
-            staged = Path(temporary) / destination.name
-            staged.write_bytes(image)
+            self.preflight([source])
+            if not graphs:
+                raise RenderError("no completed step graphs were supplied")
+            if {graph.step for graph in graphs} != samples.keys():
+                raise RenderError("sample configurations must match the completed step graphs")
+            manifest = dict(source_manifest) if source_manifest is not None else {source.name: source_sha256}
+            if manifest.get(source.name) != source_sha256:
+                raise RenderError(f"{source}: source manifest does not match the checked source")
+
+            def unchanged():
+                for name, digest in manifest.items():
+                    if Path(name).name != name or Path(name).suffix not in {".yaml", ".yml"}:
+                        raise RenderError(f"{source}: invalid source manifest filename {name!r}")
+                    dependency = source.parent / name
+                    try:
+                        current = hashlib.sha256(dependency.read_bytes()).hexdigest()
+                    except OSError as error:
+                        raise RenderError(f"{dependency}: source changed after checking; rerun checking and rendering") from error
+                    if current != digest:
+                        raise RenderError(f"{dependency}: source changed after checking; rerun checking and rendering")
+
             unchanged()
-            staged.replace(destination)
-        return destination
+            title = source.parent.name + " / " + source.stem
+            image = graphviz(dot_text(title, graphs, samples, notes))
+            information = {
+                "kind": "pipeline_graph", "source": source.name, "source_sha256": source_sha256,
+                "source_manifest": manifest, "effective_identity": effective_identity, "origins": origins or {},
+                "samples": samples, "notes": notes, "acyclic": all(not graph.cycle for graph in graphs),
+                "scope": "given sample; one representative worker per step; local event relations",
+                "steps": [{"step": graph.step, "actions": len(graph.operations),
+                           "events": 2 * len(graph.operations), "boundary_skips": len(graph.boundaries)}
+                          for graph in graphs],
+            }
+            try:
+                image = stamp(image, information)
+            except ValueError as error:
+                raise RenderError(f"Graphviz returned an invalid PNG: {error}") from error
+            destination = source.with_suffix(".png")
+            with TemporaryDirectory(prefix=".pipeline-", dir=source.parent) as temporary:
+                staged = Path(temporary) / destination.name
+                staged.write_bytes(image)
+                unchanged()
+                self.preflight([source])
+                staged.replace(destination)
+            return destination
+        except (RenderError, OSError) as error:
+            if "PNG not updated" in str(error):
+                raise
+            raise RenderError(f"{error}; PNG not updated, previous output retained") from error

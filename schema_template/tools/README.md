@@ -1,157 +1,68 @@
-# 检查器维护
+# Template 工具
 
-日常创建、提取、修改和检查 schema 见[作者入口](../README.md)；本篇描述当前检查器的实际实现与冻结协议，以及依赖、测试和规则维护。现行方法以 [schema_docs](../../schema_docs/0.common.md) 为准，与工具的对接范围见[执行器对齐说明](../../schema_extract/EXECUTOR_ALIGNMENT.md)。检查器服务于填写和阅读，不把 plan 当作待编译的程序。
+日常作者使用 [check_yaml.py](../check_yaml.py)，填写设计和处理反馈见[模板说明](../README.md#4-检查与处理反馈)。默认对整套任务同步规范化并检查；`--read-only` 预览候选，`--all` 仅扩展请求的图范围。
 
-当前 [design_resolution.py](design_resolution.py) 仍解析 `dispatch.parent` 与单字段 `{from_parent: <直接父ID>}`：非 root 未写 parent 时取 root，引用只能指向直接父的同名完整区；parent 本身不隐式带入 Design，root 三区须本地，父链必须无环。本页的解析、有效视图、检查与绘图能力都在这个协议内，尚不支持现行 `from` 的多来源内容图。
-
-差异也涉及整份结构：[structure.py](rules/structure.py) 仍使用 `phase`、`preassigned.step`、`domain / resource / milestone`、role 的 `info.execution_mode / verb`、`pipe.prologue / steady / epilogue / repeat` 和 `waits_for` 等字段，[starter.yaml](../starter.yaml) 沿用相应旧骨架。当前检查成功不能证明实例符合现行字段、具体设计集合或 dispatch 格式；旧提取计划与 Runner 的调用协议见 [extract tools](../../schema_extract/tools/README.md)。
-
-新增拒绝条件前，先说明它防止了什么阅读歧义、遗漏或引用冲突。不能只因实现方便而限制设计表达，也不能仅因检查器已有某个限制，就把它补成规范。设计取舍和无法直接判定的数学事实留给审阅。
-
-当前机器规则只接受该实现已声明的字段名称和枚举值，不提供别名、版本回退或自动改写。字段迁移需要同步核对规范、模板、实例和测试，以及冻结运行的规则身份；只改文档不会扩大解析器的接受范围。输入中的自定义对象名不受固定字段名称限制。
-
-## 目录与职责
-
-```text
-tools/
-├── schema.py              任务文件发现、检查编排、失败状态
-├── design_resolution.py   Design 整区解析、来源链与有效身份
-├── check_policy.py        可选目录策略的兼容读取；当前仓库未启用
-├── yaml_source.py         YAML 解析、精确数值与源位置
-├── diagnostics.py         统一诊断、字段路径、值显示
-├── errors.py              工具环境与处理容量错误
-├── pipeline_syntax.py     共用整数字面量、动作记法、pipe 声明与词法索引作用域
-├── requirements.txt       解析依赖
-├── pipeline_graph.py      可选的有限展开、检查与绘图入口
-├── pipeline/              动作解析、表达式、索引范围、事件图、展示及产物管理
-├── rules/
-│   ├── __init__.py        明确列出的检查顺序
-│   ├── values.py          可复用的字段类型、值形式检查
-│   ├── structure.py       按 DOC 0–6 分组的字段结构
-│   ├── hardware.py        同一套硬件字段及缺失信息的限定处理
-│   ├── common.py          错误收集、图与区间辅助检查
-│   ├── declarations.py    任务身份、声明配对与关联遍历前提
-│   ├── symbols.py         Contract、数学符号与属性引用
-│   ├── schedule.py        launch、共享 worker、handoff
-│   └── pipeline.py        role、资源、动作/事件与索引作用域
-└── tests/
-    ├── support.py         合成任务、变异与只读断言
-    ├── test_structure.py  字段、条件必填和开放表达
-    ├── test_relations.py  声明、引用、图与跨文件关系
-    ├── test_yaml.py       解析、精确数值、文件组织和只读性
-    ├── test_cli.py        单文件入口、诊断和退出状态
-    ├── test_examples.py   现有示例通过作者入口接受检查
-    ├── test_hardware_policy.py  硬件豁免的范围、诊断和只读性
-    ├── test_pipeline_graph.py   有限展开、反例和输出检查
-    ├── test_pipeline_domains.py  作用域、坐标等价写法与默认依赖
-    ├── test_pipeline_output.py   PNG 来源、失败清理与输出冲突
-    ├── test_tool_limits.py       两个公共入口的容量与错误分类
-    └── fixtures/minimal/  最小合成测试底稿
-```
-
-依赖方向是 `check_yaml.py → schema.py → design_resolution / check_policy / yaml_source / rules → diagnostics`。YAML 解析器和诊断不导入规则；规则只检查已解析的数据，不读写 plan、不打印、不决定进程退出。完整检查依次验证 raw 字段结构、父链与引用，随后对 effective 节点检查声明、符号、工作调度和微流水线关联。
-
-输入文件名决定节点 ID，所在目录决定任务范围；文件符号链接不使检查切换到目标文件的任务目录。无论传入 root 还是派生节点，都会检查同目录直属的全部 `.yaml / .yml`。共享 Contract 和显式同名整区引用只构造内存有效视图，不写回 raw。引入名称在使用节点的跨区上下文中解析，metadata/when/version/realization 保持节点本地。
-
-上述为当前协议的普通创作模式。显式 `--standalone` 调用 `schema.validate_standalone_file`，只读取一个正式生成的阅读视图：文件自带 Contract，原 `dispatch.id/parent` 保留为身份与出处，不作为外部依赖读取。字段结构先照常验证，再在检查副本中使用本地根身份解析关系；原始数据和文件不改写。现行方法对阅读视图的定义见 [common](../../schema_docs/0.common.md#单文件阅读视图)，当前输出与调用仍受本页协议约束。
-
-### 共用解析与有效视图
-
-`schema.resolve_directory(directory)` 返回 `ResolvedTask`，只验证可展开的包络、文件/节点身份、父链及引用；允许未完成的 when 和本地区域。`validate_resolved_file(filename, *, notices=None, source_hashes=None, skip_hardware=False)` 完整检查并返回 `(directory, ResolvedTask)`。旧 `validate_file` 和 `validate_directory` 返回形状不变，task 为 effective；`source_hashes` 仍以节点 ID 返回 raw 文件摘要。
-
-`ResolvedTask` 提供 `raw_task/effective_task`、以节点 ID 为键的 `source_files/source_hashes/documents`、`origins[node][region]` 和 `dependency_nodes[node]`。`RegionOrigin(provider, chain)` 的 chain 从使用节点到实际本地定义节点，包含两端；本地区域为单节点链。`source_manifest(node)` 返回 root、自身及实际引用链闭包的“真实相对文件名 → SHA256”；全部本地区域的孩子不会把未引用的中间祖先误列为内容来源。
-
-`effective_identity(node)` 散列规范化的 `kernel_schema.design_resolution.v1`、节点 ID、排序来源 manifest 和三区域 provider/chain；不含绝对路径，不承诺语义等价。`origins_dict(node)` 提供来源 JSON，`effective_document(node)` 给出带 root Contract 的独立内容副本。raw/effective 及不同节点之间不共享可变对象；缓存仅限一次调用。
-
-父链和引用遍历使用迭代实现；总展开预算 `design_resolution.MAX_RESOLVED_UNITS = 10_000_000` 累计复制的数据值、来源 chain 条目和依赖闭包记录，在分配前检查。单文件 `yaml_source.MAX_EXPANDED_NODES = 100000` 保持不变，工具容量耗尽使用 `CapacityError`/退出 2，不当作非法 schema。
-
-`check_yaml.py --show-effective FILE` 只输出 `kernel_schema.effective_view.v1` JSON，明确 `validation: not_run`。其中 effective_yaml 使用精确标量输出并回读核对；来源 manifest、origins 和身份来自同一 ResolvedTask。它不写文件、不打印 Valid，不代替 standalone 的两次完整检查。extract 通过冻结 parser 包加载本模块，不各自实现 resolver，也不越过 run 的 rules root 导入当前仓库规则。
+工具实现当前 DOC0–6 的唯一字段和语法。检查 API 保持只读；规范化库只生成候选，CLI 负责安全写回和 PNG 发布。正式案例、Extract Runner 和 GPU 任务不属于维护回归输入。
 
 ## 回归与修改
 
-需要 Python 3.10+ 和 PyYAML；生成 PNG 另需 Graphviz 的 `dot`。在所用 Python 环境中安装解析依赖，从仓库根目录运行：
+需要 Python 3.10+ 和 PyYAML，PNG 另需 Graphviz 的 `dot`。从仓库根目录运行：
 
 ```sh
 python3 -m pip install -r schema_template/tools/requirements.txt
-```
-
-运行全部维护检查：
-
-```sh
 python3 -B -m unittest discover -s schema_template/tools/tests -t schema_template -v
 ```
 
-这条命令同时运行规则、解析、入口和现有示例测试。`-t schema_template` 指定测试包的导入根，`-B` 避免生成字节码缓存。测试底稿中的 `testing.invalid` 引用仅标识合成数据；`schema_wiki` 中后续发布的任务需要单独检查。
+合成回归覆盖来源解析、规范化与引用同步、结构和预算、关键静态关系、事件图、只读接口以及文件发布安全。规则只表达可检查的设计要求，不能把有限图的求值范围变成额外 schema 语法限制。
 
-修改时按职责定位：
+| 模块 | 职责 |
+| --- | --- |
+| `yaml_source.py` | 精确值、源节点与位置、anchor/alias/merge、摘要；显式启用的窄范围缺引号与文本类型恢复 |
+| `rules/structure.py` | 当前结构；同源导出 `CANONICAL_FIELDS / STRING_FIELDS / CANONICAL_VALUES` 及纯 int/bool 叶的 `LITERAL_TYPES`，不维护旧名别名 |
+| `normalization.py` | 全任务定义和消费者作用域、字段与名称/引用的同步计划；只返回已验证候选 |
+| `yaml_format.py` | 应用授权源编辑和保守句号清理，统一引号与布局，核对源图、精确值和幂等 |
+| `text_policy.py`、`rules/` | 按 raw 定义检查预算、字段、声明、符号、硬件、调度和流水线关系 |
+| `design_resolution.py` | 整区 `from` DAG、使用节点绑定、独立 raw/effective 视图和来源身份 |
+| `schema.py` | 组合只读规范化/校验入口；任务索引和本地仓库定位检查与纯快照 API 分开 |
+| `pipeline_syntax.py`、`pipeline/` | 动作、控制与事件语法；有限展开、依赖图、渲染与 PNG 发布 |
 
-- 字段、必填项、值形式：修改 `rules/structure.py`，共用值检查放进 `rules/values.py`，补 `test_structure.py`。
-- 引用或一致性条件：修改对应关联模块；只有影响后续遍历安全的声明前提才放进 `declarations.py`，补 `test_relations.py`。
-- YAML 解析或源位置：修改 `yaml_source.py`，补 `test_yaml.py`。文件 `load(path, name)` 和内存文本 `loads(text, name, *, path=...)` 共享同一套解析规则、源位置与精确数值语义，可用于无临时文件的投影读回；诊断显示改 `diagnostics.py`，补 `test_cli.py`。
-- 新工具保持独立用途；需要现有校验能力时复用 `schema.py`，日常作者入口保持单文件参数。
+字段规则接收 `(value, path, errors)`，关联规则使用 `CheckContext`。路径通过 `field_path` 保留特殊具名键，缺项使用 `missing=True`；规则不读取文件、不打印、不决定退出码。预算和排版分支只在机器定义中维护，作者文档不复制维护表。
 
-字段规则统一接收 `(value, path, errors)`；关联规则通过 `CheckContext.require` 收集诊断。路径统一使用 `field_path` 表达特殊映射键，缺失字段标记 `missing=True`。公共入口和解析器不承载新的领域规则。
+Storage 的具名 entry 使用固定两行 flow mapping：第一行是名字及 `meaning / depth / location / shape`，第二行是 `dtype / total_size / member / view`，比 entry 名缩进两格。可选字段缺失时直接略去，内容长短不改变分组。真实多行正文、整条 alias 及超出 YAML 简单键条件的名字保留必要表示；锚定义与使用的顺序优先。其他记录与正文布局不受该规则影响。
 
-同时保留“确有歧义必须拒绝”和“表达合理应当接受”的测试。测试不为规则提供独立正当性；撤销无必要的规则时，应将相应反例改为正例，而不是继续迁就旧实现。
+## 只读 Python API
 
-## 检查范围与诊断
+以 `schema_template` 为导入根使用 `tools`。`validate_*` 检查传入或严格读取的规范快照，不自动改写或恢复内容。需要自动规范化时显式调用下列计划入口，再决定检查候选或交给 CLI 写回。
 
-保留固定字段、非空必填、shape 轴名、共享 Contract、节点与 phase 身份、声明引用和明显数值范围冲突等检查；静态工作归属、多槽视图和模板资料配对等条件防止设计信息遗漏。内建事件名不能兼作局部里程碑，避免作用域歧义。
+| API | 输入与结果 |
+| --- | --- |
+| `yaml_source.load(path, name)`、`loads(text, name, *, path=...)` | 严格返回 `Document`，不自动修复、不执行自定义标签 |
+| `normalization.load_for_normalization(path, name, *, skip_hardware=False)`、`loads_for_normalization(text, name, *, path=..., skip_hardware=False)` | 显式源恢复；返回 `LoadedDocument(document, source_sha256, corrections)`，摘要始终对应恢复前原文 |
+| `normalization.normalize_documents(files, documents, *, canonical_fields=None, skip_hardware=False)` | 输入完整任务的 `Document` 或 `LoadedDocument`；零 I/O 返回 `NormalizedTask` |
+| `schema.normalize_directory(directory, *, skip_hardware=False)` | 读取整套任务并返回同一规范化计划，不写文件 |
+| `schema.validate_documents(files, documents, *, notices=None, source_hashes=None, skip_hardware=False)` | 零 I/O 校验结构、raw 预算、`from` 与有效关联，返回 `ResolvedTask` |
+| `schema.validate_file(path, ...)`、`validate_directory(directory, ...)`、`validate_resolved_file(path, ...)` | 严格读取完整任务，包含 dispatch 与可确定的本地仓库检查；分别返回 `(directory, effective_task)`、`effective_task`、`(directory, ResolvedTask)` |
+| `schema.validate_dispatch(files)`、`validate_local_repositories(files, documents, *, skip_hardware=False)` | 独立文件检查，不重读 YAML；普通 CLI 和完整文件 API 自动调用 |
+| `schema.validate_standalone_file(path, ...)` | 检查自带 Contract 和全部本地 Design 的单文件，保留节点 ID，不读兄弟 YAML 或 dispatch |
+| `schema.resolve_directory(directory)`、`effective_yaml(resolved, node)` | 草稿展开与独立阅读视图；展开成功不代表完整校验通过 |
+| `rules.validate_algorithm(algorithm)` | 零 I/O 检查算法区的结构、关系与值预算，返回诊断列表 |
+| `text_policy.check_document(document, *, skip_hardware=False)`、`check_values(value, path='root', *, scope='document', skip_hardware=False)` | raw 源/值预算和样式诊断；不要传有效展开副本重复计数，算法映射使用 `scope='algorithm'` |
+| `yaml_format.format_document(document, *, edits=(), corrections=None, skip_hardware=False)` | 只返回保真候选字符串；不承担跨任务绑定规划或写回 |
 
-dtype、外部入口名称和数学表达式保持开放；日常入口 `check_yaml.py` 不编译或执行表达式，不限定函数白名单。能直接识别的整数（包括带引号的整数字面量）接受相同的数值关系检查，简单索引检查已声明变量的作用域；其他数学写法交给审阅。自然语言不按固定句式判定，`repeat` 不强制创建 `steady`，但 role 必须有实际动作。
+`NormalizedTask` 含 `files / documents / candidates / source_hashes / corrections`。`documents` 是全任务最终候选，`candidates` 只含变化文件；`source_hashes` 是原始字节摘要，不能用候选 `Document.source_sha256` 代替写回比较依据。候选中的位置属于候选文本，展示时必须标明尚未写入。`corrections` 是计划修改，写回成功后才能报告为已应用。
 
-Contract 输入输出按[nullable 与 None](../../schema_docs/1.contract.algorithm_requirement.md#nullable-与-none)描述对象缺席。检查器要求 `nullable` 为布尔值，并拒绝已知单值 `python_none` 搭配非标量 shape；不会从 dtype、range 或正文猜测 None 分支，也不解释默认值或符号条件。
+`Document.source_sha256` 对应其实际解析的 UTF-8 文本，`positions` 是该文本的位置；其余源节点资料服务于保真核对。小数直接构造 `Decimal`，日期与 `on/off/yes` 保持字符串。类型恢复只处理没有显式 tag、全部用途均为已知文本字段的非 null 原始 lexeme；真实数值字段和 null 不转换。重复显式键、递归 alias、非法标签和多文档输入仍拒绝。
 
-解析只接受普通 YAML 数据，不执行自定义标签；拒绝重复显式键和递归 alias。anchor、alias 和本地 merge 仅复用字段值。`on / off / yes` 和日期保持字符串；小数直接从原文构造 Decimal，不经过 binary64。
+`ResolvedTask` 保留 raw/effective 副本、provider 与完整来源链；来源身份含 root、自身和各区实际来源文件。共享区在每个 consumer 的有效上下文校验，错误回指真实 provider 和引用位置。独立阅读视图另存，保留 provenance，不作为 raw 节点读回创作目录。
 
-错误报告文件、字段路径和真实源位置，列表下标从 0 开始；alias 子字段可能定位到锚点定义。继承区域的关联错误保留 consumer 字段路径及组合上下文，使用 provider 的原始 Document 定位真实定义，同时报告 consumer 引用位置与完整 chain；不改写 Document.positions。缺失字段不编造 consumer 行号。非法引用直接定位 raw。退出状态为 `0` 通过、`1` 输入存在问题、`2` 参数、容量或工具环境使检查未完成。检查不下载依赖，不修改文件内容、权限或修改时间。
+## CLI 与发布边界
 
-作者需要了解的检查能力及人工审阅边界见[校验边界](../README.md#校验边界)。
+CLI 顺序为读取/可证源恢复、整任务规范化计划、候选保真检查、安全写回并严格重读，随后执行字段、预算、引用、关联、dispatch 和所请求的图。预算与普通语义错误不阻止独立的安全修正；碰撞、损坏或无法证明的共享引用变化不给出可写候选。节点文件名、`Dispatch.id` 和 `from` 来源值不改名。
+
+变化文件先全部暂存并保留权限，每次替换前核对完整来源摘要；写入失败时只恢复仍由本次写入持有的文件，保留外部新修改。无变化不重写。`--read-only` 校验候选且不落盘；`--standalone` 与 `--show-effective` 仍为独立的严格只读请求，不暗中规范化。
+
+warning 使用 `Diagnostic.severity` 或 `notices` 返回，规范化修改按 `field / identifier+reference / quote / period / layout` 汇总；未应用的只读差异返回 `1`。图操作遵循模板说明的退出码和有限样本边界，全部请求分析完成后才发布 PNG，来源漂移或失败保留旧图。
 
 ## 硬件占位豁免
 
-当前仓库未启用目录级硬件豁免。提取任务显式运行 `check_yaml.py --skip-hardware`，保留文件中的硬件内容并跳过整个硬件区及依赖硬件的检查；算法、工作分配、动作、索引、成员数量和其他引用照常检查。[P1 的最小 execution 登记](../../schema_extract/phases/01_contract.md#第-3-段硬件占位)由人工核对来源，该参数不验证登记是否充分。不传该选项时执行完整检查。
-
-[check_policy.py](check_policy.py) 保留可选目录策略的兼容读取及对应测试；现行提取流程不依赖这项配置。`--skip-hardware` 的操作与 Python API 见[作者入口](../README.md#4-检查与处理反馈)。
-
-## 微流水线图的维护边界
-
-用法见[微流水线图](../README.md#微流水线图)。`pipeline_graph.py` 复用 `schema.py`。规则与图工具共用 `pipeline_syntax` 的成员路径、动作记法和词法域声明；`actions` 实例化动作，`expressions` 求有限整数与域，`coordinates` 恢复目标坐标，`windows` 判断声明窗口，`graph/model` 绑定事件并构建依赖，`render` 把内存中的 DOT 交给 Graphviz 生成 PNG，`output` 管理图片来源与原子写入。规模只由命令行显式给出；[示例总览](../examples/README.md#生成-png)保存复现命令，生成器不读取它，也不按算子名称分支。
-
-默认运行只写 YAML 同目录的同名 PNG。图片内保存来源文件名、内容指纹、展示取值和检查状态；指纹来自实际解析的字节，不记录本机绝对路径，也不把旧图片当作输入配置。生成前确认同名图片归属，并使旧图失效；无法确认归属的同名 PNG 会保留并报告冲突。`--all` 同时清理已确认由工具生成、但 YAML 已删除的孤立图片。图片完整生成后原子替换目标文件，失败不留下旧成功图或半张图；校验后或渲染期间源文件改变时，停止发布该图并提示重新运行。`--check-only` 完全只读，不需要 Graphviz，不清理或写入图片。两条路径共用相同的展开和依赖检查。
-
-`pipeline_graph.analyze` 消费 effective 节点；`GraphOutput` 保留原 `source/source_sha256` 所有权字段，并记录完整 source manifest、effective identity 和 origins。生成前和原子发布前均复核 manifest 的全部 raw 文件，包括中间引用和 provider。child 字节未变不能证明图仍对应当前来源；历史 PNG 不批量重写。
-
-能直接确定的错误由日常检查器尽早报告，例如引用未实例化的 role 成员、同一成员上的事件等待自身或自身稍后的完成。索引展开后才能判断的重复动作、悬空引用和环由图工具检查。跨成员依赖、`done` 等待自身的 `issue` 等合理写法应当保留。
-
-成员端点的表达式复用现有整数求值，缺少参数时报告无法展开；每一段选择都检查非负、整数和非空，即使图以整个 worker 成员聚合内部 warp。首段明确选择 worker 成员时还检查 `worker.unit_count`，内层硬件容量及跨参数取值的正确性仍需设计审阅，不从数量上界猜出实际成员。
-
-`GraphError` 表示具体展开存在问题；`ExpansionError` 表示样例取值不足或工具不能完成展开，不能把绘图器支持的表达式子集变成新的 schema 语法限制。修改这些行为时，在 `test_pipeline_graph.py` 中同时保留错误用例、合理边界和只读性回归。
-
-索引窗口来自动作声明时的域及其表达式，不从已生成动作的最小值、最大值倒推。局部声明遮蔽外层同名域；事件引用只取被引用动作族实际使用的域，不混入无关动作的局部定义。同一条依赖或同一个带索引的里程碑需要共同解释的索引定义不一致时，返回 `ExpansionError`，不拼成缺少前驱的局部结果。手写动作列表可通过同一动作族中的未移位引用（例如 `X(i)`）关联到已声明的 `i` 域；缺少这种依据时也不能反推一个较小范围。
-
-窗口计算先从完整参数关系恢复目标的外层坐标，再用目标坐标求变长内层域。可唯一恢复的仿射参数使用精确有理数求解；flatten 仍使用其声明的坐标映射。未出现在动作参数中的外层域按完整声明范围有限枚举；需要恢复却无法唯一确定的坐标关系返回 `2`，不能猜用源事件的外层坐标。一个候选窗口无法确定时，不能仅因另一个候选不含该点就把整个动作族当作越界。固定引用、域内缺失和拼错动作仍是输入错误。
-
-展开对动作与边数量、索引依赖深度、坐标求解规模和窗口求值总量设置工具上限。达到上限或无法唯一恢复外层坐标时返回 `2`，不要求作者为工具删改合法的数学表达。前置规则的环检查使用迭代遍历；YAML 读取限制嵌套深度与别名展开总量，遇到实现容量限制按工具无法完成报告。已确认的依赖环或递归 alias 仍按输入错误报告。
-
-## 供 Agent 审计与统计
-
-程序内可复用 `schema.validate_file`、`pipeline_graph.configuration / analyze`，再读取每个 `PhaseGraph.report()`。报告包含动作及其原文位置、依赖及原因、边界跳过和里程碑，可直接统计或追踪，不必从 PNG 或终端提示中反向识别。以下命令从仓库根目录运行，只读取并分析现有示例：
-
-```sh
-PYTHONPATH=schema_template python3 -B - <<'PY'
-import json
-from tools.schema import validate_file
-from tools.pipeline_graph import analyze, configuration
-
-_, task = validate_file("schema_template/examples/fa4_decode/q4_direct.yaml")
-for graph in analyze(task["q4_direct"], configuration({"N_r": 6}, worktiles=1)):
-    print(json.dumps(graph.report(), ensure_ascii=False))
-PY
-```
-
-展示参数仍须按实际 plan 给定，参数名中的普通空格不影响表达式匹配。动作数与边数只描述所选规模的设计级实例，不直接等于指令数、FLOPs、时延或资源峰值；公式与文字契约继续由 Agent 按规范分析。
-
-## 示例状态
-
-已有案例、历史规范化依据和未决项见[示例索引](../examples/README.md)。现有示例测试自动遍历各任务目录，通过当前工具入口检查全部节点并验证文件未被改写；它没有验收现行具体设计集合与变体目录规则。
+`skip_hardware=True` 或 CLI 的 `--skip-hardware` 显式跳过 `CONTRACT.Hardware_specification` 的结构、预算、硬件关系和依赖硬件的校验。规范化保留该区的值，不恢复其文本类型或改写登记身份；源布局仍可统一。其他字段、成员、索引和动作继续检查，文件所在目录不自动产生豁免；需要不写入时同时使用 `--read-only`。
