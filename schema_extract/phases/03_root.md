@@ -1,6 +1,6 @@
 # P3：root 设计
 
-本页完成一套具体 root 的 Design 和必要 Realization；“节点逐段方法”也供 P5 使用。
+本页按 P2 已选具体实例完成 root 的 Design 和必要 Realization；“节点逐段方法”也供 P5 使用。
 
 root 的 math_reshape、work_schedule、tile_pipeline 全部本地完整定义。P5 复用本节时，按其阶段规则审阅本地与显式整区引用构成的完整有效 Design；名称、参数及跨区接口在使用节点中绑定，Realization 始终本地。
 
@@ -14,7 +14,7 @@ worker 可沿交接定位；reviewer 按[当前文档验收](../REVIEW.md)从当
 
 只修改 `root.yaml` 的 Design、必要 Realization、自身实际 `meta_data.dispatch.when` 及随本文件内容修订递增的版本。共享 Contract、已选代表身份及来源、dispatch 草案和其他文件只读。
 
-完善自身 `when` 是把已选具体方案的真实范围写全，不授权加入其他配置的选择逻辑或改变共同 Contract。同一设计的范围和细节修正在本阶段完成；root 代表作用或固定来源选择前提改变回 [P2](02_dispatch_draft.md)，Contract 已知事实错误回 [P1](01_contract.md)。新事实和影响在既有交接中说明，不能在下层补写上层缺失的定义。
+完善自身 `when` 是把已选具体方案的真实范围写全，不授权加入其他配置的选择逻辑或改变共同 Contract。同一已选机制的范围、细节及已知内容的补写在本阶段完成。具体事实或关键关系缺口影响 root 的识别与代表取舍时，按 REVIEW 的[返回分工](../REVIEW.md#发现问题与批准)修 P2 的相应判断；共享 Contract 错误回 [P1](01_contract.md)。新事实和影响在既有交接中说明，不在下层补写上层缺失定义。
 
 ## 节点逐段方法
 

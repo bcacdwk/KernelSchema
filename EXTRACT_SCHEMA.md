@@ -9,10 +9,10 @@
 | 阶段 | 工作与产物 | 放行与下一步 |
 | --- | --- | --- |
 | [P1 共享 Contract](schema_extract/phases/01_contract.md) | 建立 root 的任务元数据与共享算法 Contract，最小登记有据的执行单元，其余硬件保持占位 | 独立验收外部计算、有效域、全部输出与验收依据；尚不批准 root Design 选择 |
-| [P2 机制识别与代表选择](schema_extract/phases/02_dispatch_draft.md) | 有界调查主要机制，选定具体 root 和拟完整代表，记录差异线索与未知边界 | 有据解决会动摇选择的重要疑点；拟完整集合含 root 不超过十份，进入 P3 |
+| [P2 机制识别与代表选择](schema_extract/phases/02_dispatch_draft.md) | 有界调查主要机制，选定具体 root 和拟完整代表，记录差异线索与未知边界 | 主要机制、具体 root、拟完整代表及记录去处经独立审定，重要选型疑点已解决；拟完整集合含 root 不超过十份，进入 P3 |
 | [P3 root 设计](schema_extract/phases/03_root.md) | 完成一套具体的数学、调度、流水线与必要 Realization，写实自身范围 | 完整 root 经适用结构检查与独立全文审阅，进入 P4 |
-| [P4 设计目录与变体记录](schema_extract/phases/04_dispatch_plan.md) | 依真实 root 落实正式记录，为最多九个非 root 明确具体实例、差异、拟共享与待落实位置 | 独立审阅完整 root、记录与有限计划；未来内容仅获计划认可，按实际依赖进入 P5 |
-| [P5 其他完整设计](schema_extract/phases/05_branch.md) | 每次只写自身 YAML；相同整区引用已存在已审的实际来源，其他新事实通过既有交接汇集 | 独立审阅本节点有效全文和全部使用上下文；重大集合或前提变化先返回对应阶段，无非 root 则跳过 |
+| [P4 设计目录与变体记录](schema_extract/phases/04_dispatch_plan.md) | 沿 P2 已定取舍与真实 root 落实目录，为最多九个非 root 明确具体实例、差异、拟共享与待落实位置 | 独立核对完整 root、记录及写作安排是否支持已定判断；未来内容仅获计划认可，按实际依赖进入 P5 |
+| [P5 其他完整设计](schema_extract/phases/05_branch.md) | 每次只写自身 YAML；相同整区引用已存在已审的实际来源，其他新事实通过既有交接汇集 | 独立审阅本节点有效全文和全部使用上下文；影响取舍或依赖的变化先返回对应阶段，无非 root 则跳过 |
 | [P6 全算子终审](schema_extract/phases/06_final.md) | 新 reviewer 审全部完整设计、目录与新事实去向；按需 worker 集中补记录或限域修稿 | 最终全目录检查和独立终审通过，才可正式交付 |
 
 交付含 raw `root.yaml`、当前选定的其他完整 YAML 和中文 `dispatch.md`；含 root 最多十份完整设计，在保留关键知识前提下越少越好，每份须有独特完整价值。只有 root 也保留目录。共享 Contract 只在 root 定义，root Design 三区全本地，其他设计通过本地定义与实际整区 `from` 形成完整有效内容。参数、局部变化与已知组合按 [common 的唯一记录格式](schema_docs/0.common.md#选择条件与索引)整理，不因此逐条取得完整 YAML 身份。
@@ -33,7 +33,7 @@ Supervisor 在授权目标内决定来源、输出、预算、恢复和必要维
 | 6 | design.tile_pipeline | [P3 微流水线](schema_extract/phases/03_root.md#第-6-段微流水线) · [流水线规范](schema_docs/5.design.tile_pipeline.md) |
 | 7 | realization | [P3 实现交接](schema_extract/phases/03_root.md#第-7-段实现交接) · [实现交接规范](schema_docs/6.realization.md) |
 
-每段保留影响计算、写入边界、调度与同步的事实，已有定义直接引用。P2 先建立机制概览；写正文时围绕当前问题深入源码，能写清本段就保存，再按具体疑点回查。复杂段可跨函数、跨层、分轮完成。前提有误时修正唯一定义并复核真实使用者，返回边界由各阶段说明。
+每段保留影响计算、写入边界、调度与同步的事实，已有定义直接引用。P2 先建立机制概览；写正文时围绕当前问题深入源码，能写清本段就保存，再按具体疑点回查。复杂段可跨函数、跨层、分轮完成。前提有误时修正唯一定义并复核真实使用者，返回分工见 [REVIEW](schema_extract/REVIEW.md#发现问题与批准)。
 
 写作和审阅依据本任务适用规则，按已有字段与合法扩展表达；规范不适配时提供具体条款、反例和影响，由 Supervisor 处理。规则一致性的判断见 [REVIEW.md](schema_extract/REVIEW.md)，旧稿和检查器接受不能替代依据。
 

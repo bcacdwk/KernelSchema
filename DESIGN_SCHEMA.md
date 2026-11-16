@@ -10,7 +10,7 @@
 
 读给定 Contract，理解外部计算、全部输出与副作用、有效域、精度及验收要求，以及设备能力和已选实现栈。省略的输入 `range` 按 [DOC 1 的默认值域](schema_docs/1.contract.algorithm_requirement.md#rangedefault-与空值)解释，计算精度与输入 dtype 分别按[数学约定](schema_docs/1.contract.algorithm_requirement.md#数学表达与参考精度)核对；硬件规则见 [DOC 2](schema_docs/2.contract.hardware_specification.md)。区分契约保证的性质与未给出的输入分布、相关性或布局条件。不能从案例或源码重新定义任务，也不能缩小有效域、放宽误差来迁就方案；前提有冲突时按[修改权限](README.md#2-schema-是什么)反馈任务方。
 
-从任务说明明确优化目标、优先 workload 和计量边界，区分必须覆盖的契约域与优先优化的输入。先围绕主要 workload 形成一套具体方案，不急于按 shape 拆节点；参数取值与输入工作量的区别遵循 [common](schema_docs/0.common.md#参数变化与结构变化)。按[模板说明](schema_template/README.md#2-创建文件或进入已有任务)创建或续写任务，保留给定 Contract，只登记本次设计的实际依据。
+从任务说明明确优化目标、优先 workload、任务要求实现的范围和计量边界。先围绕主要 workload 逐层形成 root 的一套具体方案，不急于按 shape 拆节点；root 的定位见 [common](schema_docs/0.common.md#文件与共享-contract)，参数取值与输入工作量的区别见[差异规则](schema_docs/0.common.md#参数变化与结构变化)。按[模板说明](schema_template/README.md#2-创建文件或进入已有任务)创建或续写任务，保留给定 Contract，只登记本次设计的实际依据。
 
 围绕当前判断查资料：能力与容量看 `wiki.hardware`，相对代价看 `wiki.microbench`，已选栈能否表达所需保证看 `wiki.programming`。能力存在、资源够用与工具链支持分别核实。资料不足时按[缺项规则](schema_template/README.md#1-确认资料与范围)说明受影响的决定；资料入口的占位写法见 [DOC 2](schema_docs/2.contract.hardware_specification.md#省略与占位)。
 
@@ -52,7 +52,7 @@
 
 从 Coder 的角度沿输入、计算值、工作实例和动作读一遍，确认关键设计不需要由实现者补选。按 [DOC 6](schema_docs/6.realization.md#先做删除测试再判断强度)填写必要的 `realization`，将上游尚未表达的实现兼容条件和有理由的优先选择交接清楚；没有新增信息时省略。实现条件必须与 Contract 相容，不能借此新增输入限制或改换已选环境。
 
-确有独特完整方案需要并存时，按 [common 的节点规则](schema_docs/0.common.md#派生节点与-dispatch)组织，即使面向相同 workload 也可以并列；各节点分别完成上述推导，共用原 Contract，相同整区直接 `from`。其他参数取值、局部变化和已知组合按[目录规则](schema_docs/0.common.md#选择条件与索引)记录，当前各份 YAML 仍保持具体选择。各自承担范围按 `when` 规则说明，任务要求的实现范围另行核对。
+root 的主要计算、工作归属和协作关系清楚后，结合已经发现的候选，先判断是否需要其他完整方案并存。按 [common 的节点规则](schema_docs/0.common.md#派生节点与-dispatch)说明其独特价值和本次保留理由，再逐层完成选定方案；相同整区直接 `from`。其他参数取值、局部变化、已知组合和已研究但未完整展开的独立方案，按[目录规则](schema_docs/0.common.md#选择条件与索引)记录，当前各份 YAML 仍保持具体选择。各自承担范围按 `when` 规则写实，并核对本次交付是否满足任务要求的实现范围。
 
 按[模板检查入口](schema_template/README.md#4-检查与处理反馈)检查结构与关联，再人工核对数学、资源、依赖和跨区引用。中间稿可以尚未完成下游，不能为通过检查而跳层补占位。检查提前结束时，说明实际检查范围与未执行部分，继续可独立完成的核对；结构通过、字段齐全或局部验证都不能代替设计正确性与实现验收。
 
