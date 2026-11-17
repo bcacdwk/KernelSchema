@@ -80,7 +80,7 @@ def receipt_schema(attempt: dict) -> dict:
         "format": {"type": "string", "enum": ["schema_extract.receipt.v2"]},
         "identity": obj(identity),
         "decision": {"type": "string", "enum": ["complete", "continue", "approve", "revise", "blocked"]},
-        "summary": {**TEXT, "description": "Write a brief non-empty semantic conclusion for this invocation."},
+        "summary": TEXT,
         "changed_files": TEXTS,
         "artifacts": {"type": "array", "items": ARTIFACT},
         "source_evidence": {"type": "array", "items": SOURCE_ANCHOR},
@@ -116,11 +116,12 @@ def receipt_schema(attempt: dict) -> dict:
         fields["decision"]["enum"] = ["approve", "blocked"]
     if attempt.get("mode") == "signoff":
         fields["decision"]["enum"] = ["approve", "blocked"]
-    reopen = attempt["stage"] in REOPEN_TARGETS and attempt.get("mode", "normal") == "normal"
+    reopen = (attempt["stage"] in REOPEN_TARGETS and attempt.get("mode", "normal") == "normal"
+              and attempt.get("purpose") != "maintenance")
     if reopen:
         fields["decision"]["enum"].append("reopen")
         targets = set(REOPEN_TARGETS[attempt["stage"]]) | {"external"}
-        if attempt["stage"] in {"P5", "P6"} and attempt.get("purpose") != "maintenance":
+        if attempt["stage"] in {"P5", "P6"}:
             targets.update(attempt.get("provider_reopen_targets", {}))
             targets.update("P5:" + source for source in attempt.get("source_identities", {})
                            if source not in {"root", attempt["node"]})
@@ -148,7 +149,7 @@ def proposal_schema(attempt: dict, *, source_files: dict[str, str] | None = None
     if attempt.get("mode", "normal") == "normal":
         fields["decision"] = {"type": "string", "enum":
             (["complete", "continue", "blocked"] if attempt["role"] == "worker" else ["approve", "revise", "blocked"]) +
-            (["reopen"] if attempt["stage"] in REOPEN_TARGETS else [])}
+            (["reopen"] if "reopen" in fields else [])}
     return obj(fields)
 
 

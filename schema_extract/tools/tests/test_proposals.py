@@ -12,7 +12,7 @@ from uuid import uuid4
 from schema_extract.tools.artifacts import validate_plan, write_yaml
 from schema_extract.tools.audit import _receipt_response
 from schema_extract.tools.common import ExtractError, manifest
-from schema_extract.tools.reading import read_evidence, read_range
+from schema_extract.tools.reading import read_evidence
 from schema_extract.tools.receipts import ReceiptFormatError, normalize_response, validate_receipt
 from schema_extract.tools.stages import DOCUMENT_CONCLUSIONS, required_conclusions
 from schema_extract.tools.tests import test_artifact_transactions as artifact_fixture
@@ -221,14 +221,6 @@ class ProposalTests(unittest.TestCase):
         self.assertNotIn("relative_to", read_evidence(self.source, "acceptance.json", 1, 1)["quote"])
         with self.assertRaises(ValueError):
             read_evidence(self.source, "acceptance.json", 1, 1, quote_offset=len(line))
-        fragments, cursor = [], None
-        while True:
-            page = read_range(self.source, "acceptance.json", 1, 1, max_bytes=1024, cursor=cursor)
-            fragments.extend(item["text"] for item in page["fragments"])
-            cursor = page["next_cursor"]
-            if cursor is None:
-                break
-        self.assertEqual("".join(fragments), line)
 
     def test_audit_checkpoint_identity_is_stable_across_processes(self):
         # Isolate storage IO; keep the real audit selection and serialization.

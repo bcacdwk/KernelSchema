@@ -3,6 +3,7 @@
 from copy import deepcopy
 from pathlib import Path
 import subprocess
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -67,7 +68,7 @@ class CurrentRecoveryTests(unittest.TestCase):
                            "usage": usage_summary(pending["usage"])}
                     files = _Evidence(self.fixture.root, False)
                     try:
-                        _verify_attempt(object(), {"input_fingerprint": "fixed"}, row, files, notes)
+                        _verify_attempt({"input_fingerprint": "fixed"}, row, files, notes)
                     finally:
                         files.close()
                     self.assertTrue(any(item.get("recovery_outcome") == "interrupted" for item in notes))
@@ -178,7 +179,7 @@ class CurrentRecoveryTests(unittest.TestCase):
             row = dict(directory=str(directory), origin_run_id=attempt["run_id"], attempt_id=attempt["attempt_id"],
                        usage=usage_summary(result["usage"]))
             with self.assertRaisesRegex(ExtractError, "descendant closure"):
-                _verify_attempt(object(), {"input_fingerprint": "fixed"}, row, files, [])
+                _verify_attempt({"input_fingerprint": "fixed"}, row, files, [])
         finally:
             files.close()
         (directory / "process.json").unlink()
@@ -201,7 +202,7 @@ class CurrentRecoveryTests(unittest.TestCase):
                    usage=usage_summary(result["usage"]))
         notes, files = [], _Evidence(self.fixture.root, True)
         try:
-            _verify_attempt(object(), {"input_fingerprint": "fixed"}, row, files, notes)
+            _verify_attempt({"input_fingerprint": "fixed"}, row, files, notes)
             with tempfile.TemporaryDirectory() as output:
                 archive = Path(output) / "evidence.tar.gz"
                 archived = _archive(archive, files, {"attempt_id": attempt["attempt_id"]},
@@ -236,7 +237,7 @@ class CurrentRecoveryTests(unittest.TestCase):
                 files = _Evidence(self.fixture.root, False)
                 try:
                     with self.assertRaises(ExtractError):
-                        _verify_attempt(object(), {"input_fingerprint": "fixed"}, row, files, [])
+                        _verify_attempt({"input_fingerprint": "fixed"}, row, files, [])
                 finally:
                     files.close()
                     (directory / "launch.json").unlink(missing_ok=True)
@@ -275,7 +276,7 @@ class CurrentRecoveryTests(unittest.TestCase):
                    "usage": usage_summary(result["usage"])}
             files = _Evidence(self.fixture.root, False)
             try:
-                _verify_attempt(object(), {"input_fingerprint": "fixed"}, row, files, [])
+                _verify_attempt({"input_fingerprint": "fixed"}, row, files, [])
             finally:
                 files.close()
             self.assertEqual(self.records(Path(first["directory"])), before)
@@ -286,6 +287,56 @@ class CurrentRecoveryTests(unittest.TestCase):
             observed = monitor._attempt_observation(StoreView(), {"run_id": first["run_id"]}, first["attempt_id"], {}, 1)
             self.assertEqual(observed["backend"], "claude")
             self.assertEqual(observed["usage"]["session_reported_cost_usd"], result["usage"]["session_reported_cost_usd"])
+
+    def test_unstarted_gate_preserves_previous_session_even_when_result_is_missing(self):
+        first = self.attempt()
+        initial = self.fixture.invoke(first)
+        self.assertEqual(initial["outcome"], "completed")
+        session_id = initial["session_id"]
+        session_path = Path(first["session_directory"]) / "session.json"
+        executable = self.fixture.fake.read_bytes()
+        for interrupted in ("before_release", "exec_failed"):
+            for saved_result in (True, False):
+                with self.subTest(interrupted=interrupted, saved_result=saved_result):
+                    attempt = self.attempt(session_id=session_id)
+                    previous_session = read_json(session_path)
+                    cancel = threading.Event()
+                    def interrupt(_):
+                        if interrupted == "before_release":
+                            cancel.set()
+                        else:
+                            self.fixture.fake.unlink(missing_ok=True)
+                    try:
+                        result = self.fixture.invoke(attempt, cancel=cancel, on_process=interrupt)
+                    finally:
+                        self.fixture.fake.write_bytes(executable)
+                        self.fixture.fake.chmod(0o755)
+                    self.assertEqual(result["outcome"], "cancelled" if interrupted == "before_release" else "cli_error")
+                    self.assertTrue(result["termination"]["confirmed"])
+                    self.assertEqual(result["cwd_after"], [])
+                    self.assertEqual(read_json(Path(attempt["directory"]) / "launch.json")["status"], "not_started")
+                    self.assertEqual(read_json(session_path)["session_id"], session_id)
+                    if not saved_result:
+                        (Path(attempt["directory"]) / "result.json").unlink()
+                        interrupted_session = (previous_session if interrupted == "before_release" else
+                                               {**read_json(session_path), "status": "running"})
+                        write_json(session_path, interrupted_session)
+                        result = None
+                    termination = confirm_termination(attempt, result)
+                    self.assertTrue(termination["confirmed"])
+                    if saved_result:
+                        self.assertEqual(recover_result(attempt, result, termination)["session_status"], "ready")
+                    state = self.state(attempt, session_id)
+                    handoff = handoff_session(state, attempt, result, "unstarted invocation", termination=termination)
+                    self.assertEqual(handoff["status"], "not_started")
+                    self.assertEqual(state["sessions"][attempt["session_group"]]["worker"], session_id)
+                    self.assertEqual(state["session_handoffs"], [])
+                    session = read_json(session_path)
+                    self.assertEqual((session["status"], session["session_id"]), ("ready", session_id))
+                    self.assertEqual(session["retired_sessions"], [])
+        resumed = self.fixture.invoke(self.attempt(session_id=session_id))
+        self.assertEqual((resumed["outcome"], resumed["session_id"]), ("completed", session_id))
+        self.assertEqual(resumed["response"]["sticky"], first["attempt_id"])
 
 
 class CurrentScopeRecoveryTests(unittest.TestCase):
@@ -352,10 +403,113 @@ class CurrentScopeRecoveryTests(unittest.TestCase):
         ledger = f.store.read_supervisor()
         self.assertEqual(ledger["retries"][request["id"]]["status"], "consumed")
         self.assertEqual(ledger["auto_restart"]["used"][f.state["run_id"]], 1)
+
+        # A resumed call whose gate cannot exec has not received its recovery
+        # context. Keep that same handoff available for the next actual call.
+        resumed = f.prepare(node="failed", role="worker")
+        self.assertEqual(resumed["recovery_handoff"]["attempt_id"], attempt["attempt_id"])
+        executable = stub.read_bytes()
+        try:
+            result = AgentCLI(backend="claude", executable=str(stub), model=config["model"]).run(
+                attempt=resumed, prompt=build_prompt(f.state, f.lock, resumed),
+                schema=proposal_schema(resumed, source_files=f.lock["source"]["files"]), timeout=15,
+                on_process=lambda _: stub.unlink(missing_ok=True))
+        finally:
+            stub.write_bytes(executable)
+            stub.chmod(0o755)
+        self.assertEqual((result["outcome"], result["exit_code"], result["session_status"]), ("cli_error", 125, "empty"))
+        account(f.state, resumed, result["elapsed_seconds"], result=result)
+        f.state = _receive(f.store, f.state, f.lock, resumed, result, None)
+        f.state["unsettled_attempts"].pop(resumed["attempt_id"])
+        account(f.state, resumed, result["elapsed_seconds"], result=result, final=True)
+        f.store.save(f.state)
+        self.assertEqual(f.state["nodes"]["failed"]["stage"]["calls"], scope_before["calls"] + 1)
+        self.assertEqual(len(f.state["session_handoffs"]), 1)
+        self.assertIsNone(f.state["session_handoffs"][0]["next_attempt_id"])
+        following = f.prepare(node="failed", role="worker")
+        self.assertEqual(following["recovery_handoff"]["attempt_id"], attempt["attempt_id"])
         f.store.request_control(f.state["run_id"], "pause")
         with self.assertRaisesRegex(ExtractError, "manual control"):
             monitor.check_restart_authority(f.store.read_supervisor(), request, f.state)
         self.assertIn("sibling", effective_nodes(f.state))
+
+
+class AuditReceiptRecoveryTests(unittest.TestCase):
+    def test_rejected_receipts_archive_without_claiming_artifact_validation(self):
+        import json
+        import os
+        import sys
+        from schema_extract.tools.agent import AgentCLI
+        from schema_extract.tools.audit import audit_run
+        from schema_extract.tools.receipts import proposal_schema
+        from schema_extract.tools.runner import DEFAULT_CONFIG, _receive
+        from schema_extract.tools.snapshots import freeze_inputs
+        from schema_extract.tools.store import Store
+        from schema_extract.tools.tests import test_stage_flow
+
+        f = test_stage_flow.StageFlowTests(methodName="runTest")
+        f.setUp()
+        self.addCleanup(f.doCleanups)
+        binary = f.directory / "offline-receipt"
+        binary.write_text("#!" + sys.executable + "\n" + """import json, sys
+from uuid import uuid4
+if '--version' in sys.argv:
+    print('offline-receipt')
+    raise SystemExit()
+session = str(uuid4())
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': session}))
+print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                  'session_id': session, 'structured_output': json.load(sys.stdin)}))
+""")
+        binary.chmod(0o755)
+        config = {**DEFAULT_CONFIG, "agent_binary": str(binary), "adjudication_seconds": 30, "retry_limit": 2}
+        f.store = Store(f.directory / "runtime")
+        f.store.initialize()
+        f.lock = freeze_inputs(f.store.root, f.source, f.bindings, ["kernel.py"], config)
+        author = test_stage_flow.FixtureBackend(f.lock, [{"id": "root", "instance": "kernel.py::copy(instance=root)"}], [])
+        private = f.directory / "private-configuration"
+        private.mkdir()
+        for mode in ("rejected", "receipt_repair", "accepted_missing_validation"):
+            with self.subTest(mode=mode), patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(private)}):
+                f.state = f.store.create(f.lock, f.directory / mode)
+                attempt = f.prepare()
+                author.write(attempt)
+                response = author.proposal(attempt)
+                if mode == "rejected":
+                    response["framework_candidates"] = [{"id": "invalid-evidence", "scope": "extract_tools",
+                        "summary": "The candidate has an invalid evidence index", "evidence": [len(response["source_evidence"])]}]
+                elif mode == "receipt_repair":
+                    response["summary"] = ""
+                result = AgentCLI(backend="claude", executable=str(binary), model=config["model"]).run(
+                    attempt=attempt, prompt=json.dumps(response),
+                    schema=proposal_schema(attempt, source_files=f.lock["source"]["files"]), timeout=15)
+                self.assertEqual(result["outcome"], "completed")
+                account(f.state, attempt, result["elapsed_seconds"], result=result)
+                f.state = _receive(f.store, f.state, f.lock, attempt, result, None)
+                f.state["unsettled_attempts"].pop(attempt["attempt_id"], None)
+                account(f.state, attempt, result["elapsed_seconds"], result=result, final=True)
+                f.store.save(f.state)
+                validation = Path(attempt["directory"]) / "validated.json"
+                if mode == "accepted_missing_validation":
+                    self.assertIn(attempt["attempt_id"], f.state["accepted_receipts"])
+                    validation.unlink()
+                else:
+                    self.assertNotIn(attempt["attempt_id"], f.state["accepted_receipts"])
+                    self.assertFalse(validation.exists())
+                before = (f.store.run_dir(f.state["run_id"]) / "state.json").read_bytes()
+                report = audit_run(f.store, f.state["run_id"], attempt_id=attempt["attempt_id"], verify=True,
+                                   archive=f.directory / (mode + ".tar.gz"))
+                if mode == "accepted_missing_validation":
+                    self.assertEqual(report["verification"]["status"], "incomplete")
+                    self.assertEqual(report["archive"]["status"], "not_written")
+                else:
+                    self.assertEqual(report["verification"]["errors"], [])
+                    self.assertEqual(report["verification"]["status"], "partial")
+                    self.assertEqual(report["archive"]["status"], "archived", report["archive"])
+                    self.assertTrue(any(item.get("reason") == "receipt_not_accepted; artifact validation not completed"
+                                        for item in report["verification"]["unavailable"]))
+                    self.assertIsNone(report["attempts"][0]["receipt_sha256"])
+                self.assertEqual((f.store.run_dir(f.state["run_id"]) / "state.json").read_bytes(), before)
 
 
 if __name__ == "__main__":

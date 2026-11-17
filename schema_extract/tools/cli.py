@@ -12,7 +12,6 @@ import sys
 from . import __version__
 from .common import ExtractError, RunnerBusy, digest, read_json, rules_root
 from .runner import DEFAULT_CONFIG, export_checkpoint, run, summary
-from .snapshots import frozen_invocation
 from .runtime import frozen_run_invocation
 from .store import Store
 from . import monitor
@@ -27,35 +26,35 @@ STABLE_ID = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+)*")
 def registry(repo: Path) -> dict:
     """Read stable framework decisions from the current issue registry."""
     records = {}
-    for root in (repo / "schema_extract/issues",):
-        for path in sorted(root.rglob("*.json")):
-            value = read_json(path)
-            identity, category = value.get("id"), value.get("category")
-            if (not isinstance(identity, str) or not STABLE_ID.fullmatch(identity) or
-                    identity != path.stem or category not in CATEGORIES or identity in records):
-                raise ExtractError("invalid or duplicate stable maintenance ID: " + str(path))
-            for name in ("problem", "proposal", "necessity"):
-                if not isinstance(value.get(name), str) or not value[name].strip():
-                    raise ExtractError("maintenance record is missing " + name + ": " + str(path))
-            if not isinstance(value.get("evidence"), list) or not value["evidence"] or not all(
-                    isinstance(item, str) and item.strip() for item in value["evidence"]):
-                raise ExtractError("maintenance record needs reproducible evidence: " + str(path))
-            archived = path.parent.relative_to(root).parts[:1] == ("archive",)
-            expected = ("archive", category) if archived else (category,)
-            if path.parent.relative_to(root).parts != expected:
-                raise ExtractError("maintenance record is in the wrong category directory: " + str(path))
-            decision = value.get("decision")
-            if archived:
-                if (not isinstance(decision, dict) or decision.get("outcome") not in OUTCOMES or
-                        not isinstance(decision.get("reason"), str) or not decision["reason"].strip()):
-                    raise ExtractError("archived decision needs its outcome and reason: " + str(path))
-                if decision["outcome"] == "partially_adopted" and not all(
-                        isinstance(decision.get(key), str) and decision[key].strip() for key in ("adopted", "remaining")):
-                    raise ExtractError("partial decision needs adopted and remaining scope: " + str(path))
-            elif decision is not None:
-                raise ExtractError("decided issues belong in archive: " + str(path))
-            records[identity] = {**value, "path": str(path.relative_to(repo)),
-                                 "status": decision["outcome"] if archived else "pending"}
+    root = repo / "schema_extract/issues"
+    for path in sorted(root.rglob("*.json")):
+        value = read_json(path)
+        identity, category = value.get("id"), value.get("category")
+        if (not isinstance(identity, str) or not STABLE_ID.fullmatch(identity) or
+                identity != path.stem or category not in CATEGORIES or identity in records):
+            raise ExtractError("invalid or duplicate stable maintenance ID: " + str(path))
+        for name in ("problem", "proposal", "necessity"):
+            if not isinstance(value.get(name), str) or not value[name].strip():
+                raise ExtractError("maintenance record is missing " + name + ": " + str(path))
+        if not isinstance(value.get("evidence"), list) or not value["evidence"] or not all(
+                isinstance(item, str) and item.strip() for item in value["evidence"]):
+            raise ExtractError("maintenance record needs reproducible evidence: " + str(path))
+        archived = path.parent.relative_to(root).parts[:1] == ("archive",)
+        expected = ("archive", category) if archived else (category,)
+        if path.parent.relative_to(root).parts != expected:
+            raise ExtractError("maintenance record is in the wrong category directory: " + str(path))
+        decision = value.get("decision")
+        if archived:
+            if (not isinstance(decision, dict) or decision.get("outcome") not in OUTCOMES or
+                    not isinstance(decision.get("reason"), str) or not decision["reason"].strip()):
+                raise ExtractError("archived decision needs its outcome and reason: " + str(path))
+            if decision["outcome"] == "partially_adopted" and not all(
+                    isinstance(decision.get(key), str) and decision[key].strip() for key in ("adopted", "remaining")):
+                raise ExtractError("partial decision needs adopted and remaining scope: " + str(path))
+        elif decision is not None:
+            raise ExtractError("decided issues belong in archive: " + str(path))
+        records[identity] = {**value, "path": str(path.relative_to(repo)),
+                             "status": decision["outcome"] if archived else "pending"}
     return {"records": records, "pending": sum(item["status"] == "pending" for item in records.values()),
             "archived": sum(item["status"] != "pending" for item in records.values())}
 
@@ -83,10 +82,6 @@ def candidate_report(store, state: dict, repo: Path) -> list[dict]:
         group["confirmed_by"] = confirmed
         group["status"] = "confirmed" if confirmed and "invalid_reason" not in group else "candidate"
     return [groups[key] for key in sorted(groups)]
-
-
-def inspect_runs(store, repo: Path | None = None, run_ids=None) -> list[dict]:
-    return monitor.inspect_runs(store, run_ids)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -142,11 +137,10 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--scope", help="recover one failed scope, such as P5:node, through its existing Runner")
             _budget_options(command)
     for name in ("issues", "inspect"):
-        command = sub.add_parser(name, help="read-only framework registry" if name == "issues" else "read-only run summaries; does not install a scheduler")
+        command = sub.add_parser(name, help="read-only framework registry" if name == "issues" else "read-only run summaries")
         command.add_argument("--repo", type=Path, default=Path.cwd())
         command.add_argument("--state-root", type=Path)
         if name == "inspect":
-            command.add_argument("--start", metavar="RUN_UUID", help="request execution of one explicitly selected queued run")
             command.add_argument("--run", nargs="+", dest="run_ids")
             command.add_argument("--json", action="store_true")
     standalone = sub.add_parser("standalone", help="materialize one node with effective Design and its shared Contract as an independent reading view")
@@ -196,7 +190,6 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--run", nargs="+", dest="run_ids")
             command.add_argument("--auto-restart-limit", type=int, help="explicit persistent per-run authorization; never refunds use")
             command.add_argument("--codex-bin", help="Codex queue executable, or executable test substitute")
-            command.add_argument("--probe-delay", type=int, metavar="SECONDS", help="one same-thread probe in 1..300 seconds; leaves scan cadence unchanged")
         elif name == "ack":
             command.add_argument("wake_id", metavar="ID")
     background = sub.add_parser("_background")
@@ -219,16 +212,13 @@ def _budget_options(command):
                          help="explicitly add this many calls to each stage/node limit; keep used calls and decisions")
 
 
-def _frozen_entry(lock: dict, command: list[str], *, store=None, state=None) -> None:
-    arguments, directory, environment = (frozen_run_invocation(store, store.load(state["run_id"]), command)
-                                         if store is not None and state is not None else frozen_invocation(lock, command))
+def _frozen_entry(store, state: dict, command: list[str]) -> None:
+    arguments, directory, environment = frozen_run_invocation(store, store.load(state["run_id"]), command)
+    os.chdir(directory)
     if rules_root() == Path(environment["PYTHONPATH"]).resolve():
-        if store is not None:
-            os.chdir(directory)
         return
     # The absolute entry and import path select frozen code; diagnostics belong
     # in the run directory. -B keeps bytecode out of the immutable snapshot.
-    os.chdir(directory)
     os.execve(sys.executable, arguments, environment)
 
 
@@ -354,7 +344,7 @@ def main(argv=None) -> int:
                     result = monitor.scan(store, args.run_ids)
             elif args.monitor_command == "start":
                 result = clock.start(args.thread, args.run_ids, auto_restart_limit=args.auto_restart_limit,
-                                     codex_binary=args.codex_bin, probe_delay=args.probe_delay)
+                                     codex_binary=args.codex_bin)
             elif args.monitor_command == "ack":
                 result = clock.ack(args.wake_id, args.thread)
             elif args.monitor_command == "stop":
@@ -394,9 +384,8 @@ def main(argv=None) -> int:
             state = store.load(args.run_id)
             if "scoped_recovery.v2" not in state.get("executor", {}).get("capabilities", []):
                 raise ExtractError("frozen executor lacks scoped_recovery.v2")
-            lock = read_json(store.run_dir(args.run_id) / "inputs.lock.json")
             command = ["resume", args.run_id, "--scope", args.scope, "--repo", str(args.repo), "--state-root", str(state_root)]
-            _frozen_entry(lock, command, store=store, state=state)
+            _frozen_entry(store, state, command)
             request = monitor.request_restart(store, args.run_id, args.scope, args.repo, automatic=False)
             print(json.dumps(request, ensure_ascii=False, indent=2))
             return 0 if request["status"] in {"authorized", "consumed"} and request.get("launch", {}).get("status") != "launch_failed" else 1
@@ -412,31 +401,15 @@ def main(argv=None) -> int:
                 entry = monitor.claim_launch(store, args.run_id, args.launch_id)
             os.environ["SCHEMA_EXTRACT_ENTRY_ID"] = entry["id"]
             state = store.load(args.run_id)
-            lock = read_json(store.run_dir(args.run_id) / "inputs.lock.json")
             command = ["_background", args.run_id, "--launch-id", entry["id"],
                        "--repo", str(args.repo), "--state-root", str(state_root)]
-            _frozen_entry(lock, command, store=store, state=state)
+            _frozen_entry(store, state, command)
             state = run(store, args.run_id, resume=entry["mode"] != "maintenance",
                         queued_only=entry["mode"] == "queued", launch_id=entry["id"])
             print(json.dumps(summary(store, state), ensure_ascii=False, indent=2))
             return 0 if state["status"] == "ready" and state["published"] else 1
         if args.command in {"issues", "inspect"}:
-            if args.command == "inspect" and args.start:
-                store = Store(state_root)
-                state = store.load(args.start)
-                if state["status"] != "queued":
-                    raise ExtractError("inspect --start only accepts queued work; use resume explicitly for an interrupted run")
-                lock = read_json(store.run_dir(args.start) / "inputs.lock.json")
-                if lock["fingerprint"] != state["input_fingerprint"]:
-                    raise ExtractError("run input fingerprint differs from its lock")
-                entry = _launch_context(store, state, mode="queued")
-                if entry.get("reused") or entry.get("status") == "preserved":
-                    return _busy_result(state, entry)
-                _frozen_entry(lock, ["inspect", "--start", args.start, "--repo", str(args.repo), "--state-root", str(state_root)], store=store, state=state)
-                state = run(store, args.start, resume=True, queued_only=True, launch_id=entry.get("id"))
-                print(json.dumps(summary(store, state), ensure_ascii=False, indent=2))
-                return 0 if state["status"] == "ready" and state["published"] else 1
-            result = registry(args.repo) if args.command == "issues" else inspect_runs(Store(state_root), args.repo, args.run_ids)
+            result = registry(args.repo) if args.command == "issues" else monitor.inspect_runs(Store(state_root), args.run_ids)
             if args.command == "inspect":
                 _print_observations(result, as_json=args.json)
             else:
@@ -474,7 +447,7 @@ def main(argv=None) -> int:
                 if request is None:
                     request = store.request_control(args.run_id, args.command)
                     os.environ["SCHEMA_EXTRACT_CONTROL_REQUEST"] = request["id"]
-            _frozen_entry(lock, command, store=store, state=state)
+            _frozen_entry(store, state, command)
             if args.command == "maintain":
                 from .maintenance import submit_request
                 request = submit_request(store, args.run_id, issue_id=args.issue_id, tasks=read_json(args.tasks.absolute()))
@@ -545,8 +518,7 @@ def main(argv=None) -> int:
         entry = _launch_context(store, state, mode="queued" if state["status"] == "queued" else "resume")
         if entry.get("reused") or entry.get("status") == "preserved":
             return _busy_result(state, entry)
-        _frozen_entry(read_json(store.run_dir(state["run_id"]) / "inputs.lock.json"),
-                      ["resume", state["run_id"], "--repo", str(args.repo), "--state-root", str(state_root)], store=store, state=state)
+        _frozen_entry(store, state, ["resume", state["run_id"], "--repo", str(args.repo), "--state-root", str(state_root)])
         state = run(store, state["run_id"], resume=True, queued_only=entry.get("mode") == "queued", launch_id=entry.get("id"))
         print(json.dumps(summary(store, state), ensure_ascii=False, indent=2))
         return 0 if state["status"] == "ready" and state["published"] else 1

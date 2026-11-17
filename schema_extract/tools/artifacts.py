@@ -43,10 +43,10 @@ class CandidateRejected(ExtractError):
 
 
 @lru_cache(maxsize=16)
-def parser_for(root: str):
-    """Load the parser from the invocation's frozen Template package."""
+def parser_for(root: str, cache_identity: str = ""):
+    """Load a frozen Template root, or bind current code to its supplied digest."""
     source = Path(root) / "schema_template/tools/__init__.py"
-    name = "_schema_extract_checker_" + hashlib.sha256(root.encode()).hexdigest()[:16]
+    name = "_schema_extract_checker_" + hashlib.sha256((root + "\0" + cache_identity).encode()).hexdigest()[:16]
     spec = importlib.util.spec_from_file_location(name, source, submodule_search_locations=[str(source.parent)])
     if spec is None or spec.loader is None:
         raise ExtractError(f"cannot load frozen Template: {source}")
@@ -61,8 +61,8 @@ def parser_for(root: str):
         sys.dont_write_bytecode = previous
 
 
-def _module(parser_root: Path, name: str):
-    parser = parser_for(str(parser_root))
+def _module(parser_root: Path, name: str, *, cache_identity: str = ""):
+    parser = parser_for(str(parser_root), cache_identity) if cache_identity else parser_for(str(parser_root))
     previous = sys.dont_write_bytecode
     try:
         sys.dont_write_bytecode = True
@@ -71,8 +71,8 @@ def _module(parser_root: Path, name: str):
         sys.dont_write_bytecode = previous
 
 
-def schema_for(parser_root: Path):
-    return _module(parser_root, "schema")
+def schema_for(parser_root: Path, *, cache_identity: str = ""):
+    return _module(parser_root, "schema", cache_identity=cache_identity)
 
 
 def load_yaml(directory: Path, filename: str, *, parser_root: Path | None = None) -> dict:
@@ -553,7 +553,7 @@ def _file_scope(stage, role, old_files, new_files, *, node_entry=None, revision_
     return changed
 
 
-def _validate_scope(stage, role, old_files, new_files, old, new, template, *, decision, node_entry=None,
+def _validate_scope(stage, role, old_files, new_files, old, new, template, *, node_entry=None,
                     revision_scope=None, first_draft=False, maintenance_fields=None, synchronized=()):
     changed = _file_scope(stage, role, old_files, new_files, node_entry=node_entry,
                           revision_scope=revision_scope, synchronized=synchronized)
@@ -626,7 +626,7 @@ def _validate_scope(stage, role, old_files, new_files, old, new, template, *, de
                       "hardware": "only_P1_Execution_is_writable"}}
 
 
-def validate_artifacts(stage: str, role: str, before: Path, after: Path, starter: Path, *, decision: str,
+def validate_artifacts(stage: str, role: str, before: Path, after: Path, starter: Path, *,
                        node_entry: dict | None = None, revision_scope: list | None = None,
                        first_draft=False, maintenance_fields: list | None = None) -> dict:
     """Scope gate for canonical raw bytes; normalization is a separate transaction."""
@@ -645,24 +645,33 @@ def validate_artifacts(stage: str, role: str, before: Path, after: Path, starter
     old = {node: load_yaml(before, node + ".yaml", parser_root=parser_root) for node in nodes}
     new = {node: load_yaml(after, node + ".yaml", parser_root=parser_root) for node in nodes}
     template = load_root(starter.parent, starter.name, parser_root=parser_root)
-    return _validate_scope(stage, role, old_files, new_files, old, new, template, decision=decision,
+    return _validate_scope(stage, role, old_files, new_files, old, new, template,
                            node_entry=node_entry, revision_scope=revision_scope, first_draft=first_draft,
                            maintenance_fields=maintenance_fields)
 
 
-def _early_check(root, *, parser_root: Path, stage: str) -> None:
+def _early_check(root, *, parser_root: Path, stage: str) -> list[str]:
     rules = _module(parser_root, "rules")
     errors = rules.validate_structure({"root": root}, skip_hardware=True, allow_from=True)
     errors = [error for error in errors if not (error.path == "root.DESIGN" or error.path.startswith("root.DESIGN."))
               and not (stage == "P2" and error.path == "root.META_DATA.Dispatch.when")]
     errors.extend(rules.validate_algorithm(root.get("CONTRACT", {}).get("Algorithm_requirement")))
+    # Algorithm validation already includes its text policy. Check the other
+    # current content without making future Design or skipped hardware final.
+    text_policy = _module(parser_root, "text_policy")
+    errors.extend(text_policy.check_values(
+        {key: value for key, value in root.items() if key not in {"CONTRACT", "DESIGN"}},
+        skip_hardware=True))
     if stage == "P1":
         values = _module(parser_root, "rules.values")
         values.named(values.known_text, key=values.hardware_identity)(
             root.get("CONTRACT", {}).get("Hardware_specification", {}).get("Execution"),
             "root.CONTRACT.Hardware_specification.Execution", errors)
+    notices = [str(error) for error in errors if error.severity == "warning"]
+    errors = [error for error in errors if error.severity != "warning"]
     if errors:
         raise ExtractError("; ".join(map(str, errors)))
+    return notices
 
 
 def check_stage_snapshot(directory: Path, *, parser_root: Path, stage: str,
@@ -697,7 +706,7 @@ def check_stage_snapshot(directory: Path, *, parser_root: Path, stage: str,
                 schema.validate_local_repositories(files, documents, skip_hardware=True)
                 result["design_resolution"] = _resolved_context(resolved, strict=True)
             else:
-                _early_check(root, parser_root=parser_root, stage=stage)
+                result["notices"] = _early_check(root, parser_root=parser_root, stage=stage)
             result["checked_nodes"] = ["root"]
         elif stage == "P6":
             notices = []
@@ -948,7 +957,7 @@ def normalize_candidate(before: Path, original: Path, destination: Path, starter
                 final_hashes.update({name: item["final_sha256"] for name, item in synchronized.items()})
         template = load_root(starter.parent, starter.name, parser_root=parser_root)
         scope = _validate_scope(stage, role, before_hashes, final_hashes, old, new, template,
-                               decision=decision, node_entry=node_entry, revision_scope=revision_scope,
+                               node_entry=node_entry, revision_scope=revision_scope,
                                first_draft=first_draft, maintenance_fields=maintenance_fields, synchronized=synchronized)
         validation["scope"] = scope
         if artifact_manifest(original, expected=originals) != originals or artifact_manifest(before, expected=before_hashes) != before_hashes:

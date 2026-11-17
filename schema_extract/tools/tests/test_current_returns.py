@@ -589,6 +589,110 @@ class CurrentReturnsTests(unittest.TestCase):
         self.assertIsNotNone(f.state["recoverable_checkpoint"])
         self.assertEqual((f.state["stages"]["P1"]["adjudications"], f.state["stages"]["P1"]["signoffs"]), (0, 0))
 
+    def test_resumed_maintenance_ignores_consumed_pause_and_settles_started_review(self):
+        f = self.flow
+        f.create()
+        f.step(stage="P1", role="worker")
+        maintenance.submit_request(f.store, f.state["run_id"], issue_id="review-after-explicit-resume", tasks=[
+            {"stage": "P1", "node": "root", "action": "review", "fields": [],
+             "reason": "Independently review the completed Contract after resume"}])
+        f.state = maintenance.consume_requests(f.store, f.state)
+        f.state = maintenance.mark_drained(f.store, f.state)
+        old_pause = f.store.request_control(f.state["run_id"], "pause")
+        f.state = run(f.store, f.state["run_id"], transport=f.backend)
+        self.assertEqual(f.state["status"], "paused")
+        self.assertEqual(len(f.backend.calls), 1)
+        test = self
+        class MaintainedReview:
+            def run(self, *, attempt, **kwargs):
+                result = test.result(attempt)
+                f.store.request_control(f.state["run_id"], "pause")
+                return result
+        f.state = run(f.store, f.state["run_id"], resume=True, transport=MaintainedReview())
+        self.assertEqual(f.state["status"], "paused")
+        self.assertEqual(f.state["stage"], "P2")
+        self.assertEqual(f.state["maintenance"]["status"], "complete")
+        self.assertEqual(len(f.backend.calls), 2)
+        self.assertEqual(f.backend.calls[-1]["purpose"], "maintenance")
+        self.assertIn(old_pause["id"], f.state["control"]["requests"])
+        self.assertEqual(f.state["stages"]["P1"]["calls"], 2)
+        self.assertEqual(len(f.state["accepted_receipts"]), 2)
+        self.assertEqual(f.state["active_attempts"], {})
+
+    def test_maintenance_reviews_current_p2_candidate(self):
+        f = self.flow
+        f.create()
+        f.step(stage="P1", role="worker")
+        f.step(stage="P1", role="reviewer")
+        f.step(stage="P2", role="worker")
+        draft = f.state["checkpoint"]
+        _, expected = f.store.verify_checkpoint(f.state, draft)
+        plan = deepcopy(f.state["plan_draft"])
+        budget = deepcopy(f.state["stages"]["P2"])
+        maintenance.submit_request(f.store, f.state["run_id"], issue_id="review-completed-selection-draft", tasks=[
+            {"stage": "P2", "node": "root", "action": "review", "fields": [],
+             "reason": "Independently review the current completed selection draft"}])
+        f.state = maintenance.consume_requests(f.store, f.state)
+        f.state = maintenance.mark_drained(f.store, f.state)
+        review = f.prepare(stage="P2", role="reviewer")
+        self.assertEqual(review["dependency_digests"], expected["files"])
+        self.assertEqual(f.state["plan_draft"], plan)
+        f.accept(review, self.result(review))
+        self.assertEqual(f.state["selected_designs"], plan)
+        self.assertEqual((f.state["stage"], f.state["role"]), ("P3", "worker"))
+        self.assertEqual(f.state["stages"]["P2"]["calls"], budget["calls"] + 1)
+        self.assertEqual(f.state["stages"]["P2"]["deadline"], budget["deadline"])
+        self.assertEqual(f.store.verify_checkpoint(f.state, draft)[1]["files"], expected["files"])
+
+    def test_maintenance_preserves_unfinished_upstream_draft(self):
+        f = self.flow
+        f.create()
+        for stage in ("P1", "P2"):
+            f.step(stage=stage, role="worker")
+            f.step(stage=stage, role="reviewer")
+        writer = f.prepare(stage="P3", role="worker")
+        def partial(call):
+            directory = Path(call["workspace"])
+            value = load_yaml(directory, "root.yaml", parser_root=f.backend.rules)
+            value["DESIGN"]["Math_reshape"] = deepcopy(f.backend.base["DESIGN"]["Math_reshape"])
+            value["META_DATA"]["Version"] += 1
+            write_yaml(directory / "root.yaml", value, parser_root=f.backend.rules)
+        f.accept(writer, self.result(writer, decision="continue", write=partial))
+        draft, budget = f.state["checkpoint"], deepcopy(f.state["stages"]["P3"])
+        maintenance.submit_request(f.store, f.state["run_id"], issue_id="review-unfinished-root-draft", tasks=[
+            {"stage": "P3", "node": "root", "action": "review", "fields": [],
+             "reason": "Review the root only after its ordinary authoring completes"}])
+        f.state = maintenance.consume_requests(f.store, f.state)
+        f.state = maintenance.mark_drained(f.store, f.state)
+        self.assertEqual(f.state["checkpoint"], draft)
+        self.assertEqual(f.state["stages"]["P3"], budget)
+        continuing = f.prepare(stage="P3", role="worker")
+        self.assertNotIn("purpose", continuing)
+        self.assertEqual(continuing["base_checkpoint"], draft)
+        value = load_yaml(Path(continuing["workspace"]), "root.yaml", parser_root=f.backend.rules)
+        self.assertEqual(value["DESIGN"]["Math_reshape"], f.backend.base["DESIGN"]["Math_reshape"])
+
+    def test_maintenance_restores_pending_p4_plan_after_upstream_review(self):
+        f = self.flow
+        f.create(nodes=("root", "branch"))
+        for stage in ("P1", "P2", "P3"):
+            f.step(stage=stage, role="worker")
+            f.step(stage=stage, role="reviewer")
+        f.step(stage="P4", role="worker")
+        plan, budget = deepcopy(f.state["plan_draft"]), deepcopy(f.state["stages"]["P4"])
+        maintenance.submit_request(f.store, f.state["run_id"], issue_id="review-selection-before-writing-review", tasks=[
+            {"stage": "P2", "node": "root", "action": "review", "fields": [],
+             "reason": "Recheck selection while retaining the pending writing-plan candidate"}])
+        f.state = maintenance.consume_requests(f.store, f.state)
+        f.state = maintenance.mark_drained(f.store, f.state)
+        review = f.prepare(stage="P2", role="reviewer")
+        f.accept(review, self.result(review))
+        self.assertEqual((f.state["stage"], f.state["role"]), ("P4", "reviewer"))
+        self.assertEqual(f.state["plan_draft"], plan)
+        self.assertEqual(f.state["stages"]["P4"], budget)
+        f.step(stage="P4", role="reviewer")
+        self.assertEqual(f.state["writing_plan"], plan)
+
     def test_current_maintenance_uses_existing_scope_and_keeps_control_fence(self):
         f = self.start(("root", "branch"))
         self.approve_nodes("branch")

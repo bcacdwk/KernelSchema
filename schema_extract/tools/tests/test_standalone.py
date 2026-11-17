@@ -3,6 +3,7 @@
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,7 +12,8 @@ from unittest.mock import patch
 
 from schema_extract.tools import standalone
 from schema_extract.tools.artifacts import DESIGN_REGIONS, load_yaml, schema_for, write_yaml
-from schema_extract.tools.common import ExtractError, manifest, read_json
+from schema_extract.tools.common import ExtractError, digest, manifest, read_json
+from schema_extract.tools.snapshots import rule_files
 from schema_extract.tools.standalone import create_view
 
 
@@ -53,7 +55,7 @@ class StandaloneTests(unittest.TestCase):
         rows.extend(f"| [{path.stem}]({path.name}) | 临时合成设计 | 实际整区引用 |" for path in sorted(self.task.iterdir()))
         (self.task / "dispatch.md").write_text("\n".join(rows) + "\n")
         self.original = manifest(self.task)
-        self.schema = schema_for(REPO)
+        self.schema = schema_for(REPO, cache_identity=digest(standalone._template_files(REPO)))
 
     def test_export_expands_actual_regions_and_preserves_node_context(self):
         output = self.root / "view"
@@ -122,6 +124,23 @@ class StandaloneTests(unittest.TestCase):
                         create_view(self.task / "child.yaml", self.root / case, REPO)
                 finally:
                     path.unlink() if original is None else path.write_bytes(original)
+
+    def test_repeated_views_use_the_current_template_validator(self):
+        rules = self.root / "tests/current-rules"
+        shutil.copytree(REPO / "schema_template/tools", rules / "schema_template/tools",
+                        ignore=shutil.ignore_patterns("tests", "__pycache__"))
+        first = create_view(self.task / "child.yaml", self.root / "before-update", rules)
+        self.assertIn("schema_template/tools/schema.py", first["template"]["files"])
+        self.assertIn("schema_template/tools/schema.py", rule_files(rules, require_specs=False))
+        validator = rules / "schema_template/tools/schema.py"
+        validator.write_text(validator.read_text() + "\n"
+            "def validate_standalone_file(*args, **kwargs):\n"
+            "    raise ToolError('Updated Template rejects this view')\n")
+        output = self.root / "after-update"
+        with self.assertRaisesRegex(ExtractError, "Updated Template rejects"):
+            create_view(self.task / "child.yaml", output, rules)
+        self.assertFalse(output.exists())
+        self.assertEqual(list(self.root.glob(".standalone-*")), [])
 
     def test_source_drift_conflict_reuse_and_containment_preserve_existing_bytes(self):
         output = self.root / "view"

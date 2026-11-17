@@ -14,14 +14,14 @@ from uuid import UUID, uuid4
 
 from . import __version__
 from .common import (STATE_GUARD, ExtractError, RunnerBusy, StaleResult, copy_artifacts, digest, json_bytes,
-                     fsync_directory, manifest, read_json, seal, sync_tree, verify_manifest, write_json, write_text, rules_root)
+                     fsync_directory, manifest, read_json, seal, sync_tree, verify_manifest, write_json, rules_root)
 from .artifacts import (align_source_identity, approval_projection, artifact_manifest, check_stage_snapshot, design_context,
                         load_yaml, normalize_candidate, source_context, validate_artifact_sources, write_yaml)
 from .budget import call_limit, check_timeout, review_seconds
 from .runtime import EXECUTOR_CAPABILITIES, execution_boundary, verify_execution
 from .stages import (NODE_STOPS, actual_sources, call_view, effective_nodes, new_scope, next_call, next_calls, node_signature,
                      approval_is_current, scope_for, scope_key, session_group, session_scope,
-                     selection_signature, writable_files, invalidate_final, invalidate_node, invalidate_stage)
+                     selection_signature, writable_files, writing_order, invalidate_final, invalidate_node, invalidate_stage)
 
 
 STATE_FORMAT = "schema_extract.run.v2"
@@ -328,7 +328,7 @@ class Store:
                  "sessions": {},
                  "stages": {stage: new_scope() for stage in ("P1", "P2", "P3", "P4", "P5", "P6")},
                  "nodes": {"root": {"id": "root", "file": "root.yaml", "status": "draft", "merged": False,
-                                     "draft_checkpoint": None, "approved_checkpoints": {},
+                                     "draft_checkpoint": None,
                                      "approval": None, "approved_sha256": None,
                                      "generation": 0, "approved_generation": None}},
                  "checkpoint": None, "attempts": [], "active_attempts": {}, "unsettled_attempts": {},
@@ -833,7 +833,6 @@ class Store:
         key = scope_key(call["stage"], call["node"])
         if key in state["active_attempts"]:
             raise ExtractError("cannot prepare a second attempt before confirmed termination")
-        from .stages import next_calls
         if not any(all(call.get(field) == ready.get(field) for field in
                        ("stage", "node", "role", "mode", "purpose", "maintenance_task_id", "maintenance_step"))
                    for ready in next_calls(state)):
@@ -942,6 +941,8 @@ class Store:
         if call.get("purpose") == "maintenance":
             from .maintenance import task_for
             task_for(state, call).setdefault("attempts", []).append({"attempt_id": attempt_id, "step": call["maintenance_step"]})
+        if call["stage"] == "P5":
+            state["nodes"][call["node"]]["writing_started"] = writing_order(state, call["node"])
         state["attempts"].append(attempt_id)
         state["active_attempts"][key] = attempt_id
         state.setdefault("unsettled_attempts", {})[attempt_id] = "prepared"
@@ -1078,19 +1079,6 @@ class Store:
         destination.chmod(0o755)
         copy_artifacts(workspace / filename, destination / filename)
         return destination
-
-    def handoff(self, state: dict, attempt: dict, text: str, *, checkpoint_id: str) -> None:
-        directory = self.run_dir(state["run_id"]) / "stages" / attempt["stage"]
-        if attempt["stage"] == "P5":
-            directory = directory / attempt["node"]
-        directory.mkdir(parents=True, exist_ok=True)
-        context = self.context(state, attempt)
-        self.verify_checkpoint(state, checkpoint_id)
-        body = (f"Checkpoint: {checkpoint_id}\nSource: {context['source_lock']['source']['id']}\n"
-                f"Rules: {context['rules_lock']['rules']['id']}\n\n{text.rstrip()}\n")
-        write_text(directory / "handoff.md", body)
-        sync_tree(directory)
-        fsync_directory(directory.parent)
 
 
 def summary(store: Store, state: dict) -> dict:

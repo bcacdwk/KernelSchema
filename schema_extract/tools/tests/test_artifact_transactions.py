@@ -108,19 +108,19 @@ class ArtifactTransactions(unittest.TestCase):
         root["META_DATA"]["Version"] = 2
         root["META_DATA"]["Source"] = "testing.invalid/kernel@fixture-v2:kernel.py::copy"
         write_yaml(after / "root.yaml", root, parser_root=REPO)
-        validate_artifacts("P2", "worker", before, after, STARTER, decision="complete")
+        validate_artifacts("P2", "worker", before, after, STARTER)
         root["CONTRACT"]["Algorithm_requirement"]["Golden_reference"]["Tolerance"]["y"] = "Changed criterion"
         write_yaml(after / "root.yaml", root, parser_root=REPO)
         with self.assertRaisesRegex(ExtractError, "protected fields"):
-            validate_artifacts("P2", "worker", before, after, STARTER, decision="complete")
+            validate_artifacts("P2", "worker", before, after, STARTER)
         root = deepcopy(self.base)
         root["META_DATA"].pop("Dispatch")
         write_yaml(before / "root.yaml", root, parser_root=REPO)
         root["META_DATA"].update(Dispatch={"when": "Subset with a scalar input"}, Version=2)
         write_yaml(after / "root.yaml", root, parser_root=REPO)
-        validate_artifacts("P3", "worker", before, after, STARTER, decision="complete")
+        validate_artifacts("P3", "worker", before, after, STARTER)
         with self.assertRaisesRegex(ExtractError, "outside stage scope"):
-            validate_artifacts("P3", "reviewer", before, after, STARTER, decision="approve")
+            validate_artifacts("P3", "reviewer", before, after, STARTER)
         with self.assertRaises(ExtractError):
             validate_revision_scope([{"path": "root.yaml", "fields": ["DESIGN"]}], selection("root"))
         with self.assertRaises(ExtractError):
@@ -164,6 +164,41 @@ class ArtifactTransactions(unittest.TestCase):
         with self.assertRaisesRegex(CandidateRejected, "reviewer artifacts are read-only"):
             normalize_candidate(destination, destination, self.directory / "review-write", STARTER,
                                 stage="P1", role="reviewer", decision="approve")
+
+    def test_early_checks_enforce_current_text_budgets_without_future_design(self):
+        root = deepcopy(self.base)
+        root["DESIGN"] = deepcopy(self.starter["DESIGN"])
+        directory = self.task("early", {"root": root})
+        for stage in ("P1", "P2"):
+            checked = check_stage_snapshot(directory, parser_root=REPO, stage=stage,
+                                           selected_designs=selection("root"))
+            self.assertEqual(checked["exit_code"], 0, checked)
+        for field, value in (("Name", "n" * 51), ("Describe", "x" * 151),
+                             ("Dispatch.when", "x" * 501)):
+            changed = deepcopy(root)
+            if field == "Dispatch.when":
+                changed["META_DATA"]["Dispatch"]["when"] = value
+            else:
+                changed["META_DATA"][field] = value
+            write_yaml(directory / "root.yaml", changed, parser_root=REPO)
+            for stage in ("P1", "P2"):
+                with self.subTest(stage=stage, field=field):
+                    checked = check_stage_snapshot(directory, parser_root=REPO, stage=stage,
+                                                   selected_designs=selection("root"))
+                    self.assertEqual(checked["exit_code"], 1, checked)
+                    self.assertIn("root.META_DATA." + field, " ".join(checked["diagnostics"]))
+
+    def test_early_algorithm_warnings_are_reported_without_blocking(self):
+        root = deepcopy(self.base)
+        root["CONTRACT"]["Algorithm_requirement"]["Input"]["x"]["meaning"] += "."
+        directory = self.task("early-warning")
+        write_yaml(directory / "root.yaml", root, parser_root=REPO)
+        for stage in ("P1", "P2"):
+            with self.subTest(stage=stage):
+                checked = check_stage_snapshot(directory, parser_root=REPO, stage=stage,
+                                               selected_designs=selection("root"))
+                self.assertEqual(checked["exit_code"], 0, checked)
+                self.assertTrue(checked["notices"])
 
     def test_p1_execution_is_the_only_hardware_edit(self):
         before = self.task("before", {"root": self.starter})
@@ -209,13 +244,13 @@ class ArtifactTransactions(unittest.TestCase):
         proof = align_source_identity(previous, check["design_resolution"]["nodes"]["branch"])
         self.assertFalse(proof["equivalent"])
         self.assertNotEqual(proof["previous_identity"], proof["current_identity"])
-        validate_artifacts("P1", "reviewer", final, final, STARTER, decision="approve")
+        validate_artifacts("P1", "reviewer", final, final, STARTER)
         with self.assertRaisesRegex(ExtractError, "outside stage scope"):
-            validate_artifacts("P1", "worker", before, final, STARTER, decision="complete")
+            validate_artifacts("P1", "worker", before, final, STARTER)
         p5_before = self.copy(final, "p5-before")
         shutil.copyfile(before / "branch.yaml", p5_before / "branch.yaml")
         with self.assertRaisesRegex(ExtractError, "protected task or node identity"):
-            validate_artifacts("P5", "worker", p5_before, final, STARTER, decision="complete", node_entry=selection("branch")[0])
+            validate_artifacts("P5", "worker", p5_before, final, STARTER, node_entry=selection("branch")[0])
         root["META_DATA"]["Version"] = 1
         write_yaml(original / "root.yaml", root, parser_root=REPO)
         with self.assertRaisesRegex(CandidateRejected, "without increasing Version"):
@@ -411,11 +446,11 @@ class ArtifactTransactions(unittest.TestCase):
         branch["DESIGN"]["Math_reshape"]["Thesis"] = "A clarified scalar rewrite"
         write_yaml(original / "branch.yaml", branch, parser_root=REPO)
         scope = [{"path": "branch.yaml", "fields": ["DESIGN.Math_reshape"]}]
-        validate_artifacts("P6", "worker", before, original, STARTER, decision="complete", revision_scope=scope)
+        validate_artifacts("P6", "worker", before, original, STARTER, revision_scope=scope)
         branch["META_DATA"]["Dispatch"]["when"] = "An unrelated change to scope"
         write_yaml(original / "branch.yaml", branch, parser_root=REPO)
         with self.assertRaisesRegex(ExtractError, "outside the explicit revision scope"):
-            validate_artifacts("P6", "worker", before, original, STARTER, decision="complete", revision_scope=scope)
+            validate_artifacts("P6", "worker", before, original, STARTER, revision_scope=scope)
 
     def test_adjudication_format_patch_uses_same_transaction_and_keeps_authorship(self):
         before = self.task("before")

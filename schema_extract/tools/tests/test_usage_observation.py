@@ -103,7 +103,8 @@ class UsageObservationTests(unittest.TestCase):
                                                                usage_observation=observation.observation_summary(observed))])
                     self.assertIsNone(total["whole_invocation_tokens"])
                     self.assertIsNone(total["cost"])
-            # Audit reads the persisted projection, never private native history.
+            # This projection test supplies the separately tested native result check;
+            # audit still binds observation bytes to their invocation and event stream.
             (directory / "prompt.txt").write_text("fixture")
             write_json(directory / "attempt.json", attempt)
             bound, launch = deepcopy(good), deepcopy(invocation)
@@ -117,14 +118,15 @@ class UsageObservationTests(unittest.TestCase):
                        usage=usage_summary(closed["usage"]), usage_observation=observation.observation_summary(bound))
             files = _Evidence(root, False)
             try:
-                _verify_attempt(None, dict(input_fingerprint="fixed"), row, files, [])
+                with patch("schema_extract.tools.recovery.verified_result", return_value=closed):
+                    _verify_attempt(dict(input_fingerprint="fixed"), row, files, [])
             finally:
                 files.close()
             write_json(directory / "invocation.json", {**launch, "delegation_policy": "unknown"})
             files = _Evidence(root, False)
             try:
                 with self.assertRaisesRegex(ExtractError, "usage observation differs"):
-                    _verify_attempt(None, dict(input_fingerprint="fixed"), row, files, [])
+                    _verify_attempt(dict(input_fingerprint="fixed"), row, files, [])
             finally:
                 files.close()
 

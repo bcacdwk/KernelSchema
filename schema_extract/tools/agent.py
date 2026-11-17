@@ -95,12 +95,12 @@ def _retire(record, reason):
     record.update(status="retired", session_id=None, retired_reason=reason)
 
 
-def _settle_session(record, result, *, released):
+def _settle_session(record, result, *, not_started):
     if result["termination"].get("confirmed") is not True:
         record["status"] = "fenced"
     elif result["outcome"] in {"completed", "receipt_error"}:
         record.update(status="ready", session_id=result["session_id"])
-    elif not released:
+    elif not_started:
         record["status"] = "ready" if record.get("session_id") else "empty"
     else:
         for identity in result["trace"]["session_ids"]:
@@ -116,10 +116,24 @@ def settle_session(attempt: dict, *, result: dict):
     with _session(attempt) as (path, record):
         if record.get("attempt_id") != attempt["attempt_id"]:
             raise ExtractError("another invocation owns this session settlement")
-        launch = read_json(Path(attempt["directory"]) / "launch.json")
-        _settle_session(record, result, released=launch.get("status") == "released")
+        _settle_session(record, result, not_started=processes.launch_not_started(attempt))
         write_json(path, record)
         return {"status": record["status"], "session_id": record.get("session_id")}
+
+
+def restore_unstarted_session(attempt: dict):
+    """Release an interrupted gate's session only with positive no-exec proof."""
+    if not processes.launch_not_started(attempt):
+        raise ExtractError("cannot preserve a role session without confirmed no-exec evidence")
+    with _session(attempt) as (path, record):
+        if record.get("session_id") != attempt["session_id"]:
+            raise ExtractError("unstarted invocation differs from its registered role session")
+        if record["status"] in {"empty", "ready"}:
+            return
+        if record.get("attempt_id") != attempt["attempt_id"]:
+            raise ExtractError("another invocation owns this role session")
+        record["status"] = "ready" if record.get("session_id") else "empty"
+        write_json(path, record)
 
 
 def _schema_check(schema, response, attempt_id):
@@ -418,7 +432,7 @@ class AgentCLI:
         result["usage_observation_seconds"] = observed_seconds + time.monotonic() - observed
         result.update(elapsed_seconds=time.monotonic() - started, completed_at=time.time())
         if session_started:
-            _settle_session(session, result, released=release_attempted)
+            _settle_session(session, result, not_started=processes.launch_not_started(attempt))
         result["session_status"] = session["status"]
         write_json(directory / "result.json", result)
         if session_started:

@@ -138,6 +138,10 @@ def _toml(value: dict, prefix=()) -> str:
 class ClaudeBackend:
     name = "claude"
 
+    def validate_effort(self, effort: str) -> None:
+        if effort not in {"low", "medium", "high", "xhigh", "max"}:
+            raise ExtractError("unsupported Claude effort")
+
     def environment(self, home: Path, effort: str) -> tuple[dict, str]:
         source = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))).expanduser()
         settings = source / "settings.json"
@@ -165,8 +169,7 @@ class ClaudeBackend:
     def command(self, executable: str, *, model: str, effort: str, role: str,
                 session_id: str | None, schema: dict, cwd: Path, workspace: Path, schema_path: Path,
                 output_path: Path, writable_files=(), read_directories=(), check: Path | None = None) -> list[str]:
-        if effort not in {"low", "medium", "high", "xhigh", "max"}:
-            raise ExtractError("unsupported Claude effort")
+        self.validate_effort(effort)
         tools = ["Read", "Glob", "Grep"] + (["Edit", "Write"] if role == "worker" else [])
         allowed = ["Read", "Glob", "Grep"]
         if role == "worker":
@@ -191,6 +194,10 @@ class ClaudeBackend:
 
 class CodexBackend:
     name = "codex"
+
+    def validate_effort(self, effort: str) -> None:
+        if effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+            raise ExtractError("unsupported Codex effort; select an effort supported by this provider")
 
     def environment(self, home: Path, effort: str) -> tuple[dict, str]:
         source = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
@@ -226,8 +233,7 @@ class CodexBackend:
     def command(self, executable: str, *, model: str, effort: str, role: str,
                 session_id: str | None, schema: dict, cwd: Path, workspace: Path, schema_path: Path,
                 output_path: Path, writable_files=(), read_directories=(), check: Path | None = None) -> list[str]:
-        if effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
-            raise ExtractError("unsupported Codex effort; select an effort supported by this provider")
+        self.validate_effort(effort)
         command = [executable, "--no-daemon", "-a", "never", "-s", "workspace-write" if role == "worker" else "read-only", "-C", str(cwd),
                    "-c", "model_reasoning_effort=" + json.dumps(effort)]
         if role == "worker":
@@ -349,7 +355,7 @@ class NativeEvents:
             except (TypeError, ValueError):
                 self.response = None
         usage = {"format": "schema_extract.usage.v2", "backend": self.backend, "reports": self.reports,
-                 "issues": issues, "additive_tokens": dict.fromkeys(TOKEN_FIELDS), "reported_cost_usd": None,
+                 "additive_tokens": dict.fromkeys(TOKEN_FIELDS), "reported_cost_usd": None,
                  "cost_source": None, "billing_cost_usd": None, "cost_is_billing": False,
                  "cached_input_is_input_subset": self.backend == "codex"}
         if self.backend == "codex":

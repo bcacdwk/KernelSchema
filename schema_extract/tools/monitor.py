@@ -28,10 +28,6 @@ REASON_KINDS = {
 }
 
 
-def _alive(identity, table) -> bool | None:
-    return process_alive(identity, table)
-
-
 def _processes():
     try:
         return process_table(), None
@@ -67,7 +63,7 @@ def _attempt_observation(store, run: dict, attempt_id: str, table, now: float) -
     living = []
     known = [process["identity"], *process.get("descendants", [])] if process else []
     if table is not None:
-        living = sorted({item["pid"] for item in known if _alive(item, table)})
+        living = sorted({item["pid"] for item in known if process_alive(item, table)})
         while living:
             children = {pid for pid, item in table.items() if item["ppid"] in living and not item["stat"].startswith("Z")}
             if children <= set(living):
@@ -112,7 +108,8 @@ def classify(run: dict) -> list[dict]:
     anomalies = []
     runner = run.get("runner_observation", {})
     launch = run.get("launch") or {}
-    if run.get("status") == "queued" and launch.get("alive") is False and launch.get("status") in {"launching", "claimed", "launch_failed"}:
+    if run.get("status") == "queued" and (launch.get("status") == "launch_failed" or
+            launch.get("alive") is False and launch.get("status") in {"launching", "claimed"}):
         anomalies.append({"run_id": run["run_id"], "scope": "startup", "classification": "execution_failure",
                           "summary": "已登记的启动进程在任务仍排队时退出；保留原运行身份。",
                           "evidence": run["state_directory"] + "/runner.log",
@@ -197,11 +194,11 @@ def inspect_runs(store, run_ids=None) -> list[dict]:
                     invocations.append({"attempt_id": attempt_id, "status": "unknown", "error": str(exc),
                                         "evidence": str(store.run_dir(run_id) / "attempts" / str(attempt_id))})
             launch = deepcopy(ledger.get("starts", {}).get(run_id, {}).get("launch", {}))
-            launch["alive"] = _alive(launch.get("identity") or launch.get("launcher"), table)
+            launch["alive"] = process_alive(launch.get("identity") or launch.get("launcher"), table)
             identity = (view.get("runner") or {}).get("identity") or launch.get("identity")
             lock_status = store.writer_status(run_id)
             view.update(invocations=invocations,
-                        runner_observation={"lock": lock_status, "alive": _alive(identity, table), "identity": identity},
+                        runner_observation={"lock": lock_status, "alive": process_alive(identity, table), "identity": identity},
                         global_hold=ledger.get("active_hold"),
                         launch=launch,
                         gate_capable="hold.v1" in view.get("executor", {}).get("capabilities", []))
@@ -366,7 +363,7 @@ def reserve_launch(store, state: dict, *, mode="resume", hold_id=None, retry_id=
         previous = start.get("launch", {})
         if previous.get("status") in {"launching", "claimed"}:
             owner = previous.get("identity") or previous.get("launcher")
-            alive = _alive(owner, table)
+            alive = process_alive(owner, table)
             if alive is not False:
                 return {**previous, "reused": True}
         if mode == "queued" and state["status"] != "queued":
@@ -438,12 +435,17 @@ def start_background(store, run_id: str, repo: Path, *, mode="queued", hold_id=N
                                        stdout=stream, stderr=stream, start_new_session=True, close_fds=True)
         table, _ = _processes()
         identity = table.get(process.pid) if table is not None else None
+        exited = process.poll()
         with store.supervisor() as ledger:
             current = ledger["starts"][run_id]["launch"]
             if current["id"] == launch["id"]:
                 current.update(pid=process.pid, log=str(log_path))
-                if identity and current["status"] == "launching":
-                    current["identity"] = identity
+                if current["status"] == "launching":
+                    if exited is not None:
+                        current.update(status="launch_failed", exit_code=exited,
+                                       error="background Runner exited before claiming its launch")
+                    elif identity:
+                        current["identity"] = identity
                 launch = deepcopy(current)
         return launch
     except OSError as exc:
@@ -528,11 +530,8 @@ def registered_extract(repo: Path, store, output: Path, *, operator_id=None, sou
                                    " with different request parameters; its frozen inputs are unchanged. "
                                    "Use status " + run_id + " --full, resume that run, or extract to a different --output for new inputs/parameters")
         else:
-            if output.exists():
-                entries = list(output.iterdir()) if output.is_dir() else []
-                if (len(entries) != 1 or entries[0].name != ".gitkeep" or entries[0].is_symlink() or
-                        not entries[0].is_file() or entries[0].stat().st_size):
-                    raise ExtractError("output must be absent or contain only an empty .gitkeep")
+            if output.exists() or output.is_symlink():
+                raise ExtractError("output must not exist")
             run_id = str(uuid4())
             registration = {"run_id": run_id, "output": str(output), "request_key": key,
                             "created_at": time.time(), "authorized": not queued, "status": "registered"}

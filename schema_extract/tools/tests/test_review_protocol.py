@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 from schema_extract.tools.common import manifest
 from schema_extract.tools.prompts import build_prompt
+from schema_extract.tools.receipts import proposal_schema, receipt_schema
 from schema_extract.tools.runner import _begin_reopen
 from schema_extract.tools.snapshots import rule_files
 from schema_extract.tools.stages import (DOCUMENT_CONCLUSIONS, STAGES, new_node, new_scope,
@@ -105,12 +106,15 @@ class ReviewProtocolTests(unittest.TestCase):
         self.state["maintenance"] = {"tasks": {"repair": task}}
         for role in ("worker", "reviewer"):
             task["step"] = "patch" if role == "worker" else "verify"
-            _, value, _ = self.invocation(stage="P3", role=role, purpose="maintenance", maintenance_task_id="repair",
-                                           maintenance_step=task["step"])
+            _, value, call = self.invocation(stage="P3", role=role, purpose="maintenance", maintenance_task_id="repair",
+                                           maintenance_step=task["step"], input_fingerprint="fixed", plan_revision=1)
             self.assertEqual(value["maintenance"], {key: task[key] for key in ("task_id", "action", "step", "reason", "issues", "fields")})
             self.assertEqual(value["revision_scope"], fields)
             self.assertEqual(value["feedback"], task["feedback"])
             self.assertNotIn("reopen_targets", value)
+            for schema in (proposal_schema(call), receipt_schema(call)):
+                self.assertNotIn("reopen", schema["properties"])
+                self.assertNotIn("reopen", schema["properties"]["decision"]["enum"])
         candidate = {"checkpoint": "provided", "artifacts": str(self.root / "attempt/materials/candidates/provided"), "files": manifest(self.workspace)}
         self.materials["candidates"] = [candidate]
         for mode in ("adjudicate", "signoff"):

@@ -6,11 +6,13 @@
 
 批次收口时，Supervisor 逐个读取本批各 run 的 `candidates`；只将 reviewer 确认项作为正式待办，按根因和稳定 ID 查重后登记或记录已有决定，未解决项保持待决。`ready` 和证据审计通过不代表框架候选已处理，也不代替算子结果的表达质量验收。
 
+阶段回执的 framework_candidates 仅含 id、scope、summary、evidence，编码见[提交与证据](../prompt/operations/response.md)。worker 提候选，reviewer 独立核实后以同一 ID 写回；仅有 worker 提报时状态为 candidate，有 reviewer 确认且 ID 合法时为 confirmed。原候选、确认依据和已有决定一起保留，Supervisor 再整理为本目录格式，阶段角色不直接写台账。
+
 本目录只保存可复用的问题与决定。同一根因沿用原稳定 ID；证据定位当前文件或明确 Git 版本，不依赖临时运行目录，不记录建设过程和试跑流水账。
 
 只有共享规则会导致错误、遗漏或重复劳动时，才登记能解决它的最小改动。算子自身的实现差异、缺失来源与证明缺口留在本任务回执和导入来源记录中；用户要求独立追踪的源实现缺陷，也可由 Supervisor 在 `kernel_wiki/` 登记，源码修复状态与 Schema 审批独立。依 [REVIEW 的源缺陷分流边界](../REVIEW.md#源实现缺陷与设计分流)，有证据确认不改变同一完整抽象 Design 的源缺陷，登记后可归档，提取与源修复分别处理；残稿仍须补齐并独立审阅。
 
-维护者查重后，将新项放入 `schema_docs/`、`schema_template/`、`kernel_wiki/`、`extract_workflow/` 或 `extract_tools/`，目录按需创建。每个 `<id>.json` 保留 `id/category/problem/evidence/proposal/necessity`；ID 用小写字母数字及 `-` 或 `_`，不包含运行指纹。
+维护者查重后，将新项放入 `schema_docs/`、`schema_template/`、`kernel_wiki/`、`extract_workflow/` 或 `extract_tools/`，目录按需创建。每个 `<id>.json` 保留 `id/category/problem/evidence/proposal/necessity`；ID 由小写字母数字组成的词以单个 `-` 或 `_` 连接，不包含运行指纹。
 
 决定后移入 `archive/<类别>/<id>.json`，保留原字段，增加 `decision.outcome` 和 `decision.reason`。结果为 `declined`、`resolved` 或 `partially_adopted`；部分采纳还需 `adopted` 与 `remaining`。不要为已有 ID 另写副本。候选提报不改变当前任务的审批结论。
 

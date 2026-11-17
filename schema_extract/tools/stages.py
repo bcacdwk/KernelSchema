@@ -212,6 +212,11 @@ def affected_nodes(state: dict, seeds, *, regions=None, contract=False) -> list[
     return sorted(affected)
 
 
+def writing_order(state: dict, node_id: str) -> dict:
+    waits = next((item["wait_for"] for item in state.get("writing_plan") or [] if item["id"] == node_id), [])
+    return {"instance": state["nodes"][node_id]["instance"], "wait_for": sorted(waits)}
+
+
 def dependencies_ready(state: dict, node_id: str) -> bool:
     approved = effective_nodes(state)
     node = state["nodes"][node_id]
@@ -221,7 +226,9 @@ def dependencies_ready(state: dict, node_id: str) -> bool:
     sources = actual_sources(node)
     if node.get("role") == "worker":
         sources &= selected
-    waits = next((set(item["wait_for"]) for item in state.get("writing_plan") or [] if item["id"] == node_id), set())
+    order = writing_order(state, node_id)
+    # A satisfied writing order is not a continuing content dependency.
+    waits = set(order["wait_for"]) if node.get("writing_started") != order else set()
     return (sources | waits | {"root"}) <= approved
 
 
@@ -309,7 +316,7 @@ def settle(result: dict) -> None:
 def new_node(entry: dict) -> dict:
     return {"id": entry["id"], "instance": entry["instance"], "file": entry["id"] + ".yaml",
             "status": "pending", "merged": False, "draft_checkpoint": None,
-            "approved_checkpoints": {}, "approval": None, "approved_sha256": None,
+            "approval": None, "approved_sha256": None,
             "approved_generation": None, "generation": 0, "stage": new_scope(),
             "role": "worker", "mode": "normal", "feedback": [], "reason": None, "authored": False}
 
@@ -327,7 +334,7 @@ def invalidate_node(node: dict, *, require_worker=False) -> None:
     node["last_approval"] = node.get("approval") or node.get("last_approval")
     worker = require_worker or needs_authoring(node) or not complete
     node.update(approval=None, approved_generation=None, approved_sha256=None, merged=False,
-                approval_required_generation=node["generation"], status="pending" if worker else "reviewing",
+                status="pending" if worker else "reviewing",
                 role="worker" if worker else "reviewer", mode="normal", reason=None)
     node["stage"]["last_approval"] = node["stage"].get("approval") or node["stage"].get("last_approval")
     node["stage"].update(status=node["status"], approval=None)
@@ -408,7 +415,7 @@ def resume_progress(state: dict) -> None:
         role = "reviewer" if scope["status"] == "reviewing" else "worker"
         if state.get("stage") == stage and state.get("role") and scope["status"] in {"draft", "revision", "adjudicating", "signoff"}:
             return
-        if stage in {"P2", "P4"} and role == "reviewer":
+        if stage in {"P2", "P4"} and role == "reviewer" and (state.get("stage") != stage or state.get("plan_draft") is None):
             state["plan_draft"] = deepcopy(state["selected_designs"] if stage == "P2" else state["writing_plan"])
         state.update(stage=stage, node="root", role=role, mode="normal", status="running", reason=None)
         return
@@ -454,7 +461,6 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
                         design_origins=resolution["origins"])
         result["nodes"][node_id]["source_context"] = deepcopy(resolution)
     scope["status"], scope["approval"] = "approved", approval
-    result["nodes"][node_id]["approved_checkpoints"][stage] = checkpoint_id
     owner = owner_for(result, identity)
     owner["feedback"], owner["mode"] = [], "normal"
     maintaining = identity.get("purpose") == "maintenance"
@@ -553,7 +559,7 @@ def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, *
             result["plan_draft"] = deepcopy(receipt["plan"])
         if stage == "P6":
             result["pending_rechecks"] = affected_nodes(result, [*result["pending_rechecks"], *receipt["affected_nodes"]])
-    elif mode in {"adjudicate", "signoff"} and decision == "approve":
+    elif decision == "approve" and (role == "reviewer" or mode in {"adjudicate", "signoff"}):
         _approve(result, receipt, checkpoint_id, receipt_hash, validation)
     elif role == "worker" and decision == "continue":
         scope["continues"] += 1
@@ -584,8 +590,6 @@ def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, *
             else:
                 owner["mode"], owner["role"] = "adjudicate", "reviewer"
                 scope["status"] = "adjudicating"
-    elif role == "reviewer" and decision == "approve":
-        _approve(result, receipt, checkpoint_id, receipt_hash, validation)
     else:
         raise ExtractError("invalid stage/role/decision transition")
     if stage == "P5" and owner["status"] not in NODE_STOPS | {"approved", "removed"}:

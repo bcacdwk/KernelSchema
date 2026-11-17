@@ -82,9 +82,8 @@ def _locate(home, session_id, started_at):
                 row = connection.execute("SELECT rollout_path FROM threads WHERE id=?", (session_id,)).fetchone()
             if row:
                 path = Path(row[0])
-                if not path.is_absolute() or ".." in path.parts or not path.name.endswith(session_id + ".jsonl"):
-                    raise ObservationError("native_index_identity_conflict")
-                if not path.is_relative_to(root):
+                if (not path.is_absolute() or ".." in path.parts or not path.name.endswith(session_id + ".jsonl") or
+                        not path.is_relative_to(root)):
                     raise ObservationError("native_index_identity_conflict")
                 return path
         except sqlite3.Error:
@@ -362,7 +361,7 @@ def finish_usage_observation(start, parsed, result):
         if trace["error"] or not trace["stable"] or trace["truncated_line"] or trace["parse_error_count"]:
             raise ObservationError("stream_trace_incomplete")
         closed = (result.get("outcome") == "completed" and result.get("termination", {}).get("confirmed") and
-                  [record["turn_id"] for record in records if record["type"] == "task_complete"] == tasks)
+                  [record["turn_id"] for record in endings] == tasks)
         if not closed:
             value["issues"].append("invocation_not_successfully_closed")
         value.update(additive_tokens=total, root_status="exact" if closed and reports else "partial",

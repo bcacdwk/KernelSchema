@@ -107,7 +107,14 @@ class PromptMaterialsTests(unittest.TestCase):
             relative = Path(record['path']).relative_to(material['directory']).as_posix()
             self.assertEqual(manifest(Path(material['directory']))[relative], material['files'][relative]['sha256'])
         exposed = set(attempt['read_directories'])
-        self.assertIn(context['workflow_page'], {item['path'] for item in material['rules']})
+        available_rules = {Path(item['path']).relative_to(rules_root(self.flow.lock)).as_posix()
+                           for item in material['rules']}
+        self.assertTrue({'README.md', 'EXTRACT_SCHEMA.md', 'schema_extract/README.md',
+                         'schema_extract/REVIEW.md', 'schema_extract/EXECUTOR_ALIGNMENT.md',
+                         'schema_extract/tools/README.md', 'schema_extract/issues/README.md',
+                         'schema_template/README.md', 'schema_template/tools/README.md'} <= available_rules)
+        self.assertFalse(any('/archive/' in name or name.startswith(('schema_wiki/', 'kernel_wiki/'))
+                             for name in available_rules))
         self.assertNotIn(str(self.flow.store.run_dir(attempt['run_id'])), exposed)
         self.assertNotIn(str(self.flow.store.root), exposed)
 

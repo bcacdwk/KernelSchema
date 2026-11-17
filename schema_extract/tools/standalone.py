@@ -7,7 +7,7 @@ import shutil
 import tempfile
 
 from . import __version__
-from .artifacts import schema_for, write_yaml
+from .artifacts import schema_for
 from .common import ExtractError, digest, fsync_directory, manifest, read_json, sha256, sync_tree, write_json
 from .publication import rename_new
 
@@ -19,6 +19,12 @@ def _verify_sources(directory: Path, inputs: dict[str, str]) -> None:
         raise ExtractError("source changed while generating standalone view: " + ", ".join(changed[:12]))
 
 
+def _template_files(repo: Path) -> dict[str, str]:
+    return {path.relative_to(repo).as_posix(): sha256(path.read_bytes())
+            for path in (repo / "schema_template/tools").rglob("*.py")
+            if "tests" not in path.relative_to(repo).parts}
+
+
 def create_view(source: Path, output: Path, repo: Path) -> dict:
     source, output, repo = source.expanduser().absolute(), output.expanduser().absolute(), repo.resolve()
     if output.resolve().is_relative_to(source.parent.resolve()):
@@ -26,12 +32,13 @@ def create_view(source: Path, output: Path, repo: Path) -> dict:
     # The complete authoring directory is the validation subject. Actual
     # content dependencies remain the resolver's smaller source_manifest.
     original = manifest(source.parent)
-    schema = schema_for(repo)
-    if not all(callable(getattr(schema, name, None)) for name in ("validate_resolved_file", "validate_standalone_file")):
+    template_files = _template_files(repo)
+    template_identity = digest(template_files)
+    schema = schema_for(repo, cache_identity=template_identity)
+    if not all(callable(getattr(schema, name, None)) for name in
+               ("validate_resolved_file", "validate_standalone_file", "effective_yaml")):
         raise ExtractError("standalone requires the current Template validation API")
     identity = source.stem
-    template_files = {path.relative_to(repo).as_posix(): sha256(path.read_bytes())
-                      for path in (repo / "schema_template/tools").rglob("*.py") if "tests" not in path.parts}
     try:
         directory, resolved = schema.validate_resolved_file(source, skip_hardware=True)
         value = resolved.effective_document(identity)
@@ -45,8 +52,8 @@ def create_view(source: Path, output: Path, repo: Path) -> dict:
     temporary = Path(tempfile.mkdtemp(prefix=".standalone-", dir=output.parent))
     try:
         destination = temporary / source.name
-        write_yaml(destination, value, source=source, parser_root=repo)
         try:
+            destination.write_text(schema.effective_yaml(resolved, identity), encoding="utf-8")
             _, generated = schema.validate_standalone_file(destination, skip_hardware=True)
             if generated != {identity: value}:
                 raise ExtractError("standalone bytes differ from the validated effective document")
@@ -59,7 +66,7 @@ def create_view(source: Path, output: Path, repo: Path) -> dict:
             "root": resolved.source_files["root"].name,
             "source_files": inputs, "origins": origins, "effective_identity": effective_identity,
             "validated_directory_files": original,
-            "template": {"files": template_files, "identity": digest(template_files)},
+            "template": {"files": template_files, "identity": template_identity},
             "view": {source.name: sha256(destination.read_bytes())},
             "check_policy": "skip-hardware",
         }
@@ -68,6 +75,8 @@ def create_view(source: Path, output: Path, repo: Path) -> dict:
         # Include receipt generation and syncing in the guarded interval. Both
         # reuse and a new atomic publication must still match every raw source.
         _verify_sources(directory, original)
+        if _template_files(repo) != template_files:
+            raise ExtractError("Template changed while generating standalone view")
         if output.exists() or output.is_symlink():
             if output.is_symlink() or not output.is_dir() or manifest(output) != manifest(temporary):
                 raise ExtractError("standalone destination already contains different content")

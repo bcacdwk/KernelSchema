@@ -7,7 +7,6 @@ import errno
 import os
 from pathlib import Path
 import shutil
-import stat
 import sys
 import time
 from uuid import uuid4
@@ -36,111 +35,6 @@ def rename_new(source: Path, target: Path) -> None:
         if error in {errno.EEXIST, errno.ENOTEMPTY}:
             raise FileExistsError(error, os.strerror(error), str(target))
         raise OSError(error, os.strerror(error), str(target))
-
-
-def _same_inode(path: Path, device: int, inode: int, *, directory=False) -> bool:
-    try:
-        value = path.lstat()
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    return (value.st_dev, value.st_ino) == (device, inode) and (
-        not directory or stat.S_ISDIR(value.st_mode))
-
-
-def _empty_marker(path: Path) -> bool:
-    try:
-        value = path.lstat()
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    return stat.S_ISREG(value.st_mode) and value.st_size == 0
-
-
-def _same_scaffold(path: Path, scaffold: dict) -> bool:
-    """Require the durable post-move state, not a possibly reused inode."""
-    try:
-        value = path.lstat()
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    return stat.S_ISDIR(value.st_mode) and (
-        value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns) == (
-            scaffold["device"], scaffold["inode"],
-            scaffold.get("directory_mtime_ns"), scaffold.get("directory_ctime_ns"))
-
-
-def _restore_marker(output: Path, backup: Path, scaffold: dict) -> None:
-    """Put back only the saved marker, without replacing concurrent contents."""
-    if not backup.exists() and not backup.is_symlink():
-        return
-    try:
-        if not output.exists() and not output.is_symlink():
-            output.mkdir()
-        elif not _same_scaffold(output, scaffold):
-            return
-        rename_new(backup, output / ".gitkeep")
-        fsync_directory(output)
-        fsync_directory(output.parent)
-    except OSError:
-        # A competing writer may have replaced the directory or marker. Keep
-        # the saved file at its intent-derived sibling path for recovery.
-        pass
-
-
-def _prepare_scaffold(output: Path, backup: Path, intent: dict, intent_path: Path) -> None:
-    """Consume only a marker scaffold, including its interrupted empty state."""
-    try:
-        value = output.lstat()
-        if not stat.S_ISDIR(value.st_mode):
-            return
-        entries = sorted(path.name for path in output.iterdir())
-    except (FileNotFoundError, NotADirectoryError):
-        return
-    marker = output / ".gitkeep"
-    if entries == [".gitkeep"] and _empty_marker(marker):
-        if backup.exists() or backup.is_symlink():
-            return
-        # Keep the original inode alive while observing its post-move times;
-        # deleting and recreating the path cannot supply a replacement inode.
-        directory_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            opened = os.fstat(directory_fd)
-            if (opened.st_dev, opened.st_ino, opened.st_mtime_ns, opened.st_ctime_ns) != (
-                    value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns):
-                return
-            marker_stat = marker.lstat()
-            intent["scaffold"] = {"device": value.st_dev, "inode": value.st_ino,
-                                  "marker_device": marker_stat.st_dev, "marker_inode": marker_stat.st_ino}
-            write_json(intent_path, intent)
-            try:
-                rename_new(marker, backup)
-            except (FileNotFoundError, FileExistsError):
-                return
-            os.fsync(directory_fd)
-            fsync_directory(output.parent)
-            moved = os.fstat(directory_fd)
-            intent["scaffold"].update(directory_mtime_ns=moved.st_mtime_ns,
-                                      directory_ctime_ns=moved.st_ctime_ns)
-            # A crash before this write leaves an uncertain empty directory.
-            # Preserve its marker backup and report conflict on replay.
-            write_json(intent_path, intent)
-            if not _empty_marker(backup) or not _same_inode(
-                    backup, marker_stat.st_dev, marker_stat.st_ino):
-                _restore_marker(output, backup, intent["scaffold"])
-                return
-        finally:
-            os.close(directory_fd)
-    scaffold = intent.get("scaffold")
-    if not scaffold or not _empty_marker(backup) or not _same_inode(
-            backup, scaffold["marker_device"], scaffold["marker_inode"]):
-        return
-    if not _same_scaffold(output, scaffold):
-        return
-    try:
-        # rmdir is deliberately non-recursive: a concurrent new entry wins.
-        output.rmdir()
-        fsync_directory(output.parent)
-    except OSError as exc:
-        if exc.errno not in {errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST, errno.ENOTDIR}:
-            raise
 
 
 @execution_boundary
@@ -191,17 +85,8 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
     directory.mkdir(exist_ok=True)
     intent = {"id": publication_id, "target": str(output), "checkpoint": checkpoint["id"],
               "input_fingerprint": state["input_fingerprint"], "proof": proof, "export": export}
-    intent_path = directory / (publication_id + ".intent.json")
-    if intent_path.exists():
-        previous = read_json(intent_path)
-        if {key: value for key, value in previous.items() if key != "scaffold"} == intent:
-            if "scaffold" in previous:
-                intent["scaffold"] = previous["scaffold"]
-    write_json(intent_path, intent)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name("." + output.name + ".schema-extract-" + uuid4().hex)
-    backup = output.with_name("." + output.name + ".schema-extract-scaffold-" + publication_id)
-    published = False
     try:
         shutil.copytree(artifacts, temporary)
         for path in temporary.rglob("*"):
@@ -231,7 +116,6 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
             elif pending_control:
                 status = "controlled"
             else:
-                _prepare_scaffold(output, backup, intent, intent_path)
                 try:
                     rename_new(temporary, output)
                     fsync_directory(output.parent)
@@ -255,7 +139,6 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
             if not export and state["control"]["action"]:
                 state["control"].update(resume_status="ready", stopped_at=time.time())
                 state["status"] = "cancelled" if state["control"]["action"] == "cancel" else "paused"
-        published = status == "published"
         record = {**intent, "status": status, "artifacts": str(artifacts),
                   "hold_id": denied, "control_action": pending_control,
                   "reason": None if status == "published" else "全局 hold 阻止发布。" if denied else
@@ -271,13 +154,5 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
         store.save(state)
         return state
     finally:
-        if scaffold := intent.get("scaffold"):
-            if published:
-                if _empty_marker(backup) and _same_inode(
-                        backup, scaffold["marker_device"], scaffold["marker_inode"]):
-                    backup.unlink()
-                    fsync_directory(output.parent)
-            elif _same_inode(backup, scaffold["marker_device"], scaffold["marker_inode"]):
-                _restore_marker(output, backup, scaffold)
         if temporary.exists():
             shutil.rmtree(temporary)

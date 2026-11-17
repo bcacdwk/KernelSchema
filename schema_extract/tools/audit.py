@@ -218,7 +218,7 @@ def _checks(ledger):
     # Shared checks have no per-operator time allocation. Keep the bounded
     # original anchors, including message IDs that can arrive after the scan.
     records = {}
-    for item in [*clock.get("history", []), clock.get("last_reminder", {}), clock.get("reminder", {})]:
+    for item in [*clock.get("history", []), clock.get("reminder", {})]:
         if isinstance(item, dict) and item.get("scan"):
             check = deepcopy(item["scan"])
             check["ack"] = item.get("ack")
@@ -227,11 +227,11 @@ def _checks(ledger):
         check = deepcopy(clock["last_scan"])
         records[check["id"]] = {**records.get(check["id"], {}), **check}
     reminders = {}
-    for item in [*clock.get("history", []), clock.get("last_reminder", {}), clock.get("reminder", {}), clock.get("probe", {})]:
+    for item in [*clock.get("history", []), clock.get("reminder", {})]:
         if not isinstance(item, dict) or not item.get("id"):
             continue
-        reminders[item["id"]] = {key: deepcopy(item.get(key)) for key in ("id", "due_at", "ack")}
-        reminders[item["id"]]["attempts"] = [{key: attempt.get(key) for key in ("started_at", "finished_at", "status")}
+        reminders[item["id"]] = {key: deepcopy(item.get(key)) for key in ("id", "thread_id", "due_at", "ack")}
+        reminders[item["id"]]["attempts"] = [{key: attempt.get(key) for key in ("started_at", "finished_at", "status", "message_id")}
                                               for attempt in item.get("attempts", [])]
     return {"allocation": "shared_state_root_checks_not_charged_to_this_run",
             "retention": "bounded_history_not_all_checks", "records": list(records.values()),
@@ -431,7 +431,7 @@ def _checkpoint(store, state, checkpoint_id, files):
     return value
 
 
-def _verify_attempt(store, state, row, files, notes):
+def _verify_attempt(state, row, files, notes):
     from .recovery import never_launched, verified_result
     directory = Path(row["directory"])
     hashes = row.get("evidence", {})
@@ -553,26 +553,25 @@ def _verify_attempt(store, state, row, files, notes):
         known = row.get("timing", {}).get(ledger_key)
         if known is not None and processing.get(disk_key, 0) != known:
             raise ExtractError("processing timing differs from its durable high-water mark")
-    if store is not None:
-        termination = result.get("termination", {})
-        later = records.get("termination.json", {})
-        closed_later = termination.get("confirmed") is not True and later.get("confirmed") is True
-        if closed_later:
-            if later.get("attempt_sha256") != digest(attempt) or later.get("attempt_id") != attempt["attempt_id"]:
-                raise ExtractError("later termination evidence belongs to another attempt")
-            termination = later
-        recovered = verified_result(attempt, result, termination)
-        if not closed_later and recovered["outcome"] != result["outcome"]:
-            raise ExtractError("native result outcome differs")
-        if closed_later:
-            notes.append({"attempt_id": row["attempt_id"], "reason": "termination_confirmed_during_recovery",
-                          "original_outcome": result["outcome"], "recovery_outcome": recovered["outcome"]})
-        for field in ("native_status", "response_validation",
-                      "requested_model", "requested_effort", "reported_model", "reported_models", "reported_effort"):
-            if recovered.get(field) != result.get(field):
-                raise ExtractError("native result evidence differs: " + field)
-        if attempt["backend"] == "codex" and result.get("response") is not None:
-            files.file(directory / "cli-tmp/response.json", as_json=True)
+    termination = result.get("termination", {})
+    later = records.get("termination.json", {})
+    closed_later = termination.get("confirmed") is not True and later.get("confirmed") is True
+    if closed_later:
+        if later.get("attempt_sha256") != digest(attempt) or later.get("attempt_id") != attempt["attempt_id"]:
+            raise ExtractError("later termination evidence belongs to another attempt")
+        termination = later
+    recovered = verified_result(attempt, result, termination)
+    if not closed_later and recovered["outcome"] != result["outcome"]:
+        raise ExtractError("native result outcome differs")
+    if closed_later:
+        notes.append({"attempt_id": row["attempt_id"], "reason": "termination_confirmed_during_recovery",
+                      "original_outcome": result["outcome"], "recovery_outcome": recovered["outcome"]})
+    for field in ("native_status", "response_validation",
+                  "requested_model", "requested_effort", "reported_model", "reported_models", "reported_effort"):
+        if recovered.get(field) != result.get(field):
+            raise ExtractError("native result evidence differs: " + field)
+    if attempt["backend"] == "codex" and result.get("response") is not None:
+        files.file(directory / "cli-tmp/response.json", as_json=True)
     return attempt, result, receipt
 
 
@@ -586,7 +585,7 @@ def _verify(store, state, rows, files, *, whole_run):
         errors.append({"scope": scope, "reason": str(exc)})
     for row in rows:
         try:
-            selected.append((row, *_verify_attempt(store, state, row, files, notes)))
+            selected.append((row, *_verify_attempt(state, row, files, notes)))
             for checkpoint_id in {row.get("base_checkpoint"), row.get("result_checkpoint"),
                                   *row.get("checkpoints", []), selected[-1][1]["base_checkpoint"]} - {None}:
                 checkpoints[checkpoint_id] = None
@@ -623,9 +622,28 @@ def _verify(store, state, rows, files, *, whole_run):
                 continue
             directory = Path(attempt["directory"])
             artifacts = directory / "original"
-            validation = files.file(directory / "validated.json", as_json=True)
-            originals = validation.get("original_artifact_digests")
             expected = _artifact_baseline(result["response"], attempt)
+            accepted = attempt["attempt_id"] in state.get("accepted_receipts", {})
+            rejected = None
+            if accepted or os.path.lexists(directory / "validated.json"):
+                validation = files.file(directory / "validated.json", as_json=True)
+                originals = validation.get("original_artifact_digests")
+            else:
+                # Receipt capture precedes semantic validation. A settled,
+                # ledger-bound rejection can preserve those bytes without
+                # claiming a successful artifact check or stage approval.
+                for name, codes in (("rejected.json", {"proposal_rejected", "invalid_root_prerequisite"}),
+                                    ("repair.json", {"receipt_repair", "receipt_repair_budget_exhausted"})):
+                    recorded = row.get("evidence", {}).get(name)
+                    if recorded is None:
+                        continue
+                    reason = files.file(directory / name, as_json=True, json_digest=recorded)
+                    if reason.get("attempt_id") == attempt["attempt_id"] and reason.get("code") in codes:
+                        rejected = reason
+                        break
+                if rejected is None:
+                    raise ExtractError("unaccepted receipt lacks bound rejection or repair evidence")
+                originals = {**expected, **{item["path"]: item["sha256"] for item in receipt["artifacts"]}}
             selecting = attempt["mode"] == "adjudicate" and (result["response"].get("adjudication") or {}).get("action") == "select"
             additions = {"dispatch.md"} if not selecting and (attempt["stage"], attempt["role"]) == ("P2", "worker") else ()
             if (not isinstance(originals, dict) or not originals or
@@ -633,13 +651,17 @@ def _verify(store, state, rows, files, *, whole_run):
                 raise ExtractError("receipt has no matching preserved original artifact evidence")
             for name, checksum in originals.items():
                 files.file(artifacts / relative_name(name), sha256=checksum)
-            if attempt["attempt_id"] in state.get("accepted_receipts", {}):
+            if accepted:
                 baseline = checkpoints.get(attempt["base_checkpoint"])
                 if not baseline or baseline["files"] != attempt["dependency_digests"]:
                     raise ExtractError("proposal baseline differs from the registered input bytes")
                 if (attempt["role"] == "reviewer" or selecting) and originals != expected:
                     raise ExtractError("reviewer original differs from its read-only checkpoint")
-                _receipt_response(result, receipt, attempt, lock=lock, artifacts=artifacts)
+            _receipt_response(result, receipt, attempt, lock=lock, artifacts=artifacts)
+            if rejected is not None:
+                notes.append({"attempt_id": row["attempt_id"],
+                              "reason": "receipt_not_accepted; artifact validation not completed",
+                              "rejection": {key: rejected.get(key) for key in ("code", "summary")}})
             for anchor in receipt.get("source_evidence", []):
                 if anchor.get("source_id") != lock["source"]["id"] or lock["source"]["files"].get(anchor["path"]) != anchor["sha256"]:
                     raise ExtractError("source evidence differs from this run's fixed source")

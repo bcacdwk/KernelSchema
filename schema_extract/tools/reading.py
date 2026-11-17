@@ -1,9 +1,8 @@
-"""Bounded, lossless line ranges from a fixed tree; runnable as a standalone file."""
+"""Exact evidence excerpts and read-only checks against fixed extraction inputs."""
 
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -16,7 +15,7 @@ def stage_check(record: dict, *, workspace: Path | None = None, rules: Path | No
     """Preview only: a worker's normalization never writes to the attempt workspace."""
     from schema_extract.tools.artifacts import (CandidateRejected, _early_check, artifact_manifest, check_stage_snapshot,
                                                load_root, normalize_candidate, validate_artifact_sources)
-    from schema_extract.tools.common import ExtractError, manifest, verify_manifest
+    from schema_extract.tools.common import ExtractError, verify_manifest
 
     if record.get("format") != "schema_extract.stage_check.v1":
         raise ExtractError("unsupported stage-check materials")
@@ -55,9 +54,9 @@ def stage_check(record: dict, *, workspace: Path | None = None, rules: Path | No
                               original_artifact_digests=original,
                               preview_artifact_digests=validation["artifact_digests"])
                 if record["stage"] == "P2":
-                    _early_check(load_root(candidate, parser_root=rules), parser_root=rules, stage="P2")
+                    notices = _early_check(load_root(candidate, parser_root=rules), parser_root=rules, stage="P2")
                     check = {"kind": "phase_fields", "stage": "P2", "exit_code": 0, "diagnostics": [],
-                             "selection": "awaiting_proposal", "checked_nodes": ["root"]}
+                             "selection": "awaiting_proposal", "checked_nodes": ["root"], "notices": notices}
                 else:
                     check = check_stage_snapshot(candidate, **arguments)
                 validate_artifact_sources(candidate, source_lock, decision="complete", parser_root=rules,
@@ -124,59 +123,6 @@ def read_evidence(root: Path, path: str, start_line: int, end_line: int,
             "line_end": end_line, "quote": quote}
 
 
-def read_range(root: Path, path: str, start_line: int = 1, end_line: int | None = None,
-               *, max_bytes: int = 6000, cursor: str | None = None,
-               expected_sha256: str | None = None) -> dict:
-    root, data, file_hash = _read_file(root, path, expected_sha256)
-    lines = data.decode("utf-8").splitlines(keepends=True)
-    end_line = min(start_line + 79, len(lines)) if end_line is None else end_line
-    if not 1024 <= max_bytes <= 24000 or not 1 <= start_line <= end_line <= len(lines):
-        raise ValueError("invalid line range or page budget (1024..24000 bytes)")
-    binding = hashlib.sha256(encoded([str(root), path, file_hash, start_line, end_line])).hexdigest()
-    line, column = start_line, 0
-    if cursor:
-        try:
-            saved = json.loads(base64.urlsafe_b64decode(cursor.encode()))
-            if saved["binding"] != binding or set(saved) != {"binding", "line", "column"}:
-                raise ValueError()
-            line, column = saved["line"], saved["column"]
-            if type(line) is not int or type(column) is not int or not start_line <= line <= end_line or not 0 <= column < len(lines[line - 1]):
-                raise ValueError()
-        except (ValueError, TypeError, KeyError) as exc:
-            raise ValueError("invalid or stale range cursor") from exc
-
-    def continuation(next_line, next_column):
-        if next_line > end_line:
-            return None
-        return base64.urlsafe_b64encode(encoded({"binding": binding, "line": next_line, "column": next_column})).decode()
-
-    result = {"format": "schema_extract.read.v2", "root": str(root), "path": path,
-              "sha256": file_hash, "start_line": start_line, "end_line": end_line,
-              "fragments": [], "next_cursor": None}
-    while line <= end_line:
-        remaining = lines[line - 1][column:]
-        low, high, best = 1, len(remaining), 0
-        while low <= high:
-            size = (low + high) // 2
-            complete = size == len(remaining)
-            fragment = {"line": line, "column": column + 1, "text": remaining[:size], "ends_line": complete}
-            candidate = {**result, "fragments": result["fragments"] + [fragment],
-                         "next_cursor": continuation(line + 1, 0) if complete else continuation(line, column + size)}
-            if len(encoded(candidate)) <= max_bytes:
-                best, low = size, size + 1
-            else:
-                high = size - 1
-        if best == 0:
-            if not result["fragments"]:
-                raise ValueError("page metadata exceeds the budget")
-            break
-        complete = best == len(remaining)
-        result["fragments"].append({"line": line, "column": column + 1, "text": remaining[:best], "ends_line": complete})
-        line, column = (line + 1, 0) if complete else (line, column + best)
-        result["next_cursor"] = continuation(line, column)
-    return result
-
-
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path)
@@ -186,8 +132,6 @@ def main(argv=None) -> int:
     parser.add_argument("--skip-hardware", action="store_true")
     parser.add_argument("--start-line", type=int, default=1)
     parser.add_argument("--end-line", type=int)
-    parser.add_argument("--max-bytes", type=int, default=6000)
-    parser.add_argument("--cursor")
     parser.add_argument("--expected-sha256")
     parser.add_argument("--evidence", action="store_true", help="generate an exact short evidence anchor")
     parser.add_argument("--quote-offset", type=int, default=0,
@@ -195,24 +139,16 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.check_materials:
-            if not args.read_only or not args.skip_hardware or args.root or args.path or args.evidence or args.cursor:
+            if not args.read_only or not args.skip_hardware or args.root or args.path or args.evidence:
                 parser.error("--check-materials requires --read-only --skip-hardware and takes no reading options")
             result = stage_check(json.loads(args.check_materials.read_text(encoding="utf-8")))
             sys.stdout.buffer.write(encoded(result))
             return result["exit_code"]
-        if args.root is None or args.path is None or args.read_only or args.skip_hardware:
-            parser.error("line reading requires --root and --path")
-        if args.evidence:
-            if args.end_line is None or args.cursor is not None:
-                raise ValueError("--evidence requires --end-line and does not use --cursor")
-            result = read_evidence(args.root, args.path, args.start_line, args.end_line,
-                                   quote_offset=args.quote_offset, expected_sha256=args.expected_sha256)
-        else:
-            if args.quote_offset:
-                raise ValueError("--quote-offset requires --evidence")
-            result = read_range(args.root, args.path, args.start_line, args.end_line,
-                                max_bytes=args.max_bytes, cursor=args.cursor,
-                                expected_sha256=args.expected_sha256)
+        if (not args.evidence or args.root is None or args.path is None or args.end_line is None or
+                args.read_only or args.skip_hardware):
+            parser.error("evidence reading requires --evidence, --root, --path and --end-line")
+        result = read_evidence(args.root, args.path, args.start_line, args.end_line,
+                               quote_offset=args.quote_offset, expected_sha256=args.expected_sha256)
     except (ValueError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

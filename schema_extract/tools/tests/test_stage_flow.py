@@ -255,11 +255,11 @@ class StageFlowTests(unittest.TestCase):
         self.assertNotIn("sibling.yaml", consumer["source_manifest"])
         self.assertNotIn("consumer", affected_nodes(self.state, ["sibling"]))
         self.assertEqual(self.state["nodes"]["consumer"]["approved_sha256"], reviewing["dependency_digests"]["consumer.yaml"])
-        handoff = self.store.run_dir(self.state["run_id"]) / "stages/P5/consumer/handoff.md"
-        self.assertEqual(handoff.read_text().splitlines()[0],
-                         "Checkpoint: " + self.state["nodes"]["consumer"]["approval"]["checkpoint"])
         first_review = self.step(stage="P6", role="reviewer")
         records = first_review["materials"]["records"]
+        consumer_receipt = next(record for record in records if record.get("attempt_id") == reviewing["attempt_id"])
+        self.assertEqual(consumer_receipt["purpose"], "current_decision")
+        self.assertEqual(read_json(Path(consumer_receipt["path"]))["handoff"], result["response"]["handoff"])
         self.assertTrue({(stage, role) for stage in ("P2", "P4", "P5") for role in ("worker", "reviewer")} <=
                         {(record["stage"], record["role"]) for record in records if record["kind"] == "receipt"})
         self.assertTrue(all(record["read_after"] == "current_artifacts" for record in records))
@@ -269,6 +269,37 @@ class StageFlowTests(unittest.TestCase):
         self.assertEqual(last_review["session_id"], self.backend.sessions[tuple(sorted(first_review["session_scope"].items()))])
         self.assertEqual(self.state["status"], "ready")
         self.assertEqual(effective_nodes(self.state), set(nodes))
+
+    def test_last_control_gate_denies_calls_prepared_before_pause_or_cancel(self):
+        for stage, actions in (("P5", ("pause",)), ("P1", ("cancel", "pause"))):
+            with self.subTest(stage=stage, actions=actions):
+                self.create(("root", "branch") if stage == "P5" else ("root",))
+                if stage == "P5":
+                    self.through_root()
+                node = "branch" if stage == "P5" else "root"
+                scope = self.state["nodes"][node]["stage"] if stage == "P5" else self.state["stages"][stage]
+                used_calls, completed = scope["calls"], deepcopy(self.state["accepted_receipts"])
+                invoked = len(self.backend.calls)
+                prepared = self.store.prepare_attempt
+                def request_after_preparation(*args, **kwargs):
+                    attempt = prepared(*args, **kwargs)
+                    for action in actions:
+                        self.store.request_control(self.state["run_id"], action)
+                    return attempt
+                with patch.object(self.store, "prepare_attempt", side_effect=request_after_preparation):
+                    self.state = run(self.store, self.state["run_id"], transport=self.backend)
+                self.assertEqual(len(self.backend.calls), invoked)
+                self.assertEqual(self.state["status"], "cancelled" if "cancel" in actions else "paused")
+                self.assertEqual(self.state["accepted_receipts"], completed)
+                scope = self.state["nodes"][node]["stage"] if stage == "P5" else self.state["stages"][stage]
+                self.assertEqual(scope["calls"], used_calls)
+                self.assertEqual((scope["adjudications"], scope["signoffs"]), (0, 0))
+                self.assertEqual(self.state["active_attempts"], {})
+                self.assertEqual(self.state["unsettled_attempts"], {})
+                finished = self.store.run_dir(self.state["run_id"]) / "attempts" / self.state["attempts"][-1] / "finished.json"
+                self.assertEqual(read_json(finished)["status"], "not_dispatched")
+                if stage == "P5":
+                    self.assertNotIn("writing_started", self.state["nodes"][node])
 
     def test_p2_review_cannot_change_the_worker_selection(self):
         self.create()
@@ -281,6 +312,84 @@ class StageFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(ExtractError, "reviewer plan differs"):
             self.accept(reviewer, result)
         self.assertIsNone(self.store.load(self.state["run_id"])["selected_designs"])
+
+    def test_last_control_gate_preserves_pending_recovery_handoff(self):
+        from schema_extract.tools.agent import _session
+
+        self.create()
+        interrupted = self.prepare(stage="P1", role="worker")
+        self.backend.write(interrupted)
+        previous_session = str(uuid4())
+        with _session(interrupted) as (path, record):
+            record.update(status="running", attempt_id=interrupted["attempt_id"], session_id=previous_session)
+            write_json(path, record)
+        self.state = _interrupted(self.store, self.state, self.lock, interrupted, None,
+                                  {"confirmed": True}, "Recover this interrupted draft")
+        self.state["unsettled_attempts"].pop(interrupted["attempt_id"], None)
+        self.store.save(self.state)
+        checkpoint = self.state["checkpoint"]
+        used_calls = self.state["stages"]["P1"]["calls"]
+        prepared = self.store.prepare_attempt
+
+        def pause_after_preparation(*args, **kwargs):
+            attempt = prepared(*args, **kwargs)
+            self.assertEqual(attempt["recovery_handoff"]["attempt_id"], interrupted["attempt_id"])
+            self.store.request_control(self.state["run_id"], "pause")
+            return attempt
+
+        with patch.object(self.store, "prepare_attempt", side_effect=pause_after_preparation):
+            self.state = run(self.store, self.state["run_id"], transport=self.backend)
+        self.assertEqual(self.state["status"], "paused")
+        self.assertEqual(self.backend.calls, [])
+        self.assertEqual(self.state["checkpoint"], checkpoint)
+        self.assertEqual(self.state["stages"]["P1"]["calls"], used_calls)
+        self.assertIsNone(self.state["session_handoffs"][0]["next_attempt_id"])
+
+        invoke = self.backend.run
+
+        def pause_started_call(**kwargs):
+            self.store.request_control(self.state["run_id"], "pause")
+            return invoke(**kwargs)
+
+        with patch.object(self.backend, "run", side_effect=pause_started_call):
+            self.state = run(self.store, self.state["run_id"], transport=self.backend, resume=True)
+        self.assertEqual(len(self.backend.calls), 1)
+        resumed = self.backend.calls[0]
+        self.assertEqual(resumed["recovery_handoff"]["attempt_id"], interrupted["attempt_id"])
+        handoff = self.state["session_handoffs"][0]
+        self.assertEqual(handoff["next_attempt_id"], resumed["attempt_id"])
+        self.assertIsNotNone(handoff["next_session_id"])
+        self.assertNotEqual(handoff["next_session_id"], previous_session)
+        self.assertEqual(self.state["stages"]["P1"]["calls"], used_calls + 1)
+
+    def test_writing_order_does_not_block_started_local_review(self):
+        from schema_extract.tools.stages import dependencies_ready, invalidate_node
+        self.create(("root", "provider", "consumer"), writing=[
+            {"id": "provider", "wait_for": []}, {"id": "consumer", "wait_for": ["provider"]}])
+        self.through_root()
+        self.assertFalse(dependencies_ready(self.state, "consumer"))
+        self.step(node="provider", role="worker")
+        self.step(node="provider", role="reviewer")
+        self.step(node="consumer", role="worker")
+        invalidate_node(self.state["nodes"]["provider"], require_worker=True)
+        self.assertTrue(dependencies_ready(self.state, "consumer"))
+        consumer = self.state["nodes"]["consumer"]
+        origin = consumer["source_context"]["origins"]["Math_reshape"]
+        chain = origin["chain"]
+        origin["chain"] = ["consumer", "provider"]
+        self.assertFalse(dependencies_ready(self.state, "consumer"))
+        origin["chain"] = chain
+        instance = consumer["instance"]
+        consumer["instance"] += ", corrected"
+        self.assertFalse(dependencies_ready(self.state, "consumer"))
+        consumer["instance"] = instance
+        self.state["writing_plan"][1]["wait_for"].append("root")
+        self.assertFalse(dependencies_ready(self.state, "consumer"))
+        self.state["writing_plan"][1]["wait_for"].remove("root")
+        self.store.save(self.state)
+        self.step(node="consumer", role="reviewer")
+        self.assertEqual(self.state["nodes"]["consumer"]["status"], "approved")
+        self.assertEqual({call["node"] for call in next_calls(self.state)}, {"provider"})
 
     def test_p4_cannot_extend_p2_or_change_current_selection_identity(self):
         self.create(("root", "local"))

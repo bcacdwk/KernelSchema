@@ -19,7 +19,7 @@ Supervisor 负责控制请求，Runner 是状态与合入的唯一写者。worke
 | P3 | root 本地 Design 三区、必要 Realization、自身 when/Version | 完整 root 有效全文及当前目录范围 |
 | P4 | 目录与 `{id, wait_for}`，落实已定非 root 写作安排 | 完整 root、相关基线与有限未来计划 |
 | P5 | 每节点只写自身 YAML | 共享 Contract、实际 raw 来源链、本节点全部使用上下文 |
-| P6 | 仅按 reviewer 明确的文件/字段修稿或补目录 | 全部最终 YAML、中文目录、实际来源及知识去向 |
+| P6 | 按 reviewer 明确的非 root 字段修稿或补目录 | 全部最终 YAML、中文目录、实际来源及知识去向 |
 
 P2 和 P4 分别绑定真实 reviewer 回执。P4 不增删选定 ID 或更换实例；每个非 root 恰有一项安排，等待可零项或多项，拒绝自环和循环。P4 不创建占位 YAML，未来文件标明“仅计划”。
 
@@ -41,8 +41,8 @@ P6 先独立理解最终成果，再按必要 P2/P4/P5 回执和短交接反查�
 
 - `decision`、`summary`、`conclusions` 表达本次判断；正常 worker 可 complete/continue/blocked，reviewer 可 approve/revise/blocked，适用阶段可 reopen。
 - `source_evidence` 选择真实阅读的相对 path、category、行范围、quote_offset 和 note；每段最多 12 行。`artifact_evidence` 指最终实际 raw，不能用规范化预览的位置。
-- conclusions/issues/framework_candidates 的 evidence 索引本次 source_evidence；required_conclusions、绑定入口及 reviewer 所需产物证据均覆盖。
-- P1 comparisons 绑定逐输出验收；P2/P4 的 plan 使用上表格式；P6 revision_scope 指明确文件与字段。
+- conclusions/issues/framework_candidates 的 evidence 索引本次 source_evidence；当前文档的四项判断可由 artifact_evidence 支持，纯文档退修/阻塞使用相应 kind 与文件锚点，具体编码见[提交与证据](../prompt/operations/response.md)。reviewer 仍独立核查实际源码。
+- P1 comparisons 绑定逐输出验收；P2/P4 普通或维护 reviewer 独立认可后，approve 的 plan 保留 plan_draft；P6 revision_scope 限目录及明确非 root 字段，affected_nodes 登记受影响者并在批准时覆盖 pending_rechecks。
 - checks 只记亲自执行的命令及退出码；未执行时为空并说明。handoff 简短记录已定事项、必要依据、新事实去处与缺项。
 
 提案形状、身份、来源和产物问题分别记录。格式修复不授权改模型身份或伪造源码证据，缺失的语义判断仍须由本角色完成。
@@ -64,7 +64,7 @@ P6 先独立理解最终成果，再按必要 P2/P4/P5 回执和短交接反查�
 
 ## 并行合入与计划修订
 
-P2 选择、P4 等待与 P5 实际来源分别保存。wait_for 决定开始写作的次序；实际 `from`、origins、共享 Contract 和使用上下文决定内容依赖与修订影响。
+P2 选择、P4 等待与 P5 实际来源分别保存。wait_for 只约束本实例、本等待集合的首次派发准入；同一安排下的续写、复审、退修和恢复沿用已通过的准入，实例或等待集合改变时重新核验。实际 `from`、origins、共享 Contract 和使用上下文决定内容依赖与修订影响，实际来源批准持续核验。
 
 `source_manifest(node)` 包含 root、自身及同名区域实际链。为解析 provider 其他区域而补读的材料记录在解析闭包中，不自动成为该节点的采用来源。跨区环由完整图检查。
 

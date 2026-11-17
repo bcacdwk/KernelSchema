@@ -54,7 +54,7 @@ class SourceGapTests(unittest.TestCase):
         root["CONTRACT"]["Algorithm_requirement"]["Golden_reference"]["Tolerance"]["y"] = criterion
         change(root["CONTRACT"]["Algorithm_requirement"])
         write_yaml(self.after / "root.yaml", root)
-        validate_artifacts("P1", "worker", self.before, self.after, REPO / "schema_template/starter.yaml", decision="complete")
+        validate_artifacts("P1", "worker", self.before, self.after, REPO / "schema_template/starter.yaml")
         checked = check_stage_snapshot(self.after, parser_root=REPO, stage="P1")
         if checked["exit_code"]:
             raise ExtractError("; ".join(checked["diagnostics"]))

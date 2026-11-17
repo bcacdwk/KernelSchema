@@ -73,7 +73,11 @@ def _linked_rules(lock: dict, names) -> set[str]:
             except ValueError:
                 continue
             if relative in available and (relative.startswith(("schema_docs/", PROMPT_ROOT + "/")) or
-                                          relative in {"EXTRACT_SCHEMA.md", "schema_template/README.md", "schema_template/starter.yaml"}):
+                                          relative in {"README.md", "EXTRACT_SCHEMA.md", "schema_template/README.md",
+                                              "schema_template/tools/README.md", "schema_template/starter.yaml",
+                                              "schema_extract/README.md", "schema_extract/REVIEW.md",
+                                              "schema_extract/EXECUTOR_ALIGNMENT.md", "schema_extract/tools/README.md",
+                                              "schema_extract/issues/README.md"}):
                 pending.append(relative)
     return selected
 
@@ -112,9 +116,9 @@ def prepare_attempt_materials(state: dict, lock: dict, attempt: dict, *, rules_l
 
     needed_stages = {"P1": [], "P2": ["P1"], "P3": ["P2"], "P4": ["P2", "P3"],
                      "P5": ["P2", "P4"], "P6": ["P2", "P4"]}[attempt["stage"]]
-    approvals = [(stage, "root", state["stages"][stage].get("approval")) for stage in needed_stages]
+    approvals = [state["stages"][stage].get("approval") for stage in needed_stages]
     if attempt["stage"] == "P6":
-        approvals.extend(("P5", node, entry.get("approval")) for node, entry in state["nodes"].items() if node != "root")
+        approvals.extend(entry.get("approval") for node, entry in state["nodes"].items() if node != "root")
     seen_receipts = set()
 
     def receipt_record(attempt_id: str, reason: str, *, expected_digest=None):
@@ -145,18 +149,10 @@ def prepare_attempt_materials(state: dict, lock: dict, attempt: dict, *, rules_l
                         "purpose": reason, "read_after": "current_artifacts"})
         seen_receipts.add(attempt_id)
 
-    for stage, node, approval in approvals:
+    for approval in approvals:
         if not approval:
             continue
         receipt_record(approval["attempt_id"], "current_decision", expected_digest=approval["receipt_sha256"])
-        path = run_dir / "stages" / stage
-        if stage == "P5":
-            path /= node
-        path /= "handoff.md"
-        if path.is_file():
-            copied = copy_file(path, f"handoffs/{stage}/{node}.md")
-            records.append({"kind": "handoff", "stage": stage, "node": node, "path": copied,
-                            "purpose": "knowledge_destination", "read_after": "current_artifacts"})
     latest_scope = False
     for attempt_id in reversed(state["attempts"]):
         if attempt_id not in state["accepted_receipts"]:
@@ -174,7 +170,6 @@ def prepare_attempt_materials(state: dict, lock: dict, attempt: dict, *, rules_l
         if (same_scope or transfer) and (value.get("handoff", "").strip() or value.get("issues")):
             receipt_record(attempt_id, "knowledge_destination")
 
-    scope = scope_for(state, attempt)
     if attempt.get("mode") == "adjudicate":
         for entry in attempt["adjudication_candidates"]:
             checkpoint = entry["checkpoint"]
@@ -279,7 +274,7 @@ def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | N
         source_identities=attempt.get("source_identities", {}), recovery_handoff=attempt.get("recovery_handoff"),
         preparation=attempt.get("preparation"),
         historical_definitions=({"checkpoint": attempt["baseline_context_checkpoint"], "path": str(Path(materials["directory"]) / "historical"),
-                                "purpose": "Read-only historical baseline; never an eligible current from source"}
+                                "purpose": "historical_baseline"}
                                if attempt.get("baseline_context_checkpoint") else None),
         reading_order=["current_specs", "current_artifacts", "fixed_source", "process_records"], check_command=shlex.quote(attempt["check_command"]),
         budget={**{key: scope.get(key) for key in ("revisions", "continues", "receipt_repairs", "cli_failures", "calls", "deadline")},

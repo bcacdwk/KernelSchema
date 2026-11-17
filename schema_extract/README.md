@@ -124,7 +124,7 @@ python3 schema_extract/extract_yaml.py maintain RUN_UUID --issue-id copy-definit
 
 任务仅针对当前 P1–P5，action 为 `review` 或 `patch`；patch 须给明确文件/字段。请求先挡新派发和发布，由同一 Runner 排空后执行。完整稿可以先审，未完成稿继续普通 worker；维护结束仍需正常阶段和新的 P6。已交付运行不能再通过维护改稿。
 
-发布核当前批准、来源、完整目录、最终 checkpoint 和控制屏障，然后原子交付，保留已审字节。目标须不存在或只含零字节普通 `.gitkeep`。冲突保留双方内容；相同完整结果可幂等重放。另行 export 以 `exports[].status=published` 和目标回执为准。
+发布核当前批准、来源、完整目录、最终 checkpoint 和控制屏障，然后原子交付，保留已审字节。目标须不存在；相同完整结果可幂等重放，其他冲突保留双方内容。另行 export 以 `exports[].status=published` 和目标回执为准。
 
 ## 单文件阅读视图
 
@@ -164,7 +164,7 @@ python3 schema_extract/extract_yaml.py monitor status
 python3 schema_extract/extract_yaml.py monitor stop
 ```
 
-提醒使用独立的 `codex queue --resume`。收到后按消息执行绑定线程的 `monitor ack`，accepted 且 scan_required 时执行一次 `monitor scan --wake ID --thread THREAD_UUID`；以 committed/reused 为本轮完成依据。stop 只停提醒，不取消已启动提取。
+提醒使用独立的 `codex queue --resume`。收到后按消息执行绑定线程的 `monitor ack`；accepted 后执行一次 `monitor scan --wake ID --thread THREAD_UUID`，以 committed/reused 为本轮完成依据。stop 只停提醒，不取消已启动提取。
 
 自动恢复默认关闭；`--auto-restart-limit N` 只授权所选 run 内已确认终止、EX_TEMPFAIL 75、有剩余预算的普通失败，持久累计次数。普通 pause/cancel/hold 保持优先，提醒补送有固定上限。
 

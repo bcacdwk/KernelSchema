@@ -16,6 +16,7 @@ import threading
 import time
 
 from .agent import AgentCLI
+from .backends import backend_for
 from .artifacts import (CandidateRejected, UpstreamRequired, approval_projection, artifact_manifest, check_stage_snapshot,
                         normalize_candidate, source_context, validate_artifact_sources,
                         validate_artifacts, validate_plan)
@@ -29,7 +30,7 @@ from .prompts import build_prompt
 from .receipts import (ReceiptFormatError, check_proposal_identity, evidence_identity,
                        normalize_response, proposal_schema, provider_request_details, validate_receipt)
 from .recovery import (HARD_RECOVERY_STOPS, account, confirm_termination, consume_controls, elapsed_on_disk,
-                       handoff_session, recover_result, retry_classification, retry_delay, termination_observed)
+                       handoff_session, recover_result, release_unstarted_handoff, retry_classification, retry_delay, termination_observed)
 from .snapshots import freeze_inputs, verify_run_inputs
 from .runtime import execution_boundary, verify_execution
 from . import maintenance
@@ -64,6 +65,7 @@ def create_run(repo: Path, state_root: Path, output: Path, *, operator_id: str |
     for role in ("worker", "reviewer"):
         if config[f"{role}_effort"] not in {"low", "medium", "high", "xhigh", "max"}:
             raise ExtractError(f"invalid {role} effort")
+        backend_for(config["backend"]).validate_effort(config[f"{role}_effort"])
     for key in ("revision_limit", "operator_seconds", "stage_seconds", "call_seconds", "max_calls"):
         if type(config[key]) is not int or config[key] < 1:
             raise ExtractError(f"{key} must be a positive integer")
@@ -79,6 +81,8 @@ def create_run(repo: Path, state_root: Path, output: Path, *, operator_id: str |
     repo, state_root, output = repo.resolve(), state_root.resolve(), output.resolve()
     if output == repo or output.is_relative_to(state_root) or state_root.is_relative_to(output):
         raise ExtractError("output must be separate from repository root and v2 runtime storage")
+    if output.exists():
+        raise ExtractError("output must not exist; choose a new destination")
     tree, normalized, names = resolve_request(repo, operator_id=operator_id, source=source, bindings=bindings)
     source_directory = tree.root / normalized["directory"]
     if state_root.is_relative_to(source_directory) and ".schema_extract" not in state_root.relative_to(source_directory).parts:
@@ -139,10 +143,6 @@ def _release(state: dict, attempt: dict) -> None:
     state["unconfirmed_attempts"].pop(attempt["attempt_id"], None)
 
 
-def _scope_at(state: dict, attempt: dict) -> dict:
-    return state["nodes"][attempt["node"]]["stage"] if attempt["stage"] == "P5" else state["stages"][attempt["stage"]]
-
-
 def _session(state: dict, attempt: dict, result: dict, *, required=True) -> str | None:
     if result.get("session_status") != "ready":
         if required:
@@ -195,7 +195,7 @@ def _artifact_gate(store: Store, state: dict, lock: dict, attempt: dict, before:
     parser_root = rules_root(context["rules_lock"])
     entry = next((item for item in state.get("selected_designs") or [] if item["id"] == attempt["node"]), None)
     validation = validate_artifacts(attempt["stage"], role or attempt["role"], before, after,
-        parser_root / "schema_template/starter.yaml", decision=decision,
+        parser_root / "schema_template/starter.yaml",
         node_entry=entry, revision_scope=state["revision_scope"],
         first_draft=attempt["stage"] == "P5" and not state["nodes"][attempt["node"]].get("authored", False),
         maintenance_fields=maintenance.task_for(state, attempt).get("fields", []) if attempt.get("purpose") == "maintenance" else None)
@@ -253,7 +253,7 @@ def _draft(store: Store, state: dict, attempt: dict, workspace: Path, *, files, 
     node["draft_checkpoint"] = checkpoint_id
     if attempt["stage"] == "P5":
         node["authored"] = True
-    _scope_at(state, attempt)["candidates"].append({"checkpoint": checkpoint_id, "plan": deepcopy(plan),
+    scope_for(state, attempt)["candidates"].append({"checkpoint": checkpoint_id, "plan": deepcopy(plan),
                                                  "generation": attempt["generation"], "node_signature": attempt["node_signature"]})
     return checkpoint_id
 
@@ -324,7 +324,7 @@ def _record_check_failure(store: Store, state: dict, attempt: dict, receipt: dic
 
 def _stop_once(store: Store, state: dict, attempt: dict, reason: dict) -> dict:
     """Adjudication and the extra signoff have exactly one invocation and two exits."""
-    scope = _scope_at(state, attempt)
+    scope = scope_for(state, attempt)
     scope["status"] = "blocked"
     record = "signoff" if attempt.get("mode") == "signoff" else "adjudication"
     scope[record] = {**(scope.get(record) or {}), "attempt_id": attempt["attempt_id"],
@@ -736,8 +736,6 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
     if decision == "reopen" and attempt.get("purpose") != "maintenance":
         updated = (_begin_provider_reopen(store, updated, attempt, receipt, provider_details) if provider_details else
                    _begin_reopen(store, updated, attempt, receipt))
-    if attempt["stage"] in {"P2", "P3", "P4", "P5"} and decision == "approve":
-        store.handoff(updated, attempt, receipt["handoff"], checkpoint_id=checkpoint_id)
     if store.load(state["run_id"]) != state:
         raise ExtractError("authoritative state changed during result validation")
     store.save(updated)
@@ -766,7 +764,7 @@ def _recover_call(store: Store, state: dict, lock: dict, attempt: dict, result: 
         if attempt["stage"] == "P6":
             updated["pending_rechecks"] = affected_nodes(updated, [*updated["pending_rechecks"],
                 *(Path(name).stem for name in validation["changed_files"] if name.endswith(".yaml"))])
-    if fresh_context or result.get("session_status") == "retired":
+    if fresh_context or result.get("session_status") == "retired" or (attempt.get("recovery_handoff") and session_id is None):
         from .prompts import render_operation
         handoff_session(updated, attempt, result, render_operation("recovery", {
             "reason": reason, "checkpoint": call_view(updated, attempt)["checkpoint"],
@@ -863,7 +861,7 @@ def _interrupted(store: Store, state: dict, lock: dict, attempt: dict,
                  result: dict | None, termination: dict, reason: str, *, recovery_request_id=None, resume_scope=True) -> dict:
     """Save only a valid draft; an interrupted decision cannot approve anything."""
     if not termination["confirmed"]:
-        owner, scope = owner_for(state, attempt), _scope_at(state, attempt)
+        owner, scope = owner_for(state, attempt), scope_for(state, attempt)
         owner["status"] = scope["status"] = "termination_unconfirmed"
         owner["reason"] = {"code": "termination_unconfirmed", "summary": reason,
                            "termination": termination, "recovery_condition": "确认记录中的旧进程及其子进程终止后重试resume。"}
@@ -910,10 +908,10 @@ def _interrupted(store: Store, state: dict, lock: dict, attempt: dict,
         return state
     if resume_scope:
         owner["status"] = "draft" if attempt["stage"] == "P5" else "running"
-        _scope_at(state, attempt)["status"] = "reviewing" if attempt["role"] == "reviewer" else "draft"
+        scope_for(state, attempt)["status"] = "reviewing" if attempt["role"] == "reviewer" else "draft"
         owner["reason"] = None
     else:
-        owner["status"] = _scope_at(state, attempt)["status"] = "cli_error"
+        owner["status"] = scope_for(state, attempt)["status"] = "cli_error"
         owner["reason"] = {"code": "scope_recovery_pending", "summary": reason, "attempt_id": attempt["attempt_id"],
                            "recovery_request_id": recovery_request_id}
     settle(state)
@@ -972,7 +970,7 @@ def _reconcile(store: Store, state: dict, lock: dict, *, terminate_only=False, s
             owner["reason"] = reason
             if active:
                 owner["status"] = "invalid_receipt" if termination["confirmed"] else "termination_unconfirmed"
-                _scope_at(state, attempt)["status"] = owner["status"]
+                scope_for(state, attempt)["status"] = owner["status"]
                 if termination["confirmed"]:
                     state["unconfirmed_attempts"].pop(attempt_id, None)
                 else:
@@ -1381,6 +1379,7 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                         continue
                     guard.verify(state)
                     final_started = state["final_review_started"]
+                    writing_started = deepcopy(state["nodes"][call["node"]].get("writing_started"))
                     attempt = store.prepare_attempt(state, call["session_id"], call=call, timeout_seconds=timeout)
                     context = store.context(state, attempt)
                     prompt = build_prompt(state, context["source_lock"], attempt,
@@ -1388,10 +1387,11 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                     schema = proposal_schema(attempt, source_files=lock["source"]["files"])
                     thread = threading.Thread(target=invoke, args=(attempt, prompt, schema, timeout), daemon=True)
                     with store.supervisor() as ledger:
-                        denied = bool(ledger["active_hold"] or
-                                      maintenance.barrier(store, state, ledger=ledger))
                         if ledger["active_hold"]:
                             store.hold_member(ledger, state)
+                        consume_controls(store, state)
+                        denied = bool(state["control"]["action"] or ledger["active_hold"] or
+                                      maintenance.barrier(store, state, ledger=ledger))
                         if not denied:
                             state["unsettled_attempts"][attempt["attempt_id"]] = "dispatched"
                             store.save(state)
@@ -1410,6 +1410,13 @@ def run(store: Store, run_id: str, *, transport=None, resume=False, queued_only=
                         if attempt["stage"] == "P6" and not final_started:
                             state["final_review_started"] = False
                             state["p6_starts"] -= 1
+                        if attempt["stage"] == "P5":
+                            node = state["nodes"][attempt["node"]]
+                            if writing_started is None:
+                                node.pop("writing_started", None)
+                            else:
+                                node["writing_started"] = writing_started
+                        release_unstarted_handoff(state, attempt)
                         if attempt.get("purpose") == "maintenance":
                             task = maintenance.task_for(state, attempt)
                             task["attempts"] = [item for item in task.get("attempts", []) if item["attempt_id"] != attempt["attempt_id"]]
@@ -1500,12 +1507,12 @@ def _reject(store: Store, state: dict, attempt: dict, result: dict | None, exc: 
     confirmed = result is not None and result.get("termination", {}).get("confirmed")
     owner = owner_for(state, attempt)
     owner["status"] = "invalid_receipt" if confirmed else "termination_unconfirmed"
-    _scope_at(state, attempt)["invalid_receipts"] += 1
-    _scope_at(state, attempt)["status"] = owner["status"]
+    scope_for(state, attempt)["invalid_receipts"] += 1
+    scope_for(state, attempt)["status"] = owner["status"]
     owner["reason"] = {"code": "proposal_rejected", "summary": str(exc), "attempt_id": attempt["attempt_id"],
                        "recovery_condition": "核对拒绝原因与固定输入；确认旧进程终止后按原计数和预算恢复。"}
     if confirmed and isinstance(exc, UpstreamRequired):
-        owner["status"] = _scope_at(state, attempt)["status"] = "blocked"
+        owner["status"] = scope_for(state, attempt)["status"] = "blocked"
         owner["reason"].update(code="invalid_root_prerequisite", target=exc.target,
                               recovery_condition=f"在P4提供固定来源及root产物锚点，按现有reopen协议请求{exc.target}修复并重新审阅；P4/P5不可改root。")
         owner["feedback"] = [*owner["feedback"], owner["reason"]]

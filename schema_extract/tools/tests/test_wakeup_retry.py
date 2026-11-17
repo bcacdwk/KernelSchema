@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from schema_extract.tools import monitor, wakeup
+from schema_extract.tools import audit, monitor, wakeup
 from schema_extract.tools.store import Store
 
 
@@ -167,10 +167,13 @@ class WakeupRetryTests(unittest.TestCase):
                 result = fixture.clock.tick()
                 self.assertEqual(result["status"], "queued")
                 clock = fixture.store.read_supervisor()["clock"]
-                for record in (clock["last_check"], clock["history"][-1]):
-                    self.assertEqual(record["id"], fixture.wake_id)
-                    self.assertEqual(record["attempts"][-1]["message_id"], result["message_id"])
-                    self.assertEqual(record["status"], "completed" if action == "scan" else "sending")
+                record = clock["history"][-1]
+                self.assertEqual(record["id"], fixture.wake_id)
+                self.assertEqual(record["attempts"][-1]["message_id"], result["message_id"])
+                observed = next(item for item in audit._checks({"clock": clock})["reminder_timing"]
+                                if item["id"] == fixture.wake_id)
+                self.assertEqual(observed["thread_id"], fixture.thread)
+                self.assertEqual(observed["attempts"][-1]["message_id"], result["message_id"])
                 if action == "scan":
                     self.assertEqual(clock["last_check_number"], 1)
                     self.assertIn(result["message_id"], clock["last_scan"]["message_ids"])

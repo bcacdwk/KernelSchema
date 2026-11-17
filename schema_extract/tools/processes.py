@@ -42,8 +42,8 @@ def _linux_process(pid: int, boot_id: str) -> dict | None:
 
 
 def process_table(*, cwd: Path | None = None) -> dict[int, dict]:
-    # Keep ps lstart for persisted pre-token identities. Never inherit frozen
-    # rules as the working directory of this diagnostic subprocess.
+    # Collect ps identities and augment them with Linux boot/start tokens.
+    # Never inherit frozen rules as this diagnostic subprocess's working directory.
     output = subprocess.check_output(["ps", "-axo", "pid=,ppid=,pgid=,lstart=,stat="], text=True,
                                      cwd=cwd if cwd is not None else tempfile.gettempdir(), timeout=10)
     result, boot_id = {}, _boot_id()
@@ -68,7 +68,7 @@ def process_table(*, cwd: Path | None = None) -> dict[int, dict]:
 
 
 def process_identity_matches(identity: dict, current: dict | None) -> bool | None:
-    """Match new boot/start tokens or old ps lstart; unavailable proof is None."""
+    """Match boot/start tokens or ps lstart; unavailable proof is None."""
     if (not isinstance(identity, dict) or type(identity.get("pid")) is not int or identity["pid"] <= 1 or
             not isinstance(identity.get("started"), str) or
             identity["started"] in {"", "unobserved", "already_exited"}):
@@ -303,9 +303,11 @@ def _gate_main(argv: list[str]) -> int:
             except ChildProcessError:
                 write_json(Path(path).parent / "cli-exit.json", {**binding, "exit_code": code, "descendants_reaped": True})
                 return code if code >= 0 else 128 - code
-    except OSError:
+    except OSError as exc:
         if child is None:
             mark_not_started(Path(path), binding, "exec_failed")
+            print(str(exc), file=sys.stderr)
+            return 125
         raise
 
 

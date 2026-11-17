@@ -101,30 +101,27 @@ def _matches(clock: dict, binding: dict) -> bool:
     return bool(clock.get("enabled") and all(clock.get(key) == value for key, value in binding.items()))
 
 
-def _item(clock: dict, kind: str, number: int, due: float) -> dict:
-    identity = {**_binding(clock), "kind": kind, "number": number, "due_at": due}
-    return {**identity, "id": f"{kind}-{clock['generation']}-{number}-{digest(identity)[:24]}",
+def _item(clock: dict, number: int, due: float) -> dict:
+    identity = {**_binding(clock), "number": number, "due_at": due}
+    return {**identity, "id": f"check-{clock['generation']}-{number}-{digest(identity)[:24]}",
             "status": "scheduled", "attempts": [], "ack": None}
 
 
 def _archive(clock: dict, item: dict | None) -> None:
     if item:
-        clock["last_" + item["kind"]] = deepcopy(item)
         clock["history"] = (clock.get("history", []) + [deepcopy(item)])[-64:]
 
 
 def _arm(clock: dict) -> None:
     if clock.get("enabled") and clock["last_check_number"] >= 0 and not clock.get("reminder"):
-        clock["reminder"] = _item(clock, "check", clock["last_check_number"] + 1, clock["next_due_at"])
+        clock["reminder"] = _item(clock, clock["last_check_number"] + 1, clock["next_due_at"])
 
 
 def _current(clock: dict, item: dict | None, now: float) -> bool:
     if not item or not _matches(clock, _binding(item)) or now < item["due_at"]:
         return False
-    if item["kind"] == "check":
-        return (item["number"] == clock["last_check_number"] + 1 and item["due_at"] == clock["next_due_at"] and
-                item["id"] == _item(clock, "check", item["number"], item["due_at"])["id"])
-    return item["kind"] == "probe" and item["id"] == _item(clock, "probe", 0, item["due_at"])["id"]
+    return (item["number"] == clock["last_check_number"] + 1 and item["due_at"] == clock["next_due_at"] and
+            item["id"] == _item(clock, item["number"], item["due_at"])["id"])
 
 
 def _next_send_at(item: dict | None) -> float | None:
@@ -173,15 +170,12 @@ class Clock:
         except OSError:
             return "unknown"
 
-    def start(self, thread: str, run_ids=None, *, auto_restart_limit=None, codex_binary=None,
-              probe_delay=None, launch=True) -> dict:
+    def start(self, thread: str, run_ids=None, *, auto_restart_limit=None, codex_binary=None, launch=True) -> dict:
         """The foreground start performs scan #0; the detached child only ticks.
 
         launch=False is an in-process test seam, never a CLI timer option.
         """
         thread = _uuid(thread)
-        if probe_delay is not None and (type(probe_delay) is not int or not 1 <= probe_delay <= 300):
-            raise ExtractError("probe delay must be an integer from 1 to 300 seconds")
         if auto_restart_limit is not None and (type(auto_restart_limit) is not int or auto_restart_limit < 0):
             raise ExtractError("auto-restart limit must be a nonnegative integer")
         if run_ids is not None:
@@ -208,14 +202,6 @@ class Clock:
                 if (process_alive(daemon.get("identity"), table=table) is not True and
                         not (daemon.get("status") == "starting" and process_alive(daemon.get("launcher"), table=table) is True)):
                     raise ExtractError("clock lock is held but its live owner is unconfirmed; inspect monitor status")
-                if probe_delay is not None:
-                    with self.store.supervisor() as ledger:
-                        current = _clock(ledger)
-                        self._check_start(current, thread, run_ids, codex_binary)
-                        if not _matches(current, binding):
-                            raise ExtractError("clock binding changed while start was being checked")
-                        if not current.get("probe"):
-                            current["probe"] = _item(current, "probe", 0, self.now() + probe_delay)
                 if auto_restart_limit is not None:
                     selected = current.get("run_ids")
                     monitor.configure_auto_restart(self.store, selected if selected is not None else self.store.run_ids(),
@@ -232,14 +218,11 @@ class Clock:
                     raise ExtractError("recorded clock process is live without its lock; inspect monitor status")
                 if not clock.get("enabled"):
                     _archive(clock, clock.pop("reminder", None))
-                    _archive(clock, clock.pop("probe", None))
                     clock.update(enabled=True, generation=clock["generation"] + 1, thread_id=thread,
-                                 run_ids=run_ids, verified=False, verified_at=None, started_at=self.now())
+                                 run_ids=run_ids, started_at=self.now())
                 clock.setdefault("run_ids", run_ids)
                 clock.update(repo=str(self.repo), entrypoint=str(rules_root() / "schema_extract/extract_yaml.py"),
                              python=sys.executable, queue_backend="codex", codex_binary=codex_binary or clock.get("codex_binary", "codex"))
-                if probe_delay is not None and not clock.get("probe"):
-                    clock["probe"] = _item(clock, "probe", 0, self.now() + probe_delay)
                 launch_id = str(uuid4())
                 clock["daemon"] = {"id": launch_id, "status": "starting", "launcher": identity,
                                    "created_at": self.now(), "identity": None, "heartbeat_at": None}
@@ -332,17 +315,15 @@ class Clock:
                 return {"accepted": False, "reason": "disabled"}
             if thread != clock["thread_id"]:
                 return {"accepted": False, "reason": "wrong_thread"}
-            item = next((item for item in (clock.get("reminder"), clock.get("probe")) if item and item["id"] == wake_id), None)
-            if not _current(clock, item, now):
+            item = clock.get("reminder")
+            if not _current(clock, item, now) or item["id"] != wake_id:
                 return {"accepted": False, "reason": "stale_or_not_due"}
             if item.get("ack"):
-                return {"accepted": False, "reason": "already_acknowledged", "unfinished": item["kind"] == "check"}
+                return {"accepted": False, "reason": "already_acknowledged"}
             if not item["attempts"]:
                 return {"accepted": False, "reason": "not_sent"}
             item.update(status="acknowledged", ack={"thread_id": thread, "at": now})
-            clock.update(verified=True, verified_at=now)
-            return {"accepted": True, "id": wake_id, "kind": item["kind"], "number": item["number"],
-                    "ack": deepcopy(item["ack"]), "scan_required": item["kind"] == "check"}
+            return {"accepted": True, "id": wake_id, "number": item["number"], "ack": deepcopy(item["ack"])}
 
     def scan(self, wake_id=None, thread=None) -> dict:
         """Only an explicit thread can finish that thread's accepted reminder."""
@@ -456,8 +437,6 @@ class Clock:
         due = datetime.fromtimestamp(item["due_at"], timezone.utc).isoformat()
         context = {"reminder_id": item["id"], "thread_id": clock["thread_id"], "due_at": due,
                    "ack_command": ack, "status_command": status}
-        if item["kind"] == "probe":
-            return render_operation("wakeup_probe", context)
         scan = shlex.join([*entry, "scan", "--wake", item["id"], "--thread", clock["thread_id"], *where])
         manual = Path(clock["entrypoint"]).with_name("README.md")
         return render_operation("wakeup", {**context, "scan_command": scan, "manual": str(manual)})
@@ -515,31 +494,22 @@ class Clock:
             if self.launch_id:
                 clock["daemon"]["heartbeat_at"] = now
             _arm(clock)
-            selected = None
-            for key in ("probe", "reminder"):
-                item = clock.get(key)
-                if not _current(clock, item, now):
-                    continue
-                next_send_at = _next_send_at(item)
-                if next_send_at is None or now < next_send_at:
-                    continue
-                attempts = item["attempts"]
-                attempt = {"number": len(attempts) + 1, "started_at": now, "status": "sending"}
-                attempts.append(attempt)
-                item["status"] = "sending"
-                clock["queue_attempts_total"] = clock.get("queue_attempts_total", 0) + 1
-                selected = key, deepcopy(item), deepcopy(clock)
-                break
-            if selected is None:
+            item = clock.get("reminder")
+            next_send_at = _next_send_at(item)
+            if not _current(clock, item, now) or next_send_at is None or now < next_send_at:
                 if self.launch_id:
                     clock["daemon"]["status"] = "running"
                     clock["daemon"].pop("error", None)
                 return {"status": "waiting", "observation": observation}
-        key, item, sent_clock = selected
+            attempts = item["attempts"]
+            attempts.append({"number": len(attempts) + 1, "started_at": now, "status": "sending"})
+            item["status"] = "sending"
+            clock["queue_attempts_total"] = clock.get("queue_attempts_total", 0) + 1
+            item, sent_clock = deepcopy(item), deepcopy(clock)
         try:
             # Ack, scan or stop may win after reservation.
             current = _clock(self.store.read_supervisor())
-            current_item = current.get(key)
+            current_item = current.get("reminder")
             if (not _matches(current, _binding(sent_clock)) or not _current(current, current_item, self.now()) or
                     current_item["id"] != item["id"] or current_item.get("ack")):
                 return {"status": "invalidated", "id": item["id"]}
@@ -551,11 +521,11 @@ class Clock:
             outcome = {"status": "uncertain", "error": str(exc), "finished_at": self.now()}
         with self.store.supervisor() as ledger:
             clock = _clock(ledger)
-            current = clock.get(key)
+            current = clock.get("reminder")
             # A fast receiver may already have acked, completed, or stopped.
             # Supplement only this attempt's facts, including its archived
             # copies; never replace a newer reminder or undo an acceptance.
-            records = [current, clock.get("last_" + item["kind"]), *clock.get("history", [])]
+            records = [current, *clock.get("history", [])]
             for record in records:
                 if not record or record["id"] != item["id"]:
                     continue
@@ -615,10 +585,9 @@ class Clock:
                                 daemon.update(status="clock_error", error=str(exc))
                     clock = _clock(self.store.read_supervisor())
                     deadlines = [clock.get("next_observation_at", self.now() + OBSERVATION_SECONDS)]
-                    for item in (clock.get("probe"), clock.get("reminder")):
-                        next_send_at = _next_send_at(item)
-                        if next_send_at is not None:
-                            deadlines.append(next_send_at)
+                    next_send_at = _next_send_at(clock.get("reminder"))
+                    if next_send_at is not None:
+                        deadlines.append(next_send_at)
                     delay = min([HEARTBEAT_SECONDS, *(max(0.05, due - self.now()) for due in deadlines)])
                     self.stopping.wait(delay)
             finally:
@@ -632,10 +601,9 @@ class Clock:
         with self.store.supervisor() as ledger:
             clock = _clock(ledger)
             if clock.get("enabled"):
-                clock.update(enabled=False, generation=clock["generation"] + 1, verified=False, stopped_at=self.now())
+                clock.update(enabled=False, generation=clock["generation"] + 1, stopped_at=self.now())
                 clock.pop("observation_claim", None)
                 _archive(clock, clock.pop("reminder", None))
-                _archive(clock, clock.pop("probe", None))
                 ledger["clock"] = clock
             identity = deepcopy(clock.get("daemon", {}).get("identity"))
         # No control lock is held while signalling or waiting for the clock.
@@ -674,10 +642,8 @@ class Clock:
         if not clock.get("enabled") and lock == "held":
             process_status = "stopping"
         reasons = []
-        for key in ("reminder", "probe"):
-            item = clock.get(key)
-            if not item:
-                continue
+        item = clock.get("reminder")
+        if item:
             attempts = item["attempts"]
             queued_at = [attempt["finished_at"] for attempt in attempts if attempt.get("status") == "queued"]
             item["attempt_count"] = len(attempts)
@@ -689,8 +655,8 @@ class Clock:
             item["overdue_seconds"] = max(0, now - item["due_at"])
             if item.get("ack"):
                 item["delivery"] = "acknowledged"
-                item["status"] = "acknowledged_unfinished" if key == "reminder" else "verified"
-                if key == "reminder" and now - item["ack"]["at"] >= ATTENTION_SECONDS:
+                item["status"] = "acknowledged_unfinished"
+                if now - item["ack"]["at"] >= ATTENTION_SECONDS:
                     reasons.append("acknowledged_unfinished")
             elif queued_at:
                 item["delivery"] = "queued_unacknowledged"

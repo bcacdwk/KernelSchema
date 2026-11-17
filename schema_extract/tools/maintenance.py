@@ -9,6 +9,7 @@ import time
 from uuid import uuid4
 
 from .common import ExtractError, StaleResult, copy_artifacts, digest, manifest, read_json, write_json
+from .stages import scope_for
 
 
 PENDING = {"requested", "draining"}
@@ -130,7 +131,7 @@ def consume_requests(store, state: dict) -> dict:
 
 def mark_drained(store, state: dict) -> dict:
     """The writer also proves its local running/pending/deferred queues empty."""
-    from .stages import invalidate_final, invalidate_node, invalidate_stage, scope_for, scope_key
+    from .stages import invalidate_final, invalidate_node, invalidate_stage, scope_key
     if any(state.get(name) for name in ("active_attempts", "unconfirmed_attempts", "unsettled_attempts")):
         raise ExtractError("maintenance drain still has unsettled or unterminated calls")
     request = _request(store.read_supervisor(), state["run_id"])
@@ -151,8 +152,8 @@ def mark_drained(store, state: dict) -> dict:
             "request_id": request["id"], "recovery_condition": "提交符合当前选定集合的明确维护任务；原稿、预算与已用决定保持。"})
         store.save(state)
         return state
-    cursor = {key: deepcopy(state.get(key)) for key in ("stage", "node", "role", "mode", "status", "feedback", "reason", "checkpoint")}
-    working = state.get("merged_checkpoint") or state["checkpoint"]
+    cursor = {key: deepcopy(state.get(key)) for key in ("stage", "node", "role", "mode", "status", "feedback", "reason", "checkpoint", "plan_draft")}
+    working = state["checkpoint"]
     records = {}
     for task in tasks:
         key = scope_key(task["stage"], task["node"])
@@ -191,11 +192,6 @@ def task_for(state: dict, call: dict) -> dict:
     if not task or call.get("purpose") != "maintenance":
         raise StaleResult("maintenance invocation has no current task")
     return task
-
-
-def _scope(state: dict, task: dict) -> dict:
-    from .stages import scope_for
-    return scope_for(state, task)
 
 
 def _dependencies_ready(state: dict, task: dict) -> bool:
@@ -240,6 +236,8 @@ def _resume_normal(state: dict) -> None:
         maintenance["completed_at"] = time.time()
     for key, value in maintenance["normal_cursor"].items():
         state[key] = deepcopy(value)
+    if state["stage"] in {"P2", "P4"} and state["stages"][state["stage"]]["status"] == "approved":
+        state["plan_draft"] = None
     state["checkpoint"] = maintenance["working_checkpoint"]
     state["status"], state["reason"] = "running", None
     resume_progress(state)
@@ -257,14 +255,14 @@ def resume_deferred(state: dict) -> None:
     for task in maintenance["tasks"].values():
         if task["status"] != "waiting":
             continue
-        scope = _scope(state, task)
+        scope = scope_for(state, task)
         if scope["status"] == "approved" and approval_is_current(state, scope.get("approval")):
             task["status"] = "done"
         elif task["complete_candidate"] and _dependencies_ready(state, task):
             task.update(status="pending", prepared=False)
             ready = True
     if ready:
-        maintenance["normal_cursor"] = {key: deepcopy(state.get(key)) for key in ("stage", "node", "role", "mode", "status", "checkpoint", "feedback", "reason")}
+        maintenance["normal_cursor"] = {key: deepcopy(state.get(key)) for key in ("stage", "node", "role", "mode", "status", "checkpoint", "feedback", "reason", "plan_draft")}
         maintenance.update(status="active", working_checkpoint=state["checkpoint"])
     elif not any(task["status"] == "waiting" and task["complete_candidate"] for task in maintenance["tasks"].values()):
         maintenance.update(status="complete", completed_at=time.time())
@@ -297,7 +295,7 @@ def validate_attempt(state: dict, attempt: dict) -> None:
                 "maintenance_step": task["step"], "base_checkpoint": task["draft_checkpoint"]}
     if not active(state) or task["status"] != "pending" or any(attempt.get(key) != value for key, value in expected.items()):
         raise StaleResult("maintenance task, step or draft changed")
-    generation = state["nodes"][task["node"]]["generation"] if task["stage"] == "P5" else _scope(state, task)["generation"]
+    generation = state["nodes"][task["node"]]["generation"] if task["stage"] == "P5" else scope_for(state, task)["generation"]
     if attempt.get("generation") != generation:
         raise StaleResult("maintenance scope generation changed")
 
@@ -305,7 +303,10 @@ def validate_attempt(state: dict, attempt: dict) -> None:
 def prepare_workspace(store, state: dict, call: dict) -> None:
     task = task_for(state, call) if call.get("purpose") == "maintenance" else None
     if task and task["step"] == "review" and call["stage"] in {"P2", "P4"}:
-        state["plan_draft"] = deepcopy(state["selected_designs"] if call["stage"] == "P2" else state["writing_plan"])
+        cursor = state["maintenance"]["normal_cursor"]
+        plan = (cursor["plan_draft"] if cursor["stage"] == call["stage"] and cursor["plan_draft"] is not None
+                else state["selected_designs"] if call["stage"] == "P2" else state["writing_plan"])
+        state["plan_draft"] = deepcopy(plan)
     if task and call["stage"] == "P5":
         store.start_node(state, call["node"], call=call)
         task["draft_checkpoint"] = state["nodes"][call["node"]]["draft_checkpoint"]
@@ -404,10 +405,10 @@ def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, v
     if identity["stage"] == "P5":
         result["nodes"][identity["node"]]["draft_checkpoint"] = checkpoint_id
     if identity["role"] == "worker":
-        _scope(result, task)["candidates"].append({"checkpoint": checkpoint_id, "plan": deepcopy(receipt.get("plan")),
+        scope_for(result, task)["candidates"].append({"checkpoint": checkpoint_id, "plan": deepcopy(receipt.get("plan")),
                                                  "generation": identity["generation"], "node_signature": identity.get("node_signature")})
         if decision == "continue":
-            _scope(result, task)["continues"] += 1
+            scope_for(result, task)["continues"] += 1
             task.update(status="pending", feedback=[receipt["summary"], *receipt["issues"]])
         elif decision == "complete":
             if identity["stage"] == "P5":
@@ -431,7 +432,7 @@ def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, v
         task.update(step="patch", role="worker", status="pending", fields=fields, feedback=receipt["issues"])
         if identity["stage"] == "P1":
             task["prepared"] = False
-        _scope(result, task)["revisions"] += 1
+        scope_for(result, task)["revisions"] += 1
     else:
         block(result, identity, {"code": "maintenance_verify_failed" if task["step"] == "verify" else "maintenance_review_blocked", "summary": receipt["summary"], "issues": receipt["issues"]})
     settle(result)

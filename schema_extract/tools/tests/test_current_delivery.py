@@ -30,8 +30,6 @@ class CurrentDeliveryTests(unittest.TestCase):
                                 {"id": "schedule", "wait_for": ["root"]},
                                 {"id": "consumer", "wait_for": ["math", "schedule"]}])
         output = Path(f.state["output"])
-        output.mkdir()
-        (output / ".gitkeep").touch()
         f.state = run(f.store, f.state["run_id"], transport=f.backend)
         self.assertEqual(f.state["status"], "ready", f.state.get("reason"))
         self.assertTrue(f.state["published"], f.state.get("publication"))
@@ -57,11 +55,12 @@ class CurrentDeliveryTests(unittest.TestCase):
         # Existing user content wins; a conflict never mutates the approved raw.
         conflict = f.directory / "conflict"
         conflict.mkdir()
-        (conflict / "keep.txt").write_text("user data")
+        (conflict / ".gitkeep").touch()
         with f.store.writer(f.state["run_id"]):
             f.state = publish(f.store, f.state, conflict, export=True)
         self.assertEqual(f.state["exports"][-1]["status"], "conflict")
-        self.assertEqual((conflict / "keep.txt").read_text(), "user data")
+        self.assertEqual(set(manifest(conflict)), {".gitkeep"})
+        self.assertEqual((conflict / ".gitkeep").read_bytes(), b"")
         self.assertEqual(manifest(raw), checkpoint["files"])
         # A crash after atomic rename is recovered by the complete output
         # manifest; the same export is recorded only once.

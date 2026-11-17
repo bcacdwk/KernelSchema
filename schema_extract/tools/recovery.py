@@ -203,9 +203,7 @@ def scoped_restart_evidence(store, state: dict, scope: str, *, table=None, autom
     attempt = read_json(directory / "attempt.json")
     result = read_json(directory / "result.json") if (directory / "result.json").is_file() else None
     verify_execution(store, state, attempt=attempt)
-    if (Path(attempt["directory"]) != directory or Path(attempt["workspace"]) != directory / "workspace" or
-            attempt["run_id"] != state["run_id"] or attempt["input_fingerprint"] != state["input_fingerprint"] or
-            attempt["attempt_id"] != attempt_id or scope_key(attempt["stage"], attempt["node"]) != scope or
+    if (attempt["attempt_id"] != attempt_id or scope_key(attempt["stage"], attempt["node"]) != scope or
             attempt["generation"] != (owner["generation"] if stage == "P5" else budget["generation"]) or
             attempt["mode"] != "normal" or attempt["role"] != owner["role"]):
         raise ExtractError("retry no longer matches its failed attempt identity")
@@ -387,8 +385,15 @@ def elapsed_on_disk(attempt: dict, result: dict | None) -> float:
     return elapsed
 
 
+def release_unstarted_handoff(state: dict, attempt: dict) -> None:
+    """Keep the recovery context pending when its receiving call never executed."""
+    for handoff in state.get("session_handoffs", []):
+        if handoff.get("next_attempt_id") == attempt["attempt_id"]:
+            handoff["next_attempt_id"] = None
+
+
 def handoff_session(state: dict, attempt: dict, result: dict | None, reason: str, *, termination=None) -> dict:
-    from .agent import retire_session
+    from .agent import restore_unstarted_session, retire_session
     existing = next((item for item in state.setdefault("session_handoffs", [])
                      if item["attempt_id"] == attempt["attempt_id"]), None)
     if existing:
@@ -403,12 +408,15 @@ def handoff_session(state: dict, attempt: dict, result: dict | None, reason: str
     if never_launched(attempt, result) or prepared:
         # Agent never acquired this attempt's session. The prior owner and
         # exact UUID remain usable; there is no interrupted session to retire.
+        release_unstarted_handoff(state, attempt)
+        return {"attempt_id": attempt["attempt_id"], "status": "not_started"}
+    if launch_not_started(attempt):
+        restore_unstarted_session(attempt)
+        release_unstarted_handoff(state, attempt)
         return {"attempt_id": attempt["attempt_id"], "status": "not_started"}
     old = (result or {}).get("session_id") or attempt.get("session_id")
     if not old and (directory / "events.jsonl").is_file():
-        parsed = parse_events(directory / "events.jsonl", backend=attempt["backend"])
-        if len(parsed["trace"]["session_ids"]) == 1:
-            old = parsed["trace"]["session_ids"][0]
+        old = parse_events(directory / "events.jsonl", backend=attempt["backend"])["session_id"]
     retire_session(attempt, termination=termination, reason=reason)
     roles = state["sessions"].setdefault(attempt["session_group"], {"worker": None, "reviewer": None})
     if roles[attempt["role"]] in {None, old, attempt.get("session_id")}:

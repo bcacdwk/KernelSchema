@@ -1,6 +1,7 @@
 """A concurrent branch's diagnostic must not point at its sibling's attempt."""
 
 import unittest
+from unittest.mock import patch
 
 from schema_extract.tools.monitor import classify
 
@@ -39,6 +40,41 @@ class MonitorEvidenceTests(unittest.TestCase):
             if latest:
                 expected.append("/runtime/runs/operator/attempts/" + latest)
             self.assertEqual(classify(view)[0]["engineering_handoff"]["read_only_evidence"], expected)
+
+
+class MonitorLaunchTests(unittest.TestCase):
+    def test_exited_background_before_claim_does_not_reuse_living_launcher(self):
+        from schema_extract.tools import monitor
+        from schema_extract.tools.tests import test_stage_flow
+
+        f = test_stage_flow.StageFlowTests(methodName="runTest")
+        f.setUp()
+        self.addCleanup(f.doCleanups)
+        f.create()
+        f.state["status"] = "queued"
+        f.store.save(f.state)
+        popen, children = monitor.subprocess.Popen, []
+
+        def failed_start(command, **options):
+            if "_background" not in command:
+                return popen(command, **options)
+            child = popen(["/usr/bin/false"], **options)
+            children.append(child)
+            child.wait(timeout=5)
+            return child
+
+        with patch.object(monitor.subprocess, "Popen", side_effect=failed_start):
+            launch = monitor.start_background(f.store, f.state["run_id"], test_stage_flow.REPO)
+        self.assertEqual(children[0].returncode, 1)
+        self.assertEqual((launch["status"], launch.get("exit_code")), ("launch_failed", 1))
+        observed = monitor.inspect_runs(f.store, [f.state["run_id"]])[0]
+        self.assertTrue(any(item["scope"] == "startup" and item["classification"] == "execution_failure"
+                            for item in observed["anomalies"]))
+        state = f.store.load(f.state["run_id"])
+        retry = monitor.reserve_launch(f.store, state, mode="queued", background=True)
+        self.assertFalse(retry.get("reused", False))
+        self.assertNotEqual(retry["id"], launch["id"])
+        self.assertEqual((state["status"], state["stages"]["P1"]["calls"], state["attempts"]), ("queued", 0, []))
 
 
 if __name__ == "__main__":
