@@ -87,7 +87,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape
 │   ├── starter.yaml     当前字段的待填写骨架
 │   ├── check_yaml.py    统一规范化、检查与按需绘图入口
 │   ├── tools/           只读规则、有限图模块、维护说明与测试
-│   └── examples/        已有案例，本轮未改，后续用新工具整理
+│   └── examples/        四个案例、九份完整设计、变体目录与有限事件图
 ├── schema_docs/         公共约定与六个区的字段规则、设计指导及局部示例
 │   ├── 0.common.md
 │   ├── 1.contract.algorithm_requirement.md
@@ -98,14 +98,14 @@ Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape
 │   ├── 6.realization.md
 │   └── archived/        旧版草稿与旧 README（只读，不再维护）
 ├── kernel_wiki/         算子实现与证据库；README、分类索引与本地检索入口
-│   └── <batch>/operators/<family>/[<subcategory>/]<task>/
-│                       按批次、功能和稳定算子 ID 组织源码、题目与性能证据
+│   ├── aka-cuda-operators-20261030/operators/  44 题主批次，按功能与稳定 ID 组织
+│   └── aka-four-problems-20261019/            Template 四题固定来源快照
 └── schema_wiki/         按 catalog 镜像的提取输出目录与导航
     └── <batch>/operators/<family>/[<subcategory>/]<task>/
                         未提取目录以 .gitkeep 占位；已发布目录含 root.yaml / <id>.yaml + dispatch.md
 ```
 
-- `kernel_wiki` 保存任务与实现，`schema_wiki` 接收提取或撰写的设计；输出路径按 `kernel_wiki/catalog.json` 的 `paths.readme` 父目录镜像，具体操作见[输出目录导航](schema_wiki/README.md)。设计来源仍以 `meta_data.source` 等实际引用为准。
+- `kernel_wiki` 保存任务与实现，`schema_wiki` 接收提取或撰写的设计；输出路径按 `kernel_wiki/catalog.json` 的 `paths.readme` 父目录镜像，具体操作见[输出目录导航](schema_wiki/README.md)。设计来源仍以 `META_DATA.Source` 等实际引用为准。
 - 任务目录中的文件身份、共享 Contract 与派生关系见[公共约定](schema_docs/0.common.md#派生节点与-dispatch)。
 - 基础 Harness 设施尚未纳入仓库，实际实现使用任务提供的构建、测试与测量入口。
 
@@ -119,20 +119,20 @@ Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape
 2. 按上方分区表依次读第 1–6 篇：先 Contract，再 Design，最后 Realization。各篇的“核心思想”与设计指导解释如何思考，字段表和结构轮廓用于查阅，局部片段解释具体用法，不组成完整算子。
 3. 选择一个任务入口，把规范用于具体工作；用[模板说明](schema_template/README.md)完成文件操作与检查。
 
-**查阅案例与来源：** 先从[示例索引及状态](schema_template/examples/README.md)确认案例采用的规则及历史核对范围；追溯或修改某份设计时读 `schema_wiki` 的任务目录，核对源码时进入对应 `kernel_wiki` 批次与任务说明。[Kernel Wiki](kernel_wiki/README.md)现收录 L20D 的 44 个算子实现，提供[分类总索引](kernel_wiki/CATALOG.md)、[精度／阶段／来源检索](kernel_wiki/FACETS.md)与[验证状态说明](kernel_wiki/EVIDENCE.md)。案例与实验的适用范围需要核实，完整实例不是开始工作的前提。
+**查阅案例与来源：** [Template 示例索引](schema_template/examples/README.md)提供四个案例的九份完整设计，沿各案例 README、dispatch 和 YAML 阅读；源码与证据来自独立的[四题固定快照](kernel_wiki/aka-four-problems-20261019/README.md)，入口见[来源索引](schema_discussion/template_examples_20261117/SOURCES.md)。[Kernel Wiki](kernel_wiki/README.md)另有 44 题主批次，提供[分类总索引](kernel_wiki/CATALOG.md)、[精度／阶段／来源检索](kernel_wiki/FACETS.md)与[验证状态说明](kernel_wiki/EVIDENCE.md)，其提取输出导航在 [schema_wiki](schema_wiki/README.md)。核对实际源码身份和实验范围后再复用。
 
 旧规范仅在追溯时查阅 `schema_docs/archived`；维护规范或检查器时，再读 [tools/README.md](schema_template/tools/README.md)。
 
 ## 5 现状与 TODO
 
-**已有：** 提取、新建设计、优化设计和实现四个任务入口，公共约定与六个分区文档，YAML 填写骨架、统一 Python 检查入口及检查器正反例测试；`kernel_wiki` 的 44 个算子与对应的 `schema_wiki` 输出目录。使用方法与校验边界见[模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
+**已有：** 提取、新建设计、优化设计和实现四个任务入口，公共约定与六个分区文档，YAML 填写骨架、统一 Python 检查入口及检查器正反例测试；四个 Template 案例的九份完整设计与有限图；`kernel_wiki` 的 44 个算子与对应的 `schema_wiki` 输出目录。使用方法与校验边界见[模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
 
 统一入口的[微流水线图选项](schema_template/README.md#微流水线图)在其支持的协议内按展示规模展开各工作阶段的动作和依赖，检查重复动作、悬空引用、成员匹配与依赖环，并在请求的 YAML 旁生成同名 PNG。它不解析文字契约，也不证明跨工作阶段的活性或全部存储复用安全。
 
 **TODO：**
 
 - **执行器对接**：解析、目录、调用与冻结运行的待办集中见[执行器对齐说明](schema_extract/EXECUTOR_ALIGNMENT.md)，文档更新不表示工具已经支持新方法。
-- **案例核对与验收**：按实际任务逐一核对已有 YAML，补齐资料与设计缺口；已有案例及其状态见[示例索引](schema_template/examples/README.md)，数值及性能验收按相应任务执行。
+- **案例资料与来源缺口**：继续补齐 Wiki 绑定与源码中未获保证的关系，具体边界见[示例索引](schema_template/examples/README.md)；数值及性能验收按相应任务执行。
 - **更多转写与精简**：转写更多 SOTA kernel，收敛到最小交集原语。
 - **检查器与评估器**：在现有结构、具名关系及有限工作阶段内依赖检查之上，继续完善资源记账、跨工作阶段与更大规模的合法性和活性分析，以及尽量保序的性能估算。
 - **提取范围**：当前固定实现的 [Schema Extract](schema_extract/README.md) 任务不新增 GPU 正确性验收或实测；普通设计与实现任务仍按各自验收要求执行。

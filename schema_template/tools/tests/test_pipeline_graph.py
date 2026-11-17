@@ -3,17 +3,107 @@ import unittest
 from copy import deepcopy
 
 from ..pipeline import ExpansionError, GraphError, analyze, build_step, configuration
+from ..pipeline.expressions import Domains
+from ..pipeline.render import display_members
 from ..pipeline_syntax import PipelineSyntaxError, parse_action, parse_event, parse_for, parse_pipe, parse_waiting
 from .support import PIPE, WORK, TaskCase, add_step, at, role
 
 
 class GraphTests(unittest.TestCase):
-    def build(self, roles, *, index=None, parameters=None, worktiles=1, members=1, dynamic=False):
+    def build(self, roles, *, index=None, parameters=None, worktiles=1, members=1, dynamic=False,
+              member_regions=None):
         definition = {'Role': roles}
         if index:
             definition['Index'] = {name: {'meaning': 'Synthetic index', 'definition': value} for name, value in index.items()}
         return build_step('MAIN', definition, {'unit': 'cta', 'unit_count': members},
-                          parameters=parameters or {}, worktiles=worktiles, dynamic_worktiles=dynamic)
+                          parameters=parameters or {}, worktiles=worktiles, dynamic_worktiles=dynamic,
+                          member_regions=member_regions)
+
+    def test_member_regions_bind_only_proven_singletons_and_keep_local_scopes(self):
+        main = role([{'if(split == 0)': ['signal:zero']},
+                     {'for(j=0:count(i))': ['compute:x(j)']}],
+                    {'signal': {'zero': 'serial'}, 'compute': {'x': 'async_unordered'}}, member='warp[0:4]',
+                    waiting={'Prepared': ['{issue compute:x(j)} ← [{done compute:x(j-1)}]']})
+        regions = [{'split': [0, 1]}, {'split': [1, 2]}]
+        graph = self.build({'MAIN': main}, members=2, member_regions=regions,
+                           index={'i': [0, '2-split']})
+        self.assertEqual([(op.member, op.action, op.context['split']) for op in graph.operations.values()],
+                         [(0, 'signal:zero', 0), (0, 'compute:x(0)', 0), (0, 'compute:x(1)', 0),
+                          (1, 'compute:x(0)', 1)])
+        self.assertEqual(len(graph.boundaries), 2)
+        self.assertNotIn('MAIN', display_members(graph))
+        for unavailable in (None, [{'split': [0, 2]}, {'split': [2, 4]}],
+                            [{'split': [0, 'unknown']}, {'split': [1, 2]}]):
+            with self.subTest(regions=unavailable), self.assertRaises(ExpansionError):
+                self.build({'MAIN': main}, members=2, member_regions=unavailable, index={'i': [0, '2-split']})
+
+    def test_cross_member_windows_keep_valid_all_member_edges_and_reject_missing_sources(self):
+        a = role([{'for(i)': ['load:x(i,split)']}], {'load': {'x': 'serial'}}, member='warp[0:1]')
+        b = role([{'for(i)': ['compute:y(i)']}], {'compute': {'y': 'serial'}}, member='warp[1:2]',
+                 waiting={'Prepared': ['{issue compute:y(i)} ← [{done A[1]::load:x(i+1,1)}]']})
+        regions = [{'split': [0, 1]}, {'split': [1, 2]}]
+        args = dict(members=2, member_regions=regions, index={'i': [0, '3-split']})
+        graph = self.build({'A': a, 'B': b}, **args)
+        self.assertEqual(sum(kind == 'Prepared' for _, _, kind in graph.edges), 2)
+        self.assertEqual(len(graph.boundaries), 3)
+        # An independent fixed argument is checked against the peer's window.
+        b['Waiting']['Prepared'] = ['{issue compute:y(i)} ← [{done A[1]::load:x(i+1,0)}]']
+        with self.assertRaisesRegex(GraphError, 'fixed index 0'):
+            self.build({'A': a, 'B': b}, **args)
+        a['Pipe'] = [{'for(i)': ['load:x(i)']}]
+        b['Waiting']['Prepared'] = ['{issue compute:y(i)} ← [{done A[*]::load:x(i+1)}]']
+        graph = self.build({'A': a, 'B': b}, **args)
+        self.assertEqual(sum(kind == 'Prepared' for _, _, kind in graph.edges), 6)
+        self.assertIn(('MAIN/A[0]/load:x(2)@done', 'MAIN/B[0]/compute:y(1)@issue', 'Prepared'), graph.edges)
+        # Missing inside the peer's real domain remains an error, even when
+        # another selected member has a legitimate boundary.
+        a['Pipe'] = [{'for(i)': [{'if(split != 1 or i != 1)': ['load:x(i)']}]}]
+        with self.assertRaisesRegex(GraphError, 'missing predecessor inside'):
+            self.build({'A': a, 'B': b}, **args)
+
+    def test_local_indices_shadow_member_coordinates_only_in_their_scope(self):
+        main = role(['signal:start(split)', {'for(split=0:split+2)': ['compute:x(split)']},
+                     'signal:end(split)'],
+                    {'signal': {'start': 'serial', 'end': 'serial'}, 'compute': {'x': 'serial'}},
+                    member='warp[0:1]',
+                    waiting={'Prepared': ['{issue compute:x(split)} ← [{done compute:x(split-1)}]']})
+        graph = self.build({'MAIN': main}, members=2,
+                           member_regions=[{'split': [1, 2]}, {'split': [2, 3]}])
+        for member, coordinate in enumerate((1, 2)):
+            actions = [op.action for op in graph.operations.values() if op.member == member]
+            self.assertEqual(actions, [f'signal:start({coordinate})',
+                                       *(f'compute:x({i})' for i in range(coordinate+2)),
+                                       f'signal:end({coordinate})'])
+        self.assertEqual(sum(kind == 'Prepared' for _, _, kind in graph.edges), 5)
+        self.assertEqual(len(graph.boundaries), 2)
+
+    def test_member_empty_flatten_target_uses_its_own_guard_and_domain(self):
+        a = role(['signal:ready'], {'signal': {'ready': 'serial'}}, member='warp[0:1]')
+        b = role([{'for(t)': [{'if(count(i) > 0)': ['compute:y(n[t,0])']}]}],
+                 {'compute': {'y': 'serial'}}, member='warp[1:2]',
+                 waiting={'Prepared': ['{issue compute:y(n[t,0])} ← [{done A[0]::signal:ready}]']})
+        graph = self.build({'A': a, 'B': b}, members=2,
+                           member_regions=[{'split': [0, 1]}, {'split': [1, 2]}],
+                           index={'t': 'worktile', 'i': [0, 'max(0,1-split-t)'], 'n': {'flatten': ['t', 'i']}},
+                           worktiles=2)
+        self.assertEqual([(op.member, op.action) for op in graph.operations.values() if op.role == 'B'],
+                         [(0, 'compute:y(0)')])
+        self.assertEqual(sum(kind == 'Prepared' for _, _, kind in graph.edges), 1)
+
+    def test_integer_xor_and_left_shift_are_bounded(self):
+        domains = Domains({}, {}, 1)
+        self.assertEqual(domains.integer('split ^ (1 << j)', {'split': 5, 'j': 2}), 1)
+        for expression, value in (('(-6/2) ^ (4/2)', -1), ('(-6/2) << (4/2)', -12),
+                                  ('0 << 40', 0), ('1 << 39', 549755813888)):
+            with self.subTest(expression=expression):
+                self.assertEqual(domains.integer(expression, {}), value)
+        for expression in ('1 << -1', '(3/2) ^ 1', '1 << (3/2)', 'true ^ 1'):
+            with self.subTest(expression=expression), self.assertRaises(GraphError) as caught:
+                domains.integer(expression, {})
+            self.assertNotIsInstance(caught.exception, ExpansionError)
+        for expression in ('1 << 41', '1 << 40', '549755813887 ^ 549755813888'):
+            with self.subTest(expression=expression), self.assertRaises(ExpansionError):
+                domains.integer(expression, {})
 
     def test_sibling_loops_and_independent_conditions_keep_list_order(self):
         main = role([{'for(i=0:2)': ['load:x(i)']}, {'for(j=0:2)': ['compute:y(j)']},
@@ -174,6 +264,91 @@ class GraphTests(unittest.TestCase):
         with self.assertRaises(ExpansionError):
             configuration({}, 65)
 
+    def test_dynamic_work_allows_local_queries_only_with_bound_outer_coordinates(self):
+        index = {'t': 'worktile', 'i': [0, 'tile_count(t)'], 'n': {'flatten': ['t', 'i']}}
+        main = role([{'for(t)': [{'for(i)': ['compute:x(t,i)']}, 'store:y(t,count(i))']}],
+                    {'compute': {'x': 'serial'}, 'store': {'y': 'serial'}},
+                    waiting={'Prepared': ['{issue store:y(t,count(i))} ← [{done compute:x(t,last(i))}]']})
+        graph = self.build({'MAIN': main}, index=index, parameters={'tile_count(t)': 2}, dynamic=True)
+        self.assertIn(('MAIN/MAIN[0]/compute:x(0,1)@done', 'MAIN/MAIN[0]/store:y(0,2)@issue', 'Prepared'), graph.edges)
+        for query in ('count(t)', 'last(t)', 'count(n)', 'last(n)'):
+            main['Pipe'] = [{'for(t)': [f'store:y(t,{query})']}]
+            with self.subTest(query=query), self.assertRaisesRegex(GraphError, 'dynamically refilled'):
+                self.build({'MAIN': main}, index=index, worktiles=0, dynamic=True)
+        main = role(['store:y(last(i))'], {'store': {'y': 'serial'}})
+        with self.assertRaisesRegex(ExpansionError, 'requires bound outer'):
+            self.build({'MAIN': main}, index=index, parameters={'tile_count(t)': 2}, dynamic=True)
+
+    def test_mixed_flatten_declarations_prove_boundaries_without_inverting_children(self):
+        index = {'t': 'worktile', 'i': [0, 'tile_count(t)'], 'n': {'flatten': ['t', 'i']}, 'd': [0, 2]}
+        a = role([{'for(n)': [{'for(d)': ['load:k(n,d)']}]}], {'load': {'k': 'serial'}})
+        first = {'for(d)': ['compute:k(n[t,0],d)']}
+        rest = {'for(n[t,1:])': [{'for(d)': ['compute:k(n,d)']}]}
+        b = role([{'for(t)': [first, rest]}], {'compute': {'k': 'serial'}},
+                 waiting={'Released': ['{issue compute:k(n+2,0)} ← [{done A::load:k(n,0)}]']})
+        parameters = {'tile_count(t)': 4}
+        graph = self.build({'A': a, 'B': b}, index=index, parameters=parameters)
+        self.assertEqual(sum(kind == 'Released' for _, _, kind in graph.edges), 2)
+        self.assertEqual(len(graph.boundaries), 2)
+        b['Waiting']['Released'] = ['{issue compute:k(n+2,99)} ← [{done A::load:k(n,0)}]']
+        with self.assertRaises(GraphError) as caught:
+            self.build({'A': a, 'B': b}, index=index, parameters=parameters)
+        self.assertNotIsInstance(caught.exception, ExpansionError)
+        b['Waiting']['Released'] = ['{issue compute:k(n+2,0)} ← [{done A::load:k(n,0)}]']
+        a['Pipe'] = [{'for(n)': [{'if(i != 1)': [{'for(d)': ['load:k(n,d)']}]}]}]
+        with self.assertRaisesRegex(GraphError, 'missing predecessor'):
+            self.build({'A': a, 'B': b}, index=index, parameters=parameters)
+        a['Pipe'] = [{'for(n)': [{'for(d)': ['load:k(n,d)']}]}]
+        b['Pipe'][0]['for(t)'].append({'for(d)': ['compute:k(t*t+10,d)']})
+        with self.assertRaises(ExpansionError):
+            self.build({'A': a, 'B': b}, index=index, parameters=parameters)
+
+    def test_fixed_parameter_projection_does_not_evaluate_unused_padding_argument(self):
+        index = {'t': 'worktile', 'i': [0, 'tile_count(t)'], 'n': {'flatten': ['t', 'i']}}
+        a = role([{'for(t)': [{'if(valid(t))': [{'for(n[t])': ['load:k(n)']}]}]}], {'load': {'k': 'serial'}})
+        b = role([{'for(t)': [{'if(valid(t))': [{'for(n[t,1:])': ['compute:k(n-1,0)']},
+                                                   'compute:k(n[t,tile_count(t)-1],0)']}]}],
+                 {'compute': {'k': 'serial'}},
+                 waiting={'Prepared': ['{issue compute:k(n[t,i+1],0)} ← [{done A::load:k(n[t,i])}]']})
+        parameters = {'tile_count(0)': 1, 'tile_count(1)': 0, 'valid(0)': 1, 'valid(1)': 0}
+        graph = self.build({'A': a, 'B': b}, index=index, parameters=parameters, worktiles=2)
+        self.assertEqual(len(graph.operations), 2)
+        self.assertEqual(len(graph.boundaries), 1)
+        b['Waiting']['Prepared'] = ['{issue compute:k(n[t,i+1],99)} ← [{done A::load:k(n[t,i])}]']
+        with self.assertRaisesRegex(GraphError, 'fixed index 99'):
+            self.build({'A': a, 'B': b}, index=index, parameters=parameters, worktiles=2)
+
+    def test_fixed_projection_preserves_argument_correlations_at_a_boundary(self):
+        index = {'t': 'worktile', 'i': [0, 1], 'n': {'flatten': ['t', 'i']}}
+        a = role([{'for(n)': ['load:x(n,0,1)', 'load:x(n,1,0)']}], {'load': {'x': 'serial'}})
+        b = role([{'for(n)': ['compute:y(n)']}], {'compute': {'y': 'serial'}},
+                 waiting={'Prepared': ['{issue compute:y(n)} ← [{done A::load:x(n[t,i+1],0,1)}]']})
+        graph = self.build({'A': a, 'B': b}, index=index)
+        self.assertEqual(len(graph.boundaries), 1)
+        b['Waiting']['Prepared'] = ['{issue compute:y(n)} ← [{done A::load:x(n[t,i+1],0,0)}]']
+        with self.assertRaisesRegex(GraphError, 'fixed indices') as caught:
+            self.build({'A': a, 'B': b}, index=index)
+        self.assertNotIsInstance(caught.exception, ExpansionError)
+
+    def test_false_outer_guard_removes_fixed_first_target_in_empty_work(self):
+        index = {'t': 'worktile', 'i': [0, 'tile_count(t)'], 'n': {'flatten': ['t', 'i']}}
+        a = role([{'for(t)': ['release:x(t)']}], {'release': {'x': 'serial'}})
+        b = role([{'for(t)': [{'if(valid(t))': ['compute:y(n[t,0])',
+                                                   {'for(n[t,1:])': ['compute:y(n)']}]}]}],
+                 {'compute': {'y': 'serial'}},
+                 waiting={'Released': ['{issue compute:y(n[t,0])} ← [{done A::release:x(t-1)}]']})
+        parameters = {'tile_count(0)': 1, 'tile_count(1)': 0, 'valid(0)': 1, 'valid(1)': 0}
+        graph = self.build({'A': a, 'B': b}, index=index, parameters=parameters, worktiles=2)
+        self.assertEqual(len(graph.operations), 3)
+        self.assertEqual(len(graph.boundaries), 1)
+        parameters.pop('valid(1)')
+        with self.assertRaises(ExpansionError):
+            self.build({'A': a, 'B': b}, index=index, parameters=parameters, worktiles=2)
+        parameters.update({'tile_count(1)': 1, 'valid(1)': 1})
+        a['Pipe'] = [{'for(t)': [{'if(t != 0)': ['release:x(t)']}]}]
+        with self.assertRaisesRegex(GraphError, 'missing predecessor'):
+            self.build({'A': a, 'B': b}, index=index, parameters=parameters, worktiles=2)
+
     def test_composite_matmul_keeps_operand_signatures(self):
         action = parse_action('matmul:a(i)@b(i,j)')
         self.assertEqual(action.noun, 'a@b')
@@ -202,6 +377,31 @@ class GraphTests(unittest.TestCase):
 
 
 class EventCallTests(TaskCase):
+    def test_analyze_passes_member_regions_and_aliases_keep_explicit_selection_and_formals(self):
+        plan = self.plan()
+        scheduled = plan['DESIGN']['Work_schedule']['Step']['MAIN']
+        scheduled['Mapping']['Worker']['unit_count'] = 2
+        scheduled['Mapping']['Member'] = [{'split': [0, 1]}, {'split': [1, 2]}]
+        main = plan['DESIGN']['Tile_pipeline']['Step']['MAIN']
+        main['Index'] = {'i': {'meaning': 'Local stripe', 'definition': [0, '3-split']}}
+        main['Role'] = {'MAIN': role([{'for(i)': ['compute:x(i)']}],
+                                    {'compute': {'x': 'serial'}}, member='warp[0:1]')}
+        main['Event'] = {'tail': ['{done MAIN[*]::compute:x(last(i))}'],
+                         'chosen(m)': ['{done MAIN[m]::compute:x(last(i))}'],
+                         'formal(split)': ['{done MAIN[*]::compute:x(split)}']}
+        launch = plan['DESIGN']['Work_schedule']['Flow']['Launch'][1]
+        expected = {'tail': ['MAIN/MAIN[0]/compute:x(2)@done', 'MAIN/MAIN[1]/compute:x(1)@done'],
+                    'chosen(1)': ['MAIN/MAIN[1]/compute:x(1)@done'],
+                    'formal(1)': ['MAIN/MAIN[0]/compute:x(1)@done', 'MAIN/MAIN[1]/compute:x(1)@done']}
+        for call, events in expected.items():
+            with self.subTest(call=call):
+                launch['start_after'] = 'MAIN.' + call
+                self.assertEqual(analyze(plan, configuration({}))[0].events, {call: events})
+        launch['start_after'] = 'MAIN.tail'
+        main['Role']['MAIN']['Pipe'] = [{'for(i)': [{'if(split != 1 or i != 1)': ['compute:x(i)']}]}]
+        with self.assertRaisesRegex(GraphError, 'Event tail names an absent event'):
+            analyze(plan, configuration({}))
+
     def plan(self, formal='k', *, reverse=False):
         data = deepcopy(self.base)
         add_step(data)

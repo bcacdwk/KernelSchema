@@ -1,10 +1,12 @@
 # Kernel Wiki
 
-这里收录 L20D（B300）算子实现、题目合同、用例和验证证据，供查找实现、比较计算边界与提取 schema 使用。当前批次共 **44 个算子：20 个 AKA 解、24 个参考实现**；原始材料中使用 SM103 等环境标识，具体环境以各题证据为准。
+这里收录 L20D（B300）算子实现、题目合同、用例和验证证据，供查找实现、比较计算边界与提取 schema 使用。当前主批次共 **44 个算子：20 个 AKA 解、24 个参考实现**；原始材料中使用 SM103 等环境标识，具体环境以各题证据为准。
 
 **找算子：** [全部 44 题与用途](CATALOG.md) · [按精度、阶段、来源和状态查找](FACETS.md)
 
 **理解算子：** [分类区别与阅读顺序](GUIDE.md) · [验证状态和性能口径](EVIDENCE.md)
+
+**Template 四题来源：** [FA4 prefill / decode、GDN prefill、QSA prefill 快照](aka-four-problems-20261019/README.md) · [入口与证据索引](../schema_discussion/template_examples_20261117/SOURCES.md)。该固定快照用于 Template 案例提取，独立于 44 题主批次，源码与验证记录不默认互换。
 
 ## 按功能浏览
 
@@ -29,24 +31,28 @@ kernel_wiki/
 ├── IMPORT.json                导入来源、数量与原清单哈希
 ├── catalog.json               机器可读索引，路径相对于 kernel_wiki
 ├── tools/catalog.py           检索、校验与索引补丁生成
-└── aka-cuda-operators-20261030/ 原库快照，保留原有层级与文件名
-    ├── MANIFEST.json / CHECKSUMS.sha256 / PROBLEM_AUDIT.json
-    ├── README.md / CONVENTIONS.md / PROBLEM_NOTES.md
-    ├── tools/                 原库的校验与元数据工具
-    └── operators/<family>/[<subcategory>/]<operator_id>/
-        ├── README.md          逐题入口
-        ├── candidate/         当前选定实现，入口 solution.py:Model.forward
-        ├── problem/           合同、输入、正确性参考、生产对照与形状域
-        └── performance/       统一摘要与原始验收、测量记录
+├── aka-cuda-operators-20261030/ 44 题主批次，保留原有层级与文件名
+│   ├── MANIFEST.json / CHECKSUMS.sha256 / PROBLEM_AUDIT.json
+│   ├── README.md / CONVENTIONS.md / PROBLEM_NOTES.md
+│   ├── tools/                 原库的校验与元数据工具
+│   └── operators/<family>/[<subcategory>/]<operator_id>/
+│       ├── README.md          逐题入口
+│       ├── candidate/         当前选定实现，入口 solution.py:Model.forward
+│       ├── problem/           合同、输入、正确性参考、生产对照与形状域
+│       └── performance/       统一摘要与原始验收、测量记录
+└── aka-four-problems-20261019/ Template 四题固定来源快照
+    ├── README.md / MANIFEST.json
+    ├── fa4_prefill/ / fa4_decode/ / gdn_prefill/ / qsa_prefill/
+    └── evidence/ / validation-20261021/
 ```
 
-一个算子只存一份完整材料；精度、阶段等维度通过索引交叉引用。稳定 ID 和原库内部相对路径均保留，便于追溯引用和复用整个 `candidate/`。各题还可能附带 `PRECISION.md`、`VARIANTS.md`、`USER_ACCEPTANCE.md` 和许可资料。
+44 题主批次内，一个算子只存一份完整材料；精度、阶段等维度通过索引交叉引用。稳定 ID 和原库内部相对路径均保留，便于追溯引用和复用整个 `candidate/`。各题还可能附带 `PRECISION.md`、`VARIANTS.md`、`USER_ACCEPTANCE.md` 和许可资料。
 
 `catalog.json` 的 `summary` 是 Wiki 的计算概要，`source_description` 摘自导入的 `problem/metadata.json`，其中的 `〔…〕` 表示 Wiki 校注。核对合法输入时，沿条目的 `paths.shape_range` 查看动态参数域和跨字段约束。`paths.shape_cases` 列出固定用例。
 
 若条目有 `paths.annotated_entrypoint`，可直接阅读修正了注释的源码。它与 `paths.entrypoint` 的导入原件逐行对应，`catalog.py check` 核对两者的 Python 语法树和内嵌 CUDA 的非注释内容。由当前 catalog 入口发起的新提取会冻结两份文件；原件仍是实现和 host 的绑定入口，校注只作阅读辅助，声明的校注路径缺失或不合法时明确报输入错误。旧提取是否包含校注，以其 `inputs.lock.json` 的 `source.files` 为准，不能由当前 catalog 推断。[展开式 FP8 MLA 校注版](annotations/mla_expanded_fp8/solution.py)
 
-本批次来自 `/Users/hanyong/aka-cuda-operator-library`，于 2026-11-01 导入。除未列入源清单的 `.DS_Store` 缓存外，**1,266 个文件、51,906,145 字节均与源文件一致**。完整性信息见 [IMPORT.json](IMPORT.json)。
+44 题主批次来自 `/Users/hanyong/aka-cuda-operator-library`，于 2026-11-01 导入。除未列入源清单的 `.DS_Store` 缓存外，**1,266 个文件、51,906,145 字节均与源文件一致**。完整性信息见 [IMPORT.json](IMPORT.json)。
 
 ## 命令行检索
 

@@ -56,7 +56,11 @@ Storage 的具名 entry 使用固定两行 flow mapping：第一行是名字及 
 
 `ResolvedTask` 保留 raw/effective 副本、provider 与完整来源链；来源身份含 root、自身和各区实际来源文件。共享区在每个 consumer 的有效上下文校验，错误回指真实 provider 和引用位置。独立阅读视图另存，保留 provenance，不作为 raw 节点读回创作目录。
 
-单 step 入口是 `pipeline.build_step(step, definition, worker, parameters, worktiles=1, *, dynamic_worktiles=False, event_calls=())`。`event_calls` 每项为 `(本 step 的 Event 调用字符串, 来源字段路径)`，例如 `('ready(2)', 'DESIGN.Work_schedule.Flow.Launch[1].start_after')`。`analyze` 自动收集 `Flow.Launch[].start_after` 和 `Flow.Handoff.*.ready/wait_at`；`StepGraph.events` 只记录这些实际调用得到的具体事件集合。未调用的 Event 只做静态检查；缺少样本取值或表达式无法求值时返回 `ExpansionError`，具体调用指向缺失动作时返回 `GraphError`。图仍限于各 step 的局部事件，不增加跨 step 边。
+单 step 入口是 `pipeline.build_step(step, definition, worker, parameters, worktiles=1, *, dynamic_worktiles=False, event_calls=(), member_regions=None)`。`event_calls` 每项为 `(本 step 的 Event 调用字符串, 来源字段路径)`，例如 `('ready(2)', 'DESIGN.Work_schedule.Flow.Launch[1].start_after')`。`analyze` 自动收集 `Flow.Launch[].start_after` 和 `Flow.Handoff.*.ready/wait_at`；`StepGraph.events` 只记录这些实际调用得到的具体事件集合。未调用的 Event 只做静态检查；缺少样本取值或表达式无法求值时返回 `ExpansionError`，具体调用指向缺失动作时返回 `GraphError`。图仍限于各 step 的局部事件，不增加跨 step 边。
+
+`analyze` 自动传入既有 `Mapping.Member`；低层调用可用 `member_regions` 传同一列表，只有可证明宽度为 1 的半开区域绑定成员数学坐标，多元素或未知区域不猜代表值。局部索引按词法作用域遮蔽同名坐标，局部范围端点仍取外层值。展开、等待窗口和 Event 查找保留成员各自的上下文；Waiting 的地址表达式在当前目标成员求值，显式前驱的存在性及窗口按所选成员检查，Event 的显式实参仍优先。
+
+有限求值器支持整数 `^`（异或）和 `<<`（左移），操作数可以是精确求值后为整数的表达式。位移须在 0..40 内，结果仍受绝对值 `10^12` 上限约束；这些求值边界不收窄 schema 的开放整数表达式。
 
 ## CLI 与发布边界
 

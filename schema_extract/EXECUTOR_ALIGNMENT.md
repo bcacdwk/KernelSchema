@@ -14,7 +14,7 @@
 
 ## 当前执行器
 
-Template 本轮已完成当前格式与工具更新。下列 Extract 差异仍未对接；本轮未修改 Runner、现有算子、冻结运行或批准状态。
+Template 已完成当前格式、工具和[四个案例](../schema_template/examples/README.md)的更新。下列 Extract 差异仍未对接；Runner、算子源码、冻结运行或批准状态未因此改变。
 
 | 范围 | 当前实现事实 | 待对接的方法职责 |
 | --- | --- | --- |
@@ -41,3 +41,77 @@ Template 本轮已完成当前格式与工具更新。下列 Extract 差异仍�
 5. 对齐冻结能力、旧 run 可恢复性、语义采用和发布回执，再用结构正反例、旧运行回归及独立语义案例验证。
 
 本页记录已有 Template 接口及 Extract 待对接事实，不改变 Runner 命令、JSON 字段、状态或冻结规则。上述对接完成前，Template checker 通过不能证明提取方法已可端到端执行。
+
+## Claude Code / Qwen 子任务调用与待接入边界
+
+这里的“子代理”沿用当前执行器的含义：由 Supervisor/Runner 启动一个独立 CLI 进程，作为 worker 或 reviewer；不要求主代理本身使用 Claude，也不使用 Claude 内部的 Agent 工具再次委派。单独派发这种子任务只需调整调用命令。**接入现有 Extract Runner 还需要适配会话、回执、事件与权限，不能直接把 `--codex-bin` 改成 `claude`。** 当前 [agent.py](tools/agent.py)明确构造 Codex 参数，[runner.py](tools/runner.py)、[audit.py](tools/audit.py)和 [observation.py](tools/observation.py)也依赖 Codex 的完成事件及会话记录。
+
+本入口固定模型 `qwen3.8-max[1m]`，只使用 `high / xhigh / max` 三档 effort；worker/reviewer 分别按本次登记值执行，默认可沿用当前 `xhigh`。接口地址与凭据来自已配置的 `~/.claude/settings.json` 或进程环境。effort 通过 `--effort` 设置；若环境中已有 `CLAUDE_CODE_EFFORT_LEVEL`，其优先级更高，因此派发器将该变量与本次参数设为同一值。这里只采用 effort 模式，不叠加固定 thinking budget。
+
+可直接给主代理以下派发约定：
+
+> 用 Claude Code 的非交互模式 `claude -p` 启动独立 Qwen worker/reviewer。每次调用明确模型、effort、角色、工作目录、允许修改的文件、输入材料和提案 schema。子进程不会继承主代理的对话，不要假设 Claude 自动读取 AGENTS.md；把相关规则、阶段要求和本次身份显式写入 prompt。worker 与 reviewer 使用独立工作区和角色会话，禁止在任务内继续委派。读取结构化结果并核对实际产物后，再由外层 Runner 决定是否采纳。
+
+### 单次调用示例
+
+下例为 worker；路径替换为本次已准备的工作区与 attempt 目录，`prompt.txt` 包含完整任务上下文，`response.schema.json` 是本次提案 schema。外层调用器负责超时、取消和进程结算。
+
+```sh
+(
+  cd /absolute/worker-workspace || exit 1
+  CLAUDE_CODE_EFFORT_LEVEL=xhigh claude -p \
+    --model 'qwen3.8-max[1m]' --effort xhigh \
+    --tools 'Read,Glob,Grep,Edit,Write' \
+    --allowedTools 'Read,Glob,Grep,Edit,Write' \
+    --permission-mode dontAsk \
+    --strict-mcp-config --disable-slash-commands \
+    --output-format stream-json --verbose \
+    --json-schema "$(cat /absolute/attempt/response.schema.json)" \
+    < /absolute/attempt/prompt.txt \
+    > /absolute/attempt/events.jsonl \
+    2> /absolute/attempt/stderr.txt
+)
+```
+
+改为 `high` 或 `max` 时，同时替换环境变量和 `--effort` 的值。Reviewer 将两处工具列表都改为 `Read,Glob,Grep`，返回审阅提案，由 Runner 应用裁决补丁。上述列表适用于文件读写示例；执行 `reading.py` 等命令时，还须按实际任务补充受限命令权限和外部隔离，不能因此向 reviewer 开放任意可写 shell。
+
+`--tools` 控制工具集合，`--allowedTools` 允许所列工具免交互审批，`dontAsk` 拒绝仍需审批的调用。它们不提供与 Codex `workspace-write/read-only` 相同的操作系统沙箱，也不自动限制 worker 只能改阶段许可文件。正式 Runner 接入仍须保留工作区隔离、只读来源、阶段写范围及实际差异检查；本示例不提供这部分隔离实现。
+
+Python 派发器使用参数数组和 `Popen(cwd=workspace, ...)`，从 `schema_path.read_text()` 取得 `--json-schema` 参数，并将 prompt 文件作为 stdin；不必通过 shell 拼接上述命令。当前启动门、进程身份、单次超时和取消结算逻辑应继续由外层控制。
+
+### 会话与结构化结果
+
+首次调用不传 `--resume`，从 Claude 的初始化/最终结果事件保存实际 `session_id`。同一角色需要续写时，在同样的调用参数中增加：
+
+```sh
+--resume CLAUDE_SESSION_UUID
+```
+
+保留同一用户或 `CLAUDE_CONFIG_DIR` 下的会话数据及相应工作目录，每次续接仍显式传模型、effort、工具权限、本次 prompt 和提案 schema。需要恢复的调用不能使用 `--no-session-persistence`；不以 `--continue` 猜测最近会话，不把 Codex UUID 传给 Claude，也不让 reviewer 续接 worker 的会话。新建与续用时机仍遵循[角色与会话](tools/README.md#角色与会话)。
+
+`--json-schema` 接收 JSON 内容，CLI 的最终 `type=result` 事件通过 `structured_output` 返回对象。成功结果示意：
+
+```json
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "session_id": "实际 Claude 会话 UUID",
+  "structured_output": {"本次提案字段": "按 response.schema.json 返回"}
+}
+```
+
+外层须同时检查进程退出 0、最终成功事件、无调用错误、会话身份一致，以及 `structured_output` 通过本次提案 schema/nonce 校验；随后把该对象写入原协议要求的 `response.json` 并进入已有规范化与产物检查。`result` 文本仅作辅助，不能把整份 CLI 结果封装或普通 prose 当成提案。`--output-format json` 也可返回单个结果对象，但正式接入宜保留上述 JSONL 事件记录。
+
+### Runner 需要适配的部分
+
+| 范围 | Claude/Qwen 接入要求 |
+| --- | --- |
+| 命令构造 | 新增明确的 Claude transport/backend 选择；使用 `-p`、`--model`、`--effort`、stdin 和 `Popen(cwd=...)`，不沿用 Codex 的 `exec`、`-C`、`-s`、`-c model_reasoning_effort` 参数。当前尚无这个 backend 选择入口。 |
+| 提案返回 | 将 Codex 的 `--output-schema/--output-last-message` 对应到 `--json-schema` 与 `structured_output` 的提取落盘；保留原 proposal/receipt 的身份、规范化和校验职责。 |
+| 完成事件 | 解析 Claude 的 `system/init`、`assistant/user`、`result` 等事件。把 Runner 当前直接依赖 `turn.completed` 的判断改为明确的 transport 完成状态；保留原始事件，不伪造成 Codex 事件。 |
+| 会话与冻结身份 | 登记实际 CLI 类型、版本、模型、effort 和 Claude session ID；按角色精确续接。切换提供者时新建对应会话并按既有规则交接，不把已冻结的 Codex 调用解释成 Claude 调用。 |
+| 用量与审计 | 适配 Claude 结果的 `usage/modelUsage` 及其缓存口径；旧 Codex session/SQLite 观测器不能原样复用。缺失项标记未知，不以估算费用替代实际账单。 |
+| 权限与终止 | 实现与阶段职责一致的外部隔离，保留只读 reviewer、许可差异检查、启动登记、超时、取消、终止确认及预算；CLI 成功不替代这些门禁。 |
+
+2026-11-17 已在 Claude Code `2.1.316` 上用隔离临时目录实测：`high` 读取文件并返回符合小型 schema 的 `structured_output`；`max` 用精确 UUID 续接，保留上一轮 nonce 且未重读文件；`xhigh` 新建独立会话、写入指定文件并返回结构化结果。三次均成功，续接 UUID 一致，worker 文件内容已核对。这验证了工具调用、结构化输出和会话续接的基本路径；完整动态提案 schema、正式隔离及 P1–P6 流程仍须在 transport 接入时验证。本节仅追加调用约定与待办，不表示现有 Runner 已支持 Claude/Qwen。

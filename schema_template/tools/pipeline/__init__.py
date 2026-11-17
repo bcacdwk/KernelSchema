@@ -77,5 +77,6 @@ def analyze(plan: dict, config: dict) -> list[StepGraph]:
         scheduled = work["Step"][step]
         dynamic = scheduled["Schedule"]["Worker_assignment"]["Refill"] != "none"
         graphs.append(build_step(step, definition, scheduled["Mapping"]["Worker"], **config,
-                                 dynamic_worktiles=dynamic, event_calls=event_calls[step]))
+                                 dynamic_worktiles=dynamic, event_calls=event_calls[step],
+                                 member_regions=scheduled["Mapping"].get("Member")))
     return graphs

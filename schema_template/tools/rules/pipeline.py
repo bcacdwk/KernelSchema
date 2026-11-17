@@ -44,9 +44,13 @@ def _dynamic(name: str, definitions: dict, seen=frozenset()) -> bool:
     if name in seen or name not in definitions:
         return False
     definition = definitions[name]
-    return definition == "worktile" or any(
-        _dynamic(child, definitions, seen | {name})
-        for child in _dependencies(definition, definitions))
+    if definition == "worktile":
+        return True
+    # A bounded child may use an already bound work coordinate. Only
+    # enumerating a worktile axis or querying its domain needs the total length.
+    children = (definition["flatten"] if isinstance(definition, dict) else
+                {query for value in definition for _, query in domain_queries(str(value))})
+    return any(_dynamic(child, definitions, seen | {name}) for child in children)
 
 
 def _empty(name: str, definitions: dict, seen=frozenset()) -> bool:

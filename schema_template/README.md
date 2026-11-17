@@ -1,6 +1,6 @@
 # 编写和检查 schema YAML
 
-本目录提供当前 DOC0–6 的待填写骨架、统一作者入口和只读 Python API。任务方法见[提取](../EXTRACT_SCHEMA.md)、[新建设计](../DESIGN_SCHEMA.md)、[优化设计](../OPTIMIZE_SCHEMA.md)和[实现 schema](../IMPLEMENT_SCHEMA.md)，字段语义以 [schema_docs](../schema_docs/0.common.md) 为准。[已有案例](examples/README.md)的 YAML、dispatch、README 和 PNG 留待下一轮整理，此次没有用它们验收新规则。
+本目录提供当前 DOC0–6 的待填写骨架、统一作者入口和只读 Python API。任务方法见[提取](../EXTRACT_SCHEMA.md)、[新建设计](../DESIGN_SCHEMA.md)、[优化设计](../OPTIMIZE_SCHEMA.md)和[实现 schema](../IMPLEMENT_SCHEMA.md)，字段语义以 [schema_docs](../schema_docs/0.common.md) 为准。[四个案例](examples/README.md)提供九份经独立审阅的完整设计、变体目录及同名 PNG，各自注明来源和验证边界。
 
 ## 填写与检查
 
@@ -88,4 +88,4 @@ python3 -B schema_template/check_yaml.py path/to/task/root.yaml --read-only --gr
 
 检查器覆盖当前字段与具名标识、共享 Contract、整区引用、可确定的符号/属性关系、提交与交接、事件签名、成员及已知存储数量冲突。开放表达式在普通检查中不执行；有限图遇到无法求值的表达式会明确报告未完成。
 
-数学正确性、公式和正文的语义、设计范围与独特价值、组合相容性、证据真实性以及整体存储安全、活性和性能仍需审阅或相应运行证据。检查通过不把 `unknown:` 或资料占位变成保证。维护测试使用当前格式的合成任务；正式案例在下一轮用新入口更新。
+数学正确性、公式和正文的语义、设计范围与独特价值、组合相容性、证据真实性以及整体存储安全、活性和性能仍需审阅或相应运行证据。检查通过不把 `unknown:` 或资料占位变成保证。维护测试使用当前格式的合成任务；真实案例的检查参数与覆盖范围见[示例索引](examples/README.md)。

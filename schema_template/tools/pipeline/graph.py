@@ -45,22 +45,38 @@ def members(info: dict, worker: dict, domains: Domains) -> tuple[int, ...]:
 
 class Builder:
     def __init__(self, step: str, definition: dict, worker: dict, parameters: dict, worktiles: int,
-                 *, dynamic_worktiles=False):
+                 *, dynamic_worktiles=False, member_regions=None):
         self.graph, self.definition = StepGraph(step), definition
         self.path = f"DESIGN.Tile_pipeline.Step.{step}"
         self.scope = IndexScope({name: entry["definition"] for name, entry in definition.get("Index", {}).items()})
         self.domains = Domains(self.scope, parameters, worktiles, dynamic_worktiles=dynamic_worktiles)
-        self.domain_cache = {id(self.scope): self.domains}
+        self.members = {role: members(body["Info"], worker, self.domains)
+                        for role, body in definition["Role"].items()}
+        self.bindings = {member: {} for selected in self.members.values() for member in selected}
+        if member_regions is not None:
+            count = self.domains.integer(worker["unit_count"], {})
+            if len(member_regions) != count:
+                raise GraphError("Mapping.Member must contain one region per worker member")
+            for member, region in enumerate(member_regions):
+                for name, bounds in region.items():
+                    try:
+                        lo, hi = self.domains.integers(bounds, {})
+                    except ExpansionError:
+                        continue  # An unproved region is not a known coordinate.
+                    if lo < 0 or hi < lo:
+                        raise GraphError(f"Mapping.Member[{member}].{name}: invalid local region")
+                    if hi - lo == 1 and member in self.bindings:
+                        self.bindings[member][name] = lo
+        self.domain_cache = {(None, id(self.scope)): self.domains}
         self.pipes = {role: parse_pipe(body["Pipe"], path=f"{self.path}.Role.{role}.Pipe", scope=self.scope)
                       for role, body in definition["Role"].items()}
         for pipe in self.pipes.values():
             for node in pipe.controls():
                 if isinstance(node, ForLoop) and node.spec.bounds is not None:
-                    outer = self.domains_for(node.scope)
-                    inner = self.domains_for(node.body.scope)
-                    inner.range_scopes = {**outer.range_scopes, node.spec.name: (outer, node.bound)}
-        self.members = {role: members(body["Info"], worker, self.domains)
-                        for role, body in definition["Role"].items()}
+                    for member in (None, *self.bindings):
+                        outer = self.domains_for(node.scope, member)
+                        inner = self.domains_for(node.body.scope, member)
+                        inner.range_scopes = {**outer.range_scopes, node.spec.name: (outer, node.bound)}
         self.lookup, self.families = {}, defaultdict(dict)
         self.windows, self.steps = IndexWindows(), 0
         self.present = defaultdict(set)
@@ -70,11 +86,13 @@ class Builder:
         if self.steps > 100000:
             raise ExpansionError("pipe/rule expansion limit exceeded (100000); use a smaller sample")
 
-    def domains_for(self, scope: IndexScope) -> Domains:
-        if id(scope) not in self.domain_cache:
-            self.domain_cache[id(scope)] = Domains(scope, self.domains.parameters, self.domains.worktiles,
-                                                   dynamic_worktiles=self.domains.dynamic_worktiles)
-        return self.domain_cache[id(scope)]
+    def domains_for(self, scope: IndexScope, member=None) -> Domains:
+        key = (member, id(scope))
+        if key not in self.domain_cache:
+            self.domain_cache[key] = Domains(scope, self.domains.parameters, self.domains.worktiles,
+                                             dynamic_worktiles=self.domains.dynamic_worktiles,
+                                             bindings=self.bindings.get(member))
+        return self.domain_cache[key]
 
     def declarations(self):
         for role, pipe in self.pipes.items():
@@ -90,7 +108,8 @@ class Builder:
                 if family and family[0].action.signature != action.signature:
                     raise GraphError(f"{declaration.path}: action family has inconsistent argument counts")
                 family.append(declaration)
-                self.windows.register(role, declaration, self.domains_for(declaration.scope))
+            for member in self.members[role]:
+                self.windows.register(role, pipe, lambda scope: self.domains_for(scope, member), member)
             if self.domains.dynamic_worktiles:
                 for node in pipe.walk():
                     if isinstance(node, ActionDeclaration):
@@ -104,20 +123,20 @@ class Builder:
                             if local.has_worktiles(name):
                                 raise GraphError(f"{node.path}: count/last on a dynamically refilled worktile domain is undefined")
 
-    def expand_pipe(self, pipe, env):
-        domains = self.domains_for(pipe.scope)
+    def expand_pipe(self, pipe, env, member):
+        domains = self.domains_for(pipe.scope, member)
         for item in pipe.items:
             self.tick()
             try:
                 if isinstance(item, ActionDeclaration):
-                    yield instantiate(item.action, domains, env), dict(env), item
+                    yield instantiate(item.action, domains, env), {**domains.bindings, **env}, item
                 elif isinstance(item, IfBlock):
                     if domains.predicate(item.condition, env):
-                        yield from self.expand_pipe(item.body, env)
+                        yield from self.expand_pipe(item.body, env, member)
                 elif isinstance(item, ForLoop):
-                    inner = self.domains_for(item.body.scope)
+                    inner = self.domains_for(item.body.scope, member)
                     for values in inner.select(item.spec, env):
-                        yield from self.expand_pipe(item.body, merge_coordinates(env, values))
+                        yield from self.expand_pipe(item.body, merge_coordinates(env, values), member)
             except GraphError as error:
                 if str(error).startswith("DESIGN."):
                     raise
@@ -126,10 +145,9 @@ class Builder:
     def add_operations(self):
         self.declarations()
         for role, body in self.definition["Role"].items():
-            expanded = list(self.expand_pipe(self.pipes[role], {}))
             for member in self.members[role]:
                 previous = ordered = None
-                for action, context, declaration in expanded:
+                for action, context, declaration in self.expand_pipe(self.pipes[role], {}, member):
                     family = declaration.action.family
                     mode = body["Info"]["Using_verb"][family[0]][family[1]]["execution_mode"]
                     identity = f"{self.graph.step}/{role}[{member}]/{action}"
@@ -139,7 +157,7 @@ class Builder:
                     op = Operation(identity, role, member, action, mode, declaration.path, context)
                     self.graph.operations[identity] = op
                     self.lookup[(role, member, action)] = op
-                    self.present[role].add(family)
+                    self.present[(role, member)].add(family)
                     if len(self.graph.operations) > LIMIT:
                         raise ExpansionError(f"action limit exceeded ({LIMIT}); use a smaller sample")
                     self.graph.add(op.event("issue"), op.event("done"), "execute", "this action's issue precedes its done", op.path)
@@ -178,7 +196,7 @@ class Builder:
             raise GraphError(f"{ref.path}: {ref.role}[{selected}] has no role instance; omitted members mean the current worker member")
         return (selected,)
 
-    def rule_domains(self, references, *, members_only=False) -> Domains:
+    def rule_domains(self, references, member, *, members_only=False) -> Domains:
         scopes = [declaration.scope for ref in references for declaration in self.families[ref.role][ref.action.family]]
         expressions = [] if members_only else [arg for ref in references for _, arg in arguments(ref.action)]
         expressions += [ref.member for ref in references if ref.member not in (None, "*")]
@@ -196,40 +214,36 @@ class Builder:
                 raise ExpansionError(f"ambiguous Waiting index {name}; referenced declaration scopes disagree")
             definition = definitions[name] = choices[0]
             for scope in scopes:
-                if name in self.domains_for(scope).range_scopes:
-                    range_scopes[name] = self.domains_for(scope).range_scopes[name]
+                if name in self.domains_for(scope, member).range_scopes:
+                    range_scopes[name] = self.domains_for(scope, member).range_scopes[name]
                     break
             if isinstance(definition, dict):
                 pending.extend(definition["flatten"])
             elif isinstance(definition, list):
                 pending.extend(set().union(*(referenced_domains(tree(bound)) for bound in definition)))
         domains = Domains(definitions, self.domains.parameters, self.domains.worktiles,
-                          dynamic_worktiles=self.domains.dynamic_worktiles)
+                          dynamic_worktiles=self.domains.dynamic_worktiles, bindings=self.bindings[member])
         domains.range_scopes = range_scopes
         return domains
 
-    def precheck_members(self, refs, current, domains):
+    def precheck_members(self, refs, member, domains):
         """Member errors are independent of whether a target branch executes."""
         target = refs[0]
         if target.member not in (None, "*") and not variables(tree(target.member)) & domains.definitions.keys():
-            current_members = self.selected_members(target, None, {}, domains)
-        else:
-            current_members = self.members[current]
+            if member not in self.selected_members(target, None, {}, domains):
+                return False
         for ref in refs:
             if ref.member not in (None, "*") and variables(tree(ref.member)) & domains.definitions.keys():
                 continue
-            for member in current_members:
-                self.selected_members(ref, member, {}, domains)
+            self.selected_members(ref, member, {}, domains)
+        return True
 
-    def resolve(self, ref, concrete, selected, env, domains, *, target=False):
-        events = []
-        for member in selected:
-            op = self.lookup.get((ref.role, member, concrete))
-            if op is None:
-                self.windows.missing(ref.role, ref.action, concrete, domains, env, target=target)
-                return []
-            events.append(op.event(ref.time))
-        return events
+    def resolve(self, ref, concrete, member, env, domains, *, target=False):
+        op = self.lookup.get((ref.role, member, concrete))
+        if op is None:
+            self.windows.missing(ref.role, ref.action, concrete, domains, env, member, target=target)
+            return []
+        return [op.event(ref.time)]
 
     def explicit_edges(self):
         for role, body in self.definition["Role"].items():
@@ -239,75 +253,70 @@ class Builder:
                     rule = parse_waiting(text, path=path)
                     refs = [self.reference(rule.target, role, target=True),
                             *(self.reference(ref, role) for ref in rule.predecessors)]
-                    # Validate explicit/default member addressing even if this
-                    # entire target family is absent in the selected sample.
-                    inactive = refs[0].action.family not in self.present[role]
-                    # An absent target has no Waiting occurrence. Keep member
-                    # addressing checks, without trying to interpret unused
-                    # mathematical action arguments in the finite evaluator.
-                    domains = self.rule_domains(refs, members_only=inactive)
-                    self.precheck_members(refs, role, domains)
-                    if inactive:
-                        continue
-                    names = set().union(*(action_variables(ref.action, domains) for ref in refs))
-                    for ref in refs:
-                        if ref.member not in (None, "*"):
-                            names.update(variables(tree(ref.member)) & domains.definitions.keys())
-                    try:
-                        for env in domains.contexts(names):
-                            targets = self.members[role] if refs[0].member in (None, "*") else self.selected_members(refs[0], None, env, domains)
-                            for member in targets:
+                    for member in self.members[role]:
+                        # An absent member-local target has no Waiting occurrence,
+                        # but cannot hide invalid explicit/default addressing.
+                        inactive = refs[0].action.family not in self.present[(role, member)]
+                        domains = self.rule_domains(refs, member, members_only=inactive)
+                        if not self.precheck_members(refs, member, domains) or inactive:
+                            continue
+                        names = set().union(*(action_variables(ref.action, domains) for ref in refs))
+                        for ref in refs:
+                            if ref.member not in (None, "*"):
+                                names.update(variables(tree(ref.member)) & domains.definitions.keys())
+                        try:
+                            for env in domains.contexts(names):
+                                if member not in self.selected_members(refs[0], member, env, domains):
+                                    continue
                                 self.tick()
-                                selections = [self.selected_members(ref, member, env, domains) for ref in refs]
-                                # The target's [*] means one constraint for each
-                                # target member, with omissions resolved at that
-                                # member; it is not a Cartesian product of roles.
-                                selections[0] = (member,)
+                                selections = [self.selected_members(ref, member, env, domains) for ref in refs[1:]]
                                 target_ref = refs[0]
                                 target_boundary = None
                                 try:
                                     concrete = instantiate(target_ref.action, domains, env)
-                                    target_events = self.resolve(target_ref, concrete, selections[0], env, domains, target=True)
+                                    target_events = self.resolve(target_ref, concrete, member, env, domains, target=True)
                                 except EmptyCoordinate as error:
-                                    if self.windows.empty_target(target_ref.role, target_ref.action, error):
+                                    if self.windows.empty_target(target_ref.role, target_ref.action, error, member):
                                         continue
                                     raise GraphError(str(error)) from error
                                 except Boundary as error:
-                                    self.windows.validate_fixed(target_ref.role, target_ref.action, domains, env)
+                                    self.windows.validate_fixed(target_ref.role, target_ref.action, domains, env, member)
                                     target_boundary, target_events = str(error), []
                                 if not target_events and target_boundary is None:
-                                    continue  # The target's own control excludes this occurrence.
+                                    continue
                                 if target_boundary is not None:
                                     # A shifted target cannot hide a bad fixed
-                                    # counterpart, while a nonexistent target
-                                    # never demands evaluation of variable work.
-                                    for ref, selection in zip(refs[1:], selections[1:]):
-                                        self.windows.validate_fixed(ref.role, ref.action, domains, env)
-                                        if not action_variables(ref.action, domains):
-                                            concrete = instantiate(ref.action, domains, env)
-                                            self.resolve(ref, concrete, selection, env, domains)
+                                    # counterpart on any referenced member.
+                                    for ref, selection in zip(refs[1:], selections):
+                                        for peer in selection:
+                                            self.windows.validate_fixed(ref.role, ref.action, domains, env, peer)
+                                            if not action_variables(ref.action, domains):
+                                                concrete = instantiate(ref.action, domains, env)
+                                                self.resolve(ref, concrete, peer, env, domains)
                                     self.graph.boundaries.append({"path": path, "rule": text, "context": dict(env),
                                                                   "member": member, "reason": target_boundary})
                                     continue
-                                for ref, selection in zip(refs[1:], selections[1:]):
-                                    try:
-                                        concrete = instantiate(ref.action, domains, env)
-                                        predecessors = self.resolve(ref, concrete, selection, env, domains)
-                                    except Boundary as error:
-                                        self.windows.validate_fixed(ref.role, ref.action, domains, env)
-                                        self.graph.boundaries.append({"path": path, "rule": text, "predecessor": ref.text,
-                                                                      "context": dict(env), "member": member, "reason": str(error)})
-                                        continue
-                                    # Each predecessor is a constraint. A
-                                    # boundary in one never removes the other
-                                    # valid predecessors of this same target.
-                                    for source in predecessors:
-                                        for target in target_events:
-                                            self.graph.add(source, target, kind, text, path)
-                    except GraphError as error:
-                        if str(error).startswith("DESIGN."):
-                            raise
-                        raise type(error)(f"{path}: {error}") from error
+                                for ref, selection in zip(refs[1:], selections):
+                                    # Each selected predecessor is independent:
+                                    # a boundary on one member never drops a
+                                    # valid edge from another selected member.
+                                    for peer in selection:
+                                        try:
+                                            concrete = instantiate(ref.action, domains, env)
+                                            predecessors = self.resolve(ref, concrete, peer, env, domains)
+                                        except Boundary as error:
+                                            self.windows.validate_fixed(ref.role, ref.action, domains, env, peer)
+                                            self.graph.boundaries.append({"path": path, "rule": text, "predecessor": ref.text,
+                                                                          "context": dict(env), "member": member,
+                                                                          "predecessor_member": peer, "reason": str(error)})
+                                            continue
+                                        for source in predecessors:
+                                            for target in target_events:
+                                                self.graph.add(source, target, kind, text, path)
+                        except GraphError as error:
+                            if str(error).startswith("DESIGN."):
+                                raise
+                            raise type(error)(f"{path}: {error}") from error
 
     def event_aliases(self, calls):
         aliases = {}
@@ -340,10 +349,11 @@ class Builder:
                 for ref in refs:
                     self.tick()
                     selection = self.selected_members(ref, None, env, self.domains)
-                    concrete = instantiate(ref.action, self.domains, env)
                     # A called alias requires every listed event. A false
                     # control condition cannot remove this explicit reference.
                     for member in selection:
+                        local = self.domains_for(self.scope, member)
+                        concrete = instantiate(ref.action, local, env)
                         op = self.lookup.get((ref.role, member, concrete))
                         if op is None:
                             raise GraphError(f"Event {alias} names an absent event: {ref.role}[{member}]/{concrete}@{ref.time}")
@@ -363,15 +373,17 @@ class Builder:
 
 
 def build_step(step: str, definition: dict, worker: dict, parameters: dict, worktiles=1,
-               *, dynamic_worktiles=False, event_calls=()) -> StepGraph:
+               *, dynamic_worktiles=False, event_calls=(), member_regions=None) -> StepGraph:
     """Expand one worker; event_calls contains (local alias call, source path).
 
     Only supplied calls are evaluated. Event declarations remain templates;
     callers must provide sample values for any free invocation arguments.
+    member_regions is the existing Mapping.Member list. Only regions proved
+    to contain one coordinate bind a member-local mathematical value.
     """
     try:
         return Builder(step, definition, worker, parameters, worktiles,
-                       dynamic_worktiles=dynamic_worktiles).build(event_calls)
+                       dynamic_worktiles=dynamic_worktiles, member_regions=member_regions).build(event_calls)
     except PipelineSyntaxError as error:
         raise GraphError(str(error)) from error
     except EmptyCoordinate as error:

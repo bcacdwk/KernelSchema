@@ -1,7 +1,7 @@
 """Bounded, exact sample evaluation and declared index domains; never eval.
 
 Unsupported mathematical notation is an ExpansionError, not a schema syntax
-error. The evaluator only knows explicit sample parameters and lexical indices.
+error. Values come from explicit samples, member regions and lexical indices.
 """
 from __future__ import annotations
 
@@ -74,11 +74,13 @@ def merge_coordinates(env: dict[str, int], values: dict[str, int]) -> dict[str, 
 
 class Domains:
     def __init__(self, definitions: dict | IndexScope, parameters: dict[str, int], worktiles: int,
-                 *, dynamic_worktiles=False):
+                 *, dynamic_worktiles=False, bindings=None):
         self.scope = definitions if isinstance(definitions, IndexScope) else IndexScope(definitions)
         self.definitions = self.scope.definitions
         self.parameters, self.worktiles = parameters, worktiles
         self.dynamic_worktiles = dynamic_worktiles
+        self.bindings = {name: value for name, value in (bindings or {}).items()
+                         if name not in self.definitions}
         # Inline range endpoints belong to their header's outer scope, even
         # when the new index shadows a public domain or a sample parameter.
         self.range_scopes: dict[str, tuple[Domains, frozenset[str]]] = {}
@@ -140,6 +142,7 @@ class Domains:
         return needed
 
     def has_worktiles(self, name: str, seen=frozenset()) -> bool:
+        """Whether querying this domain requires a complete worktile axis."""
         if name in seen or name not in self.definitions:
             return False
         definition = self.definitions[name]
@@ -148,7 +151,10 @@ class Domains:
         if isinstance(definition, dict):
             names = definition["flatten"]
         else:
-            names = set().union(*(referenced_domains(tree(value)) for value in definition)) & self.definitions.keys()
+            names = {query.args[0].id for value in definition for query in ast.walk(tree(value))
+                     if isinstance(query, ast.Call) and isinstance(query.func, ast.Name)
+                     and query.func.id in {"count", "last"} and len(query.args) == 1
+                     and isinstance(query.args[0], ast.Name)}
         context = self.range_scopes[name][0] if name in self.range_scopes else self
         ancestry = seen | {name} if context is self else frozenset()
         return any(context.has_worktiles(child, ancestry) for child in names)
@@ -190,7 +196,7 @@ class Domains:
         return values
 
     def evaluate(self, node: ast.AST, env: dict[str, int]) -> Fraction | bool:
-        value = self._evaluate(node, env)
+        value = self._evaluate(node, {**self.bindings, **env})
         if type(value) is bool:
             return value
         if abs(value) > 10**12:
@@ -280,12 +286,25 @@ class Domains:
             if isinstance(node.op, ast.Div): return a / b
             if isinstance(node.op, ast.FloorDiv): return a // b
             if isinstance(node.op, ast.Mod): return a % b
+            if isinstance(node.op, (ast.BitXor, ast.LShift)):
+                if a.denominator != 1 or b.denominator != 1:
+                    raise GraphError("bitwise operands must be integers: " + canonical)
+                if isinstance(node.op, ast.BitXor):
+                    return int(a) ^ int(b)
+                if b < 0:
+                    raise GraphError("left shift requires a nonnegative count: " + canonical)
+                if b > 40:
+                    raise ExpansionError("left shift count exceeds the tool limit (40)")
+                return int(a) << int(b)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not node.keywords:
             name = node.func.id
             if name in {"count", "last"} and len(node.args) == 1 and isinstance(node.args[0], ast.Name):
                 domain = node.args[0].id
                 if self.dynamic_worktiles and self.has_worktiles(domain):
                     raise GraphError("count/last on a dynamically refilled worktile domain is undefined")
+                missing = self.dependencies(domain) - env.keys()
+                if missing:
+                    raise ExpansionError(f"querying {domain} requires bound outer indices: " + ", ".join(sorted(missing)))
                 values = self.entries(domain, env)
                 if name == "count": return len(values)
                 if not values: raise GraphError(f"last({domain}) on an empty domain")
@@ -379,7 +398,7 @@ class Domains:
             self._active.remove(name)
 
     def contexts(self, names: set[str], env: dict[str, int] | None = None):
-        env = {} if env is None else env
+        env = {**self.bindings, **(env or {})}
         names = set(names)
         for name in tuple(names):
             if name not in env:

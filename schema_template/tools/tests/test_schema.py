@@ -12,6 +12,23 @@ from .support import ALGO, HARD, MATH, PIPE, ROLE, STEP, TEMPLATE_ROOT, WORK, Ta
 
 
 class SchemaTests(TaskCase):
+    def test_dynamic_work_local_query_still_requires_lexical_outer_binding(self):
+        data = deepcopy(self.base)
+        at(data, STEP)['Schedule']['Worker_assignment']['Refill'] = {'atomic_counter': 'Claim the next worktile'}
+        at(data, PIPE)['Index'] = {
+            name: {'meaning': 'Synthetic index domain', 'definition': definition}
+            for name, definition in {'t': 'worktile', 'i': [0, 'tile_count(t)'],
+                                     'n': {'flatten': ['t', 'i']}}.items()}
+        at(data, ROLE)['Pipe'] = [{'for(t)': ['compute:y(t,count(i),last(i))']}]
+        self.write_task(data)
+        self.assertEqual(data, schema.validate_directory(self.directory))
+        at(data, ROLE)['Pipe'] = ['compute:y(last(i))']
+        self.assert_invalid(data, 'querying i requires bound outer index t')
+        for query in ('count(t)', 'last(t)', 'count(n)', 'last(n)'):
+            at(data, ROLE)['Pipe'] = [{'for(t)': [f'compute:y({query})']}]
+            with self.subTest(query=query):
+                self.assert_invalid(data, 'dynamically refilled worktile')
+
     def test_fixture_and_document_api_are_read_only(self):
         before = self.snapshot()
         self.assertEqual(self.base, schema.validate_directory(self.directory))
