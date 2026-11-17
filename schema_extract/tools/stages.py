@@ -11,26 +11,26 @@ DESIGN_READS = ["schema_docs/0.common.md", "schema_docs/3.design.math_reshape.md
                 "schema_docs/4.design.work_schedule.md", "schema_docs/5.design.tile_pipeline.md",
                 "schema_docs/6.realization.md", "schema_template/README.md"]
 STAGES = {
-    "P1": {"page": "01_contract.md", "session_group": "P1_P2", "writes": ["root.yaml"],
+    "P1": {"page": "01_contract.md", "writes": ["root.yaml"],
            "evidence": ["implementation", "io", "input", "reference", "acceptance", "scope"],
            "conclusions": ["contract", "coverage"],
            "reads": ["schema_docs/0.common.md", "schema_docs/1.contract.algorithm_requirement.md",
                      "schema_template/starter.yaml", "schema_template/README.md"]},
-    "P2": {"page": "02_dispatch_draft.md", "session_group": "P1_P2", "writes": ["root.yaml", "dispatch.md"],
-           "evidence": ["host"], "conclusions": ["root_choice", "paths", "coverage"],
+    "P2": {"page": "02_dispatch_draft.md", "writes": ["root.yaml", "dispatch.md"],
+           "evidence": ["host"], "conclusions": ["mechanisms", "root_choice", "selection", "coverage"],
            "reads": ["schema_docs/0.common.md"]},
-    "P3": {"page": "03_root.md", "session_group": "P3", "writes": ["root.yaml"],
+    "P3": {"page": "03_root.md", "writes": ["root.yaml"],
            "evidence": ["implementation", "host"], "conclusions": ["design", "walkthrough", "dependencies"],
            "reads": DESIGN_READS},
-    "P4": {"page": "04_dispatch_plan.md", "session_group": "P4", "writes": ["dispatch.md"],
-           "evidence": ["host"], "conclusions": ["tree", "paths", "coverage"],
+    "P4": {"page": "04_dispatch_plan.md", "writes": ["dispatch.md"],
+           "evidence": ["host"], "conclusions": ["directory", "writing_plan", "coverage"],
            "reads": ["schema_docs/0.common.md"]},
-    "P5": {"page": "05_branch.md", "session_group": "P5", "writes": [],
+    "P5": {"page": "05_branch.md", "writes": [],
            "evidence": ["implementation", "host"],
-           "conclusions": ["differences", "inherited_design", "walkthrough"],
-           "reads": ["schema_extract/phases/03_root.md", *DESIGN_READS]},
-    "P6": {"page": "06_final.md", "session_group": "P6", "writes": [],
-           "evidence": ["host"], "conclusions": ["tree", "selection", "coverage", "references", "unresolved"],
+           "conclusions": ["differences", "shared_design", "walkthrough"],
+           "reads": ["schema_extract/prompt/phases/03_root.md", *DESIGN_READS]},
+    "P6": {"page": "06_final.md", "writes": [],
+           "evidence": ["host"], "conclusions": ["directory", "selection", "coverage", "references", "unresolved"],
            "reads": ["schema_docs/0.common.md", "schema_template/README.md"]},
 }
 
@@ -50,7 +50,7 @@ def required_conclusions(attempt: dict) -> list[str]:
 def read_specs(attempt: dict) -> list[str]:
     result = list(STAGES[attempt["stage"]]["reads"])
     if attempt["role"] == "reviewer":
-        result.extend(["schema_extract/REVIEW.md", "schema_docs/0.common.md",
+        result.extend(["schema_extract/prompt/roles/reviewer.md", "schema_docs/0.common.md",
                        "schema_docs/1.contract.algorithm_requirement.md",
                        "schema_template/README.md"])
         if attempt["stage"] not in {"P1", "P2"}:
@@ -86,20 +86,22 @@ def owner_for(state: dict, call: dict) -> dict:
 def session_group(state: dict, call: dict | None = None) -> str:
     call = call or state
     if call.get("purpose") == "maintenance":
-        return "maintenance:" + call["maintenance_task_id"]
-    if call.get("mode") == "signoff":
-        return "P6_signoff"
-    if call["stage"] == "P5":
-        return "P5:" + call["node"]
-    if call.get("role") == "reviewer" and call["stage"] in {"P1", "P2"}:
-        return call["stage"]
-    return STAGES[call["stage"]]["session_group"]
+        return "maintenance:" + call["maintenance_task_id"] + ":" + call.get("maintenance_step", "review")
+    group = scope_key(call["stage"], call["node"])
+    return group if call.get("mode", "normal") == "normal" else group + ":" + call["mode"]
+
+
+def session_scope(call: dict) -> dict:
+    operation = call.get("mode", "normal")
+    if call.get("purpose") == "maintenance":
+        operation = "maintenance:" + call["maintenance_task_id"] + ":" + call["maintenance_step"]
+    return {"stage": call["stage"], "node": call["node"], "role": call["role"], "operation": operation}
 
 
 def stage_files(stage: str, *, node_entry: dict | None = None, revision_scope: list | None = None) -> list[str]:
     """One stage file policy for workspace permissions and artifact validation."""
     if stage == "P5":
-        return [node_entry["file"]] if node_entry else []
+        return [node_entry["id"] + ".yaml"] if node_entry else []
     if stage == "P6":
         return sorted({item["path"] for item in revision_scope or []})
     return STAGES[stage]["writes"]
@@ -137,43 +139,90 @@ def call_view(state: dict, call: dict) -> dict:
 
 
 def node_signature(entry: dict) -> str:
-    # Evidence indices are local to a receipt. Selection text and every other
-    # semantic part of an approved entry remain part of the dependency identity.
-    return digest({key: value for key, value in entry.items() if key != "evidence"})
+    return digest({"id": entry["id"], "instance": entry["instance"]})
 
 
-def plan_signature(plan: list | None) -> str:
-    return digest({entry["id"]: node_signature(entry) for entry in plan or []})
+def selection_signature(selected: list | None) -> str:
+    return digest({entry["id"]: entry for entry in selected or []})
+
+
+def writing_signature(plan: list | None) -> str:
+    return digest({entry["id"]: sorted(entry["wait_for"]) for entry in plan or []})
+
+
+def approval_is_current(state: dict, approval: dict | None) -> bool:
+    if not isinstance(approval, dict) or approval.get("input_fingerprint") != state["input_fingerprint"]:
+        return False
+    stage, node = approval.get("stage"), approval.get("applies_to_node", approval.get("node"))
+    selected = {entry["id"]: entry for entry in state.get("selected_designs") or []}
+    if stage == "P5" or approval.get("applies_to_node"):
+        scope = state.get("nodes", {}).get(node, {})
+        generation = approval.get("applies_generation", approval.get("generation"))
+    else:
+        scope = state.get("stages", {}).get(stage, {})
+        generation = approval.get("generation")
+    if generation != scope.get("generation"):
+        return False
+    if stage in {"P3", "P5"} or approval.get("applies_to_node"):
+        return node in selected and approval.get("node_signature") == node_signature(selected[node])
+    if stage in {"P2", "P4", "P6"} and approval.get("selection_signature") != selection_signature(state.get("selected_designs")):
+        return False
+    return stage not in {"P4", "P6"} or approval.get("writing_signature") == writing_signature(state.get("writing_plan"))
+
+
+def actual_sources(node: dict) -> set[str]:
+    context = node.get("source_context") or node.get("approval") or {}
+    origins = context.get("origins", context.get("design_origins", {}))
+    return {source for origin in origins.values() for source in origin.get("chain", [])[1:]}
 
 
 def effective_nodes(state: dict) -> set[str]:
-    from .revisions import approval_is_current
-    planned = {entry["id"] for entry in state.get("plan") or []}
-    return {node_id for node_id in planned if (node := state["nodes"].get(node_id))
+    planned = {entry["id"] for entry in state.get("selected_designs") or []}
+    available = {node_id for node_id in planned if (node := state["nodes"].get(node_id))
             and node.get("status") == "approved" and node.get("merged") and node.get("approval")
-            and not node.get("identity_migration") and not node.get("provider_reopen")
+            and not node.get("provider_reopen")
             and approval_is_current(state, node["approval"])
             and node.get("approved_generation") == node.get("generation")}
+    while True:
+        valid = {node_id for node_id in available if
+                 (actual_sources(state["nodes"][node_id]) | ({"root"} if node_id != "root" else set())) <= available}
+        if valid == available:
+            return valid
+        available = valid
 
 
 def final_eligible(state: dict) -> bool:
-    from .revisions import approval_is_current
-    if not state.get("plan") or not all(state["stages"][stage]["status"] == "approved"
+    if not state.get("selected_designs") or state.get("writing_plan") is None or not all(state["stages"][stage]["status"] == "approved"
                                        and approval_is_current(state, state["stages"][stage].get("approval"))
                                        for stage in ("P1", "P2", "P3", "P4")):
         return False
-    planned = {item["id"] for item in state["plan"]}
+    planned = {item["id"] for item in state["selected_designs"]}
     return planned == effective_nodes(state) and not state.get("reopening")
 
 
-def affected_nodes(state: dict, seeds) -> list[str]:
-    """Final edits also recheck descendants whose copied design relied on a changed node."""
-    affected = set(seeds)
-    while True:
-        expanded = affected | {entry["id"] for entry in state.get("plan") or [] if entry["parent"] in affected}
-        if expanded == affected:
-            return sorted(affected)
-        affected = expanded
+def affected_nodes(state: dict, seeds, *, regions=None, contract=False) -> list[str]:
+    """Follow recorded actual definitions, never writing-order preferences."""
+    affected, definitions = set(seeds), set(seeds)
+    for entry in state.get("selected_designs") or []:
+        context = state["nodes"].get(entry["id"], {}).get("source_context") or {}
+        origins = context.get("origins", {})
+        if contract or any((regions is None or region in regions) and
+                           set(origin.get("chain", [])[1:]) & definitions for region, origin in origins.items()):
+            affected.add(entry["id"])
+    return sorted(affected)
+
+
+def dependencies_ready(state: dict, node_id: str) -> bool:
+    approved = effective_nodes(state)
+    node = state["nodes"][node_id]
+    selected = {entry["id"] for entry in state.get("selected_designs") or []}
+    # A removed definition must be replaced explicitly by this consumer's
+    # worker. It is never an approved source or a permanent wait target.
+    sources = actual_sources(node)
+    if node.get("role") == "worker":
+        sources &= selected
+    waits = next((set(item["wait_for"]) for item in state.get("writing_plan") or [] if item["id"] == node_id), set())
+    return (sources | waits | {"root"}) <= approved
 
 
 NODE_STOPS = {"blocked", "budget_exhausted", "tool_error", "invalid_receipt", "cli_error", "termination_unconfirmed"}
@@ -188,17 +237,16 @@ def next_calls(state: dict) -> list[dict]:
     if state["stage"] not in STAGES:
         raise ExtractError("the current stage has no implementation")
     if state["stage"] == "P6" and not final_eligible(state):
-        raise ExtractError("P6 requires the current plan's complete, valid merged node set and P1-P4 approvals")
+        raise ExtractError("P6 requires the selected complete, valid merged node set and P1-P4 approvals")
     candidates = []
     if state["stage"] == "P5":
         if not all(state["stages"][stage]["status"] == "approved" for stage in ("P1", "P2", "P3", "P4")):
             return []
-        approved = effective_nodes(state)
-        for entry in state["plan"]:
+        for entry in state["selected_designs"]:
             node = state["nodes"][entry["id"]]
             if entry["id"] == "root" or node["status"] in NODE_STOPS | {"approved", "removed"}:
                 continue
-            if entry["parent"] in approved:
+            if dependencies_ready(state, entry["id"]):
                 candidates.append({"stage": "P5", "node": entry["id"], "role": node["role"], "mode": node["mode"]})
     else:
         candidates.append({key: state[key] for key in ("stage", "node", "role", "mode")})
@@ -247,19 +295,19 @@ def settle(result: dict) -> None:
         result["reason"] = {"code": "termination_unconfirmed", "summary": "旧调用尚未确认终止；同节点保持调用身份，不可重发。",
                             "attempts": unconfirmed}
     elif final_eligible(result):
-        result["stages"]["P5"]["status"] = "approved" if len(result["plan"]) > 1 else "skipped"
+        result["stages"]["P5"]["status"] = "approved" if len(result["selected_designs"]) > 1 else "skipped"
         result.update(stage="P6", node="root", role="reviewer", status="running", reason=None)
     else:
         result["stages"]["P5"]["status"] = "blocked"
         result["status"], result["role"] = "blocked", None
-        result["reason"] = {"code": "blocked_nodes", "summary": "所有可继续的节点已处理；仍有必需节点阻塞或等待父节点。",
-                            "nodes": {node: value.get("reason", {"parent": value.get("parent")})
+        result["reason"] = {"code": "blocked_nodes", "summary": "所有可继续的节点已处理；仍有必需节点阻塞或等待已定安排。",
+                            "nodes": {node: value.get("reason")
                                       for node, value in result["nodes"].items()
-                                      if node in {entry["id"] for entry in result["plan"]} and value["status"] != "approved"}}
+                                      if node in {entry["id"] for entry in result["selected_designs"]} and value["status"] != "approved"}}
 
 
 def new_node(entry: dict) -> dict:
-    return {"file": entry["file"], "parent": entry["parent"],
+    return {"id": entry["id"], "instance": entry["instance"], "file": entry["id"] + ".yaml",
             "status": "pending", "merged": False, "draft_checkpoint": None,
             "approved_checkpoints": {}, "approval": None, "approved_sha256": None,
             "approved_generation": None, "generation": 0, "stage": new_scope(),
@@ -267,7 +315,7 @@ def new_node(entry: dict) -> dict:
 
 
 def needs_authoring(node: dict) -> bool:
-    return bool(node.get("identity_migration") or node.get("provider_reopen")) and (
+    return bool(node.get("provider_reopen")) and (
         node.get("authored_generation") != node.get("generation"))
 
 
@@ -283,65 +331,95 @@ def invalidate_node(node: dict, *, require_worker=False) -> None:
                 role="worker" if worker else "reviewer", mode="normal", reason=None)
     node["stage"]["last_approval"] = node["stage"].get("approval") or node["stage"].get("last_approval")
     node["stage"].update(status=node["status"], approval=None)
+    node.pop("applicability", None)
 
 
 def invalidate_final(state: dict, nodes=()) -> None:
     scope = state["stages"]["P6"]
     scope["last_approval"] = scope.get("approval") or scope.get("last_approval")
-    scope.update(status="pending", approval=None, generation=scope["generation"] + 1)
+    changed = scope.get("approval") is not None or scope.get("status") not in {"pending", "draft"}
+    scope.update(status="pending", approval=None, generation=scope["generation"] + int(changed))
     state["final_review_started"] = False
     state["pending_rechecks"] = sorted(set(state.get("pending_rechecks", [])) | set(nodes))
 
 
-def plan_impact(state: dict, plan: list, *, root_changed=False) -> set[str]:
-    old = {entry["id"]: entry for entry in state.get("plan") or []}
-    new = {entry["id"]: entry for entry in plan}
+def selection_impact(state: dict, selected: list, *, root_changed=False) -> set[str]:
+    old = {entry["id"]: entry for entry in state.get("selected_designs") or []}
+    new = {entry["id"]: entry for entry in selected}
     changed = {node for node in old.keys() | new.keys()
                if node not in old or node not in new or node_signature(old[node]) != node_signature(new[node])}
     if root_changed:
         changed.add("root")
-    while True:
-        expanded = changed | {entry["id"] for entry in [*old.values(), *new.values()] if entry["parent"] in changed}
-        if expanded == changed:
-            return changed
-        changed = expanded
+    return set(affected_nodes(state, changed))
 
 
-def install_plan(state: dict, plan: list, invalidated: set[str], *, plan_revision: int | None = None) -> None:
+def install_selection(state: dict, selected: list, invalidated: set[str]) -> None:
     """Retire identities without deleting their budgets, drafts or used decisions."""
-    planned = {entry["id"]: entry for entry in plan}
-    old_plan = {entry["id"]: entry for entry in state.get("plan") or []}
+    planned = {entry["id"]: entry for entry in selected}
+    old_plan = {entry["id"]: entry for entry in state.get("selected_designs") or []}
     for node_id, node in state["nodes"].items():
         if node_id == "root":
             continue
-        reparented = node_id in old_plan and node_id in planned and old_plan[node_id]["parent"] != planned[node_id]["parent"]
-        if reparented:
-            previous = node.get("identity_migration")
-            if previous:
-                node.setdefault("identity_migration_history", []).append(deepcopy(previous))
-            node["identity_migration"] = {
-                "old_parent": previous["old_parent"] if previous else old_plan[node_id]["parent"],
-                "new_parent": planned[node_id]["parent"],
-                "old_checkpoint": previous["old_checkpoint"] if previous else node.get("draft_checkpoint") or state.get("merged_checkpoint"),
-                "plan_revision": state.get("plan_revision", 0) if plan_revision is None else plan_revision,
-                "reason": "P4 changed the direct parent; worker must explicitly migrate raw parent and Design references."}
-        if node_id in invalidated or reparented:
-            invalidate_node(node, require_worker=reparented)
+        changed_instance = node_id in planned and node_signature(planned[node_id]) != node_signature(node)
+        restored = node_id in planned and node.get("status") == "removed"
+        removed_sources = actual_sources(node) - planned.keys()
+        if node_id in invalidated and (node_id not in planned or changed_instance or removed_sources or restored):
+            invalidate_node(node, require_worker=bool(changed_instance or removed_sources))
         if node_id not in planned:
             node["status"] = "removed"
             key = node.pop("provider_reopen", None)
             if key:
-                state["reopen_requests"][key].update(status="retired", retired_reason="provider removed by P4",
+                state["reopen_requests"][key].update(status="retired", retired_reason="provider removed by P2",
                                                      retired_plan_revision=state.get("plan_revision", 0))
     for node_id, entry in planned.items():
-        if node_id == "root":
-            continue
         node = state["nodes"].setdefault(node_id, new_node(entry))
-        node.update(file=entry["file"], parent=entry["parent"])
-    state["plan"] = deepcopy(plan)
+        node.update(id=node_id, instance=entry["instance"], file=node_id + ".yaml")
+    state["selected_designs"] = deepcopy(selected)
+    state["selection_signature"] = selection_signature(selected)
+    if old_plan and selection_signature(list(old_plan.values())) != state["selection_signature"]:
+        invalidate_stage(state, "P4", require_worker=True)
+        if "root" in old_plan and node_signature(old_plan["root"]) != node_signature(planned["root"]):
+            invalidate_stage(state, "P3", require_worker=True)
     if old_plan and invalidated:
         invalidate_final(state, invalidated & planned.keys())
     state["pending_rechecks"] = [node for node in state["pending_rechecks"] if node in planned]
+
+
+def invalidate_stage(state: dict, stage: str, *, require_worker=False) -> None:
+    scope = state["stages"][stage]
+    complete = bool(scope.get("approval") or scope.get("last_approval") or scope.get("status") in {"reviewing", "approved"})
+    scope["last_approval"] = scope.get("approval") or scope.get("last_approval")
+    scope.update(approval=None, status="pending" if require_worker or not complete else "reviewing",
+                 generation=scope["generation"] + 1)
+    if stage == "P3":
+        node = state["nodes"]["root"]
+        node["last_approval"] = node.get("approval") or node.get("last_approval")
+        node.update(approval=None, status=scope["status"], merged=False,
+                    approved_generation=None, generation=node["generation"] + 1)
+        node.pop("applicability", None)
+
+
+def resume_progress(state: dict) -> None:
+    """Return to the first genuinely unfinished responsibility, preserving its budget."""
+    for stage in ("P1", "P2", "P3", "P4"):
+        scope = state["stages"][stage]
+        if scope["status"] == "approved" and approval_is_current(state, scope.get("approval")):
+            continue
+        role = "reviewer" if scope["status"] == "reviewing" else "worker"
+        if state.get("stage") == stage and state.get("role") and scope["status"] in {"draft", "revision", "adjudicating", "signoff"}:
+            return
+        if stage in {"P2", "P4"} and role == "reviewer":
+            state["plan_draft"] = deepcopy(state["selected_designs"] if stage == "P2" else state["writing_plan"])
+        state.update(stage=stage, node="root", role=role, mode="normal", status="running", reason=None)
+        return
+    if state.get("reopening"):
+        record = state["reopening"]
+        record.update(status="closed", closing_checkpoint=state.get("merged_checkpoint"))
+        state["reopen_requests"][record["key"]].update(record)
+        state["plan_history"].append(deepcopy(record))
+        state["reopening"] = None
+    state.update(stage="P5", node="root", role=None, mode="normal", status="running", reason=None)
+    settle(state)
 
 
 def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, validation: dict) -> None:
@@ -350,25 +428,31 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
     if stage == "P5":
         node = result["nodes"][node_id]
         if needs_authoring(node):
-            raise ExtractError("provider repair/identity migration requires a current-generation worker draft before independent approval")
+            raise ExtractError("provider repair requires a current-generation worker draft before independent approval")
         if identity.get("generation", node["generation"]) != node["generation"]:
             raise ExtractError("approval belongs to an obsolete node generation")
     scope = scope_for(result, identity)
+    if stage == "P2":
+        install_selection(result, receipt["plan"], set(validation.get("invalidated_nodes", [])))
     approval = {"attempt_id": identity["attempt_id"], "receipt_sha256": receipt_hash,
                 "checkpoint": checkpoint_id, "input_fingerprint": identity["input_fingerprint"],
                 "plan_revision": identity["plan_revision"], "stage": stage, "node": node_id,
                 "generation": result["nodes"][node_id]["generation"] if stage == "P5" else scope["generation"],
                 "node_signature": validation.get("node_signature"),
+                "selection_signature": result.get("selection_signature") if stage == "P2" else identity.get("selection_signature"),
+                "writing_signature": identity.get("writing_signature") if stage in {"P5", "P6"} else None,
+                "projection": validation.get("approval_projection"),
                 "dependency_digests": validation.get("dependency_digests", {}),
                 "artifact_digests": validation.get("artifact_digests") or
                                     {item["path"]: item["sha256"] for item in receipt["artifacts"]},
                 "conclusions": receipt["conclusions"], "issues": receipt["issues"]}
-    approval.update({key: identity[key] for key in ("semantic_revision", "maintenance_task_id", "purpose", "maintenance_step")
+    approval.update({key: identity[key] for key in ("maintenance_task_id", "purpose", "maintenance_step")
                      if key in identity})
     resolution = validation.get("design_resolution", {}).get("nodes", {}).get(node_id)
-    if stage == "P5" and resolution:
+    if stage in {"P3", "P5"} and resolution:
         approval.update(effective_identity=resolution["effective_identity"], source_manifest=resolution["source_manifest"],
                         design_origins=resolution["origins"])
+        result["nodes"][node_id]["source_context"] = deepcopy(resolution)
     scope["status"], scope["approval"] = "approved", approval
     result["nodes"][node_id]["approved_checkpoints"][stage] = checkpoint_id
     owner = owner_for(result, identity)
@@ -377,35 +461,27 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
     if maintaining and stage in {"P1", "P2", "P3", "P4"}:
         result["merged_checkpoint"] = checkpoint_id
     if stage in {"P1", "P2"} and not maintaining:
-        result["stage"], result["role"] = ("P2" if stage == "P1" else "P3"), "worker"
+        result["plan_draft"] = None
     elif stage == "P3":
         root = result["nodes"]["root"]
-        root.update(status="approved", approval=approval, approved_sha256=approval["artifact_digests"]["root.yaml"],
+        root.update(status="approved", merged=True, approval=approval, approved_sha256=approval["artifact_digests"]["root.yaml"],
                     approved_generation=root["generation"])
-        if not maintaining:
-            result["stage"], result["role"] = "P4", "worker"
+        result["merged_checkpoint"] = checkpoint_id
+        result["pending_rechecks"] = [node for node in result["pending_rechecks"] if node != "root"]
     elif stage == "P4":
-        revision = result["plan_revision"] + int(maintaining and plan_signature(result.get("plan")) != plan_signature(receipt["plan"]))
-        install_plan(result, receipt["plan"], set(validation.get("invalidated_nodes", [])), plan_revision=revision)
+        result["writing_plan"] = deepcopy(receipt["plan"])
+        result["writing_signature"] = writing_signature(receipt["plan"])
+        approval["writing_signature"] = result["writing_signature"]
+        result["plan_draft"] = None
         result["merged_checkpoint"] = checkpoint_id
         result["nodes"]["root"]["merged"] = True
-        if result.get("reopening"):
-            result["reopening"]["approved_plan_checkpoint"] = checkpoint_id
-            result["reopening"]["new_plan"] = deepcopy(receipt["plan"])
-            result["reopening"]["invalidated_nodes"] = validation.get("invalidated_nodes", [])
-            result["plan_history"].append(deepcopy(result["reopening"]))
-        result["reopening"] = None
-        if not maintaining:
-            result.update(stage="P5", node="root", role=None, status="running")
     elif stage == "P5":
         node = result["nodes"][node_id]
         node.update(status="approved", merged=True, approval=approval,
                     approved_sha256=approval["artifact_digests"][node["file"]],
                     approved_generation=node["generation"], reason=None)
         result["merged_checkpoint"] = checkpoint_id
-        migration = node.pop("identity_migration", None)
-        if migration:
-            node.setdefault("identity_migration_history", []).append({**migration, "status": "complete", "approval": deepcopy(approval)})
+        result["pending_rechecks"] = [item for item in result["pending_rechecks"] if item != node_id]
         key = node.pop("provider_reopen", None)
         if key:
             result["reopen_requests"][key].update(status="closed", closing_approval=deepcopy(approval),
@@ -413,12 +489,19 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
     elif stage == "P6":
         for node_id in result["pending_rechecks"]:
             node = result["nodes"][node_id]
-            node["approval"] = approval
+            current = validation["design_resolution"]["nodes"][node_id]
+            node["source_context"] = deepcopy(current)
+            node["approval"] = {**approval, "effective_identity": current["effective_identity"],
+                                "source_manifest": current["source_manifest"], "design_origins": current["origins"],
+                                "applies_to_node": node_id, "applies_generation": node["generation"],
+                                "node_signature": node_signature(node)}
             node["approved_sha256"] = approval["artifact_digests"][node["file"]]
             node["approved_generation"] = node["generation"]
         result["pending_rechecks"] = []
         result["merged_checkpoint"] = checkpoint_id
         result["status"], result["role"] = "ready", None
+    if stage in {"P1", "P2", "P3", "P4"} and not maintaining:
+        resume_progress(result)
 
 
 def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, *, validation: dict | None = None) -> dict:
@@ -444,7 +527,11 @@ def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, *
     result["active_attempts"].pop(key)
     owner["reason"] = None
     if role == "worker":
-        scope["candidates"].append({"checkpoint": checkpoint_id, "plan": deepcopy(receipt.get("plan"))})
+        scope["candidates"].append({"checkpoint": checkpoint_id, "plan": deepcopy(receipt.get("plan")),
+                                    "generation": identity.get("generation"), "node_signature": identity.get("node_signature")})
+        resolution = validation.get("design_resolution", {}).get("nodes", {}).get(identity["node"])
+        if resolution:
+            result["nodes"][identity["node"]]["source_context"] = deepcopy(resolution)
     if mode == "adjudicate":
         scope["adjudication"] = {"attempt_id": attempt_id, "receipt_sha256": receipt_hash,
                                   "action": receipt["adjudication"]["action"], "checkpoint": checkpoint_id,
@@ -458,11 +545,14 @@ def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, *
         return result
     if decision == "blocked" and role == "reviewer":
         _blocked(result, receipt, "adjudication_blocked" if mode == "adjudicate" else "missing_input")
-    elif mode == "adjudicate" and stage == "P6" and validation.get("adjudication_changed"):
+    elif mode == "adjudicate" and validation.get("adjudication_changed"):
         owner["mode"], owner["role"] = "signoff", "reviewer"
         scope["status"] = "signoff"
-        owner["feedback"] = [{"detail": "独立签收裁决后的最终改动及受影响结论，仅可 approve 或 blocked。"}]
-        result["pending_rechecks"] = affected_nodes(result, [*result["pending_rechecks"], *receipt["affected_nodes"]])
+        owner["feedback"] = [{"operation": "signoff", "adjudication_attempt": attempt_id}]
+        if stage in {"P2", "P4"}:
+            result["plan_draft"] = deepcopy(receipt["plan"])
+        if stage == "P6":
+            result["pending_rechecks"] = affected_nodes(result, [*result["pending_rechecks"], *receipt["affected_nodes"]])
     elif mode in {"adjudicate", "signoff"} and decision == "approve":
         _approve(result, receipt, checkpoint_id, receipt_hash, validation)
     elif role == "worker" and decision == "continue":
@@ -475,7 +565,7 @@ def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, *
         owner["role"] = "reviewer"
         scope["status"] = "reviewing"
         owner["feedback"] = [receipt["summary"], *receipt["issues"]] if decision == "blocked" else []
-        if stage == "P4":
+        if stage in {"P2", "P4"}:
             result["plan_draft"] = deepcopy(receipt["plan"])
         if stage == "P6":
             result["pending_rechecks"] = affected_nodes(result, [*result["pending_rechecks"], *receipt["affected_nodes"]])

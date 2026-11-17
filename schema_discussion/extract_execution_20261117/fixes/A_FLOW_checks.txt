@@ -1,0 +1,153 @@
+Initial independent reproductions on current workspace snapshot: /tmp/extract-flow-fix-baseline-93irbwwp
+
+$ PATH=/tmp/extract-flow-fix-baseline-93irbwwp/audit-bin:$PATH /opt/venv/python3.13.12/bin/python -B repro_preflight.py
+final_rejection: CandidateRejected write outside stage scope or deleted artifact: extra.yaml, root.yaml
+unauthorized_extra_reads_before_rejection: 4
+unauthorized_extra_captured_in_original: True
+exit_code: 0
+
+$ PATH=/tmp/extract-flow-fix-baseline-93irbwwp/audit-bin:$PATH /opt/venv/python3.13.12/bin/python -B repro_handoff.py
+before_return_worker_receipt_provided: True
+new_p5_reviewer_can_find_worker_fact: False
+worker_original_generation: 0
+current_node_generation: 1
+after_return_worker_receipt_provided: False
+new_p6_can_find_worker_fact: False
+original_receipt_remains_accepted: True
+original_receipt_still_has_fact: True
+exit_code: 0
+
+$ PATH=/tmp/extract-flow-fix-baseline-93irbwwp/audit-bin:$PATH /opt/venv/python3.13.12/bin/python -B repro_p1_retired_contract.py
+metadata landed: landed
+contract rejected: missing material required to resolve from: 'provider'
+exit_code: 0
+
+$ PATH=/tmp/extract-flow-fix-baseline-93irbwwp/audit-bin:$PATH /opt/venv/python3.13.12/bin/python -B repro_p1_contract_flow.py
+rejected: CandidateRejected missing material required to resolve from: 'provider'
+stage: P1
+consumer_role: worker
+ready_p5_calls: []
+exit_code: 0
+
+$ PATH=/tmp/extract-flow-fix-baseline-93irbwwp/audit-bin:$PATH /opt/venv/python3.13.12/bin/python -B repro_p1_source_projection.py
+stage_after_p1_approval: P3
+p2_status: approved
+next_stage_failed: ExtractError approved stage subject changed: P2
+exit_code: 0
+
+Candidate 1 snapshot: /tmp/extract-flow-fix-current-tu15j3df
+
+$ PATH=/tmp/extract-flow-fix-current-tu15j3df/audit-bin:$PATH /opt/venv/python3.13.12/bin/python -B repro_preflight.py
+final_rejection: ExtractError artifact inventory differs from the prepared scope: unexpected extra.yaml
+unauthorized_extra_reads_before_rejection: 0
+unauthorized_extra_captured_in_original: False
+exit_code: 0
+
+$ PATH=/tmp/extract-flow-fix-current-tu15j3df/audit-bin:$PATH /opt/venv/python3.13.12/bin/python -B repro_handoff.py
+before_return_worker_receipt_provided: True
+new_p5_reviewer_can_find_worker_fact: True
+worker_original_generation: 0
+current_node_generation: 1
+after_return_worker_receipt_provided: True
+new_p6_can_find_worker_fact: True
+original_receipt_remains_accepted: True
+original_receipt_still_has_fact: True
+exit_code: 0
+
+$ PATH=/tmp/extract-flow-fix-current-tu15j3df/audit-bin:$PATH /opt/venv/python3.13.12/bin/python -B repro_p1_retired_contract.py
+metadata landed: landed
+contract landed: landed
+exit_code: 0
+
+$ PATH=/tmp/extract-flow-fix-current-tu15j3df/audit-bin:$PATH /opt/venv/python3.13.12/bin/python -B repro_p1_contract_flow.py
+accepted
+stage: P1
+consumer_role: worker
+ready_p5_calls: []
+exit_code: 0
+
+$ PATH=/tmp/extract-flow-fix-current-tu15j3df/audit-bin:$PATH /opt/venv/python3.13.12/bin/python -B repro_p1_source_projection.py
+stage_after_p1_approval: P2
+p2_status: reviewing
+Traceback (most recent call last):
+  File "/tmp/extract-flow-fix-current-tu15j3df/repro_p1_source_projection.py", line 16, in <module>
+    try:f.prepare(stage='P3',role='reviewer');print('next_stage_prepared')
+        ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/extract-flow-fix-current-tu15j3df/schema_extract/tools/tests/test_stage_flow.py", line 179, in prepare
+    call = next(item for item in next_calls(self.state) if (node is None or item["node"] == node) and
+                (stage is None or item["stage"] == stage) and (role is None or item["role"] == role))
+StopIteration
+exit_code: 1
+
+$ PATH=/tmp/extract-flow-fix-current-tu15j3df/audit-bin:$PATH /opt/venv/python3.13.12/bin/python -B -m unittest -v schema_extract.tools.tests.test_stage_flow.StageFlowTests.test_extra_yaml_is_unread_in_normal_failed_and_interrupted_adoption schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_atomic_replacement_is_accepted_but_every_residual_entry_is_rejected schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_normalization_does_not_rewrite_read_only_provider schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_process_facts_survive_metadata_return_and_removed_instances schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_p1_source_change_opens_only_the_invalidated_selection_projection schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_removed_provider_stays_historical_and_consumer_must_change_from
+test_extra_yaml_is_unread_in_normal_failed_and_interrupted_adoption (schema_extract.tools.tests.test_stage_flow.StageFlowTests.test_extra_yaml_is_unread_in_normal_failed_and_interrupted_adoption) ... ok
+test_atomic_replacement_is_accepted_but_every_residual_entry_is_rejected (schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_atomic_replacement_is_accepted_but_every_residual_entry_is_rejected) ... ok
+test_normalization_does_not_rewrite_read_only_provider (schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_normalization_does_not_rewrite_read_only_provider) ... ok
+test_process_facts_survive_metadata_return_and_removed_instances (schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_process_facts_survive_metadata_return_and_removed_instances) ... ok
+test_p1_source_change_opens_only_the_invalidated_selection_projection (schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_p1_source_change_opens_only_the_invalidated_selection_projection) ... ok
+test_removed_provider_stays_historical_and_consumer_must_change_from (schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_removed_provider_stays_historical_and_consumer_must_change_from) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 98.616s
+
+OK
+exit_code: 0
+
+Final owned-code snapshot: /tmp/extract-flow-fix-final-ofsguur5
+$ sudo -n -E --preserve-env=HOME unshare --mount --mount-proc setpriv --reuid 1000 --regid 100 --clear-groups --no-new-privs env PATH=/tmp/extract-flow-fix-final-ofsguur5/audit-bin:/usr/bin:/bin /opt/venv/python3.13.12/bin/python -B -m unittest -v schema_extract.tools.tests.test_stage_flow.StageFlowTests.test_extra_yaml_is_unread_in_normal_failed_and_interrupted_adoption schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_p1_source_change_opens_only_the_invalidated_selection_projection schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_p1_shared_metadata_keeps_unmerged_drafts_and_requires_current_body_reviews schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_all_stages_reserve_signoff_and_p2_patch_binds_final_plan schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_select_only_reads_prepared_canonical_bytes_and_never_edits_after_approval schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_current_maintenance_uses_existing_scope_and_keeps_control_fence schema_extract.tools.tests.test_stage_flow.StageFlowTests.test_multiple_sources_and_late_unrelated_sibling_do_not_expire_review schema_extract.tools.tests.test_prompt_materials.PromptMaterialsTests.test_p1_preview_is_read_only_and_reports_pending_normalization schema_extract.tools.tests.test_prompt_materials.PromptMaterialsTests.test_p2_and_p4_do_not_require_planned_files_and_scopes_still_apply schema_extract.tools.tests.test_prompt_materials.PromptMaterialsTests.test_isolated_helper_reads_frozen_source_and_rejects_extra_arguments schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_p1_normalizes_before_gates_and_preserves_original_evidence schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_p1_shared_metadata_is_a_recorded_derivation_without_worker_node_permission schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_p6_changes_are_limited_to_the_reviewed_fields schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_parsing_closure_is_larger_than_same_region_manifest
+test_extra_yaml_is_unread_in_normal_failed_and_interrupted_adoption (schema_extract.tools.tests.test_stage_flow.StageFlowTests.test_extra_yaml_is_unread_in_normal_failed_and_interrupted_adoption) ... ok
+test_p1_source_change_opens_only_the_invalidated_selection_projection (schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_p1_source_change_opens_only_the_invalidated_selection_projection) ... ok
+test_p1_shared_metadata_keeps_unmerged_drafts_and_requires_current_body_reviews (schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_p1_shared_metadata_keeps_unmerged_drafts_and_requires_current_body_reviews) ... ok
+test_all_stages_reserve_signoff_and_p2_patch_binds_final_plan (schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_all_stages_reserve_signoff_and_p2_patch_binds_final_plan) ... ok
+test_select_only_reads_prepared_canonical_bytes_and_never_edits_after_approval (schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_select_only_reads_prepared_canonical_bytes_and_never_edits_after_approval) ... ok
+test_current_maintenance_uses_existing_scope_and_keeps_control_fence (schema_extract.tools.tests.test_current_returns.CurrentReturnsTests.test_current_maintenance_uses_existing_scope_and_keeps_control_fence) ... ok
+test_multiple_sources_and_late_unrelated_sibling_do_not_expire_review (schema_extract.tools.tests.test_stage_flow.StageFlowTests.test_multiple_sources_and_late_unrelated_sibling_do_not_expire_review) ... ok
+test_p1_preview_is_read_only_and_reports_pending_normalization (schema_extract.tools.tests.test_prompt_materials.PromptMaterialsTests.test_p1_preview_is_read_only_and_reports_pending_normalization) ... ok
+test_p2_and_p4_do_not_require_planned_files_and_scopes_still_apply (schema_extract.tools.tests.test_prompt_materials.PromptMaterialsTests.test_p2_and_p4_do_not_require_planned_files_and_scopes_still_apply) ... ok
+test_isolated_helper_reads_frozen_source_and_rejects_extra_arguments (schema_extract.tools.tests.test_prompt_materials.PromptMaterialsTests.test_isolated_helper_reads_frozen_source_and_rejects_extra_arguments) ... ok
+test_p1_normalizes_before_gates_and_preserves_original_evidence (schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_p1_normalizes_before_gates_and_preserves_original_evidence) ... ok
+test_p1_shared_metadata_is_a_recorded_derivation_without_worker_node_permission (schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_p1_shared_metadata_is_a_recorded_derivation_without_worker_node_permission) ... ok
+test_p6_changes_are_limited_to_the_reviewed_fields (schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_p6_changes_are_limited_to_the_reviewed_fields) ... ok
+test_parsing_closure_is_larger_than_same_region_manifest (schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_parsing_closure_is_larger_than_same_region_manifest) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 150.177s
+
+OK
+exit_code: 0
+
+Final inventory-only enumeration follow-up: /tmp/extract-flow-fix-sealed-cqay990h
+$ sudo -n -E --preserve-env=HOME unshare --mount --mount-proc setpriv --reuid 1000 --regid 100 --clear-groups --no-new-privs env PATH=/tmp/extract-flow-fix-sealed-cqay990h/audit-bin:/usr/bin:/bin /opt/venv/python3.13.12/bin/python -B -m unittest -v schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_atomic_replacement_is_accepted_but_every_residual_entry_is_rejected schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_normalization_does_not_rewrite_read_only_provider schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_parsing_closure_is_larger_than_same_region_manifest schema_extract.tools.tests.test_prompt_materials.PromptMaterialsTests.test_isolated_helper_reads_frozen_source_and_rejects_extra_arguments
+test_atomic_replacement_is_accepted_but_every_residual_entry_is_rejected (schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_atomic_replacement_is_accepted_but_every_residual_entry_is_rejected) ... ok
+test_normalization_does_not_rewrite_read_only_provider (schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_normalization_does_not_rewrite_read_only_provider) ... ok
+test_parsing_closure_is_larger_than_same_region_manifest (schema_extract.tools.tests.test_artifact_transactions.ArtifactTransactions.test_parsing_closure_is_larger_than_same_region_manifest) ... ok
+test_isolated_helper_reads_frozen_source_and_rejects_extra_arguments (schema_extract.tools.tests.test_prompt_materials.PromptMaterialsTests.test_isolated_helper_reads_frozen_source_and_rejects_extra_arguments) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 7.343s
+
+OK
+exit_code: 0
+
+Final source verification
+{
+  "owned_changed_files": [
+    "schema_extract/tools/artifacts.py",
+    "schema_extract/tools/runner.py",
+    "schema_extract/tools/store.py",
+    "schema_extract/tools/stages.py",
+    "schema_extract/tools/prompts.py",
+    "schema_extract/tools/reading.py",
+    "schema_extract/tools/receipts.py",
+    "schema_extract/tools/maintenance.py",
+    "schema_extract/prompt/common.md",
+    "schema_extract/tools/tests/test_artifact_transactions.py",
+    "schema_extract/tools/tests/test_stage_flow.py",
+    "schema_extract/tools/tests/test_current_returns.py"
+  ],
+  "owned_snapshot_drift": [],
+  "snapshot_files": 169,
+  "other_snapshot_drift": [],
+  "compiled_python_files": 11,
+  "git_diff_check_exit_code": 0
+}

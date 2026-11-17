@@ -81,7 +81,7 @@ def declarations(lock: dict) -> list[dict]:
 
 
 def _criterion(text: str, declaration: dict, output: str) -> None:
-    location = "contract.algorithm_requirement.golden_reference.tolerance." + output
+    location = "CONTRACT.Algorithm_requirement.Golden_reference.Tolerance." + output
     operands = re.findall(r"\brelative_to\s*[:=]\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)", text)
     if not operands or set(operands) != {declaration["relative_to"]}:
         raise ExtractError(f"{location} must explicitly preserve relative_to={declaration['relative_to']}")
@@ -106,8 +106,8 @@ def _criterion(text: str, declaration: dict, output: str) -> None:
 def validate_comparisons(receipt: dict, lock: dict, artifacts: Path, *, parser_root: Path | None = None) -> None:
     expected = declarations(lock)
     root = load_root(artifacts, parser_root=parser_root or rules_root(lock))
-    algorithm = root["contract"]["algorithm_requirement"]
-    criteria = algorithm["golden_reference"]["tolerance"]
+    algorithm = root["CONTRACT"]["Algorithm_requirement"]
+    criteria = algorithm["Golden_reference"]["Tolerance"]
     covered, seen = set(), set()
     for item in receipt["comparisons"]:
         output, source_output = item["output"], item["source_output"]

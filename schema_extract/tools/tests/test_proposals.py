@@ -1,4 +1,4 @@
-"""Durable protocol boundaries: nonce, read-only bytes, raw evidence and long lines."""
+"""Current proposal identity, directory decisions and exact evidence boundaries."""
 
 from copy import deepcopy
 import json
@@ -6,30 +6,30 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 import unittest
 from uuid import uuid4
 
-from schema_extract.tools.artifacts import index_prefix
+from schema_extract.tools.artifacts import validate_plan, write_yaml
 from schema_extract.tools.audit import _receipt_response
 from schema_extract.tools.common import ExtractError, manifest
 from schema_extract.tools.reading import read_evidence, read_range
 from schema_extract.tools.receipts import ReceiptFormatError, normalize_response, validate_receipt
-from schema_extract.tools.stages import DOCUMENT_CONCLUSIONS
+from schema_extract.tools.stages import DOCUMENT_CONCLUSIONS, required_conclusions
+from schema_extract.tools.tests import test_artifact_transactions as artifact_fixture
 
 
 class ProposalTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.fixture = artifact_fixture.ArtifactTransactions(methodName="runTest")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.root = self.fixture.directory
         self.source = self.root / "source"
-        self.artifacts = self.root / "artifacts"
         self.source.mkdir()
-        self.artifacts.mkdir()
+        (self.root / "rules").symlink_to(artifact_fixture.REPO, target_is_directory=True)
         (self.source / "kernel.py").write_text("def route(x): return x\n")
-        (self.artifacts / "root.yaml").write_text("selected_path: route\n")
-        (self.artifacts / "dispatch.md").write_text("[root](root.yaml) uses route.\n")
+        self.artifacts = self.fixture.task("artifacts")
+        self.selected = artifact_fixture.selection("root")
         self.lock = {"snapshot": str(self.root), "source": {"id": "fixed-source", "files": manifest(self.source),
                      "bindings": {"host": {"path": "kernel.py", "symbol": "route"}}}}
         self.attempt = {"run_id": str(uuid4()), "attempt_id": str(uuid4()), "input_fingerprint": "fixed-input",
@@ -44,110 +44,85 @@ class ProposalTests(unittest.TestCase):
                          "decision": "approve", "summary": "The compact routing description is faithful.",
                          "source_evidence": [anchor("kernel.py", category="host")],
                          "artifact_evidence": [anchor(name) for name in ("root.yaml", "dispatch.md")],
-                         "conclusions": [{"subject": subject, "text": "One route covers this task.", "evidence": [0]}
-                                         for subject in ("root_choice", "paths", "coverage")],
-                         "checks": [], "checks_note": "P2 uses its stage gate.", "issues": [],
-                         "framework_candidates": [], "handoff": "Follow route for the root design.", "reopen": None}
-        self.proposal["conclusions"].extend(
-            {"subject": subject, "text": "The current document meets this criterion.", "evidence": []}
-            for subject in DOCUMENT_CONCLUSIONS)
+                         "conclusions": self.conclusions(), "plan": deepcopy(self.selected),
+                         "checks": [], "checks_note": "Runner uses the current stage gate.", "issues": [],
+                         "framework_candidates": [], "handoff": "Follow the selected concrete design.", "reopen": None}
+
+    def conclusions(self):
+        return [{"subject": subject, "text": "Checked this property of the current submission.",
+                 "evidence": [] if subject in DOCUMENT_CONCLUSIONS else [0]}
+                for subject in required_conclusions(self.attempt)]
+
+    def state(self):
+        return {"run_id": self.attempt["run_id"], "input_fingerprint": self.attempt["input_fingerprint"],
+                "accepted_receipts": {}, "active_attempts": {self.attempt["stage"]: self.attempt["attempt_id"]},
+                "selected_designs": self.selected, "plan_draft": self.proposal.get("plan"),
+                "pending_rechecks": [], "revision_scope": []}
 
     def normalize(self, proposal=None):
         return normalize_response(self.proposal if proposal is None else proposal,
                                   self.lock, self.attempt, self.artifacts)
 
     def p4_plan(self):
-        (self.root / "rules").symlink_to(Path(__file__).resolve().parents[3], target_is_directory=True)
-        (self.artifacts / "root.yaml").write_text("meta_data:\n  dispatch:\n    id: root\n    when: N > 0\ncontract: {}\n")
-        plan = [{"id": name, "file": name + ".yaml", "parent": parent, "workload": "Positive scalar inputs.",
-                 "difference": "Selected route.", "selection": "kernel.py::route", "evidence": [0]}
-                for name, parent in (("root", ""), ("branch", "root"))]
+        self.selected = artifact_fixture.selection("root", "branch")
+        plan = [{"id": "branch", "wait_for": ["root"]}]
         self.attempt.update(stage="P4", role="worker", writable_files=["dispatch.md"],
+                            selection_signature=validate_plan("P2", self.selected, parser_root=artifact_fixture.REPO),
                             dependency_digests=manifest(self.artifacts))
-        self.proposal.update(decision="complete", plan=plan,
-                             conclusions=[{"subject": subject, "text": "The source supports this plan.", "evidence": [0]}
-                                          for subject in ("tree", "paths", "coverage")])
-        return plan
+        self.proposal.update(decision="complete", plan=plan, conclusions=self.conclusions())
+        self.fixture.index(self.artifacts, {"root", "branch"}, planned={"branch"})
+        return (self.artifacts / "dispatch.md").read_text()
 
     def validate_p4(self, text):
         (self.artifacts / "dispatch.md").write_text(text)
         receipt = self.normalize()
-        state = {key: self.attempt[key] for key in ("run_id", "input_fingerprint")}
-        state.update(accepted_receipts={}, active_attempts={"P4": self.attempt["attempt_id"]})
-        return validate_receipt(receipt, state, self.lock, self.attempt, self.artifacts, ["dispatch.md"])
+        return validate_receipt(receipt, self.state(), self.lock, self.attempt, self.artifacts, ["dispatch.md"])
 
-    def test_p4_explanation_before_coverage_passes_without_receipt_repair(self):
-        prefix = index_prefix(self.p4_plan())
-        for index in (prefix, prefix.replace("## 覆盖缺口", "Parent links describe copying.\n\n## 覆盖缺口"),
-                      prefix.replace("## 覆盖缺口", "\n\nParent links describe copying.\n\n\n## 覆盖缺口"),
-                      prefix.replace("## 覆盖缺口", "~~~markdown\n## 覆盖缺口\n~~~\n\n## 覆盖缺口")):
-            with self.subTest(index=index):
-                receipt = self.validate_p4(index + "No known gaps.\n")
-                self.assertEqual(receipt["decision"], "complete")
+    def test_p4_prose_and_layout_do_not_require_a_generated_parent_table(self):
+        index = self.p4_plan()
+        for text in (index, index + "\n安排只控制开工顺序。\n",
+                     index.replace("## 完整设计", "附加说明。\n\n## 完整设计"),
+                     index + "\n~~~markdown\n## 完整设计\n~~~\n"):
+            with self.subTest(text=text):
+                self.assertEqual(self.validate_p4(text)["decision"], "complete")
 
-    def test_p4_table_changes_remain_hard_errors_with_a_location(self):
-        prefix = index_prefix(self.p4_plan())
-        changed = prefix.replace("Positive scalar inputs.", "Negative scalar inputs.", 1)
-        with self.assertRaises(ExtractError) as caught:
-            self.validate_p4(changed + "No known gaps.\n")
-        self.assertNotIsInstance(caught.exception, ReceiptFormatError)
-        self.assertIn("first difference at line 5, column", str(caught.exception))
-
-    def test_p4_layout_tolerance_does_not_relax_gaps_links_or_parents(self):
-        plan = self.p4_plan()
-        prefix = index_prefix(plan)
-        for body, message in (("<!-- not a coverage statement -->", "requires actual coverage gaps"),
-                              ("No known gaps. [unknown](unknown.yaml)\n", "YAML links differ")):
-            with self.subTest(body=body), self.assertRaises(ExtractError) as caught:
-                self.validate_p4(prefix + body)
+    def test_p4_current_waiting_and_planned_links_remain_hard_boundaries(self):
+        index = self.p4_plan()
+        for text in (index.replace("`branch.yaml`（仅计划）", "[branch](branch.yaml)"),
+                     index + "\n[unknown](unknown.yaml)\n", index.replace("root.yaml", "missing.yaml")):
+            with self.subTest(text=text), self.assertRaises(ExtractError) as caught:
+                self.validate_p4(text)
             self.assertNotIsInstance(caught.exception, ReceiptFormatError)
-            self.assertIn(message, str(caught.exception))
-        plan[1]["parent"] = "missing"
-        with self.assertRaises(ExtractError) as caught:
-            self.validate_p4(index_prefix(plan) + "No known gaps.\n")
-        self.assertNotIsInstance(caught.exception, ReceiptFormatError)
-        self.assertIn("parent does not exist", str(caught.exception))
+        self.proposal["plan"][0]["wait_for"] = ["missing"]
+        with self.assertRaisesRegex(ExtractError, "wait_for"):
+            self.validate_p4(index)
 
-    def test_p4_coverage_needs_its_own_unique_section(self):
-        prefix = index_prefix(self.p4_plan())
-        table = prefix.removesuffix("## 覆盖缺口\n\n")
-        for text, message in (
-                (table + "No known gaps.\n", "requires one '## 覆盖缺口' section"),
-                (table + "<!--\n## 覆盖缺口\n-->\nNo known gaps.\n", "requires one '## 覆盖缺口' section"),
-                (table + "```markdown\n## 覆盖缺口\nNo known gaps.\n```\n", "requires one '## 覆盖缺口' section"),
-                (table + "No known gaps.\n\n## 覆盖缺口\n\n<!-- incomplete -->\n", "requires actual coverage gaps"),
-                (prefix + "```\nNo known gaps.\n```\n", "requires actual coverage gaps"),
-                (prefix + "## Other notes\n\nNo known gaps.\n", "requires actual coverage gaps"),
-                (prefix + "No known gaps.\n\n## 覆盖缺口\n\nConflicting coverage.\n", "requires one '## 覆盖缺口' section")):
-            with self.subTest(text=text), self.assertRaisesRegex(ExtractError, message):
+    def test_p4_required_sections_are_real_and_unique(self):
+        index = self.p4_plan()
+        for text in (index.replace("## 范围", "## 其他"),
+                     index.replace("## 完整设计", "## 其他"),
+                     index + "\n## 范围\n\n冲突范围。\n",
+                     "~~~markdown\n" + index + "~~~\n"):
+            with self.subTest(text=text), self.assertRaisesRegex(ExtractError, "dispatch|section"):
                 self.validate_p4(text)
 
     def p6_plan(self):
-        # This fixture exercises receipt and topology gates; the Runner also
-        # applies the full schema checker before accepting a real P6 result.
-        plan = self.p4_plan()
-        (self.artifacts / "branch.yaml").write_text(
-            "meta_data:\n  dispatch:\n    id: branch\n    parent: root\n    when: N > 1\ncontract: {}\n")
-        (self.artifacts / "dispatch.md").write_text(index_prefix(plan) + "No known gaps.\n")
-        self.attempt.update(stage="P6", role="reviewer", writable_files=[],
-                            dependency_digests=manifest(self.artifacts))
+        self.p4_plan()
+        write_yaml(self.artifacts / "branch.yaml", self.fixture.branch("branch"), parser_root=artifact_fixture.REPO)
+        self.fixture.index(self.artifacts, {"root", "branch"})
+        self.attempt.update(stage="P6", role="reviewer", writable_files=[], dependency_digests=manifest(self.artifacts))
         self.proposal.pop("plan")
         self.proposal.update(decision="approve", affected_nodes=["root", "branch"], revision_scope=[], handoff="",
-                             conclusions=[{"subject": subject, "text": "Checked this final property.",
-                                           "evidence": [] if subject == "tree" else [0]}
-                                          for subject in ("tree", "selection", "coverage", "references", "unresolved")])
+                             conclusions=self.conclusions())
+        self.proposal["conclusions"][0]["evidence"] = []
         self.proposal["artifact_evidence"].append(
             {"path": "branch.yaml", "line_start": 1, "line_end": 1, "quote_offset": 0,
-             "note": "Checked this node in the final tree."})
-        self.proposal["conclusions"].extend(
-            {"subject": subject, "text": "Reviewed this criterion across both current nodes.", "evidence": []}
-            for subject in DOCUMENT_CONCLUSIONS)
-        state = {key: self.attempt[key] for key in ("run_id", "input_fingerprint")}
-        state.update(accepted_receipts={}, active_attempts={"P6": self.attempt["attempt_id"]}, plan=plan,
-                     pending_rechecks=["root", "branch"], revision_scope=[])
+             "note": "Checked this current final document."})
+        state = self.state()
+        state["pending_rechecks"] = ["root", "branch"]
         return state
 
-    def test_p6_tree_can_use_complete_artifact_evidence(self):
+    def test_p6_directory_can_use_complete_artifact_evidence(self):
         state = self.p6_plan()
         receipt = self.normalize()
         self.assertEqual(validate_receipt(receipt, state, self.lock, self.attempt, self.artifacts, []), receipt)
@@ -159,59 +134,47 @@ class ProposalTests(unittest.TestCase):
         for subject in DOCUMENT_CONCLUSIONS:
             with self.subTest(subject=subject):
                 self.proposal = deepcopy(original)
-                self.proposal["conclusions"] = [
-                    item for item in self.proposal["conclusions"] if item["subject"] != subject]
+                self.proposal["conclusions"] = [item for item in self.proposal["conclusions"] if item["subject"] != subject]
                 with self.assertRaisesRegex(ExtractError, "missing supported stage conclusions"):
                     validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
         self.proposal = deepcopy(original)
-        self.proposal["artifact_evidence"] = [
-            item for item in self.proposal["artifact_evidence"] if item["path"] != "branch.yaml"]
+        self.proposal["artifact_evidence"] = [item for item in self.proposal["artifact_evidence"] if item["path"] != "branch.yaml"]
         with self.assertRaises(ExtractError):
             validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
 
     def test_p2_cumulative_review_is_required_before_design_is_complete(self):
-        state = {"run_id": self.attempt["run_id"], "input_fingerprint": self.attempt["input_fingerprint"],
-                 "accepted_receipts": {}, "active_attempts": {"P2": self.attempt["attempt_id"]}}
-        self.assertEqual(validate_receipt(self.normalize(), state, self.lock, self.attempt,
+        self.assertEqual(validate_receipt(self.normalize(), self.state(), self.lock, self.attempt,
                                          self.artifacts, [])["decision"], "approve")
-        self.proposal["conclusions"] = [
-            item for item in self.proposal["conclusions"] if item["subject"] not in DOCUMENT_CONCLUSIONS]
+        self.proposal["conclusions"] = [item for item in self.proposal["conclusions"] if item["subject"] not in DOCUMENT_CONCLUSIONS]
         with self.assertRaisesRegex(ExtractError, "document_self_contained"):
-            validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
+            validate_receipt(self.normalize(), self.state(), self.lock, self.attempt, self.artifacts, [])
 
-    def test_p6_artifact_tree_still_requires_every_file_and_source_conclusion(self):
+    def test_p6_directory_evidence_does_not_replace_source_judgments(self):
         state = self.p6_plan()
         original = deepcopy(self.proposal)
         self.proposal["artifact_evidence"].pop()
-        with self.assertRaisesRegex(ExtractError, "missing supported stage conclusions: .*tree"):
+        with self.assertRaisesRegex(ExtractError, "missing supported stage conclusions: .*directory"):
             validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
         self.proposal = original
         self.proposal["conclusions"][1]["evidence"] = []
         with self.assertRaisesRegex(ExtractError, "missing supported stage conclusions: selection"):
             validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
 
-    def test_p6_artifact_tree_checks_actual_parent_links(self):
-        state = self.p6_plan()
-        branch = self.artifacts / "branch.yaml"
-        branch.write_text(branch.read_text().replace("parent: root", "parent: missing"))
-        self.attempt["dependency_digests"] = manifest(self.artifacts)
-        with self.assertRaisesRegex(ExtractError, "YAML identity/parent differs"):
-            validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
-
-    def test_p6_artifact_tree_rejects_unplanned_files_even_when_cited(self):
+    def test_p6_rejects_unselected_files_even_when_cited(self):
         state = self.p6_plan()
         (self.artifacts / "extra.yaml").write_text("extra: file\n")
         self.proposal["artifact_evidence"].append(
             {"path": "extra.yaml", "line_start": 1, "line_end": 1, "quote_offset": 0, "note": "Observed this extra file."})
         self.attempt["dependency_digests"] = manifest(self.artifacts)
-        with self.assertRaisesRegex(ExtractError, "missing supported stage conclusions: tree"):
+        with self.assertRaisesRegex(ExtractError, "missing supported stage conclusions: directory"):
             validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
 
     def test_compact_approval_retains_raw_response_and_full_receipt_gate(self):
         raw = deepcopy(self.proposal)
         receipt = self.normalize()
         state = {key: self.attempt[key] for key in ("run_id", "input_fingerprint")}
-        state.update(accepted_receipts={}, active_attempts={"P2": self.attempt["attempt_id"]})
+        state.update(accepted_receipts={}, active_attempts={"P2": self.attempt["attempt_id"]},
+                     plan_draft=self.proposal["plan"])
         self.assertEqual(validate_receipt(receipt, state, self.lock, self.attempt, self.artifacts, []), receipt)
         self.assertEqual(self.proposal, raw)
         self.assertNotEqual(receipt, raw)
@@ -273,12 +236,13 @@ class ProposalTests(unittest.TestCase):
         script = """
 import json
 from types import SimpleNamespace
-from schema_extract.tools import audit, revisions
+from schema_extract.tools import audit
+from schema_extract.tools import runtime
 state = {"run_id": "run", "status": "ready", "checkpoint": "a" * 64, "merged_checkpoint": "b" * 64}
 audit._inputs = lambda *args: {}
 audit._checkpoint = lambda store, state, identity, files: {"id": identity, "files": {}}
 audit._state = lambda *args: state
-revisions.verify_revisions = lambda *args, **kwargs: []
+runtime.verify_execution = lambda *args, **kwargs: {}
 store = SimpleNamespace(writer_status=lambda _: "available")
 files = SimpleNamespace(file=lambda *args, **kwargs: None)
 print(json.dumps(audit._verify(store, state, [], files, whole_run=True), sort_keys=True))

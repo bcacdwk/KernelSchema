@@ -1,263 +1,300 @@
-"""Current frozen phase page, fixed handoffs, and one invocation's locating context."""
+"""Frozen Markdown instructions and exact materials for one invocation."""
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import shlex
+import sys
 
-from .artifacts import _same, design_context, load_root
+from .artifacts import _same, design_context, load_root, load_yaml
 from .budget import call_limit
-from .receipts import REOPEN_TARGETS, required_artifact_evidence
-from .stages import STAGES, owner_for, read_specs, required_conclusions, scope_for
-from .common import ExtractError, read_json, rules_root, source_root
+from .common import ExtractError, digest, manifest, read_json, regular_file, rules_root, seal, sha256, source_root, write_json
+from .receipts import REOPEN_TARGETS, call_identity, required_artifact_evidence
 from .snapshots import frozen_reader
+from .stages import STAGES, effective_nodes, owner_for, read_specs, required_conclusions, scope_for
+
+
+PROMPT_ROOT = "schema_extract/prompt"
+HELPER_FILES = ("__init__.py", "common.py", "inputs.py", "artifacts.py", "reading.py")
+
+
+def operation_text(name: str, *, rules_lock: dict | None = None) -> str:
+    if not re.fullmatch(r"[a-z][a-z_]*", name):
+        raise ExtractError("invalid prompt operation name")
+    return regular_file(rules_root(rules_lock), f"{PROMPT_ROOT}/operations/{name}.md").read_text(encoding="utf-8")
+
+
+def render_operation(name: str, context: dict | None = None, *, rules_lock: dict | None = None) -> str:
+    text = operation_text(name, rules_lock=rules_lock).rstrip()
+    if context is not None:
+        text += "\n\n<operation-context>\n" + json.dumps(context, ensure_ascii=False, indent=2) + "\n</operation-context>"
+    return text + "\n"
+
+
+def _documents(attempt: dict) -> list[str]:
+    mode = attempt.get("mode", "normal")
+    operation = "maintenance" if attempt.get("purpose") == "maintenance" else (
+        "normal_" + attempt["role"] if mode == "normal" else mode)
+    result = [f"{PROMPT_ROOT}/common.md", f"{PROMPT_ROOT}/roles/{attempt['role']}.md",
+              f"{PROMPT_ROOT}/operations/response.md", f"{PROMPT_ROOT}/operations/check.md",
+              f"{PROMPT_ROOT}/operations/{operation}.md", f"{PROMPT_ROOT}/phases/{STAGES[attempt['stage']]['page']}"]
+    if attempt["stage"] in REOPEN_TARGETS and mode == "normal" and attempt.get("purpose") != "maintenance":
+        result.append(f"{PROMPT_ROOT}/operations/reopen.md")
+    if attempt.get("recovery_handoff"):
+        result.append(f"{PROMPT_ROOT}/operations/recovery.md")
+    return result
+
+
+def _read_specs(attempt: dict) -> list[str]:
+    return list(dict.fromkeys([*read_specs(attempt), f"{PROMPT_ROOT}/roles/reviewer.md"]))
+
+
+def _linked_rules(lock: dict, names) -> set[str]:
+    """Keep local references of selected frozen reading documents available."""
+    available, root = lock["rules"]["files"], rules_root(lock)
+    pending, selected = list(names), set()
+    while pending:
+        name = pending.pop()
+        if name in selected:
+            continue
+        if name not in available:
+            raise ExtractError("required reading is not frozen: " + name)
+        selected.add(name)
+        if not name.endswith(".md"):
+            continue
+        for target in re.findall(r"\]\(([^)]+)\)", (root / name).read_text(encoding="utf-8")):
+            target = target.split("#", 1)[0]
+            if not target or ":" in target or target.startswith("/"):
+                continue
+            try:
+                relative = ((root / name).parent / target).resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+            if relative in available and (relative.startswith(("schema_docs/", PROMPT_ROOT + "/")) or
+                                          relative in {"EXTRACT_SCHEMA.md", "schema_template/README.md", "schema_template/starter.yaml"}):
+                pending.append(relative)
+    return selected
+
+
+def _first_draft(state: dict, attempt: dict, rules: Path) -> bool:
+    if attempt["stage"] == "P5":
+        return (not state["nodes"][attempt["node"]].get("authored", False) and
+                load_yaml(Path(attempt["workspace"]), attempt["node"] + ".yaml", parser_root=rules)["META_DATA"]["Version"] == 1)
+    if attempt["stage"] == "P1":
+        return _same(load_root(Path(attempt["workspace"]), parser_root=rules),
+                     load_root(rules / "schema_template", "starter.yaml", parser_root=rules))
+    return False
+
+
+def prepare_attempt_materials(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | None = None,
+                              executor_lock: dict | None = None) -> dict:
+    """Copy evidence and baselines; expose no run directory or authoritative state."""
+    semantic, executor = rules_lock or lock, executor_lock or rules_lock or lock
+    directory, workspace = Path(attempt["directory"]), Path(attempt["workspace"])
+    run_dir, destination = directory.parent.parent, directory / "materials"
+    destination.mkdir()
+    files, records, candidates = {}, [], []
+
+    def copy_file(source: Path, name: str, *, expected=None) -> str:
+        if PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts:
+            raise ExtractError("invalid attempt material path")
+        data = regular_file(source.parent, source.name).read_bytes()
+        checksum = sha256(data)
+        if expected is not None and checksum != expected:
+            raise ExtractError("material differs from its recorded source: " + str(source))
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        files[name] = {"source": str(source), "sha256": checksum, "path": str(target)}
+        return str(target)
+
+    needed_stages = {"P1": [], "P2": ["P1"], "P3": ["P2"], "P4": ["P2", "P3"],
+                     "P5": ["P2", "P4"], "P6": ["P2", "P4"]}[attempt["stage"]]
+    approvals = [(stage, "root", state["stages"][stage].get("approval")) for stage in needed_stages]
+    if attempt["stage"] == "P6":
+        approvals.extend(("P5", node, entry.get("approval")) for node, entry in state["nodes"].items() if node != "root")
+    seen_receipts = set()
+
+    def receipt_record(attempt_id: str, reason: str, *, expected_digest=None):
+        if attempt_id in seen_receipts:
+            return
+        path = run_dir / "attempts" / attempt_id / "receipt.json"
+        value = read_json(path)
+        expected_digest = expected_digest or state.get("accepted_receipts", {}).get(attempt_id)
+        if expected_digest is None or digest(value) != expected_digest:
+            raise ExtractError("material receipt differs from its accepted identity: " + attempt_id)
+        identity = value["identity"]
+        invocation = read_json(path.parent / "attempt.json")
+        if (identity != call_identity(invocation) or identity["run_id"] != state["run_id"] or
+                identity["input_fingerprint"] != state["input_fingerprint"]):
+            raise ExtractError("material receipt differs from this run's fixed source invocation")
+        selected = value.get("plan") if identity["stage"] == "P2" else invocation["selected_designs"]
+        instances = [entry for entry in selected or []
+                     if identity["stage"] in {"P2", "P4"} or entry["id"] == identity["node"]]
+        current = {entry["id"]: entry["instance"] for entry in state.get("selected_designs") or []}
+        relation = {entry["id"]: ("removed" if entry["id"] not in current else
+                                   "current_instance" if entry["instance"] == current[entry["id"]] else "changed_instance")
+                    for entry in instances}
+        copied = copy_file(path, "records/" + attempt_id + ".json")
+        records.append({"kind": "receipt", "stage": identity["stage"], "node": identity["node"],
+                        "role": identity["role"], "attempt_id": attempt_id, "path": copied,
+                        "receipt_sha256": expected_digest, "source_id": lock["source"]["id"],
+                        "generation": identity.get("generation"), "instances": instances, "instance_relation": relation,
+                        "purpose": reason, "read_after": "current_artifacts"})
+        seen_receipts.add(attempt_id)
+
+    for stage, node, approval in approvals:
+        if not approval:
+            continue
+        receipt_record(approval["attempt_id"], "current_decision", expected_digest=approval["receipt_sha256"])
+        path = run_dir / "stages" / stage
+        if stage == "P5":
+            path /= node
+        path /= "handoff.md"
+        if path.is_file():
+            copied = copy_file(path, f"handoffs/{stage}/{node}.md")
+            records.append({"kind": "handoff", "stage": stage, "node": node, "path": copied,
+                            "purpose": "knowledge_destination", "read_after": "current_artifacts"})
+    latest_scope = False
+    for attempt_id in reversed(state["attempts"]):
+        if attempt_id not in state["accepted_receipts"]:
+            continue
+        value = read_json(run_dir / "attempts" / attempt_id / "receipt.json")
+        identity = value["identity"]
+        same_scope = (identity["stage"], identity["node"]) == (attempt["stage"], attempt["node"])
+        if same_scope and not latest_scope:
+            receipt_record(attempt_id, "current_feedback")
+            latest_scope = True
+        if same_scope and value.get("framework_candidates"):
+            receipt_record(attempt_id, "framework_candidates")
+        transfer = identity["stage"] in needed_stages or (
+            attempt["stage"] == "P6" and identity["stage"] in {"P2", "P3", "P4", "P5"})
+        if (same_scope or transfer) and (value.get("handoff", "").strip() or value.get("issues")):
+            receipt_record(attempt_id, "knowledge_destination")
+
+    scope = scope_for(state, attempt)
+    if attempt.get("mode") == "adjudicate":
+        for entry in attempt["adjudication_candidates"]:
+            checkpoint = entry["checkpoint"]
+            source = run_dir / "checkpoints" / checkpoint / "artifacts"
+            for name, checksum in manifest(source).items():
+                copy_file(source / name, f"candidates/{checkpoint}/{name}", expected=checksum)
+            candidates.append({**entry, "artifacts": str(destination / "candidates" / checkpoint)})
+    if attempt["role"] == "worker":
+        for name, checksum in attempt["dependency_digests"].items():
+            copy_file(workspace / name, "baseline/" + name, expected=checksum)
+    historical = attempt.get("baseline_context_checkpoint")
+    if historical:
+        source = run_dir / "checkpoints" / historical / "artifacts"
+        for name, checksum in manifest(source).items():
+            copy_file(source / name, "historical/" + name, expected=checksum)
+    selected = state.get("plan_draft") if attempt["stage"] == "P2" and attempt["role"] == "reviewer" else state.get("selected_designs")
+    node_entry = next((entry for entry in state.get("selected_designs") or [] if entry["id"] == attempt["node"]), None)
+    check = {"format": "schema_extract.stage_check.v1", "attempt_id": attempt["attempt_id"],
+             "stage": attempt["stage"], "node": attempt["node"], "role": attempt["role"],
+             "workspace": str(workspace), "rules_root": str(rules_root(semantic)), "baseline": str(destination / "baseline"),
+             "baseline_materials": str(destination / "historical") if historical else None,
+             "source_root": str(source_root(lock)), "source": {key: lock["source"][key] for key in
+                 ("id", "repository_id", "ref", "files", "bindings")},
+             "selected_designs": selected, "node_entry": node_entry if attempt["stage"] == "P5" else None,
+             "artifact_files": sorted(attempt["dependency_digests"]),
+             "revision_scope": attempt.get("revision_scope", state.get("revision_scope", [])),
+             "first_draft": _first_draft(state, attempt, rules_root(semantic)),
+             "checked_nodes": sorted(effective_nodes(state)), "maintenance_fields": None}
+    if attempt.get("purpose") == "maintenance":
+        check["maintenance_fields"] = owner_for(state, attempt).get("fields", [])
+    write_json(destination / "check.json", check)
+    files["check.json"] = {"source": "registered_attempt", "sha256": sha256((destination / "check.json").read_bytes()),
+                           "path": str(destination / "check.json")}
+    selected_rules = _linked_rules(semantic, [*_documents(attempt), *_read_specs(attempt), "EXTRACT_SCHEMA.md", "schema_template/starter.yaml",
+                                            f"{PROMPT_ROOT}/operations/recovery.md"])
+    selected_rules.update(name for name in semantic["rules"]["files"] if name.startswith("schema_template/tools/") and name.endswith(".py"))
+    selected_rules.add("schema_template/check_yaml.py")
+    frozen_reader(executor)
+    rule_materials = []
+    for name in sorted(selected_rules):
+        path = regular_file(rules_root(semantic), name)
+        rule_materials.append({"path": str(path), "sha256": semantic["rules"]["files"][name]})
+    for name in HELPER_FILES:
+        relative = "schema_extract/tools/" + name
+        path = regular_file(rules_root(executor), relative)
+        rule_materials.append({"path": str(path), "sha256": executor["rules"]["files"][relative]})
+    material = {"format": "schema_extract.attempt_materials.v1", "directory": str(destination),
+                "source_root": str(source_root(lock)), "rules_root": str(rules_root(semantic)), "executor_root": str(rules_root(executor)),
+                "source": {"id": lock["source"]["id"], "files": lock["source"]["files"]},
+                "rules": rule_materials, "files": files, "records": records, "candidates": candidates,
+                "check": str(destination / "check.json"), "first_draft": check["first_draft"]}
+    command = destination / "check-helper.py"
+    command.write_text("#!" + sys.executable + "\nimport sys\nif len(sys.argv) != 1: raise SystemExit(125)\n" +
+        "sys.path.insert(0, " + repr(str(rules_root(executor))) + ")\n" +
+        "from schema_extract.tools.reading import main\nraise SystemExit(main(" +
+        repr(["--check-materials", str(destination / "check.json"), "--read-only", "--skip-hardware"]) + "))\n",
+        encoding="utf-8")
+    files[command.name] = {"source": "registered_attempt", "sha256": sha256(command.read_bytes()), "path": str(command)}
+    write_json(destination / "manifest.json", material)
+    seal(destination)
+    command.chmod(0o500)
+    return {"materials": material, "check_command": str(command),
+            "read_directories": list(dict.fromkeys([str(source_root(lock)), str(destination),
+                *(str(Path(item["path"]).parent) for item in rule_materials)]))}
 
 
 def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | None = None,
                  executor_lock: dict | None = None) -> str:
-    definition = STAGES[attempt["stage"]]
-    if attempt.get("semantic_revision") and rules_lock is None:
-        raise ExtractError("semantic prompt requires its explicit rules lock")
-    semantic = rules_lock or lock
-    executor = executor_lock or semantic
-    mode = attempt.get("mode", "normal")
-    maintaining = attempt.get("purpose") == "maintenance"
-    rules, source = rules_root(semantic), source_root(lock)
-    page_spec = "schema_extract/phases/" + definition["page"]
-    page_path = rules / page_spec
-    provided_documents = [page_spec]
-    if attempt["role"] == "reviewer":
-        provided_documents.append("schema_extract/REVIEW.md")
-    bindings = lock["source"]["bindings"]
+    semantic, executor = rules_lock or lock, executor_lock or rules_lock or lock
+    rules, definition, materials = rules_root(semantic), STAGES[attempt["stage"]], attempt["materials"]
+    documents, bindings = _documents(attempt), lock["source"]["bindings"]
+
     def source_reference(key):
         entry = bindings[key]
         symbol = "::" + entry["symbol"] if entry["symbol"] else ""
         return f"{lock['source']['repository_id']}@{lock['source']['ref']}:{entry['path']}{symbol}"
-    node_entry = next((entry for entry in state.get("plan") or [] if entry["id"] == attempt["node"]), None)
-    plan = state.get("plan") or state.get("plan_draft")
-    if attempt["stage"] == "P4" and attempt["role"] == "reviewer" and state.get("plan_draft") is not None:
-        # A replan reviewer must assess the current worker proposal, including
-        # an empty incomplete draft, rather than the previously approved tree.
-        plan = state["plan_draft"]
-    if attempt["stage"] in {"P1", "P3"} and plan:
-        plan = [entry for entry in plan if entry["id"] == "root"]
-    reopening = state.get("reopening")
-    if attempt["stage"] in {"P1", "P3"} and attempt["role"] == "worker" and reopening is not None:
-        # Project the model input without mutating the Runner's reopening record.
-        reopening = {key: value for key, value in reopening.items()
-                     if key not in {"previous_plan", "previous_merged_checkpoint", "previous_plan_revision"}}
-    run_dir = Path(attempt["directory"]).parent.parent
-    prior_stage = {"P3": "P2", "P4": "P3", "P5": "P4"}.get(attempt["stage"])
-    handoff_path = run_dir / "stages" / (prior_stage or "") / "handoff.md"
-    handoff = (handoff_path.read_text(encoding="utf-8")
-               if attempt["role"] == "worker" and prior_stage and handoff_path.is_file() else "")
-    scope = scope_for(state, attempt)
-    plan_receipt, node_evidence = None, []
-    relevant_nodes = {"root"} if attempt["stage"] in {"P1", "P3"} else set(state["nodes"])
-    ancestors = []
-    if attempt["stage"] == "P5":
-        if attempt["role"] == "worker":
-            approved_plan = state["stages"]["P4"]["approval"]
-            plan_receipt = run_dir / "attempts" / approved_plan["attempt_id"] / "receipt.json"
-            approved_evidence = read_json(plan_receipt)["source_evidence"]
-            node_evidence = [approved_evidence[index] for index in node_entry["evidence"]]
-        relevant_nodes = {attempt["node"]}
-        parent = node_entry["parent"]
-        while parent:
-            relevant_nodes.add(parent)
-            ancestors.append(next(entry for entry in state["plan"] if entry["id"] == parent))
-            parent = state["nodes"][parent]["parent"]
-    source_context = (design_context(state, attempt, Path(attempt["workspace"]), parser_root=rules)
-                      if attempt["stage"] in {"P5", "P6"} else {})
-    def approval_reference(value):
-        return {"checkpoint": value["checkpoint"], "receipt_sha256": value["receipt_sha256"],
-                "receipt": str(run_dir / "attempts" / value["attempt_id"] / "receipt.json")}
-    first_draft = attempt["stage"] == "P5" and not state["nodes"][attempt["node"]].get("authored", False)
-    if attempt["stage"] == "P1":
-        baseline = run_dir / "checkpoints" / attempt["base_checkpoint"] / "artifacts"
-        first_draft = _same(load_root(baseline, parser_root=rules),
-                            load_root(rules / "schema_template", "starter.yaml", parser_root=rules))
-    locating = {"attempt_id": attempt["attempt_id"], "stage": attempt["stage"], "role": attempt["role"],
-                "node": attempt["node"], "mode": mode, "purpose": attempt.get("purpose", "normal"),
-                "base_checkpoint": attempt["base_checkpoint"],
-                "dependency_digests": attempt["dependency_digests"],
-                "source_id": lock["source"]["id"], "source_ref": lock["source"]["ref"],
-                "source_root": str(source), "rules_id": semantic["rules"]["id"],
-                "semantic_revision": attempt.get("semantic_revision"),
-                "executor_rules_id": executor["rules"]["id"], "executor_root": str(rules_root(executor)),
-                "execution_binding": attempt.get("execution_binding"),
-                "rules_root": str(rules), "phase_page": str(page_path), "workspace": attempt["workspace"],
-                "inputs": {key: bindings[key] for key in ("entrypoint", "host", "io", "input", "reference", "acceptance", "scope")},
-                "implementation_source": source_reference("entrypoint"), "reference_source": source_reference("reference"),
-                "writable_files": attempt["writable_files"], "revision_scope": state["revision_scope"],
-                "provided_documents": provided_documents,
-                "read_specs": [name for name in read_specs(attempt) if name not in provided_documents],
-                "feedback": owner_for(state, attempt)["feedback"], "handoff": handoff,
-                "required_conclusions": required_conclusions(attempt), "required_evidence": definition["evidence"],
-                "required_artifact_evidence": sorted(required_artifact_evidence(state, attempt, attempt["dependency_digests"],
-                                                       resolution=source_context.get("design_resolution"))),
-                "node_entry": node_entry, "plan": plan,
-                "plan_receipt": str(plan_receipt) if plan_receipt else None, "node_evidence": node_evidence,
-                "reopening": reopening,
-                "recovery_handoff": attempt.get("recovery_handoff"),
-                "imported_draft": state.get("imported_draft"),
-                "first_draft": first_draft,
-                "pending_rechecks": state["pending_rechecks"],
-                "prior_approvals": {key: approval_reference(value["approval"]) for key, value in state["stages"].items()
-                                    if value["approval"] and (attempt["stage"] != "P5" or key == "P4")},
-                "node_approvals": {key: approval_reference(value["approval"]) for key, value in state["nodes"].items()
-                                   if key in relevant_nodes and value.get("approval")},
-                "reviewed_artifacts": {key: str(run_dir / "checkpoints" / value["approval"]["checkpoint"] / "artifacts" / value["file"])
-                                       for key, value in state["nodes"].items() if key in relevant_nodes and value.get("approval")},
-                "budget": {**{key: scope[key] for key in ("revisions", "continues", "receipt_repairs", "cli_failures", "calls", "deadline")},
-                           "call_seconds": attempt.get("timeout_seconds"), "max_calls": call_limit(state),
-                           "revision_limit": state["config"]["revision_limit"]}}
-    locating.update(source_context)
-    if maintaining:
-        task = state["maintenance"]["tasks"][attempt["maintenance_task_id"]]
-        locating["maintenance"] = {key: task.get(key) for key in
-                                   ("task_id", "action", "step", "plan_reason", "reason", "issues", "fields")}
-        locating["revision_scope"] = task.get("fields", [])
-        locating["feedback"] = task.get("feedback", [])
-        locating.pop("reopening")
-    if attempt["stage"] == "P5":
-        locating.pop("plan")
-        locating["ancestor_entries"] = ancestors
-        locating["revision_scope"] = [item for item in locating["revision_scope"] if item["path"] == node_entry["file"]]
-        locating["pending_rechecks"] = [node for node in state["pending_rechecks"] if node in relevant_nodes]
-        # P4 has already handed off the relevant source/plan decision. Its old
-        # whole-tree history and an imported legacy tree are not branch input.
-        locating.pop("reopening", None)
-        locating.pop("imported_draft")
-        node = state["nodes"][attempt["node"]]
-        if node.get("identity_migration"):
-            locating["identity_migration"] = {key: value for key, value in node["identity_migration"].items()
-                                               if key != "old_checkpoint"}
-            if attempt["role"] == "worker" and node["identity_migration"].get("old_checkpoint"):
-                locating["identity_migration"]["old_artifacts"] = str(run_dir / "checkpoints" /
-                    node["identity_migration"]["old_checkpoint"] / "artifacts")
-        if attempt["role"] == "worker":
-            key = node.get("provider_reopen")
-            if key:
-                record = state["reopen_requests"][key]
-                locating["provider_repair"] = {name: record.get(name) for name in
-                    ("key", "issue_id", "reason", "regions", "source_evidence", "artifact_evidence", "issues", "from_node")}
-            stale = [item for item in state.get("stale_results", {}).values() if item["node"] == attempt["node"]]
-            if stale:
-                locating["retired_workspaces"] = [{key: item.get(key) for key in
-                    ("attempt_id", "generation", "workspace", "base_checkpoint", "reason")} for item in stale]
-    continuation = state.get("continuation")
-    if continuation and attempt["role"] == "worker" and attempt["stage"] != "P6":
-        old = Path(continuation["evidence"]) / "artifacts"
-        names = ({state["nodes"][node]["file"] for node in relevant_nodes} if attempt["stage"] == "P5" else
-                 {"root.yaml"} if attempt["stage"] == "P1" else {"root.yaml", "dispatch.md"})
-        locating["continued_draft"] = {"predecessor": continuation["predecessor"],
-            "artifacts": {name: str(old / name) for name in sorted(names) if (old / name).is_file()}}
-    if mode == "adjudicate" and not maintaining:
-        locating["candidates"] = [{**entry, "artifacts": str(run_dir / "checkpoints" / entry["checkpoint"] / "artifacts")}
-                                  for entry in scope["candidates"]]
-    if attempt["stage"] == "P4":
-        locating["current_node_artifacts"] = dict(locating["reviewed_artifacts"])
-    review_instructions = ""
-    if attempt["role"] == "reviewer":
-        for key in ("feedback", "handoff", "plan_receipt", "node_evidence", "prior_approvals",
-                    "node_approvals", "reviewed_artifacts", "imported_draft",
-                    "continued_draft", "recovery_handoff", "reopening"):
-            locating.pop(key, None)
-        locating["review_scope"] = {
-            "files": locating["required_artifact_evidence"],
-            "method": str(rules / "schema_extract/REVIEW.md"),
-            "order": ["current_specs", "current_artifacts", "fixed_source"],
-        }
-        review_instructions = (rules / "schema_extract/REVIEW.md").read_text(encoding="utf-8")
-    reader = frozen_reader(executor)
-    example = f"python3 -B {shlex.quote(str(reader))} --root {shlex.quote(str(source))} --path {shlex.quote(bindings['host']['path'])} --start-line 1 --end-line 80"
-    checker = rules / "schema_template/check_yaml.py"
-    target = node_entry["file"] if attempt["stage"] == "P5" else "root.yaml"
-    check_command = f"python3 -B {shlex.quote(str(checker))} --skip-hardware {shlex.quote(str(Path(attempt['workspace']) / target))}"
-    if attempt["role"] == "worker":
-        role_instructions = """只修改writable_files与当前阶段、本轮字段授权的交集；已有稿件优先，不重置内容或版本。
-提交前按rules_root/schema_extract/REVIEW.md的共同方法自查独立理解、分层、一致与必要性；沿该文处理来源缺项、源实现缺陷、规范候选和issue证据。每段先查当前schema_docs，采用已定义的合法写法。
-decision=continue只保存本轮草稿并接续原逻辑步骤，不执行CLI continue的语义修订准备。"""
-    else:
-        role_instructions = "只读当前workspace；按下方共用方法独立完成当前阶段的全文审阅，检查器退出码不代替语义判断。"
-    if maintaining:
-        mode_instructions = """本轮仅执行maintenance.step；阶段页的普通推进不适用。维护不消耗或重新授予领域裁决/签收，不使用reopen决策；output-schema要求reopen字段时填null。
-review/verify的reviewer返回approve/revise/blocked，完整审阅本阶段及当前前提，fields不缩小审阅范围。review有据退修时，revision_scope逐项给出带当前artifact_evidence的{path,fields}，受已有fields上限约束；无法可靠定位字段则填[]并blocked。review最多进入一次patch再独立verify；verify仍有问题不再开启修补循环。
-patch的worker返回complete/continue/blocked，原样回传maintenance.fields作为revision_scope。continue保存当前草稿并继续同一patch逻辑步骤，沿用调用/时间预算；complete才进入verify，blocked保存草稿与恢复条件。
-需越界或修改上游时说明具体问题、字段和恢复条件，交Supervisor追加有依据的计划；不得自行扩大范围。"""
-    elif mode == "adjudicate":
-        mode_instructions = """本轮为原reviewer的一次裁决，只返回approve或blocked，不直接改workspace。
-adjudication.action=select只能选列出的候选；patch基于当前checkpoint，patches为当前阶段/授权字段内的{path,old,new}，old非空且唯一匹配。
-Runner在隔离副本应用、核对版本并检查；关键事实缺失、补丁或检查失败即blocked，不再裁决或重试。证据仍指实际读取的原workspace，补丁后的文件SHA-256由Runner另存。"""
-        if attempt["stage"] == "P6":
-            mode_instructions += "\nP6亲自patch最终稿后，由全新独立reviewer签收一次；选择已有稿不追加签收。"
-    elif mode == "signoff":
-        mode_instructions = "本轮为P6裁决补丁后的全新独立reviewer签收。只返回approve或blocked，完整审阅最终稿并覆盖全部pending_rechecks；不再返工、裁决或重试。"
-    else:
-        mode_instructions = ("返回complete/continue/blocked。continue保存草稿并续做同一普通撰写步骤，沿用调用/时间预算；blocked将合法草稿和缺项交独立reviewer判断。"
-                             if attempt["role"] == "worker" else "返回approve/revise/blocked，按共用方法给出当前阶段结论。")
-        mode_instructions += "\n普通退修沿用原角色；达到budget.revision_limit后由原reviewer仅裁决一次。格式修复不算实质退修，恢复沿用原预算。"
-    if attempt["stage"] in REOPEN_TARGETS and mode == "normal" and not maintaining:
-        locating["reopen_targets"] = sorted(set(REOPEN_TARGETS[attempt["stage"]]) |
-                                               set(source_context.get("provider_reopen_targets", {}))) + ["external"]
-        mode_instructions += """
-固定来源推翻上游时可reopen，填写稳定issue_id、target、reason和本次来源证据索引；普通提案reopen=null。
-选父/计划回P4，代表路径回P2，现有root Design/when回P3，共享Contract回P1；仅能使用reopen_targets。
-外部任务要求改变用external，等待任务方明确确认。已读源行的转录错误用issues.kind=transcription；当前产物的规范表达错误用schema_conformance。两者均由scope定位错误产物，以artifact_evidence引用该字段；规范错误还须在detail指出对应条款。其他重开需新源码发现。同一issue_id与固定源码范围只重开一次，换note/引文不重计。"""
-        if attempt["stage"] == "P5":
-            mode_instructions += """
-provider_reopen_targets仅列当前已批准严格祖先中实际保存本地区域的非root provider。定义本身错误时仅可用其中列出的P5:<provider>；对应issues.scope必须包含provider真实文件名和design.<区域>，artifact_evidence锚定该区域本地定义的raw行，issues.evidence与reopen.evidence至少共用一个本次source_evidence索引，依据为固定源码新发现或具体转录/规范纠错。recovery_condition可写“provider修正该定义并取得当前generation的新独立批准后恢复当前节点审阅”。仅在当前子选择域、参数绑定或跨区接口下不适用时，由本节点落地整个local区域修复；子节点when错误也在本节点修订。不可改祖先或引用effective视图虚拟行。"""
-    checking = ("本阶段使用阶段产物门禁；未完成或未生成的Design不要求完整检查。"
-                if attempt["stage"] in {"P1", "P2", "P4"} else
-                f"Runner接收complete/approve/revise时自动运行冻结检查器；complete/approve须退出0，revise可附退出1的产物诊断交回作者，退出2报工具/环境问题。\n需要提前自检或定位诊断时可运行：{check_command}；不要求worker/reviewer各自重复执行。")
-    context_instructions = []
-    if attempt["stage"] == "P5":
-        view_command = f"python3 -B {shlex.quote(str(checker))} --show-effective {shlex.quote(str(Path(attempt['workspace']) / target))}"
-        context_instructions.append(f"design_resolution记录当前来源；只读展开视图可用：{view_command}。输出validation=not_run，不是通过检查的证明，也不是行证据。改变继承区时取完整有效区域落地后再改。")
-        context_instructions.append("differences比较与直接父的有效Design及真实实现/选择差异；inherited_design审本次独立选择域、参数/名称绑定、跨区接口与realization适用性；walkthrough用完整有效Design覆盖输入输出、launch/producer/事件、handoff与资源闭合。历史批准不能作当前证据，也不能证明子适用。")
-        context_instructions.append("reviewer approve时，对本节点及直接父各自的每个引用区域，沿chain用artifact_evidence覆盖consumer自身from_parent、所有中间from_parent及实际provider本地定义的raw行；每文件一个无关锚点不足，同一真实行范围可覆盖多项要求，effective视图虚拟行不可作证据。")
-        if locating.get("identity_migration"):
-            context_instructions.append("identity_migration要求worker显式修改本节点parent并逐区改为新直接父引用，或从old_artifacts有效视图落地完整local区。当前旧raw保持原义；旧checkpoint仅只读恢复线索，不可把旧祖先复制为额外任务YAML。maintenance.fields仍是精确上限，缺字段范围时报告所需scope。迁移后独立批准才清标记。")
-        if locating.get("retired_workspaces"):
-            context_instructions.append("retired_workspaces保留旧generation的原稿；只能由当前worker在新依赖与合法范围下显式采用，旧正文和批准不会自动恢复。")
-    elif attempt["stage"] == "P6":
-        context_instructions.append("共有本地定义按真实文件读一次；逐节点覆盖有效绑定、独立选择域、局部差异和全部pending_rechecks。P6不开放P5 provider重开目标。")
-    if locating.get("recovery_handoff"):
-        context_instructions.append("有recovery_handoff：旧会话已确认中断并退休，以本页、当前checkpoint和固定来源重建上下文。")
-    if locating.get("imported_draft") or locating.get("continued_draft"):
-        context_instructions.append("imported_draft/continued_draft仅是列明的只读旧稿线索，旧state/批准不授予写权限或放行；证据仍指当前source_root/workspace。")
-    handoff_instructions = ("批准时handoff只写已定事项、理由、关键入口和缺口，最多20个非空行/1200字符。"
-                            if attempt["role"] == "reviewer" and attempt["stage"] in {"P2", "P3", "P4"} else
-                            "本轮无必需短交接，handoff可为空串。")
-    return f"""你是独立的 {attempt['role']}，只执行本次 {attempt['stage']} / {attempt['node']} / {locating['purpose']} / {mode}。
-目标是按当前冻结schema_docs把固定kernel提取为忠实、简洁的流水线设计。source_root绑定原固定源码，rules_root绑定本次语义规则；executor_root只提供绑定的执行工具，不能替代rules_root。不得从原工作树或旧状态切换来源、规则或权限。
-{role_instructions}
-Runner唯一写运行状态。worker/reviewer不开子代理，不改kernel，不做GPU测试；有据的源低层缺陷不要求先修kernel，按共用方法保留事实与必要设计。
-按嵌入阶段页及本轮模式工作，只读列明的冻结来源/规则/执行工具、当前workspace、回执、已审产物、候选与旧稿线索；沿当前问题读取规范和页内方法。
-provided_documents列出的文档已在本次提示提供冻结全文，直接阅读无需再次打开；其余材料按read_specs读取。
-先定位当前问题需要的源码范围；不因文件较长而通读。有next_cursor表示所选范围尚未读完，需要续读该范围时保留起止行并用--cursor：
-{example}
-最后按output-schema仅返回schema_extract.proposal.v1 JSON，原样回传本次attempt_id nonce；缺失或陈旧nonce硬拒绝。summary由你填写本轮简短、非空的语义结论。identity、文件SHA-256、文件清单、实际差异由Runner从已登记调用与真实字节生成，不手填、不另写回执文件。
-证据由你亲读并选择：相对path、1起始line_start/line_end（最多12行）、quote_offset（范围原文中从0开始的字符偏移，通常0）和说明语义的note；来源另选category。用reader --evidence --end-line N [--quote-offset N]预览该范围生成的最多320字符精确引文，不会替你寻找依据。不要回传sha256/source_id/quote。
-complete/approve覆盖required_evidence、required_conclusions；每类至少选对应绑定入口，调用链可补充。conclusions/issues等的evidence从0索引本次source_evidence。reviewer各种决策均须提供实际源码证据，artifact_evidence覆盖required_artifact_evidence每个文件。文档判断、问题分流按共用方法；P6的tree证据例外见当前阶段页。
-blocked以及本轮允许的reopen，均须至少一条有具体detail、scope与有效依据的issue同时填写非空recovery_condition；reopen的依据须为本次source_evidence索引。
-{mode_instructions}
-{chr(10).join(context_instructions)}
-checks仅记亲自执行的命令/退出码；交Runner自动检查时填[]，checks_note说明由Runner执行。
-{handoff_instructions}
-{checking}
 
-<document-review-method>
-{review_instructions}
-</document-review-method>
-
-<invocation>
-{json.dumps(locating, ensure_ascii=False, indent=2)}
-</invocation>
-
-<current-phase-page path={json.dumps(str(page_path))}>
-{page_path.read_text(encoding='utf-8')}
-</current-phase-page>
-"""
+    resolution = (design_context(state, attempt, Path(attempt["workspace"]), parser_root=rules)
+                  if attempt["stage"] in {"P5", "P6"} else {})
+    scope, owner = scope_for(state, attempt), owner_for(state, attempt)
+    selected = state.get("selected_designs")
+    node_entry = next((entry for entry in selected or [] if entry["id"] == attempt["node"]), None)
+    phase_name = f"{PROMPT_ROOT}/phases/{definition['page']}"
+    locating = {key: attempt[key] for key in ("run_id", "attempt_id", "stage", "role", "node", "base_checkpoint", "dependency_digests")}
+    locating.update(mode=attempt.get("mode", "normal"), purpose=attempt.get("purpose", "normal"),
+        backend=attempt["backend"], model=attempt["model"], effort=attempt["effort"], session_scope=attempt["session_scope"],
+        workspace=attempt["workspace"], writable_files=attempt["writable_files"],
+        source_id=lock["source"]["id"], source_ref=lock["source"]["ref"], source_root=str(source_root(lock)),
+        rules_id=semantic["rules"]["id"], rules_root=str(rules), executor_rules_id=executor["rules"]["id"], executor_root=str(rules_root(executor)),
+        workflow_page=str(rules / "EXTRACT_SCHEMA.md"), phase_page=str(rules / phase_name),
+        inputs={key: bindings[key] for key in ("entrypoint", "host", "io", "input", "reference", "acceptance", "scope")},
+        implementation_source=source_reference("entrypoint"), reference_source=source_reference("reference"),
+        revision_scope=attempt.get("revision_scope", state.get("revision_scope", [])),
+        provided_documents=[str(rules / name) for name in documents],
+        read_specs=[str(rules / name) for name in _read_specs(attempt) if name not in documents],
+        feedback=owner.get("feedback", []), process_records=materials["records"],
+        required_conclusions=required_conclusions(attempt), required_evidence=definition["evidence"],
+        required_artifact_evidence=sorted(required_artifact_evidence(state, attempt, attempt["dependency_digests"], resolution=resolution.get("design_resolution"))),
+        selected_designs=selected, writing_plan=state.get("writing_plan"), node_entry=node_entry,
+        plan_draft=state.get("plan_draft") if attempt["stage"] in {"P2", "P4"} else None,
+        first_draft=materials["first_draft"], pending_rechecks=state.get("pending_rechecks", []),
+        source_identities=attempt.get("source_identities", {}), recovery_handoff=attempt.get("recovery_handoff"),
+        preparation=attempt.get("preparation"),
+        historical_definitions=({"checkpoint": attempt["baseline_context_checkpoint"], "path": str(Path(materials["directory"]) / "historical"),
+                                "purpose": "Read-only historical baseline; never an eligible current from source"}
+                               if attempt.get("baseline_context_checkpoint") else None),
+        reading_order=["current_specs", "current_artifacts", "fixed_source", "process_records"], check_command=shlex.quote(attempt["check_command"]),
+        budget={**{key: scope.get(key) for key in ("revisions", "continues", "receipt_repairs", "cli_failures", "calls", "deadline")},
+                "call_seconds": attempt.get("timeout_seconds"), "max_calls": call_limit(state), "revision_limit": state["config"]["revision_limit"]})
+    locating.update(resolution)
+    if attempt["stage"] in REOPEN_TARGETS and attempt.get("mode", "normal") == "normal" and attempt.get("purpose") != "maintenance":
+        eligible = {"P5:" + node for node in attempt.get("source_identities", {}) if node not in {"root", attempt["node"]}}
+        locating["reopen_targets"] = sorted(set(REOPEN_TARGETS[attempt["stage"]]) | set(resolution.get("provider_reopen_targets", {})) | eligible | {"external"})
+    if attempt.get("purpose") == "maintenance":
+        locating["maintenance"] = {key: owner.get(key) for key in ("task_id", "action", "step", "reason", "issues", "fields")}
+        locating["revision_scope"] = owner.get("fields", [])
+    if attempt.get("mode") == "adjudicate":
+        locating["candidates"] = materials["candidates"]
+    locating["reading"] = {"file_tools": ["Read", "Glob", "Grep"], "source_root": str(source_root(lock)), "artifact_root": attempt["workspace"],
+                           "evidence_reader": str(rules_root(executor) / "schema_extract/tools/reading.py")}
+    parts = [f'<document path={json.dumps(str(rules / name))}>\n{(rules / name).read_text(encoding="utf-8").rstrip()}\n</document>' for name in documents]
+    parts.append("<invocation>\n" + json.dumps(locating, ensure_ascii=False, indent=2) + "\n</invocation>")
+    return "\n\n".join(parts) + "\n"

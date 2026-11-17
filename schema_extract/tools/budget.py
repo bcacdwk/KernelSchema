@@ -9,7 +9,7 @@ from .stages import scope_for
 
 
 CAPABILITY = "budget_extension.v1"
-BUDGET_STOPS = {"budget_exhausted", "checker_budget_exhausted", "continuation_budget_exhausted"}
+BUDGET_STOPS = {"budget_exhausted", "checker_budget_exhausted"}
 RECOVERY = "显式 resume {run_id} --add-seconds N 追加时间，或用 --add-calls N 追加调用；按所缺额度选择 N，已用计数和一次性决定不重置。"
 
 
@@ -24,14 +24,14 @@ def call_limit(state: dict) -> int:
 
 
 def review_seconds(config: dict) -> float:
-    ordinary = min(config["stage_seconds"], config["operator_seconds"]) - config["adjudication_seconds"]
+    ordinary = min(config["stage_seconds"], config["operator_seconds"]) - 2 * config["adjudication_seconds"]
     return min(config["call_seconds"], max(0.0, ordinary / 2))
 
 
 def reserved_calls(state: dict) -> int:
     mode, scope = state.get("mode", "normal"), scope_for(state)
     adjudication = int(not scope["adjudications"])
-    signoff = int(state["stage"] == "P6" and not scope["signoffs"])
+    signoff = int(not scope["signoffs"])
     review = int(state.get("role") == "worker")
     return adjudication + signoff + review if mode == "normal" else signoff if mode == "adjudicate" else 0
 
@@ -63,7 +63,7 @@ def check_timeout(state: dict) -> float:
 
 
 def extend(state: dict, request: dict, *, identity: str, origin: str) -> bool:
-    """Apply a persisted launch/continuation request once; never modify config or usage."""
+    """Apply a persisted launch request once; never modify config or usage."""
     request = addition(request.get("seconds", 0), request.get("calls", 0))
     if not any(request.values()):
         return False

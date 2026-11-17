@@ -1,4 +1,4 @@
-"""Finite semantic maintenance; ordinary progress and all scope budgets stay intact."""
+"""Bounded maintenance of one frozen run, behind the existing single writer."""
 
 from __future__ import annotations
 
@@ -8,14 +8,182 @@ import shutil
 import time
 from uuid import uuid4
 
-from .common import ExtractError, StaleResult, copy_artifacts, manifest
+from .common import ExtractError, StaleResult, copy_artifacts, digest, manifest, read_json, write_json
 
 
+PENDING = {"requested", "draining"}
 FINISHED = {"done", "waiting", "removed"}
 
 
 def active(state: dict) -> bool:
     return (state.get("maintenance") or {}).get("status") in {"active", "blocked"}
+
+
+def _request(ledger: dict, run_id: str) -> dict | None:
+    return ledger.get("maintenance_requests", {}).get(run_id)
+
+
+def barrier(store, state: dict, ledger=None) -> bool:
+    request = _request(store.read_supervisor() if ledger is None else ledger, state["run_id"])
+    return bool(request and request["status"] in PENDING)
+
+
+def publication_barrier(store, state: dict, ledger=None) -> bool:
+    return barrier(store, state, ledger) or (state.get("maintenance") or {}).get("status") in {"active", "blocked", "waiting"}
+
+
+def _validate_tasks(state: dict, tasks) -> list[dict]:
+    from .stages import scope_key, stage_files
+    if not isinstance(tasks, list) or not tasks or len(tasks) > 14:
+        raise ExtractError("maintenance needs one to fourteen explicit current scope tasks")
+    selected = {entry["id"] for entry in state.get("selected_designs") or []} | {"root"}
+    allowed_fields = {
+        "P1": ("META_DATA.Name", "META_DATA.Describe", "META_DATA.Source", "CONTRACT.Algorithm_requirement", "CONTRACT.Hardware_specification.Execution"),
+        "P2": ("META_DATA.Source", "META_DATA.Dispatch"),
+        "P3": ("DESIGN", "REALIZATION", "META_DATA.Dispatch.when"),
+        "P4": (), "P5": ("DESIGN", "REALIZATION", "META_DATA.Source", "META_DATA.Dispatch.when"),
+    }
+    result, seen = [], set()
+    for task in tasks:
+        if not isinstance(task, dict) or set(task) != {"stage", "node", "action", "fields", "reason"}:
+            raise ExtractError("maintenance task requires stage/node/action/fields/reason")
+        stage, node = task["stage"], task["node"]
+        if stage not in allowed_fields or node not in selected or (stage == "P5") != (node != "root"):
+            raise ExtractError("maintenance targets a selected P1-P5 responsibility; P6 remains the normal final review")
+        key = scope_key(stage, node)
+        if key in seen or task["action"] not in {"review", "patch"} or not isinstance(task["reason"], str) or not task["reason"].strip():
+            raise ExtractError("maintenance needs unique scopes, review/patch, and a concrete reason")
+        seen.add(key)
+        fields = task["fields"]
+        if not isinstance(fields, list) or task["action"] == "patch" and not fields:
+            raise ExtractError("maintenance patch requires explicit fields")
+        paths = set(stage_files(stage, node_entry=state["nodes"].get(node)))
+        cited = set()
+        for entry in fields:
+            if not isinstance(entry, dict) or set(entry) != {"path", "fields"} or entry["path"] not in paths or entry["path"] in cited:
+                raise ExtractError("maintenance fields exceed the stage file boundary")
+            cited.add(entry["path"])
+            values = entry["fields"]
+            if not isinstance(values, list) or not values or any(not isinstance(value, str) for value in values) or len(set(values)) != len(values):
+                raise ExtractError("maintenance fields must be a nonempty unique list")
+            if entry["path"] == "dispatch.md":
+                if values != ["*"]:
+                    raise ExtractError("dispatch.md uses fields ['*']")
+            elif any(not any(value == prefix or value.startswith(prefix + ".") for prefix in allowed_fields[stage])
+                     or any(not part or part == "*" for part in value.split(".")) for value in values):
+                raise ExtractError("maintenance field is outside its defining stage")
+        result.append({**deepcopy(task), "reason": task["reason"].strip()})
+    return result
+
+
+def submit_request(store, run_id: str, *, issue_id: str, tasks: list) -> dict:
+    """Seal an intention in the supervisor ledger; never write the run state here."""
+    if not isinstance(issue_id, str) or not issue_id.strip():
+        raise ExtractError("maintenance requires a stable nonempty issue_id")
+    state = store.load(run_id)
+    store.context(state)
+    tasks = _validate_tasks(state, tasks)
+    body = {"run_id": run_id, "input_fingerprint": state["input_fingerprint"], "issue_id": issue_id.strip(), "tasks": tasks}
+    with store.supervisor() as ledger:
+        state = store.load(run_id)
+        prior = _request(ledger, run_id)
+        history = [*prior.get("history", []), {key: value for key, value in prior.items() if key != "history"}] if prior else []
+        same = next((item for item in history if item["issue_id"] == body["issue_id"]), None)
+        if same:
+            if same["request_sha256"] != digest(body):
+                raise ExtractError("maintenance issue_id is already bound to another concrete request")
+            return {"run_id": run_id, "status": same["status"], "request": deepcopy(same), "reused": True, "delivered": False}
+        if prior and prior["status"] in PENDING or active(state) or (state.get("maintenance") or {}).get("status") == "waiting":
+            raise ExtractError("finish the pending current-run maintenance before submitting another request")
+        if state["published"] or state.get("exports") or ledger.get("commits", {}).get(run_id):
+            raise ExtractError("maintenance cannot change an already delivered run")
+        if body["input_fingerprint"] != state["input_fingerprint"]:
+            raise ExtractError("the frozen run changed while submitting maintenance")
+        request = {**body, "id": str(uuid4()), "request_sha256": digest(body), "status": "requested",
+                   "created_at": time.time(), "history": history}
+        write_json(store.root / "maintenance_requests" / run_id / (request["id"] + ".json"),
+                   {key: value for key, value in request.items() if key not in {"history", "status"}})
+        ledger.setdefault("maintenance_requests", {})[run_id] = request
+    return {"run_id": run_id, "status": "requested", "request": deepcopy(request), "reused": False, "delivered": False}
+
+
+def consume_requests(store, state: dict) -> dict:
+    with store.supervisor() as ledger:
+        request = _request(ledger, state["run_id"])
+        if not request or request["status"] not in PENDING:
+            return state
+        body = {key: request[key] for key in ("run_id", "input_fingerprint", "issue_id", "tasks")}
+        sealed = read_json(store.root / "maintenance_requests" / state["run_id"] / (request["id"] + ".json"))
+        expected = {**body, **{key: request[key] for key in ("id", "request_sha256", "created_at")}}
+        if sealed != expected or digest(body) != request["request_sha256"] or request["input_fingerprint"] != state["input_fingerprint"]:
+            raise ExtractError("maintenance request differs from its sealed current-run identity")
+        if (state.get("maintenance") or {}).get("request_id") == request["id"]:
+            request.update(status="applied", applied_at=state["maintenance"]["started_at"])
+            return state
+        request.update(status="draining", observed_at=request.get("observed_at", time.time()))
+        projection = {key: request[key] for key in ("id", "issue_id", "request_sha256", "status")}
+    if state.get("maintenance_request") != projection:
+        state["maintenance_request"] = projection
+        store.save(state)
+    return state
+
+
+def mark_drained(store, state: dict) -> dict:
+    """The writer also proves its local running/pending/deferred queues empty."""
+    from .stages import invalidate_final, invalidate_node, invalidate_stage, scope_for, scope_key
+    if any(state.get(name) for name in ("active_attempts", "unconfirmed_attempts", "unsettled_attempts")):
+        raise ExtractError("maintenance drain still has unsettled or unterminated calls")
+    request = _request(store.read_supervisor(), state["run_id"])
+    if not request or request["status"] not in PENDING:
+        return state
+    store.context(state)
+    try:
+        tasks = _validate_tasks(state, request["tasks"])
+    except ExtractError as exc:
+        with store.supervisor() as ledger:
+            current = _request(ledger, state["run_id"])
+            if not current or current["id"] != request["id"]:
+                raise ExtractError("maintenance request changed during drain") from exc
+            current.update(status="superseded", reason=str(exc), completed_at=time.time())
+        state["maintenance_request"] = {"id": request["id"], "issue_id": request["issue_id"],
+                                        "request_sha256": request["request_sha256"], "status": "superseded"}
+        state.update(status="blocked", reason={"code": "maintenance_scope_changed", "summary": str(exc),
+            "request_id": request["id"], "recovery_condition": "提交符合当前选定集合的明确维护任务；原稿、预算与已用决定保持。"})
+        store.save(state)
+        return state
+    cursor = {key: deepcopy(state.get(key)) for key in ("stage", "node", "role", "mode", "status", "feedback", "reason", "checkpoint")}
+    working = state.get("merged_checkpoint") or state["checkpoint"]
+    records = {}
+    for task in tasks:
+        key = scope_key(task["stage"], task["node"])
+        task_id = request["id"] + ":" + key
+        scope = scope_for(state, task)
+        complete = bool(scope.get("approval") or scope["status"] in {"reviewing", "revision", "adjudicating", "signoff"})
+        entry = {**deepcopy(task), "task_id": task_id, "scope": key, "purpose": "maintenance", "complete_candidate": complete,
+                 "status": "pending" if complete else "waiting", "step": "patch" if task["action"] == "patch" else "review",
+                 "role": "worker" if task["action"] == "patch" else "reviewer", "mode": "normal",
+                 "plan_reason": task["reason"], "reason": None, "feedback": [task["reason"]], "history": [], "attempts": [],
+                 "draft_checkpoint": working, "prepared": False}
+        if complete:
+            if task["stage"] == "P5":
+                invalidate_node(state["nodes"][task["node"]], require_worker=task["action"] == "patch")
+            else:
+                invalidate_stage(state, task["stage"], require_worker=task["action"] == "patch")
+        records[task_id] = entry
+    invalidate_final(state)
+    state["maintenance"] = {"request_id": request["id"], "issue_id": request["issue_id"], "status": "active",
+                            "started_at": time.time(), "normal_cursor": cursor, "working_checkpoint": working,
+                            "tasks": records, "completed": []}
+    settle(state)
+    if cursor["status"] in {"paused", "cancelled"}:
+        state["status"] = cursor["status"]
+    store.save(state)
+    with store.supervisor() as ledger:
+        current = _request(ledger, state["run_id"])
+        if not current or current["id"] != request["id"]:
+            raise ExtractError("maintenance request changed during writer installation")
+        current.update(status="applied", applied_at=state["maintenance"]["started_at"])
+    return state
 
 
 def task_for(state: dict, call: dict) -> dict:
@@ -26,102 +194,30 @@ def task_for(state: dict, call: dict) -> dict:
 
 
 def _scope(state: dict, task: dict) -> dict:
-    return state["nodes"][task["node"]]["stage"] if task["stage"] == "P5" else state["stages"][task["stage"]]
-
-
-def _complete_candidate(state: dict, task: dict) -> bool:
-    from .stages import needs_authoring
-    if task["stage"] == "P5" and needs_authoring(state["nodes"][task["node"]]):
-        return False
-    if "complete_candidate" in task:
-        return bool(task["complete_candidate"])
-    if "complete_candidate" in task.get("basis", {}):
-        return bool(task["basis"]["complete_candidate"])
-    scope = _scope(state, task)
-    if scope.get("approval") or scope.get("last_approval"):
-        return True
-    cursor = state["maintenance"]["normal_cursor"]
-    owner = state["nodes"][task["node"]] if task["stage"] == "P5" else cursor
-    return (scope.get("status") in {"reviewing", "revision", "adjudicating", "signoff", "approved"}
-            or (owner.get("stage", task["stage"]) == task["stage"] and owner.get("role") == "reviewer"))
-
-
-def _initialize(state: dict) -> None:
-    maintenance = state["maintenance"]
-    for key, task in maintenance["tasks"].items():
-        task.setdefault("id", key)
-        task.setdefault("task_id", key)
-        task["purpose"] = "maintenance"
-        task.setdefault("step", "patch" if task["action"] in {"patch", "reextract"} else "review")
-        task.setdefault("role", "worker" if task["step"] == "patch" else "reviewer")
-        task.setdefault("mode", "normal")
-        if not task.get("feedback"):
-            task["feedback"] = [item for item in [task.get("reason"), *task.get("issues", [])] if item]
-        if isinstance(task.get("reason"), str):
-            task["plan_reason"], task["reason"] = task["reason"], None
-        task.setdefault("history", [])
-        task.setdefault("complete_candidate", _complete_candidate(state, task))
-        if task.get("basis", {}).get("retired") or (task["stage"] == "P5" and
-                state["nodes"][task["node"]].get("status") == "removed"):
-            task["status"] = "removed"
-            continue
-        from .stages import needs_authoring
-        if task["stage"] == "P5" and needs_authoring(state["nodes"][task["node"]]):
-            task["complete_candidate"] = False
-            if task["action"] not in {"patch", "reextract"}:
-                task.update(status="blocked", reason={"code": "maintenance_patch_scope_missing",
-                    "summary": "待provider修复/身份迁移必须先由worker改稿；当前维护计划未封存patch字段范围，需修订具体scope。"})
-                continue
-            elif task.get("status") in FINISHED:
-                if task.get("history") or task.get("attempts"):
-                    task.update(status="blocked", reason={"code": "maintenance_dependency_changed_after_review",
-                        "summary": "当前generation需要新的修复范围；已消费的维护动作不能由旧task状态重新授予。"})
-                    continue
-                task.update(status="pending", step="patch", role="worker")
-        if task.get("status") in FINISHED:
-            continue
-        pending_repair = task["stage"] == "P5" and needs_authoring(state["nodes"][task["node"]])
-        if task["stage"] == "P6" or (not task["complete_candidate"] and not (pending_repair and task["action"] in {"patch", "reextract"})):
-            # A partial draft is still ordinary authoring. Its new requirements
-            # accompany that author; a maintenance approval cannot complete it.
-            task["status"] = "waiting"
-            task["waiting_reason"] = "normal_final_review" if task["stage"] == "P6" else "unfinished_authoring"
-        elif task["action"] == "keep":
-            from .revisions import approval_is_current
-            approval = _scope(state, task).get("approval")
-            if approval and approval_is_current(state, approval):
-                task["status"] = "done"
-                if key not in maintenance["completed"]:
-                    maintenance["completed"].append(key)
-            else:
-                task.update(action="review", step="review", role="reviewer", status="pending")
+    from .stages import scope_for
+    return scope_for(state, task)
 
 
 def _dependencies_ready(state: dict, task: dict) -> bool:
-    from .revisions import approval_is_current
-    from .stages import effective_nodes
+    from .stages import approval_is_current, dependencies_ready
     for stage in ("P1", "P2", "P3", "P4"):
         if int(stage[1:]) >= int(task["stage"][1:]):
             break
         scope = state["stages"][stage]
         if scope["status"] != "approved" or not approval_is_current(state, scope.get("approval")):
             return False
-    if task["stage"] == "P5":
-        node = state["nodes"].get(task["node"])
-        return bool(node and node.get("parent") in effective_nodes(state))
-    return True
+    return task["stage"] != "P5" or dependencies_ready(state, task["node"])
 
 
 def next_calls(state: dict) -> list[dict]:
     from .stages import STAGES, session_group
-    if state.get("status") != "running" or state.get("active_attempts"):
+    if state["status"] != "running" or state["active_attempts"]:
         return []
-    tasks = state["maintenance"]["tasks"].values()
-    for task in sorted(tasks, key=lambda item: (int(item["stage"][1:]), item["scope"])):
-        if task.get("status") != "pending" or not _dependencies_ready(state, task):
+    for task in sorted(state["maintenance"]["tasks"].values(), key=lambda item: (item["stage"], item["scope"])):
+        if task["status"] != "pending" or not _dependencies_ready(state, task):
             continue
-        call = {"stage": task["stage"], "node": task["node"], "role": task["role"], "mode": "normal",
-                "purpose": "maintenance", "maintenance_task_id": task["task_id"], "maintenance_step": task["step"]}
+        call = {key: task[key] for key in ("stage", "node", "role", "mode")}
+        call.update(purpose="maintenance", maintenance_task_id=task["task_id"], maintenance_step=task["step"])
         group = session_group(state, call)
         return [{**call, "page": STAGES[task["stage"]]["page"], "session_group": group,
                  "session_id": state["sessions"].get(group, {}).get(task["role"])}]
@@ -129,126 +225,70 @@ def next_calls(state: dict) -> list[dict]:
 
 
 def _normal_feedback(state: dict, task: dict) -> None:
-    entry = {"code": "semantic_revision_continuation", "maintenance_task_id": task["task_id"],
-             "action": task["action"], "summary": task.get("plan_reason", task.get("reason")), "issues": task.get("issues", []),
-             "fields": task.get("fields", [])}
     owner = state["nodes"][task["node"]] if task["stage"] == "P5" else state
+    entry = {"code": "current_run_maintenance", "maintenance_task_id": task["task_id"], "summary": task["plan_reason"], "fields": task["fields"]}
     if entry not in owner.setdefault("feedback", []):
         owner["feedback"].append(entry)
 
 
 def _resume_normal(state: dict) -> None:
-    from .revisions import approval_is_current
-    from .stages import final_eligible, settle as settle_stages
+    from .stages import resume_progress
     maintenance = state["maintenance"]
-    cursor = maintenance["normal_cursor"]
-    deferred = any(task["status"] == "waiting" and task.get("complete_candidate") and task["stage"] != "P6"
-                   for task in maintenance["tasks"].values())
-    maintenance["status"] = "waiting" if deferred else "complete"
-    if not deferred:
+    pending = any(task["status"] == "waiting" and task["complete_candidate"] for task in maintenance["tasks"].values())
+    maintenance["status"] = "waiting" if pending else "complete"
+    if not pending:
         maintenance["completed_at"] = time.time()
-    for key in ("stage", "node", "role", "mode", "feedback", "reason"):
-        if key in cursor:
-            state[key] = deepcopy(cursor[key])
-    state["status"] = "running"
-    state["reason"] = None
-    state["checkpoint"] = maintenance.get("working_checkpoint") or state["checkpoint"]
-    for stage in ("P1", "P2", "P3", "P4"):
-        scope = state["stages"][stage]
-        if scope["status"] == "approved" and approval_is_current(state, scope.get("approval")):
-            continue
-        same = cursor.get("stage") == stage
-        role = cursor.get("role") if same else ("reviewer" if scope["status"] in {"reviewing", "revision", "adjudicating"} else "worker")
-        state.update(stage=stage, node="root", role=role or "worker", mode=cursor.get("mode", "normal") if same else "normal")
-        break
-    else:
-        if final_eligible(state):
-            # P6 remains a current-context final review. Preserve an unfinished
-            # final patch and every consumed one-shot decision when resuming it.
-            same = cursor.get("stage") == "P6"
-            state.update(stage="P6", node="root", role=(cursor.get("role") or "reviewer") if same else "reviewer",
-                         mode=cursor.get("mode", "normal") if same else "normal")
-            state["stages"]["P5"]["status"] = "approved" if len(state["plan"]) > 1 else "skipped"
-            state["stages"]["P6"]["status"] = "reviewing" if state["role"] == "reviewer" else "draft"
-            if state["role"] is None:
-                state["role"] = "reviewer"
-        else:
-            state.update(stage="P5", node="root", role=None, mode="normal")
-            settle_stages(state)
+    for key, value in maintenance["normal_cursor"].items():
+        state[key] = deepcopy(value)
+    state["checkpoint"] = maintenance["working_checkpoint"]
+    state["status"], state["reason"] = "running", None
+    resume_progress(state)
     for task in maintenance["tasks"].values():
         if task["status"] == "waiting" and (task["stage"] == "P5" or task["stage"] == state["stage"]):
             _normal_feedback(state, task)
 
 
 def resume_deferred(state: dict) -> None:
-    """Ordinary authoring can unlock a saved maintenance candidate later."""
-    from .revisions import approval_is_current
+    from .stages import approval_is_current
     maintenance = state.get("maintenance") or {}
     if maintenance.get("status") != "waiting":
         return
     ready = False
     for task in maintenance["tasks"].values():
-        if task["status"] != "waiting" or task["stage"] == "P6":
+        if task["status"] != "waiting":
             continue
         scope = _scope(state, task)
         if scope["status"] == "approved" and approval_is_current(state, scope.get("approval")):
             task["status"] = "done"
-        elif task.get("complete_candidate") and _dependencies_ready(state, task):
+        elif task["complete_candidate"] and _dependencies_ready(state, task):
             task.update(status="pending", prepared=False)
             ready = True
     if ready:
-        maintenance["normal_cursor"] = {key: deepcopy(state.get(key)) for key in
-                                        ("stage", "node", "role", "mode", "status", "checkpoint", "feedback", "reason")}
-        maintenance["working_checkpoint"] = state["checkpoint"]
-        maintenance["status"] = "active"
-        settle(state)
-    elif not any(task["status"] == "waiting" and task.get("complete_candidate") and task["stage"] != "P6"
-                 for task in maintenance["tasks"].values()):
-        maintenance["status"], maintenance["completed_at"] = "complete", time.time()
+        maintenance["normal_cursor"] = {key: deepcopy(state.get(key)) for key in ("stage", "node", "role", "mode", "status", "checkpoint", "feedback", "reason")}
+        maintenance.update(status="active", working_checkpoint=state["checkpoint"])
+    elif not any(task["status"] == "waiting" and task["complete_candidate"] for task in maintenance["tasks"].values()):
+        maintenance.update(status="complete", completed_at=time.time())
 
 
 def settle(state: dict) -> None:
-    from .revisions import approval_is_current
-    _initialize(state)
-    if state.get("active_attempts"):
+    if state["active_attempts"]:
         return
     maintenance = state["maintenance"]
     tasks = list(maintenance["tasks"].values())
     stopped = [task for task in tasks if task["status"] not in FINISHED | {"pending"}]
     if stopped:
-        maintenance["status"] = "blocked"
-        state["status"] = "blocked"
-        state["reason"] = {"code": "maintenance_blocked", "summary": "维护已保留当前稿；以下有界动作需要明确修复或预算追加。",
+        maintenance["status"], state["status"] = "blocked", "blocked"
+        state["reason"] = {"code": "maintenance_blocked", "summary": "有限维护已停止；原稿、预算和已用决定保持。",
                            "tasks": {task["task_id"]: task.get("reason") for task in stopped}}
         return
-    # A downstream complete candidate cannot be reviewed before an unfinished
-    # ordinary prerequisite. Defer it together with its original progress.
-    unfinished = [task for task in tasks if task["status"] == "waiting" or
-                  not task.get("complete_candidate") and not approval_is_current(state, _scope(state, task).get("approval"))]
-    waiting_stages = {task["stage"] for task in unfinished if task["stage"] != "P6"}
-    waiting_nodes = {task["node"] for task in unfinished if task["stage"] == "P5"}
-    for task in tasks:
-        if task["status"] != "pending":
-            continue
-        if any(int(stage[1:]) < int(task["stage"][1:]) for stage in waiting_stages if stage != "P5"):
-            task.update(status="waiting", waiting_reason="unfinished_prerequisite")
-        elif task["stage"] == "P5":
-            parent = state["nodes"][task["node"]].get("parent")
-            while parent:
-                if parent in waiting_nodes:
-                    task.update(status="waiting", waiting_reason="unfinished_parent")
-                    break
-                parent = state["nodes"][parent].get("parent")
-    if all(task["status"] in FINISHED for task in tasks):
-        _resume_normal(state)
-        return
+    state["status"], state["reason"] = "running", None
     maintenance["status"] = "active"
-    if state["status"] not in {"paused", "cancelled"}:
-        state["status"], state["reason"] = "running", None
-        if not next_calls(state):
-            maintenance["status"], state["status"] = "blocked", "blocked"
-            state["reason"] = {"code": "maintenance_dependencies", "summary": "维护候选缺少当前适用的上游批准；已保留所有稿件。",
-                               "scopes": [task["scope"] for task in tasks if task["status"] == "pending"]}
+    if next_calls(state):
+        return
+    for task in tasks:
+        if task["status"] == "pending":
+            task.update(status="waiting", waiting_reason="normal_prerequisite")
+    _resume_normal(state)
 
 
 def validate_attempt(state: dict, attempt: dict) -> None:
@@ -256,216 +296,143 @@ def validate_attempt(state: dict, attempt: dict) -> None:
     expected = {"stage": task["stage"], "node": task["node"], "role": task["role"], "mode": "normal",
                 "maintenance_step": task["step"], "base_checkpoint": task["draft_checkpoint"]}
     if not active(state) or task["status"] != "pending" or any(attempt.get(key) != value for key, value in expected.items()):
-        raise StaleResult("maintenance task, step or draft changed while the invocation ran")
+        raise StaleResult("maintenance task, step or draft changed")
     generation = state["nodes"][task["node"]]["generation"] if task["stage"] == "P5" else _scope(state, task)["generation"]
     if attempt.get("generation") != generation:
         raise StaleResult("maintenance scope generation changed")
 
 
-def _copy_local(source: Path, destination: Path) -> None:
-    destination.mkdir()
-    for name in ("root.yaml", "dispatch.md"):
-        if (source / name).is_file():
-            copy_artifacts(source / name, destination / name)
-
-
 def prepare_workspace(store, state: dict, call: dict) -> None:
-    """Refresh only read-only inputs, always keeping a node's own authored file."""
-    maintaining = call.get("purpose") == "maintenance"
-    task = task_for(state, call) if maintaining else None
-    if maintaining:
-        maintenance = state["maintenance"]
-        if not maintenance.get("working_checkpoint"):
-            working = state["merged_checkpoint"] or state["checkpoint"]
-            current_id = maintenance["normal_cursor"].get("checkpoint", state["checkpoint"])
-            current, _ = store.verify_checkpoint(state, current_id)
-            if state["merged_checkpoint"] and maintenance["normal_cursor"].get("stage") in {"P1", "P2", "P3", "P4"}:
-                temporary = store.run_dir(state["run_id"]) / (".maintaining-" + uuid4().hex)
-                source, _ = store.verify_checkpoint(state, working)
-                try:
-                    copy_artifacts(source, temporary)
-                    for path in temporary.rglob("*"):
-                        path.chmod(0o755 if path.is_dir() else 0o644)
-                    temporary.chmod(0o755)
-                    for name in ("root.yaml", "dispatch.md"):
-                        if (current / name).is_file():
-                            copy_artifacts(current / name, temporary / name)
-                    working = store.checkpoint(state, temporary, attempt_id=None, stage=call["stage"], node=call["node"], parent=working, call=call)
-                finally:
-                    shutil.rmtree(temporary, ignore_errors=True)
-            maintenance["working_checkpoint"] = working
-        if call["stage"] == "P5":
-            store.start_node(state, call["node"], call=call)
-            task["draft_checkpoint"] = state["nodes"][call["node"]]["draft_checkpoint"]
-            return
-        if task.get("prepared"):
-            return
-        source_id = maintenance["working_checkpoint"]
-    elif call["stage"] in {"P1", "P2", "P3", "P4"}:
-        source_id = state["checkpoint"]
-    else:
+    task = task_for(state, call) if call.get("purpose") == "maintenance" else None
+    if task and task["step"] == "review" and call["stage"] in {"P2", "P4"}:
+        state["plan_draft"] = deepcopy(state["selected_designs"] if call["stage"] == "P2" else state["writing_plan"])
+    if task and call["stage"] == "P5":
+        store.start_node(state, call["node"], call=call)
+        task["draft_checkpoint"] = state["nodes"][call["node"]]["draft_checkpoint"]
+        return
+    if task and task["prepared"]:
+        return
+    source_id = state["maintenance"]["working_checkpoint"] if task else state["checkpoint"]
+    if call["stage"] == "P1" and call["role"] == "worker":
+        source_id = store.prepare_shared_metadata(state, source_id, call)
+        if not task:
+            state["checkpoint"] = source_id
+    if call["stage"] != "P2":
+        if task:
+            task.update(draft_checkpoint=source_id, prepared=True)
         return
     source, info = store.verify_checkpoint(state, source_id)
-    if not maintaining and set(info["files"]) <= {"root.yaml", "dispatch.md"}:
+    if set(info["files"]) <= {"root.yaml", "dispatch.md"}:
+        if task:
+            task.update(draft_checkpoint=source_id, prepared=True)
         return
     temporary = store.run_dir(state["run_id"]) / (".maintaining-" + uuid4().hex)
+    temporary.mkdir()
     try:
-        _copy_local(source, temporary)
-        checkpoint = store.checkpoint(state, temporary, attempt_id=None, stage=call["stage"], node=call["node"], parent=source_id, call=call)
+        for name in ("root.yaml", "dispatch.md"):
+            if (source / name).is_file():
+                copy_artifacts(source / name, temporary / name)
+        checkpoint = store.checkpoint(state, temporary, attempt_id=None, stage=call["stage"], node=call["node"],
+                                     parent=source_id, call=call, expected_files=set(info["files"]) & {"root.yaml", "dispatch.md"})
     finally:
-        shutil.rmtree(temporary, ignore_errors=True)
-    if maintaining:
-        task["draft_checkpoint"], task["prepared"] = checkpoint, True
+        shutil.rmtree(temporary)
+    if task:
+        task.update(draft_checkpoint=checkpoint, prepared=True)
     else:
         state["checkpoint"] = checkpoint
 
 
-def merge_upstream(store, state: dict, attempt: dict, workspace: Path, destination: Path) -> Path:
-    """A local P1-P4 checkpoint overlays the complete tree; it never replaces it."""
-    base = ((state.get("maintenance") or {}).get("working_checkpoint")
-            if attempt.get("purpose") == "maintenance" else None) or state["merged_checkpoint"]
+def merge_upstream(store, state: dict, attempt: dict, workspace: Path, destination: Path, *, selected=None) -> Path:
+    """Merge reviewed bytes, including P1's already checked metadata copies."""
+    base = ((state.get("maintenance") or {}).get("working_checkpoint") if attempt.get("purpose") == "maintenance" else None) or state.get("merged_checkpoint")
     if base:
         source, _ = store.verify_checkpoint(state, base)
         copy_artifacts(source, destination)
     else:
         destination.mkdir()
-    for path in destination.rglob("*"):
-        path.chmod(0o755 if path.is_dir() else 0o644)
+    for path in destination.iterdir():
+        path.chmod(0o644)
     destination.chmod(0o755)
     for name in ("root.yaml", "dispatch.md"):
         if (workspace / name).is_file():
             copy_artifacts(workspace / name, destination / name)
+    if attempt["stage"] == "P1":
+        # P1's worker could write only root. The candidate transaction derived
+        # these shared fields before review; merging must never regenerate them.
+        for name in manifest(workspace):
+            if name.endswith(".yaml") and name != "root.yaml":
+                copy_artifacts(workspace / name, destination / name)
+    if selected is not None:
+        planned = {entry["id"] + ".yaml" for entry in selected}
+        for name in manifest(destination):
+            if name.endswith(".yaml") and name not in planned:
+                (destination / name).unlink()
     return destination
 
 
 def block(state: dict, call: dict, reason: dict, *, status="blocked") -> None:
     task = task_for(state, call)
     task["status"], task["reason"] = status, deepcopy(reason)
-    task.setdefault("feedback", []).append(deepcopy(reason))
+    task["feedback"].append(deepcopy(reason))
 
 
 def _patch_fields(task: dict, receipt: dict, state: dict) -> list[dict]:
-    from .stages import stage_files
-    allowed = set(stage_files(task["stage"], node_entry=state["nodes"].get(task["node"]),
-                              revision_scope=state.get("revision_scope")))
-    requested = receipt.get("revision_scope") or task.get("fields", [])
-    ceiling = {item["path"]: item["fields"] for item in task.get("fields", [])}
-    anchored = {anchor["path"] for anchor in receipt.get("artifact_evidence", [])}
-    result, seen = [], set()
+    requested = receipt.get("revision_scope") or task["fields"]
+    ceiling = {item["path"]: item["fields"] for item in task["fields"]}
+    anchored = {item["path"] for item in receipt["artifact_evidence"]}
+    _validate_tasks(state, [{"stage": task["stage"], "node": task["node"], "action": "patch", "fields": requested, "reason": task["plan_reason"]}])
     for item in requested:
-        path, fields = item["path"], item["fields"]
-        if path not in allowed & anchored or path in seen or not fields:
-            raise ExtractError("maintenance revision scope needs unique stage files and current artifact evidence")
-        seen.add(path)
-        if path == "dispatch.md":
-            if fields != ["*"]:
-                raise ExtractError("dispatch.md maintenance scope uses fields ['*']")
-        elif any(not field or any(not part or part == "*" for part in field.split(".")) for field in fields):
-            raise ExtractError("maintenance revision scope requires explicit YAML fields")
-        if ceiling and (path not in ceiling or any(not any(limit == "*" or field == limit or field.startswith(limit + ".")
-                                                         for limit in ceiling[path]) for field in fields)):
-            raise ExtractError("reviewer maintenance scope exceeds the sealed plan's field boundary")
-        result.append({"path": path, "fields": list(fields)})
-    return result
-
-
-def _reconsider_dependents(state: dict, task: dict, validation: dict) -> None:
-    from .stages import affected_nodes, invalidate_final, invalidate_node
-    changed = validation.get("maintenance_changed_files", [])
-    if not changed and not validation.get("invalidated_nodes"):
-        return
-    descendants = set(affected_nodes(state, [task["node"]])) if task["stage"] == "P5" else set()
-    if changed and task["stage"] in {"P3", "P5"}:
-        invalidated = (descendants - {task["node"]} if task["stage"] == "P5" else
-                       {entry["id"] for entry in state.get("plan") or []} - {"root"})
-        for node in invalidated:
-            invalidate_node(state["nodes"][node])
-        invalidate_final(state, invalidated)
-    candidates = set(validation.get("invalidated_nodes", []))
-    planned = {entry["id"] for entry in state.get("plan") or []}
-    for other in state["maintenance"]["tasks"].values():
-        if other is task or other["stage"] == "P6":
-            continue
-        if other["stage"] == "P5" and other["node"] not in planned:
-            other["status"] = "removed"
-            continue
-        affected = ((task["stage"] in {"P1", "P2", "P3"} and int(other["stage"][1:]) > int(task["stage"][1:]))
-                    or (other["stage"] == "P5" and other["node"] in candidates | descendants))
-        if not affected or not other.get("complete_candidate"):
-            continue
-        if other["status"] in {"done", "waiting"}:
-            if other.get("history"):
-                # The finite task already ran. Changed dependencies now need a
-                # new concrete plan, rather than buying another review loop.
-                block(state, {"purpose": "maintenance", "maintenance_task_id": other["task_id"]},
-                      {"code": "maintenance_dependency_changed_after_review", "summary": "依赖在本次有限复核后改变；保留稿件并重新评估具体范围。"})
-                continue
-            other.update(action="review", step="review", role="reviewer", status="pending", prepared=False)
-            if other["task_id"] in state["maintenance"]["completed"]:
-                state["maintenance"]["completed"].remove(other["task_id"])
-            _scope(state, other)["status"] = "reviewing"
-            if other["stage"] == "P5":
-                state["nodes"][other["node"]]["status"] = "reviewing"
+        if item["path"] not in ceiling or item["path"] not in anchored or any(not any(limit == "*" or field == limit or field.startswith(limit + ".")
+                for limit in ceiling[item["path"]]) for field in item["fields"]):
+            raise ExtractError("maintenance revision exceeds its sealed fields or lacks current artifact evidence")
+    return deepcopy(requested)
 
 
 def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, validation: dict) -> dict:
-    from .stages import _approve, scope_key, plan_signature
+    from .stages import _approve, scope_key
     result = deepcopy(state)
     identity = receipt["identity"]
-    attempt_id = identity["attempt_id"]
-    key = scope_key(identity["stage"], identity["node"])
+    attempt_id, key = identity["attempt_id"], scope_key(identity["stage"], identity["node"])
     if attempt_id in result["accepted_receipts"] or result["active_attempts"].get(key) != attempt_id:
-        raise StaleResult("maintenance receipt is duplicate or no longer active")
-    task = task_for(result, identity)
-    decision, step = receipt["decision"], task["step"]
+        raise StaleResult("maintenance receipt is duplicate or inactive")
+    task, decision = task_for(result, identity), receipt["decision"]
     result["accepted_receipts"][attempt_id] = receipt_hash
     result["active_attempts"].pop(key)
     task["draft_checkpoint"] = checkpoint_id
-    task["history"].append({"attempt_id": attempt_id, "step": step, "decision": decision,
-                            "checkpoint": checkpoint_id, "receipt_sha256": receipt_hash})
+    task["history"].append({"attempt_id": attempt_id, "step": task["step"], "decision": decision, "checkpoint": checkpoint_id, "receipt_sha256": receipt_hash})
     result["recoverable_checkpoint"] = checkpoint_id
     if identity["stage"] == "P5":
         result["nodes"][identity["node"]]["draft_checkpoint"] = checkpoint_id
     if identity["role"] == "worker":
-        _scope(result, task)["candidates"].append({"checkpoint": checkpoint_id, "plan": deepcopy(receipt.get("plan"))})
+        _scope(result, task)["candidates"].append({"checkpoint": checkpoint_id, "plan": deepcopy(receipt.get("plan")),
+                                                 "generation": identity["generation"], "node_signature": identity.get("node_signature")})
         if decision == "continue":
-            # One bounded patch can require several ordinary authoring calls.
-            # Keep its logical step and saved draft; normal call/time credit
-            # still reserves the independent verification that follows.
             _scope(result, task)["continues"] += 1
-            task.update(status="pending", reason=None, feedback=[receipt["summary"], *receipt["issues"]])
+            task.update(status="pending", feedback=[receipt["summary"], *receipt["issues"]])
         elif decision == "complete":
             if identity["stage"] == "P5":
                 result["nodes"][identity["node"]]["authored_generation"] = result["nodes"][identity["node"]]["generation"]
-                task["complete_candidate"] = True
-            task.update(step="verify", role="reviewer", status="pending", reason=None,
-                        feedback=[receipt["summary"], *receipt["issues"]])
-            if identity["stage"] == "P4":
+            task.update(step="verify", role="reviewer", status="pending", complete_candidate=True, feedback=[receipt["summary"]])
+            if identity["stage"] in {"P2", "P4"}:
                 result["plan_draft"] = deepcopy(receipt["plan"])
         else:
-            block(result, identity, {"code": "maintenance_patch_incomplete", "summary": receipt["summary"],
-                                     "issues": receipt["issues"], "checkpoint": checkpoint_id})
+            block(result, identity, {"code": "maintenance_patch_incomplete", "summary": receipt["summary"], "issues": receipt["issues"]})
     elif decision == "approve":
         if not task["complete_candidate"]:
             raise ExtractError("maintenance cannot approve an unfinished ordinary draft")
-        changed_plan = identity["stage"] == "P4" and plan_signature(result.get("plan")) != plan_signature(receipt["plan"])
         _approve(result, receipt, checkpoint_id, receipt_hash, validation)
-        if changed_plan:
-            result["plan_revision"] += 1
         task.update(status="done", reason=None)
         result["maintenance"]["completed"].append(task["task_id"])
         result["maintenance"]["working_checkpoint"] = checkpoint_id
-        _reconsider_dependents(result, task, validation)
-    elif decision == "revise" and step == "review":
+        if identity["stage"] in {"P2", "P4"}:
+            result["plan_draft"] = None
+    elif decision == "revise" and task["step"] == "review":
         fields = _patch_fields(task, receipt, result)
-        if fields:
-            task.update(step="patch", role="worker", status="pending", fields=fields,
-                        reason=None, feedback=receipt["issues"])
-        else:
-            block(result, identity, {"code": "maintenance_patch_scope_missing", "summary": "复核已定位问题；需要有产物锚点的明确文件/字段范围才能执行一次修补。",
-                                     "issues": receipt["issues"], "checkpoint": checkpoint_id})
+        task.update(step="patch", role="worker", status="pending", fields=fields, feedback=receipt["issues"])
+        if identity["stage"] == "P1":
+            task["prepared"] = False
+        _scope(result, task)["revisions"] += 1
     else:
-        block(result, identity, {"code": "maintenance_verify_failed" if step == "verify" else "maintenance_review_blocked",
-                                 "summary": receipt["summary"], "issues": receipt["issues"], "checkpoint": checkpoint_id})
+        block(result, identity, {"code": "maintenance_verify_failed" if task["step"] == "verify" else "maintenance_review_blocked", "summary": receipt["summary"], "issues": receipt["issues"]})
     settle(result)
     return result

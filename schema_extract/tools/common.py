@@ -119,6 +119,13 @@ def relative_name(value: str) -> str:
     return value
 
 
+def real_directory(path: Path) -> Path:
+    """Require an absolute directory without any symlink component."""
+    if not path.is_absolute() or ".." in path.parts or path.resolve(strict=True) != path or not path.is_dir():
+        raise ExtractError("expected a real absolute directory without symlinks: " + str(path))
+    return path
+
+
 def regular_file(root: Path, name: str) -> Path:
     relative_name(name)
     path = root / name

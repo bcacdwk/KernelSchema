@@ -8,6 +8,7 @@ from copy import deepcopy
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -17,10 +18,10 @@ import time
 from uuid import UUID, uuid4
 
 from .common import ExtractError, digest, json_bytes, manifest, relative_name, source_root
+from .backends import NativeEvents, TOKEN_FIELDS, strict_json
 from .observation import FORMAT as OBSERVATION_FORMAT, interval_observation, observation_summary, observation_totals
 
 
-TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens")
 COUNTER_SCOPE = "provider_counter_semantics_unverified"
 
 
@@ -63,17 +64,14 @@ def _stamp(stream):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
-def parse_events(path: Path, *, sink=None) -> dict:
-    """One streaming pass; an unterminated final line is evidence, not a consumed event.
-
-    No live-log consumer needs a cursor. Byte/line anchors are retained for an
-    explicit later audit, not for repeated monitoring or session-history scans.
-    """
-    trace = {"format": "schema_extract.trace.v1", "path": "events.jsonl", "sha256": None,
+def parse_events(path: Path, *, backend: str, sink=None) -> dict:
+    """One bounded-memory pass through the selected backend's native JSONL."""
+    native = NativeEvents(backend)
+    trace = {"format": "schema_extract.trace.v2", "backend": backend, "path": "events.jsonl", "sha256": None,
              "bytes": 0, "complete_bytes": 0, "line_count": 0, "event_counts": {},
              "parse_error_lines": [], "parse_error_count": 0, "truncated_line": None,
              "session_ids": [], "stable": False, "error": None}
-    reports, counts, checksum = [], Counter(), hashlib.sha256()
+    counts, checksum = Counter(), hashlib.sha256()
     try:
         with _open_file(path) as stream:
             before = _stamp(stream)
@@ -89,23 +87,13 @@ def parse_events(path: Path, *, sink=None) -> dict:
                 trace["complete_bytes"] = trace["bytes"]
                 trace["line_count"] = number
                 try:
-                    event = json.loads(line)
+                    event = strict_json(line)
                     kind = event["type"]
                     if not isinstance(kind, str):
                         raise ValueError("event type is not a string")
                     counts[kind] += 1
-                    if kind == "thread.started":
-                        session_id = _uuid(event["thread_id"], "event thread")
-                        if session_id not in trace["session_ids"]:
-                            trace["session_ids"].append(session_id)
-                    if kind == "turn.completed":
-                        raw = event.get("usage")
-                        tokens = {field: raw.get(field) if isinstance(raw, dict) and
-                                  type(raw.get(field)) is int and raw[field] >= 0 else None
-                                  for field in TOKEN_FIELDS}
-                        reports.append({"line": number, "offset": offset, "end_offset": trace["bytes"],
-                                        "event_sha256": hashlib.sha256(line).hexdigest(),
-                                        "raw": raw, "tokens": tokens})
+                    native.observe(event, {"line": number, "offset": offset, "end_offset": trace["bytes"],
+                                           "event_sha256": hashlib.sha256(line).hexdigest()}, trace)
                 except (ValueError, KeyError, TypeError, AttributeError):
                     trace["parse_error_count"] += 1
                     if len(trace["parse_error_lines"]) < 32:
@@ -115,27 +103,7 @@ def parse_events(path: Path, *, sink=None) -> dict:
     except (ExtractError, OSError) as exc:
         trace["error"] = str(exc)
     trace["event_counts"] = dict(counts)
-    issues = []
-    if trace["error"] or not trace["stable"]:
-        issues.append("missing_or_changing_trace")
-    if trace["truncated_line"]:
-        issues.append("unterminated_final_line")
-    if trace["parse_error_count"]:
-        issues.append("malformed_events")
-    if not reports or any(item["raw"] is None for item in reports):
-        issues.append("missing_usage")
-    if any(any(item["tokens"][field] is None for field in TOKEN_FIELDS) for item in reports):
-        issues.append("missing_or_invalid_token_fields")
-    if any(item["tokens"]["input_tokens"] is not None and item["tokens"]["cached_input_tokens"] is not None and
-           item["tokens"]["cached_input_tokens"] > item["tokens"]["input_tokens"] for item in reports):
-        issues.append("cached_input_exceeds_input")
-    reported = any(item["raw"] is not None for item in reports)
-    usage = {"format": "schema_extract.usage.v1", "status": "partial" if reported and issues else
-             "reported" if reported else "unknown", "source": "events.jsonl:turn.completed.usage",
-             "counter_scope": COUNTER_SCOPE, "cached_input_is_input_subset": True,
-             "additive_tokens": {field: None for field in TOKEN_FIELDS},
-             "reports": reports, "issues": issues}
-    return {"trace": trace, "usage": usage}
+    return {"trace": trace, **native.finish(trace)}
 
 
 def result_usage(parsed: dict, *, outcome: str, termination: dict) -> dict:
@@ -151,13 +119,59 @@ def usage_summary(usage: dict | None) -> dict:
     """A small ledger entry; raw provider objects remain in result/events only."""
     usage = usage or {}
     reports = usage.get("reports", [])
-    return {"status": usage.get("status", "unknown"),
+    raw = reports[-1].get("raw") if reports else None
+    return {"backend": usage.get("backend"), "status": usage.get("status", "unknown"),
             "counter_scope": usage.get("counter_scope", COUNTER_SCOPE),
             "source": usage.get("source", "usage_not_recorded"),
             "report_count": len(reports),
-            "last_reported_tokens": deepcopy(reports[-1]["tokens"]) if reports else {field: None for field in TOKEN_FIELDS},
-            "additive_tokens": {field: None for field in TOKEN_FIELDS},
+            "last_reported_tokens": {field: reports[-1]["tokens"].get(field) if reports else None for field in TOKEN_FIELDS},
+            "additive_tokens": {field: usage.get("additive_tokens", {}).get(field) for field in TOKEN_FIELDS},
+            "cached_input_is_input_subset": usage.get("cached_input_is_input_subset"),
+            "reported_cost_usd": usage.get("reported_cost_usd"), "cost_is_billing": False,
+            "session_reported_cost_usd": usage.get("session_reported_cost_usd"),
+            "session_model_usage": deepcopy(raw.get("modelUsage")) if isinstance(raw, dict) else None,
+            "cumulative_source": usage.get("cumulative_source"),
+            "report_evidence": [{key: item.get(key) for key in ("line", "offset", "end_offset", "event_sha256")}
+                                for item in reports[-8:]],
             "issues": list(usage.get("issues", ["usage_not_recorded"]))}
+
+
+def usage_totals(rows):
+    """Deduplicate invocation counters without adding cumulative session reports."""
+    selected, conflicts, duplicates = {}, set(), 0
+    for row in rows:
+        identity = row.get("origin_run_id", row.get("run_id")), row.get("attempt_id")
+        if not all(isinstance(value, str) and value for value in identity):
+            raise ExtractError("usage accounting requires run and attempt identities")
+        if identity in selected:
+            duplicates += 1
+            if selected[identity].get("usage") != row.get("usage"):
+                conflicts.add(identity)
+        else:
+            selected[identity] = row
+    groups = {}
+    for identity, row in selected.items():
+        usage = row.get("usage") or {}
+        key = usage.get("backend"), usage.get("counter_scope", "unknown")
+        group = groups.setdefault(key, [])
+        group.append(usage if identity not in conflicts else {})
+    summaries = []
+    for (backend, scope), values in sorted(groups.items(), key=lambda item: str(item[0])):
+        tokens = {}
+        for field in TOKEN_FIELDS:
+            known = [item.get("additive_tokens", {}).get(field) for item in values]
+            known = [value for value in known if type(value) is int and value >= 0]
+            tokens[field] = {"known_subtotal": sum(known) if known else None,
+                             "known_attempts": len(known), "unknown_attempts": len(values) - len(known)}
+        costs = [value.get("reported_cost_usd") for value in values]
+        costs = [value for value in costs if type(value) in {int, float} and math.isfinite(value) and value >= 0]
+        summaries.append({"backend": backend, "counter_scope": scope, "attempt_count": len(values), "tokens": tokens,
+                          "cached_input_is_input_subset": backend == "codex" if backend in {"claude", "codex"} else None,
+                          "reported_cost_usd_subtotal": sum(costs) if costs else None,
+                          "cost_known_attempts": len(costs), "cost_unknown_attempts": len(values) - len(costs),
+                          "billing_cost_usd": None, "cost_is_billing": False})
+    return {"attempt_count": len(selected), "duplicate_attempts": duplicates, "conflicting_attempts": len(conflicts),
+            "by_backend_and_scope": summaries}
 
 
 def _json(path):
@@ -169,13 +183,15 @@ def _json(path):
 
 
 def _state(store, run_id, files=None):
-    from .runtime import STATE_FORMAT as RUNTIME_STATE_FORMAT
-    from .revisions import STATE_FORMAT as SEMANTIC_STATE_FORMAT
+    from .runtime import STATE_FORMAT
     path = store.run_dir(_uuid(run_id, "run")) / "state.json"
     value = files.file(path, as_json=True) if files else _json(path)
-    if (not isinstance(value, dict) or value.get("format") not in {"schema_extract.run.v2", RUNTIME_STATE_FORMAT, SEMANTIC_STATE_FORMAT} or
-            value.get("run_id") != run_id or "active_attempts" not in value or "reopen_requests" not in value):
-        raise ExtractError("audit requires a matching v2 run record; older fields remain unavailable")
+    if (not isinstance(value, dict) or value.get("format") != STATE_FORMAT or
+            value.get("run_id") != run_id or
+            not {"active_attempts", "reopen_requests", "selected_designs", "writing_plan"} <= value.keys() or
+            any(key in value for key in ("continuation", "semantic_revision", "execution_binding", "imported_draft"))):
+        raise ExtractError("audit requires a current frozen run record")
+    store.execution_config(value)
     return value
 
 
@@ -190,7 +206,8 @@ def _sum_time(rows, field):
 def _totals(rows):
     return {"attempt_count": len(rows), "usage_status": dict(Counter(row["usage"]["status"] for row in rows)),
             "additive_tokens": {field: None for field in TOKEN_FIELDS},
-            "root_usage": observation_totals(rows),
+            "provider_usage": usage_totals(rows),
+            "root_usage": observation_totals([row for row in rows if row.get("usage", {}).get("backend") == "codex"]),
             "accounted_seconds": _sum_time(rows, "elapsed_seconds"),
             "cli_seconds": _sum_time(rows, "cli_seconds"),
             "processing_seconds": _sum_time(rows, "processing_seconds")}
@@ -269,24 +286,22 @@ def _waits(state, ledger, now):
 
 
 def _rows(store, state):
-    origins = state.get("continuation", {}).get("attempt_origins", {})
     usage = state.get("attempt_usage", {})
     active = {*state.get("active_attempts", {}).values(), *state.get("unsettled_attempts", {}),
               *state.get("unconfirmed_attempts", {})}
-    rows = {}
+    rows = []
     for attempt_id in dict.fromkeys([*usage, *state.get("attempts", [])]):
         _uuid(attempt_id, "attempt")
         entry = deepcopy(usage.get(attempt_id, {}))
-        entry.pop("handoffs", None)  # Session progress belongs to its origin state.
-        origin = entry.get("origin_run_id") or origins.get(attempt_id) or state["run_id"]
-        _uuid(origin, "origin run")
-        entry.update(attempt_id=attempt_id, origin_run_id=origin, inherited=origin != state["run_id"],
-                     active=origin == state["run_id"] and attempt_id in active,
-                     directory=str(store.run_dir(origin) / "attempts" / attempt_id))
-        entry.setdefault("usage", usage_summary(None))
+        if entry.get("origin_run_id", state["run_id"]) != state["run_id"]:
+            raise ExtractError("attempt usage belongs to another run")
+        entry.update(attempt_id=attempt_id, origin_run_id=state["run_id"], run_id=state["run_id"],
+                     active=attempt_id in active,
+                     directory=str(store.run_dir(state["run_id"]) / "attempts" / attempt_id))
+        entry.setdefault("usage", usage_summary({"backend": state["config"]["backend"]}))
         entry.setdefault("timing", {})
-        rows[origin, attempt_id] = entry
-    return sorted(rows.values(), key=lambda row: (row.get("created_at", float("inf")), row["origin_run_id"], row["attempt_id"]))
+        rows.append(entry)
+    return sorted(rows, key=lambda row: (row.get("created_at", float("inf")), row["attempt_id"]))
 
 
 class _Evidence:
@@ -308,7 +323,7 @@ class _Evidence:
             stream.write(data)
             self.objects[checksum] = stream
 
-    def file(self, path, *, as_json=False, events=False, sha256=None, json_digest=None):
+    def file(self, path, *, as_json=False, events=False, backend=None, sha256=None, json_digest=None):
         path = path.absolute()
         if not path.is_relative_to(self.root):
             raise ExtractError("evidence leaves this runtime store: " + str(path))
@@ -320,7 +335,7 @@ class _Evidence:
             spool = tempfile.TemporaryFile() if self.portable else None
             try:
                 if events:
-                    value = parse_events(path, sink=spool.write if spool else None)
+                    value = parse_events(path, backend=backend, sink=spool.write if spool else None)
                     trace = value["trace"]
                     if trace["error"] or not trace["stable"]:
                         raise ExtractError("missing or changing events: " + str(path))
@@ -365,13 +380,11 @@ def _receipt_response(result, receipt, attempt, *, lock=None, artifacts=None):
     """Prove the receipt came from this raw response and the bytes it concerned."""
     from .receipts import call_identity, normalize_response
     response = result.get("response")
-    response_format = attempt.get("response_format", "schema_extract.receipt.v2")
-    if response_format == "schema_extract.proposal.v1":
-        if lock is None or artifacts is None:
-            raise ExtractError("proposal audit requires its fixed inputs and original artifact checkpoint")
-        response = normalize_response(response, lock, attempt, artifacts)
-    elif response_format != "schema_extract.receipt.v2":
-        raise ExtractError("unknown recorded response format")
+    if attempt.get("response_format") != "schema_extract.proposal.v1":
+        raise ExtractError("attempt has no current proposal protocol")
+    if lock is None or artifacts is None:
+        raise ExtractError("proposal audit requires fixed inputs and the original artifact evidence")
+    response = normalize_response(response, lock, attempt, artifacts)
     if response != receipt:
         raise ExtractError("accepted receipt differs from the recorded CLI response")
     if receipt.get("identity") != call_identity(attempt):
@@ -392,7 +405,7 @@ def _inputs(store, state, files):
         raise ExtractError("fixed snapshot path leaves the registered runtime snapshot")
     files.file(snapshot / "inputs.lock.json", as_json=True, json_digest=digest(lock))
     private_git = manifest(snapshot / "source.git") if lock["source"].get("ref_kind") == "private_snapshot_commit" else {}
-    # Explicit deep audit uses the real gate, including aliases/private Git.
+    # Explicit deep audit uses the real gate, including the private Git source identity.
     # Packaging then streams selected bytes; normal observation does neither.
     verify_run_inputs(state, lock)
     for kind in ("source", "rules"):
@@ -419,11 +432,11 @@ def _checkpoint(store, state, checkpoint_id, files):
 
 
 def _verify_attempt(store, state, row, files, notes):
+    from .recovery import never_launched, verified_result
     directory = Path(row["directory"])
     hashes = row.get("evidence", {})
     attempt = files.file(directory / "attempt.json", as_json=True, json_digest=hashes.get("attempt.json"))
-    row["execution_binding"] = attempt.get("execution_binding")
-    for key in ("semantic_revision", "maintenance_task_id", "purpose", "maintenance_step"):
+    for key in ("backend", "model", "effort", "session_scope", "maintenance_task_id", "purpose", "maintenance_step"):
         if key in row and row[key] != attempt.get(key):
             raise ExtractError("attempt ledger context differs: " + key)
         row[key] = attempt.get(key)
@@ -441,7 +454,7 @@ def _verify_attempt(store, state, row, files, notes):
     for name in ("invocation.json", "result.json", "response.schema.json", "receipt.json", "validated.json",
                  "check.json", "merge_check.json", "event.json", "processing.json", "finished.json",
                  "repair.json", "recovery.json", "rejected.json", "stale.json", "handoff.json",
-                 "termination.json", "launch.json", "process.json", "usage-observation.json"):
+                 "termination.json", "launch.json", "process.json", "exit.json", "cli-exit.json", "normalization.json", "usage-observation.json"):
         path = directory / name
         if name in hashes or os.path.lexists(path):
             records[name] = files.file(path, as_json=True, json_digest=hashes.get(name))
@@ -454,7 +467,15 @@ def _verify_attempt(store, state, row, files, notes):
     for key in ("run_id", "attempt_id", "stage", "node", "role", "session_group"):
         if result.get(key) is not None and result[key] != attempt.get(key):
             raise ExtractError("result invocation identity differs: " + key)
-    parsed = files.file(directory / "events.jsonl", events=True)
+    if result.get("backend") != attempt.get("backend"):
+        raise ExtractError("result backend differs from its registered attempt")
+    if never_launched(attempt, result):
+        # The same invocation-bound setup failure is recoverable without a
+        # provider stream. Preserve its absence rather than archiving fake bytes.
+        parsed = parse_events(directory / "events.jsonl", backend=attempt["backend"])
+        notes.append({"attempt_id": row["attempt_id"], "reason": "not_started; no provider stream; usage unknown"})
+    else:
+        parsed = files.file(directory / "events.jsonl", events=True, backend=attempt.get("backend"))
     if result.get("trace"):
         if parsed["trace"] != result["trace"]:
             raise ExtractError("events differ from the closed trace summary")
@@ -467,6 +488,8 @@ def _verify_attempt(store, state, row, files, notes):
     else:
         notes.append({"attempt_id": row["attempt_id"], "reason": "usage_not_recorded; inspected events do not rewrite history"})
     if result.get("usage_observation_sha256"):
+        if attempt["backend"] != "codex":
+            raise ExtractError("a non-Codex attempt cannot adopt Codex native observations")
         observed = records.get("usage-observation.json", {})
         if (observed.get("format") != OBSERVATION_FORMAT or digest(observed) != result["usage_observation_sha256"] or
                 observed.get("identity") != {key: result.get(key) for key in ("run_id", "attempt_id", "launch_id", "attempt_sha256")} or
@@ -515,8 +538,8 @@ def _verify_attempt(store, state, row, files, notes):
             raise ExtractError("accepted receipt differs from the recorded digest")
         if records.get("validated.json", {}).get("receipt_sha256") != accepted:
             raise ExtractError("validation is not bound to the accepted receipt")
-        if attempt.get("semantic_revision"):
-            for key in ("semantic_revision", "maintenance_task_id", "purpose", "maintenance_step"):
+        if attempt.get("purpose") == "maintenance":
+            for key in ("maintenance_task_id", "purpose", "maintenance_step"):
                 if records.get("validated.json", {}).get(key) != attempt.get(key):
                     raise ExtractError("validation context differs from its original attempt: " + key)
     if row.get("receipt_sha256") is not None and row["receipt_sha256"] != accepted:
@@ -530,48 +553,57 @@ def _verify_attempt(store, state, row, files, notes):
         known = row.get("timing", {}).get(ledger_key)
         if known is not None and processing.get(disk_key, 0) != known:
             raise ExtractError("processing timing differs from its durable high-water mark")
+    if store is not None:
+        termination = result.get("termination", {})
+        later = records.get("termination.json", {})
+        closed_later = termination.get("confirmed") is not True and later.get("confirmed") is True
+        if closed_later:
+            if later.get("attempt_sha256") != digest(attempt) or later.get("attempt_id") != attempt["attempt_id"]:
+                raise ExtractError("later termination evidence belongs to another attempt")
+            termination = later
+        recovered = verified_result(attempt, result, termination)
+        if not closed_later and recovered["outcome"] != result["outcome"]:
+            raise ExtractError("native result outcome differs")
+        if closed_later:
+            notes.append({"attempt_id": row["attempt_id"], "reason": "termination_confirmed_during_recovery",
+                          "original_outcome": result["outcome"], "recovery_outcome": recovered["outcome"]})
+        for field in ("native_status", "response_validation",
+                      "requested_model", "requested_effort", "reported_model", "reported_models", "reported_effort"):
+            if recovered.get(field) != result.get(field):
+                raise ExtractError("native result evidence differs: " + field)
+        if attempt["backend"] == "codex" and result.get("response") is not None:
+            files.file(directory / "cli-tmp/response.json", as_json=True)
     return attempt, result, receipt
 
 
 def _verify(store, state, rows, files, *, whole_run):
-    from .receipts import _anchor
-    from .revisions import resolve_context, verify_revisions
-    errors, notes, selected, origins, checkpoints = [], [], [], {state["run_id"]: state}, {}
+    from .artifacts import artifact_manifest
+    from .receipts import _anchor, _artifact_baseline
+    from .runtime import verify_execution
+    errors, notes, selected, checkpoints = [], [], [], {}
+    run_id = state["run_id"]
     def failure(scope, exc):
         errors.append({"scope": scope, "reason": str(exc)})
     for row in rows:
         try:
-            origin = row["origin_run_id"]
-            if origin not in origins:
-                origins[origin] = _state(store, origin, files)
-            selected.append((row, *_verify_attempt(store, origins[origin], row, files, notes)))
+            selected.append((row, *_verify_attempt(store, state, row, files, notes)))
             for checkpoint_id in {row.get("base_checkpoint"), row.get("result_checkpoint"),
                                   *row.get("checkpoints", []), selected[-1][1]["base_checkpoint"]} - {None}:
-                checkpoints[origin, checkpoint_id] = None
+                checkpoints[checkpoint_id] = None
         except (ExtractError, OSError, ValueError, KeyError, TypeError) as exc:
             failure(row["attempt_id"], exc)
     if whole_run:
         for checkpoint_id in {state.get("checkpoint"), state.get("merged_checkpoint")} - {None}:
-            checkpoints[state["run_id"], checkpoint_id] = None
-    locks = {}
-    for origin, original in origins.items():
+            checkpoints[checkpoint_id] = None
+    lock = None
+    try:
+        lock = _inputs(store, state, files)
+        verify_execution(store, state, attempts=[attempt for _, attempt, _, _ in selected], evidence=files.file)
+    except (ExtractError, OSError, ValueError, KeyError, TypeError) as exc:
+        failure(run_id, exc)
+    for checkpoint_id in checkpoints:
         try:
-            locks[origin] = _inputs(store, original, files)
-            revision_records = verify_revisions(store, original, evidence=files.file)
-            for entry in revision_records:
-                snapshot = Path(entry["target_lock"]["snapshot"])
-                if entry["target_lock"]["source"].get("ref_kind") == "private_snapshot_commit":
-                    for name, checksum in manifest(snapshot / "source.git").items():
-                        files.file(snapshot / "source.git" / name, sha256=checksum)
-            if original.get("execution_binding") or original.get("execution_bindings") or original.get("format") == "schema_extract.run.v2.runtime.v1":
-                from .runtime import verify_execution
-                verify_execution(store, original, attempts=[attempt for row, attempt, _, _ in selected
-                                                            if row["origin_run_id"] == origin], evidence=files.file)
-        except (ExtractError, OSError, ValueError, KeyError, TypeError) as exc:
-            failure(origin, exc)
-    for (origin, checkpoint_id) in checkpoints:
-        try:
-            checkpoints[origin, checkpoint_id] = _checkpoint(store, origins[origin], checkpoint_id, files)
+            checkpoints[checkpoint_id] = _checkpoint(store, state, checkpoint_id, files)
         except (ExtractError, OSError, ValueError, KeyError, TypeError) as exc:
             failure(checkpoint_id, exc)
     sessions = {}
@@ -579,64 +611,61 @@ def _verify(store, state, rows, files, *, whole_run):
         try:
             actual = (result or {}).get("session_id")
             if actual:
-                owner = row["origin_run_id"], attempt["session_group"], attempt["role"]
+                owner = attempt["backend"], digest(attempt["session_scope"])
                 if actual in sessions and sessions[actual] != owner:
-                    raise ExtractError("one session is used by different roles/stages/nodes or continuation runs")
+                    raise ExtractError("one session is used by different backends or stage/node/role/operation scopes")
                 sessions[actual] = owner
-                for handoff in origins[row["origin_run_id"]].get("session_handoffs", []):
-                    if (actual == handoff.get("previous_session_id") and attempt.get("created_at", 0) > handoff.get("at", float("inf"))):
+                for handoff in state.get("session_handoffs", []):
+                    if actual == handoff.get("previous_session_id") and attempt["created_at"] > handoff["at"]:
                         raise ExtractError("selected attempt reused a retired session")
-            context = resolve_context(store, origins[row["origin_run_id"]], attempt)
-            row["context"] = context["identity"]
-            # This checks raw response provenance against its original source
-            # and checkpoint. It does not run current semantic acceptance rules
-            # or turn a historical receipt into an effective current approval.
-            lock = context["source_lock"]
-            if receipt and lock:
-                if attempt["attempt_id"] in origins[row["origin_run_id"]].get("accepted_receipts", {}):
-                    if attempt.get("response_format") == "schema_extract.proposal.v1":
-                        baseline = checkpoints.get((row["origin_run_id"], attempt["base_checkpoint"]))
-                        if not baseline or baseline["files"] != attempt["dependency_digests"]:
-                            raise ExtractError("proposal baseline differs from the registered dependency bytes")
-                        checkpoint_id = (attempt["base_checkpoint"] if attempt["role"] == "reviewer"
-                                         else row.get("result_checkpoint"))
-                        if not checkpoints.get((row["origin_run_id"], checkpoint_id)):
-                            raise ExtractError("proposal has no verified original artifact checkpoint")
-                        artifacts = store.run_dir(row["origin_run_id"]) / "checkpoints" / checkpoint_id / "artifacts"
-                        _receipt_response(result, receipt, attempt, lock=lock, artifacts=artifacts)
-                    else:
-                        _receipt_response(result, receipt, attempt)
-                for anchor in receipt.get("source_evidence", []):
-                    if anchor.get("source_id") != lock["source"]["id"] or lock["source"]["files"].get(anchor["path"]) != anchor["sha256"]:
-                        raise ExtractError("source evidence differs from the selected fixed source")
-                    _anchor(anchor, source_root(lock), lock["source"]["files"])
-                candidates = [value for (origin, _), value in checkpoints.items() if origin == row["origin_run_id"] and value]
-                for anchor in receipt.get("artifact_evidence", []):
-                    match = next((value for value in candidates if value["files"].get(anchor["path"]) == anchor["sha256"]), None)
-                    if match is None:
-                        raise ExtractError("artifact evidence has no matching selected immutable checkpoint")
-                    _anchor(anchor, store.run_dir(row["origin_run_id"]) / "checkpoints" / match["id"] / "artifacts", match["files"])
-        except (ExtractError, KeyError, TypeError) as exc:
+            row["context"] = store.context(state, attempt)["identity"]
+            if not receipt or not lock:
+                continue
+            directory = Path(attempt["directory"])
+            artifacts = directory / "original"
+            validation = files.file(directory / "validated.json", as_json=True)
+            originals = validation.get("original_artifact_digests")
+            expected = _artifact_baseline(result["response"], attempt)
+            selecting = attempt["mode"] == "adjudicate" and (result["response"].get("adjudication") or {}).get("action") == "select"
+            additions = {"dispatch.md"} if not selecting and (attempt["stage"], attempt["role"]) == ("P2", "worker") else ()
+            if (not isinstance(originals, dict) or not originals or
+                    artifact_manifest(artifacts, expected=expected, additions=additions) != originals):
+                raise ExtractError("receipt has no matching preserved original artifact evidence")
+            for name, checksum in originals.items():
+                files.file(artifacts / relative_name(name), sha256=checksum)
+            if attempt["attempt_id"] in state.get("accepted_receipts", {}):
+                baseline = checkpoints.get(attempt["base_checkpoint"])
+                if not baseline or baseline["files"] != attempt["dependency_digests"]:
+                    raise ExtractError("proposal baseline differs from the registered input bytes")
+                if (attempt["role"] == "reviewer" or selecting) and originals != expected:
+                    raise ExtractError("reviewer original differs from its read-only checkpoint")
+                _receipt_response(result, receipt, attempt, lock=lock, artifacts=artifacts)
+            for anchor in receipt.get("source_evidence", []):
+                if anchor.get("source_id") != lock["source"]["id"] or lock["source"]["files"].get(anchor["path"]) != anchor["sha256"]:
+                    raise ExtractError("source evidence differs from this run's fixed source")
+                _anchor(anchor, source_root(lock), lock["source"]["files"])
+            for anchor in receipt.get("artifact_evidence", []):
+                if originals.get(anchor["path"]) != anchor["sha256"]:
+                    raise ExtractError("artifact evidence differs from this invocation's original bytes")
+                _anchor(anchor, artifacts, originals)
+        except (ExtractError, OSError, KeyError, TypeError) as exc:
             failure(row["attempt_id"], exc)
-    # Atomic state replacement during collection makes this an incomplete
-    # observation, even if each individually selected payload was readable.
-    for origin, original in origins.items():
-        try:
-            if _state(store, origin) != original:
-                failure(origin, "state changed during the selected audit")
-        except (ExtractError, OSError) as exc:
-            failure(origin, exc)
-    active = any(row["active"] for row in rows) or (whole_run and (state["status"] == "running" or store.writer_status(state["run_id"]) == "held"))
+    try:
+        if _state(store, run_id) != state:
+            failure(run_id, "state changed during the selected audit")
+    except (ExtractError, OSError) as exc:
+        failure(run_id, exc)
+    active = any(row["active"] for row in rows) or (whole_run and
+        (state["status"] == "running" or store.writer_status(run_id) == "held"))
     if active:
-        failure(state["run_id"], "selected scope is active or unsettled; this is not a complete evidence snapshot")
-    chosen = {(row["origin_run_id"], row["attempt_id"]) for row in rows}
-    handoffs = [{"origin_run_id": origin, **item} for origin, original in origins.items()
-                for item in original.get("session_handoffs", []) if (origin, item["attempt_id"]) in chosen or
-                (origin, item.get("next_attempt_id")) in chosen]
+        failure(run_id, "selected scope is active or unsettled; this is not a complete evidence snapshot")
+    chosen = {row["attempt_id"] for row in rows}
+    handoffs = [{"origin_run_id": run_id, **item} for item in state.get("session_handoffs", [])
+                if item["attempt_id"] in chosen or item.get("next_attempt_id") in chosen]
     return {"status": "incomplete" if errors else "partial" if notes else "verified", "errors": errors,
             "unavailable": notes, "authority": "evidence_only; no approval, dispatch or publication",
             "session_handoffs": handoffs,
-            "checkpoint_ids": [{"origin_run_id": origin, "checkpoint": identity} for origin, identity in sorted(checkpoints)]}
+            "checkpoint_ids": [{"origin_run_id": run_id, "checkpoint": identity} for identity in sorted(checkpoints)]}
 
 
 def _archive_manifest(path):
@@ -757,7 +786,7 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
         ledger = _json(supervisor) if os.path.lexists(supervisor) else {}
         checks = _checks(ledger)
         scope = {"run_id": run_id, "attempt_id": attempt_id, "session_id": session_id,
-                 "usage_scope": "this run's registered CLI attempts, including deduplicated inherited origins; excludes Supervisor and external billing",
+                 "usage_scope": "this run's registered CLI attempts, deduplicated by attempt; excludes Supervisor and external billing",
                  "attempts": [{"origin_run_id": row["origin_run_id"], "attempt_id": row["attempt_id"]} for row in rows],
                  "unindexed_session_attempts": unindexed,
                  "checkpoint_policy": "selected call input/result checkpoints" if attempt_id or session_id else "call input/result and current/final checkpoints"}
@@ -768,32 +797,20 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
         selected_ids = {(row["origin_run_id"], row["attempt_id"]) for row in rows}
         handoffs = [{"origin_run_id": run_id, **item} for item in state.get("session_handoffs", []) if
                     (run_id, item["attempt_id"]) in selected_ids or (run_id, item.get("next_attempt_id")) in selected_ids]
-        inherited_handoffs = [{"origin_run_id": origin, "path": str(store.run_dir(origin) / "state.json") + "#session_handoffs",
-                               "availability": "not_checked"} for origin in sorted({row["origin_run_id"] for row in rows if row["inherited"]})]
         now = time.time()
-        created = state.get("continuation", {}).get("original_created_at", state.get("created_at"))
+        created = state.get("created_at")
         commit = ledger.get("commits", {}).get(run_id, {})
         completed = commit.get("at") if state.get("published") and commit.get("checkpoint") == state.get("checkpoint") and commit.get("target") == state.get("output") else None
         waits = _waits(state, ledger, now)
         report = {"format": "schema_extract.audit.v1", "scope": scope, "observed_at": now,
                   "operator_id": state.get("operator_id"), "status": state["status"], "executor": state.get("executor"),
-                  "execution_binding": state.get("execution_binding"),
-                  "execution_bindings": list(state.get("execution_bindings", [])),
-                  "semantic_revision": state.get("semantic_revision"),
-                  "semantic_revisions": list(state.get("semantic_revisions", [])),
-                  "semantic_context_sources": [{"revision": identity,
-                      "record": str(store.run_dir(run_id) / "revisions" / identity / "revision.json"),
-                      "plan": str(store.run_dir(run_id) / "revisions" / identity / "plan.json"),
-                      "target_lock": str(store.run_dir(run_id) / "revisions" / identity / "target.lock.json")}
-                      for identity in state.get("semantic_revisions", [])],
-                  "approval_adoptions": deepcopy(state.get("approval_adoptions", {})),
-                  "semantic_request": deepcopy(ledger.get("semantic_requests", {}).get(run_id)),
+                  "execution": {key: state["config"][key] for key in
+                                ("backend", "model", "worker_effort", "reviewer_effort", "agent_binary")},
+                  "maintenance_request": deepcopy(ledger.get("maintenance_requests", {}).get(run_id)),
                   "maintenance": deepcopy(state.get("maintenance")),
                   "state": str(store.run_dir(run_id) / "state.json"), "totals": _totals(rows),
-                  "segments": {"current": _totals([row for row in rows if not row["inherited"]]),
-                               "inherited": _totals([row for row in rows if row["inherited"]])},
                   "by_scope": [{"stage": key[0], "role": key[1], "node": key[2], **_totals(value)} for key, value in sorted(groups.items())],
-                  "attempts": rows, "session_handoffs": handoffs, "inherited_handoff_sources": inherited_handoffs,
+                  "attempts": rows, "session_handoffs": handoffs,
                   "supervisor_checks": checks,
                   "time": {"operator_created_at": created, "publication_committed_at": completed,
                            "run_created_at": state.get("created_at"),
@@ -815,7 +832,7 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
             checked = _verify(store, state, rows, files, whole_run=not (attempt_id or session_id))
             if unindexed:
                 checked["status"] = "incomplete"
-                checked["errors"].append({"scope": session_id, "reason": "legacy session fields are unavailable; selection may omit calls"})
+                checked["errors"].append({"scope": session_id, "reason": "session fields have not been recorded for all attempts; selection may omit calls"})
             report["verification"] = checked
             report["session_handoffs"] = checked["session_handoffs"]
             if archive is not None:
@@ -835,25 +852,27 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
 
 
 def format_audit(report):
-    total, segments = report["totals"], report["segments"]
+    total = report["totals"]
     def seconds(value):
         return "unknown" if value["seconds"] is None else f"{value['seconds']:.3f}s ({value['unknown_attempts']} unknown calls)"
-    lines = [f"{report['scope']['run_id']} {report['status']} attempts={total['attempt_count']} "
-             f"current={segments['current']['attempt_count']} inherited={segments['inherited']['attempt_count']}",
-             "whole-invocation tokens=unknown; cached input is part of input",
-             "usage scope=this run's registered CLI attempts, including deduplicated inherited origins",
+    lines = [f"{report['scope']['run_id']} {report['status']} attempts={total['attempt_count']}",
+             "tokens retain backend scopes; cache read/write counts are not combined across providers",
+             "usage scope=this run's registered CLI attempts, deduplicated by attempt",
              "budget policy=wall_clock_deadline; queue, pause and waiting consume budget",
              f"CLI={seconds(total['cli_seconds'])} processing={seconds(total['processing_seconds'])} "
              f"budget-accounted={seconds(total['accounted_seconds'])}"]
     root = total["root_usage"]
     tokens = root["additive_tokens"]
-    lines.append(f"root {root['root_status']} input/cached/output={tokens['input_tokens']}/{tokens['cached_input_tokens']}/{tokens['output_tokens']} "
+    lines.append(f"Codex root {root['root_status']} input/cached/output={tokens['input_tokens']}/{tokens['cached_input_tokens']}/{tokens['output_tokens']} "
                  f"({root['exact_attempts']} exact, {root['partial_attempts']} partial, {root['unknown_attempts']} unknown calls; "
                  f"known={root['known_attempts']})")
     delegation = root["delegation"]["attempt_status"]
     lines.append(f"delegation evidence: {delegation['observed']} observed, {delegation['not_observed_in_range']} not observed in range, "
                  f"{delegation['unavailable']} unavailable calls; child-session tokens and full coverage unknown")
-    lines.append("cost=unknown; no reliable pricing or billing source")
+    for item in total["provider_usage"]["by_backend_and_scope"]:
+        counters = "/".join(str(item["tokens"][field]["known_subtotal"]) for field in TOKEN_FIELDS)
+        lines.append(f"{item['backend']} {item['counter_scope']} known input/cache-read/cache-write/output={counters}; "
+                     f"reported cost subtotal={item['reported_cost_usd_subtotal']}; billing=unknown")
     waits = report["time"]["observed_waits"]["known_union"]
     lines.append(f"run wall={report['time']['run_wall_seconds']}s; observed scope-wait union={waits['seconds']}s "
                  f"({waits['unknown_intervals']} unknown boundaries; may overlap CLI work)")
@@ -868,7 +887,7 @@ def format_audit(report):
                          f"evidence={row['directory']}")
     lines.append("state=" + report["state"] + "; --attempt UUID / --session UUID / --json locate recorded evidence")
     if report["scope"]["unindexed_session_attempts"]:
-        lines.append("session selection is incomplete: older calls have no recorded session fields")
+        lines.append("session selection is incomplete: some attempts have no recorded session fields")
     if report["verification"]["status"] != "not_requested":
         checked = report["verification"]
         lines.append(f"verification={checked['status']} errors={len(checked['errors'])} unavailable={len(checked['unavailable'])}")

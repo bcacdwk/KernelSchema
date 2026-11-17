@@ -25,9 +25,9 @@ STABLE_ID = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+)*")
 
 
 def registry(repo: Path) -> dict:
-    """Legacy files remain historical data, never an imported runtime package."""
+    """Read stable framework decisions from the current issue registry."""
     records = {}
-    for root in (repo / "schema_extract_old/issues", repo / "schema_extract/issues"):
+    for root in (repo / "schema_extract/issues",):
         for path in sorted(root.rglob("*.json")):
             value = read_json(path)
             identity, category = value.get("id"), value.get("category")
@@ -78,6 +78,10 @@ def candidate_report(store, state: dict, repo: Path) -> list[dict]:
                       "role": receipt["identity"]["role"], "receipt": str(path),
                       "evidence": [receipt["source_evidence"][index] for index in item["evidence"]]}
             group["reports"].append({"candidate": item, "source": source})
+    for group in groups.values():
+        confirmed = [report["source"] for report in group["reports"] if report["source"]["role"] == "reviewer"]
+        group["confirmed_by"] = confirmed
+        group["status"] = "confirmed" if confirmed and "invalid_reason" not in group else "candidate"
     return [groups[key] for key in sorted(groups)]
 
 
@@ -88,7 +92,7 @@ def inspect_runs(store, repo: Path | None = None, run_ids=None) -> list[dict]:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Schema Extract v2: P1-P6 extraction with concurrent ready nodes and an independently approved checkpoint.")
     result.add_argument("--version", action="version", version=f"Schema Extract {__version__}")
-    sub = result.add_subparsers(dest="command", required=True)
+    sub = result.add_subparsers(dest="command", required=True, metavar="COMMAND")
     extract = sub.add_parser("extract", help="freeze inputs and independently approve all six stages")
     select = extract.add_mutually_exclusive_group(required=True)
     select.add_argument("--id", dest="operator_id")
@@ -102,29 +106,33 @@ def parser() -> argparse.ArgumentParser:
     launch.add_argument("--background", action="store_true", help="durably register and start a detached frozen Runner")
     extract.add_argument("--repo", type=Path, default=Path.cwd(), help="catalog/Git source repository")
     extract.add_argument("--state-root", type=Path, help="separate v2 store (default: REPO/.schema_extract/v2)")
-    extract.add_argument("--worker-effort", choices=("low", "medium", "high", "xhigh", "max"), default=DEFAULT_CONFIG["worker_effort"])
-    extract.add_argument("--reviewer-effort", choices=("low", "medium", "high", "xhigh", "max"), default=DEFAULT_CONFIG["reviewer_effort"])
-    extract.add_argument("--model", help="optional model override; provider settings remain loaded")
-    extract.add_argument("--codex-bin", default=DEFAULT_CONFIG["codex_binary"], help="Codex CLI executable, or executable test substitute")
+    extract.add_argument("--worker-effort", choices=("low", "medium", "high", "xhigh", "max"), default=None,
+                         help="worker reasoning effort (Claude default: max)")
+    extract.add_argument("--reviewer-effort", choices=("low", "medium", "high", "xhigh", "max"), default=None,
+                         help="reviewer reasoning effort (Claude default: max)")
+    extract.add_argument("--backend", choices=("claude", "codex"), default=DEFAULT_CONFIG["backend"],
+                         help="stage backend (default: claude); Codex requires explicit model and role efforts")
+    extract.add_argument("--model", help="stage model (Claude default: qwen3.8-max[1m])")
+    extract.add_argument("--agent-binary", help="executable for the selected stage backend")
     for option in ("revision_limit", "operator_seconds", "stage_seconds", "call_seconds", "max_calls"):
         extract.add_argument("--" + option.replace("_", "-"), type=int, default=DEFAULT_CONFIG[option],
                              help="finite call budget per stage, and per P5 node; includes reserved adjudication calls" if option == "max_calls" else None)
-    imported = sub.add_parser("import-legacy", parents=[extract], add_help=False,
-                              help="import a terminated v1 checkpoint and independently re-review from P1")
-    imported.add_argument("--from-task", dest="source_task", type=Path, required=True)
-    imported.add_argument("--checkpoint", dest="checkpoint_id", required=True)
     for name, help_text in (("status", "read a saved run without advancing it"),
                             ("pause", "request a pause at invocation boundaries"),
                             ("cancel", "request termination of all started invocations"),
                             ("resume", "resume the frozen run; add finite budget only with explicit options"),
                             ("export", "export the final reviewed checkpoint to another destination"),
-                            ("candidates", "read accepted framework proposals and prior stable-ID decisions")):
+                            ("candidates", "read confirmed framework issues and their original candidates"),
+                            ("maintain", "request bounded review or correction within the current frozen run")):
         command = sub.add_parser(name, help=help_text)
         command.add_argument("run_id", nargs="?" if name in {"pause", "resume"} else None)
         command.add_argument("--repo", type=Path, default=Path.cwd())
         command.add_argument("--state-root", type=Path)
         if name == "status":
             command.add_argument("--full", action="store_true", help="print the entire authoritative state")
+        if name == "maintain":
+            command.add_argument("--issue-id", required=True, help="stable issue identity; repetitions never refund used calls")
+            command.add_argument("--tasks", type=Path, required=True, help="JSON array of stage/node/action/fields/reason tasks")
         if name == "export":
             command.add_argument("--output", type=Path, required=True)
         if name in {"pause", "resume"}:
@@ -141,50 +149,21 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--start", metavar="RUN_UUID", help="request execution of one explicitly selected queued run")
             command.add_argument("--run", nargs="+", dest="run_ids")
             command.add_argument("--json", action="store_true")
-    continued = sub.add_parser("continue", help="prepare or adopt an in-run semantic revision; drafts and budgets remain")
-    continued.add_argument("run_id")
-    continued.add_argument("--checkpoint", help="required only for an explicit full restart")
-    continued.add_argument("--full-restart", action="store_true", help="explicitly create a successor that re-reviews from P1")
-    continued.add_argument("--reason", help="revision reason; a full restart requires a nonempty reason")
-    continued.add_argument("--plan", type=Path, help="independent revision proposal or prepared plan JSON")
-    continued.add_argument("--target-repo", type=Path, help="target rule worktree; source and configuration remain fixed")
-    continued.add_argument("--request-id", help="stable semantic request UUID")
-    continued.add_argument("--repo", type=Path, default=Path.cwd())
-    continued.add_argument("--state-root", type=Path)
-    _budget_options(continued)
-    revised = sub.add_parser("revise", help="request, prepare, apply or inspect a continuous semantic revision")
-    revision_commands = revised.add_subparsers(dest="revision_command", required=True)
-    for name in ("request", "prepare", "apply", "status"):
-        command = revision_commands.add_parser(name)
-        command.add_argument("run_id")
-        command.add_argument("--repo", type=Path, default=Path.cwd())
-        command.add_argument("--state-root", type=Path)
-        if name != "status":
-            command.add_argument("--request-id", help="stable request UUID; omitted selects the current request")
-        if name == "request":
-            command.add_argument("--reason", required=True)
-            command.add_argument("--target-repo", type=Path)
-        if name in {"prepare", "apply"}:
-            command.add_argument("--plan", type=Path, help="independent proposal JSON; prepare without it returns the evaluation template")
-    compatibility = sub.add_parser("compatibility-report", help="read complete frozen/target differences and optional Supervisor review; does not change a run")
-    compatibility.add_argument("run_id")
-    compatibility.add_argument("--checkpoint", required=True)
-    compatibility.add_argument("--repo", type=Path, default=Path.cwd())
-    compatibility.add_argument("--state-root", type=Path)
-    compatibility.add_argument("--target-repo", type=Path, help="target rule worktree (default: this executor's repository)")
-    compatibility.add_argument("--review", type=Path, help="independent Supervisor review JSON bound to this exact report")
-    upgrade = sub.add_parser("upgrade-runtime", help="register a reviewed compatible frozen executor on the same run; does not start it")
-    upgrade.add_argument("run_id")
-    upgrade.add_argument("--report", type=Path, required=True, help="exact compatibility-report JSON (raw report or its report wrapper)")
-    upgrade.add_argument("--review", type=Path, required=True, help="original independent Supervisor compatibility review JSON")
-    upgrade.add_argument("--target-repo", type=Path)
-    upgrade.add_argument("--repo", type=Path, default=Path.cwd())
-    upgrade.add_argument("--state-root", type=Path)
     standalone = sub.add_parser("standalone", help="materialize one node with effective Design and its shared Contract as an independent reading view")
     standalone.add_argument("source", type=Path)
     standalone.add_argument("--output", type=Path, required=True)
     standalone.add_argument("--repo", type=Path, default=Path.cwd())
     standalone.add_argument("--state-root", type=Path)
+    evaluation = sub.add_parser("review-eval", help="evaluate current document cases with independent bounded reviewers")
+    evaluation.add_argument("--suite", type=Path, required=True)
+    evaluation.add_argument("--output", type=Path, required=True)
+    evaluation.add_argument("--backend", choices=("claude", "codex"), default=DEFAULT_CONFIG["backend"])
+    evaluation.add_argument("--agent-binary")
+    evaluation.add_argument("--model")
+    evaluation.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"))
+    evaluation.add_argument("--call-seconds", type=int, default=240)
+    evaluation.add_argument("--case", action="append", dest="cases")
+    evaluation.add_argument("--repo", type=Path, default=rules_root(), help="rules to freeze for this evaluation")
     audit = sub.add_parser("audit", help="read recorded usage/session evidence; explicitly verify or archive selected evidence")
     audit.add_argument("run_id")
     selection = audit.add_mutually_exclusive_group()
@@ -215,7 +194,7 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--thread", required=True, metavar="UUID")
         if name == "start":
             command.add_argument("--run", nargs="+", dest="run_ids")
-            command.add_argument("--auto-restart-limit", type=int, help="explicit persistent per-lineage authorization; never refunds use")
+            command.add_argument("--auto-restart-limit", type=int, help="explicit persistent per-run authorization; never refunds use")
             command.add_argument("--codex-bin", help="Codex queue executable, or executable test substitute")
             command.add_argument("--probe-delay", type=int, metavar="SECONDS", help="one same-thread probe in 1..300 seconds; leaves scan cadence unchanged")
         elif name == "ack":
@@ -225,7 +204,7 @@ def parser() -> argparse.ArgumentParser:
     background.add_argument("--launch-id", required=True)
     background.add_argument("--repo", type=Path, default=Path.cwd())
     background.add_argument("--state-root", type=Path)
-    clock = sub.add_parser("_clock", help=argparse.SUPPRESS)
+    clock = sub.add_parser("_clock")
     clock.add_argument("--launch-id", required=True)
     clock.add_argument("--lock-fd", type=int)
     clock.add_argument("--repo", type=Path, default=Path.cwd())
@@ -270,8 +249,6 @@ def _print_observations(rows, *, as_json=False):
               f"gate={'v1' if row.get('gate_capable') else 'unsupported'} "
               f"last={row.get('updated_at')} deadline={row.get('budget', {}).get('deadline')} "
               f"published={row.get('published')} checkpoint={row.get('checkpoint')}")
-        if row.get("successor"):
-            print(f"  successor={row['successor']['run_id']} status={row['successor']['status']} saved_status={row['status']}")
         for item in row.get("anomalies", []):
             print(f"  {item.get('classification')} {item.get('scope')}: {item.get('summary')} [{item.get('evidence')}]")
             if item.get("recovery_condition"):
@@ -282,7 +259,10 @@ def _launch_context(store, state: dict, *, mode="resume", budget_addition=None) 
     token = os.environ.get("SCHEMA_EXTRACT_ENTRY_ID")
     entry = store.read_supervisor()["starts"].get(state["run_id"], {}).get("launch", {})
     if token and entry.get("id") == token and entry.get("status") == "claimed" and entry.get("identity", {}).get("pid") == os.getpid():
-        return entry
+        from .processes import process_identity_matches
+        if process_identity_matches(entry.get("identity"), monitor._identity()) is True:
+            return entry
+        raise ExtractError("claimed launcher process identity changed")
     entry = monitor.reserve_launch(store, state, mode=mode, budget_addition=budget_addition)
     if not entry.get("reused") and entry.get("id"):
         os.environ["SCHEMA_EXTRACT_ENTRY_ID"] = entry["id"]
@@ -305,13 +285,9 @@ def _registration_result(store, registration: dict, state: dict | None, *, queue
                             "source": {key: lock["source"][key] for key in ("id", "repository_id", "ref", "ref_kind")},
                             "rules_id": lock["rules"]["id"], "executor": observed.get("executor"), "config": lock["config"]}
     if registration.get("reused"):
-        result["input_policy"] = "沿用已登记的固定源码、规则和参数，本次未重新读取工作树。源码或参数变更请换输出目录 extract；兼容工具修复经审阅后 upgrade-runtime，语义变化使用 continue。"
-    successor = store.read_supervisor()["continuations"].get(run_id)
+        result["input_policy"] = "沿用已登记的固定源码、规则和参数。来源、规则或参数改变时，用新输出目录创建运行。"
     launch = registration.get("background") or {}
-    if successor:
-        outcome, next_step = "superseded", "查看接续任务 " + successor["run_id"] + "；旧任务已停止派发。"
-        result["successor"] = successor
-    elif result["run_status"] == "ready" and result["published"]:
+    if result["run_status"] == "ready" and result["published"]:
         outcome, next_step = "published", "交付回执：" + str(Path(registration["output"]) / ".extraction/receipt.json")
     elif background and launch.get("status") in {"launching", "claimed"}:
         outcome = "already_running" if launch.get("reused") or state is None else "start_requested"
@@ -328,7 +304,7 @@ def _registration_result(store, registration: dict, state: dict | None, *, queue
         outcome, next_step = "publication_pending", "status " + run_id + " 查看发布原因；目标冲突时用 export " + run_id + " --output NEW_DIRECTORY 另行交付。"
     else:
         outcome = "stopped"
-        next_step = "status " + run_id + " 查看原因；resume 使用已登记执行器，兼容升级用 upgrade-runtime，语义变化用 continue。"
+        next_step = "status " + run_id + " 查看原因；resume 使用本次冻结执行器和原预算。"
     result.update(result=outcome, next_step=next_step)
     success = (outcome == "published" and state is not None or queued and outcome == "queued" or
                background and outcome in {"start_requested", "already_running", "held"})
@@ -346,25 +322,17 @@ def main(argv=None) -> int:
     args = parser().parse_args(argv)
     try:
         args.repo = args.repo.resolve()
-        state_root = (args.state_root or args.repo / ".schema_extract/v2").resolve()
-        if args.command == "compatibility-report":
-            from .compatibility import build_report, verify_review
-            report = build_report(Store(state_root), args.run_id, args.checkpoint, args.target_repo)
-            result = {"report": report, "review": verify_review(report, read_json(args.review)) if args.review else None}
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0
-        if args.command == "upgrade-runtime":
-            from .runtime import upgrade_runtime
-            report = read_json(args.report)
-            report = report.get("report", report)
-            result = upgrade_runtime(Store(state_root), args.run_id, report, read_json(args.review),
-                                     target_repo=args.target_repo)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0
+        state_root = (getattr(args, "state_root", None) or args.repo / ".schema_extract/v2").resolve()
         if args.command == "standalone":
             from .standalone import create_view
             print(json.dumps(create_view(args.source, args.output, args.repo), ensure_ascii=False, indent=2))
             return 0
+        if args.command == "review-eval":
+            from .review_eval import evaluate
+            report = evaluate(args.suite.resolve(), args.output.resolve(), args.repo, backend=args.backend,
+                              agent_binary=args.agent_binary, model=args.model, effort=args.effort,
+                              call_seconds=args.call_seconds, selected=args.cases)
+            return 0 if report["passed"] else 1
         if args.command == "audit":
             from .audit import _parent_fd, audit_run, format_audit
             with _parent_fd((args.state_root or args.repo / ".schema_extract/v2").absolute() / "state-root-check"):
@@ -404,57 +372,6 @@ def main(argv=None) -> int:
         if args.command == "_clock":
             from .wakeup import Clock
             return Clock(Store(state_root), args.repo).run(args.launch_id, args.lock_fd)
-        if args.command in {"revise", "continue"}:
-            from .revision_control import (PENDING, apply_prepared_revision, prepare_revision,
-                                           request_revision, revision_status)
-            store = Store(state_root)
-            if args.command == "continue" and args.full_restart:
-                from .continuation import continue_run
-                if not args.checkpoint or not args.reason or not args.reason.strip():
-                    raise ExtractError("continue --full-restart requires --checkpoint and a nonempty --reason")
-                if args.plan or args.target_repo or args.request_id:
-                    raise ExtractError("a full restart does not accept semantic revision plan or request options")
-                state = continue_run(args.repo, store, args.run_id, args.checkpoint, full_restart=True,
-                                     reason=args.reason, add_seconds=args.add_seconds, add_calls=args.add_calls)
-                print(json.dumps({**summary(store, state), "action": "full_restart_registered", "delivered": False},
-                                 ensure_ascii=False, indent=2))
-                return 0
-            if args.command == "continue":
-                if args.checkpoint or args.add_seconds or args.add_calls:
-                    raise ExtractError("continuous revision preserves the current frontier and budget; use resume for budget additions, or explicit --full-restart")
-                proposal = read_json(args.plan) if args.plan else None
-                current = revision_status(store, args.run_id)
-                if current["status"] not in PENDING:
-                    if current["maintenance"] and current["maintenance"].get("status") not in {"completed", "complete", "cancelled"}:
-                        result = current
-                    else:
-                        reason = args.reason or (proposal or {}).get("reason") or "continue: evaluate current frozen target rules and preserve valid progress"
-                        request_revision(store, args.run_id, reason=reason, target_repo=args.target_repo, request_id=args.request_id)
-                        result = prepare_revision(store, args.run_id, proposal=proposal, request_id=args.request_id, repo=args.repo)
-                else:
-                    if args.reason or args.target_repo:
-                        request_revision(store, args.run_id, reason=args.reason or current["request"]["reason"],
-                                         target_repo=args.target_repo, request_id=args.request_id)
-                    result = prepare_revision(store, args.run_id, proposal=proposal, request_id=args.request_id, repo=args.repo)
-                if proposal is not None and result["status"] == "prepared":
-                    result = apply_prepared_revision(store, args.run_id, request_id=args.request_id, repo=args.repo)
-            elif args.revision_command == "status":
-                result = revision_status(store, args.run_id)
-            elif args.revision_command == "request":
-                result = request_revision(store, args.run_id, reason=args.reason, target_repo=args.target_repo,
-                                          request_id=args.request_id)
-            elif args.revision_command == "prepare":
-                result = prepare_revision(store, args.run_id, proposal=read_json(args.plan) if args.plan else None,
-                                          request_id=args.request_id, repo=args.repo)
-            else:
-                result = prepare_revision(store, args.run_id, proposal=read_json(args.plan),
-                                          request_id=args.request_id, repo=args.repo) if args.plan else None
-                if result is None or result["status"] in {"prepared", "applied"}:
-                    result = apply_prepared_revision(store, args.run_id, request_id=args.request_id, repo=args.repo)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            # Registration and preparation can succeed while delivery remains
-            # pending. Malformed requests still use the common error exit 2.
-            return 0
         if args.command in {"pause", "resume"} and args.all:
             if getattr(args, "scope", None):
                 raise ExtractError("--scope requires a single run UUID")
@@ -466,6 +383,8 @@ def main(argv=None) -> int:
             result = monitor.hold_all(store) if args.command == "pause" else monitor.release_hold(store, args.hold, args.repo)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "maintain":
+            args.tasks = args.tasks.expanduser().resolve()
         if args.command in {"pause", "resume"} and (not args.run_id or getattr(args, "hold", None)):
             raise ExtractError("single-run control requires a UUID; --hold requires --all")
         if args.command == "resume" and args.scope:
@@ -474,7 +393,7 @@ def main(argv=None) -> int:
             store = Store(state_root)
             state = store.load(args.run_id)
             if "scoped_recovery.v2" not in state.get("executor", {}).get("capabilities", []):
-                raise ExtractError("frozen executor lacks scoped_recovery.v2; use its original resume or explicitly upgrade-runtime first")
+                raise ExtractError("frozen executor lacks scoped_recovery.v2")
             lock = read_json(store.run_dir(args.run_id) / "inputs.lock.json")
             command = ["resume", args.run_id, "--scope", args.scope, "--repo", str(args.repo), "--state-root", str(state_root)]
             _frozen_entry(lock, command, store=store, state=state)
@@ -483,14 +402,21 @@ def main(argv=None) -> int:
             return 0 if request["status"] in {"authorized", "consumed"} and request.get("launch", {}).get("status") != "launch_failed" else 1
         if args.command == "_background":
             store = Store(state_root)
-            entry = monitor.claim_launch(store, args.run_id, args.launch_id)
+            if os.environ.get("SCHEMA_EXTRACT_ENTRY_ID") == args.launch_id:
+                entry = store.read_supervisor()["starts"].get(args.run_id, {}).get("launch", {})
+                from .processes import process_identity_matches
+                if (entry.get("id") != args.launch_id or entry.get("status") != "claimed" or
+                        process_identity_matches(entry.get("identity"), monitor._identity()) is not True):
+                    raise ExtractError("background launch claim changed before frozen entry")
+            else:
+                entry = monitor.claim_launch(store, args.run_id, args.launch_id)
             os.environ["SCHEMA_EXTRACT_ENTRY_ID"] = entry["id"]
             state = store.load(args.run_id)
             lock = read_json(store.run_dir(args.run_id) / "inputs.lock.json")
-            command = (["inspect", "--start", args.run_id] if entry["mode"] == "queued" and
-                       "hold.v1" not in state.get("executor", {}).get("capabilities", []) else ["resume", args.run_id])
-            _frozen_entry(lock, [*command, "--repo", str(args.repo), "--state-root", str(state_root)], store=store, state=state)
-            state = run(store, args.run_id, resume=entry["mode"] != "revision_drain",
+            command = ["_background", args.run_id, "--launch-id", entry["id"],
+                       "--repo", str(args.repo), "--state-root", str(state_root)]
+            _frozen_entry(lock, command, store=store, state=state)
+            state = run(store, args.run_id, resume=entry["mode"] != "maintenance",
                         queued_only=entry["mode"] == "queued", launch_id=entry["id"])
             print(json.dumps(summary(store, state), ensure_ascii=False, indent=2))
             return 0 if state["status"] == "ready" and state["published"] else 1
@@ -516,12 +442,14 @@ def main(argv=None) -> int:
             else:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
-        if args.command not in {"extract", "import-legacy"}:
+        if args.command != "extract":
             store = Store(state_root)
             state = store.load(args.run_id)
             command = [args.command, args.run_id, "--repo", str(args.repo), "--state-root", str(state_root)]
             if getattr(args, "full", False):
                 command.append("--full")
+            if args.command == "maintain":
+                command.extend(["--issue-id", args.issue_id, "--tasks", str(args.tasks.absolute())])
             if args.command == "export":
                 command.extend(["--output", str(args.output.absolute())])
             lock = read_json(store.run_dir(args.run_id) / "inputs.lock.json")
@@ -532,9 +460,7 @@ def main(argv=None) -> int:
                 budget_addition = addition(args.add_seconds, args.add_calls) if args.command == "resume" else addition()
                 if any(budget_addition.values()):
                     if BUDGET_CAPABILITY not in state.get("executor", {}).get("capabilities", []):
-                        raise ExtractError("this frozen executor cannot add budget; adopt a reviewed compatible "
-                                           "runtime with upgrade-runtime, then resume with --add-*; or explicitly use "
-                                           "continue --full-restart with --checkpoint, --reason and --add-*")
+                        raise ExtractError("this frozen executor cannot add budget")
                     command.extend(["--add-seconds", str(args.add_seconds), "--add-calls", str(args.add_calls)])
                 store.assert_startable(args.run_id)
                 entry = _launch_context(store, state, mode=args.command, budget_addition=budget_addition)
@@ -549,7 +475,15 @@ def main(argv=None) -> int:
                     request = store.request_control(args.run_id, args.command)
                     os.environ["SCHEMA_EXTRACT_CONTROL_REQUEST"] = request["id"]
             _frozen_entry(lock, command, store=store, state=state)
-            if args.command == "status":
+            if args.command == "maintain":
+                from .maintenance import submit_request
+                request = submit_request(store, args.run_id, issue_id=args.issue_id, tasks=read_json(args.tasks.absolute()))
+                writer = store.writer_status(args.run_id)
+                delivery = ({"status": "active_runner"} if writer == "held" else
+                            monitor.start_background(store, args.run_id, args.repo, mode="maintenance")
+                            if writer in {"free", "absent"} else {"status": "writer_unknown"})
+                result, code = {"request": request, "delivery": delivery}, 0 if delivery["status"] != "launch_failed" else 1
+            elif args.command == "status":
                 result = state if args.full else summary(store, state)
                 code = 0
             elif args.command in {"pause", "cancel"}:
@@ -564,17 +498,17 @@ def main(argv=None) -> int:
             elif args.command == "candidates":
                 result, code = candidate_report(store, state, args.repo), 0
             else:
-                state = run(store, args.run_id, resume=entry.get("mode") != "revision_drain",
+                state = run(store, args.run_id, resume=entry.get("mode") != "maintenance",
                             queued_only=entry.get("mode") == "queued", launch_id=entry.get("id"))
                 result = summary(store, state)
                 code = 0 if state["status"] == "ready" and state["published"] else 1
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return code
-        config = {key: getattr(args, key) for key in ("worker_effort", "reviewer_effort", "model", "revision_limit",
-                                                     "operator_seconds", "stage_seconds", "call_seconds", "max_calls")}
-        config["codex_binary"] = args.codex_bin
+        config = {key: getattr(args, key) for key in ("backend", "agent_binary", "worker_effort", "reviewer_effort", "model", "revision_limit",
+                                                     "operator_seconds", "stage_seconds", "call_seconds", "max_calls")
+                  if getattr(args, key) is not None}
         if args.ids:
-            if args.command == "import-legacy" or args.output or not args.output_root or not (args.background or args.queue):
+            if args.output or not args.output_root or not (args.background or args.queue):
                 raise ExtractError("--ids requires --output-root and --background or --queue")
             store, results = Store(state_root), []
             targets = monitor.catalog_targets(args.repo, args.ids, args.output_root)
@@ -594,25 +528,15 @@ def main(argv=None) -> int:
             return 1 if any(value.get("error") or value.get("exit_code") for value in results) else 0
         if not args.output or args.output_root:
             raise ExtractError("single-source extraction requires --output and does not take --output-root")
-        if args.command == "import-legacy":
-            from .legacy import import_legacy
-            if args.background:
-                raise ExtractError("import-legacy supports --queue followed by explicit resume; --background belongs to extract")
-            if args.operator_id:
-                raise ExtractError("import-legacy requires --source with explicit legacy frozen-source bindings")
-            store, state, _ = import_legacy(args.repo, state_root, args.output, source_task=args.source_task,
-                                             checkpoint_id=args.checkpoint_id, source=args.source,
-                                             bindings=args.bindings, config=config, queued=args.queue)
-        else:
-            store = Store(state_root)
-            registered, state = monitor.registered_extract(args.repo, store, args.output, operator_id=args.operator_id,
-                                                          source=args.source, bindings=args.bindings, config=config, queued=args.queue)
-            if state is None or args.background or (registered.get("reused") and (not registered["authorized"] or state["status"] != "queued")):
-                if state is not None and args.background and registered["authorized"]:
-                    registered["background"] = monitor.start_background(store, state["run_id"], args.repo)
-                result, code = _registration_result(store, registered, state, queued=args.queue, background=args.background)
-                print(json.dumps(result, ensure_ascii=False, indent=2))
-                return code
+        store = Store(state_root)
+        registered, state = monitor.registered_extract(args.repo, store, args.output, operator_id=args.operator_id,
+                                                      source=args.source, bindings=args.bindings, config=config, queued=args.queue)
+        if state is None or args.background or (registered.get("reused") and (not registered["authorized"] or state["status"] != "queued")):
+            if state is not None and args.background and registered["authorized"]:
+                registered["background"] = monitor.start_background(store, state["run_id"], args.repo)
+            result, code = _registration_result(store, registered, state, queued=args.queue, background=args.background)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return code
         print(json.dumps({"run_id": state["run_id"], "state_directory": str(store.run_dir(state["run_id"])),
                           "status": state["status"]}, ensure_ascii=False), file=sys.stderr, flush=True)
         if args.queue:

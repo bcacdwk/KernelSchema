@@ -1,4 +1,4 @@
-"""Bounded root-session usage evidence; observation never supplies extra budget.
+"""Bounded Codex root-session usage evidence; observation never supplies extra budget.
 
 Only the requested UUID is read. Native conversation text is neither retained nor
 passed to the agent. A fresh pre-invocation sample replaces cross-call cursors, so
@@ -78,15 +78,17 @@ def _locate(home, session_id, started_at):
     database = home / "state_5.sqlite"
     if database.is_file():
         try:
-            with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=0.2)) as connection:
+            with _open(database), closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=0.2)) as connection:
                 row = connection.execute("SELECT rollout_path FROM threads WHERE id=?", (session_id,)).fetchone()
             if row:
-                path = Path(row[0]).absolute()
-                if not path.is_relative_to(root) or not path.name.endswith(session_id + ".jsonl"):
+                path = Path(row[0])
+                if not path.is_absolute() or ".." in path.parts or not path.name.endswith(session_id + ".jsonl"):
+                    raise ObservationError("native_index_identity_conflict")
+                if not path.is_relative_to(root):
                     raise ObservationError("native_index_identity_conflict")
                 return path
         except sqlite3.Error:
-            pass  # Older CLI layouts can still use the bounded UUID/date lookup.
+            pass  # An unavailable index still permits bounded UUID/date lookup.
     dates = {datetime.fromtimestamp(started_at, timezone.utc).date()}
     if identity.version == 7:
         dates.add(datetime.fromtimestamp((identity.int >> 80) / 1000, timezone.utc).date())
@@ -213,20 +215,29 @@ def _baseline(path, session_id):
             "counter": counters[-1]}
 
 
-def begin_usage_observation(attempt, invocation, *, home=None):
+def begin_usage_observation(attempt, invocation, *, home):
     """Sample resume history before launch; never infer a missing baseline as 0."""
-    value = {"format": FORMAT, "identity": {key: invocation.get(key) for key in
+    if attempt.get("backend") != "codex" or invocation.get("backend") != "codex":
+        raise ObservationError("native_observation_requires_registered_codex_backend")
+    value = {"format": FORMAT, "backend": "codex", "identity": {key: invocation.get(key) for key in
              ("run_id", "attempt_id", "launch_id", "attempt_sha256")},
-             "requested_session_id": attempt.get("session_id"), "workspace": attempt["workspace"],
+             "requested_session_id": attempt.get("session_id"), "workspace": invocation["cwd"],
+             "session_scope": deepcopy(attempt["session_scope"]),
              "started_at": invocation["started_at"], "cli_version": invocation.get("cli_version"),
              "baseline": None, "issues": []}
     value["delegation"] = {"policy": "forbidden" if invocation.get("delegation_policy") == "forbidden" else "unknown",
                            "status": "unavailable", "records": [], "issues": [],
                            "child_usage_reason": "child_session_tokens_and_complete_source_set_not_observed"}
     try:
-        value["home"] = str((home or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))).expanduser().absolute())
+        registered = Path(attempt["session_directory"]) / "home/.codex"
+        if (not registered.is_absolute() or ".." in registered.parts or Path(home) != registered or
+                invocation.get("attempt_sha256") != digest(attempt) or
+                any(invocation.get(key) != attempt.get(key) for key in
+                    ("run_id", "attempt_id", "session_directory", "session_scope"))):
+            raise ObservationError("native_scope_identity_conflict")
+        value.update(home=str(registered))
         if attempt.get("session_id"):
-            path = _locate(Path(value["home"]), attempt["session_id"], invocation["started_at"])
+            path = _locate(registered, attempt["session_id"], invocation["started_at"])
             value["baseline"] = _baseline(path, attempt["session_id"])
     except Exception as exc:
         value["issues"].append(str(exc) if isinstance(exc, ObservationError) else "native_baseline_" + type(exc).__name__)
@@ -285,6 +296,11 @@ def finish_usage_observation(start, parsed, result):
                  cli_version=result.get("cli_version"), source="native token_count reconciled with events.jsonl",
                  stream_reports=deepcopy(parsed["usage"]["reports"]), stream_trace_sha256=parsed["trace"]["sha256"])
     try:
+        if start.get("backend") != "codex" or result.get("backend") != "codex" or parsed["trace"].get("backend") != "codex":
+            raise ObservationError("native_observation_backend_conflict")
+        if (start["identity"] != {key: result.get(key) for key in start["identity"]} or
+                start["session_scope"] != result.get("session_scope")):
+            raise ObservationError("native_scope_identity_conflict")
         if value["issues"]:
             raise ObservationError("resume_baseline_unavailable")
         session_id = result.get("session_id")
@@ -363,7 +379,7 @@ def finish_usage_observation(start, parsed, result):
 
 def observation_summary(value):
     """The existing attempt ledger retains a small immutable observation binding."""
-    keys = ("format", "identity", "session_id", "turn_id", "status", "root_status", "scope",
+    keys = ("format", "backend", "identity", "session_id", "turn_id", "status", "root_status", "scope",
             "source", "cursor_valid", "additive_tokens", "baseline_tokens", "final_tokens", "issues")
     summary = {key: deepcopy(value[key]) for key in keys if key in value}
     if "delegation" in value:
@@ -392,7 +408,7 @@ def observation_totals(rows):
     usable, spans = {}, {}
     for identity, row in selected.items():
         observed = row.get("usage_observation", {})
-        if not observed.get("cursor_valid") or observed.get("format") != FORMAT:
+        if not observed.get("cursor_valid") or observed.get("format") != FORMAT or observed.get("backend") != "codex":
             continue
         try:
             tokens = _tokens(observed.get("additive_tokens"))
@@ -415,11 +431,12 @@ def observation_totals(rows):
     policy_counts = {key: 0 for key in ("forbidden", "unknown")}
     for identity, row in selected.items():
         observed = row.get("usage_observation") or {}
-        delegation = observed.get("delegation", {}) if observed.get("format") == FORMAT and identity not in conflicts else {}
+        delegation = observed.get("delegation", {}) if (observed.get("format") == FORMAT and
+                        observed.get("backend") == "codex" and identity not in conflicts) else {}
         state = delegation.get("status", "unavailable")
         delegation_counts[state if state in delegation_counts else "unavailable"] += 1
         policy_counts["forbidden" if delegation.get("policy") == "forbidden" else "unknown"] += 1
-    return {"status": "partial" if known else "unavailable", "scope": "root_session_known_subtotal",
+    return {"backend": "codex", "status": "partial" if known else "unavailable", "scope": "root_session_known_subtotal",
             "attempt_scope": "registered_cli_attempts_in_this_run_including_deduplicated_origins",
             "root_status": "exact" if selected and exact == len(selected) else "partial" if known else "unavailable",
             "additive_tokens": {key: sum(tokens[key] for tokens in known.values()) if known else None for key in TOKEN_FIELDS},

@@ -13,7 +13,6 @@ from uuid import uuid4
 
 from .common import ExtractError, digest, fsync_directory, read_json, rules_root, seal, sha256, sync_tree, verify_manifest, write_json
 from .inputs import SourceTree
-from .stages import STAGES
 
 
 def executor_files(repo: Path) -> set[Path]:
@@ -27,7 +26,7 @@ def rule_files(repo: Path, *, require_specs: bool = True) -> list[str]:
              repo / "schema_extract/README.md", repo / "schema_extract/REVIEW.md",
              repo / "schema_extract/tools/README.md", repo / "schema_extract/issues/README.md"}
     paths.update((repo / "schema_docs").glob("*.md"))
-    paths.update(repo / "schema_extract/phases" / stage["page"] for stage in STAGES.values())
+    paths.update((repo / "schema_extract/prompt").rglob("*.md"))
     paths.update(executor_files(repo))
     paths.update(p for p in (repo / "schema_template/tools").rglob("*.py") if "tests" not in p.parts)
     if require_specs and (not (repo / "schema_docs/0.common.md").is_file() or
@@ -78,7 +77,7 @@ def _private_commit(directory: Path, files: dict[str, str]) -> str:
     return commit
 
 
-def _version(tree: SourceTree, files: dict[str, str], frozen: Path, bindings=None, aliases=None) -> dict:
+def _version(tree: SourceTree, files: dict[str, str], frozen: Path, bindings=None) -> dict:
     head = _head(tree)
     dirty = []
     if not tree.commit:
@@ -94,11 +93,6 @@ def _version(tree: SourceTree, files: dict[str, str], frozen: Path, bindings=Non
                 "dirty_files": dirty}
     if bindings is not None:
         identity["bindings"] = bindings
-    if aliases:
-        for alias in aliases:
-            if not alias["files"] or any(files.get(name) != value for name, value in alias["files"].items()):
-                raise ExtractError("imported source alias is not bound to the new fixed source bytes")
-        identity["aliases"] = aliases
     if bindings is not None and dirty:
         identity["ref"] = _private_commit(frozen, files)
         identity["ref_kind"] = "private_snapshot_commit"
@@ -127,7 +121,7 @@ def _reuse_snapshot(lock: dict) -> dict:
 
 
 def freeze_inputs(state_root: Path, tree: SourceTree, bindings: dict, names: list[str],
-                  config: dict, *, rules_repo: Path | None = None, source_aliases=None) -> dict:
+                  config: dict, *, rules_repo: Path | None = None) -> dict:
     """Read actual worktree bytes; never substitute HEAD for uncommitted code."""
     rules_repo = (rules_repo or rules_root()).resolve()
     state_root = state_root.resolve()
@@ -150,8 +144,7 @@ def freeze_inputs(state_root: Path, tree: SourceTree, bindings: dict, names: lis
                 for name, expected in hashes.items():
                     if sha256(origin.read(name)) != expected:
                         raise ExtractError(f"{kind} changed during snapshot: {name}")
-            versions[kind] = _version(origin, hashes, temporary / kind, bindings if kind == "source" else None,
-                                      source_aliases if kind == "source" else None)
+            versions[kind] = _version(origin, hashes, temporary / kind, bindings if kind == "source" else None)
         fingerprint = digest({"source": versions["source"]["id"], "rules": versions["rules"]["id"],
                               "config": config, "policy": "skip-hardware"})
         destination = snapshots / fingerprint
@@ -193,9 +186,6 @@ def verify_snapshot(lock: dict) -> None:
         if digest(identity) != version["id"]:
             raise ExtractError(f"{kind} version digest mismatch")
         verify_manifest(root / kind, version["files"])
-        for alias in version.get("aliases", []):
-            if any(version["files"].get(name) != value for name, value in alias["files"].items()):
-                raise ExtractError("imported source alias no longer matches fixed bytes")
         if version["ref_kind"] == "private_snapshot_commit":
             fixed = SourceTree(root / "source.git", version["ref"])
             if sorted(fixed.files(".")) != sorted(version["files"]):
@@ -229,28 +219,20 @@ def verify_run_inputs(state: dict, lock: dict) -> None:
     verify_snapshot(lock)
 
 
-def _script_layout(lock: dict) -> bool:
-    """Select only entry points present in the verified frozen manifest."""
-    files = lock["rules"]["files"]
-    if "schema_extract/extract.py" in files and "schema_extract/tools/cli.py" in files:
-        return True
-    if {"schema_extract/__init__.py", "schema_extract/__main__.py", "schema_extract/cli.py"} <= files.keys():
-        return False
-    raise ExtractError("snapshot does not contain a supported frozen executor")
-
-
 def frozen_invocation(lock: dict, arguments: list[str]) -> tuple[list[str], Path, dict[str, str]]:
     """Verify before entering a frozen executor; projections need no invocation."""
     verify_snapshot(lock)
     directory = rules_root(lock)
-    entry = [str(directory / "schema_extract/extract.py")] if _script_layout(lock) else ["-m", "schema_extract"]
+    name = "schema_extract/extract_yaml.py"
+    if name not in lock["rules"]["files"]:
+        raise ExtractError("snapshot is missing its extraction entrypoint")
     environment = {**os.environ, "PYTHONPATH": str(directory), "PYTHONDONTWRITEBYTECODE": "1"}
-    return [sys.executable, "-B", *entry, *arguments], directory, environment
+    return [sys.executable, "-B", str(directory / name), *arguments], directory, environment
 
 
 def frozen_reader(lock: dict) -> Path:
     """Locate the reader in a run whose input snapshot has already been verified."""
-    name = "schema_extract/tools/reading.py" if _script_layout(lock) else "schema_extract/reading.py"
+    name = "schema_extract/tools/reading.py"
     if name not in lock["rules"]["files"]:
         raise ExtractError("snapshot does not contain its frozen reader: " + name)
     return rules_root(lock) / name

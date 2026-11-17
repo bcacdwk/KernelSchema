@@ -10,7 +10,7 @@
 
 资料不足时说明缺项及其影响，继续能够确定的部分。不要编造参考入口、硬件保证、实验结果或设计定义。缺口按[算法验收记录](../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)、[硬件占位](../schema_docs/2.contract.hardware_specification.md#省略与占位)和[数学缺项](../schema_docs/3.design.math_reshape.md#引用与缺项)表达。
 
-固定源码提取按 [P1](../schema_extract/phases/01_contract.md#第-3-段硬件占位)最小登记有据的执行单元，其余硬件保留占位，显式使用 `--read-only --skip-hardware` 检查。Template 工具已对齐当前字段；Extract Runner 的阶段与权限对接仍待后续，实际状态见[执行器对齐说明](../schema_extract/EXECUTOR_ALIGNMENT.md)。
+固定源码提取按 [P1](../schema_extract/prompt/phases/01_contract.md#第-3-段硬件占位)最小登记有据的执行单元，其余硬件保留占位，显式使用 `--read-only --skip-hardware` 检查。Extract 的阶段检查、隔离与运行环境见[执行器对齐说明](../schema_extract/EXECUTOR_ALIGNMENT.md)。
 
 ### 2 创建文件或进入已有任务
 

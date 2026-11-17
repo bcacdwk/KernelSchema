@@ -19,9 +19,9 @@ Kernel Schema 设计的核心出发点在于，压缩是智能的基础，对于
 
 一次任务选择当前工作对应的入口，通过产物与必要说明交接。分区与权限见[分区总览](#2-schema-是什么)；需要系统学习或选择案例时，再看[阅读入口](#阅读入口)。
 
-Schema Extract `2.5.0` 的六阶段自动提取、独立审阅、返工、依赖并发、引用解析与发布按其冻结协议运行。本文档的具体设计与 `from` 方法尚待执行器对接，使用命令前先读[执行器对齐说明](schema_extract/EXECUTOR_ALIGNMENT.md)；旧运行按原身份与规则解释，历史产物不自动转换。操作与验证范围见[提取指南](schema_extract/README.md)。
+Schema Extract 通过唯一入口 `schema_extract/extract_yaml.py` 执行六阶段提取、独立审阅、按实际来源返回与原子发布。默认使用 Claude Code `qwen3.8-max[1m]` / `max`，各阶段和角色建立独立会话；Codex 可显式选择。直接运行环境与角色权限见[执行边界](schema_extract/EXECUTOR_ALIGNMENT.md)，操作见[提取指南](schema_extract/README.md)。
 
-交付需核对具体目标与版本：`ready` 表示终审通过，`published: true` 表示已发布到原输出目录；另行 `export` 以对应的 `exports[].status=published` 记录和目标 `.extraction/receipt.json` 为准。记录与回执中的 checkpoint、规则、批准及文件摘要须对应本次交付，旧 export 不证明当前修订已交付。[开始试用](schema_extract/README.md#开始一次试用) · [输出目录](schema_wiki/README.md) · [恢复与交付](schema_extract/README.md#恢复与交付)
+交付需核对具体目标与版本：`ready` 表示终审通过，`published: true` 表示已发布到原输出目录；另行 `export` 以对应的 `exports[].status=published` 记录和目标 `.extraction/receipt.json` 为准。记录与回执中的 checkpoint、规则、批准及文件摘要须对应本次交付。[开始试用](schema_extract/README.md#开始一次试用) · [输出目录](schema_wiki/README.md) · [恢复与交付](schema_extract/README.md#恢复与交付)
 
 新建与优化均由 Planner 承担，按数学改写、工作调度、微流水线的顺序逐层推导和写入。先把上层方向收束，再向下投入优化精力；下层发现前提问题时，回到对应上层修正并复查受影响部分。
 
@@ -131,7 +131,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape
 
 **TODO：**
 
-- **执行器对接**：解析、目录、调用与冻结运行的待办集中见[执行器对齐说明](schema_extract/EXECUTOR_ALIGNMENT.md)，文档更新不表示工具已经支持新方法。
+- **执行器验证**：适用环境、真实 CLI 与受控全链路的覆盖集中见[执行边界](schema_extract/EXECUTOR_ALIGNMENT.md)；独立验收与正式算子提取分别记录。
 - **案例资料与来源缺口**：继续补齐 Wiki 绑定与源码中未获保证的关系，具体边界见[示例索引](schema_template/examples/README.md)；数值及性能验收按相应任务执行。
 - **更多转写与精简**：转写更多 SOTA kernel，收敛到最小交集原语。
 - **检查器与评估器**：在现有结构、具名关系及有限工作阶段内依赖检查之上，继续完善资源记账、跨工作阶段与更大规模的合法性和活性分析，以及尽量保序的性能估算。

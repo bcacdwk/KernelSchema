@@ -22,14 +22,14 @@ class MonitorEvidenceTests(unittest.TestCase):
             self.assertEqual(observations["P5:" + name]["engineering_handoff"]["read_only_evidence"],
                              ["/runtime/runs/operator/state.json", "/runtime/runs/operator/attempts/failed-" + name])
 
-    def test_legacy_branch_without_identity_does_not_guess_the_latest_attempt(self):
+    def test_branch_without_identity_does_not_guess_the_latest_attempt(self):
         view = self.run_view()
         for detail in view["node_details"].values():
             detail["reason"].pop("attempt_id")
         for item in classify(view):
             self.assertEqual(item["engineering_handoff"]["read_only_evidence"], ["/runtime/runs/operator/state.json"])
 
-    def test_sequential_legacy_failure_uses_an_available_last_attempt(self):
+    def test_sequential_failure_uses_an_available_last_attempt(self):
         view = self.run_view()
         view.update(stage="P4", status="invalid_receipt", node_details={},
                     reason={"code": "proposal_rejected", "summary": "Root failed."})

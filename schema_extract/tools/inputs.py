@@ -127,14 +127,11 @@ def _locator(value, name: str, prefix: str, tree: SourceTree) -> dict:
 def validate_source_reference(value: str, lock: dict, *, role: str) -> dict:
     """Resolve a YAML source citation in this run's actual frozen source version."""
     source = lock["source"]
-    matches = [entry for entry in [source, *source.get("aliases", [])]
-               if isinstance(value, str) and value.startswith(f"{entry['repository_id']}@{entry['ref']}:")]
-    if not matches:
-        raise ExtractError(f"{role} source must cite a fixed repository and ref: {source['repository_id']}@{source['ref']}:")
-    origin = matches[0]
-    prefix = f"{origin['repository_id']}@{origin['ref']}:"
+    prefix = f"{source['repository_id']}@{source['ref']}:"
+    if not isinstance(value, str) or not value.startswith(prefix):
+        raise ExtractError(f"{role} source must cite this fixed repository and ref: {prefix}")
     locator = _locator(value[len(prefix):], role, ".", SourceTree(source_root(lock)))
-    if locator["path"] not in origin["files"] or origin["files"][locator["path"]] != source["files"].get(locator["path"]):
+    if locator["path"] not in source["files"]:
         raise ExtractError(f"{role} source is not in the fixed manifest")
     if role == "reference":
         expected = source["bindings"]["reference"]

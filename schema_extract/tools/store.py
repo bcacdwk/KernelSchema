@@ -15,14 +15,13 @@ from uuid import UUID, uuid4
 from . import __version__
 from .common import (STATE_GUARD, ExtractError, RunnerBusy, StaleResult, copy_artifacts, digest, json_bytes,
                      fsync_directory, manifest, read_json, seal, sync_tree, verify_manifest, write_json, write_text, rules_root)
-from .artifacts import DESIGN_REGIONS, _same, design_context, load_yaml, validate_artifact_sources, write_yaml
-from .budget import call_limit, review_seconds
-from .runtime import (EXECUTOR_CAPABILITIES, STATE_FORMAT as RUNTIME_STATE_FORMAT,
-                      execution_boundary, verify_execution)
-from .revisions import (STATE_FORMAT as SEMANTIC_STATE_FORMAT, CONTEXT_FIELDS, resolve_context,
-                        verify_effective_approval as verify_effective_context_approval)
-from .stages import (NODE_STOPS, call_view, effective_nodes, new_scope, next_call, next_calls, node_signature,
-                     scope_for, scope_key, session_group, writable_files)
+from .artifacts import (align_source_identity, approval_projection, artifact_manifest, check_stage_snapshot, design_context,
+                        load_yaml, normalize_candidate, source_context, validate_artifact_sources, write_yaml)
+from .budget import call_limit, check_timeout, review_seconds
+from .runtime import EXECUTOR_CAPABILITIES, execution_boundary, verify_execution
+from .stages import (NODE_STOPS, actual_sources, call_view, effective_nodes, new_scope, next_call, next_calls, node_signature,
+                     approval_is_current, scope_for, scope_key, session_group, session_scope,
+                     selection_signature, writable_files, invalidate_final, invalidate_node, invalidate_stage)
 
 
 STATE_FORMAT = "schema_extract.run.v2"
@@ -42,6 +41,30 @@ def _state_stamp(path: Path) -> dict:
 class Store:
     def __init__(self, root: Path):
         self.root = root.resolve()
+
+    @staticmethod
+    def execution_config(state: dict) -> dict:
+        config = state.get("config", {})
+        if config.get("backend") not in {"claude", "codex"} or any(
+                not isinstance(config.get(key), str) or not config[key]
+                for key in ("agent_binary", "model", "worker_effort", "reviewer_effort")):
+            raise ExtractError("run must register backend, executable, model and both role efforts")
+        if not Path(config["agent_binary"]).is_absolute():
+            raise ExtractError("registered agent executable must be an absolute path")
+        return config
+
+    def context(self, state: dict, attempt: dict | None = None) -> dict:
+        from .snapshots import verify_run_inputs
+        lock = read_json(self.run_dir(state["run_id"]) / "inputs.lock.json")
+        verify_run_inputs(state, lock)
+        self.execution_config(state)
+        if attempt is not None and (attempt.get("run_id") != state["run_id"] or
+                attempt.get("input_fingerprint") != state["input_fingerprint"] or
+                attempt.get("attempt_id") not in state["attempts"]):
+            raise ExtractError("attempt does not belong to the current frozen run")
+        return {"source_lock": lock, "rules_lock": lock, "executor_lock": lock,
+                "identity": {"source_fingerprint": lock["fingerprint"], "rules_id": lock["rules"]["id"],
+                             "executor_rules_id": lock["rules"]["id"]}}
 
     def initialize(self) -> None:
         marker = self.root / "format.json"
@@ -74,12 +97,12 @@ class Store:
         path = self.root / "supervisor.json"
         if not path.exists():
             return {"format": SUPERVISOR_FORMAT, "revision": 0, "active_hold": None,
-                    "holds": {}, "starts": {}, "controls": {}, "continuations": {},
+                    "holds": {}, "starts": {}, "controls": {}, "maintenance_requests": {},
                     "retries": {}, "auto_restart": {}, "observations": {}}
         value = read_json(path)
         if not isinstance(value, dict) or value.get("format") != SUPERVISOR_FORMAT:
             raise ExtractError("unsupported supervisor control ledger")
-        for name in ("holds", "starts", "controls", "continuations", "retries", "auto_restart", "observations"):
+        for name in ("holds", "starts", "controls", "maintenance_requests", "retries", "auto_restart", "observations"):
             if not isinstance(value.get(name), dict):
                 raise ExtractError("invalid supervisor field: " + name)
         return value
@@ -119,17 +142,8 @@ class Store:
 
     def assert_startable(self, run_id: str, ledger: dict | None = None) -> None:
         ledger = self.read_supervisor() if ledger is None else ledger
-        if run_id in ledger["continuations"]:
-            raise ExtractError("run has a reserved successor; use " + ledger["continuations"][run_id]["run_id"])
-        self.assert_constructed(run_id, ledger)
         if ledger["active_hold"]:
             raise ExtractError("global hold is active: " + ledger["active_hold"])
-
-    def assert_constructed(self, run_id: str, ledger: dict | None = None) -> None:
-        """Both dispatch and further continuation require committed inheritance."""
-        ledger = self.read_supervisor() if ledger is None else ledger
-        if any(value["run_id"] == run_id and value["status"] != "ready" for value in ledger["continuations"].values()):
-            raise ExtractError("successor is still being constructed; its original budget is not yet committed")
 
     def append_control(self, ledger: dict, run_id: str, action: str, *, hold_id=None) -> dict:
         """Caller holds supervisor.lock; requests remain the Runner's input."""
@@ -194,14 +208,15 @@ class Store:
         path = self.run_dir(run_id) / "state.json"
         guard = STATE_GUARD.get()
         value = guard.read_state() if guard and path.parent == guard.directory else read_json(path)
-        if not isinstance(value, dict) or value.get("format") not in {STATE_FORMAT, RUNTIME_STATE_FORMAT, SEMANTIC_STATE_FORMAT} or value.get("run_id") != run_id:
-            raise ExtractError("unsupported or mismatched state; v1 runs must use their frozen executor")
-        if "active_attempts" not in value or "reopen_requests" not in value:
-            raise ExtractError("this older serial run must use its frozen executor; import its checkpoint into a new run")
+        if not isinstance(value, dict) or value.get("format") != STATE_FORMAT or value.get("run_id") != run_id:
+            raise ExtractError("unsupported or mismatched state; start a new extraction")
+        if not {"active_attempts", "reopen_requests", "selected_designs", "writing_plan"} <= value.keys():
+            raise ExtractError("run does not implement the current six-stage protocol")
+        self.execution_config(value)
         return value
 
     def save(self, state: dict) -> None:
-        if state.get("format") not in {STATE_FORMAT, RUNTIME_STATE_FORMAT, SEMANTIC_STATE_FORMAT}:
+        if state.get("format") != STATE_FORMAT:
             raise ExtractError("cannot save another state format")
         directory = self.run_dir(state["run_id"])
         guard = STATE_GUARD.get()
@@ -283,7 +298,7 @@ class Store:
             requests.append(value)
         return sorted(requests, key=lambda item: (item["created_at"], item["id"]))
 
-    def create(self, lock: dict, output: Path, *, seed: dict | None = None, queued=False,
+    def create(self, lock: dict, output: Path, *, queued=False,
                run_id: str | None = None, created_at: float | None = None) -> dict:
         if not (self.root / "format.json").exists():
             write_json(self.root / "format.json", {"format": "schema_extract.store.v2"})
@@ -298,7 +313,8 @@ class Store:
                  "input_fingerprint": lock["fingerprint"], "snapshot": lock["snapshot"],
                  "source_identity": {key: lock["source"][key] for key in ("id", "repository_id", "ref", "ref_kind")},
                  "status": "queued" if queued else "running", "stage": "P1", "role": "worker", "node": "root",
-                 "mode": "normal", "plan": None, "plan_draft": None, "merged_checkpoint": None,
+                 "mode": "normal", "selected_designs": None, "writing_plan": None, "plan_draft": None,
+                 "selection_signature": None, "writing_signature": None, "merged_checkpoint": None,
                  "revision_scope": [], "pending_rechecks": [], "recoverable_checkpoint": None,
                  "plan_revision": 1, "created_at": now,
                  "executor": {"version": __version__, "rules_id": lock["rules"]["id"],
@@ -309,10 +325,9 @@ class Store:
                  "stale_results": {}, "unconfirmed_attempts": {}, "p6_starts": 0, "final_review_started": False,
                  "config": lock["config"], "deadline": now + lock["config"]["operator_seconds"],
                  "budget_extensions": [],
-                 "sessions": {group: {"worker": None, "reviewer": None}
-                              for group in ("P1_P2", "P3", "P4", "P6", "P6_signoff")},
+                 "sessions": {},
                  "stages": {stage: new_scope() for stage in ("P1", "P2", "P3", "P4", "P5", "P6")},
-                 "nodes": {"root": {"file": "root.yaml", "parent": "", "status": "draft", "merged": False,
+                 "nodes": {"root": {"id": "root", "file": "root.yaml", "status": "draft", "merged": False,
                                      "draft_checkpoint": None, "approved_checkpoints": {},
                                      "approval": None, "approved_sha256": None,
                                      "generation": 0, "approved_generation": None}},
@@ -325,31 +340,7 @@ class Store:
         initial = directory / (".initial-" + uuid4().hex)
         initial.mkdir()
         shutil.copyfile(rules_root(lock) / "schema_template/starter.yaml", initial / "root.yaml")
-        if seed:
-            imported = directory / "imported"
-            shutil.copytree(seed["artifact_directory"], imported / "artifacts")
-            verify_manifest(imported / "artifacts", seed["checkpoint_record"]["files"])
-            for name, value in (("checkpoint.json", seed["checkpoint_record"]), ("inputs.lock.json", seed["input_lock"]),
-                                ("task.json", seed["task_record"]), ("provenance.json", seed["provenance"])):
-                write_json(imported / name, value)
-            root = load_yaml(imported / "artifacts", "root.yaml", parser_root=rules_root(lock))
-            starter = load_yaml(initial, "root.yaml", parser_root=rules_root(lock))
-            adjustments = []
-            hardware = starter["contract"]["hardware_specification"]
-            if not _same(root["contract"].get("hardware_specification"), hardware):
-                root["contract"]["hardware_specification"] = deepcopy(hardware)
-                root["meta_data"]["version"] += 1
-                adjustments.append("Hardware placeholder restored to the current starter; original bytes remain in imported/artifacts.")
-            write_yaml(initial / "root.yaml", root, source=imported / "artifacts/root.yaml",
-                       parser_root=rules_root(lock))
-            validate_artifact_sources(initial, lock, decision="continue")
-            state["imported_draft"] = {**seed["provenance"], "artifacts": str(imported / "artifacts"),
-                                       "initial_adjustments": adjustments, "approval_inherited": False}
-            state["feedback"] = [{"detail": "按当前P1独立重审导入的Contract；旧Design/索引/派生只作后续阅读线索。",
-                                   "prior_issues": seed["task_record"].get("issues", [])}]
-            seal(imported)
-            sync_tree(imported)
-        state["checkpoint"] = self.checkpoint(state, initial, attempt_id=None)
+        state["checkpoint"] = self.checkpoint(state, initial, attempt_id=None, expected_files={"root.yaml"})
         state["nodes"]["root"]["draft_checkpoint"] = state["checkpoint"]
         shutil.rmtree(initial)
         self.save(state)
@@ -361,21 +352,19 @@ class Store:
         fsync_directory(self.root)
         return state
 
-    def checkpoint(self, state: dict, artifacts: Path, *, attempt_id: str | None,
+    def checkpoint(self, state: dict, artifacts: Path, *, attempt_id: str | None, expected_files,
                    stage: str | None = None, node: str | None = None, parent: str | None = None,
-                   call: dict | None = None) -> str:
-        files = manifest(artifacts)
+                   call: dict | None = None, preparation: dict | None = None) -> str:
+        files = artifact_manifest(artifacts, expected=expected_files)
         identity = {"format": "schema_extract.checkpoint.v2", "run_id": state["run_id"],
                     "stage": stage or state["stage"], "node": node or state["node"], "attempt_id": attempt_id,
                     "plan_revision": state["plan_revision"], "parent": parent or state["checkpoint"],
                     "input_fingerprint": state["input_fingerprint"], "files": files}
-        if state.get("semantic_revision"):
-            identity["semantic_revision"] = state["semantic_revision"]
         if call is not None:
-            identity.update({key: call[key] for key in CONTEXT_FIELDS if key in call})
-        if state.get("semantic_revision") and attempt_id:
-            invocation = read_json(self.run_dir(state["run_id"]) / "attempts" / attempt_id / "attempt.json")
-            identity.update({key: invocation[key] for key in CONTEXT_FIELDS if key in invocation})
+            identity.update({key: call[key] for key in ("maintenance_task_id", "purpose", "maintenance_step") if key in call})
+        if preparation:
+            identity["preparation"] = preparation
+        identity["selection_signature"] = state.get("selection_signature")
         checkpoint_id = digest(identity)
         base = self.run_dir(state["run_id"]) / "checkpoints"
         destination = base / checkpoint_id
@@ -384,7 +373,9 @@ class Store:
             return checkpoint_id
         temporary = base / (".building-" + uuid4().hex)
         temporary.mkdir(parents=True)
-        shutil.copytree(artifacts, temporary / "artifacts")
+        (temporary / "artifacts").mkdir()
+        for name in files:
+            shutil.copyfile(artifacts / name, temporary / "artifacts" / name)
         verify_manifest(temporary / "artifacts", files)
         write_json(temporary / "checkpoint.json", {**identity, "id": checkpoint_id})
         seal(temporary)
@@ -404,6 +395,7 @@ class Store:
         for key in ("run_id", "input_fingerprint"):
             if info[key] != state[key]:
                 raise ExtractError(f"checkpoint {key} mismatch")
+        artifact_manifest(directory / "artifacts", expected=info["files"])
         verify_manifest(directory / "artifacts", info["files"])
         return directory / "artifacts", info
 
@@ -421,48 +413,143 @@ class Store:
         receipt = read_json(directory / "receipt.json")
         validation = read_json(directory / "validated.json")
         invocation = read_json(directory / "attempt.json")
-        if state.get("execution_binding") or state.get("semantic_revision"):
-            resolve_context(self, state, invocation)
+        self.context(state, invocation)
+        verify_execution(self, state, attempt=invocation)
         if any(approval[key] != invocation[key] for key in ("stage", "node", "attempt_id", "input_fingerprint")):
             raise ExtractError("approval scope differs from its invocation")
         if approval["generation"] != invocation["generation"] or approval["plan_revision"] != invocation["plan_revision"]:
             raise ExtractError("approval invocation generation/revision identity changed")
-        if invocation.get("semantic_revision"):
-            from .receipts import call_identity
-            if receipt.get("identity") != call_identity(invocation):
-                raise ExtractError("approval receipt semantic context differs from its invocation")
-            for key in CONTEXT_FIELDS:
-                if approval.get(key) != invocation.get(key) or validation.get(key) != invocation.get(key):
-                    raise ExtractError("approval or gate semantic context changed: " + key)
+        from .receipts import call_identity
+        if receipt.get("identity") != call_identity(invocation) or invocation.get("role") != "reviewer":
+            raise ExtractError("approval is not the independent review of its registered invocation")
         if digest(receipt) != approval["receipt_sha256"] or receipt["decision"] != "approve":
             raise ExtractError("approval receipt was changed or did not approve")
+        from .stages import writing_signature
+        stage = invocation["stage"]
+        selected = selection_signature(receipt["plan"]) if stage == "P2" else invocation.get("selection_signature")
+        writing = writing_signature(receipt["plan"]) if stage == "P4" else invocation.get("writing_signature")
+        if approval.get("selection_signature") != selected or approval.get("writing_signature") != writing:
+            raise ExtractError("approval decision signatures differ from their original review")
+        if stage in {"P3", "P5"} and (approval.get("node_signature") != invocation["node_signature"] or
+                                       validation.get("node_signature") != invocation["node_signature"]):
+            raise ExtractError("approval selected instance differs from its original review")
+        if approval.get("applies_to_node"):
+            entry = next((entry for entry in invocation["selected_designs"] if entry["id"] == approval["applies_to_node"]), None)
+            if not entry or approval.get("node_signature") != node_signature(entry):
+                raise ExtractError("scoped final approval differs from the actually reviewed instance")
+        if stage in {"P3", "P5"} or approval.get("applies_to_node"):
+            subject = approval.get("applies_to_node", invocation["node"])
+            provenance = validation.get("design_resolution", {}).get("nodes", {}).get(subject, {})
+            if (provenance.get("validation") != "strict" or any(approval.get(key) != provenance.get(field) for key, field in
+                    (("effective_identity", "effective_identity"), ("source_manifest", "source_manifest"), ("design_origins", "origins")))):
+                raise ExtractError("approval provenance differs from its original strictly checked use")
         if validation["receipt_sha256"] != approval["receipt_sha256"] or validation["check"]["exit_code"] != 0:
             raise ExtractError("approval has no matching successful Runner gate")
+        if invocation.get("mode") == "adjudicate" and validation.get("adjudication_changed"):
+            raise ExtractError("an adjudication edit requires its new independent final signoff")
+        if invocation.get("mode") == "signoff":
+            from .stages import stage_files, writing_signature
+            _, base = self.verify_checkpoint(state, invocation["adjudication_checkpoint"])
+            producer = base.get("attempt_id")
+            if not producer or producer not in state["accepted_receipts"]:
+                raise ExtractError("signoff has no accepted adjudication candidate")
+            previous = self.run_dir(state["run_id"]) / "attempts" / producer
+            adjudication = read_json(previous / "receipt.json")
+            edited = read_json(previous / "validated.json")
+            if (adjudication["identity"].get("mode") != "adjudicate" or adjudication["decision"] != "approve" or
+                    digest(adjudication) != state["accepted_receipts"][producer] or not edited.get("adjudication_changed") or
+                    edited["artifact_digests"] != base["files"] or edited["check"]["exit_code"] != 0 or
+                    any(adjudication["identity"][key] != invocation[key] for key in ("stage", "node", "generation"))):
+                raise ExtractError("signoff does not bind the exact edited candidate and final stage decision")
+            compared = stage_files(invocation["stage"], node_entry={"id": invocation["node"]}, revision_scope=invocation["revision_scope"])
+            if any(base["files"].get(name) != invocation["dependency_digests"].get(name) for name in compared):
+                raise ExtractError("signoff target changed after adjudication")
+            signature = selection_signature if invocation["stage"] == "P2" else writing_signature
+            if invocation["stage"] in {"P2", "P4"} and signature(adjudication["plan"]) != signature(receipt["plan"]):
+                raise ExtractError("signoff changed the adjudicated stage decision")
         _, checkpoint = self.verify_checkpoint(state, approval["checkpoint"])
-        if invocation.get("semantic_revision") and any(checkpoint.get(key) != invocation.get(key) for key in CONTEXT_FIELDS):
-            raise ExtractError("approval checkpoint semantic context changed")
         if checkpoint["files"] != approval["artifact_digests"] or checkpoint["files"] != validation["artifact_digests"]:
             raise ExtractError("approval content differs from its checked immutable checkpoint")
+        if approval.get("projection") != validation.get("approval_projection") or not approval.get("projection"):
+            raise ExtractError("approval has no matching stage subject projection")
         return receipt, checkpoint
 
     @execution_boundary
-    def verify_effective_approval(self, state: dict, approval: dict | None) -> tuple[dict, dict]:
-        return verify_effective_context_approval(self, state, approval)
+    def verify_effective_approval(self, state: dict, approval: dict | None, *, directory: Path | None = None) -> tuple[dict, dict]:
+        receipt, checkpoint = self.verify_approval_origin(state, approval)
+        if not approval_is_current(state, approval):
+            raise ExtractError("approval belongs to a superseded scope or selection")
+        if directory is None:
+            pointer = state["checkpoint"] if state["stage"] in {"P1", "P2", "P3", "P4", "P6"} else state["merged_checkpoint"]
+            directory, _ = self.verify_checkpoint(state, pointer)
+        stage = approval["stage"]
+        plan = state.get("selected_designs") if stage == "P2" else state.get("writing_plan") if stage == "P4" else None
+        projection = approval_projection(stage, directory,
+            parser_root=rules_root(self.context(state)["rules_lock"]), plan=plan,
+            selected_designs=state.get("selected_designs"), node=approval["node"])
+        if projection["subject_sha256"] != approval["projection"]["subject_sha256"]:
+            if stage != "P5" or not self._aligned_context(state, approval["node"], approval,
+                                                        projection["source_context"]):
+                raise ExtractError("approved stage subject changed: " + stage)
+        return receipt, checkpoint
 
-    def verify_approval(self, state: dict, approval: dict | None) -> tuple[dict, dict]:
+    def verify_approval(self, state: dict, approval: dict | None, *, directory: Path | None = None) -> tuple[dict, dict]:
         """Execution admission uses current applicability, not just old evidence."""
-        return self.verify_effective_approval(state, approval)
+        return self.verify_effective_approval(state, approval, directory=directory)
+
+    def _reviewed_context(self, state: dict, approval: dict, node_id: str) -> dict:
+        validation = read_json(self.run_dir(state["run_id"]) / "attempts" / approval["attempt_id"] / "validated.json")
+        context = validation.get("design_resolution", {}).get("nodes", {}).get(node_id)
+        if not context or context.get("validation") != "strict":
+            raise ExtractError("node approval lacks strictly checked actual source context: " + node_id)
+        return context
+
+    @staticmethod
+    def source_identity(state: dict, node_id: str) -> str | None:
+        node = state["nodes"][node_id]
+        return (node.get("source_context") or node.get("approval") or {}).get("effective_identity")
+
+    def _aligned_context(self, state: dict, node_id: str, approval: dict, current: dict) -> bool:
+        pointer = state["nodes"][node_id].get("applicability")
+        if not pointer or pointer.get("approval_attempt_id") != approval["attempt_id"]:
+            return False
+        path = self.run_dir(state["run_id"]) / "attempts" / pointer["attempt_id"] / "validated.json"
+        validation = read_json(path)
+        if (state["accepted_receipts"].get(pointer["attempt_id"]) != validation.get("receipt_sha256") or
+                validation.get("check", {}).get("exit_code") != 0):
+            raise ExtractError("current applicability has no accepted successful Runner validation")
+        record = validation.get("retained_approvals", {}).get(node_id)
+        if not record or digest(record) != pointer["record_sha256"]:
+            raise ExtractError("current approval applicability differs from its Runner validation")
+        if (record["approval_attempt_id"] != approval["attempt_id"] or record["generation"] != state["nodes"][node_id]["generation"]
+                or record["current_context"]["effective_identity"] != current["effective_identity"]):
+            return False
+        _, checkpoint = self.verify_checkpoint(state, record["checkpoint"])
+        if any(checkpoint["files"].get(name) != checksum for name, checksum in current["source_manifest"].items()):
+            return False
+        previous = self._reviewed_context(state, approval, node_id)
+        strict = record["current_context"]
+        used = ("file", "raw_sha256", "origins", "contract_sha256", "region_sha256", "use_context_sha256", "source_manifest", "effective_identity")
+        if any(strict.get(key) != current.get(key) for key in used):
+            return False
+        proof = align_source_identity(previous, strict)
+        return proof["equivalent"] and proof == record["equivalence"]
 
     @execution_boundary
     def verify_node(self, state: dict, node_id: str, *, merged_info: dict | None = None) -> dict:
-        """Current validity depends on this node and its ancestors, never siblings."""
+        """Verify this node's actual content and source identities in the current merge."""
         if node_id not in effective_nodes(state):
             raise ExtractError("node is not a current approved merge: " + node_id)
         node = state["nodes"][node_id]
-        receipt, approval_checkpoint = self.verify_approval(state, node["approval"])
+        merged, current_info = self.verify_checkpoint(state, state["merged_checkpoint"])
+        if merged_info is not None and merged_info != current_info:
+            raise ExtractError("node verification received an obsolete merged checkpoint")
+        merged_info = current_info
         approval = node["approval"]
+        receipt, approval_checkpoint = (self.verify_approval_origin(state, approval) if approval.get("applies_to_node")
+                                         else self.verify_approval(state, approval, directory=merged))
         if approval["stage"] == "P5":
-            entry = next(entry for entry in state["plan"] if entry["id"] == node_id)
+            entry = next(entry for entry in state["selected_designs"] if entry["id"] == node_id)
             if (approval["node"] != node_id or approval["generation"] != node["generation"] or
                     approval["node_signature"] != node_signature(entry)):
                 raise ExtractError("node review belongs to another node or superseded selection")
@@ -471,19 +558,29 @@ class Store:
                 raise ExtractError("final review did not explicitly recheck this node")
         elif node_id != "root" or approval["stage"] != "P3":
             raise ExtractError("node has no scoped Design approval")
-        if merged_info is None:
-            _, merged_info = self.verify_checkpoint(state, state["merged_checkpoint"])
         if (approval_checkpoint["files"].get(node["file"]) != node["approved_sha256"] or
                 merged_info["files"].get(node["file"]) != node["approved_sha256"]):
             raise ExtractError("node approval does not match its current merged bytes: " + node_id)
-        from .revisions import effective_dependency_digests
-        dependencies = effective_dependency_digests(self, state, approval, approval_checkpoint)
-        parent = node["parent"]
-        while parent:
-            ancestor = state["nodes"][parent]
-            if parent not in effective_nodes(state) or dependencies.get(ancestor["file"]) != merged_info["files"].get(ancestor["file"]):
-                raise ExtractError("approved node ancestor dependency changed: " + node_id)
-            parent = ancestor["parent"]
+        graph = source_context(merged, parser_root=rules_root(self.context(state)["rules_lock"]), nodes=[node_id])
+        current = graph["nodes"][node_id]
+        if current["effective_identity"] != approval.get("effective_identity") and not self._aligned_context(state, node_id, approval, current):
+            raise ExtractError("approved node's actual source identity changed: " + node_id)
+        if self.source_identity(state, node_id) != current["effective_identity"]:
+            raise ExtractError("node does not record its current actual source identity: " + node_id)
+        for name, checksum in current["source_manifest"].items():
+            source = name.removesuffix(".yaml")
+            if source == node_id:
+                continue
+            if source not in effective_nodes(state) or checksum != merged_info["files"].get(name):
+                raise ExtractError("approved node uses a source without current approval: " + source)
+            provider = state["nodes"][source]["approval"]
+            self.verify_approval_origin(state, provider)
+            if (self.source_identity(state, source) != graph["nodes"][source]["effective_identity"] or
+                    state["nodes"][source]["approved_sha256"] != merged_info["files"][name]):
+                raise ExtractError("source approval differs from current actual provenance: " + source)
+            if (provider.get("effective_identity") != graph["nodes"][source]["effective_identity"] and
+                    not self._aligned_context(state, source, provider, graph["nodes"][source])):
+                raise ExtractError("source identity drift lacks current equivalence evidence: " + source)
         return approval_checkpoint
 
     @execution_boundary
@@ -491,10 +588,16 @@ class Store:
         directory = self.run_dir(state["run_id"]) / "attempts" / attempt["attempt_id"]
         if read_json(directory / "attempt.json") != attempt:
             raise ExtractError("agent modified invocation identity")
-        if state.get("execution_binding") or state.get("semantic_revision"):
-            resolve_context(self, state, attempt)
-        if attempt.get("semantic_revision") != state.get("semantic_revision"):
-            raise StaleResult("invocation semantic context was superseded")
+        self.context(state, attempt)
+        config = self.execution_config(state)
+        if any(attempt.get(key) != config[key] for key in ("backend", "model")) or (
+                attempt.get("effort") != config[attempt["role"] + "_effort"] or
+                attempt.get("executable") != config["agent_binary"] or
+                attempt.get("session_scope") != session_scope(attempt)):
+            raise ExtractError("invocation execution or session identity differs from this run")
+        if attempt["stage"] in {"P4", "P6"} and (
+                attempt.get("selection_signature") != selection_signature(state["selected_designs"])):
+            raise StaleResult("approved selection changed while the invocation ran")
         maintenance_call = attempt.get("purpose") == "maintenance"
         if maintenance_call:
             from .maintenance import validate_attempt as validate_maintenance_attempt
@@ -506,34 +609,224 @@ class Store:
             raise StaleResult("receipt is not from the active invocation for this scope")
         if attempt["stage"] == "P5":
             node = state["nodes"].get(attempt["node"])
-            entry = next((entry for entry in state.get("plan") or [] if entry["id"] == attempt["node"]), None)
+            entry = next((entry for entry in state.get("selected_designs") or [] if entry["id"] == attempt["node"]), None)
             if not node or not entry or attempt["generation"] != node["generation"] or attempt["node_signature"] != node_signature(entry):
-                raise StaleResult("node membership, parent or selection changed while the invocation ran")
+                raise StaleResult("node membership or selected instance changed while the invocation ran")
             if state.get("reopening") or not all(state["stages"][stage]["status"] == "approved" for stage in ("P1", "P2", "P3", "P4")):
                 raise StaleResult("upstream review is not currently valid")
             if not maintenance_call and attempt["base_checkpoint"] != node["draft_checkpoint"]:
                 raise StaleResult("this node's draft checkpoint changed")
             if not maintenance_call and (attempt["role"], attempt["mode"]) != (node["role"], node["mode"]):
                 raise StaleResult("this node's role or review mode changed")
-            _, merged = self.verify_checkpoint(state, state["merged_checkpoint"])
-            parent = node["parent"]
-            while parent:
-                ancestor = state["nodes"][parent]
-                self.verify_node(state, parent, merged_info=merged)
-                if attempt["dependency_digests"].get(ancestor["file"]) != merged["files"].get(ancestor["file"]):
-                    raise StaleResult("approved parent or Contract changed while the invocation ran")
-                parent = ancestor["parent"]
+            known_sources = actual_sources(node) & {entry["id"] for entry in state["selected_designs"]}
+            if known_sources - effective_nodes(state):
+                raise StaleResult("an actual source is awaiting its independent repair or review")
         elif not maintenance_call:
             if any(attempt[key] != state[key] for key in ("stage", "node", "role", "mode", "plan_revision")):
                 raise StaleResult("upstream stage invocation no longer matches its current scope")
             if attempt["generation"] != scope_for(state, attempt)["generation"] or attempt["base_checkpoint"] != state["checkpoint"]:
                 raise StaleResult("stage generation or checkpoint changed")
+        if attempt["stage"] in {"P3", "P5"}:
+            entry = next((entry for entry in state["selected_designs"] if entry["id"] == attempt["node"]), None)
+            if not entry or attempt.get("node_signature") != node_signature(entry):
+                raise StaleResult("the current selected instance changed")
+
+    def validate_sources(self, state: dict, attempt: dict, workspace: Path, *, graph: dict | None = None,
+                         reviewed_graph: dict | None = None) -> dict:
+        """Only adopted definitions must remain provided, independently approved and current."""
+        parser_root = rules_root(self.context(state, attempt)["rules_lock"])
+        graph = graph or source_context(workspace, parser_root=parser_root, nodes=[attempt["node"]])
+        reviewed = reviewed_graph or graph
+        submitted = reviewed["nodes"][attempt["node"]]
+        offered = attempt.get("source_identities", {})
+        used = {}
+        for name, checksum in submitted["source_manifest"].items():
+            source = name.removesuffix(".yaml")
+            if source == attempt["node"]:
+                continue
+            if source not in offered or attempt["dependency_digests"].get(name) != checksum:
+                raise StaleResult("adopted source was not provided in this invocation: " + source)
+            if source not in effective_nodes(state):
+                raise StaleResult("adopted source no longer has current independent approval: " + source)
+            if reviewed["nodes"][source]["effective_identity"] != offered[source]:
+                raise StaleResult("adopted source differs from the read and approved invocation material: " + source)
+            try:
+                self.verify_node(state, source)
+            except ExtractError as exc:
+                raise StaleResult("adopted source approval or identity changed: " + source + ": " + str(exc)) from exc
+            used[source] = self.source_identity(state, source)
+        _, merged_info = self.verify_checkpoint(state, state["merged_checkpoint"])
+        drift = any(merged_info["files"].get(name) != checksum for name, checksum in submitted["source_manifest"].items()
+                    if name != attempt["node"] + ".yaml")
+        drift = drift or any(offered[source] != identity for source, identity in used.items())
+        alignment = None
+        if drift and reviewed_graph is None:
+            temporary = self.run_dir(state["run_id"]) / (".source-check-" + uuid4().hex)
+            try:
+                self.merged_workspace(state, workspace, temporary, node_id=attempt["node"])
+                checked = check_stage_snapshot(temporary, parser_root=parser_root, stage="P5",
+                                               selected_designs=state["selected_designs"], node=attempt["node"])
+                if checked["exit_code"]:
+                    raise StaleResult("current adopted definitions do not form a strict completed snapshot")
+                graph = checked["design_resolution"]
+            finally:
+                shutil.rmtree(temporary, ignore_errors=True)
+        current = graph["nodes"][attempt["node"]]
+        if drift:
+            alignment = align_source_identity(submitted, current)
+            if not alignment["equivalent"]:
+                raise StaleResult("actual definitions, shared Contract or complete use context changed while the invocation ran")
+        for source, identity in used.items():
+            if graph["nodes"][source]["effective_identity"] != identity:
+                raise StaleResult("adopted source has no currently applicable provenance: " + source)
+        return {"design_resolution": graph, "reviewed_design_resolution": reviewed,
+                "source_alignment": alignment, "adopted_source_identities": used,
+                "dependency_digests": {name: checksum for name, checksum in current["source_manifest"].items()
+                                       if name != attempt["node"] + ".yaml"}}
+
+    def refresh_approvals(self, state: dict, workspace: Path, checkpoint_id: str, attempt: dict, validation: dict) -> None:
+        """Retain authentic approvals only after checking the actual current use."""
+        parser_root = rules_root(self.context(state)["rules_lock"])
+        planned = {entry["id"] for entry in state.get("selected_designs") or []}
+        projections = {}
+        for stage in ("P2", "P4"):
+            if int(stage[1:]) <= int(attempt["stage"][1:]):
+                continue
+            approval = state["stages"][stage].get("approval")
+            if not approval or approval["attempt_id"] == attempt["attempt_id"]:
+                continue
+            plan = state["selected_designs"] if stage == "P2" else state["writing_plan"]
+            projection = approval_projection(stage, workspace, parser_root=parser_root, plan=plan,
+                                             selected_designs=state["selected_designs"])
+            if (projection["subject_sha256"] != approval["projection"]["subject_sha256"] or
+                    not approval_is_current(state, approval)):
+                self.verify_approval_origin(state, approval)
+                projections[stage] = {"previous_approval": approval["attempt_id"],
+                                      "previous_subject": approval["projection"]["subject_sha256"],
+                                      "current_subject": projection["subject_sha256"]}
+                invalidate_stage(state, stage)
+        validation["invalidated_projections"] = projections
+        if projections:
+            state.setdefault("feedback", []).append({"code": "stage_subject_changed", "stages": projections})
+        retained, invalidated = {}, []
+        for node_id in sorted(planned):
+            node = state["nodes"][node_id]
+            approval = node.get("approval")
+            if not approval or approval["attempt_id"] == attempt["attempt_id"]:
+                continue
+            self.verify_approval_origin(state, approval)
+            previous = self._reviewed_context(state, approval, node_id)
+            checked = check_stage_snapshot(workspace, parser_root=parser_root, stage="P3" if node_id == "root" else "P5",
+                                           selected_designs=state["selected_designs"], node=node_id)
+            current = checked.get("design_resolution", {}).get("nodes", {}).get(node_id)
+            proof = align_source_identity(previous, current) if current and not checked["exit_code"] else None
+            if (not proof or not proof["equivalent"] or not approval_is_current(state, approval)):
+                if node_id == "root":
+                    invalidate_stage(state, "P3")
+                else:
+                    invalidate_node(node, require_worker=bool(actual_sources(node) - planned))
+                if current:
+                    node["source_context"] = deepcopy(current)
+                node.setdefault("feedback", []).append({"code": "actual_use_changed", "source_check": checked,
+                                                         "previous_approval": approval["attempt_id"], "equivalence": proof})
+                invalidated.append(node_id)
+                continue
+            node["source_context"] = deepcopy(current)
+            if (proof["current_identity"] != approval.get("effective_identity") or
+                    approval.get("selection_signature") != state.get("selection_signature") or
+                    approval.get("writing_signature") not in {None, state.get("writing_signature")}):
+                record = {"approval_attempt_id": approval["attempt_id"], "generation": node["generation"],
+                          "checkpoint": checkpoint_id, "current_context": current, "equivalence": proof,
+                          "selection_signature": state.get("selection_signature"), "writing_signature": state.get("writing_signature")}
+                retained[node_id] = record
+                node["applicability"] = {"attempt_id": attempt["attempt_id"], "approval_attempt_id": approval["attempt_id"],
+                                         "record_sha256": digest(record)}
+        validation["retained_approvals"] = retained
+        validation["invalidated_uses"] = invalidated
+        if invalidated or projections:
+            invalidate_final(state, invalidated)
+
+    def _adjudication_candidates(self, state: dict, call: dict, before: Path) -> list[dict]:
+        """Prepare versions, current materials and canonical bytes before any selection."""
+        from .artifacts import _erase_fields, _same, validate_plan
+        from .stages import stage_files
+        context = self.context(state)
+        parser_root = rules_root(context["rules_lock"])
+        scope = scope_for(state, call)
+        view = call_view(state, call)
+        entry = next((item for item in state.get("selected_designs") or [] if item["id"] == call["node"]), None)
+        own_signature = node_signature(entry) if entry and call["stage"] in {"P3", "P5"} else ""
+        saved = [*scope["candidates"], {"checkpoint": view["checkpoint"], "plan": state.get("plan_draft"),
+                                      "node_signature": own_signature}]
+        prepared, seen = [], set()
+        started, allowance = time.monotonic(), check_timeout(view)
+        for candidate in saved:
+            if candidate["checkpoint"] in seen:
+                continue
+            seen.add(candidate["checkpoint"])
+            if time.monotonic() - started >= allowance:
+                break
+            if own_signature and candidate.get("node_signature") != own_signature:
+                continue
+            temporary = self.run_dir(state["run_id"]) / (".adjudication-" + uuid4().hex)
+            original, normalized = temporary / "original", temporary / "normalized"
+            try:
+                source, _ = self.verify_checkpoint(state, candidate["checkpoint"])
+                plan = deepcopy(candidate.get("plan"))
+                if call["stage"] in {"P2", "P4"}:
+                    validate_plan(call["stage"], plan, parser_root=parser_root,
+                                  selected_designs=state.get("selected_designs") if call["stage"] == "P4" else None)
+                copy_artifacts(before, original)
+                original.chmod(0o755)
+                for path in original.iterdir():
+                    path.chmod(0o644)
+                version_adjustments = []
+                for name in stage_files(call["stage"], node_entry=entry, revision_scope=state["revision_scope"]):
+                    if not (source / name).is_file():
+                        raise ExtractError("candidate has no completed stage file: " + name)
+                    copy_artifacts(source / name, original / name)
+                    if name.endswith(".yaml"):
+                        current = load_yaml(before, name, parser_root=parser_root)
+                        selected = load_yaml(original, name, parser_root=parser_root)
+                        different = not _same(_erase_fields(current, []), _erase_fields(selected, []))
+                        version = max(current["META_DATA"]["Version"] + int(different), selected["META_DATA"]["Version"])
+                        if selected["META_DATA"]["Version"] != version:
+                            version_adjustments.append({"path": name, "before": selected["META_DATA"]["Version"], "after": version})
+                            selected["META_DATA"]["Version"] = version
+                            write_yaml(original / name, selected, parser_root=parser_root)
+                validation = normalize_candidate(before, original, normalized, parser_root / "schema_template/starter.yaml",
+                    stage=call["stage"], role="worker", decision="complete", node_entry=entry if call["stage"] == "P5" else None,
+                    selected_designs=plan if call["stage"] == "P2" else state.get("selected_designs"), revision_scope=state["revision_scope"],
+                    first_draft=call["stage"] == "P5" and not state["nodes"][call["node"]].get("authored", False))
+                validation.update(origin="runner_candidate_preparation", original_checkpoint=candidate["checkpoint"],
+                                  reading_checkpoint=view["checkpoint"], version_adjustments=version_adjustments)
+                validate_artifact_sources(normalized, context["source_lock"], decision="complete", parser_root=parser_root,
+                                          completed_nodes=None if call["stage"] == "P6" else [call["node"]])
+                if call["stage"] == "P5":
+                    graph = validation["check"]["design_resolution"]
+                    adopted = set(graph["nodes"][call["node"]]["source_manifest"]) - {call["node"] + ".yaml"}
+                    for name in adopted:
+                        source_id = name.removesuffix(".yaml")
+                        if source_id not in effective_nodes(state) or graph["nodes"][source_id]["effective_identity"] != self.source_identity(state, source_id):
+                            raise ExtractError("candidate needs an unapproved or changed actual source")
+                checkpoint_id = self.checkpoint(state, normalized, attempt_id=None, expected_files=validation["artifact_digests"],
+                                                stage=call["stage"], node=call["node"], parent=view["checkpoint"])
+                prepared.append({"checkpoint": checkpoint_id, "original_checkpoint": candidate["checkpoint"], "plan": plan,
+                                 "files": manifest(normalized), "node_signature": own_signature,
+                                 "normalization": validation})
+            except ExtractError:
+                # Incomplete or inapplicable old drafts remain history. They
+                # are not candidates a reviewer can silently adopt.
+                continue
+            finally:
+                shutil.rmtree(temporary, ignore_errors=True)
+        return list({item["checkpoint"]: item for item in prepared}.values())
 
     @execution_boundary
     def prepare_attempt(self, state: dict, session_id: str | None, *, call: dict | None = None,
                         timeout_seconds: float | None = None) -> dict:
-        if state.get("execution_binding") or state.get("semantic_revision"):
-            verify_execution(self, state, executor=True)
+        config = self.execution_config(state)
+        verify_execution(self, state, executor=True)
         call = call or next_call(state)
         if call is None:
             raise ExtractError("no dependency-ready call can be prepared")
@@ -550,16 +843,25 @@ class Store:
         if call.get("purpose") != "maintenance" and call["stage"] == "P5":
             self.start_node(state, call["node"])
         view = call_view(state, call)
+        if call.get("purpose") != "maintenance":
+            prerequisite_directory, _ = self.verify_checkpoint(state, state["merged_checkpoint"] if call["stage"] == "P5" else view["checkpoint"])
+            for required in ("P1", "P2", "P3", "P4"):
+                if int(required[1:]) >= int(call["stage"][1:]):
+                    break
+                if state["stages"][required]["status"] != "approved":
+                    raise ExtractError("missing independent prerequisite approval: " + required)
+                self.verify_approval(state, state["stages"][required]["approval"], directory=prerequisite_directory)
         scope = scope_for(state, call)
         if scope["started_at"] is None:
             scope["started_at"] = time.time()
             scope["deadline"] = scope["started_at"] + state["config"]["stage_seconds"]
             scope["adjudication_reserved_seconds"] = state["config"]["adjudication_seconds"]
-            scope["signoff_reserved_seconds"] = state["config"]["adjudication_seconds"] if call["stage"] == "P6" else 0
+            scope["signoff_reserved_seconds"] = state["config"]["adjudication_seconds"]
             scope["review_reserved_seconds"] = review_seconds(state["config"])
         if scope["baseline_checkpoint"] is None:
             scope["baseline_checkpoint"] = view["checkpoint"]
-            scope["candidates"].append({"checkpoint": view["checkpoint"], "plan": state.get("plan_draft")})
+            scope["candidates"].append({"checkpoint": view["checkpoint"], "plan": state.get("plan_draft"),
+                                       "generation": scope["generation"], "node_signature": None})
         mode = call.get("mode", "normal")
         if mode in {"adjudicate", "signoff"}:
             counter = "adjudications" if mode == "adjudicate" else "signoffs"
@@ -569,6 +871,8 @@ class Store:
         scope["calls"] += 1
         group = session_group(state, call)
         state["sessions"].setdefault(group, {"worker": None, "reviewer": None})
+        if session_id != state["sessions"][group][call["role"]]:
+            raise ExtractError("requested session does not match this exact stage/node/role/operation")
         artifacts, checkpoint = self.verify_checkpoint(state, view["checkpoint"])
         attempt_id = str(uuid4())
         directory = self.run_dir(state["run_id"]) / "attempts" / attempt_id
@@ -578,26 +882,56 @@ class Store:
             path.chmod(0o755 if path.is_dir() else 0o644)
         (directory / "workspace").chmod(0o755)
         invocation = {key: view[key] for key in ("run_id", "input_fingerprint", "stage", "role", "node", "plan_revision")}
-        entry = next((entry for entry in state.get("plan") or [] if entry["id"] == call["node"]), None)
+        entry = next((entry for entry in state.get("selected_designs") or [] if entry["id"] == call["node"]), None)
+        scoped_session = session_scope(call)
         invocation.update({"attempt_id": attempt_id, "base_checkpoint": view["checkpoint"],
                            "response_format": "schema_extract.proposal.v1",
                            "dependency_digests": checkpoint["files"], "session_id": session_id,
                            "session_group": group, "mode": mode, "writable_files": writable_files(state, call),
+                           "session_scope": scoped_session,
+                           "session_directory": str(self.run_dir(state["run_id"]) / "sessions" / digest(scoped_session)),
+                           "backend": config["backend"], "model": config["model"], "executable": config["agent_binary"],
+                           "effort": config[call["role"] + "_effort"],
                            "generation": state["nodes"][call["node"]]["generation"] if call["stage"] == "P5" else scope["generation"],
-                           "node_signature": node_signature(entry) if entry and call["stage"] == "P5" else "",
+                           "node_signature": node_signature(entry) if entry and call["stage"] in {"P3", "P5"} else "",
+                           "selected_designs": deepcopy(state["selected_designs"]),
                            "revision_scope": state["revision_scope"],
                            "workspace": str(directory / "workspace"), "directory": str(directory),
                            "created_at": time.time()})
-        if state.get("semantic_revision"):
-            invocation["semantic_revision"] = state["semantic_revision"]
-        invocation.update({key: call[key] for key in CONTEXT_FIELDS if key in call})
+        if checkpoint.get("preparation"):
+            invocation["preparation"] = deepcopy(checkpoint["preparation"])
+        invocation.update({key: call[key] for key in ("maintenance_task_id", "purpose", "maintenance_step") if key in call})
+        if call["stage"] == "P5" and state["nodes"][call["node"]].get("baseline_context_checkpoint"):
+            invocation["baseline_context_checkpoint"] = state["nodes"][call["node"]]["baseline_context_checkpoint"]
+        if mode == "adjudicate":
+            invocation["adjudication_candidates"] = self._adjudication_candidates(state, call, artifacts)
+        elif mode == "signoff":
+            invocation["adjudication_checkpoint"] = scope["adjudication"]["checkpoint"]
+        if call["stage"] in {"P3", "P4", "P5", "P6"}:
+            invocation["selection_signature"] = selection_signature(state["selected_designs"])
+        if call["stage"] in {"P5", "P6"}:
+            invocation["writing_signature"] = state["writing_signature"]
         if timeout_seconds is not None:
             invocation["timeout_seconds"] = timeout_seconds
-        if state.get("execution_binding"):
-            invocation["execution_binding"] = state["execution_binding"]
+        for filename in invocation["writable_files"]:
+            path = directory / "workspace" / filename
+            if not path.exists():
+                path.touch()
         if call["stage"] in {"P5", "P6"}:
+            invocation["source_identities"] = {}
+            for node_id in sorted(effective_nodes(state)):
+                if node_id == call["node"] and call["stage"] == "P5":
+                    continue
+                node = state["nodes"][node_id]
+                if node["file"] in checkpoint["files"]:
+                    self.verify_node(state, node_id)
+                    invocation["source_identities"][node_id] = self.source_identity(state, node_id)
             invocation.update(design_context(state, invocation, directory / "workspace",
-                parser_root=rules_root(resolve_context(self, state)["rules_lock"])))
+                parser_root=rules_root(self.context(state)["rules_lock"])))
+        from .prompts import prepare_attempt_materials
+        context = self.context(state)
+        invocation.update(prepare_attempt_materials(state, context["source_lock"], invocation,
+                          rules_lock=context["rules_lock"], executor_lock=context["executor_lock"]))
         handoff = next((item for item in reversed(state.get("session_handoffs", []))
                         if item["session_group"] == group and item["role"] == call["role"] and
                         not item.get("next_attempt_id")), None)
@@ -617,64 +951,127 @@ class Store:
         self.save(state)
         return invocation
 
-    def start_node(self, state: dict, node_id: str, *, call: dict | None = None) -> None:
-        """Refresh read-only ancestors; an authored node always keeps its own body."""
+    def _node_draft(self, state: dict, node_id: str):
         node = state["nodes"][node_id]
-        parser_root = rules_root(resolve_context(self, state)["rules_lock"])
+        candidates = [node.get("draft_checkpoint"), node.get("last_draft_checkpoint"),
+                      (node.get("approval") or {}).get("checkpoint"),
+                      (node.get("last_approval") or {}).get("checkpoint"), state.get("merged_checkpoint")]
+        for previous in dict.fromkeys(item for item in candidates if item):
+            directory, info = self.verify_checkpoint(state, previous)
+            if node["file"] in info["files"]:
+                return previous, directory, info
+        return None
+
+    def prepare_shared_metadata(self, state: dict, checkpoint_id: str, call: dict) -> str:
+        """Present current existing drafts read-only to the P1 root author."""
+        selected = {entry["id"] for entry in state.get("selected_designs") or []}
+        if not selected - {"root"}:
+            return checkpoint_id
+        source, info = self.verify_checkpoint(state, checkpoint_id)
+        temporary = self.run_dir(state["run_id"]) / (".shared-metadata-" + uuid4().hex)
+        temporary.mkdir()
+        try:
+            expected = set()
+            for name in info["files"]:
+                if name == "dispatch.md" or name.removesuffix(".yaml") in selected:
+                    shutil.copyfile(source / name, temporary / name)
+                    expected.add(name)
+            for node_id in sorted(selected - {"root"}):
+                material = self._node_draft(state, node_id)
+                if material:
+                    previous, directory, old_info = material
+                    node = state["nodes"][node_id]
+                    shutil.copyfile(directory / node["file"], temporary / node["file"])
+                    expected.add(node["file"])
+                    if actual_sources(node) - selected and not node.get("baseline_context_checkpoint"):
+                        if any(name.endswith(".yaml") and name.removesuffix(".yaml") not in selected
+                               for name in old_info["files"]):
+                            node["baseline_context_checkpoint"] = previous
+            if artifact_manifest(temporary, expected=expected) == info["files"]:
+                return checkpoint_id
+            return self.checkpoint(state, temporary, attempt_id=None, stage="P1", node="root",
+                                   parent=checkpoint_id, call=call, expected_files=expected)
+        finally:
+            shutil.rmtree(temporary)
+
+    def shared_drafts(self, state: dict, checkpoint_id: str) -> None:
+        """Keep the checked P1 draft bytes without granting Design approval."""
+        _, info = self.verify_checkpoint(state, checkpoint_id)
+        for entry in state.get("selected_designs") or []:
+            node = state["nodes"][entry["id"]]
+            if node["id"] == "root" or node["file"] not in info["files"]:
+                continue
+            if node.get("draft_checkpoint") != checkpoint_id:
+                node["last_draft_checkpoint"] = node.get("draft_checkpoint") or node.get("last_draft_checkpoint")
+                node["draft_checkpoint"] = checkpoint_id
+
+    def start_node(self, state: dict, node_id: str, *, call: dict | None = None) -> None:
+        """Refresh reading material while preserving the node's own raw draft."""
+        node = state["nodes"][node_id]
+        parser_root = rules_root(self.context(state)["rules_lock"])
         merged, checkpoint = self.verify_checkpoint(state, state["merged_checkpoint"])
-        ancestors, parent = [], node["parent"]
-        while parent:
-            value = state["nodes"][parent]
-            self.verify_node(state, parent, merged_info=checkpoint)
-            ancestors.append(value["file"])
-            parent = value["parent"]
+        selected = {entry["id"] for entry in state["selected_designs"]}
+        if not actual_sources(node) - selected:
+            node.pop("baseline_context_checkpoint", None)
+        for source in sorted(effective_nodes(state)):
+            self.verify_node(state, source, merged_info=checkpoint)
         temporary = self.run_dir(state["run_id"]) / (".preparing-" + uuid4().hex)
         temporary.mkdir()
         try:
-            for name in ancestors:
+            preparation = None
+            for name in checkpoint["files"]:
+                if name == node["file"]:
+                    continue
                 shutil.copyfile(merged / name, temporary / name)
-            parent_file = state["nodes"][node["parent"]]["file"]
             own = None
-            candidates = [node.get("draft_checkpoint"), node.get("last_draft_checkpoint"),
-                          (node.get("approval") or {}).get("checkpoint"),
-                          (node.get("last_approval") or {}).get("checkpoint"), state["merged_checkpoint"]]
-            for previous in dict.fromkeys(item for item in candidates if item):
-                old, old_info = self.verify_checkpoint(state, previous)
-                if node["file"] in old_info["files"]:
-                    own = old / node["file"]
-                    break
+            material = self._node_draft(state, node_id)
+            if material:
+                previous, old, old_info = material
+                own = old / node["file"]
+                if actual_sources(node) - selected and any(name.endswith(".yaml") and name != node["file"]
+                        and name not in checkpoint["files"] for name in old_info["files"]):
+                    node["baseline_context_checkpoint"] = previous
             if own:
                 shutil.copyfile(own, temporary / node["file"])
+                # Restoring an existing raw draft uses the same approved shared
+                # metadata as creating a starter. The old immutable raw remains
+                # historical; only this new, still unapproved working copy changes.
+                from .artifacts import _synchronize_metadata
+                old = {"root": load_yaml(own.parent, "root.yaml", parser_root=parser_root)}
+                new = {"root": load_yaml(merged, "root.yaml", parser_root=parser_root)}
+                synchronization = _synchronize_metadata(own.parent, temporary, old, new,
+                                                         parser_root=parser_root, nodes=[node_id])
+                if synchronization["nodes"]:
+                    shared = state["stages"]["P1"]["approval"]
+                    self.verify_approval(state, shared, directory=merged)
+                    preparation = {"kind": "shared_metadata_initialization", "original_checkpoint": previous,
+                                   "p1_approval": {key: shared[key] for key in ("attempt_id", "receipt_sha256", "checkpoint")},
+                                   "root_sha256": checkpoint["files"]["root.yaml"], "synchronization": synchronization}
             else:
-                derived = load_yaml(merged, parent_file, parser_root=parser_root)
-                derived.pop("contract", None)
-                derived.pop("realization", None)
-                derived["design"] = {region: {"from_parent": node["parent"]} for region in DESIGN_REGIONS}
-                derived["meta_data"]["version"] = 1
-                derived["meta_data"]["dispatch"] = {"id": node_id, "parent": node["parent"], "when": ""}
-                write_yaml(temporary / node["file"], derived, source=merged / parent_file, parser_root=parser_root)
+                starter = parser_root / "schema_template/starter.yaml"
+                derived = load_yaml(starter.parent, starter.name, parser_root=parser_root)
+                root = load_yaml(merged, "root.yaml", parser_root=parser_root)
+                derived.pop("CONTRACT")
+                for field in ("Name", "Describe"):
+                    derived["META_DATA"][field] = deepcopy(root["META_DATA"][field])
+                derived["META_DATA"]["Version"] = 1
+                derived["META_DATA"]["Dispatch"] = {"id": node_id, "when": None}
+                write_yaml(temporary / node["file"], derived, parser_root=parser_root)
             if node.get("draft_checkpoint"):
                 _, old_info = self.verify_checkpoint(state, node["draft_checkpoint"])
                 if old_info["files"] == manifest(temporary):
-                    node["parent_sha256"] = checkpoint["files"][parent_file]
                     return
             node["draft_checkpoint"] = self.checkpoint(state, temporary, attempt_id=None, stage="P5", node=node_id,
-                                                       parent=node.get("draft_checkpoint") or state["merged_checkpoint"], call=call)
-            node["parent_sha256"] = checkpoint["files"][parent_file]
-            # The initial clone is a saved checkpoint too. A request to reopen
-            # before writing anything must not turn that clone into a first draft.
+                                                       parent=node.get("draft_checkpoint") or state["merged_checkpoint"], call=call,
+                                                       preparation=preparation, expected_files=set(checkpoint["files"]) | {node["file"]})
             node["authored"] = node.get("authored", False)
         finally:
             shutil.rmtree(temporary)
 
     def merged_workspace(self, state: dict, workspace: Path, destination: Path, *, node_id: str) -> Path:
-        """Serial commit input: a node proposal cannot replace ancestors or siblings."""
-        merged, info = self.verify_checkpoint(state, state["merged_checkpoint"])
+        """Adopt only the reviewed target raw into the latest merged snapshot."""
+        merged, _ = self.verify_checkpoint(state, state["merged_checkpoint"])
         filename = state["nodes"][node_id]["file"]
-        private = manifest(workspace)
-        for name, value in private.items():
-            if name != filename and info["files"].get(name) != value:
-                raise ExtractError("node dependencies changed before serial merge")
         copy_artifacts(merged, destination)
         for path in destination.rglob("*"):
             path.chmod(0o755 if path.is_dir() else 0o644)
@@ -682,11 +1079,14 @@ class Store:
         copy_artifacts(workspace / filename, destination / filename)
         return destination
 
-    def handoff(self, state: dict, attempt: dict, text: str, lock: dict) -> None:
+    def handoff(self, state: dict, attempt: dict, text: str, *, checkpoint_id: str) -> None:
         directory = self.run_dir(state["run_id"]) / "stages" / attempt["stage"]
+        if attempt["stage"] == "P5":
+            directory = directory / attempt["node"]
         directory.mkdir(parents=True, exist_ok=True)
-        context = resolve_context(self, state, attempt)
-        body = (f"Checkpoint: {state['checkpoint']}\nSource: {context['source_lock']['source']['id']}\n"
+        context = self.context(state, attempt)
+        self.verify_checkpoint(state, checkpoint_id)
+        body = (f"Checkpoint: {checkpoint_id}\nSource: {context['source_lock']['source']['id']}\n"
                 f"Rules: {context['rules_lock']['rules']['id']}\n\n{text.rstrip()}\n")
         write_text(directory / "handoff.md", body)
         sync_tree(directory)
@@ -695,9 +1095,10 @@ class Store:
 
 def summary(store: Store, state: dict) -> dict:
     """Project recorded progress without reading or approving any artifact."""
-    planned = {entry["id"] for entry in state.get("plan") or []}
+    planned = {entry["id"] for entry in state.get("selected_designs") or []}
     approved = effective_nodes(state)
-    groups = {key: [] for key in ("ready", "in_flight", "revision", "approved", "waiting_parent", "blocked")}
+    groups = {key: [] for key in ("ready", "in_flight", "revision", "approved", "waiting", "blocked")}
+    waits = {entry["id"]: entry["wait_for"] for entry in state.get("writing_plan") or []}
     ready = ({call["node"] for call in next_calls(state)}
              if state["status"] == "running" and state["stage"] != "P6" and
              not (state.get("control") or {}).get("action") else set())
@@ -717,24 +1118,30 @@ def summary(store: Store, state: dict) -> dict:
             groups["blocked"].append(node_id)
         elif node_id in ready:
             groups["ready"].append(node_id)
-        elif node["parent"] and node["parent"] not in approved:
-            groups["waiting_parent"].append(node_id)
+        elif set(waits.get(node_id, [])) - approved:
+            groups["waiting"].append(node_id)
         if node.get("stage", {}).get("status") in {"revision", "adjudicating"}:
             groups["revision"].append(node_id)
-        details[node_id] = {"parent": node["parent"], "status": node["status"], "role": node.get("role"),
+        details[node_id] = {"wait_for": waits.get(node_id, []), "status": node["status"], "role": node.get("role"),
                             "mode": node.get("mode", "normal"), "attempt_id": attempt_id,
                             "reason": node.get("reason"), "generation": node["generation"],
-                            "planned": node_id in planned, "identity_migration": node.get("identity_migration"),
+                            "planned": node_id in planned, "instance": node.get("instance"),
                             "provider_reopen": node.get("provider_reopen")}
     scopes = {**state["stages"], **{"P5:" + node: state["nodes"][node]["stage"]
                                    for node in observed if "stage" in state["nodes"][node]}}
     budget_fields = ("status", "calls", "revisions", "elapsed_seconds", "started_at", "deadline",
                      "adjudications", "signoffs")
+    from .audit import usage_summary, usage_totals
+    from .observation import observation_totals
+    rows = [{"run_id": state["run_id"], "origin_run_id": state["run_id"], "attempt_id": key,
+             "backend": state["config"]["backend"],
+             "usage": usage_summary({"backend": state["config"]["backend"], "counter_scope": "unknown"}),
+             **state.get("attempt_usage", {}).get(key, {})} for key in state.get("attempts", [])]
     return {key: state.get(key) for key in ("run_id", "operator_id", "status", "stage", "role", "node",
                                           "checkpoint", "output", "published", "reason")} | {
         "format": SUMMARY_FORMAT, "input_fingerprint": state["input_fingerprint"],
         "source_identity": deepcopy(state.get("source_identity")),
-        "execution": {key: state.get("config", {}).get(key) for key in ("worker_effort", "reviewer_effort", "model", "codex_binary")},
+        "execution": {key: state.get("config", {}).get(key) for key in ("backend", "worker_effort", "reviewer_effort", "model", "agent_binary")},
         "executor": deepcopy(state.get("executor", {"version": None, "digest": None, "rules_id": None,
                                                      "capabilities": []})),
         "state_revision": state.get("state_revision"), "generated_at": time.time(),
@@ -744,13 +1151,14 @@ def summary(store: Store, state: dict) -> dict:
         "approved_stages": [key for key, value in state["stages"].items() if value["status"] == "approved"],
         "approved_nodes": sorted(approved), "nodes_by_status": groups, "node_details": details,
         "active_attempts": dict(active), "unsettled_attempts": dict(state.get("unsettled_attempts", {})),
-        "runner": state.get("runner"), "continuation": state.get("continuation"),
-        "execution_binding": state.get("execution_binding"),
-        "execution_bindings": list(state.get("execution_bindings", [])),
+        "runner": state.get("runner"),
         "unconfirmed_attempts": dict(state.get("unconfirmed_attempts", {})),
         "control": state.get("control"), "publication": state.get("publication"),
         "exports": state.get("exports", []),
         "elapsed_seconds": sum(item.get("elapsed_seconds", 0) for item in state.get("attempt_usage", {}).values()),
+        "provider_usage": usage_totals(rows),
+        "root_usage": observation_totals([row for row in rows if row.get("backend") == "codex" or
+                                           (row.get("usage") or {}).get("backend") == "codex"]),
         "budget": {"deadline": state.get("deadline"),
                    "limits": {key: state.get("config", {}).get(key) for key in
                               ("operator_seconds", "stage_seconds", "call_seconds", "max_calls",
@@ -759,8 +1167,6 @@ def summary(store: Store, state: dict) -> dict:
                                   for item in state.get("budget_extensions", [])],
                    "scopes": {key: {field: value.get(field) for field in budget_fields}
                               for key, value in scopes.items()}},
-        "imported_checkpoint": state.get("imported_draft", {}).get("checkpoint"),
-        "legacy_usage": state.get("imported_draft", {}).get("usage"),
         "completed_node_count": len(approved), "plan_revision": state["plan_revision"],
         "p6_starts": state.get("p6_starts", 0), "planned_node_count": len(planned),
         "attempt_count": len(state.get("attempts", [])),

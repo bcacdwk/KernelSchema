@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from uuid import uuid4
 
-from schema_extract.tools.artifacts import (load_yaml, parser_for, validate_artifact_sources,
+from schema_extract.tools.artifacts import (check_stage_snapshot, load_yaml, parser_for, validate_artifact_sources,
                                            validate_artifacts, write_yaml)
 from schema_extract.tools.common import ExtractError, manifest
 from schema_extract.tools.receipts import normalize_response, validate_receipt
@@ -15,8 +15,7 @@ from schema_extract.tools.stages import DOCUMENT_CONCLUSIONS
 
 
 REPO = Path(__file__).resolve().parents[3]
-SOURCE_RECORD = ("Source record: atol=0.01, rtol=0.05. The comparison formula and relative-error basis "
-                 "are not specified; the default atol/rtol criterion is not adopted.")
+SOURCE_RECORD = "Source record: atol=0.01, rtol=0.05; formula and relative basis unknown; no default adoption"
 
 
 class SourceGapTests(unittest.TestCase):
@@ -43,18 +42,22 @@ class SourceGapTests(unittest.TestCase):
         starter = load_yaml(REPO / "schema_template", "starter.yaml")
         fixture = load_yaml(REPO / "schema_template/tools/tests/fixtures/minimal", "root.yaml")
         self.base = deepcopy(starter)
-        self.base["meta_data"] = {**fixture["meta_data"], "source": "fixture@fixed:kernel.py::kernel"}
-        self.base["contract"]["algorithm_requirement"] = deepcopy(fixture["contract"]["algorithm_requirement"])
-        self.base["contract"]["algorithm_requirement"]["golden_reference"]["source"] = "fixture@fixed:kernel.py::reference"
+        self.base["META_DATA"] = {**fixture["META_DATA"], "Source": "fixture@fixed:kernel.py::kernel"}
+        self.base["CONTRACT"]["Algorithm_requirement"] = deepcopy(fixture["CONTRACT"]["Algorithm_requirement"])
+        self.base["CONTRACT"]["Algorithm_requirement"]["Golden_reference"]["Source"] = "fixture@fixed:kernel.py::reference"
+        self.base["CONTRACT"]["Hardware_specification"]["Execution"] = deepcopy(fixture["CONTRACT"]["Hardware_specification"]["Execution"])
         write_yaml(self.before / "root.yaml", self.base)
 
     def artifact(self, criterion=SOURCE_RECORD, change=lambda _: None):
         root = deepcopy(self.base)
-        root["meta_data"]["version"] = 2
-        root["contract"]["algorithm_requirement"]["golden_reference"]["tolerance"]["Y"] = criterion
-        change(root["contract"]["algorithm_requirement"])
+        root["META_DATA"]["Version"] = 2
+        root["CONTRACT"]["Algorithm_requirement"]["Golden_reference"]["Tolerance"]["y"] = criterion
+        change(root["CONTRACT"]["Algorithm_requirement"])
         write_yaml(self.after / "root.yaml", root)
         validate_artifacts("P1", "worker", self.before, self.after, REPO / "schema_template/starter.yaml", decision="complete")
+        checked = check_stage_snapshot(self.after, parser_root=REPO, stage="P1")
+        if checked["exit_code"]:
+            raise ExtractError("; ".join(checked["diagnostics"]))
         validate_artifact_sources(self.after, self.lock, decision="complete")
 
     def approve(self, *, declared=False):
@@ -76,10 +79,10 @@ class SourceGapTests(unittest.TestCase):
                     "conclusions": [{"subject": subject, "text": "Copy semantics are known; no unsupported acceptance guarantee is made.",
                                      "evidence": [0, 1, 3, 4]} for subject in ("contract", "coverage")],
                     "checks": [], "checks_note": "Runner validates the P1 artifact gate.",
-                    "issues": [{"kind": "source_gap", "scope": "golden_reference.tolerance.Y",
+                    "issues": [{"kind": "source_gap", "scope": "CONTRACT.Algorithm_requirement.Golden_reference.Tolerance.y",
                                 "detail": "An external comparison definition is unavailable; it is not needed to describe scalar copy.",
                                 "evidence": [4], "recovery_condition": "Obtain the comparator before using this record for implementation acceptance."}],
-                    "comparisons": [{"output": "Y", "source_output": "Y", "evidence": [4]}] if declared else [],
+                    "comparisons": [{"output": "y", "source_output": "Y", "evidence": [4]}] if declared else [],
                     "framework_candidates": [], "handoff": ""}
         proposal["conclusions"].extend(
             {"subject": subject, "text": "The current Contract is clear and records its explicit source limitation.",
@@ -97,8 +100,8 @@ class SourceGapTests(unittest.TestCase):
         self.assertEqual(receipt["comparisons"], [])
 
     def test_source_record_does_not_hide_missing_core_facts_or_false_reference(self):
-        changes = (lambda a: a["input"]["X"].pop("dtype"), lambda a: a["output"].pop("Y"),
-                   lambda a: a["golden_reference"].update(source="fixture@fixed:kernel.py::kernel"))
+        changes = (lambda a: a["Input"]["x"].pop("dtype"), lambda a: a["Output"].pop("y"),
+                   lambda a: a["Golden_reference"].update(Source="fixture@fixed:kernel.py::kernel"))
         for change in changes:
             with self.subTest(change=change), self.assertRaises(ExtractError):
                 self.artifact(change=change)
@@ -107,7 +110,7 @@ class SourceGapTests(unittest.TestCase):
         self.task["outputs"] = {"Y": {"tolerance": {"relative_to": "candidate", "atol": 0.01, "rtol": 0.05, "max_rel_l2": 0.01}}}
         (self.source / "task.json").write_text(json.dumps(self.task) + "\n")
         self.lock["source"]["files"] = manifest(self.source)
-        valid = "relative_to=candidate; atol=0.01; rtol=0.05; max_rel_l2=0.01. External relative-L2 normalization is not specified."
+        valid = "relative_to=candidate; atol=0.01; rtol=0.05; max_rel_l2=0.01; L2 normalization unspecified"
         self.artifact(valid)
         self.assertEqual(self.approve(declared=True)["decision"], "approve")
         for invalid in (valid.replace("relative_to=candidate", "relative_to=reference"),
@@ -123,13 +126,14 @@ class SourceGapTests(unittest.TestCase):
             with self.subTest(family=family):
                 def update(algorithm):
                     algorithm.update(deepcopy(excerpt))
-                    algorithm["golden_reference"]["tolerance"] = {name: "exact" for name in excerpt["output"]}
+                    algorithm["Golden_reference"]["Tolerance"] = {name: "exact" for name in excerpt["Output"]}
+                    algorithm["Golden_reference"]["Source"] = "fixture@fixed:kernel.py::reference"
                 # Only the current P1 artifact gate is exercised. These are I/O
                 # excerpts in a synthetic task, not operator Reviewer approvals.
                 self.artifact(change=update)
-                actual = load_yaml(self.after, "root.yaml")["contract"]["algorithm_requirement"]
-                self.assertEqual(actual["input"], excerpt["input"])
-                self.assertEqual(actual["output"], excerpt["output"])
+                actual = load_yaml(self.after, "root.yaml")["CONTRACT"]["Algorithm_requirement"]
+                self.assertEqual(actual["Input"], excerpt["Input"])
+                self.assertEqual(actual["Output"], excerpt["Output"])
 
     def test_p1_gate_rejects_nullable_type_and_singleton_shape_conflicts(self):
         cases = (({"nullable": "true"}, "expected a boolean"),
@@ -137,7 +141,7 @@ class SourceGapTests(unittest.TestCase):
                  ({"dtype": "python_none", "shape": [{"element": 0}]}, "python_none is a singleton scalar"))
         for fields, message in cases:
             with self.subTest(fields=fields), self.assertRaisesRegex(ExtractError, message):
-                self.artifact(change=lambda a: a["input"]["X"].update(fields))
+                self.artifact(change=lambda a: a["Input"]["x"].update(fields))
 
 
 if __name__ == "__main__":

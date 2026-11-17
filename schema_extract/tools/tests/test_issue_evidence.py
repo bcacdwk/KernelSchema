@@ -6,10 +6,11 @@ import tempfile
 import unittest
 from uuid import uuid4
 
-from schema_extract.tools.artifacts import index_prefix
+from schema_extract.tools.artifacts import validate_plan
 from schema_extract.tools.common import ExtractError, manifest
 from schema_extract.tools.receipts import normalize_response, validate_receipt
 from schema_extract.tools.stages import DOCUMENT_CONCLUSIONS
+from schema_extract.tools.tests.test_artifact_transactions import selection
 
 
 class IssueEvidenceTests(unittest.TestCase):
@@ -23,14 +24,15 @@ class IssueEvidenceTests(unittest.TestCase):
         self.artifacts.mkdir()
         (self.root / "rules").symlink_to(Path(__file__).resolve().parents[3], target_is_directory=True)
         (self.source / "kernel.py").write_text("def route(n): return 'branch' if n > 1 else 'root'\n")
-        (self.artifacts / "root.yaml").write_text(
-            "meta_data:\n  dispatch:\n    id: root\n    when: N > 0\ncontract: {}\n")
-        self.plan = [
-            {"id": name, "file": name + ".yaml", "parent": parent, "workload": "Positive N.",
-             "difference": "The selected route.", "selection": "kernel.py::route", "evidence": [0]}
-            for name, parent in (("root", ""), ("branch", "root"))
-        ]
-        (self.artifacts / "dispatch.md").write_text(index_prefix(self.plan) + "No known gaps.\n")
+        repo = Path(__file__).resolve().parents[3]
+        (self.artifacts / "root.yaml").write_bytes((repo / "schema_template/tools/tests/fixtures/minimal/root.yaml").read_bytes())
+        self.selected = selection("root", "branch")
+        self.plan = [{"id": "branch", "wait_for": ["root"]}]
+        (self.artifacts / "dispatch.md").write_text(
+            "# 复制任务\n\n## 范围\n\n固定合成测试来源。\n\n## 完整设计\n\n"
+            "| 设计 | 具体机制与保留理由 | 关系 |\n| --- | --- | --- |\n"
+            "| [root](root.yaml) | 当前基线 | 本地定义 |\n"
+            "| `branch.yaml`（仅计划） | 已选代表 | 等待root完成 |\n")
         self.lock = {"snapshot": str(self.root), "source": {
             "id": "fixed-source", "files": manifest(self.source),
             "bindings": {"host": {"path": "kernel.py", "symbol": "route"}},
@@ -40,11 +42,12 @@ class IssueEvidenceTests(unittest.TestCase):
             "stage": "P4", "role": "reviewer", "node": "root", "plan_revision": 0,
             "base_checkpoint": "base", "dependency_digests": manifest(self.artifacts),
             "mode": "normal", "generation": 0, "node_signature": "", "writable_files": [],
+            "selection_signature": validate_plan("P2", self.selected, parser_root=repo),
         }
         self.state = {
             "run_id": self.attempt["run_id"], "input_fingerprint": self.attempt["input_fingerprint"],
             "accepted_receipts": {}, "active_attempts": {"P4": self.attempt["attempt_id"]},
-            "plan_draft": [],
+            "plan_draft": [], "selected_designs": self.selected,
         }
 
         def anchor(path, start=1, end=1, **extra):
@@ -76,7 +79,7 @@ class IssueEvidenceTests(unittest.TestCase):
 
     def test_schema_conformance_revise_can_use_its_current_file(self):
         self.proposal["issues"][0].update(
-            kind="schema_conformance", scope="root.yaml:design",
+            kind="schema_conformance", scope="root.yaml:DESIGN",
             detail="The current root has no completed Design; the P3 stage page requires a full root.")
         self.assertEqual(self.validate()["decision"], "revise")
 
@@ -165,7 +168,7 @@ class IssueEvidenceTests(unittest.TestCase):
             "issue_id": "incomplete-root", "target": "P3", "reason": "The root needs upstream correction.",
             "evidence": [0],
         })
-        self.proposal["issues"][0].update(kind="schema_conformance", scope="root.yaml:design")
+        self.proposal["issues"][0].update(kind="schema_conformance", scope="root.yaml:DESIGN")
         with self.assertRaisesRegex(ExtractError, "revision/blocking"):
             self.validate()
         self.proposal["issues"][0]["evidence"] = [0]
@@ -179,18 +182,18 @@ class IssueEvidenceTests(unittest.TestCase):
         self.proposal.update(decision="approve", handoff="Follow the two source-selected routes.")
         self.proposal["conclusions"] = [
             {"subject": subject, "text": "The fixed source supports this property.", "evidence": [0]}
-            for subject in ("tree", "paths", "coverage")
+            for subject in ("directory", "writing_plan", "coverage")
         ] + [
             {"subject": subject, "text": "The current document meets this criterion.", "evidence": []}
             for subject in DOCUMENT_CONCLUSIONS
         ]
-        with self.assertRaisesRegex(ExtractError, "plan"):
+        with self.assertRaisesRegex(ExtractError, "arrange"):
             self.validate()
         self.proposal["plan"] = deepcopy(self.plan)
         self.state["plan_draft"] = deepcopy(self.plan)
         self.assertEqual(self.validate()["decision"], "approve")
-        self.proposal["plan"][1]["evidence"] = []
-        with self.assertRaisesRegex(ExtractError, "each planned node needs valid source evidence"):
+        self.proposal["plan"][0]["wait_for"] = []
+        with self.assertRaisesRegex(ExtractError, "reviewer plan differs"):
             self.validate()
         self.proposal["plan"] = deepcopy(self.plan)
         self.proposal["conclusions"][2]["evidence"] = []

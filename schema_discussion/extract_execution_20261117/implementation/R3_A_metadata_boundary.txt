@@ -1,0 +1,13 @@
+当前 run 晚期共享任务元数据更正边界（未闭合，交 R4 A）
+
+离线最小材料：复用 test_artifact_transactions.ArtifactTransactions.task/branch，建立 root.yaml 与 branch.yaml，共享原 META_DATA.Name/Describe，两个完整 Design，当前 Template 格式正确。源码、Contract、选择集合不变。
+
+1. 只把 root.yaml 的 META_DATA.Name 从 scalar_copy 改为 scalar_copy_corrected，Version 增 1。
+2. 调用 normalize_candidate(before, original, final, STARTER, stage='P1', role='worker', decision='complete', selected_designs=selection('root','branch'))。
+3. 在该原始更正副本再只改 branch.yaml 的 Name，使它与 root 一致，并将 branch Version 增 1；调用 validate_artifacts('P5','worker',original,repaired,STARTER,decision='complete',node_entry=selection('branch')[0])。
+
+实际结果：
+P1 current collection metadata correction: CandidateRejected non-root nodes omit CONTRACT and keep the task Name/Describe
+P5 consumer metadata correction: ExtractError P5 changed protected task or node identity
+
+未写入任何真实 run。两侧均拒绝，未放行不一致产物；缺少的是本属同一固定任务的 Name/Describe 纠错由 P1 受控同步后再审的出口。

@@ -3,24 +3,19 @@
 from copy import deepcopy
 import json
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 
-from schema_extract.tools.common import ExtractError, read_json, rules_root, source_root
-from schema_extract.tools.compatibility import PRESERVED, build_report, verify_report, verify_review
-from schema_extract.tools.inputs import SourceTree
+from schema_extract.tools.common import read_json
 from schema_extract.tools.monitor import reserve_launch
-from schema_extract.tools.snapshots import freeze_inputs
-from schema_extract.tools.stages import new_node
 from schema_extract.tools.store import Store
 
 
 REPO = Path(__file__).resolve().parents[3]
-ENTRY = REPO / "schema_extract/extract.py"
+ENTRY = REPO / "schema_extract/extract_yaml.py"
 
 
 class CLIRecoveryTests(unittest.TestCase):
@@ -37,13 +32,13 @@ class CLIRecoveryTests(unittest.TestCase):
             "repository": str(self.source), "directory": ".", "entrypoint": "kernel.py::kernel",
             "input": "kernel.py::inputs", "reference": "kernel.py::reference", "io": ["task.md"],
             "acceptance": ["task.md"], "scope": ["task.md"]}))
-        self.stub = self.root / "codex-stub"
+        self.stub = self.root / "claude-stub"
         self.stub.write_text(f"#!{sys.executable}\nimport sys\nif '--version' in sys.argv:\n print('controlled-stub')\n sys.exit(0)\nsys.exit(75)\n")
         self.stub.chmod(0o755)
         self.store = Store(self.root / "runtime")
         self.output = self.root / "delivery"
         self.request = ["extract", "--source", str(self.descriptor), "--output", str(self.output),
-                        "--codex-bin", str(self.stub), "--operator-seconds", "600", "--stage-seconds", "600",
+                        "--agent-binary", str(self.stub), "--operator-seconds", "600", "--stage-seconds", "600",
                         "--call-seconds", "60", "--max-calls", "6"]
         result = self.cli(*self.request, "--queue")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -55,77 +50,6 @@ class CLIRecoveryTests(unittest.TestCase):
 
     def state(self):
         return self.store.load(self.run_id)
-
-    def test_compatibility_report_binds_complete_target_and_independent_review(self):
-        old = self.state()
-        lock = read_json(self.store.run_dir(self.run_id) / "inputs.lock.json")
-        target = self.root / "target-rules"
-        shutil.copytree(rules_root(lock), target)
-        runtime = target / "schema_extract/tools/agent.py"
-        runtime.chmod(0o644)
-        runtime.write_text(runtime.read_text() + "\n# Isolated runtime maintenance fixture.\n")
-        report = build_report(self.store, self.run_id, old["checkpoint"], target)
-        self.assertEqual(report, build_report(self.store, self.run_id, old["checkpoint"], target))
-        self.assertEqual(report["assessment"]["outcome"], "insufficient_information")
-        change = report["changes"][0]
-        self.assertEqual([item["path"] for item in report["changes"]], ["schema_extract/tools/agent.py"])
-        review = {"format": "schema_extract.compatibility_review.v1", "report_id": report["id"],
-                  "supervisor": {"role": "Supervisor", "identity": "synthetic-reviewer",
-                                 "independent_review": True, "record": "isolated review fixture"},
-                  "decision": "compatible_runtime", "reason": "Comment-only fixture retains all meanings.",
-                  "preserves": dict.fromkeys(PRESERVED, True),
-                  "changes": [{key: change[key] for key in ("path", "before_sha256", "after_sha256")} |
-                              {"classification": "runtime_fix", "reason": "Only a Python comment was added.",
-                               "evidence": ["Full unified diff has one comment addition."]}]}
-        self.assertEqual(verify_review(report, review)["outcome"], "compatible_runtime")
-        verify_report(self.store, report, target)
-        frozen = freeze_inputs(self.root / "candidate-snapshots", SourceTree(source_root(lock)),
-                               lock["source"]["bindings"], sorted(lock["source"]["files"]), old["config"],
-                               rules_repo=target)
-        verify_report(self.store, report, target_lock=frozen)
-        command = self.cli("compatibility-report", self.run_id, "--checkpoint", old["checkpoint"],
-                           "--target-repo", str(target))
-        self.assertEqual(command.returncode, 0, command.stderr)
-        self.assertEqual(json.loads(command.stdout)["report"], report)
-        bad = deepcopy(review)
-        bad["changes"][0]["after_sha256"] = "0" * 64
-        with self.assertRaisesRegex(ExtractError, "digest mismatch"):
-            verify_review(report, bad)
-        bad = deepcopy(review)
-        bad["changes"] = []
-        with self.assertRaisesRegex(ExtractError, "missing, duplicate or extra"):
-            verify_review(report, bad)
-        bad = deepcopy(report)
-        bad["target"]["files"][change["path"]] = "0" * 64
-        with self.assertRaisesRegex(ExtractError, "digest or format"):
-            verify_report(self.store, bad, target)
-        # Simultaneous policy, normative and undeclared runtime changes cannot
-        # reuse the report for the single comment change.
-        readme = target / "schema_extract/README.md"
-        readme.chmod(0o644)
-        readme.write_text(readme.read_text() + "\nFixture policy changes acceptance requirements.\n")
-        spec = target / "schema_docs/0.common.md"
-        spec.chmod(0o644)
-        spec.write_text(spec.read_text() + "\nFixture changes a field meaning.\n")
-        extra = target / "schema_extract/tools/additional_fixture.py"
-        extra.parent.chmod(0o755)
-        extra.write_text("# Additional actual target file.\n")
-        with self.assertRaisesRegex(ExtractError, "no longer matches"):
-            verify_report(self.store, report, target)
-        expanded = build_report(self.store, self.run_id, old["checkpoint"], target)
-        bad = deepcopy(review)
-        bad["report_id"] = expanded["id"]
-        with self.assertRaisesRegex(ExtractError, "missing, duplicate or extra"):
-            verify_review(expanded, bad)
-        bad["changes"] = [{key: item[key] for key in ("path", "before_sha256", "after_sha256")} |
-                          {"classification": "policy", "reason": "Changes acceptance policy.",
-                           "evidence": ["Complete fixture diff."]} for item in expanded["changes"]]
-        with self.assertRaisesRegex(ExtractError, "cannot override"):
-            verify_review(expanded, bad)
-        bad["decision"] = "full_re_review"
-        self.assertEqual(verify_review(expanded, bad)["semantic_review"]["suggested_start"], "P1")
-        self.assertEqual(self.state(), old)
-        self.assertEqual(read_json(self.store.run_dir(self.run_id) / "inputs.lock.json"), lock)
 
     def test_repeated_commands_report_saved_state_and_frozen_source(self):
         original = self.state()
@@ -142,7 +66,7 @@ class CLIRecoveryTests(unittest.TestCase):
             report = json.loads(result.stdout)
             self.assertEqual((report["run_id"], report["run_status"], report["published"]), (self.run_id, "blocked", False))
             self.assertEqual(report["frozen"]["input_fingerprint"], original["input_fingerprint"])
-            self.assertIn("未重新读取工作树", report["input_policy"])
+            self.assertEqual(report["frozen"]["config"], original["config"])
         result = self.cli(*self.request, "--worker-effort", "high")
         self.assertEqual(result.returncode, 2)
         self.assertIn("different request parameters", result.stderr)
@@ -207,10 +131,11 @@ if '--version' in sys.argv:
     print('controlled-stub')
     sys.exit(0)
 sys.stdin.read()
-destination = Path(sys.argv[sys.argv.index('--output-last-message') + 1])
-destination.write_text(json.dumps({'format': 'schema_extract.proposal.v1', 'attempt_id': 'wrong-invocation'}))
-print(json.dumps({'type': 'thread.started', 'thread_id': '00000000-0000-4000-8000-000000000001'}))
-print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'cached_input_tokens': 0, 'output_tokens': 1}}))
+session = '00000000-0000-4000-8000-000000000001'
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': session}))
+print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'session_id': session,
+                  'structured_output': {'format': 'schema_extract.proposal.v1', 'attempt_id': 'wrong-invocation'},
+                  'usage': {'input_tokens': 1, 'output_tokens': 1}}))
 ''')
         result = self.cli("resume", self.run_id)
         self.assertEqual(result.returncode, 1, result.stderr)
@@ -221,38 +146,6 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'cached
         rejected = read_json(self.store.run_dir(self.run_id) / "attempts" / attempt_id / "rejected.json")
         self.assertEqual(rejected["attempt_id"], attempt_id)
 
-    def test_continuation_inherits_old_counts_and_only_adds_once(self):
-        self.assertEqual(self.cli("resume", self.run_id, "--add-seconds", "600", "--add-calls", "2").returncode, 1)
-        old = self.state()
-        old["deadline"] = time.time() - 100
-        old["stages"]["P1"]["deadline"] = time.time() - 100
-        old["nodes"]["retired"] = new_node({"file": "retired.yaml", "parent": "root"})
-        old["nodes"]["retired"]["status"] = "removed"
-        old["nodes"]["retired"]["stage"].update(calls=5, revisions=5, adjudications=1, elapsed_seconds=42)
-        self.store.save(old)
-        before = (self.store.run_dir(self.run_id) / "state.json").read_bytes()
-        command = ["continue", self.run_id, "--full-restart", "--reason", "Explicit full re-extraction fixture",
-                   "--checkpoint", old["checkpoint"], "--add-seconds", "600", "--add-calls", "2"]
-        result = self.cli(*command)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        successor = json.loads(result.stdout)["run_id"]
-        current = self.store.load(successor)
-        self.assertEqual((current["status"], current["stage"], current["role"]), ("queued", "P1", "worker"))
-        self.assertTrue(all(scope["approval"] is None for scope in current["stages"].values()))
-        self.assertEqual(current["stages"]["P1"]["calls"], old["stages"]["P1"]["calls"])
-        self.assertEqual(current["attempt_usage"], old["attempt_usage"])
-        self.assertEqual(current["budget_extensions"][:-1], old["budget_extensions"])
-        self.assertEqual(len(current["budget_extensions"]), 2)
-        self.assertEqual(current["nodes"]["retired"]["stage"]["adjudications"], 1)
-        self.assertEqual(current["nodes"]["retired"]["stage"]["calls"], 5)
-        result = self.cli(*command)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout)["run_id"], successor)
-        self.assertEqual(self.store.load(successor), current)
-        self.assertEqual((self.store.run_dir(self.run_id) / "state.json").read_bytes(), before)
-        self.assertEqual(self.cli("resume", self.run_id).returncode, 2)
-        self.assertEqual(read_json(self.store.run_dir(successor) / "inputs.lock.json")["source"]["files"],
-                         read_json(self.store.run_dir(self.run_id) / "inputs.lock.json")["source"]["files"])
 
 
 if __name__ == "__main__":

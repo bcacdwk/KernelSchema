@@ -1,0 +1,77 @@
+META_DATA:
+  Name: scalar_copy
+  Describe: Copy one scalar in a synthetic validation task
+  Version: 1
+CONTRACT:
+  Algorithm_requirement:
+    Input: {x: {meaning: Input scalar, shape: [], dtype: fp32}}
+    Output: {y: {meaning: Copied scalar, shape: [], dtype: fp32}}
+    Compute:
+      - Name: Copy
+        Math: |
+          y = x
+    Golden_reference:
+      Source: testing.invalid/kernel@fixture-v1:reference.py::copy
+      Tolerance:
+        y: exact
+  Hardware_specification:
+    Device: Synthetic test device
+    Architecture: test
+    Execution:
+      cta: One cooperative block
+      warp: One execution group inside a CTA
+    Feature:
+      register: Private local state for each execution member
+    Stack:
+      Language: Test language 1
+      Toolchain: Test compiler 1
+    Wiki:
+      Hardware: <testing.invalid/hardware@pending:test.md>
+      Programming:
+        Language: <testing.invalid/language@pending:test/>
+      Microbench: <testing.invalid/microbench@pending:test/>
+      Sota:
+        Kernel: <testing.invalid/kernel@pending:test/>
+        Schema: <testing.invalid/schema@pending:test/>
+      Profile: <testing.invalid/profile@pending:test/>
+DESIGN:
+  Math_reshape:
+    Thesis: Retain the scalar copy without intermediate values
+    Rewrite:
+      - Name: Copy
+        Math: |
+          y = x
+  Work_schedule:
+    Thesis: One worker produces the scalar result
+    Step:
+      MAIN:
+        Describe: Produce the scalar y
+        Decomposition:
+          Partition: {}
+          Worktile:
+            Invariant: {x: {meaning: Source scalar for this worktile, shape: [], dtype: fp32}}
+          Target:
+            Single_tile: {y: {meaning: Result scalar for this worktile, shape: [], dtype: fp32}}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: 1
+        Schedule:
+          Worker_assignment:
+            Preassigned: {start: 0, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: One serial role copies the scalar
+    Step:
+      MAIN:
+        Role:
+          MAIN:
+            Info:
+              Describe: Copy x to y
+              Member: warp[0:1]
+              Using_verb:
+                compute: {y: {execution_mode: serial, describe: Read x and write y according to Copy; done makes the scalar output visible}}
+            Pipe:
+              - compute:y

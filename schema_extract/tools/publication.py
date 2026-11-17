@@ -13,8 +13,8 @@ import time
 from uuid import uuid4
 
 from .common import (ExtractError, digest, fsync_directory, json_bytes, manifest, read_json, sha256,
-                     sync_tree, verify_manifest, write_json)
-from .snapshots import verify_run_inputs
+                     sync_tree, verify_manifest, write_json, rules_root)
+from .artifacts import check_complete, validate_artifact_sources
 from .runtime import execution_boundary, verify_execution
 
 
@@ -145,65 +145,47 @@ def _prepare_scaffold(output: Path, backup: Path, intent: dict, intent_path: Pat
 
 @execution_boundary
 def publish(store, state: dict, output: Path, *, export=False) -> dict:
-    from .revision_control import publication_barrier
-    from .revisions import resolve_context
+    from .maintenance import publication_barrier
     from .runner import _final_inputs
-    if state["status"] != "ready" or any(state.get(name) for name in
-            ("active_attempts", "unconfirmed_attempts", "unsettled_attempts")):
-        raise ExtractError("only the final independently reviewed ready checkpoint can be published")
+    if (state["status"] != "ready" or state["stages"]["P6"]["status"] != "approved" or state["control"]["action"] or
+            state.get("pending_rechecks") or state.get("reopening") or
+            any(state.get(name) for name in ("active_attempts", "unconfirmed_attempts", "unsettled_attempts"))):
+        raise ExtractError("only the settled, independently reviewed final checkpoint can be published")
     if publication_barrier(store, state):
-        raise ExtractError("semantic request, drain or maintenance prevents publication and export")
-    context = resolve_context(store, state)
-    lock, semantic_lock = context["source_lock"], context["rules_lock"]
-    verify_run_inputs(state, lock)
-    if state.get("execution_binding"):
-        verify_execution(store, state, executor=True)
-    receipt, reviewed = store.verify_approval(state, state["stages"]["P6"]["approval"])
+        raise ExtractError("a control request, drain or maintenance prevents publication and export")
+    lock = verify_execution(store, state, executor=True)
     artifacts, checkpoint = store.verify_checkpoint(state)
-    _final_inputs(store, state, artifacts)
+    receipt, reviewed = store.verify_approval(state, state["stages"]["P6"]["approval"], directory=artifacts)
     if checkpoint["id"] != reviewed["id"] or checkpoint["id"] != state["merged_checkpoint"]:
-        raise ExtractError("final checkpoint differs from its effective independent P6 approval")
-    output = output.absolute()
-    imported = state.get("imported_draft")
-    if imported and output.resolve().is_relative_to(Path(imported["source_task"]).parent.parent):
-        raise ExtractError("publication target must be outside the legacy runtime storage")
+        raise ExtractError("final checkpoint differs from its current independent P6 approval")
+    approval_attempt = read_json(store.run_dir(state["run_id"]) / "attempts" /
+                                 receipt["identity"]["attempt_id"] / "attempt.json")
+    verify_execution(store, state, attempt=approval_attempt)
+    if approval_attempt["stage"] != "P6" or approval_attempt["role"] != "reviewer":
+        raise ExtractError("delivery requires the current full P6 reviewer receipt")
+    _final_inputs(store, state, artifacts)
+    checked = check_complete(artifacts, rules_root(lock), selected_designs=state["selected_designs"])
+    if checked["exit_code"] != 0 or checked["excluded_nodes"]:
+        raise ExtractError("final directory did not pass complete publication checks: " +
+                           "; ".join(checked["diagnostics"]))
+    validate_artifact_sources(artifacts, lock, decision="approve", parser_root=rules_root(lock))
+    output = output.expanduser().absolute()
     if (output.is_symlink() or output.resolve().is_relative_to(store.root) or
             store.root.is_relative_to(output.resolve()) or output.resolve() == Path(lock["source"]["origin_repository"])):
         raise ExtractError("publication target must be separate from runtime and source repository roots")
     output = output.resolve()
     proof = {"format": "schema_extract.delivery.v2", "run_id": state["run_id"],
              "checkpoint": checkpoint["id"], "input_fingerprint": state["input_fingerprint"],
-             "source": {key: lock["source"][key] for key in ("id", "ref", "repository_id", "bindings")},
-             "rules_id": semantic_lock["rules"]["id"], "files": checkpoint["files"],
-             "approval": {"attempt_id": receipt["identity"]["attempt_id"], "receipt_sha256": digest(receipt)},
-             "check_policy": "skip-hardware"}
-    if state.get("execution_binding"):
-        proof["execution"] = {"binding": state["execution_binding"],
-                              "history": list(state["execution_bindings"]),
-                              "executor": state["executor"],
-                              "approval_binding": read_json(store.run_dir(state["run_id"]) / "attempts" /
-                                                            receipt["identity"]["attempt_id"] / "attempt.json").get("execution_binding"),
-                              "semantic_rules_id": semantic_lock["rules"]["id"]}
-    if state.get("semantic_revision"):
-        proof["semantic_context"] = {"revision": state["semantic_revision"],
-                                     "history": list(state.get("semantic_revisions", [])),
-                                     "identity": context["identity"],
-                                     "rules_snapshot": semantic_lock["snapshot"],
-                                     "approval_revision": receipt["identity"].get("semantic_revision")}
-    if lock["source"].get("aliases"):
-        proof["source"]["aliases"] = lock["source"]["aliases"]
-    if state.get("imported_draft"):
-        proof["imported_from"] = {key: state["imported_draft"][key]
-                                  for key in ("task_key", "checkpoint", "fingerprint", "files", "usage")}
-    previous = state.get("publication") or {}
-    previous_proof = previous.get("proof", {})
-    if (not export and state["published"] and previous.get("status") == "published" and
-            previous.get("target") == str(output) and
-            {key: value for key, value in previous_proof.items() if key != "execution"} ==
-            {key: value for key, value in proof.items() if key != "execution"}):
-        # A runtime upgrade never replaces an already delivered receipt. The
-        # run's migration history and any new export carry the added provenance.
-        proof = previous_proof
+             "source": {key: lock["source"][key] for key in ("id", "ref", "ref_kind", "repository_id", "bindings")},
+             "rules_id": lock["rules"]["id"], "executor": state["executor"],
+             "files": checkpoint["files"], "selected_designs": state["selected_designs"],
+             "selection_signature": state["selection_signature"], "writing_signature": state["writing_signature"],
+             "design_sources": checked["design_resolution"]["nodes"],
+             "approval": {"attempt_id": receipt["identity"]["attempt_id"], "receipt_sha256": digest(receipt),
+                          "attempt_sha256": digest(approval_attempt), "backend": approval_attempt["backend"],
+                          "model": approval_attempt["model"], "effort": approval_attempt["effort"],
+                          "session_scope": approval_attempt["session_scope"]},
+             "check_policy": "skip-hardware", "checked_nodes": checked["checked_nodes"]}
     publication_id = digest({"proof": proof, "target": str(output)})
     directory = store.run_dir(state["run_id"]) / "publications"
     directory.mkdir(exist_ok=True)
@@ -229,22 +211,25 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
         expected = {**checkpoint["files"], ".extraction/receipt.json": sha256(json_bytes(proof))}
         verify_manifest(temporary, expected)
         sync_tree(temporary)
+        verify_manifest(artifacts, checkpoint["files"])
         if store.load(state["run_id"]) != state:
             raise ExtractError("Runner state changed before publication")
         with store.supervisor() as ledger:
             if store.load(state["run_id"]) != state:
                 raise ExtractError("Runner context changed before the publication rename")
             if publication_barrier(store, state, ledger):
-                raise ExtractError("semantic request, drain or maintenance fenced the publication rename")
+                raise ExtractError("control request, drain or maintenance fenced the publication rename")
             # Full P6/effective-approval checks ran under the run writer above.
             # This short transaction rechecks their exact state/context and
             # checkpoint identities, then linearizes rename against requests.
             denied = ledger["active_hold"]
-            if state["run_id"] in ledger["continuations"]:
-                raise ExtractError("a superseded run cannot publish")
+            pending_control = state["control"]["action"] or next((request["action"] for request in
+                store.control_requests(state["run_id"]) if request["id"] not in state["control"]["requests"]), None)
             if denied:
                 store.hold_member(ledger, state)
                 status = "held"
+            elif pending_control:
+                status = "controlled"
             else:
                 _prepare_scaffold(output, backup, intent, intent_path)
                 try:
@@ -263,16 +248,18 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
             except ExtractError:
                 same = False
             status = "published" if same else "conflict"
-        if status == "held":
+        if status in {"held", "controlled"}:
             from .recovery import consume_controls
             consume_controls(store, state)
+            pending_control = state["control"]["action"]
             if not export and state["control"]["action"]:
                 state["control"].update(resume_status="ready", stopped_at=time.time())
                 state["status"] = "cancelled" if state["control"]["action"] == "cancel" else "paused"
         published = status == "published"
         record = {**intent, "status": status, "artifacts": str(artifacts),
-                  "hold_id": denied,
-                  "reason": None if status == "published" else "全局 hold 阻止发布。" if denied else "目标已有不同内容；目标与已审checkpoint均已保留。"}
+                  "hold_id": denied, "control_action": pending_control,
+                  "reason": None if status == "published" else "全局 hold 阻止发布。" if denied else
+                            "当前 pause/cancel 请求阻止发布。" if pending_control else "目标已有不同内容；目标与已审checkpoint均已保留。"}
         # The target may already be visible if the Runner dies here. Replay
         # checks its complete manifest and writes this same receipt once.
         write_json(directory / (publication_id + ".json"), record)

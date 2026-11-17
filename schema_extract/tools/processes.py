@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import ctypes
 import os
 from pathlib import Path
 import signal
@@ -178,22 +179,24 @@ def terminate_owned(identity: dict, known=(), grace: float = 1.0, *, cwd: Path |
         return value
 
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        alive, unknown, reasons = observe()
-        if not alive:
-            return result(alive, unknown, reasons)
-        for item in reversed(alive):
-            if _signal_process(item, sig, cwd=cwd):
-                actions.append({"pid": item["pid"], "signal": sig.name})
         until = time.monotonic() + max(0, grace)
+        signalled = set()
         while True:
-            # Recheck unknown groups on every observation, including after the
-            # leader exits. An empty owned list alone never confirms termination.
             alive, unknown, reasons = observe()
             if not alive:
                 return result(alive, unknown, reasons)
+            for item in reversed(alive):
+                # ps/proc snapshots can miss a child forked during enumeration.
+                # Only the gate's wait/ECHILD can establish that none remain.
+                if item["pid"] == identity["pid"] or identity_key(item) in signalled:
+                    continue
+                if _signal_process(item, sig, cwd=cwd):
+                    actions.append({"pid": item["pid"], "signal": sig.name})
+                    signalled.add(identity_key(item))
             if time.monotonic() >= until:
                 break
             time.sleep(0.05)
+
     return result(alive, unknown, reasons)
 
 
@@ -253,6 +256,19 @@ def launch_not_started(attempt: dict, *, table: dict[int, dict] | None = None) -
         return False
 
 
+def gate_reaped(attempt: dict) -> bool:
+    """Require the gate to have actually waited for every adopted child."""
+    directory = Path(attempt["directory"])
+    try:
+        ended, launch = read_json(directory / "cli-exit.json"), read_json(directory / "launch.json")
+        return (ended.get("descendants_reaped") is True and type(ended.get("exit_code")) is int and
+                ended.get("protocol") == launch.get("protocol") == GATE_PROTOCOL and
+                ended.get("attempt_id") == attempt["attempt_id"] and ended.get("attempt_sha256") == digest(attempt) and
+                ended.get("launch_id") == launch.get("launch_id"))
+    except (ExtractError, KeyError, TypeError):
+        return False
+
+
 def _gate_main(argv: list[str]) -> int:
     if len(argv) < 8 or argv[0] != "--launch-gate":
         return 125
@@ -267,11 +283,29 @@ def _gate_main(argv: list[str]) -> int:
     if permitted != b"1":
         mark_not_started(Path(path), binding, "gate_closed")
         return 125
+    child = None
     try:
         os.chdir(cwd)
-        os.execvpe(argv[7], argv[7:], os.environ)
+        # Keep double-forked/setsid descendants under this invocation's gate.
+        # This changes parentage only: no namespaces, mounts or privilege change.
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+            raise OSError(ctypes.get_errno(), "cannot establish invocation child ownership")
+        # Runner signals descendants first. Keep their ownership anchor alive
+        # through TERM; it exits after the CLI and all adopted children are reaped.
+        signal.signal(signal.SIGTERM, lambda *_: None)
+        child = subprocess.Popen(argv[7:], close_fds=True)
+        code = child.wait()
+        write_json(Path(path).parent / "cli-exit.json", {**binding, "exit_code": code, "descendants_reaped": False})
+        while True:
+            try:
+                os.wait()
+            except ChildProcessError:
+                write_json(Path(path).parent / "cli-exit.json", {**binding, "exit_code": code, "descendants_reaped": True})
+                return code if code >= 0 else 128 - code
     except OSError:
-        mark_not_started(Path(path), binding, "exec_failed")
+        if child is None:
+            mark_not_started(Path(path), binding, "exec_failed")
         raise
 
 

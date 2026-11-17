@@ -11,7 +11,8 @@ from uuid import uuid4
 from schema_extract.tools import monitor
 from schema_extract.tools.common import ExtractError, digest, write_json
 from schema_extract.tools.runner import _consume_scope_retries, _reconcile_orphans
-from schema_extract.tools.stages import new_node, new_scope, next_calls, node_signature
+from schema_extract.tools.stages import (new_node, new_scope, next_calls, node_signature,
+                                        selection_signature, writing_signature)
 from schema_extract.tools.store import Store
 from schema_extract.tools.wakeup import Clock
 
@@ -23,18 +24,25 @@ class ScopedRecoveryTests(unittest.TestCase):
         self.store = Store(Path(temporary.name) / "runtime")
         self.store.initialize()
         self.run_id, self.attempt_id, self.sibling = (str(uuid4()) for _ in range(3))
-        plan = [{"id": name, "file": name + ".yaml", "parent": "" if name == "root" else "root"}
+        selected = [{"id": name, "instance": "kernel.py::copy(" + name + ")"}
                 for name in ("root", "a", "b")]
-        nodes = {entry["id"]: new_node(entry) for entry in plan}
-        nodes["root"].update(status="approved", merged=True, approval={"saved": True}, approved_generation=0)
+        writing = [{"id": name, "wait_for": []} for name in ("a", "b")]
+        nodes = {entry["id"]: new_node(entry) for entry in selected}
+        nodes["root"].update(status="approved", merged=True, approved_generation=0,
+                            approval={"stage": "P3", "node": "root", "input_fingerprint": "original-inputs",
+                                      "generation": 0, "node_signature": node_signature(selected[0])})
         nodes["a"].update(status="cli_error", draft_checkpoint="draft-a")
         nodes["a"]["stage"].update(calls=1, cli_failures=1, elapsed_seconds=7)
         self.state = {"format": "schema_extract.run.v2", "run_id": self.run_id, "status": "running", "stage": "P5",
-            "node": "root", "role": None, "mode": "normal", "plan": plan, "plan_revision": 1, "nodes": nodes,
+            "node": "root", "role": None, "mode": "normal", "selected_designs": selected,
+            "writing_plan": writing, "selection_signature": selection_signature(selected),
+            "writing_signature": writing_signature(writing), "plan_revision": 1, "nodes": nodes,
             "stages": {key: new_scope() for key in ("P1", "P2", "P3", "P4", "P5", "P6")},
-            "executor": {"capabilities": ["scoped_recovery.v2"]}, "input_fingerprint": "original-inputs",
+            "executor": {"capabilities": ["scoped_recovery.v2"], "digest": "frozen-executor"}, "input_fingerprint": "original-inputs",
             "checkpoint": "merged", "merged_checkpoint": "merged", "reopening": None, "reopen_requests": {},
             "config": {"operator_seconds": 3600, "stage_seconds": 3600, "call_seconds": 60,
+                       "backend": "claude", "agent_binary": "/usr/bin/false", "model": "offline-fixture",
+                       "worker_effort": "max", "reviewer_effort": "max",
                        "adjudication_seconds": 30, "max_calls": 12, "retry_limit": 2},
             "deadline": time.time() + 3600, "active_attempts": {"P5:b": self.sibling},
             "unconfirmed_attempts": {}, "unsettled_attempts": {self.sibling: "dispatched"},
@@ -49,7 +57,7 @@ class ScopedRecoveryTests(unittest.TestCase):
             "role": "worker", "mode": "normal", "generation": 0, "plan_revision": 1,
             "input_fingerprint": "original-inputs", "base_checkpoint": "before-failure",
             "directory": str(directory), "workspace": str(directory / "workspace"),
-            "node_signature": node_signature(plan[1]), "dependency_digests": {"root.yaml": "approved-root"}}
+            "node_signature": node_signature(selected[1]), "dependency_digests": {"root.yaml": "approved-root"}}
         result = {"outcome": "cli_error", "exit_code": 75, "termination": {"confirmed": True}}
         write_json(directory / "attempt.json", self.attempt)
         write_json(directory / "result.json", result)
@@ -57,9 +65,19 @@ class ScopedRecoveryTests(unittest.TestCase):
                                 "attempt_id": self.attempt_id, "result_sha256": digest(result), "next_due_at": 0}
         self.store.save(self.state)
         self.files = {"root.yaml": "approved-root"}
+        # Native exit/frozen-execution and actual source parsing are exercised
+        # by test_current_recovery and test_current_returns. These unit cases
+        # isolate the authorization ledger, controls and concurrent-scope fences.
+        def source_check(state, attempt, workspace):
+            if self.files != attempt["dependency_digests"]:
+                raise ExtractError("actual dependency changed")
+            return {"dependency_digests": deepcopy(self.files), "adopted_source_identities": {"root": "root-identity"}}
         for mocker in (patch.object(self.store, "verify_checkpoint", side_effect=lambda *_: (directory, {"files": self.files})),
-                       patch.object(self.store, "verify_node"), patch.object(self.store, "writer_status", return_value="held"),
-                       patch("schema_extract.tools.recovery.process_table", return_value={})):
+                       patch.object(self.store, "validate_sources", side_effect=source_check),
+                       patch.object(self.store, "writer_status", return_value="held"),
+                       patch("schema_extract.tools.runtime.verify_execution", return_value={}),
+                       patch("schema_extract.tools.recovery.termination_observed", return_value=True),
+                       patch("schema_extract.tools.recovery.verified_result", side_effect=lambda attempt, result, termination: result)):
             mocker.start()
             self.addCleanup(mocker.stop)
 
@@ -79,7 +97,7 @@ class ScopedRecoveryTests(unittest.TestCase):
         self.assertEqual(self.store.read_supervisor()["retries"][request["id"]]["status"], "consumed")
         self.assertEqual(_consume_scope_retries(self.store, state, {}, {})[0], state)
 
-    def test_parent_change_and_later_pause_prevent_dispatch(self):
+    def test_actual_source_change_and_later_pause_prevent_dispatch(self):
         self.files["root.yaml"] = "changed-root"
         with self.assertRaisesRegex(ExtractError, "dependency changed"):
             monitor.request_restart(self.store, self.run_id, "P5:a", self.store.root, automatic=False)

@@ -2,6 +2,14 @@
 
 ## 2026-11-17
 
+### Extract 当前流程与执行工具
+
+- 后续移除隔离的独立增量、短验证与边界见[本次实施记录](../schema_discussion/extract_execution_20261117/isolation_removal/IMPLEMENTATION.md)；原重构实测作为历史保留。
+
+- 唯一入口为 `schema_extract/extract_yaml.py`；P2 选择有限代表，P4 安排写作，P5 按实际整区来源合入，P6 独立终审。候选经 Template 规范化与严格重读后再审阅，裁决改稿有一次独立签收，当前维护保留固定身份与预算。
+- 默认 Claude Code `qwen3.8-max[1m]` / `max`，阶段、角色及 P5 节点独立会话；保留显式 Codex。按用户决定移除 Extract 自建进程隔离及 proc/sudo 前置条件；直接使用真实路径，保留原子编辑、CLI 只读角色、精确 resume 和原生结果核验，见[执行边界](../schema_extract/EXECUTOR_ALIGNMENT.md)。
+- 离线六阶段、恢复与交付测试，以及真实 CLI 和 Reviewer 正反例分别验证；完整真实模型试跑按用户要求停止，未形成阶段批准或发布。两位独立审阅者的七项问题已修复并复验签收，覆盖读前许可集合、事实交接、阶段投影、恢复审计和原生用量索引；最终范围与证据见[交付记录](../schema_discussion/extract_execution_20261117/FINAL.md)。
+
 ### 四个 Template 案例与有限图补缺
 
 - 原样恢复四题固定源码与证据快照，按当前规范人工重提取并独立审阅；完整集合由21份收束为9份，参数、局部变化和组合进入 dispatch，同步当前入口与同名 PNG。
