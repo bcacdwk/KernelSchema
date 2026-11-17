@@ -9,11 +9,6 @@ def parsed(action: Action | str) -> Action:
     return parse_action(action) if isinstance(action, str) else action
 
 
-def operands(action: Action | str):
-    value = parsed(action)
-    return value.verb, [(operand.name, operand.args) for operand in value.operands]
-
-
 def arguments(action: Action | str):
     return [((oi, ai), argument) for oi, operand in enumerate(parsed(action).operands)
             for ai, argument in enumerate(operand.args)]

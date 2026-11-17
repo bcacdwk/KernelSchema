@@ -55,7 +55,7 @@ class ResolvedTask:
         plan = dict(self.effective_task[node])
         if "CONTRACT" in self.effective_task["root"]:
             plan["CONTRACT"] = self.effective_task["root"]["CONTRACT"]
-        _Budget().charge(_units(plan))
+        _units(plan)  # Check this delivery view's capacity before copying.
         return _clone(plan)
 
     def diagnostic_source(self, node: str, path: str) -> tuple[str, str, RegionOrigin | None]:

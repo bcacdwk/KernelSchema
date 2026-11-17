@@ -12,11 +12,10 @@ from ..diagnostics import field_path
 from ..pipeline_syntax import (
     ActionDeclaration, EventRef, ForLoop, IfBlock, IndexScope, PipelineSyntaxError,
     domain_choices, domain_queries, parse_action, parse_event, parse_members,
-    parse_pipe, parse_waiting, same_domain,
+    parse_pipe, parse_waiting,
 )
 from ..rules.common import EXECUTION_MODES
 from .actions import action_variables, arguments, instantiate
-from .coordinates import recover
 from .expressions import Boundary, Domains, EmptyCoordinate, LIMIT, merge_coordinates, referenced_domains, tree, variables
 from .model import ExpansionError, GraphError, Operation, StepGraph
 from .windows import IndexWindows
@@ -54,6 +53,12 @@ class Builder:
         self.domain_cache = {id(self.scope): self.domains}
         self.pipes = {role: parse_pipe(body["Pipe"], path=f"{self.path}.Role.{role}.Pipe", scope=self.scope)
                       for role, body in definition["Role"].items()}
+        for pipe in self.pipes.values():
+            for node in pipe.controls():
+                if isinstance(node, ForLoop) and node.spec.bounds is not None:
+                    outer = self.domains_for(node.scope)
+                    inner = self.domains_for(node.body.scope)
+                    inner.range_scopes = {**outer.range_scopes, node.spec.name: (outer, node.bound)}
         self.members = {role: members(body["Info"], worker, self.domains)
                         for role, body in definition["Role"].items()}
         self.lookup, self.families = {}, defaultdict(dict)
@@ -93,7 +98,7 @@ class Builder:
                     elif isinstance(node, IfBlock):
                         expressions, local = [node.condition], self.domains_for(node.body.scope)
                     else:
-                        expressions, local = [node.spec.text], self.domains_for(node.body.scope)
+                        expressions, local = [node.spec.text], self.domains_for(node.scope)
                     for expression in expressions:
                         for _, name in domain_queries(expression):
                             if local.has_worktiles(name):
@@ -178,7 +183,7 @@ class Builder:
         expressions = [] if members_only else [arg for ref in references for _, arg in arguments(ref.action)]
         expressions += [ref.member for ref in references if ref.member not in (None, "*")]
         pending = list(set().union(*(referenced_domains(tree(expression)) for expression in expressions)))
-        definitions, visited = dict(self.scope.definitions), set()
+        definitions, visited, range_scopes = dict(self.scope.definitions), set(), {}
         while pending:
             name = pending.pop()
             if name in visited:
@@ -187,15 +192,21 @@ class Builder:
             choices = domain_choices(scopes, name)
             if not choices:
                 continue  # An ordinary parameter must come from the sample.
-            if len(choices) != 1 or name in definitions and not same_domain(definitions[name], choices[0]):
+            if len(choices) != 1:
                 raise ExpansionError(f"ambiguous Waiting index {name}; referenced declaration scopes disagree")
             definition = definitions[name] = choices[0]
+            for scope in scopes:
+                if name in self.domains_for(scope).range_scopes:
+                    range_scopes[name] = self.domains_for(scope).range_scopes[name]
+                    break
             if isinstance(definition, dict):
                 pending.extend(definition["flatten"])
             elif isinstance(definition, list):
                 pending.extend(set().union(*(referenced_domains(tree(bound)) for bound in definition)))
-        return Domains(definitions, self.domains.parameters, self.domains.worktiles,
-                       dynamic_worktiles=self.domains.dynamic_worktiles)
+        domains = Domains(definitions, self.domains.parameters, self.domains.worktiles,
+                          dynamic_worktiles=self.domains.dynamic_worktiles)
+        domains.range_scopes = range_scopes
+        return domains
 
     def precheck_members(self, refs, current, domains):
         """Member errors are independent of whether a target branch executes."""
@@ -298,78 +309,69 @@ class Builder:
                             raise
                         raise type(error)(f"{path}: {error}") from error
 
-    def alias_contexts(self, formals, refs):
-        if not formals:
-            yield {}
-            return
-        domains = self.rule_domains(refs)
-        if set(formals) <= domains.definitions.keys():
-            yield from domains.contexts(set(formals))
-            return
-        # Infer an alias's formal arguments from complete declaration windows,
-        # not from an intersection of actual events. Every listed event is then
-        # resolved separately, so a missing member of the alias cannot vanish.
-        first = refs[0]
-        formal_domains = Domains({name: [0, 0] for name in formals}, self.domains.parameters, self.domains.worktiles)
-        seen = set()
-        for window in self.windows.declarations[(first.role, first.action.family)]:
-            for concrete in self.windows.values(window):
-                values = dict(arguments(concrete))
-                for member in self.members[first.role]:
-                    equations = [(tree(expression), int(values[position])) for position, expression in arguments(first.action)]
-                    if first.member not in (None, "*"):
-                        equations.append((tree(first.member), member))
-                    context = recover(equations, formal_domains, {}, set(formals))
-                    if context is None:
-                        continue
-                    identity = tuple(context[name] for name in formals)
-                    if identity not in seen:
-                        seen.add(identity)
-                        yield context
-                    if len(seen) > LIMIT:
-                        raise ExpansionError("Event alias expansion exceeds the action limit")
-
-    def event_aliases(self):
+    def event_aliases(self, calls):
+        aliases = {}
         for name, values in self.definition.get("Event", {}).items():
             path = field_path(self.path + ".Event", name)
             formal = parse_action("compute:" + name, path=path).operands[0]
             refs = [self.reference(parse_event(value, path=f"{path}[{i}]"), None) for i, value in enumerate(values)]
             if any(ref.member is None for ref in refs):
                 raise GraphError(path + ": Event aliases must explicitly select ROLE and member")
-            domains = self.rule_domains(refs)
+            aliases[formal.name] = formal.args, refs
+        # Event formals are bound by calls, never by a coincidentally named
+        # loop or the first referenced action's declaration window. Unused
+        # aliases need no finite values and do not create event occurrences.
+        for name, path in calls:
             try:
-                for env in self.alias_contexts(formal.args, refs):
+                call = parse_action("compute:" + name, path=path).operands[0]
+                if call.name in {"kernel_done", "launch_ready"}:
+                    if call.args:
+                        raise GraphError("built-in launch events have no indices")
+                    continue
+                if call.name not in aliases:
+                    raise GraphError(f"undefined Event alias {call.name}")
+                formals, refs = aliases[call.name]
+                if len(formals) != len(call.args):
+                    raise GraphError(f"Event alias {call.name} expects {len(formals)} arguments, got {len(call.args)}")
+                values = self.domains.integers(call.args, {})
+                env = dict(zip(formals, values))
+                alias = call.name + ("(" + ",".join(map(str, values)) + ")" if values else "")
+                events = []
+                for ref in refs:
                     self.tick()
-                    alias = formal.name + ("(" + ",".join(str(env[arg]) for arg in formal.args) + ")" if formal.args else "")
-                    events = []
-                    for ref in refs:
-                        selection = self.selected_members(ref, None, env, domains)
-                        concrete = instantiate(ref.action, domains, env)
-                        # An alias names existing events; it does not have a
-                        # Waiting target whose false condition can remove it.
-                        for member in selection:
-                            op = self.lookup.get((ref.role, member, concrete))
-                            if op is None:
-                                raise GraphError(f"Event {alias} names an absent event: {ref.role}[{member}]/{concrete}@{ref.time}")
-                            events.append(op.event(ref.time))
-                    self.graph.events[alias] = sorted(set(events))
+                    selection = self.selected_members(ref, None, env, self.domains)
+                    concrete = instantiate(ref.action, self.domains, env)
+                    # A called alias requires every listed event. A false
+                    # control condition cannot remove this explicit reference.
+                    for member in selection:
+                        op = self.lookup.get((ref.role, member, concrete))
+                        if op is None:
+                            raise GraphError(f"Event {alias} names an absent event: {ref.role}[{member}]/{concrete}@{ref.time}")
+                        events.append(op.event(ref.time))
+                self.graph.events[alias] = sorted(set(events))
             except GraphError as error:
                 if str(error).startswith("DESIGN."):
                     raise
                 raise type(error)(f"{path}: {error}") from error
 
-    def build(self):
+    def build(self, event_calls):
         self.add_operations()
         self.explicit_edges()
-        self.event_aliases()
+        self.event_aliases(event_calls)
         self.graph.check()
         return self.graph
 
 
 def build_step(step: str, definition: dict, worker: dict, parameters: dict, worktiles=1,
-               *, dynamic_worktiles=False) -> StepGraph:
+               *, dynamic_worktiles=False, event_calls=()) -> StepGraph:
+    """Expand one worker; event_calls contains (local alias call, source path).
+
+    Only supplied calls are evaluated. Event declarations remain templates;
+    callers must provide sample values for any free invocation arguments.
+    """
     try:
-        return Builder(step, definition, worker, parameters, worktiles, dynamic_worktiles=dynamic_worktiles).build()
+        return Builder(step, definition, worker, parameters, worktiles,
+                       dynamic_worktiles=dynamic_worktiles).build(event_calls)
     except PipelineSyntaxError as error:
         raise GraphError(str(error)) from error
     except EmptyCoordinate as error:

@@ -57,7 +57,10 @@ class DispatchTests(unittest.TestCase):
         text = '''## 范围
 合成任务
 ## 完整设计
-[root](root.yaml) [branch](branch.yml)
+| 设计 | 具体机制与保留理由 | 关系 |
+| --- | --- | --- |
+| [root](root.yaml) | 标量复制 | 入口 |
+| [branch](branch.yml) | 分块复制 | 独立 |
 ## 变体与组合
 ### 第一条（局部）
 基线只链接 [以前的记录](#other)
@@ -68,8 +71,40 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(sum('direct baseline' in d.message for d in diagnostics), 2)
         self.assertTrue(any('removed.yaml' in d.message for d in diagnostics))
 
-    def test_required_sections_and_count_do_not_impose_extra_columns(self):
-        self.assertFalse(validate('## 范围\n实际范围\n## 完整设计\n[root](root.yaml) [branch](branch.yml)\n', self.files))
+    def test_complete_designs_need_the_minimum_table_and_design_column_registration(self):
+        prefix = '## 范围\n实际范围\n## 完整设计\n'
+        plain_links = '[root](root.yaml) [branch](branch.yml)\n'
+        self.assertTrue(any('needs the table' in d.message for d in validate(prefix + plain_links, self.files)))
+        table = ('设计 | 具体机制与保留理由 | 关系\n--- | --- | ---\n'
+                 '[root](root.yaml) | 标量复制 | 对照 [branch](branch.yml)\n')
+        errors = validate(prefix + table + '\n' + plain_links, self.files)
+        self.assertEqual(len(errors), 1)
+        self.assertIn('branch.yml in the design column', errors[0].message)
+        errors = validate(prefix + table + '### [branch](branch.yml) | 另一个段落\n', self.files)
+        self.assertEqual(len(errors), 1)
+        self.assertIn('branch.yml in the design column', errors[0].message)
+        table += '[branch](branch.yml) | 分块复制 | 独立\n'
+        self.assertFalse(validate(prefix + table, self.files))
+
+    def test_variants_need_a_named_type_but_accept_one_sentence(self):
+        text = '''## 范围
+实际范围
+## 完整设计
+| 设计 | 具体机制与保留理由 | 关系 |
+| --- | --- | --- |
+| [root](root.yaml) | 标量复制 | 入口 |
+| [branch](branch.yml) | 分块复制 | 独立 |
+## 变体与组合
+### 调整复制（参数）
+基于 [root](root.yaml) 的 x，改为分块复制并保持输入约束
+'''
+        self.assertFalse(validate(text, self.files))
+        for heading in ('更快', '调整复制（整体）', '（参数）'):
+            with self.subTest(heading=heading):
+                errors = validate(text.replace('调整复制（参数）', heading), self.files)
+                self.assertTrue(any('variant heading' in d.message for d in errors))
+
+    def test_required_sections_and_count(self):
         self.assertTrue(any('required section' in d.message for d in validate('# Task\n', self.files)))
         files = {'root': Path('root.yaml'), **{f'node_{n}': Path(f'node_{n}.yaml') for n in range(10)}}
         self.assertTrue(any('at most 10' in d.message for d in validate('# Task\n', files)))

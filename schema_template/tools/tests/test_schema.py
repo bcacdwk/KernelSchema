@@ -98,6 +98,7 @@ class SchemaTests(TaskCase):
         self.assert_invalid(data, 'covered by Prefer')
         for preferred, feedback in (
                 ('CONTRACT.Algorithm_requirement.Input::x', 'CONTRACT.Algorithm_requirement::x'),
+                ('x.dtype', 'CONTRACT.Algorithm_requirement::x.dtype'),
                 ('DESIGN.Math_reshape::formula_value', 'formula_value')):
             with self.subTest(preferred=preferred, feedback=feedback):
                 data['root']['REALIZATION']['Prefer'][0]['Item'] = preferred
@@ -105,8 +106,68 @@ class SchemaTests(TaskCase):
                 at(data, MATH)['Rewrite'][0]['Math'] = 'formula_value = x; y = formula_value\n'
                 self.write_task(data)
                 self.assertEqual(data, schema.validate_directory(self.directory))
+        data['root']['REALIZATION']['Prefer'][0]['Item'] = 'x.dtype'
+        data['root']['REALIZATION']['Feedback'][0]['Item'] = 'x.shape'
+        self.assert_invalid(data, 'covered by Prefer')
         data['root']['REALIZATION'].pop('Prefer')
         self.assert_invalid(data, 'covered by Prefer')
+
+    def test_item_resolves_known_bare_properties_and_full_names_first(self):
+        data = deepcopy(self.base)
+        at(data, MATH)['Rewrite'][0]['Symbol'] = {
+            'copy': {'meaning': 'Copied value', 'shape': [], 'dtype': 'fp32'}}
+        row = {'Item': ['x.dtype', 'DESIGN.Math_reshape::copy.dtype'],
+               'Choice': 'Preserve the value types', 'Reason': 'Required precision'}
+        data['root']['REALIZATION'] = {'Require': [row]}
+        self.write_task(data)
+        self.assertEqual(data, schema.validate_directory(self.directory))
+        for name, owner in (('x', 'CONTRACT.Algorithm_requirement'), ('copy', 'DESIGN.Math_reshape')):
+            with self.subTest(name=name):
+                row['Item'] = [name + '.dtype', owner + '::' + name + '.dtype']
+                self.assert_invalid(data, 'cannot repeat the same upstream object')
+                for target in (name + '.no_such_property', owner + '::' + name + '.no_such_property'):
+                    row['Item'] = target
+                    self.assert_invalid(data, 'unknown declared target no_such_property')
+        at(data, MATH)['Rewrite'][0]['Name'] = 'x.dtype'
+        row['Item'] = ['x.dtype', 'CONTRACT.Algorithm_requirement::x.dtype']
+        self.write_task(data)
+        self.assertEqual(data, schema.validate_directory(self.directory))
+        at(data, MATH)['Rewrite'][0]['Name'] = 'Copy'
+        at(data, ALGO)['Compute'][0]['Name'] = 'x.dtype'
+        row['Item'] = ['x.dtype', 'CONTRACT.Algorithm_requirement.Input::x.dtype']
+        self.write_task(data)
+        self.assertEqual(data, schema.validate_directory(self.directory))
+
+    def test_operation_names_must_be_unique_only_when_referenced(self):
+        for area, field, owner in ((ALGO, 'Compute', 'CONTRACT.Algorithm_requirement'),
+                                   (MATH, 'Rewrite', 'DESIGN.Math_reshape')):
+            with self.subTest(owner=owner):
+                data = deepcopy(self.base)
+                entries = [{'Name': 'Cast', 'Math': 'a = fp32(x)'},
+                           {'Name': 'Cast', 'Math': 'y = fp32(a)'}]
+                at(data, area)[field] = entries
+                self.write_task(data)
+                self.assertEqual(data, schema.validate_directory(self.directory))
+                row = {'Item': 'Cast', 'Choice': 'Use a scalar conversion', 'Reason': 'Preserve rounding'}
+                data['root']['REALIZATION'] = {'Require': [row]}
+                for target in ('Cast', owner + '::Cast'):
+                    row['Item'] = target
+                    self.assert_invalid(data, 'Item', 'ambiguous')
+                del data['root']['REALIZATION']
+                assignment = at(data, STEP)['Schedule']['Worker_assignment']
+                previous = assignment['Exit']
+                assignment['Exit'] = owner + '::Cast'
+                self.assert_invalid(data, 'Exit', 'ambiguous')
+                assignment['Exit'] = previous
+                if area == MATH:
+                    entries[0]['Symbol'] = {'cast_alias': {'meaning': 'Referenced conversion',
+                                                          'binding': 'ref:' + owner + '::Cast'}}
+                    self.assert_invalid(data, 'binding', 'ambiguous')
+                entries[1]['Name'] = 'Final_cast'
+                row['Item'] = [owner + '::Cast', owner + '::Final_cast']
+                data['root']['REALIZATION'] = {'Require': [row]}
+                self.write_task(data)
+                self.assertEqual(data, schema.validate_directory(self.directory))
 
     def test_skip_hardware_preserves_the_raw_payload(self):
         data = deepcopy(self.base)
@@ -175,7 +236,8 @@ class SchemaTests(TaskCase):
         self.assertEqual(data, schema.validate_directory(self.directory))
         symbols = at(data, MATH)['Rewrite'][0]['Symbol']
         symbols['copy']['dtype'] = 'ref:CONTRACT.Algorithm_requirement::absent.dtype'
-        self.assert_invalid(data, 'unknown')
+        errors = self.assert_invalid(data, 'unknown')
+        self.assertEqual(errors.count('unknown shared Contract reference absent'), 1)
 
     def test_name_and_dtype_budgets_follow_the_value_branch(self):
         errors = []
@@ -315,7 +377,11 @@ class SchemaTests(TaskCase):
         git('init', '-q')
         original = self.directory / 'source (original).py'
         original.write_text('def entry():\n    return 1\n', encoding='utf-8')
-        git('add', original.name)
+        materials = self.directory / 'device materials'
+        materials.mkdir()
+        manual = materials / 'device.md'
+        manual.write_text('Synthetic device material\n', encoding='utf-8')
+        git('add', original.name, materials.name)
         git('-c', 'user.name=Schema test', '-c', 'user.email=schema@example.invalid',
             'commit', '-qm', 'Local reference fixture')
         commit = git('rev-parse', 'HEAD')
@@ -338,3 +404,22 @@ class SchemaTests(TaskCase):
         self.assertFalse(diagnostics(skip_hardware=True))
         data['CONTRACT']['Hardware_specification']['Wiki']['Profile'] = f'<{self.directory.name}@{commit}:absent.md>'
         self.assertFalse(diagnostics())
+        wiki = data['CONTRACT']['Hardware_specification']['Wiki']
+        wiki['Programming']['Language'] = f'{self.directory.name}@{commit}:{materials.name}'
+        wiki['Hardware'] = f'{self.directory.name}@{commit}:{materials.name}'
+        errors = diagnostics()
+        self.assertEqual([d.path for d in errors], ['root.CONTRACT.Hardware_specification.Wiki.Hardware'])
+        self.assertIn('not a directory', errors[0].message)
+        self.assertFalse(diagnostics(skip_hardware=True))
+        wiki['Hardware'] = f'<{self.directory.name}@pending:{materials.name}/device.md>'
+        self.assertFalse(diagnostics())
+        manual.unlink()
+        wiki['Hardware'] = f'{self.directory.name}@{commit}:{materials.name}/device.md'
+        self.assertFalse(diagnostics())
+        git('update-index', '--add', '--cacheinfo', f'160000,{commit},device_submodule')
+        git('-c', 'user.name=Schema test', '-c', 'user.email=schema@example.invalid',
+            'commit', '-qm', 'Device submodule fixture')
+        wiki['Hardware'] = f'{self.directory.name}@{git("rev-parse", "HEAD")}:device_submodule'
+        errors = diagnostics()
+        self.assertEqual([d.path for d in errors], ['root.CONTRACT.Hardware_specification.Wiki.Hardware'])
+        self.assertIn('not a directory', errors[0].message)

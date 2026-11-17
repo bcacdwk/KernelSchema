@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from decimal import Decimal
 from typing import Any
 
@@ -60,15 +61,23 @@ def _math_objects(plan):
             for name, obj in rewrite.get("Symbol", {}).items()}
 
 
+def _named_reference(check, target, names, path):
+    if target not in names:
+        return False
+    check.require(names[target] == 1, path, "reference is ambiguous; name must identify one upstream definition")
+    return True
+
+
 def _target(check, target, contract_objects, math_objects, path, *, contract_local=False, plan=None):
     """Resolve declared value objects; a semantic prose target remains unresolved."""
     if is_repository(target):
         repository(target, path, check.errors, fixed=True)
         return None
-    math_names = ({rewrite["Name"] for rewrite in plan["DESIGN"]["Math_reshape"]["Rewrite"]}
-                  if plan is not None else set())
+    math_names = (Counter(rewrite["Name"] for rewrite in plan["DESIGN"]["Math_reshape"]["Rewrite"])
+                  if plan is not None else Counter())
     if "::" not in target:
-        if not contract_local and target in math_names and target not in contract_objects and target not in math_objects:
+        if (not contract_local and target not in contract_objects and target not in math_objects
+                and _named_reference(check, target, math_names, path)):
             return None
         if IDENTIFIER.fullmatch(target):
             check.require(LOWER_NAME.fullmatch(target) is not None, path, "value reference names must be lowercase")
@@ -86,7 +95,7 @@ def _target(check, target, contract_objects, math_objects, path, *, contract_loc
         check.require(name in contract_objects, path, f"unknown shared Contract reference {name}")
         return contract_objects.get(name)
     if area == "DESIGN.Math_reshape" and owner == area:
-        if name not in math_objects:
+        if name not in math_objects and not _named_reference(check, name, math_names, path):
             semantic_reference(name, path, check.errors, known=math_names)
         return math_objects.get(name)
     if area == "CONTRACT.Hardware_specification":
@@ -289,7 +298,9 @@ def math(check: CheckContext, plan: dict[str, Any], algorithm: dict[str, Any], p
             else:
                 check.require(not target.endswith((".shape", ".dtype")), locations[name] + ".binding",
                               "binding references the whole object, not one property")
-            source = _target(check, target, contract_objects, objects, locations[name] + "." + attribute, plan=plan)
+            # Shape/dtype targets are checked once by descriptor_properties.
+            source = (_target(check, target, contract_objects, objects, locations[name] + ".binding", plan=plan)
+                      if attribute == "binding" else None)
             local = target.removeprefix("DESIGN.Math_reshape::")
             if local in objects:
                 graph[name] = [local]
@@ -342,15 +353,18 @@ def math(check: CheckContext, plan: dict[str, Any], algorithm: dict[str, Any], p
 
     # These weak references may name formula/strategy-defined conditions. Check
     # only their outer form after giving registered full names first priority.
-    known = set(contract_objects) | set(objects)
-    known.update(entry["Name"] for entry in algorithm["Compute"])
-    known.update(entry["Name"] for entry in plan["DESIGN"]["Math_reshape"]["Rewrite"])
+    known = Counter({name: 1 for name in set(contract_objects) | set(objects)})
+    for owner, entries in (("CONTRACT.Algorithm_requirement", algorithm["Compute"]),
+                           ("DESIGN.Math_reshape", plan["DESIGN"]["Math_reshape"]["Rewrite"])):
+        names = Counter(entry["Name"] for entry in entries)
+        known.update(names)
+        known.update({owner + "::" + name: count for name, count in names.items()})
 
     def reference(value, location):
-        if value in known:
+        if _named_reference(check, value, known, location):
             return
         target = value.split(":", 1)[1] if value.startswith(("ref:", "bind:")) else value
-        if target in known:
+        if _named_reference(check, target, known, location):
             return
         _target(check, target, contract_objects, objects, location, plan=plan)
 
@@ -396,8 +410,10 @@ def realization(check: CheckContext, plan: dict, algorithm: dict, hardware: dict
     contract_objects = {**algorithm.get("Constant", {}), **algorithm["Input"], **algorithm["Output"]}
     for step in algorithm["Compute"]:
         contract_objects.update(step.get("Symbol", {}))
-    contract_names = {step["Name"] for step in algorithm["Compute"]}
-    math_names = {step["Name"] for step in plan["DESIGN"]["Math_reshape"]["Rewrite"]}
+    contract_names = Counter(step["Name"] for step in algorithm["Compute"])
+    math_names = Counter(step["Name"] for step in plan["DESIGN"]["Math_reshape"]["Rewrite"])
+    scopes = {"CONTRACT.Algorithm_requirement": (contract_objects, contract_names),
+              "DESIGN.Math_reshape": (math_objects, math_names)}
     work = plan["DESIGN"]["Work_schedule"]
     tile = plan["DESIGN"]["Tile_pipeline"]
     unresolved = set()
@@ -408,53 +424,67 @@ def realization(check: CheckContext, plan: dict, algorithm: dict, hardware: dict
             return
         semantic_reference(reference, location, check.errors, known=math_names)
 
+    def named_item(target, location, owners):
+        # Full declared names take precedence over their possible dotted paths.
+        candidates = []
+        for owner in owners:
+            objects, operations = scopes[owner]
+            if target in objects:
+                candidates.append((owner, "value", target))
+            candidates.extend((owner, "operation", target) for _ in range(operations[target]))
+        if not candidates:
+            base, separator, suffix = target.partition(".")
+            if separator and suffix:
+                candidates = [(owner, "value", target) for owner in owners if base in scopes[owner][0]]
+        if not candidates:
+            return None
+        if not check.require(len(candidates) == 1, location,
+                             "item is ambiguous; name must identify one upstream definition"):
+            return "", "ambiguous", target
+        owner, kind, target = candidates[0]
+        base, _, suffix = target.partition(".")
+        if kind == "value" and suffix:
+            _published_path(check, scopes[owner][0][base], suffix, location)
+        return candidates[0]
+
     def item(reference, location):
         # Registered names and mapping keys may themselves contain brackets.
         # Only reject index notation after those complete identities are tried.
         if "::" not in reference:
-            candidates = []
-            if reference in contract_objects or reference in contract_names:
-                candidates.append("CONTRACT.Algorithm_requirement::" + reference)
-            if reference in math_objects or reference in math_names:
-                candidates.append("DESIGN.Math_reshape::" + reference)
-            check.require(len(candidates) <= 1, location, "bare item is ambiguous; qualify its upstream owner")
-            if not candidates:
-                semantic_item(reference, location)
-                unresolved.add(reference)
-            return candidates[0] if len(candidates) == 1 else reference
+            resolved = named_item(reference, location, scopes)
+            if resolved is not None:
+                return resolved
+            semantic_item(reference, location)
+            target = ("", "semantic", reference)
+            unresolved.add(target)
+            return target
         owner, target = (part.strip() for part in reference.split("::", 1))
         area = next((area for area in AREAS if owner == area or owner.startswith(area + ".")), None)
         if not check.require(area is not None and bool(target), location, "item needs a canonical upstream owner and an object after ::"):
-            return reference
+            return "", "invalid", reference
         if owner != area:
             target = owner[len(area) + 1:] + "." + target
+        if area in scopes:
+            resolved = named_item(target, location, (area,))
+            if resolved is not None:
+                return resolved
         if area == "CONTRACT.Algorithm_requirement":
-            if target in contract_names:
-                return area + "::" + target
             group, separator, tail = target.partition(".")
             if separator and group in {"Constant", "Input", "Output"} and tail.split(".", 1)[0] in algorithm.get(group, {}):
-                target = tail
-            base = target.split(".", 1)[0]
-            if base in contract_objects:
-                suffix = target[len(base):].lstrip(".")
-                if suffix:
-                    _published_path(check, contract_objects[base], suffix, location)
+                _published_path(check, algorithm[group], tail, location)
+                return area, "value", tail
             else:
                 _published_path(check, algorithm, target, location)
         elif area == "CONTRACT.Hardware_specification":
             if hardware is not None:
                 _published_path(check, hardware, target, location)
             else:
-                unresolved.add(area + "::" + target)
+                unresolved.add((area, "path", target))
         elif area == "DESIGN.Math_reshape":
-            base, _, suffix = target.partition(".")
-            if base in math_objects and suffix:
-                _published_path(check, math_objects[base], suffix, location)
-            if base not in math_objects and target not in math_names:
-                semantic_item(target, location)
-                unresolved.add(area + "::" + target)
-            # A Rewrite name or a formula-defined operation is semantic, not
-            # necessarily a registered Symbol; its correspondence needs review.
+            # Formula-defined operations need not be registered Symbols.
+            semantic_item(target, location)
+            unresolved.add((area, "semantic", target))
+            return area, "semantic", target
         else:
             region = work if area == "DESIGN.Work_schedule" else tile
             target = target.removeprefix("Step.")
@@ -471,8 +501,9 @@ def realization(check: CheckContext, plan: dict, algorithm: dict, hardware: dict
                 _published_path(check, region, target, location)
             else:
                 semantic_item(target, location)
-                unresolved.add(area + "::" + target)
-        return area + "::" + target
+                unresolved.add((area, "semantic", target))
+                return area, "semantic", target
+        return area, "path", target
 
     preferred = set()
     for kind, entries in body.items():

@@ -7,8 +7,9 @@ operation; importing or analyzing never reads or writes a source file.
 """
 from __future__ import annotations
 
+from ..diagnostics import field_path
 from ..pipeline_syntax import PipelineSyntaxError
-from ..rules.common import CheckContext
+from ..rules.common import CheckContext, indexed_values
 from ..rules import pipeline as pipeline_rules, schedule
 from .graph import build_step
 from .model import ExpansionError, GraphError, StepGraph
@@ -37,8 +38,9 @@ def analyze(plan: dict, config: dict) -> list[StepGraph]:
     """Analyze given sample values; no inference from names, images or dispatch.
 
     The input is an effective plan whose field structure has already been
-    checked. Flow is validated statically; each returned graph checks local
-    events in one representative worker, without simulating cross-step life.
+    checked. Flow is validated statically; its Event calls are evaluated with
+    the supplied arguments. Each returned graph checks local events in one
+    representative worker, without simulating cross-step life.
     """
     config = configuration(config["parameters"], config["worktiles"])
     work = plan["DESIGN"]["Work_schedule"]
@@ -57,10 +59,23 @@ def analyze(plan: dict, config: dict) -> list[StepGraph]:
     if check.errors:
         error = check.errors[0]
         raise GraphError(f"{error.path.lstrip('.')}: {error.message}")
+    event_calls = {step: [] for step in steps}
+
+    def collect(value, path):
+        for reference, location in indexed_values(value, path):
+            step, call = reference.split(".", 1)
+            event_calls[step].append((call, location))
+
+    for i, launch in enumerate(work["Flow"]["Launch"]):
+        collect(launch.get("start_after", []), f"DESIGN.Work_schedule.Flow.Launch[{i}].start_after")
+    for name, handoff in work["Flow"].get("Handoff", {}).items():
+        path = field_path("DESIGN.Work_schedule.Flow.Handoff", name)
+        for field in ("ready", "wait_at"):
+            collect(handoff.get(field, []), path + "." + field)
     graphs = []
     for step, definition in steps.items():
         scheduled = work["Step"][step]
         dynamic = scheduled["Schedule"]["Worker_assignment"]["Refill"] != "none"
         graphs.append(build_step(step, definition, scheduled["Mapping"]["Worker"], **config,
-                                 dynamic_worktiles=dynamic))
+                                 dynamic_worktiles=dynamic, event_calls=event_calls[step]))
     return graphs

@@ -99,9 +99,13 @@ def _expression(check, expression, scope, bound, all_indices, path, *, dynamic):
                           f"querying {name} requires bound outer index {dependency}")
 
 
-def _domain(check, name, definition, scope, path, *, dynamic):
+def _domain(check, definition, scope, path, *, dynamic):
     if isinstance(definition, list):
         check.interval(definition, path)
+        # Domain declarations may depend on outer indices. Their binding is
+        # checked at each loop/query use; here only queries are checked.
+        for value in definition:
+            _expression(check, value, scope, set(scope.definitions), set(scope.definitions), path, dynamic=dynamic)
     elif isinstance(definition, dict):
         restored = set()
         for i, child in enumerate(definition["flatten"]):
@@ -111,19 +115,9 @@ def _domain(check, name, definition, scope, path, *, dynamic):
                 check.require(not restored & coordinates, cp,
                               "flatten components must restore distinct coordinates")
                 restored.update(coordinates)
-    # Domain declarations may depend on outer indices. Their binding is checked
-    # at each loop/query use; here only queries and definite cycles are checked.
-    if isinstance(definition, list):
-        for value in definition:
-            _expression(check, value, scope, set(scope.definitions), set(scope.definitions), path, dynamic=dynamic)
 
 
-def _pipe(check, value, scope, path, all_indices, *, dynamic):
-    try:
-        root = parse_pipe(value, path=path, scope=scope)
-    except PipelineSyntaxError as error:
-        check.require(False, error.path, error.message)
-        return None
+def _pipe(check, root, all_indices, *, dynamic):
     for node in root.walk():
         if isinstance(node, ActionDeclaration):
             for operand in node.action.operands:
@@ -135,8 +129,11 @@ def _pipe(check, value, scope, path, all_indices, *, dynamic):
             spec = node.spec
             if spec.bounds is not None:
                 check.interval(list(spec.bounds), node.path)
+                # A new local index is not visible in its own range endpoints;
+                # the same spelling can still name an outer mathematical value.
+                outer_indices = all_indices if spec.name in node.scope.definitions else all_indices - {spec.name}
                 for value in spec.bounds:
-                    _expression(check, value, node.scope, node.bound, all_indices, node.path, dynamic=dynamic)
+                    _expression(check, value, node.scope, node.bound, outer_indices, node.path, dynamic=dynamic)
             elif check.require(spec.name in node.scope.definitions, node.path,
                                f"for names an undefined domain {spec.name}"):
                 for needed in _requirements(spec.name, node.scope):
@@ -154,7 +151,6 @@ def _pipe(check, value, scope, path, all_indices, *, dynamic):
                     values = (selector,)
                 for value in values:
                     _expression(check, value, node.scope, node.bound, all_indices, node.path, dynamic=dynamic)
-    return root
 
 
 def _members(check, body, mapping, hardware, scope, all_indices, path, *, dynamic):
@@ -234,27 +230,31 @@ def validate(check: CheckContext, plan: dict[str, Any], hardware: dict[str, Any]
         mapping = work[step]["Mapping"]
         dynamic = work[step]["Schedule"]["Worker_assignment"]["Refill"] != "none"
         for name, definition in definitions.items():
-            _domain(check, name, definition, scope, field_path(p + ".Index", name) + ".definition", dynamic=dynamic)
+            _domain(check, definition, scope, field_path(p + ".Index", name) + ".definition", dynamic=dynamic)
         check.acyclic({name: sorted(_dependencies(definition, definitions)) for name, definition in definitions.items()}, p + ".Index")
 
         # Local indices must also be recognized after a loop, where they are no
         # longer present in IndexScope; this catches leakage into siblings.
         all_indices = set(definitions)
+        pipes, syntax_errors = {}, {}
         for role, role_body in body["Role"].items():
             try:
-                syntax = parse_pipe(role_body["Pipe"], path=f"{p}.Role.{role}.Pipe", scope=scope)
+                syntax = pipes[role] = parse_pipe(role_body["Pipe"], path=f"{p}.Role.{role}.Pipe", scope=scope)
                 all_indices.update(node.spec.name for node in syntax.controls() if isinstance(node, ForLoop))
-            except PipelineSyntaxError:
-                pass
+            except PipelineSyntaxError as error:
+                syntax_errors[role] = error
         families, selected = {}, {}
         for role, role_body in body["Role"].items():
             rp = f"{p}.Role.{role}"
             _members(check, role_body, mapping, hardware, scope, all_indices, rp + ".Info.Member", dynamic=dynamic)
             selected[role] = role_member_range(role_body, mapping)
-            root = _pipe(check, role_body["Pipe"], scope, rp + ".Pipe", all_indices, dynamic=dynamic)
             families[role] = {}
-            if root is None:
+            if role in syntax_errors:
+                error = syntax_errors[role]
+                check.require(False, error.path, error.message)
                 continue
+            root = pipes[role]
+            _pipe(check, root, all_indices, dynamic=dynamic)
             declared = role_body["Info"]["Using_verb"]
             for declaration in root.actions():
                 action = declaration.action

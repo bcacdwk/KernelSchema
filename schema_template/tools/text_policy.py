@@ -7,7 +7,7 @@ import re
 
 from .diagnostics import Diagnostic, field_path
 from .errors import bounded
-from .yaml_source import Document, plain_scalar_allowed, yaml_backend
+from .yaml_source import Document, plain_scalar_allowed, scalar_contexts, yaml_backend
 
 
 # None selects a named mapping member; int selects a list entry. These are
@@ -29,7 +29,6 @@ class Budget:
     lines: int
     prose: bool = False
     prefix: str | None = None
-    string_only: bool = True
 
 
 BUDGETS = (
@@ -52,9 +51,9 @@ BUDGETS = (
         WS + ("Decomposition", "Target", "Single_tile"),
         PS + ("Index",), PS + ("Storage",),
     )),
-    *(Budget(A + ("Input", None, field), 150, 1, string_only=False)
+    *(Budget(A + ("Input", None, field), 150, 1)
       for field in ("range", "default")),
-    Budget(A + ("Input", None, "range", int), 150, 1, string_only=False),
+    Budget(A + ("Input", None, "range", int), 150, 1),
     *(Budget(region + ("Thesis",), 300, 2, prose=True) for region in (M, W, P)),
     Budget(A + ("Golden_reference", "Tolerance", None), 100, 1),
     Budget(A + ("Golden_reference", "Gap"), 100, 1, prose=True),
@@ -72,12 +71,12 @@ BUDGETS = (
     # Arithmetic.Approx already has the same budget. Only these Symbol
     # properties additionally admit unknown:<reason>; do not widen its scope.
     *(Budget(M + ("Rewrite", int, "Symbol", None, field), 150, 1,
-             prose=True, prefix="unknown:", string_only=False) for field in ("shape", "dtype")),
+             prose=True, prefix="unknown:") for field in ("shape", "dtype")),
     Budget(M + ("Rewrite", int, "Symbol", None, "retention"), 150, 1),
     *(Budget(WS + (part, "Strategy"), 150, 1, prose=True)
       for part in ("Decomposition", "Mapping", "Schedule")),
     Budget(WS + ("Schedule", "Worker_assignment", "Refill", None), 150, 1, prose=True),
-    *(Budget(prefix, 300, 2, string_only=False) for prefix in (
+    *(Budget(prefix, 300, 2) for prefix in (
         WS + ("Schedule", "Worker_assignment", "Exit"),
         WS + ("Decomposition", "Target", "Tile_reduction", "input"),
         WS + ("Decomposition", "Target", "Tile_reduction", "output"),
@@ -89,12 +88,11 @@ BUDGETS = (
         WS + ("Decomposition", "Target", "Tile_reduction", "output"),
     )),
     Budget(WS + ("Decomposition", "Target", "Tile_reduction", "method"), 300, 2),
-    *(Budget(("REALIZATION", section, int, field), 300, 2, prose=field != "Item",
-             string_only=field != "Item")
+    *(Budget(("REALIZATION", section, int, field), 300, 2, prose=field != "Item")
       for section in ("Require", "Prefer", "Forbid") for field in ("Item", "Choice", "Reason")),
     *(Budget(("REALIZATION", section, int, "Item", int), 300, 2)
       for section in ("Require", "Prefer", "Forbid", "Feedback")),
-    Budget(("REALIZATION", "Feedback", int, "Item"), 300, 2, string_only=False),
+    Budget(("REALIZATION", "Feedback", int, "Item"), 300, 2),
     Budget(("REALIZATION", "Feedback", int, "Choice"), 150, 1, prose=True),
 )
 
@@ -105,11 +103,6 @@ def _matches(parts, pattern):
         type(part) is int if rule is int else part == rule
         for part, rule in zip(parts, pattern)
     )
-
-
-def expects_text(parts):
-    """A small, definite subset for parser hints, not another schema checker."""
-    return any(rule.string_only and _matches(parts, rule.path) for rule in BUDGETS)
 
 
 def _select(value, pattern, path):
@@ -234,33 +227,17 @@ def sentence_period_changes(document: Document, *, skip_hardware=False):
     prevents editing that shared scalar. Overridden merge values are treated
     conservatively as uses too, so no raw source text is silently changed.
     """
-    yaml = yaml_backend()
     uses = {}
-
-    def visit(node, parts=(), *, key=False):
-        if isinstance(node, yaml.ScalarNode):
-            uses.setdefault(id(node), (node, set()))[1].add((parts, key))
-        elif isinstance(node, yaml.SequenceNode):
-            for index, child in enumerate(node.value):
-                visit(child, parts + (index,))
-        elif isinstance(node, yaml.MappingNode):
-            for field, child in node.value:
-                visit(field, parts + (field.value,), key=True)
-                if field.tag == "tag:yaml.org,2002:merge":
-                    entries = child.value if isinstance(child, yaml.SequenceNode) else [child]
-                    for entry in entries:
-                        visit(entry, parts)
-                else:
-                    visit(child, parts + (field.value,))
-
-    visit(document.node)
+    for context in scalar_contexts(document):
+        uses.setdefault(id(context.node), (context.node, set()))[1].add(context)
     changes = []
     for node, contexts in uses.values():
         if node.tag != "tag:yaml.org,2002:str":
             continue
         paths = []
-        for parts, key in contexts:
-            if key or skip_hardware and parts[:len(H)] == H:
+        for context in contexts:
+            parts = context.parts
+            if context.key or skip_hardware and parts[:len(H)] == H:
                 continue
             if any(rule.prose and _matches(parts, rule.path) and
                    (rule.prefix is None or node.value.startswith(rule.prefix)) for rule in BUDGETS):
@@ -272,10 +249,7 @@ def sentence_period_changes(document: Document, *, skip_hardware=False):
                     continue
                 if actual != node.value:
                     continue
-                location = document.name
-                for part in parts:
-                    location = f"{location}[{part}]" if type(part) is int else field_path(location, part)
-                paths.append(location)
+                paths.append(context.path)
         if paths and _sentence_stop(node.value):
             stop = len(node.value.rstrip()) - 1
             changes.append(PeriodChange(node, node.value[:stop] + node.value[stop + 1:],

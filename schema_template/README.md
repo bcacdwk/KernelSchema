@@ -82,7 +82,7 @@ python3 -B schema_template/check_yaml.py path/to/task/root.yaml --read-only --gr
 
 所有所选图先完成分析再发布。缺少取值、未知条件或容量限制返回 `2`，保留旧图；前置检查、来源复核或渲染失败也不覆盖该图。完整样本发现环时可生成标红诊断图并返回 `1`。PNG 内记录最终 raw 来源摘要、实际来源链、effective identity 和样本；普通检查与 `--all` 不清扫旧图片。
 
-图按有序 `for/if` 展开动作，建立 issue→done、pipe 发起/serial 推进、`async_ordered` 累积完成和显式 Waiting 的四种时点边，同名 noun 不产生数据边。它只检查所选样本、所列 step 内代表 worker 的局部事件关系；Flow 另做静态核对。缺前驱、成员错误和越过声明窗口是不同情况，不能从已生成动作倒推更小窗口。
+图按有序 `for/if` 展开动作，建立 issue→done、pipe 发起/serial 推进、`async_ordered` 累积完成和显式 Waiting 的四种时点边，同名 noun 不产生数据边。它只检查所选样本、所列 step 内代表 worker 的局部事件关系。Flow 先做静态核对，再按 `start_after`、`ready`、`wait_at` 的实际参数检查所调用的 Event；未调用的 Event 不需要有限取值。缺前驱、成员错误和越过声明窗口是不同情况，不能从已生成动作倒推更小窗口。
 
 ## 校验边界
 

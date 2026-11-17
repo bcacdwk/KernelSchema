@@ -114,7 +114,7 @@ class IndexWindows:
                          for position, expression in arguments(declaration.action)]
             needed = set(declaration.bound)
             try:
-                recovered = recover(equations, local, {}, needed, partial=True)
+                recovered = recover(equations, local)
             except ExpansionError as error:
                 uncertain.append(error)
                 continue
@@ -124,7 +124,7 @@ class IndexWindows:
             # coordinate may make an inner domain undefined, but does not hide
             # a separate fixed-index error (validated above).
             pending = set(recovered) & local.definitions.keys()
-            checked, outside, unavailable = set(), [], set()
+            outside, unavailable = [], set()
             while pending:
                 ready = [name for name in pending if local.dependencies(name) <= recovered.keys()
                          and not (local.dependencies(name) & pending)]
@@ -149,7 +149,6 @@ class IndexWindows:
                         break
                     outside.append(f"{name}={recovered[name]} outside its declared domain")
                     unavailable.update(local.coordinates(name))
-                checked.add(name)
             if outside:
                 boundaries.append("; ".join(outside))
             elif needed - recovered.keys():

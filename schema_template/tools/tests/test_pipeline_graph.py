@@ -1,9 +1,10 @@
 """Finite event semantics: ordered control, windows, members and four times."""
 import unittest
+from copy import deepcopy
 
-from ..pipeline import ExpansionError, GraphError, build_step, configuration
+from ..pipeline import ExpansionError, GraphError, analyze, build_step, configuration
 from ..pipeline_syntax import PipelineSyntaxError, parse_action, parse_event, parse_for, parse_pipe, parse_waiting
-from .support import role
+from .support import PIPE, WORK, TaskCase, add_step, at, role
 
 
 class GraphTests(unittest.TestCase):
@@ -145,6 +146,25 @@ class GraphTests(unittest.TestCase):
         with self.assertRaises(GraphError):
             self.build({'MAIN': main}, index={'t': [0, 2], 'i': [0, 2], 'n': {'flatten': ['t', 'i']}})
 
+    def test_local_range_endpoints_keep_outer_scope_in_expansion_and_waiting(self):
+        for endpoint, index, parameters in (('count(i)', {'i': [0, 3]}, {}), ('i', None, {'i': 3})):
+            with self.subTest(endpoint=endpoint):
+                main = role([{f'for(i=0:{endpoint})': ['compute:y(i)']}],
+                            {'compute': {'y': 'async_unordered'}},
+                            waiting={'Prepared': ['{issue compute:y(i)} ← [{done compute:y(i-1)}]']})
+                graph = self.build({'MAIN': main}, index=index, parameters=parameters)
+                self.assertEqual([op.action for op in graph.operations.values()],
+                                 ['compute:y(0)', 'compute:y(1)', 'compute:y(2)'])
+                self.assertEqual(sum(kind == 'Prepared' for _, _, kind in graph.edges), 2)
+                self.assertEqual(len(graph.boundaries), 1)
+                main['Waiting']['Prepared'] = ['{issue compute:y(i)} ← [{done compute:y(99)}]']
+                with self.assertRaises(GraphError) as caught:
+                    self.build({'MAIN': main}, index=index, parameters=parameters)
+                self.assertNotIsInstance(caught.exception, ExpansionError)
+        main = role([{'for(i)': ['compute:y(i)']}], {'compute': {'y': 'serial'}})
+        with self.assertRaisesRegex(GraphError, 'recursive index domain'):
+            self.build({'MAIN': main}, index={'i': [0, 'count(i)']})
+
     def test_dynamic_domain_queries_cannot_be_hidden_by_empty_sample(self):
         main = role([{'for(t)': ['compute:y(count(t))']}], {'compute': {'y': 'serial'}})
         with self.assertRaisesRegex(GraphError, 'dynamically refilled'):
@@ -179,3 +199,60 @@ class GraphTests(unittest.TestCase):
         event = '{done MAIN[*]::compute:' + noun + '(' + ','.join(['i'] * 70) + ')}'
         rule = parse_waiting(event + ' ← [' + ', '.join([event] * 6) + ']')
         self.assertEqual(len(rule.predecessors), 6)
+
+
+class EventCallTests(TaskCase):
+    def plan(self, formal='k', *, reverse=False):
+        data = deepcopy(self.base)
+        add_step(data)
+        main = at(data, PIPE)
+        main['Role'] = {'MAIN': role(
+            ['signal:entry', {'for(i=0:2)': ['compute:x(i+1)']}, {'for(j=0:3)': ['store:y(j)']}],
+            {'signal': {'entry': 'serial'}, 'compute': {'x': 'async_unordered'},
+             'store': {'y': 'async_unordered'}})}
+        references = ['{done MAIN[0]::signal:entry}',
+                      f'{{done MAIN[0]::compute:x({formal})}}', f'{{done MAIN[0]::store:y({formal})}}']
+        main['Event'] = {f'ready({formal})': list(reversed(references)) if reverse else references,
+                         'unused(q)': ['{done MAIN[0]::compute:x(⌊q⌋)}']}
+        at(data, WORK)['Flow']['Launch'][1]['start_after'] = 'MAIN.ready(2)'
+        return data['root']
+
+    def test_calls_bind_formals_without_capturing_loop_domains_or_list_order(self):
+        expected = {'ready(2)': ['MAIN/MAIN[0]/compute:x(2)@done',
+                                 'MAIN/MAIN[0]/signal:entry@done', 'MAIN/MAIN[0]/store:y(2)@done']}
+        for formal in ('i', 'k'):
+            for reverse in (False, True):
+                with self.subTest(formal=formal, reverse=reverse):
+                    graph = analyze(self.plan(formal, reverse=reverse), configuration({}))[0]
+                    self.assertEqual(graph.events, expected)
+
+    def test_all_flow_event_call_sites_are_evaluated_without_cross_step_edges(self):
+        plan = self.plan()
+        work, pipe = plan['DESIGN']['Work_schedule'], plan['DESIGN']['Tile_pipeline']['Step']
+        work['Flow']['Handoff'] = {'y': {'producer': 'MAIN', 'consumer': ['NEXT'], 'storage': 'global',
+                                               'ready': ['MAIN.ready(1)'], 'wait_at': ['NEXT.input_wait(0)']}}
+        pipe['NEXT']['Role'] = {'MAIN': role(['await:input(0)'], {'await': {'input': 'serial'}})}
+        pipe['NEXT']['Event'] = {'input_wait(v)': ['{done MAIN[0]::await:input(v)}']}
+        graphs = analyze(plan, configuration({}))
+        self.assertEqual(set(graphs[0].events), {'ready(1)', 'ready(2)'})
+        self.assertEqual(graphs[1].events, {'input_wait(0)': ['NEXT/MAIN[0]/await:input(0)@done']})
+        for graph in graphs:
+            self.assertTrue(all(source.startswith(graph.step + '/') and target.startswith(graph.step + '/')
+                                for source, target, _ in graph.edges))
+
+    def test_only_used_aliases_need_values_and_missing_called_events_are_errors(self):
+        plan = self.plan()
+        launch = plan['DESIGN']['Work_schedule']['Flow']['Launch'][1]
+        launch['start_after'] = 'MAIN.ready(selection)'
+        with self.assertRaises(ExpansionError):
+            analyze(plan, configuration({}))
+        self.assertEqual(set(analyze(plan, configuration({'selection': 2}))[0].events), {'ready(2)'})
+        launch['start_after'] = 'MAIN.unused(2)'
+        with self.assertRaises(ExpansionError):
+            analyze(plan, configuration({}))
+        launch['start_after'] = 'MAIN.ready(0)'
+        with self.assertRaises(GraphError) as caught:
+            analyze(plan, configuration({}))
+        self.assertNotIsInstance(caught.exception, ExpansionError)
+        self.assertIn('Flow.Launch[1].start_after', str(caught.exception))
+        self.assertIn('compute:x(0)', str(caught.exception))

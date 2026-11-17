@@ -502,7 +502,7 @@ def local_repository_errors(files, documents, *, skip_hardware=False):
         value = re.sub(r"^(?:https?|ssh)://(?:git@)?", "", value).rstrip("/").removesuffix(".git")
         return value.removeprefix("git@").replace(":", "/", 1) if value.startswith("git@") else value
 
-    errors, roots, commits, checked = [], {}, {}, set()
+    errors, roots, commits, checked = [], {}, {}, {}
     for node, filename in files.items():
         locators = []
         for value, location in _repository_fields(documents[node].value, node, skip_hardware=skip_hardware):
@@ -538,16 +538,19 @@ def local_repository_errors(files, documents, *, skip_hardware=False):
             if not target or target != target.strip() or PurePosixPath(target).is_absolute() or ".." in PurePosixPath(target).parts:
                 continue  # The pure field validator owns malformed paths.
             target = str(PurePosixPath(target))
-            if target == ".":
-                continue
-            query = (root, commits[key], target, location)
-            if query in checked:
-                continue
-            checked.add(query)
-            tree = git(root, "ls-tree", "--full-tree", "-z", commits[key], "--", target)
-            entries = [record.partition("\t")[2] for record in tree.stdout.split("\0") if record]
-            if target not in entries:
+            query = (root, commits[key], target)
+            if query not in checked:
+                if target == ".":
+                    checked[query] = "tree"
+                else:
+                    tree = git(root, "ls-tree", "--full-tree", "-z", commits[key], "--", target)
+                    entries = {name: metadata.split()[1] for record in tree.stdout.split("\0") if record
+                               for metadata, _, name in (record.partition("\t"),)}
+                    checked[query] = entries.get(target)
+            if checked[query] is None:
                 reject(errors, location, "repository path is absent from the locally available referenced commit")
+            elif checked[query] in {"tree", "commit"} and location.endswith(".CONTRACT.Hardware_specification.Wiki.Hardware"):
+                reject(errors, location, "Wiki.Hardware must identify a device file, not a directory")
     return errors
 
 

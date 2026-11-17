@@ -17,9 +17,9 @@ python3 -B -m unittest discover -s schema_template/tools/tests -t schema_templat
 
 | 模块 | 职责 |
 | --- | --- |
-| `yaml_source.py` | 精确值、源节点与位置、anchor/alias/merge、摘要；显式启用的窄范围缺引号与文本类型恢复 |
+| `yaml_source.py` | 精确值、源节点与位置、anchor/alias/merge、摘要；显式启用的窄范围缺引号及文本、int/bool 类型恢复 |
 | `rules/structure.py` | 当前结构；同源导出 `CANONICAL_FIELDS / STRING_FIELDS / CANONICAL_VALUES` 及纯 int/bool 叶的 `LITERAL_TYPES`，不维护旧名别名 |
-| `normalization.py` | 全任务定义和消费者作用域、字段与名称/引用的同步计划；只返回已验证候选 |
+| `normalization.py` | 全任务定义和消费者作用域、字段与名称/引用的同步计划；返回经过源保真核对的候选 |
 | `yaml_format.py` | 应用授权源编辑和保守句号清理，统一引号与布局，核对源图、精确值和幂等 |
 | `text_policy.py`、`rules/` | 按 raw 定义检查预算、字段、声明、符号、硬件、调度和流水线关系 |
 | `design_resolution.py` | 整区 `from` DAG、使用节点绑定、独立 raw/effective 视图和来源身份 |
@@ -48,12 +48,15 @@ Storage 的具名 entry 使用固定两行 flow mapping：第一行是名字及 
 | `rules.validate_algorithm(algorithm)` | 零 I/O 检查算法区的结构、关系与值预算，返回诊断列表 |
 | `text_policy.check_document(document, *, skip_hardware=False)`、`check_values(value, path='root', *, scope='document', skip_hardware=False)` | raw 源/值预算和样式诊断；不要传有效展开副本重复计数，算法映射使用 `scope='algorithm'` |
 | `yaml_format.format_document(document, *, edits=(), corrections=None, skip_hardware=False)` | 只返回保真候选字符串；不承担跨任务绑定规划或写回 |
+| `pipeline.configuration(parameters, worktiles=1)`、`pipeline.analyze(plan, config)` | 用显式整数样本分析已校验的 effective 设计；零 I/O 返回各 step 的 `StepGraph`，完整环记录在 `cycle`，未完成或确定的引用错误抛出异常 |
 
 `NormalizedTask` 含 `files / documents / candidates / source_hashes / corrections`。`documents` 是全任务最终候选，`candidates` 只含变化文件；`source_hashes` 是原始字节摘要，不能用候选 `Document.source_sha256` 代替写回比较依据。候选中的位置属于候选文本，展示时必须标明尚未写入。`corrections` 是计划修改，写回成功后才能报告为已应用。
 
-`Document.source_sha256` 对应其实际解析的 UTF-8 文本，`positions` 是该文本的位置；其余源节点资料服务于保真核对。小数直接构造 `Decimal`，日期与 `on/off/yes` 保持字符串。类型恢复只处理没有显式 tag、全部用途均为已知文本字段的非 null 原始 lexeme；真实数值字段和 null 不转换。重复显式键、递归 alias、非法标签和多文档输入仍拒绝。
+`Document.source_sha256` 对应其实际解析的 UTF-8 文本，`positions` 是该文本的位置；其余源节点资料服务于保真核对。小数直接构造 `Decimal`，日期与 `on/off/yes` 保持字符串。类型恢复仅在全部用途要求同一已知类型时调整引号：纯文本字段保留非 null 原始 lexeme，纯 int/bool 叶去除可直接解析的字面量引号。union、null、显式 tag、含转义的引号文本及混用 alias 保持原类型；重复显式键、递归 alias、非法标签和多文档输入仍拒绝。
 
 `ResolvedTask` 保留 raw/effective 副本、provider 与完整来源链；来源身份含 root、自身和各区实际来源文件。共享区在每个 consumer 的有效上下文校验，错误回指真实 provider 和引用位置。独立阅读视图另存，保留 provenance，不作为 raw 节点读回创作目录。
+
+单 step 入口是 `pipeline.build_step(step, definition, worker, parameters, worktiles=1, *, dynamic_worktiles=False, event_calls=())`。`event_calls` 每项为 `(本 step 的 Event 调用字符串, 来源字段路径)`，例如 `('ready(2)', 'DESIGN.Work_schedule.Flow.Launch[1].start_after')`。`analyze` 自动收集 `Flow.Launch[].start_after` 和 `Flow.Handoff.*.ready/wait_at`；`StepGraph.events` 只记录这些实际调用得到的具体事件集合。未调用的 Event 只做静态检查；缺少样本取值或表达式无法求值时返回 `ExpansionError`，具体调用指向缺失动作时返回 `GraphError`。图仍限于各 step 的局部事件，不增加跨 step 边。
 
 ## CLI 与发布边界
 

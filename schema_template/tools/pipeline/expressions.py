@@ -79,6 +79,9 @@ class Domains:
         self.definitions = self.scope.definitions
         self.parameters, self.worktiles = parameters, worktiles
         self.dynamic_worktiles = dynamic_worktiles
+        # Inline range endpoints belong to their header's outer scope, even
+        # when the new index shadows a public domain or a sample parameter.
+        self.range_scopes: dict[str, tuple[Domains, frozenset[str]]] = {}
         self._active: set[str] = set()
         self._dependencies: dict[str, set[str]] = {}
 
@@ -107,17 +110,19 @@ class Domains:
         if name not in self.definitions:
             raise GraphError(f"undefined index domain: {name}")
         definition, needed = self.definitions[name], set()
+        context = self.range_scopes[name][0] if name in self.range_scopes else self
+        ancestry = visited | {name} if context is self else frozenset()
         if isinstance(definition, list):
             for expression in definition:
                 node = tree(expression)
-                if not variables(node) & self.definitions.keys() and ast.unparse(node).replace(" ", "") in self.parameters:
+                if not variables(node) & context.definitions.keys() and ast.unparse(node).replace(" ", "") in self.parameters:
                     continue
-                needed.update(variables(node) & self.definitions.keys())
+                needed.update(variables(node) & context.definitions.keys())
                 for query in ast.walk(node):
                     if (isinstance(query, ast.Call) and isinstance(query.func, ast.Name)
                             and query.func.id in {"count", "last"} and len(query.args) == 1
                             and isinstance(query.args[0], ast.Name)):
-                        needed.update(self.dependencies(query.args[0].id, visited | {name}))
+                        needed.update(context.dependencies(query.args[0].id, ancestry))
         elif isinstance(definition, dict):
             bound = set()
             children = set().union(*(self.coordinates(child) for child in definition["flatten"]))
@@ -130,7 +135,7 @@ class Domains:
         elif definition != "worktile":
             raise GraphError(f"invalid index domain: {name}")
         for dependency in tuple(needed):
-            needed.update(self.dependencies(dependency, visited | {name}))
+            needed.update(context.dependencies(dependency, ancestry))
         self._dependencies[name] = needed
         return needed
 
@@ -144,7 +149,9 @@ class Domains:
             names = definition["flatten"]
         else:
             names = set().union(*(referenced_domains(tree(value)) for value in definition)) & self.definitions.keys()
-        return any(self.has_worktiles(child, seen | {name}) for child in names)
+        context = self.range_scopes[name][0] if name in self.range_scopes else self
+        ancestry = seen | {name} if context is self else frozenset()
+        return any(context.has_worktiles(child, ancestry) for child in names)
 
     def integer(self, expression, env: dict[str, int]) -> int:
         value = self.evaluate(tree(expression), env)
@@ -348,7 +355,9 @@ class Domains:
             if definition == "worktile":
                 return [{name: value} for value in range(self.worktiles)]
             if isinstance(definition, list):
-                lo, hi = self.integers(definition, env)
+                context, bound = self.range_scopes.get(name, (self, env.keys()))
+                outer_env = {key: value for key, value in env.items() if key in bound}
+                lo, hi = context.integers(definition, outer_env)
                 if hi < lo:
                     raise GraphError(f"reversed domain {name}: [{lo}, {hi})")
                 if hi - lo > LIMIT:

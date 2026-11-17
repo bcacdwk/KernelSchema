@@ -11,6 +11,7 @@ _HEADING = re.compile(r"^ {0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$")
 _DEFINITION = re.compile(r'^ {0,3}\[([^\]]+)\]:\s*(<[^>]+>|\S+)(?:\s+.*)?$')
 _INLINE = re.compile(r'''(?<!!)\[([^\]\n]+)\]\(\s*(<[^>\n]+>|(?:\\.|[^\s)])+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)''')
 _REFERENCE = re.compile(r"(?<!!)\[([^\]\n]+)\](?:\[([^\]\n]*)\])?(?![\[(])")
+_DESIGN_COLUMNS = ["设计", "具体机制与保留理由", "关系"]
 
 
 def _visible(text):
@@ -55,6 +56,35 @@ def _links(lines):
                 yield number, target
 
 
+def _cells(line):
+    if "|" not in line:
+        return []
+    cells = re.split(r"(?<!\\)\|", line.strip())
+    if not cells[0]:
+        cells.pop(0)
+    if cells and not cells[-1]:
+        cells.pop()
+    return [cell.strip() for cell in cells]
+
+
+def _design_rows(lines):
+    """Read the minimum table and its design cells, without interpreting prose."""
+    found, rows, in_table = False, [], False
+    for index, (number, line) in enumerate(lines):
+        cells = _cells(line)
+        if (index and cells and len(cells) == len(_DESIGN_COLUMNS)
+                and all(re.fullmatch(r":?-+:?", cell) for cell in cells)
+                and lines[index - 1][0] == number - 1
+                and _cells(lines[index - 1][1]) == _DESIGN_COLUMNS):
+            found = in_table = True
+        elif in_table:
+            if cells and not _HEADING.fullmatch(line) and lines[index - 1][0] == number - 1:
+                rows.append((number, cells[0]))
+            else:
+                in_table = False
+    return found, rows
+
+
 def validate(text: str, files: dict[str, Path]) -> list[Diagnostic]:
     """Check required sections and direct links to the current complete designs.
 
@@ -90,7 +120,16 @@ def validate(text: str, files: dict[str, Path]) -> list[Diagnostic]:
                 fail(start, f"section {title} needs content")
 
     current = {path.name: node for node, path in files.items()}
+    registrations = set()
+    if "完整设计" in sections:
+        start, end = sections["完整设计"]
+        found, rows = _design_rows([(number, line) for number, line in lines if start < number < end])
+        if not found:
+            fail(start, "complete-design section needs the table: 设计 | 具体机制与保留理由 | 关系")
+        definitions = [(number, line) for number, line in lines if _DEFINITION.fullmatch(line)]
+        registrations = set(_links(definitions + rows))
     links = []
+    registered = set()
     for number, target in _links(lines):
         try:
             parsed = urlsplit(target)
@@ -106,17 +145,23 @@ def validate(text: str, files: dict[str, Path]) -> list[Diagnostic]:
             fail(number, f"YAML link does not name a current task file: {target}")
         else:
             links.append((number, current[normalized]))
+            if (number, target) in registrations:
+                registered.add(current[normalized])
 
     if "完整设计" in sections:
         start, end = sections["完整设计"]
-        linked = {node for number, node in links if start < number < end}
-        for node in sorted(files.keys() - linked):
-            fail(start, f"complete-design section is missing a link to {files[node].name}")
+        for node in sorted(files.keys() - registered):
+            fail(start, f"complete-design table is missing a link to {files[node].name} in the design column")
     if "变体与组合" in sections:
         start, end = sections["变体与组合"]
-        entries = [number for number, level, _ in headings if level == 3 and start < number < end]
+        entries = []
+        for number, level, title in headings:
+            if level == 3 and start < number < end:
+                entries.append(number)
+                if not re.fullmatch(r"\S(?:.*\S)?\s*（(?:参数|局部|组合)）", title):
+                    fail(number, "variant heading must name its type: 参数, 局部 or 组合")
         if not entries and any(line.strip() for number, line in lines if start < number < end):
-            entries = [start]
+            fail(start, "variant section needs entries headed ### <name>（参数|局部|组合）")
         for begin, stop in zip(entries, entries[1:] + [end]):
             if not any(begin < number < stop for number, _ in links):
                 fail(begin, "variant or combination needs a direct baseline link to a current complete YAML")

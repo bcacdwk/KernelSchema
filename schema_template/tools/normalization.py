@@ -22,6 +22,8 @@ from .yaml_source import (Document, loads, recover_scalar_quotes,
 
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 TOKEN = re.compile(r"(?<![\w.])[A-Za-z_][A-Za-z0-9_]*(?!\w)")
+QUANTIFIER = re.compile(r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b")
+QUOTED = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"")
 REGIONS = ("Math_reshape", "Work_schedule", "Tile_pipeline")
 AREAS = (A, H, M, W, P)
 
@@ -114,6 +116,7 @@ class _Names:
     """One namespace; the stored original spelling makes collisions explicit."""
     def __init__(self, previous=None):
         self.entries = dict(previous.entries) if previous is not None else {}
+        self.shadowed = dict(previous.shadowed) if previous is not None else {}
 
     def add(self, name, path, *, target=None, related=False):
         if not isinstance(name, str):
@@ -129,24 +132,122 @@ class _Names:
         for name, target, path in names.entries.values():
             self.add(name, path, target=target, related=related)
 
-    def find(self, name):
+    def bind(self, name, path, *, target=None):
+        """Enter a local binding without losing distinct outer spellings."""
+        folded = name.casefold()
+        previous = self.entries.get(folded)
+        if previous is not None and previous[0] != name:
+            self.shadowed[previous[0]] = previous
+        self.entries[folded] = (name, name.lower() if target is None else target, path)
+
+    def find(self, name, *, exact=False):
         entry = self.entries.get(name.casefold())
-        return entry[1] if entry else name
+        if entry is not None and entry[0] != name and name in self.shadowed:
+            original, _, path = self.shadowed[name]
+            raise SchemaError(f"{entry[2]}: name normalization would capture outer name "
+                              f"{original!r} at {path} with local {entry[0]!r}; "
+                              "use distinct names before normalizing")
+        return entry[1] if entry and (not exact or entry[0] == name) else name
 
 
-def _tokens(value, names):
+def _tokens(value, names, bindings=None, *, exact=False):
     """Change bound roots/tokens, preserving strings and attribute members."""
-    protected = [(match.start(), match.end()) for match in re.finditer(
-        r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"", value)]
+    protected = [(match.start(), match.end()) for match in QUOTED.finditer(value)]
     protected.extend((match.start(1), match.end(1)) for match in re.finditer(
         r"\.\s*([A-Za-z_][A-Za-z0-9_]*)", value))
 
     def replace(match):
         if any(start <= match.start() < end for start, end in protected):
             return match[0]
-        return names.find(match[0])
+        return (bindings.get(match.start(), names) if bindings is not None else names).find(match[0], exact=exact)
 
     return TOKEN.sub(replace, value)
+
+
+def _math_tokens(value, names, path):
+    """Recognize comprehension bindings, without evaluating mathematical text."""
+    protected = [(match.start(), match.end()) for match in QUOTED.finditer(value)]
+    quantifiers = [match for match in QUANTIFIER.finditer(value)
+                   if not any(start <= match.start() < end for start, end in protected)]
+    if not quantifiers:
+        return _tokens(value, names)
+    source, padding = value.strip(), 0
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError):
+        # Parentheses also admit standalone generators and operator continuations.
+        source, padding = "(" + source + ")", 1
+        try:
+            tree = ast.parse(source, mode="eval")
+        except (SyntaxError, ValueError, RecursionError):
+            # Open notation can surround a familiar, balanced comprehension.
+            # Reuse its exact source slice, including newlines; never bind the
+            # whole line or guess a scope from an unsupported mathematical body.
+            scanned = QUOTED.sub(lambda match: " " * len(match[0]), value)
+            groups, cursor = [], 0
+            for opening in re.finditer(r"[([{]", scanned):
+                start = opening.start()
+                if start < cursor:
+                    continue
+                end = _group_end(scanned, start)
+                if end is None or start == 0 and end == len(value) - 1:
+                    continue
+                if any(start < match.start() < end for match in quantifiers):
+                    groups.append((start, end + 1))
+                    cursor = end + 1
+            if any(not any(start < match.start() < end for start, end in groups)
+                   for match in quantifiers):
+                # A canonical open formula needs no parser approval. A rename
+                # does need a known scope; casefold alone is not that evidence.
+                local_names = {match[1].casefold() for match in quantifiers}
+                colliding = _Names(names)
+                colliding.entries = {key: entry for key, entry in names.entries.items() if key in local_names}
+                if (any(match[1] != match[1].lower() for match in quantifiers) or
+                        _tokens(value, colliding, exact=True) != value):
+                    raise SchemaError(f"{path}: cannot uniquely bind an open mathematical quantifier "
+                                      "before normalizing names; make its local scope explicit")
+                return _tokens(value, names, exact=True)
+            result, cursor = [], 0
+            for start, end in groups:
+                result.append(_tokens(value[cursor:start], names, exact=True))
+                result.append(_math_tokens(value[start:end], names, path))
+                cursor = end
+            result.append(_tokens(value[cursor:], names, exact=True))
+            return "".join(result)
+    lines = source.splitlines(keepends=True)
+    offsets, offset = [], len(value) - len(value.lstrip()) - padding
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line)
+    bindings = {}
+
+    def visit(node, current):
+        if isinstance(node, (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp)):
+            local = _Names(current)
+            for generator in node.generators:
+                visit(generator.iter, local)
+                # The iterable uses the outer scope, before this target binds.
+                local = _Names(local)
+                parameters = _Names()
+                for parameter in ast.walk(generator.target):
+                    if isinstance(parameter, ast.Name):
+                        parameters.add(parameter.id, path)
+                for original, _, location in parameters.entries.values():
+                    local.bind(original, location)
+                visit(generator.target, local)
+                for condition in generator.ifs:
+                    visit(condition, local)
+            for child in ((node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,)):
+                visit(child, local)
+        elif isinstance(node, ast.Name):
+            column = len(lines[node.lineno - 1].encode("utf-8")[:node.col_offset].decode("utf-8"))
+            bindings[offsets[node.lineno - 1] + column] = current
+        else:
+            for child in ast.iter_child_nodes(node):
+                visit(child, current)
+
+    visit(tree, names)
+    return _tokens(value, names, bindings)
 
 
 def _name_text(value, names):
@@ -172,12 +273,18 @@ def _formula_scopes(value, names, established, path):
     definitions = [re.match(
         r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)(?:[ \t]*([([])([^\n]*?)[)\]])?[ \t]*=(?!=)", line)
         for line in lines]
-    quantifiers = [list(re.finditer(r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b", line)) for line in lines]
-    operators, local = tuple("+-*/%@^·×÷−"), {}
+    quantifiers = [list(QUANTIFIER.finditer(line)) for line in lines]
+    operators, result, offsets = tuple("+-*/%@^·×÷−"), {}, [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
     for index, match in enumerate(definitions):
         if match is None:
             continue
         names.add(match[1], path, related=match[1].casefold() in established)
+        # An explicit next definition ends a preceding standalone quantifier.
+        # Its name remains in the outer scope, including for simple assignments.
+        end = match.start(3) if match[2] else match.end()
+        result[offsets[index], offsets[index] + end] = _Names()
         if not match[2]:
             continue
         arguments = [parameter.strip() for parameter in match[3].split(",")]
@@ -187,7 +294,7 @@ def _formula_scopes(value, names, established, path):
         parameters = _Names()
         for parameter in arguments:
             if NAME.fullmatch(parameter):
-                parameters.add(parameter, path, related=True)
+                parameters.add(parameter, path)
         if not parameters.entries:
             continue
         stop = next((line for line in range(index + 1, len(lines))
@@ -220,15 +327,10 @@ def _formula_scopes(value, names, established, path):
                     unbound.entries.pop(quantifier[1].casefold(), None)
                 if _tokens(lines[line], unbound) != lines[line]:
                     ambiguous(line)
-        for line in range(index, end):
-            local.setdefault(line, _Names()).add_all(parameters, related=True)
-    result, offset = {}, 0
-    for index, line in enumerate(lines):
-        for match in quantifiers[index]:
-            local.setdefault(index, _Names()).add(match[1], path, related=True)
-        if index in local:
-            result[offset, offset + len(line)] = local[index]
-        offset += len(line)
+        # The function name belongs to the outer scope. Separate the parameter
+        # declaration from the RHS so comprehension ranges keep their scopes.
+        result[offsets[index] + match.start(3), offsets[index] + match.end()] = parameters
+        result[offsets[index] + match.end(), offsets[end]] = parameters
     return result
 
 
@@ -297,10 +399,9 @@ class _Scope:
     def path(self, parts):
         return _location(self.name, parts)
 
-    def _table(self, parts, names, *, related=False, target=None):
+    def _table(self, parts, names, *, related=False):
         for key in _mapping(_get(self.value, *parts)):
-            names.add(key, self.path(parts + (key,)), related=related,
-                      target=target(key) if target is not None else None)
+            names.add(key, self.path(parts + (key,)), related=related)
 
     def _axes(self, parts, names):
         def visit(value, path):
@@ -397,7 +498,7 @@ class _Scope:
                     events.add(base, self.path(ep))
                     local = self.formals[ep] = _Names(names)
                     for parameter in parameters:
-                        local.add(parameter, self.path(ep), related=True)
+                        local.bind(parameter, self.path(ep))
             for storage, block in _mapping(_get(body, "Storage")).items():
                 for key in _mapping(_get(block, "view")):
                     vp = prefix + ("Storage", storage, "view", key)
@@ -405,7 +506,7 @@ class _Scope:
                     if base is not None:
                         local = self.formals[vp] = _Names(names)
                         for parameter in parameters:
-                            local.add(parameter, self.path(vp), related=True)
+                            local.bind(parameter, self.path(vp))
             for role, definition in role_table.items():
                 self._pipe(_get(definition, "Pipe"), prefix + ("Role", role, "Pipe"),
                            _Names(names), set(), step, role)
@@ -432,8 +533,7 @@ class _Scope:
                 if parameter.casefold() in bound:
                     raise SchemaError(f"{self.path(path + (control,))}: local loop indices collide in one active scope")
                 # A local for binding can shadow an outer *unbound* parameter.
-                child.entries.pop(parameter.casefold(), None)
-                child.add(parameter, self.path(path + (control,)))
+                child.bind(parameter, self.path(path + (control,)))
                 bound.add(parameter.casefold())
             else:
                 match = re.fullmatch(r"\s*for\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)(?:\[.*\])?\s*\)\s*", control, re.I | re.S)
@@ -461,12 +561,13 @@ class _Scope:
     def formula(self, value, parts):
         names, result, cursor = self.names(parts), [], 0
         for (start, end), parameters in sorted(self.formulas.get(parts, {}).items()):
-            result.append(_tokens(value[cursor:start], names))
+            result.append(_math_tokens(value[cursor:start], names, self.path(parts)))
             local = _Names(names)
-            local.entries.update(parameters.entries)
-            result.append(_tokens(value[start:end], local))
+            for original, _, location in parameters.entries.values():
+                local.bind(original, location)
+            result.append(_math_tokens(value[start:end], local, self.path(parts)))
             cursor = end
-        result.append(_tokens(value[cursor:], names))
+        result.append(_math_tokens(value[cursor:], names, self.path(parts)))
         return "".join(result)
 
     def key(self, parts):
@@ -562,7 +663,6 @@ def _event(value, scope, parts, *, waiting=False):
         tail = qualified[3]
         if tail.strip() and (not tail.strip().startswith("[") or _group_end(tail.strip(), 0) != len(tail.strip()) - 1):
             return value
-        qualifier = qualified[1] + scope.roles.get(step.casefold(), _Names()).find(role) + _tokens(tail, names) + "::"
     if waiting and role is not None and (family := _action_family(segments[-1])):
         local = _Names(names)
         seen = {}
@@ -572,8 +672,10 @@ def _event(value, scope, parts, *, waiting=False):
                     raise SchemaError(f"{scope.path(parts)}: Waiting index {original!r} is ambiguous between "
                                       f"{seen[fold][1]} and {location} after normalization")
                 seen[fold] = original, location
-                local.entries[fold] = (original, target, location)
+                local.bind(original, location, target=target)
         names = local
+    if len(segments) == 2:
+        qualifier = qualified[1] + scope.roles.get(step.casefold(), _Names()).find(role) + _tokens(tail, names) + "::"
     return match[1] + match[2].lower() + match[3] + qualifier + _action(segments[-1], names) + match[5]
 
 
@@ -610,8 +712,9 @@ def _member(value, scope, parts):
 
 
 def _tree_reference(text, value, parts, scope):
+    """Return a recognized structural path, or None when no target was found."""
     if not isinstance(value, dict) or not text:
-        return text
+        return None
     candidates = []
     for key in value:
         if not isinstance(key, str):
@@ -625,14 +728,16 @@ def _tree_reference(text, value, parts, scope):
             return _tree_reference(text, _get(value, "Step"), parts + ("Step",), scope)
         if _matches(parts, PS):
             return _tree_reference(text, _get(value, "Role"), parts + ("Role",), scope)
-        return text
+        return None
     key = max(candidates, key=len)
     target = scope.key(parts + (key,))
     rest = text[len(key):]
     if not rest:
         return target
     delimiter = "::" if rest.startswith("::") else "."
-    return target + delimiter + _tree_reference(rest[len(delimiter):], value[key], parts + (key,), scope)
+    suffix = rest[len(delimiter):]
+    changed = _tree_reference(suffix, value[key], parts + (key,), scope)
+    return target + delimiter + (suffix if changed is None else changed)
 
 
 def _title_target(text, scope, areas, path):
@@ -659,9 +764,11 @@ def _area_target(text, area, scope):
             key = path[-1]
             rest = text[len(key):]
             if text[:len(key)].casefold() == folded and (not rest or rest.startswith(".")):
-                return key.lower() + ("." + _tree_reference(rest[1:], _get(scope.value, *path), path, scope) if rest else "")
-    rewritten = _tree_reference(text, _get(scope.value, *area), area, scope)
-    return _tokens(rewritten, scope.algorithm if area == A else scope.math) if rewritten == text and area in (A, M) else rewritten
+                if not rest:
+                    return key.lower()
+                suffix = _tree_reference(rest[1:], _get(scope.value, *path), path, scope)
+                return key.lower() + "." + (rest[1:] if suffix is None else suffix)
+    return _tree_reference(text, _get(scope.value, *area), area, scope)
 
 
 def _reference(value, scope, parts):
@@ -675,16 +782,19 @@ def _reference(value, scope, parts):
         for area in AREAS:
             area_name = ".".join(area)
             if owner.casefold() == area_name.casefold():
-                if area == H and scope.skip_hardware:
-                    return value
-                text = area_name + "::" + _area_target(target, area, scope)
-                break
-            if owner[:len(area_name) + 1].casefold() == area_name.casefold() + ".":
-                if area == H and scope.skip_hardware:
-                    return value
+                suffix, delimiter = target, "::"
+            elif owner[:len(area_name) + 1].casefold() == area_name.casefold() + ".":
                 suffix = owner[len(area_name) + 1:] + "::" + target
-                text = area_name + "." + _area_target(suffix, area, scope)
-                break
+                delimiter = "."
+            else:
+                continue
+            if area == H and scope.skip_hardware:
+                return value
+            changed = _area_target(suffix, area, scope)
+            if changed is None:
+                changed = _tokens(suffix, scope.algorithm if area == A else scope.math) if area in (A, M) else suffix
+            text = area_name + delimiter + changed
+            break
     else:
         names = _Names(scope.names(parts))
         title = _title_target(text, scope, (A, M), scope.path(parts))
@@ -695,15 +805,14 @@ def _reference(value, scope, parts):
             text = title
         elif registered is not None:
             text = names.find(text)
-        elif marker:
+        else:
             for area in ((A,) if parts[:len(A)] == A else (M, A)):
                 changed = _area_target(text, area, scope)
-                if changed != text:
+                if changed is not None:
                     text = changed
                     break
-            text = _tokens(text, names)
-        else:
-            text = _tokens(text, names)
+            else:
+                text = _tokens(text, names)
     return lead + marker.lower() + text + trailing
 
 
@@ -786,7 +895,11 @@ def _value(context, scope):
         if value.lower() == "global":
             return value.lower()
         match = re.match(r"(?i:Tile_pipeline)\.", value)
-        return "Tile_pipeline." + _tree_reference(value[match.end():], _get(scope.value, *P), P, scope) if match else value
+        if match:
+            suffix = value[match.end():]
+            changed = _tree_reference(suffix, _get(scope.value, *P), P, scope)
+            return "Tile_pipeline." + (suffix if changed is None else changed)
+        return value
     if _matches(parts, PS + ("Event", None, int)):
         return _event(value, scope, parts)
     if _matches(parts, PS + ("Role", None, "Waiting", None, int)):

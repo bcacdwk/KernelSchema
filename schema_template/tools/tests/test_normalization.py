@@ -319,7 +319,9 @@ class NormalizationTests(TaskCase):
         collision['root']['META_DATA']['Describe'] = 'A second distinct field'
         names = self.mixed_task()
         at(names, ALGO)['Input']['x'] = deepcopy(at(names, ALGO)['Input']['X'])
-        for data in (collision, names):
+        coordinates = self.mixed_task()
+        at(coordinates, MATH)['Rewrite'][0]['Math'] = 'z[T,t] = T + t\nY = X\n'
+        for data in (collision, names, coordinates):
             with self.subTest(data=data['root']['META_DATA']):
                 self.write_task(data)
                 before = self.snapshot()
@@ -394,6 +396,141 @@ class NormalizationTests(TaskCase):
                          'f(t) = t +\n  sum(q for q in x) + t\n'
                          't for t in x\ny = f(x) + T + Q\n')
         schema.validate_documents(plan.files, plan.documents)
+
+    def test_local_renames_cannot_capture_outer_names_or_publish_sibling_changes(self):
+        for kind in ('formal', 'quantifier', 'open_quantifier', 'pipe', 'event', 'waiting', 'view'):
+            with self.subTest(kind=kind):
+                data = deepcopy(self.base)
+                algorithm = at(data, ALGO)
+                algorithm['Input']['t'] = algorithm['Input'].pop('x')
+                algorithm['Compute'][0]['Math'] = 'y = t\n'
+                invariant = at(data, STEP)['Decomposition']['Worktile']['Invariant']
+                invariant['t'] = invariant.pop('x')
+                rewrite = at(data, MATH)['Rewrite'][0]
+                rewrite['Math'] = 'y = t\n'
+                if kind == 'formal':
+                    rewrite['Math'] = 'f(T) = T + t\ny = f(0)\n'
+                elif kind == 'quantifier':
+                    rewrite['Math'] = 'y = sum(T + t for T in [0])\n'
+                elif kind == 'open_quantifier':
+                    rewrite['Math'] = 'y = sum(\n  T + t\n  for T in [0]\n) ⊙ t\n'
+                elif kind == 'pipe':
+                    at(data, ROLE)['Pipe'] = [{'for(T=0:2)': ['compute:y(T + t)']}]
+                elif kind == 'event':
+                    at(data, ROLE)['Pipe'] = ['compute:y(0)']
+                    at(data, PIPE)['Event'] = {'finished(T)': ['{done MAIN[0]::compute:y(T + t)}']}
+                elif kind == 'waiting':
+                    at(data, ROLE)['Pipe'] = [{'for(T=0:2)': ['compute:y(T)']}]
+                    at(data, ROLE)['Waiting'] = {'Allowed': [
+                        '{done MAIN[t]::compute:y(T)} ← [{issue MAIN[t]::compute:y(T)}]']}
+                else:
+                    at(data, PIPE)['Storage'] = {'buffer': {
+                        'meaning': 'Slots', 'depth': 16, 'location': 'register', 'shape': [],
+                        'dtype': 'fp32', 'total_size': 64, 'view': {'y(T)': {'slot_index': 'T + t'}}}}
+                child = add_child(data, source='root')
+                child['META_DATA']['describe'] = child['META_DATA'].pop('Describe') + '.'
+                self.write_task(data)
+                before = self.snapshot()
+                with self.assertRaisesRegex(schema.SchemaError, 'capture outer name'):
+                    schema.normalize_directory(self.directory)
+                for args in ((), ('--read-only', '--graph', 'check')):
+                    code, out, error = self.cli(*args)
+                    self.assertEqual(code, 1, error)
+                    self.assertIn('capture outer name', error)
+                    self.assertNotIn('Schema checked:', out)
+                    self.assertNotIn('warning:', error)
+                    self.assertEqual(before, self.snapshot())
+
+    def test_safe_local_renames_preserve_exact_shadowing_and_outer_scopes(self):
+        data = deepcopy(self.base)
+        algorithm = at(data, ALGO)
+        algorithm['Input']['t'] = algorithm['Input'].pop('x')
+        algorithm['Compute'][0]['Math'] = 'y = t\n'
+        invariant = at(data, STEP)['Decomposition']['Worktile']['Invariant']
+        invariant['t'] = invariant.pop('x')
+        at(data, MATH)['Rewrite'][0]['Math'] = (
+            'F(T) = T + 1\nSame(t) = t + 1\nSelf(self) = self + 1\n'
+            'y = F(0) + Same(t) + t\ny = α + sum(T for T in t) + t\n'
+            'y = sum(T for T in t) ⊙ t\ny = sum(\n  T\n  for T in t\n) ⊙ t\n')
+        at(data, ROLE)['Pipe'] = [{'for(T=0:t)': ['compute:y(T)']}, {'for(t=2:4)': ['compute:y(t)']}]
+        at(data, PIPE)['Event'] = {'finished(T)': ['{done MAIN[0]::compute:y(T)}']}
+        at(data, PIPE)['Storage'] = {'buffer': {
+            'meaning': 'Slots', 'depth': 4, 'location': 'register', 'shape': [], 'dtype': 'fp32',
+            'total_size': 16, 'view': {'y(T)': {'slot_index': 'T'}}}}
+        self.write_task(data)
+        code, _, error = self.cli()
+        self.assertEqual(code, 0, error)
+        normalized = schema.validate_directory(self.directory)
+        self.assertEqual(at(normalized, MATH)['Rewrite'][0]['Math'],
+                         'f(t) = t + 1\nsame(t) = t + 1\nself(self) = self + 1\n'
+                         'y = f(0) + same(t) + t\ny = α + sum(t for t in t) + t\n'
+                         'y = sum(t for t in t) ⊙ t\ny = sum(\n  t\n  for t in t\n) ⊙ t\n')
+        self.assertEqual(at(normalized, ROLE)['Pipe'],
+                         [{'for(t=0:t)': ['compute:y(t)']}, {'for(t=2:4)': ['compute:y(t)']}])
+        self.assertEqual(at(normalized, PIPE)['Event'], {'finished(t)': ['{done MAIN[0]::compute:y(t)}']})
+        self.assertEqual(at(normalized, PIPE)['Storage']['buffer']['view'], {'y(t)': {'slot_index': 't'}})
+        before = self.snapshot()
+        code, _, error = self.cli('--read-only')
+        self.assertEqual(code, 0, error)
+        self.assertNotIn('warning:', error)
+        self.assertEqual(before, self.snapshot())
+
+    def test_open_quantifiers_preserve_text_and_require_evidence_for_renames(self):
+        data = deepcopy(self.base)
+        at(data, ALGO)['Constant'] = {'N': {'meaning': 'Fixed scale', 'value': 2}}
+        rewrite = at(data, MATH)['Rewrite'][0]
+        formula = 'y = sum(N * X ⊙ x for x in [0])\ny = f("sum(T for T in t)") ⊙ x\n'
+        rewrite['Math'] = formula
+        self.write_task(data)
+        plan = schema.normalize_directory(self.directory)
+        self.assertEqual(plan.documents['root'].value['DESIGN']['Math_reshape']['Rewrite'][0]['Math'],
+                         formula.replace('N *', 'n *'))
+        schema.validate_documents(plan.files, plan.documents)
+        self.assertFalse(normalization.normalize_documents(plan.files, plan.documents).candidates)
+        rewrite['Math'] = 'y = sum(X ⊙ x for X in [0])\n'
+        add_child(data, source='root')
+        self.write_task(data)
+        before = self.snapshot()
+        for args in ((), ('--read-only',)):
+            code, out, error = self.cli(*args)
+            self.assertEqual(code, 1, error)
+            self.assertIn('cannot uniquely bind an open mathematical quantifier', error)
+            self.assertNotIn('Schema checked:', out)
+            self.assertNotIn('warning: applied', error)
+            self.assertEqual(before, self.snapshot())
+
+    def test_property_references_resolve_their_owner_once_with_from_and_aliases(self):
+        source = self.source.replace('Input: {x:', 'Input: {X:').replace('Invariant: {x:', 'Invariant: {X:')
+        source = source.replace('y = x', 'y = X').replace('  Version: 1\n',
+                                  '  Version: 1\n  Dispatch: {when: All scalar inputs}\n')
+        source = source.replace('    Rewrite:\n      - Name: Copy\n',
+                                '    Rewrite:\n      - Name: Copy\n        Symbol:\n'
+                                '          z: {meaning: Copied view, shape: &shape_ref ref:X.SHAPE, dtype: fp32}\n'
+                                '          z2: {meaning: Second view, shape: *shape_ref, dtype: fp32}\n')
+        data = {'root': yaml_source.loads(source, 'root').value}
+        child = add_child(data, source='root')
+        child['REALIZATION'] = {'Require': [{'Item': 'X.SHAPE', 'Choice': 'Keep the scalar shape',
+                                            'Reason': 'Preserve the input interface'}]}
+        self.write_task(data)
+        (self.directory / 'root.yaml').write_text(source, encoding='utf-8')
+        before = self.snapshot()
+        plan = schema.normalize_directory(self.directory)
+        self.assertEqual(before, self.snapshot())
+        symbols = plan.documents['root'].value['DESIGN']['Math_reshape']['Rewrite'][0]['Symbol']
+        self.assertEqual([symbol['shape'] for symbol in symbols.values()], ['ref:x.shape', 'ref:x.shape'])
+        self.assertEqual([use.alias for use in plan.documents['root'].occurrences if use.alias], ['shape_ref'])
+        self.assertEqual(plan.documents['branch'].value['REALIZATION']['Require'][0]['Item'], 'x.shape')
+        schema.validate_documents(plan.files, plan.documents)
+        self.assertFalse(normalization.normalize_documents(plan.files, plan.documents).candidates)
+        code, _, error = self.cli()
+        self.assertEqual(code, 0, error)
+        self.assertIn('warning: applied declarations and references', error)
+        before = self.snapshot()
+        for args in ((), ('--read-only',)):
+            code, _, error = self.cli(*args)
+            self.assertEqual(code, 0, error)
+            self.assertNotIn('warning:', error)
+            self.assertEqual(before, self.snapshot())
 
     def test_ambiguous_multiline_formals_cannot_publish_partial_renames(self):
         for body in ('T\n  T', 'T +\n  T\n  T', '(T +\n  T)', 'T +\ny = T',

@@ -11,8 +11,8 @@ definitions maps index names directly to their domain definitions. Its ordered
 items are ActionDeclaration, ForLoop and IfBlock. ``actions()`` visits every
 declaration, including empty loops and false branches. ForLoop.scope/bound
 describe the header's outer context; its body has the extended scope/bindings.
-ForLoop.restored names flatten coordinates: finite expansion must compare any
-already-bound coordinates, never overwrite them or discard conflicting items.
+The body's bindings include restored flatten coordinates: finite expansion
+must compare already-bound coordinates, never overwrite or discard conflicts.
 
 Declaration existence, fixed family signatures, expression name resolution,
 domain validity and event membership belong to consumers. Mathematical text is
@@ -54,10 +54,9 @@ def literal_integer(value: Any) -> int | None:
 @dataclass(frozen=True)
 class IndexScope:
     definitions: dict[str, Any]
-    parent: IndexScope | None = None
 
     def extend(self, name: str, definition: Any) -> IndexScope:
-        return IndexScope({**self.definitions, name: definition}, self)
+        return IndexScope({**self.definitions, name: definition})
 
     def coordinates(self, name: str) -> set[str]:
         """Include recursively restored coordinates; consumers validate domains."""
@@ -88,11 +87,6 @@ def domain_choices(scopes: list[IndexScope], name: str) -> list[Any]:
         if name in scope.definitions and not any(same_domain(scope.definitions[name], value) for value in values):
             values.append(scope.definitions[name])
     return values
-
-
-def common_domains(scopes: list[IndexScope]) -> dict[str, Any]:
-    names = dict.fromkeys(name for scope in scopes for name in scope.definitions)
-    return {name: choices[0] for name in names if len(choices := domain_choices(scopes, name)) == 1}
 
 
 def split_top(text: str, delimiter: str) -> list[str] | None:
@@ -399,7 +393,6 @@ class ActionDeclaration:
     action: Action
     scope: IndexScope
     bound: frozenset[str]
-    conditions: tuple[str, ...]
 
     @property
     def text(self) -> str:
@@ -417,7 +410,6 @@ class ForLoop:
     path: str
     scope: IndexScope
     bound: frozenset[str]
-    restored: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -433,7 +425,6 @@ class ScopedPipe:
     path: str
     scope: IndexScope
     bound: frozenset[str]
-    conditions: tuple[str, ...]
 
     def walk(self) -> Iterator[ActionDeclaration | ForLoop | IfBlock]:
         """Visit nodes in declaration order, including all control bodies."""
@@ -459,14 +450,14 @@ def parse_pipe(value: Any, *, path: str = "Pipe", scope: IndexScope | None = Non
     Pass the step's definitions to expose recovered flatten coordinates. Missing
     declarations are checked by the consumer, so syntax-only use needs no schema.
     """
-    def read(body, location, current, active, conditions):
+    def read(body, location, current, active):
         if not isinstance(body, list) or not body:
             raise PipelineSyntaxError(location, "pipe and control bodies must be nonempty lists")
         items = []
         for index, item in enumerate(body):
             item_path = f"{location}[{index}]"
             if isinstance(item, str):
-                items.append(ActionDeclaration(parse_action(item, path=item_path), current, active, conditions))
+                items.append(ActionDeclaration(parse_action(item, path=item_path), current, active))
                 continue
             if not isinstance(item, dict) or len(item) != 1:
                 raise PipelineSyntaxError(item_path, "pipe item must be an action string or a single for(...)/if(...) mapping")
@@ -474,7 +465,7 @@ def parse_pipe(value: Any, *, path: str = "Pipe", scope: IndexScope | None = Non
             control_path = field_path(item_path, key) if isinstance(key, str) else item_path
             kind, expression = _control(key, control_path)
             if kind == "if":
-                child = read(content, control_path, current, active, conditions + (expression,))
+                child = read(content, control_path, current, active)
                 items.append(IfBlock(expression, child, control_path))
                 continue
             spec = parse_for(key, path=control_path)
@@ -482,11 +473,11 @@ def parse_pipe(value: Any, *, path: str = "Pipe", scope: IndexScope | None = Non
                 raise PipelineSyntaxError(control_path, f"for cannot rebind active outer index {spec.name}")
             inner = current.extend(spec.name, list(spec.bounds)) if spec.bounds is not None else current
             coordinates = frozenset(inner.coordinates(spec.name))
-            child = read(content, control_path, inner, active | coordinates, conditions)
-            items.append(ForLoop(spec, child, control_path, current, active, coordinates - {spec.name}))
-        return ScopedPipe(tuple(items), location, current, active, conditions)
+            child = read(content, control_path, inner, active | coordinates)
+            items.append(ForLoop(spec, child, control_path, current, active))
+        return ScopedPipe(tuple(items), location, current, active)
 
-    return read(value, path, scope if scope is not None else IndexScope({}), frozenset(bound), ())
+    return read(value, path, scope if scope is not None else IndexScope({}), frozenset(bound))
 
 
 def expression_names(expression: str) -> set[str]:
