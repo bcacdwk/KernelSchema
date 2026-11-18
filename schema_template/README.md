@@ -6,11 +6,11 @@
 
 ### 1 确认资料与范围
 
-先取得任务给定的输入输出、数学定义、参考入口、误差判据、目标设备与已选实现栈，以及实际 workload 和优化目标。新建设计和优化使用既定 Contract；提取按固定材料建立共享 Contract。修改前提遵守[修改权限](../README.md#2-schema-是什么)，不能为当前方案缩小任务或放宽验收。
+先确认任务给定的输入输出、数学定义、参考入口、误差判据、目标设备与已选实现栈，以及实际 workload 和优化目标。新建设计和优化以任务方给定或已确认的 Contract 为前提：已有 `root.yaml` 时直接沿用，尚无文件时按已确认资料如实填入；前提未定或有冲突时向任务方确认，遵守[修改权限](../README.md#2-schema-是什么)，Planner 与 Coder 不自行设定、缩小任务或放宽验收。提取按固定材料建立共享 Contract。
 
-资料不足时说明缺项及其影响，继续能够确定的部分。不要编造参考入口、硬件保证、实验结果或设计定义。缺口按[算法验收记录](../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)、[硬件占位](../schema_docs/2.contract.hardware_specification.md#省略与占位)和[数学缺项](../schema_docs/3.design.math_reshape.md#引用与缺项)表达。
+资料不足时说明缺项及其影响，继续能够确定的部分；不编造参考入口、硬件保证、实验结果或设计定义。条件省略与允许保留的缺口分别按[算法验收记录](../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)、[硬件省略与占位](../schema_docs/2.contract.hardware_specification.md#省略与占位)和[数学缺项](../schema_docs/3.design.math_reshape.md#引用与缺项)表达。
 
-固定源码提取按 [P1](../schema_extract/prompt/phases/01_contract.md#第-3-段硬件占位)最小登记有据的执行单元，其余硬件保留占位，显式使用 `--read-only --skip-hardware` 检查。Extract 的阶段检查、执行边界与运行环境见[执行器对齐说明](../schema_extract/EXECUTOR_ALIGNMENT.md)。
+固定源码提取按 [P1](../schema_extract/prompt/phases/01_contract.md#第-3-段硬件占位)最小登记有据的执行单元，其余硬件保留占位，手工检查显式使用 `--read-only --skip-hardware`。Extract 的运行环境与角色权限见 [Supervisor 手册](../schema_extract/README.md)，阶段检查见[执行协议](../schema_extract/tools/README.md#规范化与检查)。
 
 ### 2 创建文件或进入已有任务
 
@@ -23,15 +23,15 @@ cp -n schema_template/starter.yaml path/to/task/root.yaml
 
 参照骨架和对应字段说明，命名输入输出、轴、对象和动作，并用引用连接它们。普通正文、设备名称和实际路径表达真实设计与来源。
 
-完整设计集合含 root 最多十份。root 保存唯一 Contract；其他 `<id>.yaml` 填本地元数据、`Dispatch.id/when`、版本与必要 Realization。三个 Design 区域分别完整本地定义或写 `{from: id}` 引用同任务同名整区，整个引用图须无环。参数、局部变化及已知组合按 common 记录，目录不产生隐式 patch。
+完整设计集合含 root 最多十份。root 保存唯一 Contract；其他 `<id>.yaml` 省略 `CONTRACT`，填写与 root 一致的任务 `Name / Describe`、本地 `Source? / Version / Dispatch` 及必要 `REALIZATION`。三个 Design 区域分别完整本地定义或写 `{from: id}` 引用同任务同名整区，整个引用图须无环。参数、局部变化及已知组合按 common 记录，目录不产生隐式 patch。
 
 ### 3 填写与修订
 
 按所属任务方法形成数学改写、工作调度、微流水线与必要实现条件；当前定义须涵盖其范围内的全部输出、尾块、空工作和数值分支。每个决定表达一次，说明写在已有说明字段中，数据类型、定义关系与引用范围按对应 DOC 填写。
 
-修改唯一定义后沿实际引用复核受影响的节点。引入定义在使用节点的完整上下文绑定；provider 的元数据、选择条件、版本和反馈不随区域传播。只改共享区域的一部分时，将该整区完整本地化再编辑，不能在 `from` 旁增加覆盖字段。重命名时同步属性引用、动作、事件、交接及 Realization 定位。
+修改唯一定义后沿实际引用复核受影响的节点。引入定义在使用节点的完整上下文绑定；provider 的元数据、`when`、版本和 `REALIZATION` 不随区域传播。只改共享区域的一部分时，将该整区完整本地化再编辑，不能在 `from` 旁增加覆盖字段。重命名时同步属性引用、动作、事件、交接及 Realization 定位。
 
-设计内容变化按[版本规则](../schema_docs/0.common.md#单份-plan-与元数据)递增实际改动文件的版本；工具的规范化不递增版本。来源身份由 root、自身和三区实际内容链的 raw 文件摘要及 provider/chain 组成；版本相同不证明来源未变。
+设计内容变化按[版本规则](../schema_docs/0.common.md#单份-plan-与元数据)递增实际改动文件的版本；工具的规范化不递增版本。有效来源身份由 root、自身及三区实际引用链的 raw 文件摘要（`source_files`）与各区 `origins`（`provider / chain`）共同决定；版本相同不证明有效设计未变。
 
 ### 4 检查与处理反馈
 
@@ -44,7 +44,7 @@ python3 -B schema_template/check_yaml.py path/to/task/root.yaml --read-only
 
 填写设计后运行同一个命令。工具先为同目录直属的全部 `.yaml / .yml` 生成规范化候选，自动处理可确定的大小写、必要引号、普通说明末句号与布局，并同步定义和引用；核对候选后写回，再检查字段、文本预算、`from`、关联与 dispatch。warning 按修改类别列出字段和例子，核对修改即可；超长正文按反馈精简，语义、字段、类型或引用问题按具体诊断修改。
 
-传入任意节点时，规范化和检查都覆盖整个任务，避免只改来源而留下旧引用。文件名、`Dispatch.id`、`from` 来源值保持不变；目录内不要放备份 YAML。`--all` 只用于下方图操作的范围。
+传入任意节点时，规范化和检查都覆盖整个任务，避免只改来源而留下旧引用。文件名、`Dispatch.id`、`from` 来源值保持不变；目录直属 `.yaml / .yml` 均计入任务节点，不要在目录内放备份 YAML。`--all` 只用于下方图操作的范围。
 
 仓库定位符写成一个完整目标，保留真实相对路径中的空格与括号。输入文件所在本地仓库与引用身份、修订可准确匹配时，工具核对对应提交中的路径；源码入口及资料内容按原件审阅。
 
@@ -61,13 +61,13 @@ python3 -B schema_template/check_yaml.py path/to/task/node.yaml --show-effective
 python3 -B schema_template/check_yaml.py path/to/view/node.yaml --standalone
 ```
 
-`--show-effective` 输出含 `validation: not_run` 的 JSON、精确 effective YAML 和来源身份，成功只表示可以展开。`--standalone` 要求单文件自带完整 Contract 和本地 Design，只读校验该文件及可确定的本地仓库定位，不读取兄弟 YAML 或 dispatch。这两种模式不执行格式写回或图操作。正式导出须先完整检查创作任务，再独立验证生成的阅读视图。
+`--show-effective` 输出含 `validation: not_run` 的 JSON，给出精确 `effective_yaml`、`origins`、`source_files` 清单与 `effective_identity`，成功只表示可以展开。`--standalone` 要求单文件自带完整 Contract 和本地 Design，只读校验该文件及可确定的本地仓库定位，不读取兄弟 YAML 或 dispatch。这两种模式不执行格式写回或图操作。正式导出须先完整检查创作任务，再独立验证生成的阅读视图。
 
 ### 5 交付
 
-交付当前 raw YAML 集合与 `dispatch.md`，核对每份完整设计的范围、独特价值、必要定义及目录记录的真实基线。源码、资料和实验保留在实际来源，以规定引用定位。独立阅读视图另存，并记录完整 provenance；不能用草稿展开替代验收。
+交付当前 raw YAML 集合与 `dispatch.md`，核对每份完整设计的范围、独特价值、必要定义及目录记录的真实基线。源码、资料和实验保留在实际来源中按规定格式引用；冻结交付时将资料与实验引用的 `ref` 固定到具体 commit 或不可变修订，并复核受影响的节点。独立阅读视图另存，并记录完整 provenance；不能用草稿展开替代验收。
 
-按任务要求固定资料与实验来源，说明检查命令、实际结果及尚未解决的缺口。固定实现提取保留其硬件占位和已有外部验收缺口，依所属流程独立审阅；其他任务仍执行自己的验收要求。
+当前采用的 workload、优化目标与计量范围随原任务材料或本轮交接说明一并保留，不自行增加 YAML 字段；同时说明检查命令、实际结果、来源身份及尚未解决的缺口。固定实现提取保留其硬件占位和已有外部验收缺口，依所属流程独立审阅；其他任务仍执行自己的验收要求。
 
 ## 微流水线图
 
@@ -80,7 +80,7 @@ python3 -B schema_template/check_yaml.py path/to/task/root.yaml --read-only --gr
 
 按实际 plan 填显式样本参数；`n` 只是命令示意，`--worktiles` 默认 1。`--graph check` 增加有限检查，不要求 Graphviz；只有 `--graph png` 需要 `dot` 并生成同目录同名 PNG。`--read-only` 与 `--graph png` 不能合用。默认分析传入节点，加 `--all` 分析所有当前节点。
 
-所有所选图先完成分析再发布。缺少取值、未知条件或容量限制返回 `2`，保留旧图；前置检查、来源复核或渲染失败也不覆盖该图。完整样本发现环时可生成标红诊断图并返回 `1`。PNG 内记录最终 raw 来源摘要、实际来源链、effective identity 和样本；普通检查与 `--all` 不清扫旧图片。
+所选节点全部完成分析后才发布 PNG。缺少取值、未知条件或容量限制返回 `2`，保留旧图；前置检查、来源复核或渲染失败也不覆盖该图。完整样本发现环时可生成标红诊断图并返回 `1`。PNG 内记录最终 raw 来源摘要、实际来源链、effective identity 和样本；普通检查与 `--all` 不清扫旧图片。
 
 图按有序 `for/if` 展开动作，建立 issue→done、pipe 发起/serial 推进、`async_ordered` 累积完成和显式 Waiting 的四种时点边，同名 noun 不产生数据边。它只检查所选样本、所列 step 内代表 worker 的局部事件关系。Flow 先做静态核对，再按 `start_after`、`ready`、`wait_at` 的实际参数检查所调用的 Event；未调用的 Event 不需要有限取值。缺前驱、成员错误和越过声明窗口是不同情况，不能从已生成动作倒推更小窗口。
 

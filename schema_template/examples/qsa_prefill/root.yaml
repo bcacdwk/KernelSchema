@@ -2,7 +2,7 @@ META_DATA:
   Name: paged_sparse_grouped_query_attention
   Describe: Compute selected paged attention, round the attention result, and apply an elementwise sigmoid gate
   Source: KernelSchema@3d64ad35900a0e6a66d6f93da34108fbceba0daf:kernel_wiki/aka-four-problems-20261019/qsa_prefill/aka_solution/solution.py::Model.forward
-  Version: 11
+  Version: 12
   Dispatch:
     when: Serialized eager calls on one current CUDA stream; shared workspace consumers finish before reuse
 CONTRACT:
@@ -243,7 +243,7 @@ DESIGN:
           i: {meaning: union tile within accepted work, definition: [0, tile_count(t)]}
           n: {meaning: Continuous union tile ordinal, definition: {flatten: [t, i]}}
         Storage:
-          ticket: {meaning: One published work ticket, depth: 1, location: smem, shape: [],
+          ticket: {meaning: Published base-adjusted ticket u, depth: 1, location: smem, shape: [],
             dtype: int32, total_size: 4}
           qblk: {meaning: Unwritten padding participates in correction votes, depth: 1, location: smem, shape: [{packed_query: m}, {d: d}],
             dtype: bf16, total_size: 2*m*d}
@@ -280,8 +280,8 @@ DESIGN:
               Member: warp[11:12]
               Using_verb:
                 compute:
-                  initialticket: {execution_mode: serial, describe: 'Atomically claim from the cached global counter, subtract tbase, write Ticket and notify all eleven consumer warps'}
-                  nextticket: {execution_mode: serial, describe: Claim and publish the next Ticket as initialticket; nextticket(t) includes the terminal ticket}
+                  initialticket: {execution_mode: serial, describe: 'Atomically claim from the cached global counter, subtract base into u, write ticket and notify all eleven consumer warps'}
+                  nextticket: {execution_mode: serial, describe: Claim and publish the next u to ticket as in initialticket; nextticket(t) includes the terminal ticket}
                 await:
                   initialtaken: {execution_mode: serial, describe: Join all consumer copies and acknowledgements of initialticket}
                   nexttaken: {execution_mode: serial, describe: Join all consumer acknowledgements before another claim; retire the acknowledged terminal ticket}
@@ -398,7 +398,7 @@ DESIGN:
               Using_verb:
                 compute:
                   halfmax: {execution_mode: serial, describe: Capture this S(n) half from accumulator into scorecopy and write its row maxima to halfmax}
-                  weights: {execution_mode: serial, describe: 'From scorecopy/reference/peer halfmax, form Online weightcopy, alpha and tsum; correction(n)=any warp vote'}
+                  weights: {execution_mode: serial, describe: 'From scorecopy/reference/peer halfmax, form Online weightcopy, alpha and tsum; correction(n)=1 if any warp votes move_ref'}
                   p: {execution_mode: serial, describe: Update reference/l from Online alpha/tsum; copy weightcopy to p_a in accumulator p(n); notify MMA after TMEM visibility}
                   normalization: {execution_mode: serial, describe: Read peer halfsum; retain Gate inv in normalization}
                   outputprefix: {execution_mode: serial, describe: 'Read this Y half in accumulator through outputcopy strips; Gate/store all but the last strip to out, retaining the last before release'}
@@ -407,12 +407,12 @@ DESIGN:
                 load:
                   initialticket: {execution_mode: serial, describe: 'Copy SCHEDULER initialticket from ticket and acknowledge; decode b,v; terminal starts no work'}
                   nextticket: {execution_mode: serial, describe: Copy SCHEDULER nextticket(t) from ticket and acknowledge; bind has_next(t) and next coordinates from it; terminal starts no work}
-                  initialq: {execution_mode: serial, describe: 'Gather real q rows for min(ticket,worktile_count-1) into qblk and notify MMA, even on an initial terminal ticket; padding remains unwritten'}
+                  initialq: {execution_mode: serial, describe: 'Gather real q rows for unit min(u,worktile_count-1) into qblk and notify MMA, even on an initial terminal u; padding remains unwritten'}
                   nextq: {execution_mode: async_unordered, describe: Gather the next accepted worktile's real query rows into qblk; current final QK has retired}
                   workcount: {execution_mode: serial, describe: Read global union_count for the accepted b; bind tile_count(t) for this work}
                 store: {halfsum: {execution_mode: serial, describe: Copy final l to this role's halfsum half}}
                 await:
-                  maxexchange: {execution_mode: serial, describe: Rendezvous after both halfmax writes and scorecopy captures}
+                  maxexchange: {execution_mode: serial, describe: Rendezvous after both halfmax writes and scorecopy captures; no post-read barrier precedes tile n+1 halfmax writes}
                   correction: {execution_mode: serial, describe: Only voting warps await preceding PV completion before the Y read-modify-write}
                   nextq: {execution_mode: serial, describe: 'Complete load:nextq(t) and establish qblk shared visibility'}
                 signal: {nextq: {execution_mode: serial, describe: Publish Q readiness to MMA after releasing this role's Y half; also notify on a terminal next ticket}}
@@ -459,7 +459,7 @@ DESIGN:
               Using_verb:
                 compute:
                   halfmax: {execution_mode: serial, describe: Capture this S(n) half from accumulator into scorecopy and write its row maxima to halfmax}
-                  weights: {execution_mode: serial, describe: 'From scorecopy/reference/peer halfmax, form Online weightcopy, alpha and tsum; correction(n)=any warp vote'}
+                  weights: {execution_mode: serial, describe: 'From scorecopy/reference/peer halfmax, form Online weightcopy, alpha and tsum using per-warp move_ref votes'}
                   p: {execution_mode: serial, describe: Update reference/l from Online alpha/tsum; copy weightcopy to p_b in accumulator p(n); notify MMA after TMEM visibility}
                   normalization: {execution_mode: serial, describe: Read peer halfsum; retain Gate inv in normalization}
                   outputprefix: {execution_mode: serial, describe: 'Read this Y half in accumulator through outputcopy strips; Gate/store all but the last strip to out, retaining the last before release'}
@@ -469,7 +469,7 @@ DESIGN:
                   nextticket: {execution_mode: serial, describe: Copy SCHEDULER nextticket(t) from ticket and acknowledge; bind has_next(t) and next coordinates from it; terminal starts no work}
                   workcount: {execution_mode: serial, describe: Read global union_count for the accepted b; bind tile_count(t) for this work}
                 store: {halfsum: {execution_mode: serial, describe: Copy final l to this role's halfsum half}}
-                await: {maxexchange: {execution_mode: serial, describe: Rendezvous after both halfmax writes and scorecopy captures}}
+                await: {maxexchange: {execution_mode: serial, describe: Rendezvous after both halfmax writes and scorecopy captures; no post-read barrier precedes tile n+1 halfmax writes}}
                 release: {y: {execution_mode: serial, describe: Notify MMA that this role has read all of its Y column half into registers}}
             Pipe:
               - load:initialticket

@@ -2,7 +2,7 @@ META_DATA:
   Name: paged_causal_attention_prefill
   Describe: Compute right-aligned causal GQA from FP8 queries and an HND paged KV cache into the supplied BF16 output
   Source: KernelSchema@3d64ad35900a0e6a66d6f93da34108fbceba0daf:kernel_wiki/aka-four-problems-20261019/fa4_prefill/aka_solution/solution.py::Model.forward
-  Version: 7
+  Version: 8
   Dispatch:
     id: packed_persistent
     when: 5<=batchcount<=16; compact stride persistence on 148 SMs, dual K/V load and separate rescale evaluation; one unsplit traversal
@@ -15,7 +15,7 @@ DESIGN:
       Launch: [{step: [MAIN]}]
     Step:
       MAIN:
-        Describe: Keep request order; map stride work through a CTA-local prefix table and four-step binary search; pad logical CTA extent to an even count
+        Describe: Keep request order; map stride work through a CTA-local prefix table and four-step binary search; pad logical CTA extent to 2*cpad
         Decomposition:
           Strategy: 'cpad=ceil((totalq+15*(batchcount-1))/16); c_b=ceil(qlen(b)/16); valid(t): m<c_b; tile_count(t)=tile_count if valid(t), else 0'
           Partition: {cluster_tile: {size: cpad, tile: 1, meaning: cluster tile coordinate}}

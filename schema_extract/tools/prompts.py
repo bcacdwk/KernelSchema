@@ -76,7 +76,7 @@ def _linked_rules(lock: dict, names) -> set[str]:
                                           relative in {"README.md", "EXTRACT_SCHEMA.md", "schema_template/README.md",
                                               "schema_template/tools/README.md", "schema_template/starter.yaml",
                                               "schema_extract/README.md", "schema_extract/REVIEW.md",
-                                              "schema_extract/EXECUTOR_ALIGNMENT.md", "schema_extract/tools/README.md",
+                                              "schema_extract/tools/README.md",
                                               "schema_extract/issues/README.md"}):
                 pending.append(relative)
     return selected

@@ -22,7 +22,7 @@ def executor_files(repo: Path) -> set[Path]:
 
 def rule_files(repo: Path, *, require_specs: bool = True) -> list[str]:
     paths = {repo / "README.md", repo / "EXTRACT_SCHEMA.md", repo / "schema_template/README.md",
-             repo / "schema_template/tools/README.md", repo / "schema_extract/EXECUTOR_ALIGNMENT.md",
+             repo / "schema_template/tools/README.md",
              repo / "schema_template/starter.yaml", repo / "schema_template/check_yaml.py",
              repo / "schema_extract/README.md", repo / "schema_extract/REVIEW.md",
              repo / "schema_extract/tools/README.md", repo / "schema_extract/issues/README.md"}

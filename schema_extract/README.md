@@ -2,11 +2,11 @@
 
 Schema Extract 将固定源码和任务材料整理为少量完整设计、中文 `dispatch.md` 和交付凭据。唯一入口是 [extract_yaml.py](extract_yaml.py)。六阶段职责见[提取总览](../EXTRACT_SCHEMA.md)，审阅方法见 [REVIEW](REVIEW.md)，执行协议见 [tools/README](tools/README.md)。
 
-默认阶段后端为 Claude Code，模型固定 `qwen3.8-max[1m]`，worker/reviewer 均为 `max`。Codex 是显式可选后端，须同时指定模型和两种角色的 effort。Supervisor 的 Codex queue 提醒另行配置。
+默认阶段后端为 Claude Code（默认模型 `qwen3.8-max[1m]`，worker/reviewer effort 均为 `max`）。Codex 是显式可选后端，须同时指定模型和两种角色的 effort。Supervisor 的 Codex queue 提醒另行配置。
 
 ## 开始一次试用
 
-运行需要 Linux、Python 3.11+、PyYAML、jsonschema、Git、`ps` 和已配置认证的 CLI。调用以当前用户身份直接使用真实文件系统；具体角色权限见[执行边界](EXECUTOR_ALIGNMENT.md)。
+运行需要 Linux、Python 3.11+、PyYAML、jsonschema、Git、`ps` 和已配置认证的 CLI。调用以当前用户身份直接使用真实文件系统；各角色的工具与目录权限见[运行、恢复与维护](tools/README.md#运行恢复与维护)。
 
 从仓库根目录运行：
 
@@ -86,7 +86,7 @@ python3 schema_extract/extract_yaml.py extract --source /path/to/source.json --o
 
 Supervisor 确定来源、输出、预算和具体维护请求；Runner 唯一提交运行状态、checkpoint、合入和发布。worker 通过 CLI 角色工具编辑本次目录中的授权产物；reviewer 使用只读角色。正式采纳由 Runner 核验授权文件集合、字段权限、完整文件类型及固定来源。CLI 权限与差异核验不保证宿主文件系统不可写。
 
-每 scope 使用固定的真实空 cwd 和私有 CLI home；候选、材料与原稿始终保存在各自 attempt 目录。每阶段、角色和操作建立独立新会话，P5 另按节点分开。P1 与 P2 也独立。只有同一 scope 内的续写或退修可用已登记的精确 UUID resume；新调用始终获得完整动态材料。P6 先启动新 reviewer，存在明确限域修改时才启动 worker。所有阶段调用禁止内部委派。
+每 scope 使用固定的真实空 cwd 和私有 CLI home；候选、材料与原稿始终保存在各自 attempt 目录。每阶段（含 P1 与 P2）、角色和操作均建立独立新会话，P5 另按节点分开。只有同一 scope 内的续写或退修可用已登记的精确 UUID resume；新调用始终获得完整动态材料。P6 先启动新 reviewer，存在明确限域修改时才启动 worker。所有阶段调用禁止内部委派。
 
 P2 提交 `{id, instance}` 的有限选择，P4 提交 `{id, wait_for}` 的写作安排，P5 按实际 raw `from` 采用已审来源。单 root 仍完成 P4、明确跳过 P5，并经过 P6。
 
@@ -122,9 +122,9 @@ python3 schema_extract/extract_yaml.py maintain RUN_UUID --issue-id copy-definit
 [{"stage":"P3","node":"root","action":"patch","fields":[{"path":"root.yaml","fields":["DESIGN.Math_reshape"]}],"reason":"修正已定位的计算定义"}]
 ```
 
-任务仅针对当前 P1–P5，action 为 `review` 或 `patch`；patch 须给明确文件/字段。请求先挡新派发和发布，由同一 Runner 排空后执行。完整稿可以先审，未完成稿继续普通 worker；维护结束仍需正常阶段和新的 P6。已交付运行不能再通过维护改稿。
+每项任务均包含 `stage/node/action/fields/reason`，仅针对当前已选的 P1–P5（`dispatch.md` 用 `{"path":"dispatch.md","fields":["*"]}`）。`patch` 须给非空文件/字段；`review` 无默认修补上限，填 `fields: []` 仅做只读复核（不可退修进入 `patch`），需允许退修修补时须预先填入 `fields` 上限。请求先阻挡新派发和发布，由同一 Runner 排空后执行。完整稿可先审，未完成稿继续普通写作；维护结束仍需正常阶段和新的 P6。已交付运行不能再通过维护改稿。
 
-发布核当前批准、来源、完整目录、最终 checkpoint 和控制屏障，然后原子交付，保留已审字节。目标须不存在；相同完整结果可幂等重放，其他冲突保留双方内容。另行 export 以 `exports[].status=published` 和目标回执为准。
+P6 通过达 `ready` 后，无控制或维护屏障时 Runner 自动核验当前批准、来源、完整目录与最终 checkpoint 并原子发布，保留已审字节。若接手时 `ready` 但 `published: false`，先用 `inspect --run RUN_UUID --json` 核对 `publication`、`control`、`global_hold` 与 `maintenance_request`（权威运行状态及已应用的 `maintenance` 详情查 `status RUN_UUID --full`）：全局 hold 先 `resume --all --hold ID` 释放；因暂停、取消或发布中断未提交状态时，执行 `resume RUN_UUID` 重放发布（目标已有相同完整结果时幂等成功）；目标已有不同内容（`publication.status=conflict`）时保留双方内容，改用 `export RUN_UUID --output /path/to/new/delivery` 另行交付，并以 `exports[].status=published` 和目标回执为准。
 
 ## 单文件阅读视图
 
@@ -152,7 +152,7 @@ requested model/effort 是调用要求，reported 只取原生报告，缺项保
 python3 schema_extract/extract_yaml.py review-eval --suite schema_extract/tools/tests/fixtures/review_eval/suite.json --output /path/to/new/evaluation --call-seconds 360
 ```
 
-`review-eval` 对明确提供的已知正确/错误文档各启动独立只读 reviewer，检查四项判断及缺陷定位。它会真实调用模型，用于 Reviewer 能力回归，不参与 run 批准；suite 和新输出目录必须显式指定。
+`review-eval` 针对当前合成标量复制任务，对明确提供的已知正确/错误文档用例各启动独立只读 reviewer，检查四项判断及缺陷定位（显式 `--suite` 可自定义该任务的用例，不会切换为其他算子评估；用例约定见[能力回归协议](tools/README.md#review-eval-用例约定)）。它会真实调用模型，用于 Reviewer 能力回归，不参与 run 批准；suite 和新输出目录必须显式指定。
 
 ## 同线程持久提醒
 
@@ -164,8 +164,8 @@ python3 schema_extract/extract_yaml.py monitor status
 python3 schema_extract/extract_yaml.py monitor stop
 ```
 
-提醒使用独立的 `codex queue --resume`。收到后按消息执行绑定线程的 `monitor ack`；accepted 后执行一次 `monitor scan --wake ID --thread THREAD_UUID`，以 committed/reused 为本轮完成依据。stop 只停提醒，不取消已启动提取。
+提醒使用独立的 `codex queue --resume`。收到后按消息执行绑定线程的 `monitor ack`；返回 `accepted: true` 或 `reason: already_acknowledged` 时均执行一次同一提醒的 `monitor scan --wake ID --thread THREAD_UUID`（其余拒绝直接结束），以 `committed`/`reused` 为本轮完成依据。`stop` 只停提醒，不取消已启动提取。
 
 自动恢复默认关闭；`--auto-restart-limit N` 只授权所选 run 内已确认终止、EX_TEMPFAIL 75、有剩余预算的普通失败，持久累计次数。普通 pause/cancel/hold 保持优先，提醒补送有固定上限。
 
-框架候选由 `candidates RUN_UUID` 汇总，reviewer 确认项按稳定 ID 交 [issues](issues/README.md) 处理。实际工具与模型验证范围见[执行器对齐说明](EXECUTOR_ALIGNMENT.md)；历史记录从 [archive](archive/README.md) 查阅。
+框架候选由 `candidates RUN_UUID` 汇总，reviewer 确认项按稳定 ID 交 [issues](issues/README.md) 处理。离线测试与能力回归方法见[执行协议](tools/README.md#离线验证与能力回归)；历史记录从 [archive](archive/README.md) 查阅。

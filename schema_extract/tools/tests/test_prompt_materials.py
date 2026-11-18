@@ -110,7 +110,7 @@ class PromptMaterialsTests(unittest.TestCase):
         available_rules = {Path(item['path']).relative_to(rules_root(self.flow.lock)).as_posix()
                            for item in material['rules']}
         self.assertTrue({'README.md', 'EXTRACT_SCHEMA.md', 'schema_extract/README.md',
-                         'schema_extract/REVIEW.md', 'schema_extract/EXECUTOR_ALIGNMENT.md',
+                         'schema_extract/REVIEW.md',
                          'schema_extract/tools/README.md', 'schema_extract/issues/README.md',
                          'schema_template/README.md', 'schema_template/tools/README.md'} <= available_rules)
         self.assertFalse(any('/archive/' in name or name.startswith(('schema_wiki/', 'kernel_wiki/'))

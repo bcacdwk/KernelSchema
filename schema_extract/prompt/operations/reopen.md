@@ -1,6 +1,6 @@
 # 定点返回
 
-具体事实或关键关系表明上游决定有误时，可使用本次 reopen_targets；填写稳定 issue_id、target、reason 和本次 source_evidence 索引。普通提案的 reopen 为 null。
+具体事实或关键关系表明上游决定有误时，令 `decision="reopen"`，按本次 `reopen_targets` 填写稳定 `issue_id`、`target`、`reason` 和本次 `source_evidence` 索引；其余决策的 `reopen` 必须为 `null`。
 
 共享 Contract 回 P1，机制或代表判断回 P2，root 定义及自身 when 回 P3，已定代表的登记或写作安排回 P4。真实任务或固定来源改变用 external，交 Supervisor 另建运行。固定源码中的具体误读同样可纠正，不要求必须首次发现新行。
 

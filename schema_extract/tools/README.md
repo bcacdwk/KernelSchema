@@ -40,7 +40,7 @@ P6 先独立理解最终成果，再按必要 P2/P4/P5 回执和短交接反查�
 模型只返回本次动态 schema 的 `schema_extract.proposal.v1`，含精确 `attempt_id` nonce。Runner 从实际 bytes 生成完整 receipt 的身份、摘要与差异。
 
 - `decision`、`summary`、`conclusions` 表达本次判断；正常 worker 可 complete/continue/blocked，reviewer 可 approve/revise/blocked，适用阶段可 reopen。
-- `source_evidence` 选择真实阅读的相对 path、category、行范围、quote_offset 和 note；每段最多 12 行。`artifact_evidence` 指最终实际 raw，不能用规范化预览的位置。
+- `source_evidence` 选择真实阅读的相对 path、category、行范围、quote_offset 和 note；每段最多 12 行。`artifact_evidence` 锚定本次实际审阅或提交的 raw（普通调用为 `workspace`，裁决 `select` 为所选候选 `materials/candidates/<checkpoint>`），不能用展开视图或规范化预览的位置。
 - conclusions/issues/framework_candidates 的 evidence 索引本次 source_evidence；当前文档的四项判断可由 artifact_evidence 支持，纯文档退修/阻塞使用相应 kind 与文件锚点，具体编码见[提交与证据](../prompt/operations/response.md)。reviewer 仍独立核查实际源码。
 - P1 comparisons 绑定逐输出验收；P2/P4 普通或维护 reviewer 独立认可后，approve 的 plan 保留 plan_draft；P6 revision_scope 限目录及明确非 root 字段，affected_nodes 登记受影响者并在批准时覆盖 pending_rechecks。
 - checks 只记亲自执行的命令及退出码；未执行时为空并说明。handoff 简短记录已定事项、必要依据、新事实去处与缺项。
@@ -58,9 +58,10 @@ P6 先独立理解最终成果，再按必要 P2/P4/P5 回执和短交接反查�
 | P1 | 适用算法/结构、来源与阶段权限，不要求未来 Design |
 | P2/P4 | 选择/安排、现有/未来文件、中文目录和合法链接 |
 | P3/P5 | 受控完成快照及解析必需来源的严格 Template 检查；记录 checked/excluded |
-| P6/发布/standalone | 全部直属 YAML、dispatch、所选集合与完整实际图；完整目录 API |
+| P6/发布 | 全部直属 YAML、`dispatch.md`、完整实际图，且直属 YAML 集合精确等于 `selected_designs` |
+| standalone | 用完整目录 API 检查来源目录全部直属 YAML、`dispatch.md` 与完整实际图，并严格校验导出单文件；不接收运行 `selected_designs` |
 
-`invocation.check_command` 指向本次固定 helper 不接受额外参数。worker 获得规范化预览，reviewer 检查当前 raw；输出区分 raw_passed、preview_passed 和 pending_corrections。模型手动用 Template CLI 时必须显式 `--read-only --skip-hardware`。预览通过与最终 raw 已通过分别记录。
+`invocation.check_command` 指向本次固定 helper，不接受额外参数。worker 获得规范化预览，reviewer 检查当前 raw；输出区分 raw_passed、preview_passed 和 pending_corrections。模型手动用 Template CLI 时必须显式 `--read-only --skip-hardware`。预览通过与最终 raw 已通过分别记录。
 
 ## 并行合入与计划修订
 
@@ -90,15 +91,15 @@ CLI 直接使用当前用户真实文件系统。Claude 的工具清单按角色
 
 启动门先登记身份再放行，并作为本次调用的 child-subreaper 保持脱离后代的归属。CLI 主进程的实际退出单独登记；正常结束、取消或超时均由已有进程身份/父子/进程组检查确认后代结清。未确认终止保持 fence。恢复重用同一 parser 和真实 exit，确认中断后退休私有 session，以 checkpoint 和短交接新建；确证未启动保留前次会话。
 
-当前维护只处理未交付的固定 run，由已有 Supervisor ledger/单写者排空与发布屏障执行。请求明确 P1–P5 的 review/patch 和文件/字段；完整稿先审，未完成稿继续正常写作。维护不换来源、规则或执行器，不代替正常阶段和 P6。
+当前维护只处理未交付的固定 run，由已有 Supervisor ledger、单写者排空与发布屏障执行。任务指定已选 P1–P5 的 `review` 或 `patch` 及 `fields`（`patch` 必填非空；`review` 无默认上限，填 `[]` 仅做只读复核，非空时作为退修进入 `patch` 的范围上限）；完整稿先审，未完成稿继续正常写作。维护不换来源、规则或执行器，不代替正常阶段和 P6。
 
 ## 发布与独立视图
 
 发布核冻结身份、全部调用结清、当前 P1–P4/节点批准、P6、最终 checkpoint 和完整 Template 目录检查。最终直属 YAML 精确等于 selected_designs，中文目录、来源、唯一共享 Contract 与实际图齐全。检查不改已审 bytes。
 
-原子交付保留 raw 与 `.extraction/receipt.json`；命名冲突拒绝，原子可见后状态提交中断可按完整 manifest 重放。PNG 按需生成，不是统一发布硬门禁。
+原子交付保留 raw 与 `.extraction/receipt.json`；存在全局 hold、控制请求或维护屏障时不落盘，目标已有不同内容时记 `conflict` 并保留双方，原子可见后状态提交中断可由 `resume`/`export` 按相同完整 manifest 幂等重放。PNG 按需生成，不是统一发布硬门禁。
 
-standalone 使用当前 Template 的严格解析与导出 API，展开实际 Design 和 root Contract，保留该节点元数据、when、Version、Realization。输出另置，来源回执分别绑定实际内容来源、完整目录检查及 Template 身份；目录或原件漂移均拒绝。
+standalone 使用当前 Template 的完整目录校验与导出 API（不接收某次 run 的 `selected_designs`），展开实际 Design 和 root Contract，保留该节点元数据、when、Version、Realization。输出置于来源目录外，`.source.json` 分别绑定实际内容来源、完整目录检查清单及 Template 身份；目录或原件漂移均拒绝。
 
 ## usage、时间与证据封存
 
@@ -120,4 +121,13 @@ python3 -m unittest discover -s schema_extract/tools/tests -v
 
 离线测试使用临时目录、fake CLI 与确定性回执；运行测试时将真实 claude/codex 入口从测试进程 PATH 阻断。不需要额外 proc 或 sudo 环境准备。Template 只重跑相关 API 回归。
 
-`review-eval --suite FILE --output NEW_DIRECTORY` 则会真实调用独立 reviewer，评已知正确/错误文档的四项判断及具体缺陷。当前小套件为 [`tests/fixtures/review_eval/suite.json`](tests/fixtures/review_eval/suite.json)，不设 archive 默认；能力回归不参与 run 批准。真实 CLI、真实六阶段和离线机器测试的覆盖分别记录。
+`review-eval --suite FILE --output NEW_DIRECTORY` 则会真实调用独立 reviewer，在固定的合成标量复制任务（共用同一评估指令、相邻 `reference.py`/`source.md` 绑定与标量复制 `dispatch.md`）下评已知正确/错误用例的四项判断及具体缺陷；自定义 suite 用于增改该任务用例，不切换评估算子。当前小套件为 [`tests/fixtures/review_eval/suite.json`](tests/fixtures/review_eval/suite.json)，不设 archive 默认；能力回归不参与 run 批准。真实 CLI、真实六阶段和离线机器测试的覆盖分别记录。
+
+### review-eval 用例约定
+
+字段骨架参照 [`suite.json`](tests/fixtures/review_eval/suite.json)，增改用例时遵守以下装配与评分语义：
+
+- **材料装配与 `Source` 覆写：**`base` 与同目录的 `reference.py`、`source.md` 相对 suite 所在目录读取。展开后的每个 case 写入 `root.yaml`，工具自动生成标量复制 `dispatch.md`，并将 `META_DATA.Source` 与 `CONTRACT.Algorithm_requirement.Golden_reference.Source` 覆写为本次冻结快照下的 `reference.py::kernel` 和 `reference.py::reference`（针对这两处的补丁会被覆盖）。送审前先完成规范化及 `skip-hardware` 结构与来源检查，错误例须为结构合法的语义缺陷。
+- **`extends` 与 `patches`：**省略 `extends` 从 `base` 展开，填写则从同 suite 指定 case 的已展开文档开始，再顺序应用本 case 补丁；仅继承文档，`expected` 由各 case 自填。补丁 `path` 用非空分段数组沿已有父容器定位（字符串作映射键、整数作列表下标，如 `["DESIGN", "Work_schedule", "Thesis"]`），将目标整值替换为 `value`，不做深合并。
+- **四项判断标识：**[REVIEW 四项判断](../REVIEW.md#四项判断)依次对应 `document_self_contained`（独立理解）、`document_layering`（分层正确）、`document_consistency`（全文一致）、`document_relevance`（内容必要）。
+- **`expected` 命中语义：**通过例填 `decision: "approve"`、`criteria: []`、`path: ""`，要求 reviewer 返回 `approve` 且无 `issues`。错误例填 `decision: "revise"`：`criteria` 为可接受标识集合，`path` 为单个不带文件名的字段路径字符串（从 `META_DATA`、`CONTRACT`、`DESIGN` 或 `REALIZATION` 起始，如 `"DESIGN.Work_schedule.Thesis"`）；reviewer 返回 `revise`，且任一条位于这四个顶层区内的 `issue` 同时满足 `criterion` 属于 `criteria`、`detail` 非空、`issue.path` 与 `expected.path` 相同或以 `.`/`[` 为边界互为祖先/后代即判通过（不要求检出 `criteria` 中全部项，也不逐项验收多处缺陷）。
