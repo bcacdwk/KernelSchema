@@ -13,13 +13,12 @@ import time
 from uuid import UUID, uuid4
 
 from . import __version__
-from .common import (STATE_GUARD, ExtractError, RunnerBusy, StaleResult, copy_artifacts, digest, json_bytes,
+from .common import (STATE_GUARD, ExtractError, RunnerBusy, StaleResult, SupervisorBusy, copy_artifacts, digest, json_bytes,
                      fsync_directory, manifest, read_json, seal, sync_tree, verify_manifest, write_json, rules_root)
 from .artifacts import (align_source_identity, approval_projection, artifact_manifest, check_stage_snapshot, design_context,
                         load_yaml, normalize_candidate, source_context, validate_artifact_sources, write_yaml)
-from .budget import call_limit, check_timeout, review_seconds
 from .runtime import EXECUTOR_CAPABILITIES, execution_boundary, verify_execution
-from .stages import (NODE_STOPS, actual_sources, call_view, effective_nodes, new_scope, next_call, next_calls, node_signature,
+from .stages import (NODE_STOPS, call_limit, actual_sources, call_view, effective_nodes, new_scope, next_call, next_calls, node_signature,
                      approval_is_current, scope_for, scope_key, session_group, session_scope,
                      selection_signature, writable_files, writing_order, invalidate_final, invalidate_node, invalidate_stage)
 
@@ -74,7 +73,10 @@ class Store:
             return
         self.root.mkdir(parents=True, exist_ok=True)
         with (self.root / "supervisor.lock").open("a") as stream:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise SupervisorBusy("supervisor is busy; control transaction was not committed") from exc
             try:
                 if marker.exists():
                     if read_json(marker) != {"format": "schema_extract.store.v2"}:
@@ -98,11 +100,11 @@ class Store:
         if not path.exists():
             return {"format": SUPERVISOR_FORMAT, "revision": 0, "active_hold": None,
                     "holds": {}, "starts": {}, "controls": {}, "maintenance_requests": {},
-                    "retries": {}, "auto_restart": {}, "observations": {}}
+                    "retries": {}, "observations": {}}
         value = read_json(path)
         if not isinstance(value, dict) or value.get("format") != SUPERVISOR_FORMAT:
             raise ExtractError("unsupported supervisor control ledger")
-        for name in ("holds", "starts", "controls", "maintenance_requests", "retries", "auto_restart", "observations"):
+        for name in ("holds", "starts", "controls", "maintenance_requests", "retries", "observations"):
             if not isinstance(value.get(name), dict):
                 raise ExtractError("invalid supervisor field: " + name)
         return value
@@ -112,7 +114,10 @@ class Store:
         """Short control transaction. Never acquire a run lock or wait here."""
         self.initialize()
         with (self.root / "supervisor.lock").open("a") as stream:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise SupervisorBusy("supervisor is busy; control transaction was not committed") from exc
             try:
                 value = self.read_supervisor()
                 before = deepcopy(value)
@@ -123,6 +128,23 @@ class Store:
                     write_json(self.root / "supervisor.json", value)
             finally:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def control_transaction(self):
+        while True:
+            transaction = self.supervisor()
+            try:
+                ledger = transaction.__enter__()
+                break
+            except SupervisorBusy:
+                time.sleep(0.05)
+        try:
+            yield ledger
+        except BaseException as exc:
+            if not transaction.__exit__(type(exc), exc, exc.__traceback__):
+                raise
+        else:
+            transaction.__exit__(None, None, None)
 
     def writer_status(self, run_id: str) -> str:
         """Observe a lock without creating a file or changing run authority."""
@@ -145,16 +167,19 @@ class Store:
         if ledger["active_hold"]:
             raise ExtractError("global hold is active: " + ledger["active_hold"])
 
-    def append_control(self, ledger: dict, run_id: str, action: str, *, hold_id=None) -> dict:
-        """Caller holds supervisor.lock; requests remain the Runner's input."""
+    def append_control(self, ledger: dict, run_id: str, action: str, *, hold_id=None, binding=None) -> dict:
+        """Caller holds supervisor.lock; requests also bind independent cancel delivery."""
         previous = ledger["controls"].get(run_id, {})
         request = {"format": "schema_extract.control.v2", "run_id": run_id,
                    "id": str(uuid4()), "action": action, "created_at": time.time(),
                    "control_revision": previous.get("revision", 0) + 1,
                    "origin": "hold" if hold_id else "manual", "hold_id": hold_id}
+        if binding is not None:
+            request["binding"] = binding
         write_json(self.root / "requests" / run_id / (request["id"] + ".json"), request)
         ledger["controls"][run_id] = {"revision": request["control_revision"], "id": request["id"],
-                                      "action": action, "hold_id": hold_id, "at": request["created_at"]}
+                                      "action": action, "hold_id": hold_id, "at": request["created_at"],
+                                      "deliveries": deepcopy(previous.get("deliveries", {}))}
         return request
 
     def hold_member(self, ledger: dict, state: dict) -> dict | None:
@@ -279,11 +304,19 @@ class Store:
 
     def request_control(self, run_id: str, action: str) -> dict:
         """Submit an immutable request outside the run; never edit its state."""
-        self.load(run_id)
+        state = self.load(run_id)
         if action not in {"pause", "cancel"}:
             raise ExtractError("control action must be pause or cancel")
         with self.supervisor() as ledger:
-            return self.append_control(ledger, run_id, action)
+            binding = {"input_fingerprint": state["input_fingerprint"],
+                       "executor_digest": state["executor"]["digest"]}
+            previous = ledger["controls"].get(run_id, {})
+            if action == "cancel" and previous.get("action") == action and previous.get("binding") == binding:
+                request = read_json(self.root / "requests" / run_id / (previous["id"] + ".json"))
+                return {**request, "committed": True, "reused": True}
+            request = self.append_control(ledger, run_id, action, binding=binding)
+            ledger["controls"][run_id]["binding"] = binding
+        return {**request, "committed": True}
 
     def control_requests(self, run_id: str) -> list[dict]:
         directory = self.root / "requests" / run_id
@@ -323,8 +356,8 @@ class Store:
                               "capabilities": list(EXECUTOR_CAPABILITIES)},
                  "reopening": None, "reopen_requests": {}, "plan_history": [],
                  "stale_results": {}, "unconfirmed_attempts": {}, "p6_starts": 0, "final_review_started": False,
-                 "config": lock["config"], "deadline": now + lock["config"]["operator_seconds"],
-                 "budget_extensions": [],
+                 "config": lock["config"],
+                 "call_additions": [],
                  "sessions": {},
                  "stages": {stage: new_scope() for stage in ("P1", "P2", "P3", "P4", "P5", "P6")},
                  "nodes": {"root": {"id": "root", "file": "root.yaml", "status": "draft", "merged": False,
@@ -759,13 +792,10 @@ class Store:
         saved = [*scope["candidates"], {"checkpoint": view["checkpoint"], "plan": state.get("plan_draft"),
                                       "node_signature": own_signature}]
         prepared, seen = [], set()
-        started, allowance = time.monotonic(), check_timeout(view)
         for candidate in saved:
             if candidate["checkpoint"] in seen:
                 continue
             seen.add(candidate["checkpoint"])
-            if time.monotonic() - started >= allowance:
-                break
             if own_signature and candidate.get("node_signature") != own_signature:
                 continue
             temporary = self.run_dir(state["run_id"]) / (".adjudication-" + uuid4().hex)
@@ -823,8 +853,7 @@ class Store:
         return list({item["checkpoint"]: item for item in prepared}.values())
 
     @execution_boundary
-    def prepare_attempt(self, state: dict, session_id: str | None, *, call: dict | None = None,
-                        timeout_seconds: float | None = None) -> dict:
+    def prepare_attempt(self, state: dict, session_id: str | None, *, call: dict | None = None) -> dict:
         config = self.execution_config(state)
         verify_execution(self, state, executor=True)
         call = call or next_call(state)
@@ -853,10 +882,6 @@ class Store:
         scope = scope_for(state, call)
         if scope["started_at"] is None:
             scope["started_at"] = time.time()
-            scope["deadline"] = scope["started_at"] + state["config"]["stage_seconds"]
-            scope["adjudication_reserved_seconds"] = state["config"]["adjudication_seconds"]
-            scope["signoff_reserved_seconds"] = state["config"]["adjudication_seconds"]
-            scope["review_reserved_seconds"] = review_seconds(state["config"])
         if scope["baseline_checkpoint"] is None:
             scope["baseline_checkpoint"] = view["checkpoint"]
             scope["candidates"].append({"checkpoint": view["checkpoint"], "plan": state.get("plan_draft"),
@@ -910,8 +935,6 @@ class Store:
             invocation["selection_signature"] = selection_signature(state["selected_designs"])
         if call["stage"] in {"P5", "P6"}:
             invocation["writing_signature"] = state["writing_signature"]
-        if timeout_seconds is not None:
-            invocation["timeout_seconds"] = timeout_seconds
         for filename in invocation["writable_files"]:
             path = directory / "workspace" / filename
             if not path.exists():
@@ -1117,7 +1140,7 @@ def summary(store: Store, state: dict) -> dict:
                             "provider_reopen": node.get("provider_reopen")}
     scopes = {**state["stages"], **{"P5:" + node: state["nodes"][node]["stage"]
                                    for node in observed if "stage" in state["nodes"][node]}}
-    budget_fields = ("status", "calls", "revisions", "elapsed_seconds", "started_at", "deadline",
+    scope_fields = ("status", "calls", "revisions", "elapsed_seconds", "started_at",
                      "adjudications", "signoffs")
     from .audit import usage_summary, usage_totals
     from .observation import observation_totals
@@ -1129,7 +1152,8 @@ def summary(store: Store, state: dict) -> dict:
                                           "checkpoint", "output", "published", "reason")} | {
         "format": SUMMARY_FORMAT, "input_fingerprint": state["input_fingerprint"],
         "source_identity": deepcopy(state.get("source_identity")),
-        "execution": {key: state.get("config", {}).get(key) for key in ("backend", "worker_effort", "reviewer_effort", "model", "agent_binary")},
+        "execution": {key: state.get("config", {}).get(key) for key in
+                      ("backend", "worker_effort", "reviewer_effort", "model", "agent_binary")},
         "executor": deepcopy(state.get("executor", {"version": None, "digest": None, "rules_id": None,
                                                      "capabilities": []})),
         "state_revision": state.get("state_revision"), "generated_at": time.time(),
@@ -1147,14 +1171,10 @@ def summary(store: Store, state: dict) -> dict:
         "provider_usage": usage_totals(rows),
         "root_usage": observation_totals([row for row in rows if row.get("backend") == "codex" or
                                            (row.get("usage") or {}).get("backend") == "codex"]),
-        "budget": {"deadline": state.get("deadline"),
-                   "limits": {key: state.get("config", {}).get(key) for key in
-                              ("operator_seconds", "stage_seconds", "call_seconds", "max_calls",
-                               "revision_limit", "adjudication_seconds")} | {"max_calls": call_limit(state)},
-                   "extensions": [{key: item[key] for key in ("id", "run_id", "origin", "at", "seconds", "calls")}
-                                  for item in state.get("budget_extensions", [])],
-                   "scopes": {key: {field: value.get(field) for field in budget_fields}
-                              for key, value in scopes.items()}},
+        "calls": {"limit": call_limit(state), "revision_limit": state["config"]["revision_limit"],
+                  "additions": deepcopy(state.get("call_additions", [])),
+                  "scopes": {key: {field: value.get(field) for field in scope_fields}
+                             for key, value in scopes.items()}},
         "completed_node_count": len(approved), "plan_revision": state["plan_revision"],
         "p6_starts": state.get("p6_starts", 0), "planned_node_count": len(planned),
         "attempt_count": len(state.get("attempts", [])),

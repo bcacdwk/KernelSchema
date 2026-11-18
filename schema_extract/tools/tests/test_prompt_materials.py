@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 from unittest.mock import patch
@@ -54,14 +55,26 @@ class PromptMaterialsTests(unittest.TestCase):
         attempt = self.flow.prepare()
         self.flow.backend.write(attempt)
         before = manifest(Path(attempt['workspace']))
-        result = self.check(attempt)
+        completed = subprocess.run([attempt['check_command']], capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        result = json.loads(completed.stdout)
         self.assertEqual(manifest(Path(attempt['workspace'])), before)
         self.assertTrue(result['preview_passed'], result)
         self.assertTrue(result['pending_corrections'])
         self.assertFalse(result['raw_passed'])
-        self.assertEqual(result['exit_code'], 1)
+        self.assertEqual(result['exit_code'], 0)
         self.assertTrue(result['corrections'])
         self.assertEqual(result['source_validation']['status'], 'verified')
+
+        root = Path(attempt['workspace']) / 'root.yaml'
+        text = root.read_text()
+        describe = self.flow.backend.base['META_DATA']['Describe'] + '.'
+        self.assertIn(describe, text)
+        root.write_text(text.replace(describe, 'x' * 151, 1))
+        rejected = self.check(attempt)
+        self.assertEqual(rejected['exit_code'], 1, rejected)
+        self.assertFalse(rejected['preview_passed'])
+        self.assertIn('META_DATA.Describe: text has 151', '; '.join(rejected['check']['diagnostics']))
 
     def test_p2_and_p4_do_not_require_planned_files_and_scopes_still_apply(self):
         self.flow.create(('root', 'planned'))
@@ -116,6 +129,13 @@ class PromptMaterialsTests(unittest.TestCase):
         self.assertFalse(any('/archive/' in name or name.startswith(('schema_wiki/', 'kernel_wiki/'))
                              for name in available_rules))
         self.assertNotIn(str(self.flow.store.run_dir(attempt['run_id'])), exposed)
+        self.assertEqual(self.check(attempt)['exit_code'], 0)
+        root = Path(attempt['workspace']) / 'root.yaml'
+        self.assertIn('META_DATA', root.read_text())
+        root.write_text(root.read_text().replace('META_DATA', 'meta_data', 1))
+        rejected = self.check(attempt)
+        self.assertEqual(rejected['exit_code'], 1, rejected)
+        self.assertFalse(rejected['raw_passed'])
         self.assertNotIn(str(self.flow.store.root), exposed)
 
     def test_real_helper_reads_frozen_source_and_rejects_extra_arguments(self):
@@ -139,7 +159,7 @@ class PromptMaterialsTests(unittest.TestCase):
         before = manifest(Path(attempt['workspace']))
         with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR':str(configuration)}):
             result = AgentCLI(backend='claude', executable=str(fake), model=attempt['model']).run(
-                attempt=attempt, prompt=build_prompt(self.flow.state, self.flow.lock, attempt), schema=schema, timeout=30)
+                attempt=attempt, prompt=build_prompt(self.flow.state, self.flow.lock, attempt), schema=schema)
         self.assertEqual(result['outcome'], 'completed', result)
         response = result['response']
         self.assertEqual(response['exit_code'], 0, response)
@@ -149,6 +169,12 @@ class PromptMaterialsTests(unittest.TestCase):
         self.assertTrue(response['extra_rejected'])
         self.assertTrue(response['host_visible'])
         self.assertEqual(manifest(Path(attempt['workspace'])), before)
+        root = Path(attempt['workspace']) / 'root.yaml'
+        self.assertIn('META_DATA', root.read_text())
+        root.write_text(root.read_text().replace('META_DATA', 'meta_data', 1))
+        rejected = self.check(attempt)
+        self.assertEqual(rejected['exit_code'], 1, rejected)
+        self.assertFalse(rejected['raw_passed'])
 
 
 if __name__ == '__main__':

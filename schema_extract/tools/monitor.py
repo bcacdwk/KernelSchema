@@ -10,18 +10,20 @@ import sys
 import time
 from uuid import UUID, uuid4
 
-from .common import ExtractError, RunnerBusy, digest, read_json, relative_name, rules_root
-from .processes import launch_not_started, process_alive, process_table
-from .recovery import scoped_restart_evidence
+from .common import ExtractError, RunnerBusy, SupervisorBusy, digest, read_json, relative_name, rules_root
+from .processes import (launch_not_started, process_alive, process_table,
+                        process_identity_matches, identity_key, owned_processes, signal_process,
+                        terminate_owned, observe_owned, gate_reaped, GATE_PROTOCOL)
+from .recovery import scoped_restart_evidence, termination_observed
 from .prompts import render_operation
 
 
 REASON_KINDS = {
     **dict.fromkeys(("missing_input", "blocked_nodes", "external_confirmation", "adjudication_blocked",
                      "checker_input_error", "invalid_root_prerequisite"), "operator_blocked"),
-    **dict.fromkeys(("budget_exhausted", "checker_budget_exhausted",
-                     "adjudication_already_used", "interrupted_single_decision", "reopen_already_used",
-                     "cli_retry_budget_exhausted", "receipt_repair_budget_exhausted"), "budget_or_single_decision"),
+    **dict.fromkeys(("call_limit_reached", "adjudication_already_used", "interrupted_single_decision",
+                     "reopen_already_used", "cli_retry_limit_reached", "receipt_repair_limit_reached"),
+                   "call_limit_or_single_decision"),
     **dict.fromkeys(("checker_tool_error", "authority_changed", "proposal_rejected", "unreadable_result",
                      "invalid_final_prerequisites"), "framework_or_protocol"),
     "termination_unconfirmed": "unknown_termination", "cli_retry": "execution_failure", "receipt_repair": "protocol_repair",
@@ -52,7 +54,6 @@ def _attempt_observation(store, run: dict, attempt_id: str, table, now: float) -
     if not attempt or attempt.get("run_id") != run["run_id"] or attempt.get("attempt_id") != attempt_id:
         raise ExtractError("active attempt identity is missing or mismatched: " + str(directory))
     process, launch, result = (_optional(directory / name) for name in ("process.json", "launch.json", "result.json"))
-    invocation = _optional(directory / "invocation.json") or {}
     logs = {}
     for name in ("events.jsonl", "stderr.txt"):
         try:
@@ -74,7 +75,7 @@ def _attempt_observation(store, run: dict, attempt_id: str, table, now: float) -
         status = "running"
     elif table is None:
         status = "unknown"
-    elif confirmed:
+    elif confirmed and termination_observed(attempt, result, table=table):
         status = "terminated"
     elif launch_not_started(attempt, table=table):
         status = "not_dispatched"
@@ -84,12 +85,6 @@ def _attempt_observation(store, run: dict, attempt_id: str, table, now: float) -
     else:
         status = "unknown"
     scope = attempt["stage"] + (":" + attempt["node"] if attempt["stage"] == "P5" else "")
-    budget = run.get("budget", {})
-    started = invocation.get("started_at", attempt.get("created_at"))
-    limits = [value for value in (budget.get("deadline"), budget.get("scopes", {}).get(scope, {}).get("deadline"),
-              started + attempt.get("timeout_seconds", budget.get("limits", {}).get("call_seconds", 0)) if started else None)
-              if isinstance(value, (int, float))]
-    deadline = min(limits) if limits else None
     from .audit import usage_summary
     return {"attempt_id": attempt_id, "scope": scope, "role": attempt["role"], "status": status,
             "backend": attempt.get("backend"), "requested_model": attempt.get("model"),
@@ -98,8 +93,7 @@ def _attempt_observation(store, run: dict, attempt_id: str, table, now: float) -
             "reported_model": (result or {}).get("reported_model"),
             "reported_effort": (result or {}).get("reported_effort"),
             "usage": usage_summary((result or {}).get("usage") or {"backend": attempt.get("backend")}),
-            "process_ids": living, "termination_recorded": confirmed, "deadline": deadline,
-            "overdue": bool(deadline and now >= deadline and status != "terminated"),
+            "process_ids": living, "termination_recorded": confirmed,
             "logs": logs, "outcome": result.get("outcome") if result else None, "evidence": str(directory)}
 
 
@@ -113,17 +107,7 @@ def classify(run: dict) -> list[dict]:
         anomalies.append({"run_id": run["run_id"], "scope": "startup", "classification": "execution_failure",
                           "summary": "已登记的启动进程在任务仍排队时退出；保留原运行身份。",
                           "evidence": run["state_directory"] + "/runner.log",
-                          "recovery_condition": "核对启动日志；重复原命令对账，不创建新预算。"})
-    now = run.get("observation", {}).get("observed_at", time.time())
-    if run.get("status") == "running" and not run.get("active_attempts") and not run.get("unsettled_attempts"):
-        budget = run.get("budget", {})
-        for scope, deadline in (("operator", budget.get("deadline")),
-                                (run.get("stage"), budget.get("scopes", {}).get(run.get("stage"), {}).get("deadline"))):
-            if isinstance(deadline, (int, float)) and now >= deadline:
-                anomalies.append({"run_id": run["run_id"], "scope": scope, "classification": "deadline_exceeded",
-                                  "summary": "当前截止已过且没有在途调用；需诊断 Runner 边界进展。",
-                                  "evidence": run["state_directory"] + "/state.json",
-                                  "recovery_condition": "保留原截止和计数；巡检不终止进程或自动重试。"})
+                          "recovery_condition": "核对启动日志；重复原命令对账，保留已用计数。"})
     if run.get("status") == "running" and runner.get("lock") != "held":
         if launch.get("alive") is True and launch.get("status") in {"launching", "claimed"}:
             pass  # An owned startup window is waiting, not a deadlock.
@@ -133,7 +117,7 @@ def classify(run: dict) -> list[dict]:
                               "classification": "runner_exited" if confirmed else "unknown",
                               "summary": "Runner 已退出且未持写锁。" if confirmed else "Runner 身份与写锁证据不足或不一致。",
                               "evidence": run["state_directory"] + "/runner.lock",
-                              "recovery_condition": "核对持久启动身份和未结调用；确认旧进程终止后按原预算显式恢复。"})
+                              "recovery_condition": "核对持久启动身份和未结调用；确认旧进程终止后沿原记录显式恢复。"})
     reasons = [(run.get("stage"), run.get("reason"))]
     reasons += [("P5:" + node, detail.get("reason")) for node, detail in run.get("node_details", {}).items()
                 if detail.get("reason")]
@@ -146,7 +130,7 @@ def classify(run: dict) -> list[dict]:
         anomaly = {"run_id": run["run_id"], "scope": scope, "classification": kind,
                           "code": code, "summary": reason.get("summary", code),
                           "evidence": run["state_directory"] + "/state.json",
-                          "recovery_condition": reason.get("recovery_condition", "核对固定证据和原预算后显式控制。"),
+                          "recovery_condition": reason.get("recovery_condition", "核对固定证据和已用计数后显式控制。"),
                           "suggested_action": "核对工具与协议证据及本次冻结身份" if kind == "framework_or_protocol" else "保留其他任务，核实本范围恢复条件"}
         if kind == "framework_or_protocol":
             attempt_id = reason.get("attempt_id")
@@ -163,10 +147,10 @@ def classify(run: dict) -> list[dict]:
                 "recovery_condition": anomaly["recovery_condition"]}
         anomalies.append(anomaly)
     for attempt in run.get("invocations", []):
-        if attempt.get("status") == "unknown" or attempt.get("overdue") or attempt.get("error"):
+        if attempt.get("status") == "unknown" or attempt.get("error"):
             anomalies.append({"run_id": run["run_id"], "scope": attempt.get("scope"),
-                              "classification": "unknown" if attempt.get("status") == "unknown" else "deadline_exceeded",
-                              "evidence": attempt["evidence"], "summary": attempt.get("error", "核对本次调用的进程身份、原截止条件及结果记录。"),
+                              "classification": "unknown",
+                              "evidence": attempt["evidence"], "summary": attempt.get("error", "核对本次调用的进程身份、归属及结果记录。"),
                               "recovery_condition": "确认旧调用及其子进程终止；不能按日志沉默判断死锁。"})
     return anomalies
 
@@ -224,7 +208,7 @@ def record_scan(ledger: dict, rows: list[dict], now: float) -> dict:
     """Commit an already collected observation; the caller holds the control lock.
 
     A bound clock scan uses the same transaction for this record and its next
-    deadline. No process observation, waiting or task control happens here.
+    reminder time. No process observation, waiting or task control happens here.
     """
     observations = ledger["observations"]
     previous = observations.get("latest", {})
@@ -232,8 +216,7 @@ def record_scan(ledger: dict, rows: list[dict], now: float) -> dict:
         prior = previous.get(row["run_id"], {})
         stable = prior.get("state_revision") is not None and prior.get("state_revision") == row.get("state_revision")
         row["unchanged_since"] = prior.get("unchanged_since", now) if stable else now
-        limit = min(300, row.get("budget", {}).get("limits", {}).get("call_seconds") or 300)
-        if (stable and now - row["unchanged_since"] >= limit and row.get("status") == "running" and
+        if (stable and now - row["unchanged_since"] >= 300 and row.get("status") == "running" and
                 not row.get("active_attempts") and not row.get("unsettled_attempts") and
                 row.get("runner_observation", {}).get("lock") == "held" and row["runner_observation"]["alive"] is True):
             row["anomalies"].append({"run_id": row["run_id"], "scope": row.get("stage"), "classification": "possible_stall",
@@ -249,6 +232,177 @@ def record_scan(ledger: dict, rows: list[dict], now: float) -> dict:
                         changes=(observations.get("changes", []) + [{"at": now, **item} for item in changes])[-64:])
     return {"observed_at": now, "runs": rows, "changes": changes,
             "anomalies": [item for row in rows for item in row.get("anomalies", [])]}
+
+
+def _cancel_binding(state):
+    return {"input_fingerprint": state["input_fingerprint"], "executor_digest": state["executor"]["digest"]}
+
+
+def _cancel_attempts(store, state, attempt_ids=()):
+    """Read only the already registered unfinished attempts and their gate bindings."""
+    records, unknown = {}, []
+    ids = set(state.get("active_attempts", {}).values()) | set(state.get("unconfirmed_attempts", {})) | set(state.get("unsettled_attempts", {}))
+    for attempt_id in sorted(ids | set(attempt_ids)):
+        try:
+            if str(UUID(attempt_id)) != attempt_id or attempt_id not in state["attempts"]:
+                raise ExtractError("unregistered attempt identity")
+            directory = store.run_dir(state["run_id"]) / "attempts" / attempt_id
+            attempt = read_json(directory / "attempt.json")
+            if (attempt.get("attempt_id") != attempt_id or attempt.get("run_id") != state["run_id"] or
+                    attempt.get("input_fingerprint") != state["input_fingerprint"] or
+                    attempt.get("directory") != str(directory)):
+                raise ExtractError("attempt differs from the requested frozen run")
+            launch = _optional(directory / "launch.json")
+            process = _optional(directory / "process.json")
+            invocation = _optional(directory / "invocation.json")
+            if launch is None and process is None:
+                if state.get("unsettled_attempts", {}).get(attempt_id) == "prepared":
+                    records[attempt_id] = {"attempt": attempt, "not_dispatched": True}
+                    continue
+                raise ExtractError("unfinished attempt has no gate record")
+            if launch_not_started(attempt):
+                records[attempt_id] = {"attempt": attempt, "not_dispatched": True}
+                continue
+            if (not invocation or invocation.get("attempt_sha256") != digest(attempt) or
+                    any(invocation.get(key) != attempt.get(key) for key in
+                        ("run_id", "attempt_id", "backend", "model", "effort", "session_scope")) or
+                    not launch or launch.get("protocol") != GATE_PROTOCOL or
+                    launch.get("launch_id") != invocation.get("launch_id") or
+                    launch.get("attempt_id") != attempt_id or launch.get("run_id") != state["run_id"] or
+                    launch.get("attempt_sha256") != digest(attempt) or
+                    not process or process.get("launch_id") != launch.get("launch_id") or
+                    not process.get("identity") or
+                    (launch.get("identity") is not None and
+                     process_identity_matches(process["identity"], launch["identity"]) is not True)):
+                raise ExtractError("unfinished attempt gate identity is unconfirmed")
+            records[attempt_id] = {"attempt": attempt, "identity": process["identity"],
+                                   "descendants": process.get("descendants", []), "launch_id": launch["launch_id"]}
+        except (ExtractError, OSError, KeyError, TypeError, ValueError) as exc:
+            unknown.append({"attempt_id": attempt_id, "reason": str(exc)})
+    return records, unknown
+
+
+def deliver_cancel(store, request: dict) -> dict:
+    """Persist delivery ownership before one KILL pass; never acquire runner.lock."""
+    run_id, request_id = request["run_id"], request["id"]
+    state = store.load(run_id)
+    ledger = store.read_supervisor()
+    control = ledger["controls"].get(run_id, {})
+    previous = control.get("deliveries", {}).get(request_id, {})
+    binding = _cancel_binding(state)
+    if previous.get("confirmed") is True:
+        return deepcopy(previous)
+
+    def authorized(current):
+        value = current["controls"].get(run_id, {})
+        launch = current["starts"].get(run_id, {}).get("launch", {})
+        return (request.get("action") == "cancel" and request.get("binding") == binding and
+                request["control_revision"] > launch.get("control_revision", 0) and
+                value.get("action") in {"cancel", "pause"} and
+                value.get("revision", 0) >= request["control_revision"])
+    if not authorized(ledger):
+        return {"status": "superseded", "confirmed": False}
+    runner = previous.get("runner") or (state.get("runner") or {}).get("identity")
+    launch = ledger["starts"].get(run_id, {}).get("launch", {})
+    table, process_error = _processes()
+    startup_unknown = False
+    if launch.get("status") in {"launching", "claimed"}:
+        launch_identity = launch.get("identity")
+        if (launch.get("input_fingerprint") != state["input_fingerprint"] or
+                launch.get("executor_digest") != state["executor"]["digest"] or not launch_identity):
+            startup_unknown = True
+        elif not runner or process_alive(runner, table) is False:
+            runner = launch_identity
+        elif process_identity_matches(runner, launch_identity) is not True:
+            startup_unknown = True
+    known = previous.get("runner_descendants", [])
+    if runner and table is not None:
+        known = list({identity_key(value): value for value in [*known, *owned_processes(runner, known, table=table)]}.values())
+    records, unknown = _cancel_attempts(store, state, previous.get("targets", {}))
+    if startup_unknown:
+        unknown.append({"scope": "startup", "reason": "Runner launch ownership is unconfirmed"})
+    delivery = {**previous, "request_id": request_id, "binding": binding, "status": "pending", "confirmed": False,
+                "runner": runner, "runner_descendants": known, "requested_at": previous.get("requested_at", time.time()),
+                "attempts": previous.get("attempts", {}), "actions": previous.get("actions", []), "unknown": unknown,
+                "targets": {key: {name: value for name, value in record.items() if name != "attempt"}
+                            for key, record in records.items()}}
+    if process_error:
+        delivery["observer_error"] = process_error
+    with store.supervisor() as ledger:
+        latest = ledger["controls"].get(run_id, {})
+        if not authorized(ledger):
+            return {"status": "superseded", "confirmed": False}
+        latest.setdefault("deliveries", {})[request_id] = deepcopy(delivery)
+    if table is None:
+        return delivery
+
+    def current_cancel():
+        return authorized(store.read_supervisor())
+
+    def signal_target(identity):
+        if not current_cancel():
+            return
+        if identity.get("pid") == os.getpid():
+            raise ExtractError("cancel delivery cannot terminate its own control process")
+        if signal_process(identity):
+            delivery["actions"].append({"pid": identity["pid"], "start_token": identity["start_token"], "signal": "SIGKILL"})
+
+    try:
+        # Stop synchronous Python/check work independently of its writer lock.
+        if runner and process_alive(runner, table) is True:
+            signal_target(runner)
+        # Re-read committed gates after the signal. Only a confirmed exited
+        # Runner permits auxiliary selection from this captured ownership tree.
+        current = store.load(run_id)
+        if _cancel_binding(current) != binding:
+            raise ExtractError("frozen run changed during cancel delivery")
+        records, unknown = _cancel_attempts(store, current, delivery["targets"])
+        if startup_unknown:
+            unknown.append({"scope": "startup", "reason": "Runner launch ownership is unconfirmed"})
+        delivery["unknown"] = unknown
+        delivery["targets"] = {key: {name: value for name, value in record.items() if name != "attempt"}
+                               for key, record in records.items()}
+        with store.supervisor() as ledger:
+            latest = ledger["controls"].get(run_id, {})
+            if not authorized(ledger):
+                return {"status": "superseded", "confirmed": False}
+            latest.setdefault("deliveries", {})[request_id] = deepcopy(delivery)
+        runner_exited = not runner or process_alive(runner, process_table()) is False
+        gates = {identity_key(record["identity"]) for record in records.values() if record.get("identity")}
+        for attempt_id, record in records.items():
+            if record.get("not_dispatched"):
+                termination = {"confirmed": True, "actions": [], "survivors": [], "reason": "prepared; no gate dispatched"}
+            else:
+                termination = (terminate_owned(record["identity"], record["descendants"]) if current_cancel()
+                               else observe_owned(record["identity"], record["descendants"]))
+                if termination["confirmed"] and not (gate_reaped(record["attempt"]) or launch_not_started(record["attempt"])):
+                    termination.update(confirmed=False, reason="gate descendant closure is not recorded")
+            delivery["attempts"][attempt_id] = termination
+        # Unknown attempt gates may be among these children; do not guess which
+        # child is an auxiliary process when any gate identity is unavailable.
+        if not unknown and runner_exited:
+            for identity in reversed(known):
+                if identity_key(identity) not in gates and (not runner or identity_key(identity) != identity_key(runner)):
+                    signal_target(identity)
+        observed = (observe_owned(runner, known) if runner else
+                    {"confirmed": store.writer_status(run_id) in {"free", "absent"}, "survivors": [], "actions": []})
+        delivery["runner_termination"] = observed
+        delivery["runner_descendants"] = observed.get("descendants", known)
+        confirmed = (observed["confirmed"] and store.writer_status(run_id) in {"free", "absent"} and
+                     not unknown and all(value["confirmed"] for value in delivery["attempts"].values()))
+        delivery.update(confirmed=confirmed, status="confirmed" if confirmed else "pending", observed_at=time.time())
+    except (ExtractError, OSError) as exc:
+        delivery.update(status="pending", confirmed=False, observer_error=str(exc))
+    try:
+        with store.supervisor() as ledger:
+            latest = ledger["controls"].get(run_id, {})
+            if not authorized(ledger):
+                return {"status": "superseded", "confirmed": False}
+            latest.setdefault("deliveries", {})[request_id] = deepcopy(delivery)
+    except SupervisorBusy:
+        delivery.update(status="pending", confirmed=False, evidence_committed=False,
+                        reason="cancel request is committed; delivery observation could not acquire supervisor.lock")
+    return delivery
 
 
 def hold_all(store) -> dict:
@@ -325,19 +479,8 @@ def _identity(table=None) -> dict:
     return identity
 
 
-def _check_clock_binding(ledger: dict, binding: dict | None, *, require_completed_scan=True) -> None:
-    if binding is None:
-        return
-    clock = ledger.get("clock", {})
-    if (not clock.get("enabled") or clock.get("generation") != binding.get("generation") or
-            clock.get("thread_id") != binding.get("thread_id") or
-            (require_completed_scan and binding.get("check_id") not in
-             {clock.get("last_scan", {}).get("id"), clock.get("last_observation", {}).get("id")})):
-        raise ExtractError("clock scan authorization was stopped or superseded")
-
-
 def reserve_launch(store, state: dict, *, mode="resume", hold_id=None, retry_id=None, background=False,
-                   budget_addition=None) -> dict:
+                   add_calls=0) -> dict:
     from .maintenance import barrier
     from .runtime import verify_execution
     verify_execution(store, state)
@@ -369,6 +512,8 @@ def reserve_launch(store, state: dict, *, mode="resume", hold_id=None, retry_id=
         if mode == "queued" and state["status"] != "queued":
             return {"status": "preserved", "run_id": state["run_id"], "run_status": state["status"]}
         latest = ledger["controls"].get(state["run_id"], {})
+        if any(not value.get("confirmed") for value in latest.get("deliveries", {}).values()):
+            raise ExtractError("cancel termination is pending; reconcile its owned processes before another launch")
         if mode == "maintenance" and (state["status"] in {"paused", "cancelled"} or
                 state["control"]["action"] or latest.get("action") in {"pause", "cancel"} or
                 any(item["id"] not in state["control"]["requests"] for item in requests)):
@@ -380,7 +525,8 @@ def reserve_launch(store, state: dict, *, mode="resume", hold_id=None, retry_id=
             return {"status": "preserved", "run_id": state["run_id"], "reason": "unconsumed manual control request"}
         if mode == "resume":
             ledger["controls"][state["run_id"]] = {"revision": latest.get("revision", 0) + 1,
-                "action": "resume", "id": str(uuid4()), "hold_id": None, "at": time.time()}
+                "action": "resume", "id": str(uuid4()), "hold_id": None, "at": time.time(),
+                "deliveries": deepcopy(latest.get("deliveries", {}))}
         if mode in {"resume", "queued"}:
             start["authorized"] = True
         launch = {"id": str(uuid4()), "run_id": state["run_id"], "mode": mode,
@@ -389,8 +535,9 @@ def reserve_launch(store, state: dict, *, mode="resume", hold_id=None, retry_id=
                   "launcher": identity, "created_at": time.time(),
                   "request_ids": [request["id"] for request in requests],
                   "control_revision": ledger["controls"].get(state["run_id"], {}).get("revision", 0)}
-        if budget_addition and any(budget_addition.values()):
-            launch["budget_addition"] = budget_addition
+        if add_calls:
+            from .stages import validate_add_calls
+            launch["add_calls"] = validate_add_calls(add_calls)
         if not background:
             launch.update(status="claimed", identity=identity)
         start["launch"] = launch
@@ -409,7 +556,10 @@ def claim_launch(store, run_id: str, launch_id: str) -> dict:
                 state["executor"]["digest"] != launch.get("executor_digest")):
             raise ExtractError("frozen run identity changed after launch reservation")
         if launch["mode"] == "retry":
-            _check_clock_binding(ledger, ledger["retries"].get(launch.get("retry_id"), {}).get("clock_binding"), require_completed_scan=False)
+            request = ledger["retries"].get(launch.get("retry_id"))
+            if not request or request["status"] != "authorized":
+                raise ExtractError("scope recovery authorization was consumed or replaced")
+            check_restart_authority(ledger, request, state)
         launch.update(status="claimed", identity=identity, claimed_at=time.time())
         return deepcopy(launch)
 
@@ -532,6 +682,8 @@ def registered_extract(repo: Path, store, output: Path, *, operator_id=None, sou
         else:
             if output.exists() or output.is_symlink():
                 raise ExtractError("output must not exist")
+            from .runner import normalize_config
+            normalize_config(config)
             run_id = str(uuid4())
             registration = {"run_id": run_id, "output": str(output), "request_key": key,
                             "created_at": time.time(), "authorized": not queued, "status": "registered"}
@@ -563,22 +715,8 @@ def registered_extract(repo: Path, store, output: Path, *, operator_id=None, sou
             "authorized": registration["authorized"]}, state
 
 
-def configure_auto_restart(store, run_ids: list[str], limit: int, *, clock_binding=None) -> dict:
-    """The explicit clock-start option authorizes retries without refunding use."""
-    if type(limit) is not int or limit < 0:
-        raise ExtractError("auto-restart limit must be a nonnegative integer")
-    for run_id in run_ids:
-        store.run_dir(run_id)
-    with store.supervisor() as ledger:
-        _check_clock_binding(ledger, clock_binding, require_completed_scan=False)
-        policy = ledger["auto_restart"]
-        policy.update(enabled=limit > 0, run_ids=sorted(set(run_ids)), limit=limit,
-                      used=policy.get("used", {}), configured_at=time.time())
-        return deepcopy(policy)
-
-
-def restart_evidence(store, state: dict, scope: str, *, table=None, automatic=True) -> dict:
-    return scoped_restart_evidence(store, state, scope, table=table, automatic=automatic)
+def restart_evidence(store, state: dict, scope: str, *, table=None) -> dict:
+    return scoped_restart_evidence(store, state, scope, table=table)
 
 
 def check_restart_authority(ledger: dict, request: dict, state: dict) -> None:
@@ -589,35 +727,26 @@ def check_restart_authority(ledger: dict, request: dict, state: dict) -> None:
         raise ExtractError("scope recovery is fenced by current maintenance")
     if ledger["active_hold"]:
         raise ExtractError("scope recovery was superseded by hold")
-    _check_clock_binding(ledger, request.get("clock_binding"), require_completed_scan=False)
     latest = ledger["controls"].get(run_id, {})
     if (state["control"]["action"] or latest.get("action") in {"pause", "cancel"} or
             request["control_revision"] != latest.get("revision", 0) or
             set(state["control"]["requests"]) - set(request.get("request_ids", []))):
         raise ExtractError("scope recovery was superseded by manual control")
-    if request.get("automatic", True):
-        policy = ledger["auto_restart"]
-        if not policy.get("enabled") or run_id not in policy.get("run_ids", []):
-            raise ExtractError("automatic recovery authorization is disabled")
 
 
-def request_restart(store, run_id: str, scope: str, repo: Path, *, clock_binding=None, automatic=True) -> dict:
+def request_restart(store, run_id: str, scope: str, repo: Path) -> dict:
     state = store.load(run_id)
-    evidence = restart_evidence(store, state, scope, automatic=automatic)
+    evidence = restart_evidence(store, state, scope)
     requests = store.control_requests(run_id)
     with store.supervisor() as ledger:
         store.assert_startable(run_id, ledger)
         from .maintenance import publication_barrier
         if publication_barrier(store, state, ledger):
             raise ExtractError("scope recovery is fenced by current maintenance")
-        _check_clock_binding(ledger, clock_binding)
         latest = ledger["controls"].get(run_id, {})
         if (latest.get("action") in {"pause", "cancel"} or
                 any(item["id"] not in state["control"]["requests"] for item in requests)):
             raise ExtractError("scope recovery cannot override a pending pause, cancel or hold")
-        policy = ledger["auto_restart"]
-        if automatic and (not policy.get("enabled") or run_id not in policy.get("run_ids", [])):
-            raise ExtractError("no automatic restart authorization for this run")
         previous = next((value for value in reversed(ledger["retries"].values())
                          if value["failure_id"] == evidence["failure_id"]), None)
         if previous and previous["status"] == "authorized":
@@ -631,17 +760,10 @@ def request_restart(store, run_id: str, scope: str, repo: Path, *, clock_binding
         if previous:
             request = deepcopy(previous)
         else:
-            used = policy.setdefault("used", {})
-            if automatic and used.get(run_id, 0) >= policy["limit"]:
-                raise ExtractError("persistent run auto-restart limit exhausted")
             request = {**evidence, "id": str(uuid4()), "status": "authorized", "created_at": time.time(),
-                       "automatic": automatic, "control_revision": latest.get("revision", 0),
+                       "control_revision": latest.get("revision", 0),
                        "request_ids": [item["id"] for item in requests]}
-            if clock_binding is not None:
-                request["clock_binding"] = deepcopy(clock_binding)
             ledger["retries"][request["id"]] = request
-            if automatic:
-                used[run_id] = used.get(run_id, 0) + 1
             request = deepcopy(request)
     if request["status"] != "authorized":
         return request
@@ -653,26 +775,3 @@ def request_restart(store, run_id: str, scope: str, repo: Path, *, clock_binding
     else:
         request["delivery"] = "waiting" if writer in {"free", "absent"} else "writer_unknown"
     return request
-
-
-def authorized_restarts(store, rows: list[dict], repo: Path, *, clock_binding=None) -> list[dict]:
-    """A bounded clock observation may authorize recovery without reminder ack."""
-    candidates = list(dict.fromkeys((row["run_id"], anomaly["scope"])
-                      for row in rows for anomaly in row.get("anomalies", [])
-                      if anomaly.get("classification") == "transient_execution"))
-    if not candidates:
-        return []
-    with store.supervisor() as ledger:
-        policy = ledger["auto_restart"]
-        if not policy.get("enabled"):
-            return []
-        offset = policy.get("observation_cursor", 0) % len(candidates)
-        selected = (candidates[offset:] + candidates[:offset])[:8]
-        policy["observation_cursor"] = (offset + len(selected)) % len(candidates)
-    results = []
-    for run_id, scope in selected:
-        try:
-            results.append(request_restart(store, run_id, scope, repo, clock_binding=clock_binding))
-        except (ExtractError, OSError) as exc:
-            results.append({"run_id": run_id, "scope": scope, "status": "preserved", "reason": str(exc)})
-    return results

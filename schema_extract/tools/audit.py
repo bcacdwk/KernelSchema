@@ -237,7 +237,7 @@ def _checks(ledger):
             "retention": "bounded_history_not_all_checks", "records": list(records.values()),
             "reminder_timing": list(reminders.values()),
             "latest_observation": {key: clock.get("last_observation", {}).get(key) for key in
-                                   ("id", "due_at", "started_at", "completed_at", "recovery_completed_at")},
+                                   ("id", "due_at", "started_at", "completed_at")},
             "latency_scope": "recorded due/queue/ack boundaries; client-side cause remains unknown",
             "known_seconds": sum(item.get("elapsed_seconds", 0) for item in records.values()) if records else None}
 
@@ -454,10 +454,19 @@ def _verify_attempt(state, row, files, notes):
     for name in ("invocation.json", "result.json", "response.schema.json", "receipt.json", "validated.json",
                  "check.json", "merge_check.json", "event.json", "processing.json", "finished.json",
                  "repair.json", "recovery.json", "rejected.json", "stale.json", "handoff.json",
-                 "termination.json", "launch.json", "process.json", "exit.json", "cli-exit.json", "normalization.json", "usage-observation.json"):
+                 "termination.json", "launch.json", "process.json", "exit.json", "cli-exit.json", "cli-tmp/version.json",
+                 "normalization.json", "usage-observation.json"):
         path = directory / name
         if name in hashes or os.path.lexists(path):
             records[name] = files.file(path, as_json=True, json_digest=hashes.get(name))
+    version = records.get("cli-tmp/version.json")
+    if version is not None and any(version.get(key) != records.get("launch.json", {}).get(key)
+            for key in ("protocol", "launch_id", "attempt_id", "attempt_sha256")):
+        raise ExtractError("CLI version evidence differs from its launch gate")
+    for name in ("cli-tmp/version.txt", "cli-tmp/version-stderr.txt"):
+        path = directory / name
+        if version is not None or os.path.lexists(path):
+            files.file(path)
     result = records.get("result.json")
     if not result:
         if records.get("finished.json", {}).get("status") == "not_dispatched":
@@ -633,7 +642,7 @@ def _verify(store, state, rows, files, *, whole_run):
                 # ledger-bound rejection can preserve those bytes without
                 # claiming a successful artifact check or stage approval.
                 for name, codes in (("rejected.json", {"proposal_rejected", "invalid_root_prerequisite"}),
-                                    ("repair.json", {"receipt_repair", "receipt_repair_budget_exhausted"})):
+                                    ("repair.json", {"receipt_repair", "receipt_repair_limit_reached"})):
                     recorded = row.get("evidence", {}).get(name)
                     if recorded is None:
                         continue
@@ -826,14 +835,16 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
         waits = _waits(state, ledger, now)
         report = {"format": "schema_extract.audit.v1", "scope": scope, "observed_at": now,
                   "operator_id": state.get("operator_id"), "status": state["status"], "executor": state.get("executor"),
-                  "execution": {key: state["config"][key] for key in
+                  "execution": {key: state["config"].get(key) for key in
                                 ("backend", "model", "worker_effort", "reviewer_effort", "agent_binary")},
+                  "call_additions": deepcopy(state.get("call_additions", [])),
                   "maintenance_request": deepcopy(ledger.get("maintenance_requests", {}).get(run_id)),
                   "maintenance": deepcopy(state.get("maintenance")),
                   "state": str(store.run_dir(run_id) / "state.json"), "totals": _totals(rows),
                   "by_scope": [{"stage": key[0], "role": key[1], "node": key[2], **_totals(value)} for key, value in sorted(groups.items())],
                   "attempts": rows, "session_handoffs": handoffs,
                   "supervisor_checks": checks,
+                  "cancel_deliveries": deepcopy(ledger.get("controls", {}).get(run_id, {}).get("deliveries", {})),
                   "time": {"operator_created_at": created, "publication_committed_at": completed,
                            "run_created_at": state.get("created_at"),
                            "run_wall_seconds": (completed or now) - state["created_at"] if state.get("created_at") is not None else None,
@@ -841,12 +852,9 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
                            "operator_wall_seconds": completed - created if completed is not None and created is not None else None,
                            "creation_to_observation_seconds": now - created if created is not None else None,
                            "wall_includes": "queue, pause and waiting; never a sum of concurrent calls",
-                           "budget_policy": "wall_clock_deadline", "waiting_consumes_budget": True,
                            "pause_wait_seconds": None, "model_execution_seconds": None,
                            "observed_waits": waits,
                            "unavailable": "historical missing wait boundaries, child-session usage, and model-only time",
-                           "budget_deadline": state.get("deadline"),
-                           "budget_extensions": deepcopy(state.get("budget_extensions", [])),
                            "cli_scope": "cumulative monotonic transport including setup, termination, parsing and usage observation; parallel calls overlap",
                            "processing_scope": "Runner checks/processing; estimated crash intervals are separately marked"},
                   "verification": {"status": "not_requested"}, "archive": None}
@@ -863,6 +871,7 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
                 else:
                     files.projection("observations/supervisor-checks.json", checks)
                     files.projection("observations/wait-intervals.json", waits)
+                    files.projection("observations/cancel-deliveries.json", report["cancel_deliveries"])
                     try:
                         report["archive"] = _archive(Path(archive), files, scope, checked)
                     except (ExtractError, OSError, ValueError, KeyError, TypeError, tarfile.TarError) as exc:
@@ -880,9 +889,8 @@ def format_audit(report):
     lines = [f"{report['scope']['run_id']} {report['status']} attempts={total['attempt_count']}",
              "tokens retain backend scopes; cache read/write counts are not combined across providers",
              "usage scope=this run's registered CLI attempts, deduplicated by attempt",
-             "budget policy=wall_clock_deadline; queue, pause and waiting consume budget",
              f"CLI={seconds(total['cli_seconds'])} processing={seconds(total['processing_seconds'])} "
-             f"budget-accounted={seconds(total['accounted_seconds'])}"]
+             f"accounted={seconds(total['accounted_seconds'])}"]
     root = total["root_usage"]
     tokens = root["additive_tokens"]
     lines.append(f"Codex root {root['root_status']} input/cached/output={tokens['input_tokens']}/{tokens['cached_input_tokens']}/{tokens['output_tokens']} "

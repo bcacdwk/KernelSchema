@@ -9,7 +9,6 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from uuid import UUID
 
@@ -22,11 +21,14 @@ else:  # The gate is launched by absolute filename, including from frozen rules.
 GATE_PROTOCOL = "schema_extract.pipe_gate.v1"
 
 
-def _boot_id() -> str | None:
+def _boot_id() -> str:
     try:
-        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip() or None
-    except OSError:
-        return None
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    except UnicodeError as exc:
+        raise OSError("cannot read Linux boot identity") from exc
+    if not value:
+        raise OSError("cannot establish Linux boot identity")
+    return value
 
 
 def _linux_process(pid: int, boot_id: str) -> dict | None:
@@ -37,51 +39,40 @@ def _linux_process(pid: int, boot_id: str) -> dict | None:
                 "start_token": f"linux:{boot_id}:{int(fields[19])}"}
     except (FileNotFoundError, ProcessLookupError):
         return None
-    except (IndexError, ValueError) as exc:
+    except (IndexError, ValueError, UnicodeError) as exc:
         raise OSError(f"cannot read process identity for {pid}") from exc
 
 
-def process_table(*, cwd: Path | None = None) -> dict[int, dict]:
-    # Collect ps identities and augment them with Linux boot/start tokens.
-    # Never inherit frozen rules as this diagnostic subprocess's working directory.
-    output = subprocess.check_output(["ps", "-axo", "pid=,ppid=,pgid=,lstart=,stat="], text=True,
-                                     cwd=cwd if cwd is not None else tempfile.gettempdir(), timeout=10)
+def process_identity(pid: int) -> dict | None:
+    """Read one Linux boot/start identity; only an absent PID returns None."""
+    if type(pid) is not int or pid < 1:
+        raise ValueError("process PID must be a positive integer")
+    return _linux_process(pid, _boot_id())
+
+
+def process_table() -> dict[int, dict]:
+    """Take a complete observable /proc snapshot or report observation failure."""
     result, boot_id = {}, _boot_id()
-    for line in output.splitlines():
-        parts = line.split()
-        if len(parts) >= 9:
-            pid = int(parts[0])
-            item = {"pid": pid, "ppid": int(parts[1]), "pgid": int(parts[2]),
-                    "started": " ".join(parts[3:8]), "stat": parts[8]}
-            if boot_id:
-                try:
-                    native = _linux_process(pid, boot_id)
-                except PermissionError:
-                    native = None
-                else:
-                    if native is None:
-                        continue  # It exited after ps; do not manufacture an unknown live row.
-                if native is not None:
-                    item.update(native)
-            result[pid] = item
+    for path in Path("/proc").iterdir():
+        if path.name.isdecimal():
+            item = _linux_process(int(path.name), boot_id)
+            if item is not None:
+                result[item["pid"]] = item
     return result
 
 
 def process_identity_matches(identity: dict, current: dict | None) -> bool | None:
-    """Match boot/start tokens or ps lstart; unavailable proof is None."""
+    """Match Linux boot/start identities; unavailable proof is None."""
     if (not isinstance(identity, dict) or type(identity.get("pid")) is not int or identity["pid"] <= 1 or
-            not isinstance(identity.get("started"), str) or
-            identity["started"] in {"", "unobserved", "already_exited"}):
+            not isinstance(identity.get("start_token"), str) or not identity["start_token"].startswith("linux:")):
         return None
     if current is None:
         return False
     if current.get("pid") != identity["pid"]:
         return False
-    if identity.get("start_token"):
-        if not current.get("start_token"):
-            return None
-        return identity["start_token"] == current["start_token"]
-    return identity["started"] == current.get("started")
+    if not current.get("start_token"):
+        return None
+    return identity["start_token"] == current["start_token"]
 
 
 def process_alive(identity: dict, table: dict[int, dict] | None) -> bool | None:
@@ -94,7 +85,7 @@ def process_alive(identity: dict, table: dict[int, dict] | None) -> bool | None:
 
 
 def identity_key(identity: dict) -> tuple:
-    return identity["pid"], identity.get("start_token") or identity["started"]
+    return identity["pid"], identity.get("start_token")
 
 
 def _owned_snapshot(identity: dict, known, table: dict[int, dict]) -> tuple[list[dict], list[dict], list[str]]:
@@ -128,11 +119,12 @@ def _owned_snapshot(identity: dict, known, table: dict[int, dict]) -> tuple[list
     return alive, [unknown[pid] for pid in sorted(unknown)], reasons
 
 
-def owned_processes(identity: dict, known=(), *, cwd: Path | None = None) -> list[dict]:
-    return _owned_snapshot(identity, known, process_table(cwd=cwd))[0]
+def owned_processes(identity: dict, known=(), *, table: dict[int, dict] | None = None) -> list[dict]:
+    return _owned_snapshot(identity, known, process_table() if table is None else table)[0]
 
 
-def _signal_process(identity: dict, sig: signal.Signals, *, cwd: Path | None) -> bool:
+def signal_process(identity: dict, sig: signal.Signals = signal.SIGKILL) -> bool:
+    """Signal one verified identity; True records delivery, never exit."""
     descriptor = None
     try:
         if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
@@ -141,16 +133,12 @@ def _signal_process(identity: dict, sig: signal.Signals, *, cwd: Path | None) ->
             except OSError as exc:
                 if exc.errno not in {errno.ENOSYS, errno.EINVAL}:
                     raise
-        boot_id = _boot_id() if identity.get("start_token") else None
-        current = (_linux_process(identity["pid"], boot_id) if boot_id else
-                   process_table(cwd=cwd).get(identity["pid"]))
-        matched = process_identity_matches(identity, current)
+        matched = process_identity_matches(identity, process_identity(identity["pid"]))
         if matched is None:
             raise OSError(f"cannot verify process {identity['pid']} before signalling")
         if not matched:
             return False
         if descriptor is not None:
-            # The descriptor pins the target across the verification/signal gap.
             signal.pidfd_send_signal(descriptor, sig)
         else:
             os.kill(identity["pid"], sig)
@@ -162,52 +150,46 @@ def _signal_process(identity: dict, sig: signal.Signals, *, cwd: Path | None) ->
             os.close(descriptor)
 
 
-def terminate_owned(identity: dict, known=(), grace: float = 1.0, *, cwd: Path | None = None) -> dict:
-    seen, actions = list(known), []
+def observe_owned(identity: dict, known=(), *, table: dict[int, dict] | None = None) -> dict:
+    """Observe owned liveness without signalling or waiting for exit."""
+    alive, unknown, reasons = _owned_snapshot(identity, known, process_table() if table is None else table)
+    descendants = list({identity_key(item): item for item in [*known, *alive]}.values())
+    survivors = list({identity_key(item): item for item in [*alive, *unknown]}.values())
+    result = {"confirmed": not survivors and not reasons, "actions": [], "survivors": survivors,
+              "descendants": descendants}
+    if reasons:
+        result["reason"] = "; ".join(dict.fromkeys(reasons))
+    return result
 
-    def observe():
-        nonlocal seen
-        alive, unknown, reasons = _owned_snapshot(identity, seen, process_table(cwd=cwd))
-        seen = list({identity_key(item): item for item in [*seen, *alive]}.values())
-        return alive, unknown, reasons
 
-    def result(alive, unknown, reasons):
-        survivors = list({identity_key(item): item for item in [*alive, *unknown]}.values())
-        value = {"confirmed": not survivors and not reasons, "actions": actions, "survivors": survivors}
-        if reasons:
-            value["reason"] = "; ".join(dict.fromkeys(reasons))
-        return value
-
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        until = time.monotonic() + max(0, grace)
-        signalled = set()
-        while True:
-            alive, unknown, reasons = observe()
-            if not alive:
-                return result(alive, unknown, reasons)
-            for item in reversed(alive):
-                # ps/proc snapshots can miss a child forked during enumeration.
-                # Only the gate's wait/ECHILD can establish that none remain.
-                if item["pid"] == identity["pid"] or identity_key(item) in signalled:
-                    continue
-                if _signal_process(item, sig, cwd=cwd):
-                    actions.append({"pid": item["pid"], "signal": sig.name})
-                    signalled.add(identity_key(item))
-            if time.monotonic() >= until:
-                break
-            time.sleep(0.05)
-
-    return result(alive, unknown, reasons)
+def terminate_owned(identity: dict, known=(), *, include_anchor: bool = False) -> dict:
+    """Send one round of verified KILLs, then observe; invocation gates stay alive."""
+    table, actions, errors = process_table(), [], []
+    alive, _, _ = _owned_snapshot(identity, known, table)
+    seen = list({identity_key(item): item for item in [*known, *alive]}.values())
+    for item in reversed(alive):
+        if item["pid"] == identity["pid"] and not include_anchor:
+            continue
+        try:
+            if signal_process(item):
+                actions.append({"pid": item["pid"], "start_token": item["start_token"], "signal": "SIGKILL"})
+        except OSError as exc:
+            errors.append(str(exc))
+    try:
+        result = observe_owned(identity, seen)
+    except OSError as exc:
+        result = {"confirmed": False, "survivors": alive, "descendants": seen, "reason": str(exc)}
+    result["actions"] = actions
+    if errors:
+        result.update(confirmed=False, reason="; ".join([*errors, *([result["reason"]] if result.get("reason") else [])]))
+    return result
 
 
 def child_exited(process: subprocess.Popen) -> bool:
     """Observe exit without reaping the leader that still pins its process group."""
     if process.returncode is not None:
         return True
-    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
-        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
-    # Older POSIX hosts retain conservative unknown-group fencing after poll.
-    return process.poll() is not None
+    return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
 
 
 def mark_not_started(path: Path, binding: dict, reason: str) -> None:
@@ -220,11 +202,11 @@ def mark_not_started(path: Path, binding: dict, reason: str) -> None:
 
 
 def launch_not_started(attempt: dict, *, table: dict[int, dict] | None = None) -> bool:
-    """Confirm this attempt's gate never exec'd; old/mismatched markers fence.
+    """Confirm no model launch and no remaining setup child for this attempt.
 
     `released` only means exec was authorized, never that it exited. `gated`
     is positive no-exec proof only after the creator has died and a second read
-    confirms it did not persist a release before dying. A wrapper's explicit
+    confirms it did not authorize setup before dying. A wrapper's explicit
     `not_started` marker also covers death between release persistence and send.
     """
     directory = Path(attempt["directory"])
@@ -249,10 +231,10 @@ def launch_not_started(attempt: dict, *, table: dict[int, dict] | None = None) -
             return False
         # A caller's snapshot may predate the creator. Confirm death with a
         # fresh observation taken after reading the gated marker.
-        if process_alive(launch.get("creator"), process_table(cwd=directory)) is not False:
+        if process_alive(launch.get("creator"), process_table()) is not False:
             return False
         return read_json(directory / "launch.json") == launch
-    except (ExtractError, OSError, subprocess.SubprocessError, KeyError, TypeError, ValueError, AttributeError):
+    except (OSError, KeyError, TypeError, ValueError, AttributeError):
         return False
 
 
@@ -274,41 +256,60 @@ def _gate_main(argv: list[str]) -> int:
         return 125
     descriptor = int(argv[1])
     path, launch_id, attempt_id, attempt_sha256, cwd = argv[2:7]
+    directory = Path(path).parent
     binding = {"protocol": GATE_PROTOCOL, "launch_id": launch_id,
                "attempt_id": attempt_id, "attempt_sha256": attempt_sha256}
+    model_started = False
     try:
-        permitted = os.read(descriptor, 1)
-    finally:
-        os.close(descriptor)
-    if permitted != b"1":
-        mark_not_started(Path(path), binding, "gate_closed")
-        return 125
-    child = None
-    try:
+        if os.read(descriptor, 1) != b"S":
+            mark_not_started(Path(path), binding, "gate_closed")
+            return 125
         os.chdir(cwd)
         # Keep double-forked/setsid descendants under this invocation's gate.
-        # This changes parentage only: no namespaces, mounts or privilege change.
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
             raise OSError(ctypes.get_errno(), "cannot establish invocation child ownership")
-        # Runner signals descendants first. Keep their ownership anchor alive
-        # through TERM; it exits after the CLI and all adopted children are reaped.
-        signal.signal(signal.SIGTERM, lambda *_: None)
-        child = subprocess.Popen(argv[7:], close_fds=True)
-        code = child.wait()
-        write_json(Path(path).parent / "cli-exit.json", {**binding, "exit_code": code, "descendants_reaped": False})
+        version_path = directory / "cli-tmp/version.txt"
+        with version_path.open("wb") as output, (directory / "cli-tmp/version-stderr.txt").open("wb") as errors:
+            version = subprocess.Popen([argv[7], "--version"], stdin=subprocess.DEVNULL,
+                                       stdout=output, stderr=errors, close_fds=True)
+        version_code = version.wait()
         while True:
             try:
                 os.wait()
             except ChildProcessError:
-                write_json(Path(path).parent / "cli-exit.json", {**binding, "exit_code": code, "descendants_reaped": True})
+                break
+        write_json(directory / "cli-tmp/version.json", {**binding, "exit_code": version_code,
+                   "cli_version": version_path.read_text(encoding="utf-8").strip()})
+        if os.read(descriptor, 1) != b"1":
+            mark_not_started(Path(path), binding, "gate_closed")
+            return 125
+        child = subprocess.Popen(argv[7:], close_fds=True)
+        model_started = True
+        code = child.wait()
+        while True:
+            try:
+                pid, _ = os.waitpid(-1, os.WNOHANG)
+                if pid == 0:
+                    write_json(directory / "cli-exit.json", {**binding, "exit_code": code, "descendants_reaped": False})
+                    os.wait()
+            except ChildProcessError:
+                write_json(directory / "cli-exit.json", {**binding, "exit_code": code, "descendants_reaped": True})
                 return code if code >= 0 else 128 - code
-    except OSError as exc:
-        if child is None:
+    except (OSError, UnicodeError) as exc:
+        if not model_started:
+            # A failed setup still owns every child until wait confirms closure.
+            while True:
+                try:
+                    os.wait()
+                except ChildProcessError:
+                    break
             mark_not_started(Path(path), binding, "exec_failed")
             print(str(exc), file=sys.stderr)
             return 125
         raise
+    finally:
+        os.close(descriptor)
 
 
 if __name__ == "__main__":

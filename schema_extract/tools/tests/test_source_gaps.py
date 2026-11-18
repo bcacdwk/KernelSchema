@@ -60,7 +60,7 @@ class SourceGapTests(unittest.TestCase):
             raise ExtractError("; ".join(checked["diagnostics"]))
         validate_artifact_sources(self.after, self.lock, decision="complete")
 
-    def approve(self, *, declared=False):
+    def approve(self, *, declared=False, acceptance="task.json"):
         attempt = {"run_id": str(uuid4()), "attempt_id": str(uuid4()), "input_fingerprint": "fixed-input",
                    "stage": "P1", "role": "reviewer", "node": "root", "plan_revision": 1,
                    "base_checkpoint": "reviewed-copy", "dependency_digests": manifest(self.after),
@@ -70,7 +70,7 @@ class SourceGapTests(unittest.TestCase):
                      "quote_offset": 0, "note": "The selected source fixes this role's facts."}
                     for category, path, line in (("implementation", "kernel.py", 1), ("io", "task.json", 1),
                         ("input", "kernel.py", 3), ("reference", "kernel.py", 2),
-                        ("acceptance", "task.json", 1), ("scope", "task.json", 1))]
+                        ("acceptance", acceptance, 1), ("scope", "task.json", 1))]
         proposal = {"format": "schema_extract.proposal.v1", "attempt_id": attempt["attempt_id"],
                     "decision": "approve", "summary": "The scalar-copy Contract and its source gap are faithful.",
                     "source_evidence": evidence,
@@ -109,6 +109,10 @@ class SourceGapTests(unittest.TestCase):
     def test_source_gap_does_not_relax_explicit_comparison_facts(self):
         self.task["outputs"] = {"Y": {"tolerance": {"relative_to": "candidate", "atol": 0.01, "rtol": 0.05, "max_rel_l2": 0.01}}}
         (self.source / "task.json").write_text(json.dumps(self.task) + "\n")
+        for name, text in (("checker.py", 'result = {"relative_to": "candidate"}\n'),
+                           ("acceptance.md", 'The checker records `"relative_to": "candidate"`.\n')):
+            (self.source / name).write_text(text)
+            self.lock["source"]["bindings"]["acceptance"].append({"path": name, "symbol": ""})
         self.lock["source"]["files"] = manifest(self.source)
         valid = "relative_to=candidate; atol=0.01; rtol=0.05; max_rel_l2=0.01; L2 normalization unspecified"
         self.artifact(valid)
@@ -118,6 +122,29 @@ class SourceGapTests(unittest.TestCase):
             with self.subTest(criterion=invalid), self.assertRaises(ExtractError):
                 self.artifact(invalid)
                 self.approve(declared=True)
+
+    def test_code_and_prose_acceptance_remain_citable_without_json_declarations(self):
+        self.artifact()
+        for name, text in (("checker.py", 'result = {"relative_to": "candidate"}\n'),
+                           ("acceptance.md", 'The checker records `"relative_to": "candidate"`.\n')):
+            with self.subTest(name=name):
+                (self.source / name).write_text(text)
+                self.lock["source"]["bindings"]["acceptance"] = [{"path": name, "symbol": ""}]
+                self.lock["source"]["files"] = manifest(self.source)
+                receipt = self.approve(acceptance=name)
+                self.assertEqual(receipt["comparisons"], [])
+                self.assertEqual(receipt["source_evidence"][4]["path"], name)
+                self.assertIn('"relative_to": "candidate"', receipt["source_evidence"][4]["quote"])
+
+    def test_invalid_acceptance_json_is_not_treated_as_unstructured_evidence(self):
+        self.artifact()
+        for text in ('{"outputs":{"Y":{"tolerance":{"relative_to":"candidate"}}}',
+                     '{"outputs": invalid}'):
+            with self.subTest(text=text):
+                (self.source / "task.json").write_text(text + "\n")
+                self.lock["source"]["files"] = manifest(self.source)
+                with self.assertRaisesRegex(ExtractError, "invalid acceptance JSON: task.json"):
+                    self.approve()
 
     def test_p1_gate_accepts_nullable_io_excerpts(self):
         excerpts = parser_for(str(REPO)).load(

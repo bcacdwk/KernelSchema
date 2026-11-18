@@ -33,18 +33,18 @@ class ReviewProtocolTests(unittest.TestCase):
             "nodes": {entry["id"]: new_node(entry) for entry in selected},
             "selected_designs": selected, "writing_plan": [{"id": "branch", "wait_for": ["root"]}], "plan_draft": None,
             "plan_revision": 1, "revision_scope": [], "pending_rechecks": [], "feedback": ["Current scoped source correction"],
-            "config": {"max_calls": 32, "revision_limit": 5}, "budget_extensions": [{"calls": 3}],
+            "config": {"max_calls": 32, "revision_limit": 5}, "call_additions": [{"calls": 3}],
             "checkpoint": "current-checkpoint", "merged_checkpoint": "current-checkpoint", "reopening": None,
             "reopen_requests": {}, "reason": None}
         for scope in self.state["stages"].values():
-            scope.update(revisions=2, continues=3, receipt_repairs=1, cli_failures=1, calls=11, deadline=4321.5)
+            scope.update(revisions=2, continues=3, receipt_repairs=1, cli_failures=1, calls=11)
         self.materials = {"directory": str(self.root / "attempt/materials"), "first_draft": False, "candidates": [], "records": [
             {"kind": "receipt", "stage": "P2", "node": "root", "role": "worker", "attempt_id": "current-record",
              "path": str(self.root / "attempt/materials/records/current-record.json"), "purpose": "knowledge_destination", "read_after": "current_artifacts"}]}
         self.attempt = {"run_id": "run", "attempt_id": "current", "stage": "P6", "node": "root", "role": "reviewer",
             "mode": "normal", "directory": str(self.root / "attempt"), "workspace": str(self.workspace),
             "base_checkpoint": "current-checkpoint", "dependency_digests": manifest(self.workspace), "writable_files": [],
-            "backend": "claude", "model": "offline-fixture", "effort": "max", "timeout_seconds": 117,
+            "backend": "claude", "model": "offline-fixture", "effort": "max",
             "check_command": str(self.root / "attempt/check-helper.py"), "materials": self.materials, "session_scope": {"stage": "P6", "node": "root", "role": "reviewer", "operation": "normal"}}
         one = {"path": "kernel.py", "symbol": "copy"}
         self.lock = {"snapshot": str(self.root), "rules": {"id": "current-rules"},
@@ -64,7 +64,7 @@ class ReviewProtocolTests(unittest.TestCase):
         context = json.loads(prompt.split("<invocation>\n", 1)[1].split("\n</invocation>", 1)[0])
         return prompt, context, call
 
-    def test_every_role_receives_current_task_decisions_sources_scope_and_budget(self):
+    def test_every_role_receives_current_task_decisions_sources_scope_and_calls(self):
         for stage in STAGES:
             for role in ("worker", "reviewer"):
                 with self.subTest(stage=stage, role=role):
@@ -82,8 +82,7 @@ class ReviewProtocolTests(unittest.TestCase):
                     self.assertEqual(value["required_conclusions"], required_conclusions(call))
                     self.assertEqual(value["required_evidence"], STAGES[stage]["evidence"])
                     self.assertEqual(value["session_scope"], session_scope(call))
-                    self.assertEqual(value["budget"]["max_calls"], 35)
-                    self.assertEqual(value["budget"]["call_seconds"], 117)
+                    self.assertEqual(value["calls"]["max_calls"], 35)
                     self.assertEqual(value["reading_order"], ["current_specs", "current_artifacts", "fixed_source", "process_records"])
                     self.assertEqual(value["process_records"], self.materials["records"])
 
@@ -161,7 +160,7 @@ class ReviewProtocolTests(unittest.TestCase):
                             session_group({}, {"stage": "P2", "role": "worker", "node": "root"}))
         self.assertIn("schema_extract/prompt/roles/reviewer.md", rule_files(REPO))
 
-    def test_known_source_misread_can_return_once_without_new_budget(self):
+    def test_known_source_misread_can_return_once_without_resetting_calls(self):
         evidence = {"source_id": "source", "path": "kernel.py", "sha256": "b" * 64, "line_start": 1, "line_end": 1}
         receipt = {"reopen": {"issue_id": "missing-current-definition", "target": "P3", "reason": "Correct the fixed source interpretation", "evidence": [0]},
                    "source_evidence": [evidence], "artifact_evidence": [{"path": "root.yaml", "sha256": self.attempt["dependency_digests"]["root.yaml"]}],

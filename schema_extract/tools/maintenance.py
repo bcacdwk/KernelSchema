@@ -109,7 +109,7 @@ def submit_request(store, run_id: str, *, issue_id: str, tasks: list) -> dict:
 
 
 def consume_requests(store, state: dict) -> dict:
-    with store.supervisor() as ledger:
+    with store.control_transaction() as ledger:
         request = _request(ledger, state["run_id"])
         if not request or request["status"] not in PENDING:
             return state
@@ -141,7 +141,7 @@ def mark_drained(store, state: dict) -> dict:
     try:
         tasks = _validate_tasks(state, request["tasks"])
     except ExtractError as exc:
-        with store.supervisor() as ledger:
+        with store.control_transaction() as ledger:
             current = _request(ledger, state["run_id"])
             if not current or current["id"] != request["id"]:
                 raise ExtractError("maintenance request changed during drain") from exc
@@ -149,7 +149,7 @@ def mark_drained(store, state: dict) -> dict:
         state["maintenance_request"] = {"id": request["id"], "issue_id": request["issue_id"],
                                         "request_sha256": request["request_sha256"], "status": "superseded"}
         state.update(status="blocked", reason={"code": "maintenance_scope_changed", "summary": str(exc),
-            "request_id": request["id"], "recovery_condition": "提交符合当前选定集合的明确维护任务；原稿、预算与已用决定保持。"})
+            "request_id": request["id"], "recovery_condition": "提交符合当前选定集合的明确维护任务；原稿、已用次数与决定保持。"})
         store.save(state)
         return state
     cursor = {key: deepcopy(state.get(key)) for key in ("stage", "node", "role", "mode", "status", "feedback", "reason", "checkpoint", "plan_draft")}
@@ -179,7 +179,7 @@ def mark_drained(store, state: dict) -> dict:
     if cursor["status"] in {"paused", "cancelled"}:
         state["status"] = cursor["status"]
     store.save(state)
-    with store.supervisor() as ledger:
+    with store.control_transaction() as ledger:
         current = _request(ledger, state["run_id"])
         if not current or current["id"] != request["id"]:
             raise ExtractError("maintenance request changed during writer installation")
@@ -276,7 +276,7 @@ def settle(state: dict) -> None:
     stopped = [task for task in tasks if task["status"] not in FINISHED | {"pending"}]
     if stopped:
         maintenance["status"], state["status"] = "blocked", "blocked"
-        state["reason"] = {"code": "maintenance_blocked", "summary": "有限维护已停止；原稿、预算和已用决定保持。",
+        state["reason"] = {"code": "maintenance_blocked", "summary": "有限维护已停止；原稿、已用次数和决定保持。",
                            "tasks": {task["task_id"]: task.get("reason") for task in stopped}}
         return
     state["status"], state["reason"] = "running", None
@@ -289,11 +289,13 @@ def settle(state: dict) -> None:
     _resume_normal(state)
 
 
-def validate_attempt(state: dict, attempt: dict) -> None:
+def validate_attempt(state: dict, attempt: dict, *, status="pending", current_checkpoint=None) -> None:
     task = task_for(state, attempt)
     expected = {"stage": task["stage"], "node": task["node"], "role": task["role"], "mode": "normal",
-                "maintenance_step": task["step"], "base_checkpoint": task["draft_checkpoint"]}
-    if not active(state) or task["status"] != "pending" or any(attempt.get(key) != value for key, value in expected.items()):
+                "maintenance_step": task["step"]}
+    checkpoint = attempt["base_checkpoint"] if current_checkpoint is None else current_checkpoint
+    if (not active(state) or task["status"] != status or checkpoint != task["draft_checkpoint"] or
+            any(attempt.get(key) != value for key, value in expected.items())):
         raise StaleResult("maintenance task, step or draft changed")
     generation = state["nodes"][task["node"]]["generation"] if task["stage"] == "P5" else scope_for(state, task)["generation"]
     if attempt.get("generation") != generation:

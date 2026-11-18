@@ -16,8 +16,8 @@ import threading
 import time
 from uuid import UUID, uuid4
 
-from .common import ExtractError, digest, rules_root
-from .processes import process_table
+from .common import ExtractError, SupervisorBusy, digest, rules_root
+from .processes import child_exited, process_identity, process_alive, process_table, observe_owned, terminate_owned
 from .prompts import render_operation
 from . import monitor
 
@@ -27,12 +27,11 @@ EARLY_SECONDS = 300
 REGULAR_SECONDS = 1800
 RETRY_SECONDS = 120
 MAX_QUEUE_ATTEMPTS = 3
-QUEUE_TIMEOUT_SECONDS = 30
 HEARTBEAT_SECONDS = 15
 OBSERVATION_SECONDS = 30
 MAX_OBSERVED_RUNS = 16
 ATTENTION_SECONDS = 1800
-PROC_IDENTITIES = Path("/proc/sys/kernel/random/boot_id").is_file()
+HEARTBEAT_STALE_SECONDS = 75
 
 
 def _uuid(value: str, label="thread") -> str:
@@ -44,45 +43,11 @@ def _uuid(value: str, label="thread") -> str:
     raise ExtractError(label + " must be a canonical UUID")
 
 
-def process_identity(pid=None, *, table=None) -> dict | None:
-    """Prefer Linux boot/start ticks; reuse the existing ps identity on Unix."""
-    pid = os.getpid() if pid is None else pid
-    if not PROC_IDENTITIES:
-        if table is False:
-            return None
-        table = process_table() if table is None else table
-        current = table.get(pid)
-        if not current or current["stat"].startswith("Z"):
-            return None
-        return {"pid": pid, "started": current["started"]}
+def _alive(identity, table=None) -> bool | None:
     try:
-        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        if fields[0] == "Z":
-            return None
-        return {"pid": pid, "start_ticks": fields[19],
-                "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
-    except FileNotFoundError:
+        return process_alive(identity, process_table() if table is None else table)
+    except OSError:
         return None
-
-
-def process_alive(identity, *, table=None) -> bool | None:
-    if (not isinstance(identity, dict) or type(identity.get("pid")) is not int or
-            not ((identity.get("start_ticks") and identity.get("boot_id")) or identity.get("started")) or table is False):
-        return None
-    try:
-        return process_identity(identity["pid"], table=table) == identity
-    except (OSError, IndexError, ValueError, subprocess.SubprocessError):
-        return None
-
-
-def _control_processes():
-    """Collect a Unix fallback before entering any control transaction."""
-    if PROC_IDENTITIES:
-        return None
-    try:
-        return process_table()
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return False
 
 
 def _clock(ledger: dict) -> dict:
@@ -125,8 +90,9 @@ def _current(clock: dict, item: dict | None, now: float) -> bool:
 
 
 def _next_send_at(item: dict | None) -> float | None:
-    """Every outcome spends the same budget; only the latest attempt sets the delay."""
-    if not item or item.get("ack") or len(item["attempts"]) >= MAX_QUEUE_ATTEMPTS:
+    """Only a completed attempt can make another delivery eligible."""
+    if (not item or item.get("ack") or len(item["attempts"]) >= MAX_QUEUE_ATTEMPTS or
+            any(attempt.get("status") == "sending" for attempt in item["attempts"])):
         return None
     if not item["attempts"]:
         return item["due_at"]
@@ -146,6 +112,8 @@ class Clock:
         self.sender = sender
         self.stopping = threading.Event()
         self.launch_id = None
+        self.inflight = None
+        self.observation_claim = None
 
     @property
     def lock_path(self) -> Path:
@@ -170,21 +138,19 @@ class Clock:
         except OSError:
             return "unknown"
 
-    def start(self, thread: str, run_ids=None, *, auto_restart_limit=None, codex_binary=None, launch=True) -> dict:
+    def start(self, thread: str, run_ids=None, *, codex_binary=None, launch=True) -> dict:
         """The foreground start performs scan #0; the detached child only ticks.
 
         launch=False is an in-process test seam, never a CLI timer option.
         """
         thread = _uuid(thread)
-        if auto_restart_limit is not None and (type(auto_restart_limit) is not int or auto_restart_limit < 0):
-            raise ExtractError("auto-restart limit must be a nonnegative integer")
         if run_ids is not None:
             run_ids = sorted(set(run_ids))
             for run_id in run_ids:
                 self.store.run_dir(run_id)
         self.store.initialize()
-        table = _control_processes()
-        identity = process_identity(table=table)
+        identity = process_identity(os.getpid())
+        table = process_table()
         if identity is None:
             raise ExtractError("cannot establish clock launcher identity")
         # The same open-file description is inherited by the daemon. Closing
@@ -199,13 +165,9 @@ class Clock:
                     raise ExtractError("previous clock is still stopping; inspect monitor status before start")
                 binding = _binding(current)
                 daemon = current.get("daemon", {})
-                if (process_alive(daemon.get("identity"), table=table) is not True and
-                        not (daemon.get("status") == "starting" and process_alive(daemon.get("launcher"), table=table) is True)):
+                if (_alive(daemon.get("identity"), table) is not True and
+                        not (daemon.get("status") == "starting" and _alive(daemon.get("launcher"), table) is True)):
                     raise ExtractError("clock lock is held but its live owner is unconfirmed; inspect monitor status")
-                if auto_restart_limit is not None:
-                    selected = current.get("run_ids")
-                    monitor.configure_auto_restart(self.store, selected if selected is not None else self.store.run_ids(),
-                                                   auto_restart_limit, clock_binding=binding)
                 result = self.status()
                 if not _matches(result, binding):
                     return {**result, "reused": False, "started": False, "reason": "start_invalidated"}
@@ -214,8 +176,13 @@ class Clock:
                 clock = _clock(ledger)
                 self._check_start(clock, thread, run_ids, codex_binary)
                 daemon = clock.get("daemon", {})
-                if daemon.get("status") not in {"stopped", "launch_failed"} and process_alive(daemon.get("identity"), table=table) is True:
-                    raise ExtractError("recorded clock process is live without its lock; inspect monitor status")
+                if (daemon and daemon.get("status") not in {"stopped", "launch_failed"} and
+                        _alive(daemon.get("identity"), table) is not False):
+                    raise ExtractError("recorded clock owner is not confirmed exited; inspect monitor status")
+                for _, pending in self._sending(clock):
+                    if (not pending.get("identity") or
+                            not observe_owned(pending["identity"], pending.get("descendants", []), table=table)["confirmed"]):
+                        raise ExtractError("previous queue delivery is not confirmed exited; inspect monitor status")
                 if not clock.get("enabled"):
                     _archive(clock, clock.pop("reminder", None))
                     clock.update(enabled=True, generation=clock["generation"] + 1, thread_id=thread,
@@ -230,9 +197,6 @@ class Clock:
                 ledger["clock"] = clock
                 binding, selected = _binding(clock), clock["run_ids"]
                 initial = clock["last_check_number"] < 0
-            if auto_restart_limit is not None:
-                monitor.configure_auto_restart(self.store, selected if selected is not None else self.store.run_ids(),
-                                               auto_restart_limit, clock_binding=binding)
             if initial:
                 self._initial_scan(binding)
             clock = _clock(self.store.read_supervisor())
@@ -251,12 +215,17 @@ class Clock:
                 with log_path.open("ab") as log:
                     process = subprocess.Popen(command, cwd=self.runtime_directory, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                                close_fds=True, pass_fds=(lock.fileno(),), start_new_session=True)
-                child_identity = process_identity(process.pid)
+                try:
+                    child_identity, identity_error = process_identity(process.pid), None
+                except OSError as exc:
+                    child_identity, identity_error = None, str(exc)
                 with self.store.supervisor() as ledger:
                     current = _clock(ledger)
                     daemon = current.get("daemon", {})
                     if daemon.get("id") == launch_id and daemon["status"] == "starting":
                         daemon.update(pid=process.pid, identity=child_identity, log=str(log_path))
+                        if identity_error:
+                            daemon["observation_error"] = identity_error
                 return {**self.status(), "started": True, "pid": process.pid}
             except OSError as exc:
                 with self.store.supervisor() as ledger:
@@ -287,7 +256,6 @@ class Clock:
             result = monitor.record_scan(ledger, rows, now)
             check = self._complete(clock, result, 0, f"initial-{clock['generation']}", started, now)
             clock["next_observation_at"] = now + OBSERVATION_SECONDS
-        monitor.authorized_restarts(self.store, rows, self.repo, clock_binding={**binding, "check_id": check["id"]})
 
     @staticmethod
     def _complete(clock, result, number, wake_id, started, now) -> dict:
@@ -328,8 +296,8 @@ class Clock:
     def scan(self, wake_id=None, thread=None) -> dict:
         """Only an explicit thread can finish that thread's accepted reminder."""
         thread = _uuid(thread)
-        table = _control_processes()
-        identity = process_identity(table=table)
+        identity = process_identity(os.getpid())
+        table = process_table()
         if identity is None:
             raise ExtractError("cannot establish scan process identity")
         with self.store.supervisor() as ledger:
@@ -344,7 +312,7 @@ class Clock:
             if not _current(clock, item, self.now()) or (wake_id and item["id"] != wake_id) or not item.get("ack"):
                 raise ExtractError("scan requires the current accepted reminder; acknowledge it first")
             previous = item.get("scan")
-            if previous and process_alive(previous.get("owner"), table=table) is not False:
+            if previous and _alive(previous.get("owner"), table) is not False:
                 return {"runs": [], "changes": [], "anomalies": [], "clock": {"committed": False,
                         "status": "scan_busy", "id": item["id"], "owner": previous.get("owner")}}
             claim = {"id": str(uuid4()), "owner": identity, "started_at": self.now()}
@@ -371,8 +339,6 @@ class Clock:
                     item.pop("scan", None)
                     item["scan_error"] = str(exc)
             raise
-        result["automatic_restarts"] = monitor.authorized_restarts(
-            self.store, result["runs"], self.repo, clock_binding={**binding, "check_id": check["id"]})
         return result
 
     def observe(self) -> dict:
@@ -383,8 +349,8 @@ class Clock:
             return {"status": "waiting"}
         run_ids = current.get("run_ids")
         run_ids = sorted(run_ids if run_ids is not None else self.store.run_ids())
-        table = _control_processes()
-        identity = process_identity(table=table)
+        identity = process_identity(os.getpid())
+        table = process_table()
         if identity is None:
             raise ExtractError("cannot establish observation process identity")
         with self.store.supervisor() as ledger:
@@ -393,13 +359,14 @@ class Clock:
                     (self.launch_id and clock.get("daemon", {}).get("id") != self.launch_id)):
                 return {"status": "invalidated"}
             previous = clock.get("observation_claim")
-            if previous and process_alive(previous.get("owner"), table=table) is not False:
+            if previous and previous.get("id") != self.observation_claim and _alive(previous.get("owner"), table) is not False:
                 return {"status": "busy"}
             offset = clock.get("observation_cursor", 0) % max(1, len(run_ids))
             selected = (run_ids[offset:] + run_ids[:offset])[:MAX_OBSERVED_RUNS]
             claim = {"id": str(uuid4()), "owner": identity, "started_at": now,
                      "due_at": clock.get("next_observation_at", now), **_binding(clock)}
             clock["observation_claim"] = claim
+        self.observation_claim = claim["id"]
         try:
             rows = monitor.inspect_runs(self.store, selected)
             with self.store.supervisor() as ledger:
@@ -414,13 +381,10 @@ class Clock:
                              observation_cursor=(offset + len(selected)) % max(1, len(run_ids)))
                 clock.pop("observation_claim", None)
                 clock.pop("observation_error", None)
-            restarts = monitor.authorized_restarts(self.store, rows, self.repo,
-                clock_binding={**_binding(claim), "check_id": claim["id"]})
-            with self.store.supervisor() as ledger:
-                clock = _clock(ledger)
-                if clock.get("last_observation", {}).get("id") == claim["id"]:
-                    clock["last_observation"].update(recovery_completed_at=self.now(), automatic_restarts=restarts)
-            return {"status": "observed", "id": claim["id"], "automatic_restarts": restarts}
+            self.observation_claim = None
+            return {"status": "observed", "id": claim["id"]}
+        except SupervisorBusy:
+            raise
         except Exception as exc:
             with self.store.supervisor() as ledger:
                 clock = _clock(ledger)
@@ -441,114 +405,175 @@ class Clock:
         manual = Path(clock["entrypoint"]).with_name("README.md")
         return render_operation("wakeup", {**context, "scan_command": scan, "manual": str(manual)})
 
-    def _send(self, thread: str, message: str, binary: str) -> str:
-        # Supervisor wakeups always use Codex queue. Stage backend/model
-        # configuration has no role in this independent control channel.
-        command = [binary, "queue", "--thread", thread, "--message", message, "--resume"]
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   text=True, start_new_session=True, cwd=self.runtime_directory)
-        try:
-            deadline = time.monotonic() + QUEUE_TIMEOUT_SECONDS
-            while True:
-                if self.stopping.is_set() or time.monotonic() >= deadline:
-                    raise QueueError("queue stopped or timed out; delivery is uncertain")
-                try:
-                    stdout, stderr = process.communicate(timeout=min(0.25, max(0.01, deadline - time.monotonic())))
-                    break
-                except subprocess.TimeoutExpired:
-                    pass
-        finally:
-            # A detached descendant can retain stdout after the queue parent
-            # exits. Reap only our parent with a bound; never wait for pipe EOF
-            # in cleanup or Popen.__exit__, and do not chase other groups.
-            try:
-                for sig in (signal.SIGTERM, signal.SIGKILL):
-                    if process.poll() is not None:
-                        break
-                    try:
-                        os.killpg(process.pid, sig)
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        process.wait(timeout=1)
-                    except subprocess.TimeoutExpired:
-                        continue
-            finally:
-                for stream in (process.stdout, process.stderr):
-                    if stream is not None:
-                        stream.close()
-        match = re.search(r"Queued message ([0-9a-f-]{36}) for thread ([0-9a-f-]{36})", stdout)
-        if process.returncode or not match or match[2] != thread:
-            raise QueueError(f"queue did not confirm the bound thread and message ID (exit={process.returncode}); "
-                             + (stderr or stdout)[-500:])
-        return _uuid(match[1], "queue message")
+    @staticmethod
+    def _sending(clock):
+        return [(record, attempt) for record in [clock.get("reminder"), *clock.get("history", [])]
+                if record for attempt in record.get("attempts", []) if attempt.get("status") == "sending"]
 
-    def tick(self) -> dict:
-        """Observe first, then reserve one reminder send outside the control lock."""
-        observation = self.observe()
-        now = self.now()
-        with self.store.supervisor() as ledger:
-            clock = _clock(ledger)
-            if not clock.get("enabled") or (self.launch_id and clock.get("daemon", {}).get("id") != self.launch_id):
-                return {"status": "disabled"}
-            if self.launch_id:
-                clock["daemon"]["heartbeat_at"] = now
-            _arm(clock)
-            item = clock.get("reminder")
-            next_send_at = _next_send_at(item)
-            if not _current(clock, item, now) or next_send_at is None or now < next_send_at:
-                if self.launch_id:
-                    clock["daemon"]["status"] = "running"
-                    clock["daemon"].pop("error", None)
-                return {"status": "waiting", "observation": observation}
-            attempts = item["attempts"]
-            attempts.append({"number": len(attempts) + 1, "started_at": now, "status": "sending"})
-            item["status"] = "sending"
-            clock["queue_attempts_total"] = clock.get("queue_attempts_total", 0) + 1
-            item, sent_clock = deepcopy(item), deepcopy(clock)
-        try:
-            # Ack, scan or stop may win after reservation.
-            current = _clock(self.store.read_supervisor())
-            current_item = current.get("reminder")
-            if (not _matches(current, _binding(sent_clock)) or not _current(current, current_item, self.now()) or
-                    current_item["id"] != item["id"] or current_item.get("ack")):
-                return {"status": "invalidated", "id": item["id"]}
-            message = self.message(sent_clock, item)
-            message_id = _uuid(self.sender(sent_clock["thread_id"], message) if self.sender else
-                               self._send(sent_clock["thread_id"], message, sent_clock["codex_binary"]), "queue message")
-            outcome = {"status": "queued", "message_id": message_id, "finished_at": self.now()}
-        except Exception as exc:
-            outcome = {"status": "uncertain", "error": str(exc), "finished_at": self.now()}
+    def _record_send(self, item, number, outcome):
         with self.store.supervisor() as ledger:
             clock = _clock(ledger)
             current = clock.get("reminder")
-            # A fast receiver may already have acked, completed, or stopped.
-            # Supplement only this attempt's facts, including its archived
-            # copies; never replace a newer reminder or undo an acceptance.
-            records = [current, *clock.get("history", [])]
-            for record in records:
+            for record in [current, *clock.get("history", [])]:
                 if not record or record["id"] != item["id"]:
                     continue
-                attempt = next((attempt for attempt in record["attempts"]
-                                if attempt["number"] == len(item["attempts"])), None)
+                attempt = next((value for value in record["attempts"] if value["number"] == number), None)
                 if attempt is not None:
                     attempt.update(outcome)
-                if (record is current and _matches(clock, _binding(sent_clock)) and not record.get("ack") and
-                        record["status"] == "sending" and record["attempts"][-1]["number"] == len(item["attempts"])):
-                    record["status"] = "queued" if outcome["status"] == "queued" else "retry_pending"
+                if (record is current and _matches(clock, _binding(item)) and not record.get("ack") and
+                        record["status"] == "sending" and record["attempts"][-1]["number"] == number):
+                    record["status"] = ("sending" if outcome["status"] == "sending" else
+                                        "queued" if outcome["status"] == "queued" else "retry_pending")
                 if outcome.get("message_id") and record.get("scan", {}).get("completed_at") is not None:
                     ids = record["scan"].setdefault("message_ids", [])
                     if outcome["message_id"] not in ids:
                         ids.append(outcome["message_id"])
             last = clock.get("last_scan", {})
-            if last.get("id") == item["id"] and outcome.get("message_id") not in last.get("message_ids", []):
-                if outcome.get("message_id"):
+            if last.get("id") == item["id"] and outcome.get("message_id"):
+                if outcome["message_id"] not in last.get("message_ids", []):
                     last.setdefault("message_ids", []).append(outcome["message_id"])
-            if (self.launch_id and _matches(clock, _binding(sent_clock)) and
-                    clock.get("daemon", {}).get("id") == self.launch_id):
+
+    def _send(self, clock: dict, item: dict) -> None:
+        number = len(item["attempts"])
+        attempt = item["attempts"][-1]
+        message = self.message(clock, item)
+        if self.sender:
+            # A synchronous fake sender is only an offline seam. Real delivery
+            # always uses the nonblocking child below.
+            self.inflight = {"item": item, "number": number, "facts": {"status": "sending"}}
+            try:
+                message_id = _uuid(self.sender(clock["thread_id"], message), "queue message")
+                outcome = {"status": "queued", "message_id": message_id}
+            except Exception as exc:
+                outcome = {"status": "uncertain", "error": str(exc)}
+            self.inflight["outcome"] = {**outcome, "finished_at": self.now()}
+            return
+        command = [clock["codex_binary"], "queue", "--thread", clock["thread_id"], "--message", message, "--resume"]
+        stdout_path, stderr_path = Path(attempt["stdout"]), Path(attempt["stderr"])
+        with stdout_path.open("ab") as stdout, stderr_path.open("ab") as stderr:
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                       start_new_session=True, cwd=self.runtime_directory)
+        self.inflight = {"item": item, "number": number, "process": process,
+                         "facts": {"status": "sending", "pid": process.pid}, "thread": clock["thread_id"]}
+        try:
+            self.inflight["facts"]["identity"] = process_identity(process.pid)
+        except OSError as exc:
+            self.inflight["facts"]["observation_error"] = str(exc)
+
+    def _poll_send(self):
+        pending = self.inflight
+        if pending is None:
+            # A restarted clock cannot recover a Popen wait status. Preserve an
+            # unfinished delivery until its recorded processes are truly gone.
+            for item, attempt in self._sending(_clock(self.store.read_supervisor())):
+                identity = attempt.get("identity")
+                if not identity:
+                    return {"status": "sending", "id": item["id"], "reason": "queue identity unconfirmed"}
+                observed = observe_owned(identity, attempt.get("descendants", []))
+                if not observed["confirmed"]:
+                    self._record_send(item, attempt["number"], {"status": "sending", "termination": observed,
+                                      "descendants": observed.get("descendants", [])})
+                    return {"status": "sending", "id": item["id"]}
+                outcome = {"status": "uncertain", "finished_at": self.now(), "termination": observed,
+                           "error": "queue owner exited before recording its result"}
+                self._record_send(item, attempt["number"], outcome)
+                return {"id": item["id"], **outcome}
+            return None
+        item, facts = pending["item"], pending["facts"]
+        process = pending.get("process")
+        if process is not None and "outcome" not in pending:
+            exited = child_exited(process)
+            if not facts.get("identity"):
+                try:
+                    facts["identity"] = process_identity(process.pid)
+                except OSError as exc:
+                    facts["observation_error"] = str(exc)
+            identity = facts.get("identity")
+            observed = (observe_owned(identity, facts.get("descendants", [])) if identity else
+                        {"confirmed": False, "actions": [], "survivors": [], "reason": "queue identity unconfirmed"})
+            facts.update(termination=observed, descendants=observed.get("descendants", []))
+            if exited and identity and not observed["confirmed"]:
+                observed = terminate_owned(identity, facts.get("descendants", []), include_anchor=True)
+                facts.update(termination=observed, descendants=observed.get("descendants", []))
+            if not exited or not observed["confirmed"]:
+                self._record_send(item, pending["number"], facts)
+                return {"status": "sending", "id": item["id"]}
+            code = process.poll()
+            attempt = item["attempts"][-1]
+            stdout = Path(attempt["stdout"]).read_text(errors="replace")
+            stderr = Path(attempt["stderr"]).read_text(errors="replace")
+            match = re.search(r"Queued message ([0-9a-f-]{36}) for thread ([0-9a-f-]{36})", stdout)
+            try:
+                if code or not match or match[2] != pending["thread"]:
+                    raise QueueError(f"queue did not confirm the bound thread and message ID (exit={code}); "
+                                     + (stderr or stdout)[-500:])
+                outcome = {"status": "queued", "message_id": _uuid(match[1], "queue message")}
+            except ExtractError as exc:
+                outcome = {"status": "uncertain", "error": str(exc)}
+            pending["outcome"] = {**outcome, "exit_code": code, "finished_at": self.now()}
+        outcome = {**facts, **pending["outcome"]}
+        self._record_send(item, pending["number"], outcome)
+        self.inflight = None
+        return {"id": item["id"], **outcome}
+
+    def tick(self) -> dict:
+        try:
+            return self._tick()
+        except SupervisorBusy:
+            return {"status": "busy", "committed": False}
+        except OSError as exc:
+            return {"status": "observation_unknown", "error": str(exc)}
+
+    def _tick(self) -> dict:
+        owner = process_identity(os.getpid())
+        with self.store.supervisor() as ledger:
+            clock = _clock(ledger)
+            if self.launch_id and clock.get("enabled") and clock.get("daemon", {}).get("id") == self.launch_id:
                 clock["daemon"].update(heartbeat_at=self.now(), status="running")
+        observation = self.observe()
+        delivery = self._poll_send()
+        now = self.now()
+        with self.store.supervisor() as ledger:
+            clock = _clock(ledger)
+            if not clock.get("enabled") or (self.launch_id and clock.get("daemon", {}).get("id") != self.launch_id):
+                return {"status": "disabled", "delivery": delivery}
+            if self.launch_id:
+                clock["daemon"].update(heartbeat_at=now, status="running")
                 clock["daemon"].pop("error", None)
-        return {"id": item["id"], **outcome, "observation": observation}
+            if delivery:
+                return {**delivery, "observation": observation}
+            _arm(clock)
+            item = clock.get("reminder")
+            next_send_at = _next_send_at(item)
+            if (self.inflight or self._sending(clock) or not _current(clock, item, now) or
+                    next_send_at is None or now < next_send_at):
+                return {"status": "waiting", "observation": observation}
+            attempts = item["attempts"]
+            prefix = self.runtime_directory / (item["id"] + "-" + str(len(attempts) + 1))
+            attempts.append({"number": len(attempts) + 1, "started_at": now, "status": "sending",
+                             "owner": owner, "launch_id": self.launch_id,
+                             "stdout": str(prefix) + ".stdout", "stderr": str(prefix) + ".stderr"})
+            item["status"] = "sending"
+            clock["queue_attempts_total"] = clock.get("queue_attempts_total", 0) + 1
+            item, sent_clock = deepcopy(item), deepcopy(clock)
+        current = _clock(self.store.read_supervisor())
+        current_item = current.get("reminder")
+        if (not _matches(current, _binding(sent_clock)) or not _current(current, current_item, self.now()) or
+                current_item["id"] != item["id"] or current_item.get("ack")):
+            self._record_send(item, len(item["attempts"]), {"status": "not_started", "finished_at": self.now()})
+            return {"status": "invalidated", "id": item["id"]}
+        try:
+            self._send(sent_clock, item)
+            self._record_send(item, len(item["attempts"]), self.inflight["facts"])
+        except SupervisorBusy:
+            raise
+        except Exception as exc:
+            if self.inflight is None:
+                self.inflight = {"item": item, "number": len(item["attempts"]), "facts": {},
+                                 "outcome": {"status": "uncertain", "error": str(exc), "finished_at": self.now()}}
+            else:
+                raise
+        return {**self._poll_send(), "observation": observation}
 
     def run(self, launch_id: str, lock_fd=None) -> int:
         self.store.initialize()
@@ -561,7 +586,7 @@ class Clock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return 1
-            identity = process_identity()
+            identity = process_identity(os.getpid())
             if identity is None:
                 raise ExtractError("cannot establish clock daemon identity")
             with self.store.supervisor() as ledger:
@@ -579,22 +604,38 @@ class Clock:
                         if self.tick()["status"] == "disabled":
                             break
                     except Exception as exc:
-                        with self.store.supervisor() as ledger:
-                            daemon = _clock(ledger).get("daemon", {})
-                            if daemon.get("id") == launch_id:
-                                daemon.update(status="clock_error", error=str(exc))
+                        try:
+                            with self.store.supervisor() as ledger:
+                                daemon = _clock(ledger).get("daemon", {})
+                                if daemon.get("id") == launch_id:
+                                    daemon.update(status="clock_error", error=str(exc))
+                        except SupervisorBusy:
+                            pass
                     clock = _clock(self.store.read_supervisor())
-                    deadlines = [clock.get("next_observation_at", self.now() + OBSERVATION_SECONDS)]
+                    due_times = [clock.get("next_observation_at", self.now() + OBSERVATION_SECONDS)]
                     next_send_at = _next_send_at(clock.get("reminder"))
                     if next_send_at is not None:
-                        deadlines.append(next_send_at)
-                    delay = min([HEARTBEAT_SECONDS, *(max(0.05, due - self.now()) for due in deadlines)])
+                        due_times.append(next_send_at)
+                    delay = min([HEARTBEAT_SECONDS, *(max(0.05, due - self.now()) for due in due_times)])
                     self.stopping.wait(delay)
             finally:
-                with self.store.supervisor() as ledger:
-                    daemon = _clock(ledger).get("daemon", {})
-                    if daemon.get("id") == launch_id:
-                        daemon.update(status="stopped", stopped_at=self.now())
+                cleanup = None
+                if self.inflight and self.inflight["facts"].get("identity"):
+                    cleanup = terminate_owned(self.inflight["facts"]["identity"],
+                                              self.inflight["facts"].get("descendants", []), include_anchor=True)
+                    try:
+                        self._poll_send()
+                    except (SupervisorBusy, OSError):
+                        pass
+                try:
+                    with self.store.supervisor() as ledger:
+                        daemon = _clock(ledger).get("daemon", {})
+                        if daemon.get("id") == launch_id:
+                            daemon.update(status="stopped", stopped_at=self.now())
+                            if cleanup is not None:
+                                daemon["queue_cleanup"] = cleanup
+                except SupervisorBusy:
+                    pass
         return 0
 
     def stop(self) -> dict:
@@ -605,37 +646,59 @@ class Clock:
                 clock.pop("observation_claim", None)
                 _archive(clock, clock.pop("reminder", None))
                 ledger["clock"] = clock
-            identity = deepcopy(clock.get("daemon", {}).get("identity"))
-        # No control lock is held while signalling or waiting for the clock.
-        if process_alive(identity) is True:
-            for sig, grace in ((signal.SIGTERM, 2), (signal.SIGKILL, 1)):
-                if process_alive(identity) is not True:
-                    break
-                try:
-                    os.kill(identity["pid"], sig)
-                except ProcessLookupError:
-                    break
-                deadline = time.monotonic() + grace
-                while time.monotonic() < deadline and process_alive(identity) is True:
-                    time.sleep(0.05)
-        return self.status()
+            daemon = deepcopy(clock.get("daemon", {}))
+            sends = deepcopy(self._sending(clock))
+        # Invalidation commits before any signal, and never controls Extract.
+        outcomes = []
+        for item, attempt in sends:
+            pending = self.inflight
+            identity = attempt.get("identity")
+            known = attempt.get("descendants", [])
+            if pending and pending["item"]["id"] == item["id"] and pending["number"] == attempt["number"]:
+                identity = pending["facts"].get("identity", identity)
+                known = pending["facts"].get("descendants", known)
+            try:
+                outcome = (terminate_owned(identity, known, include_anchor=True) if identity else
+                           {"confirmed": False, "actions": [], "survivors": [], "reason": "queue identity unconfirmed"})
+            except OSError as exc:
+                outcome = {"confirmed": False, "actions": [], "survivors": [], "reason": str(exc)}
+            try:
+                self._record_send(item, attempt["number"], {"status": "sending", "stop_requested": True, "termination": outcome,
+                                                          "descendants": outcome.get("descendants", [])})
+            except SupervisorBusy:
+                outcome.update(confirmed=False, evidence_committed=False)
+            outcomes.append(outcome)
+        identity = daemon.get("identity")
+        if identity:
+            try:
+                outcomes.append(terminate_owned(identity, include_anchor=True))
+            except OSError as exc:
+                outcomes.append({"confirmed": False, "reason": str(exc)})
+        elif daemon.get("status") not in {None, "stopped", "launch_failed"}:
+            outcomes.append({"confirmed": False, "reason": "clock identity unconfirmed"})
+        self.stopping.set()
+        result = self.status()
+        confirmed = all(item["confirmed"] for item in outcomes) and result["process_lock"] in {"free", "absent"}
+        result.update(committed=True, termination={"confirmed": confirmed, "targets": outcomes},
+                      stop_status="confirmed" if confirmed else "pending")
+        return result
 
     def status(self) -> dict:
         clock = deepcopy(_clock(self.store.read_supervisor()))
         now = self.now()
         daemon = clock.get("daemon", {})
-        alive, lock = process_alive(daemon.get("identity")), self._lock_status()
+        alive, lock = _alive(daemon.get("identity")), self._lock_status()
         heartbeat = daemon.get("heartbeat_at")
         heartbeat_age = max(0, now - heartbeat) if heartbeat is not None else None
         if alive is True and lock == "held":
             process_status = "starting" if heartbeat is None else "running"
-            if heartbeat_age is not None and heartbeat_age > HEARTBEAT_SECONDS * 3 + QUEUE_TIMEOUT_SECONDS:
+            if heartbeat_age is not None and heartbeat_age > HEARTBEAT_STALE_SECONDS:
                 process_status = "heartbeat_stale"
             if daemon.get("status") == "clock_error":
                 process_status = "clock_error"
         elif alive is True:
             process_status = "identity_lock_mismatch"
-        elif lock in {"free", "absent"} and (alive is False or not daemon.get("identity")):
+        elif lock in {"free", "absent"} and (alive is False or daemon.get("status") in {None, "stopped", "launch_failed"}):
             process_status = "stopped_requires_start" if clock.get("enabled") else "stopped"
         else:
             process_status = "unknown"
@@ -663,8 +726,10 @@ class Clock:
                 if now - item["first_queued_at"] >= ATTENTION_SECONDS:
                     reasons.append("queued_without_ack")
             else:
-                item["delivery"] = "uncertain" if attempts else "not_sent"
-            if not item.get("ack") and len(attempts) >= MAX_QUEUE_ATTEMPTS:
+                item["delivery"] = ("sending" if any(attempt["status"] == "sending" for attempt in attempts) else
+                                    "uncertain" if attempts else "not_sent")
+            if (not item.get("ack") and len(attempts) >= MAX_QUEUE_ATTEMPTS and
+                    not any(attempt["status"] == "sending" for attempt in attempts)):
                 reasons.append("queue_attempts_exhausted")
         if clock.get("enabled") and process_status not in {"running", "starting"}:
             reasons.append(process_status)

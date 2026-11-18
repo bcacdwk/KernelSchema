@@ -2,14 +2,15 @@
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
+from unittest.mock import patch
 
-from schema_extract.tools.common import read_json
+from schema_extract.tools.common import ExtractError, read_json
 from schema_extract.tools.monitor import reserve_launch
 from schema_extract.tools.store import Store
 
@@ -38,8 +39,7 @@ class CLIRecoveryTests(unittest.TestCase):
         self.store = Store(self.root / "runtime")
         self.output = self.root / "delivery"
         self.request = ["extract", "--source", str(self.descriptor), "--output", str(self.output),
-                        "--agent-binary", str(self.stub), "--operator-seconds", "600", "--stage-seconds", "600",
-                        "--call-seconds", "60", "--max-calls", "6"]
+                        "--agent-binary", str(self.stub), "--max-calls", "6"]
         result = self.cli(*self.request, "--queue")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.run_id = json.loads(result.stdout)["run_id"]
@@ -84,6 +84,51 @@ class CLIRecoveryTests(unittest.TestCase):
             if not published:
                 self.assertIn("export " + self.run_id, report["next_step"])
 
+    def test_configuration_is_validated_before_registration_and_default_output_is_frozen(self):
+        self.stub.write_text(f"#!{sys.executable}\nimport os, sys\n"
+                            "if '--version' in sys.argv:\n print('controlled-stub')\n sys.exit(0)\n"
+                            "print(os.environ.get('CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'unset'), file=sys.stderr)\n"
+                            "sys.exit(75)\n")
+        request = list(self.request)
+        output = self.root / "validated-delivery"
+        request[request.index("--output") + 1] = str(output)
+        for options, message in ((["--revision-limit", "0"], "revision_limit"),
+                                 (["--max-calls", "3"], "max_calls must reserve"),
+                                 (["--backend", "codex", "--model", "fixture", "--worker-effort", "max",
+                                   "--reviewer-effort", "high"], "unsupported Codex effort")):
+            rejected = self.cli(*request, *options, "--queue")
+            self.assertEqual(rejected.returncode, 2, rejected.stderr)
+            self.assertIn(message, rejected.stderr)
+            self.assertFalse(output.exists())
+            self.assertEqual(set(self.store.read_supervisor()["starts"]), {self.run_id})
+            self.assertEqual(self.store.run_ids(), [self.run_id])
+        queued = self.cli(*request, "--queue")
+        self.assertEqual(queued.returncode, 0, queued.stderr)
+        run_id = json.loads(queued.stdout)["run_id"]
+        fixed = self.store.load(run_id)
+        lock = read_json(self.store.run_dir(run_id) / "inputs.lock.json")
+        self.assertEqual(lock["config"], fixed["config"])
+        self.assertEqual(fixed["input_fingerprint"], self.state()["input_fingerprint"])
+        changed = self.cli(*request, "--worker-effort", "high", "--queue")
+        self.assertEqual(changed.returncode, 2, changed.stderr)
+        self.assertIn("different request parameters", changed.stderr)
+        with patch.dict(os.environ, {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "4096"}):
+            resumed = self.cli("resume", run_id)
+        self.assertEqual(resumed.returncode, 1, resumed.stderr)
+        state = self.store.load(run_id)
+        self.assertEqual(state["config"], fixed["config"])
+        directory = self.store.run_dir(run_id) / "attempts" / state["attempts"][-1]
+        self.assertEqual((directory / "stderr.txt").read_text().strip(), "128000")
+        archive = self.root / "evidence.tar.gz"
+        audit = self.cli("audit", run_id, "--verify", "--archive", str(archive), "--json")
+        self.assertEqual(audit.returncode, 0, audit.stderr)
+        report = json.loads(audit.stdout)
+        self.assertEqual(report["verification"]["errors"], [])
+        from schema_extract.tools.audit import _archive_manifest
+        archived = {entry["name"] for entry in _archive_manifest(archive)["entries"]}
+        prefix = directory.relative_to(self.store.root).as_posix() + "/cli-tmp/"
+        self.assertTrue({prefix + name for name in ("version.json", "version.txt", "version-stderr.txt")} <= archived)
+
     def test_running_foreground_reuse_does_not_report_delivery_success(self):
         state = self.state()
         state["status"] = "running"
@@ -95,34 +140,52 @@ class CLIRecoveryTests(unittest.TestCase):
             report = json.loads(result.stdout)
             self.assertEqual(report["result"], "already_running")
             self.assertFalse(report["published"])
-            result = self.cli("resume", self.run_id, "--add-seconds", "600")
+            result = self.cli("resume", self.run_id, "--add-calls", "2")
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(json.loads(result.stdout)["result"], "already_running")
-            self.assertEqual(self.state()["budget_extensions"], [])
+            self.assertEqual(self.state()["call_additions"], [])
 
-    def test_resume_adds_finite_credit_after_expiry_without_refunding_calls(self):
+    def test_resume_adds_calls_without_refunding_used_calls(self):
         result = self.cli("resume", self.run_id)
         self.assertEqual(result.returncode, 1, result.stderr)
         state = self.state()
         self.assertEqual((state["status"], state["stages"]["P1"]["calls"]), ("cli_error", 1))
         usage = deepcopy(state["attempt_usage"])
-        state.update(status="budget_exhausted", deadline=time.time() - 100, reason={"code": "budget_exhausted"})
-        state["stages"]["P1"].update(status="budget_exhausted", deadline=time.time() - 100)
-        self.store.save(state)
-        self.assertEqual(self.cli("resume", self.run_id).returncode, 1)
-        self.assertEqual(self.state()["attempt_usage"], usage)
-        result = self.cli("resume", self.run_id, "--add-seconds", "600", "--add-calls", "2")
-        self.assertEqual(result.returncode, 1, result.stderr)  # Stub stops; no schema was approved.
+        result = self.cli("resume", self.run_id, "--add-calls", "2")
+        self.assertEqual(result.returncode, 1, result.stderr)
         current = self.state()
         self.assertEqual((current["status"], current["stages"]["P1"]["calls"]), ("cli_error", 2))
-        self.assertGreater(current["deadline"], time.time() + 500)
-        self.assertEqual(len(current["budget_extensions"]), 1)
+        self.assertEqual(len(current["call_additions"]), 1)
+        self.assertEqual(current["call_additions"][0]["calls"], 2)
         self.assertEqual(current["config"], state["config"])
         for key, value in usage.items():
             self.assertEqual(current["attempt_usage"][key], value)
         report = self.cli("audit", self.run_id, "--json")
         self.assertEqual(report.returncode, 0, report.stderr)
-        self.assertEqual(len(json.loads(report.stdout)["time"]["budget_extensions"]), 1)
+        self.assertEqual(len(json.loads(report.stdout)["call_additions"]), 1)
+
+    def test_resume_confirms_cancel_before_later_pause_even_without_delivery_record(self):
+        from schema_extract.tools.cli import _launch_context
+        self.store.request_control(self.run_id, "cancel")
+        self.store.request_control(self.run_id, "pause")
+        order = []
+        def deliver(store, request):
+            order.append("delivery")
+            return {"confirmed": True}
+        def reserve(*args, **kwargs):
+            order.append("reserve")
+            return {"id": "new-launch", "status": "claimed"}
+        with patch.dict(os.environ, {}, clear=True), \
+                patch("schema_extract.tools.cli.monitor.deliver_cancel", return_value={"confirmed": False}), \
+                patch("schema_extract.tools.cli.monitor.reserve_launch") as reservation:
+            with self.assertRaisesRegex(ExtractError, "cancel termination is pending"):
+                _launch_context(self.store, self.state())
+            reservation.assert_not_called()
+        with patch.dict(os.environ, {}, clear=True), \
+                patch("schema_extract.tools.cli.monitor.deliver_cancel", side_effect=deliver), \
+                patch("schema_extract.tools.cli.monitor.reserve_launch", side_effect=reserve):
+            _launch_context(self.store, self.state())
+        self.assertEqual(order, ["delivery", "reserve"])
 
     def test_rejection_records_the_registered_attempt_not_the_bad_nonce(self):
         self.stub.write_text(f"#!{sys.executable}\n" + '''import json, sys

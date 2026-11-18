@@ -1,4 +1,4 @@
-"""Bounded, independent Reviewer calls over document-integrity regression cases."""
+"""Independent Reviewer calls over document-integrity regression cases."""
 
 from __future__ import annotations
 
@@ -118,13 +118,13 @@ def _materials(lock: dict, attempt: dict) -> dict:
 
 
 def evaluate(suite_path: Path, output: Path, repo: Path, *, backend=DEFAULT_BACKEND,
-             agent_binary=None, model=None, effort=None, call_seconds=240, selected=None) -> dict:
+             agent_binary=None, model=None, effort=None, selected=None, cancel_event=None) -> dict:
     if backend == "codex" and (model is None or effort is None):
         raise ExtractError("Codex review evaluation requires an explicit model and effort")
     model = model if model is not None else DEFAULT_MODEL
     effort = effort if effort is not None else DEFAULT_EFFORT
-    if not isinstance(model, str) or not model.strip() or not 1 <= call_seconds <= 1800:
-        raise ExtractError("evaluation requires a model and a call_seconds limit in 1..1800")
+    if not isinstance(model, str) or not model.strip():
+        raise ExtractError("evaluation requires a nonempty model")
     executable = shutil.which(agent_binary or backend)
     if executable is None:
         raise ExtractError("evaluation backend executable is missing")
@@ -149,7 +149,7 @@ def evaluate(suite_path: Path, output: Path, repo: Path, *, backend=DEFAULT_BACK
                 **{kind: [{"path": "source.md", "symbol": ""}] for kind in ("io", "acceptance", "scope")}}
     config = {"suite": digest(suite), "case_count": len(cases), "backend": backend,
               "agent_binary": executable, "model": model, "effort": effort,
-              "call_seconds": call_seconds, "max_calls_per_case": 1}
+              "max_calls_per_case": 1}
     lock = freeze_inputs(output / "runtime", SourceTree(seed), bindings,
                          ["reference.py", "source.md"], config, rules_repo=repo)
     rules, checker = rules_root(lock), schema_for(rules_root(lock))
@@ -160,6 +160,8 @@ def evaluate(suite_path: Path, output: Path, repo: Path, *, backend=DEFAULT_BACK
     write_json(output / "report.json", report)
     cli = AgentCLI(backend=backend, executable=executable, model=model)
     for case in cases:
+        if cancel_event is not None and cancel_event.is_set():
+            break
         attempt_id = str(uuid4())
         directory = output / "attempts" / attempt_id
         workspace = directory / "workspace"
@@ -189,7 +191,7 @@ def evaluate(suite_path: Path, output: Path, repo: Path, *, backend=DEFAULT_BACK
         attempt["read_directories"] = _materials(lock, attempt)
         write_json(directory / "attempt.json", attempt)
         result = cli.run(attempt=attempt, prompt=evaluation_prompt(lock, attempt),
-                         schema=response_schema(attempt_id), timeout=call_seconds)
+                         schema=response_schema(attempt_id), cancel_event=cancel_event)
         grade = (grade_response(result["response"], case["expected"], attempt_id=attempt_id)
                  if result["outcome"] == "completed" else {"passed": False, "reason": result["outcome"]})
         if manifest(workspace) != before:
@@ -206,6 +208,7 @@ def evaluate(suite_path: Path, output: Path, repo: Path, *, backend=DEFAULT_BACK
         print(json.dumps({"case": case["id"], "decision": row["decision"], **grade}, ensure_ascii=False), flush=True)
         if not result["termination"]["confirmed"]:
             break
+    report["cancelled"] = cancel_event is not None and cancel_event.is_set()
     report["completed_at"] = time.time()
     report["passed"] = len(report["cases"]) == len(cases) and all(row["grade"]["passed"] for row in report["cases"])
     write_json(output / "report.json", report)

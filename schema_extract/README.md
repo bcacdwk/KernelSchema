@@ -6,7 +6,7 @@ Schema Extract 将固定源码和任务材料整理为少量完整设计、中�
 
 ## 开始一次试用
 
-运行需要 Linux、Python 3.11+、PyYAML、jsonschema、Git、`ps` 和已配置认证的 CLI。调用以当前用户身份直接使用真实文件系统；各角色的工具与目录权限见[运行、恢复与维护](tools/README.md#运行恢复与维护)。
+运行需要 Linux、Python 3.11+、PyYAML、jsonschema、Git 和已配置认证的 CLI。调用以当前用户身份直接使用真实文件系统；各角色的工具与目录权限见[运行、恢复与维护](tools/README.md#运行恢复与维护)。
 
 从仓库根目录运行：
 
@@ -41,11 +41,13 @@ python3 schema_extract/extract_yaml.py status RUN_UUID
 
 角色路径相对 `directory`，`repository` 相对描述文件，省略为 `.`；`host` 省略时采用 entrypoint。来源目录中的 `schema-inputs.json` 也可用。未指定 `revision` 时冻结本地实际字节；指定时读取解析后的 Git commit。`--source 'git:<ref>:<directory>' --bindings FILE` 使用 `--repo` 指定的仓库。
 
+`acceptance` 可同时绑定 JSON 记录、比较器代码和 Markdown 说明。P1 严格解析 `.json` 文件，核验其中具名输出的 `tolerance.relative_to` 声明；其他材料由 worker 与独立 reviewer 按固定来源证据核实比较语义。
+
 一个 run 固定以下身份，恢复与维护均沿用它们：
 
 | 身份 | 固定内容 |
 | --- | --- |
-| source/config | 源码字节、入口与角色绑定、任务、输出和调用预算 |
+| source/config | 源码字节、入口与角色绑定、任务、输出和调用次数 |
 | rules | schema_docs、starter、Template、完整 prompt 树及其引用 |
 | executor | 实际 Python 执行器、能力和后端配置 |
 
@@ -69,10 +71,9 @@ python3 schema_extract/extract_yaml.py inspect --run RUN_UUID --json
 | `--model` | `qwen3.8-max[1m]` |
 | `--worker-effort`、`--reviewer-effort` | `max` |
 | `--revision-limit` | 每阶段或 P5 节点 5 次实质退修 |
-| `--operator-seconds` | 从创建开始 7200 秒 |
-| `--stage-seconds` | 阶段或节点从首次调用开始 3600 秒 |
-| `--call-seconds` | 单次调用 1800 秒 |
 | `--max-calls` | 每阶段或节点 32 次，最少 4 次 |
+
+Claude backend（含 `review-eval`）默认请求单响应上限 128000 tokens，不继承主机同名输出设置，不设固定 thinking budget；实际上限由 CLI 和服务端决定。调用记录环境配置指纹和实际用量。
 
 显式 Codex 示例：
 
@@ -80,11 +81,11 @@ python3 schema_extract/extract_yaml.py inspect --run RUN_UUID --json
 python3 schema_extract/extract_yaml.py extract --source /path/to/source.json --output /path/to/delivery --backend codex --model YOUR_MODEL --worker-effort high --reviewer-effort high
 ```
 
-预算同时覆盖续写、退修、失败、检查处理和一次裁决/签收的预留。排队、暂停和维护等待仍计墙钟。恢复、返回和重复 issue 不退还已用次数；需要追加时由 Supervisor 明确指定。
+调用次数覆盖续写、退修、失败，并预留一次裁决和签收。调用、阶段、整算子及检查不设时间上限，耗时与 token 只作统计。恢复、返回和重复 issue 不退还已用次数；需要追加时由 Supervisor 明确指定。
 
 ## 角色与会话
 
-Supervisor 确定来源、输出、预算和具体维护请求；Runner 唯一提交运行状态、checkpoint、合入和发布。worker 通过 CLI 角色工具编辑本次目录中的授权产物；reviewer 使用只读角色。正式采纳由 Runner 核验授权文件集合、字段权限、完整文件类型及固定来源。CLI 权限与差异核验不保证宿主文件系统不可写。
+Supervisor 确定来源、输出、调用次数和具体维护请求；Runner 唯一提交运行状态、checkpoint、合入和发布。worker 通过 CLI 角色工具编辑本次目录中的授权产物；reviewer 使用只读角色。正式采纳由 Runner 核验授权文件集合、字段权限、完整文件类型及固定来源。CLI 权限与差异核验不保证宿主文件系统不可写。
 
 每 scope 使用固定的真实空 cwd 和私有 CLI home；候选、材料与原稿始终保存在各自 attempt 目录。每阶段（含 P1 与 P2）、角色和操作均建立独立新会话，P5 另按节点分开。只有同一 scope 内的续写或退修可用已登记的精确 UUID resume；新调用始终获得完整动态材料。P6 先启动新 reviewer，存在明确限域修改时才启动 worker。所有阶段调用禁止内部委派。
 
@@ -92,7 +93,7 @@ P2 提交 `{id, instance}` 的有限选择，P4 提交 `{id, wait_for}` 的写�
 
 ## 状态阅读
 
-`status` 展示阶段、角色、checkpoint、节点和停止原因；`--full` 读取权威状态。`inspect` 是轻量只读观察，`monitor scan` 另保存短观察，默认不恢复任务。日志沉默不能证明死锁。
+`status` 展示阶段、角色、checkpoint、节点和停止原因；`--full` 读取权威状态。`inspect` 是轻量只读观察，`monitor scan` 另保存短观察，不自动恢复任务。运行时长和日志沉默不触发终止。
 
 先看 `reason`、节点原因及 `active_attempts / unconfirmed_attempts / unsettled_attempts`。停止状态与调用结清分别核对；终止未确认时保持 fence，不能启动同一范围的新调用。
 
@@ -103,14 +104,14 @@ P2 提交 `{id, instance}` 的有限选择，P4 提交 `{id, wait_for}` 的写�
 | 操作 | 命令与边界 |
 | --- | --- |
 | 调用边界暂停 | `pause RUN_UUID`，已启动调用可结算 |
-| 取消在途调用 | `cancel RUN_UUID`，核对实际终止证明 |
+| 取消在途调用 | `cancel RUN_UUID`，直接 KILL 已核准归属的进程，返回 pending 或 confirmed |
 | 恢复当前冻结运行 | `resume RUN_UUID` |
 | 恢复单个普通失败范围 | `resume RUN_UUID --scope P5:NODE_ID` |
-| 明确增加预算 | `resume RUN_UUID --add-seconds N --add-calls N` |
+| 明确增加调用次数 | `resume RUN_UUID --add-calls N` |
 | 全局暂停与释放 | `pause --all` 返回 hold；`resume --all --hold ID` 只释放该 hold |
 | 交付到另一新目录 | `export RUN_UUID --output /path/to/new/delivery` |
 
-恢复先核进程、真实 exit、原生结果、schema、nonce 和精确会话。真正中断的会话在确认终止后退休，保留 checkpoint 和短交接；确证未启动时可以保留前次有效会话。范围恢复绑定实际失败 attempt、当前实例和实际来源；健康兄弟继续。`--scope` 不接受预算追加。
+cancel 不等待刷盘；pause 允许当前调用自然完成。显式 resume 先复查未确认的取消交付，真实结清后才能启动。恢复核进程、真实 exit、原生结果、schema、nonce 和精确会话。真正中断的会话在确认终止后退休，保留 checkpoint 和短交接；确证未启动时可以保留前次有效会话。范围恢复绑定实际失败 attempt、当前实例和实际来源；健康兄弟继续。`--scope` 不接受次数追加。
 
 当前未交付 run 的有限维护：
 
@@ -149,7 +150,7 @@ requested model/effort 是调用要求，reported 只取原生报告，缺项保
 ## Reviewer 能力回归
 
 ```sh
-python3 schema_extract/extract_yaml.py review-eval --suite schema_extract/tools/tests/fixtures/review_eval/suite.json --output /path/to/new/evaluation --call-seconds 360
+python3 schema_extract/extract_yaml.py review-eval --suite schema_extract/tools/tests/fixtures/review_eval/suite.json --output /path/to/new/evaluation
 ```
 
 `review-eval` 针对当前合成标量复制任务，对明确提供的已知正确/错误文档用例各启动独立只读 reviewer，检查四项判断及缺陷定位（显式 `--suite` 可自定义该任务的用例，不会切换为其他算子评估；用例约定见[能力回归协议](tools/README.md#review-eval-用例约定)）。它会真实调用模型，用于 Reviewer 能力回归，不参与 run 批准；suite 和新输出目录必须显式指定。
@@ -166,6 +167,6 @@ python3 schema_extract/extract_yaml.py monitor stop
 
 提醒使用独立的 `codex queue --resume`。收到后按消息执行绑定线程的 `monitor ack`；返回 `accepted: true` 或 `reason: already_acknowledged` 时均执行一次同一提醒的 `monitor scan --wake ID --thread THREAD_UUID`（其余拒绝直接结束），以 `committed`/`reused` 为本轮完成依据。`stop` 只停提醒，不取消已启动提取。
 
-自动恢复默认关闭；`--auto-restart-limit N` 只授权所选 run 内已确认终止、EX_TEMPFAIL 75、有剩余预算的普通失败，持久累计次数。普通 pause/cancel/hold 保持优先，提醒补送有固定上限。
+monitor 只观察和提醒，恢复由 Supervisor 决定；Runner 保留普通有限错误重试。pause/cancel/hold 保持优先，提醒补送有固定上限。投递未结清时不重发，clock 继续观察；queue 挂住时不能保证同通道唤醒。
 
 框架候选由 `candidates RUN_UUID` 汇总，reviewer 确认项按稳定 ID 交 [issues](issues/README.md) 处理。离线测试与能力回归方法见[执行协议](tools/README.md#离线验证与能力回归)；历史记录从 [archive](archive/README.md) 查阅。

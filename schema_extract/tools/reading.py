@@ -62,7 +62,7 @@ def stage_check(record: dict, *, workspace: Path | None = None, rules: Path | No
                 validate_artifact_sources(candidate, source_lock, decision="complete", parser_root=rules,
                                           nodes=check.get("checked_nodes") or [record["node"]])
                 result.update(check=check, preview_passed=check["exit_code"] == 0,
-                              exit_code=check["exit_code"] or (1 if result["pending_corrections"] else 0),
+                              exit_code=check["exit_code"] or (1 if record["stage"] == "P6" and result["pending_corrections"] else 0),
                               raw_passed=check["exit_code"] == 0 and not result["pending_corrections"] and record["stage"] != "P2")
         result["source_validation"] = {"status": "verified", "source_id": record["source"]["id"],
                                        "repository_id": record["source"]["repository_id"], "ref": record["source"]["ref"]}
@@ -111,8 +111,8 @@ def read_evidence(root: Path, path: str, start_line: int, end_line: int,
     _, data, file_hash = _read_file(root, path, expected_sha256)
     lines = data.decode("utf-8").splitlines()
     if (type(start_line) is not int or type(end_line) is not int or
-            not 1 <= start_line <= end_line <= len(lines) or end_line - start_line >= 12):
-        raise ValueError("invalid evidence range (maximum 12 lines)")
+            not 1 <= start_line <= end_line <= len(lines)):
+        raise ValueError(f"invalid evidence range (file has {len(lines)} lines)")
     selected = "\n".join(lines[start_line - 1:end_line])
     if type(quote_offset) is not int or not 0 <= quote_offset < len(selected):
         raise ValueError("quote_offset must select a character within the evidence range")

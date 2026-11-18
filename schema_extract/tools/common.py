@@ -25,6 +25,10 @@ class StaleResult(ExtractError):
     """A genuine invocation whose dependencies were superseded while it ran."""
 
 
+class SupervisorBusy(ExtractError):
+    """The control transaction was not acquired; no requested change was committed."""
+
+
 class RunnerBusy(ExtractError):
     """The run's existing Runner will consume any newly queued control request."""
 

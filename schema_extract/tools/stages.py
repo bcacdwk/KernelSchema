@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import time
 
 from .common import ExtractError, digest
 
@@ -62,9 +63,48 @@ def new_scope() -> dict:
     return {"status": "pending", "revisions": 0, "continues": 0, "invalid_receipts": 0,
             "receipt_repairs": 0, "cli_failures": 0, "check_failures": 0, "tool_failures": 0,
             "calls": 0, "elapsed_seconds": 0.0, "approval": None, "started_at": None,
-            "deadline": None, "baseline_checkpoint": None, "candidates": [],
+            "baseline_checkpoint": None, "candidates": [],
             "adjudications": 0, "signoffs": 0, "adjudication": None, "signoff": None,
             "generation": 0}
+
+
+CALL_STOPS = {"call_limit_reached"}
+CALL_RECOVERY = "显式 resume {run_id} --add-calls N 追加调用；已用计数和一次性决定不重置。"
+
+
+def validate_add_calls(calls: int) -> int:
+    if type(calls) is not int or calls < 0:
+        raise ExtractError("additional calls must be a nonnegative integer")
+    return calls
+
+
+def call_limit(state: dict) -> int:
+    return state["config"]["max_calls"] + sum(item["calls"] for item in state.get("call_additions", []))
+
+
+def call_exhaustion(state: dict) -> str | None:
+    scope, mode = scope_for(state), state.get("mode", "normal")
+    if mode in {"adjudicate", "signoff"} and scope["adjudications" if mode == "adjudicate" else "signoffs"]:
+        return "本范围的一次裁决/签收已使用；追加调用或重开不能重置该决定。"
+    reserved = (int(not scope["adjudications"]) + int(not scope["signoffs"]) + int(state.get("role") == "worker")
+                if mode == "normal" else int(not scope["signoffs"]) if mode == "adjudicate" else 0)
+    if scope["calls"] >= call_limit(state) - reserved:
+        return "本阶段/节点调用余额不足；后续审阅、裁决与签收的调用仍保留。"
+    return None
+
+
+def add_calls(state: dict, calls: int, *, identity: str, origin: str) -> bool:
+    calls = validate_add_calls(calls)
+    if not calls:
+        return False
+    previous = next((item for item in state.get("call_additions", []) if item["id"] == identity), None)
+    if previous:
+        if previous["calls"] != calls:
+            raise ExtractError("call authorization identity was reused with a different amount")
+        return False
+    state.setdefault("call_additions", []).append({"id": identity, "origin": origin,
+        "run_id": state["run_id"], "at": time.time(), "calls": calls})
+    return True
 
 
 def scope_key(stage: str, node: str = "root") -> str:
@@ -232,7 +272,7 @@ def dependencies_ready(state: dict, node_id: str) -> bool:
     return (sources | waits | {"root"}) <= approved
 
 
-NODE_STOPS = {"blocked", "budget_exhausted", "tool_error", "invalid_receipt", "cli_error", "termination_unconfirmed"}
+NODE_STOPS = {"blocked", "call_limit_reached", "tool_error", "invalid_receipt", "cli_error", "termination_unconfirmed"}
 
 
 def next_calls(state: dict) -> list[dict]:
@@ -361,7 +401,7 @@ def selection_impact(state: dict, selected: list, *, root_changed=False) -> set[
 
 
 def install_selection(state: dict, selected: list, invalidated: set[str]) -> None:
-    """Retire identities without deleting their budgets, drafts or used decisions."""
+    """Retire identities without deleting their counters, drafts or used decisions."""
     planned = {entry["id"]: entry for entry in selected}
     old_plan = {entry["id"]: entry for entry in state.get("selected_designs") or []}
     for node_id, node in state["nodes"].items():
@@ -407,7 +447,7 @@ def invalidate_stage(state: dict, stage: str, *, require_worker=False) -> None:
 
 
 def resume_progress(state: dict) -> None:
-    """Return to the first genuinely unfinished responsibility, preserving its budget."""
+    """Return to the first genuinely unfinished responsibility, preserving its counters."""
     for stage in ("P1", "P2", "P3", "P4"):
         scope = state["stages"][stage]
         if scope["status"] == "approved" and approval_is_current(state, scope.get("approval")):

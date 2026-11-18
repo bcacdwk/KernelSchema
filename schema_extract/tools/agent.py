@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import fcntl
-import math
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from uuid import uuid4
 
@@ -23,7 +21,7 @@ from .common import ExtractError, digest, read_json, real_directory, regular_fil
 from .artifacts import artifact_inventory
 from .observation import begin_usage_observation, finish_usage_observation
 from .processes import (GATE_PROTOCOL, child_exited, identity_key, mark_not_started,
-                        owned_processes, process_table, terminate_owned)
+                        observe_owned, owned_processes, process_identity, terminate_owned)
 
 
 def _binding(attempt):
@@ -45,7 +43,7 @@ def _binding(attempt):
             any(scope[key] != attempt[key] for key in ("stage", "node", "role")) or
             not isinstance(scope["operation"], str) or not scope["operation"]):
         raise ExtractError("session_scope must bind this stage, node, role and operation")
-    return {key: attempt[key] for key in ("run_id", "backend", "model", "effort", "session_scope")}
+    return {key: attempt.get(key) for key in ("run_id", "backend", "model", "effort", "session_scope")}
 
 
 @contextmanager
@@ -162,7 +160,8 @@ def read_result(attempt: dict, *, exit_code: int | None, termination: dict, outc
     if (invocation.get("attempt_sha256") != digest(attempt) or
             invocation.get("cwd") != str(Path(attempt["session_directory"]) / "cwd") or
             invocation.get("workspace") != attempt["workspace"] or
-            any(invocation.get(key) != attempt[key] for key in ("backend", "model", "effort", "run_id", "attempt_id", "session_scope"))):
+            any(invocation.get(key) != attempt.get(key) for key in
+                ("backend", "model", "effort", "run_id", "attempt_id", "session_scope"))):
         raise ExtractError("recorded invocation differs from its registered attempt")
     schema = read_json(directory / "response.schema.json")
     if digest(schema) != invocation["response_schema_digest"]:
@@ -215,30 +214,16 @@ class AgentCLI:
             raise ExtractError("model must be explicitly registered")
         self.model = model
 
-    def run(self, *, attempt: dict, prompt: str, schema: dict, timeout: float,
+    def run(self, *, attempt: dict, prompt: str, schema: dict,
             on_process=lambda _: None, cancel_event=None) -> dict:
-        if type(timeout) not in {int, float} or not math.isfinite(timeout) or timeout <= 0:
-            raise ExtractError("invocation timeout must be finite and positive")
-        if attempt.get("backend") != self.backend.name or attempt.get("model") != self.model:
-            raise ExtractError("CLI backend/model differs from the registered attempt")
-        if attempt.get("executable") is not None and str(Path(attempt["executable"]).resolve()) != self.executable:
-            raise ExtractError("CLI executable differs from the registered attempt")
-        with _session(attempt) as (session_path, session):
-            if session["status"] in {"running", "fenced"}:
-                raise ExtractError("the prior role invocation requires termination recovery")
-            if attempt["session_id"] != session.get("session_id"):
-                raise ExtractError("resume requires this exact registered role session UUID")
-            return self._run(attempt, prompt, schema, timeout, on_process, cancel_event, session_path, session)
+        _binding(attempt)
+        with ExitStack() as resources:
+            return self._run(attempt, prompt, schema, on_process, cancel_event, resources)
 
-    def _run(self, attempt, prompt, schema, timeout, on_process, cancel_event, session_path, session):
+    def _run(self, attempt, prompt, schema, on_process, cancel_event, resources):
         directory = Path(attempt["directory"])
-        home = session_path.parent / "home"
-        home.mkdir(mode=0o700, exist_ok=True)
-        real_directory(home)
+        session_path, session = Path(attempt["session_directory"]) / "session.json", None
         schema_path, prompt_path = directory / "response.schema.json", directory / "prompt.txt"
-        _schema_check(schema, {}, attempt["attempt_id"])
-        write_json(schema_path, schema)
-        prompt_path.write_text(prompt, encoding="utf-8")
         invocation = {key: attempt.get(key) for key in ("run_id", "attempt_id", "stage", "node", "role", "session_group",
                       "session_scope", "session_directory", "backend", "model", "effort")}
         invocation.update(resume_session_id=attempt["session_id"], executable=self.executable,
@@ -248,9 +233,24 @@ class AgentCLI:
         started = time.monotonic()
         termination = {"confirmed": True, "actions": [], "survivors": [], "reason": "not_started"}
         outcome, exit_code, process, usage_start, observed_seconds = "completed", None, None, None, 0.0
-        release_attempted, known, identity, threads, pipe_errors = False, [], None, [], []
+        release_attempted, setup_started, native_exited, known, identity = False, False, False, [], None
         session_started = False
         try:
+            _schema_check(schema, {}, attempt["attempt_id"])
+            write_json(schema_path, schema)
+            prompt_path.write_text(prompt, encoding="utf-8")
+            if attempt["backend"] != self.backend.name or attempt["model"] != self.model:
+                raise ExtractError("CLI backend/model differs from the registered attempt")
+            if attempt.get("executable") is not None and str(Path(attempt["executable"]).resolve()) != self.executable:
+                raise ExtractError("CLI executable differs from the registered attempt")
+            session_path, session = resources.enter_context(_session(attempt))
+            if session["status"] in {"running", "fenced"}:
+                raise ExtractError("the prior role invocation requires termination recovery")
+            if attempt["session_id"] != session.get("session_id"):
+                raise ExtractError("resume requires this exact registered role session UUID")
+            home = session_path.parent / "home"
+            home.mkdir(mode=0o700, exist_ok=True)
+            real_directory(home)
             if cancel_event is not None and cancel_event.is_set():
                 raise InterruptedError("cancel requested before invocation launch")
             workspace = real_directory(Path(attempt["workspace"]))
@@ -275,16 +275,10 @@ class AgentCLI:
             environment, fingerprint = self.backend.environment(home, attempt["effort"])
             environment["TMPDIR"] = str(temporary)
             if session.get("configuration_digest") not in {None, fingerprint}:
-                raise ExtractError("role provider connection configuration changed")
+                raise ExtractError("role provider connection or output configuration changed")
             invocation["configuration_digest"] = fingerprint
-            invocation["cli_version"] = subprocess.check_output([self.executable, "--version"], text=True,
-                                    cwd=directory, env=environment, stderr=subprocess.PIPE,
-                                    timeout=min(15, timeout)).strip()
-            if attempt.get("cli_version") is not None and attempt["cli_version"] != invocation["cli_version"]:
-                raise ExtractError("CLI version differs from the registered attempt")
-            if (session.get("executable") not in {None, self.executable} or
-                    session.get("cli_version") not in {None, invocation["cli_version"]}):
-                raise ExtractError("role CLI executable or version changed")
+            if session.get("executable") not in {None, self.executable}:
+                raise ExtractError("role CLI executable changed")
             command = self.backend.command(self.executable, model=self.model, effort=attempt["effort"], role=attempt["role"],
                           session_id=attempt["session_id"], schema=schema, cwd=cwd, workspace=workspace,
                           schema_path=schema_path, output_path=temporary / "response.json", writable_files=writable,
@@ -299,101 +293,110 @@ class AgentCLI:
                 except Exception as exc:
                     invocation["usage_observation_error"] = "baseline_" + type(exc).__name__
                 observed_seconds += time.monotonic() - observed
-            creator = process_table(cwd=directory).get(os.getpid())
+            creator = process_identity(os.getpid())
             if creator is None:
                 raise OSError("cannot establish launch creator identity")
             launch = {"protocol": GATE_PROTOCOL, "status": "gated", "at": time.time(), "creator": creator,
                       **{key: invocation[key] for key in ("run_id", "attempt_id", "launch_id", "attempt_sha256")}}
             write_json(directory / "launch.json", launch)
             session.update(status="running", attempt_id=attempt["attempt_id"], configuration_digest=fingerprint,
-                           executable=self.executable, cli_version=invocation["cli_version"])
+                           executable=self.executable)
             write_json(session_path, session)
             session_started = True
             start_read, start_write = os.pipe()
 
             def record():
                 nonlocal known
-                known = list({identity_key(item): item for item in [*known, *owned_processes(identity, known, cwd=directory)]}.values())
+                known = list({identity_key(item): item for item in [*known, *owned_processes(identity, known)]}.values())
                 value = {"identity": identity, "descendants": known, "launch_id": launch["launch_id"]}
                 write_json(directory / "process.json", value)
                 on_process(value)
-
-            def drain(pipe, name):
-                try:
-                    with (directory / name).open("wb") as output, pipe:
-                        shutil.copyfileobj(pipe, output)
-                        output.flush()
-                        os.fsync(output.fileno())
-                except Exception as exc:
-                    pipe_errors.append(type(exc).__name__)
 
             try:
                 wrapper = [sys.executable, "-B", str(Path(processes.__file__).resolve()), "--launch-gate",
                            str(start_read), str(directory / "launch.json"), launch["launch_id"], launch["attempt_id"],
                            launch["attempt_sha256"], str(cwd), *command]
-                with prompt_path.open("rb") as stdin:
+                with prompt_path.open("rb") as stdin, (directory / "events.jsonl").open("wb") as stdout, (directory / "stderr.txt").open("wb") as stderr:
                     process = subprocess.Popen(wrapper, cwd=directory, env=environment, stdin=stdin,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, close_fds=True,
-                              pass_fds=(start_read,), bufsize=0)
+                              stdout=stdout, stderr=stderr, start_new_session=True, close_fds=True,
+                              pass_fds=(start_read,))
                 termination = {"confirmed": False, "actions": [], "survivors": [], "reason": "process_started"}
-                for pipe, name in ((process.stdout, "events.jsonl"), (process.stderr, "stderr.txt")):
-                    thread = threading.Thread(target=drain, args=(pipe, name), daemon=True)
-                    thread.start()
-                    threads.append(thread)
-                identity = process_table(cwd=directory).get(process.pid)
+                identity = process_identity(process.pid)
                 if identity is None:
                     raise OSError("cannot establish gated invocation identity")
                 record()
                 if cancel_event is not None and cancel_event.is_set():
-                    raise InterruptedError("cancel requested before invocation release")
-                if time.monotonic() - started >= timeout:
-                    outcome = "timeout"
-                else:
-                    write_json(directory / "launch.json", {**launch, "status": "released", "identity": identity,
-                                                           "released_at": time.time()})
-                    release_attempted = True
-                    os.write(start_write, b"1")
+                    raise InterruptedError("cancel requested before invocation setup")
+                write_json(directory / "launch.json", {**launch, "status": "setup", "identity": identity,
+                                                       "setup_at": time.time()})
+                os.write(start_write, b"S")
+                setup_started = True
                 next_scan = 0
-                while outcome == "completed" and not child_exited(process):
-                    if (directory / "cli-exit.json").exists():
-                        cli_exit = read_json(directory / "cli-exit.json")
-                        if any(cli_exit.get(key) != launch[key] for key in ("protocol", "launch_id", "attempt_id", "attempt_sha256")):
-                            raise ExtractError("CLI exit differs from the registered launch gate")
-                        break  # Main CLI exited; reap/terminate any remaining descendants below.
+                while not child_exited(process):
                     if cancel_event is not None and cancel_event.is_set():
                         outcome = "cancelled"
                         break
-                    if time.monotonic() - started >= timeout:
-                        outcome = "timeout"
-                        break
+                    if not release_attempted:
+                        version_path = temporary / "version.json"
+                        if version_path.exists():
+                            version = read_json(version_path)
+                            if any(version.get(key) != launch[key] for key in ("protocol", "launch_id", "attempt_id", "attempt_sha256")):
+                                raise ExtractError("CLI version result differs from the registered launch gate")
+                            if version.get("exit_code") != 0 or not isinstance(version.get("cli_version"), str) or not version["cli_version"]:
+                                raise ExtractError("CLI version query failed")
+                            invocation["cli_version"] = version["cli_version"]
+                            if attempt.get("cli_version") not in {None, invocation["cli_version"]}:
+                                raise ExtractError("CLI version differs from the registered attempt")
+                            if session.get("cli_version") not in {None, invocation["cli_version"]}:
+                                raise ExtractError("role CLI version changed")
+                            session["cli_version"] = invocation["cli_version"]
+                            write_json(session_path, session)
+                            write_json(directory / "invocation.json", invocation)
+                            if cancel_event is not None and cancel_event.is_set():
+                                raise InterruptedError("cancel requested before invocation release")
+                            write_json(directory / "launch.json", {**launch, "status": "released", "identity": identity,
+                                                                   "released_at": time.time()})
+                            release_attempted = True
+                            os.write(start_write, b"1")
+                    elif (directory / "cli-exit.json").exists():
+                        cli_exit = read_json(directory / "cli-exit.json")
+                        if any(cli_exit.get(key) != launch[key] for key in ("protocol", "launch_id", "attempt_id", "attempt_sha256")):
+                            raise ExtractError("CLI exit differs from the registered launch gate")
+                        if cli_exit.get("descendants_reaped") is False:
+                            native_exited = True
+                            break
                     if time.monotonic() >= next_scan:
-                        record()
+                        try:
+                            record()
+                        except (OSError, ValueError) as exc:
+                            invocation["process_observation_error"] = str(exc)
+                            write_json(directory / "invocation.json", invocation)
                         next_scan = time.monotonic() + 0.5
                     time.sleep(0.05)
             finally:
                 os.close(start_read)
                 os.close(start_write)
-                if not release_attempted:
+                if not setup_started:
                     mark_not_started(directory / "launch.json", launch, "parent_aborted" if process else "spawn_failed")
                 if process is not None:
+                    cancelled = outcome == "cancelled" or cancel_event is not None and cancel_event.is_set()
                     try:
-                        termination = terminate_owned(identity or {"pid": process.pid, "started": "unobserved"}, known, cwd=directory)
-                    except (OSError, subprocess.SubprocessError) as exc:
-                        termination = {"confirmed": False, "actions": [], "survivors": [], "reason": type(exc).__name__}
-                    try:
-                        exit_code = process.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        termination["confirmed"] = False
+                        if identity is None:
+                            termination = {"confirmed": False, "actions": [], "survivors": [],
+                                           "reason": "gated invocation identity unavailable"}
+                        elif cancelled or native_exited:
+                            termination = terminate_owned(identity, known)
+                        else:
+                            termination = observe_owned(identity, known)
+                    except OSError as exc:
+                        termination = {"confirmed": False, "actions": [], "survivors": known, "reason": str(exc)}
+                    if child_exited(process):
+                        exit_code = process.poll()
                     if (termination["confirmed"] and release_attempted and not processes.gate_reaped(attempt) and
                             not processes.launch_not_started(attempt)):
                         termination.update(confirmed=False, reason="invocation anchor exited without confirmed descendant closure")
-                    if not release_attempted and exit_code is not None:
+                    if not setup_started and exit_code is not None:
                         termination.update(confirmed=True, survivors=[], reason="gate never released; wrapper reaped")
-                for thread in threads:
-                    thread.join(timeout=3)
-                if any(thread.is_alive() for thread in threads):
-                    termination["confirmed"] = False
-                if process is not None:
                     write_json(directory / "exit.json", {"exit_code": exit_code, "termination": termination,
                                "launch_id": launch["launch_id"], "attempt_sha256": digest(attempt)})
         except InterruptedError as exc:
@@ -411,9 +414,7 @@ class AgentCLI:
             except (OSError, ValueError) as exc:
                 outcome = "cli_error"
                 invocation["error"] = str(exc)
-        if pipe_errors:
-            outcome = "cli_error"
-            invocation["log_error"] = pipe_errors
+        invocation["terminal_outcome"] = outcome
         write_json(directory / "invocation.json", invocation)
         result = read_result(attempt, exit_code=exit_code, termination=termination, outcome=outcome)
         result.update(elapsed_seconds=time.monotonic() - started, completed_at=time.time(),
@@ -433,7 +434,7 @@ class AgentCLI:
         result.update(elapsed_seconds=time.monotonic() - started, completed_at=time.time())
         if session_started:
             _settle_session(session, result, not_started=processes.launch_not_started(attempt))
-        result["session_status"] = session["status"]
+        result["session_status"] = session["status"] if session_started else "not_started"
         write_json(directory / "result.json", result)
         if session_started:
             write_json(session_path, session)

@@ -40,7 +40,7 @@ P6 先独立理解最终成果，再按必要 P2/P4/P5 回执和短交接反查�
 模型只返回本次动态 schema 的 `schema_extract.proposal.v1`，含精确 `attempt_id` nonce。Runner 从实际 bytes 生成完整 receipt 的身份、摘要与差异。
 
 - `decision`、`summary`、`conclusions` 表达本次判断；正常 worker 可 complete/continue/blocked，reviewer 可 approve/revise/blocked，适用阶段可 reopen。
-- `source_evidence` 选择真实阅读的相对 path、category、行范围、quote_offset 和 note；每段最多 12 行。`artifact_evidence` 锚定本次实际审阅或提交的 raw（普通调用为 `workspace`，裁决 `select` 为所选候选 `materials/candidates/<checkpoint>`），不能用展开视图或规范化预览的位置。
+- `source_evidence` 选择真实阅读的相对 path、category、行范围、quote_offset 和 note。`artifact_evidence` 锚定本次实际审阅或提交的 raw（普通调用为 `workspace`，裁决 `select` 为所选候选 `materials/candidates/<checkpoint>`），不能用展开视图或规范化预览的位置。
 - conclusions/issues/framework_candidates 的 evidence 索引本次 source_evidence；当前文档的四项判断可由 artifact_evidence 支持，纯文档退修/阻塞使用相应 kind 与文件锚点，具体编码见[提交与证据](../prompt/operations/response.md)。reviewer 仍独立核查实际源码。
 - P1 comparisons 绑定逐输出验收；P2/P4 普通或维护 reviewer 独立认可后，approve 的 plan 保留 plan_draft；P6 revision_scope 限目录及明确非 root 字段，affected_nodes 登记受影响者并在批准时覆盖 pending_rechecks。
 - checks 只记亲自执行的命令及退出码；未执行时为空并说明。handoff 简短记录已定事项、必要依据、新事实去处与缺项。
@@ -77,9 +77,9 @@ P2 选择、P4 等待与 P5 实际来源分别保存。wait_for 只约束本实�
 
 普通记录由 P3 交 P4、P5 交 P6 汇集；当前节点本地化或换用已审整区沿 P5 全文审阅。已定代表的登记/等待改变回 P4，具体事实表明机制或取舍错误回 P2，共享 Contract 错误回 P1。provider 定义错误回实际定义的 P3/P5，consumer 绑定不适用由 consumer 修正。已有固定源码的具体误读同样可以返回。
 
-稳定 issue、证据、原预算、草稿与未受影响批准保留。真实任务或固定来源改变另建运行。返回和恢复不重授已用额度。
+稳定 issue、证据、已用次数、草稿与未受影响批准保留。真实任务或固定来源改变另建运行。返回和恢复不重授已用次数。
 
-普通退修达到有界裁决条件时，现有 reviewer 选择 select/patch/blocked。patch 是唯一匹配 `{path, old, new}`；Runner 应用后走同一规范化、权限与严格检查，再由全新 reviewer 对最终 raw 和本阶段有效全文签收。签收只有 approve/blocked，原 scope 预留一次调用和时间，没有新裁决循环。
+普通退修达到有界裁决条件时，现有 reviewer 选择 select/patch/blocked。patch 是唯一匹配 `{path, old, new}`；Runner 应用后走同一规范化、权限与严格检查，再由全新 reviewer 对最终 raw 和本阶段有效全文签收。签收只有 approve/blocked，原 scope 预留一次调用，没有新裁决循环。
 
 select 只采用本次实际提供且已规范化的候选；版本、来源和必要调整在交给裁决前完成。直接选择所读候选后不再改字节。未签收的改稿不能解锁后续或发布。
 
@@ -87,9 +87,9 @@ select 只采用本次实际提供且已规范化的候选；版本、来源和�
 
 CLI 直接使用当前用户真实文件系统。Claude 的工具清单按角色裁剪，worker 的 Edit/Write 精确到授权文件，Bash 只许可固定 helper；Codex worker 用原生 workspace-write 加本次 workspace，reviewer 用 read-only。worker 可以用同目录临时文件完成原子编辑；最终采纳要求精确许可集合、普通直属文件和受保护内容不变。Extract 不提供宿主文件系统隔离保证。
 
-`agent.run(attempt, prompt, schema, timeout)` 返回真实 backend、退出/终止、原生完成、session、response、usage 和日志。成功同时要求退出 0、唯一明确成功终结、无调用错误、精确 session、有效 schema/nonce。Claude 读取 structured_output；Codex 核原生末条 agent_message 与 output-last-message。文本、截断事件或缺失结果不放行。
+`agent.run(attempt=..., prompt=..., schema=..., cancel_event=...)` 返回真实 backend、退出/终止、原生完成、session、response、usage 和日志。成功同时要求退出 0、唯一明确成功终结、无调用错误、精确 session、有效 schema/nonce。Claude 读取 structured_output；Codex 核原生末条 agent_message 与 output-last-message。文本、截断事件或缺失结果不放行。
 
-启动门先登记身份再放行，并作为本次调用的 child-subreaper 保持脱离后代的归属。CLI 主进程的实际退出单独登记；正常结束、取消或超时均由已有进程身份/父子/进程组检查确认后代结清。未确认终止保持 fence。恢复重用同一 parser 和真实 exit，确认中断后退休私有 session，以 checkpoint 和短交接新建；确证未启动保留前次会话。
+启动门先登记身份再放行，并作为本次调用的 child-subreaper 保持脱离后代的归属。CLI 主进程的实际退出单独登记；正常结束或取消均由 Linux `/proc` 的进程身份与归属检查确认后代结清。未确认终止保持 fence。恢复重用同一 parser 和真实 exit，确认中断后退休私有 session，以 checkpoint 和短交接新建；确证未启动保留前次会话。
 
 当前维护只处理未交付的固定 run，由已有 Supervisor ledger、单写者排空与发布屏障执行。任务指定已选 P1–P5 的 `review` 或 `patch` 及 `fields`（`patch` 必填非空；`review` 无默认上限，填 `[]` 仅做只读复核，非空时作为退修进入 `patch` 的范围上限）；完整稿先审，未完成稿继续正常写作。维护不换来源、规则或执行器，不代替正常阶段和 P6。
 
@@ -103,13 +103,13 @@ standalone 使用当前 Template 的完整目录校验与导出 API（不接收�
 
 ## usage、时间与证据封存
 
-用量按 attempt 去重，原始 provider 口径留在 result 和 ledger。requested/reported model/effort 分列；未知项保留 null。失败、取消、恢复和明确预算追加都保留已用账目。
+用量按 attempt 去重，原始 provider 口径留在 result 和 ledger。requested/reported model/effort 分列；未知项保留 null。失败、取消、恢复和追加调用次数均保留已用账目。
 
 Claude 的 `model_usage_since_last_result` 是原生本进程已报告增量；`usage` 仅主循环当前 turn，`modelUsage/total_cost_usd` 可随 resume 累计。没有增量时不把累计 session 值相加成调用总量。cache read/write 分列，不套 Codex 的缓存输入子集公式。
 
 Codex 原生 usage 与可选精确 UUID 的 native counter 观测分别保留。可证的根会话增量不自动代表全部模型调用，未观察到子会话也不记为零。CLI 报告成本不等于实际账单。
 
-墙钟、CLI、检查处理和等待时间分别记录；等待可与兄弟工作重叠。进程内 Template 检查在提交前结算实际耗时，超额候选不获批准；它不提供硬实时抢占。
+墙钟、CLI、检查处理和等待时间分别记录；等待可与兄弟工作重叠。耗时与 token 只作统计，Template 检查结果须在提交前核验。
 
 `audit --verify` 深验原生事件、exit、schema/nonce、原稿、最终 checkpoint 和来源证据。归档只收具体证据文件；Codex 额外收末条响应，私有认证及整个 CLI home 不进入包。包用于审计，不提供新的恢复或批准授权。
 

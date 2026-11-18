@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from schema_extract.tools import maintenance
 from schema_extract.tools.artifacts import load_yaml, resolve_workspace, write_yaml
-from schema_extract.tools.budget import call_budget, check_timeout, reserved_calls
+from schema_extract.tools.stages import call_exhaustion
 from schema_extract.tools.common import ExtractError, StaleResult, manifest, read_json, rules_root, write_json
 from schema_extract.tools.prompts import build_prompt
 from schema_extract.tools.receipts import proposal_schema
@@ -38,7 +38,7 @@ class CurrentReturnsTests(unittest.TestCase):
         def run_fixture():
             if attempt["mode"] == "normal" and attempt.get("purpose") != "maintenance":
                 return f.result(attempt)
-            result = f.backend.run(attempt=attempt, prompt="Fixture semantic response", schema={"type": "object"}, timeout=30)
+            result = f.backend.run(attempt=attempt, prompt="Fixture semantic response", schema={"type": "object"})
             if "reopen" not in proposal_schema(attempt)["properties"]:
                 result["response"].pop("reopen", None)
             if attempt.get("purpose") == "maintenance":
@@ -209,7 +209,7 @@ class CurrentReturnsTests(unittest.TestCase):
         self.assertEqual(current["last_approval"], previous["approval"])
         self.assertIsNone(current["approval"])
         self.assertEqual(current["generation"], previous["generation"] + 1)
-        for key in ("calls", "elapsed_seconds", "deadline", "adjudications", "signoffs", "revisions"):
+        for key in ("calls", "elapsed_seconds", "adjudications", "signoffs", "revisions"):
             self.assertEqual(current[key], previous[key])
         f.store.verify_approval_origin(f.state, previous["approval"])
         validation = read_json(Path(approval["directory"]) / "validated.json")
@@ -417,7 +417,7 @@ class CurrentReturnsTests(unittest.TestCase):
         self.assertEqual(f.state["stage"], "P4")
         self.assertEqual(f.state["nodes"]["provider"]["role"], "reviewer")
         self.assertEqual(f.state["nodes"]["provider"]["status"], "reviewing")
-        for key in ("calls", "adjudications", "signoffs", "started_at", "deadline"):
+        for key in ("calls", "adjudications", "signoffs", "started_at"):
             self.assertEqual(f.state["nodes"]["provider"]["stage"][key], counts[key])
         for node in current_approvals:
             self.assertEqual(f.state["nodes"][node]["approval"], current_approvals[node])
@@ -444,7 +444,7 @@ class CurrentReturnsTests(unittest.TestCase):
         f.step(stage="P1", role="worker")
         f.step(stage="P1", role="reviewer")
         attempt = f.prepare(stage="P2", role="worker")
-        self.assertEqual(reserved_calls({**f.state, "role": "worker"}), 3)
+        self.assertIsNone(call_exhaustion(f.state))
         f.accept(attempt)
         reviewer = f.prepare(stage="P2", role="reviewer")
         revised = self.result(reviewer, decision="revise", issues=[{"kind": "schema_conformance", "scope": "dispatch.md", "detail": "Clarify the representative reason", "evidence": [0], "recovery_condition": "Use one explicit scoped patch"}])
@@ -456,7 +456,7 @@ class CurrentReturnsTests(unittest.TestCase):
         attempt = f.prepare(stage="P2", role="reviewer")
         self.assertEqual(attempt["mode"], "adjudicate")
         self.assertTrue(attempt["adjudication_candidates"])
-        result = f.backend.run(attempt=attempt, prompt="", schema={"type": "object"}, timeout=30)
+        result = f.backend.run(attempt=attempt, prompt="", schema={"type": "object"})
         value = result["response"]
         value.pop("reopen", None)
         value.update(decision="approve", adjudication={"action": "patch", "checkpoint": attempt["base_checkpoint"],
@@ -477,7 +477,6 @@ class CurrentReturnsTests(unittest.TestCase):
         scope = f.state["stages"]["P2"]
         self.assertEqual((scope["adjudications"], scope["signoffs"]), (1, 1))
         self.assertEqual(scope["approval"]["attempt_id"], signoff["attempt_id"])
-        self.assertGreater(scope["signoff_reserved_seconds"], 0)
         f.store.verify_approval(f.state, scope["approval"])
 
     def test_unaffected_inflight_review_survives_selection_and_directory_changes(self):
@@ -536,7 +535,7 @@ class CurrentReturnsTests(unittest.TestCase):
     def test_p4_signoff_interruption_retires_session_without_new_decision_credit(self):
         from uuid import uuid4
         from schema_extract.tools.agent import _session
-        from schema_extract.tools.budget import extend
+        from schema_extract.tools.stages import add_calls
         from schema_extract.tools.runner import _resume_failed_scopes
         f = self.flow
         f.create(nodes=("root", "branch"))
@@ -571,19 +570,19 @@ class CurrentReturnsTests(unittest.TestCase):
         retired = read_json(Path(signoff["session_directory"]) / "session.json")
         self.assertEqual(retired["status"], "retired")
         self.assertIn(session_id, retired["retired_sessions"])
-        extend(f.state, {"seconds": 1000, "calls": 10}, identity="explicit-fixture-extension", origin="resume")
+        add_calls(f.state, 10, identity="explicit-fixture-extension", origin="resume")
         _resume_failed_scopes(f.state)
         self.assertEqual(f.state["stages"]["P4"]["status"], "blocked")
-        self.assertIsNotNone(call_budget(f.state)[1])
+        self.assertIsNotNone(call_exhaustion(f.state))
 
-    def test_checker_time_after_normalization_cannot_spend_reserved_review_time(self):
+    def test_large_checker_elapsed_preserves_success_and_independent_review(self):
         f = self.flow
         f.create()
         attempt = f.prepare(stage="P1", role="worker")
         result = self.result(attempt)
-        with patch("schema_extract.tools.runner._check_timeout", side_effect=[30.0, 30.0, 0.0]):
+        with patch("schema_extract.tools.runner.time.monotonic", side_effect=[0.0, 10**12]):
             f.accept(attempt, result)
-        self.assertEqual(f.state["status"], "budget_exhausted")
+        self.assertEqual((f.state["status"], f.state["role"]), ("running", "reviewer"))
         self.assertIsNone(f.state["stages"]["P1"]["approval"])
         self.assertEqual(f.state["stage"], "P1")
         self.assertIsNotNone(f.state["recoverable_checkpoint"])
@@ -628,7 +627,7 @@ class CurrentReturnsTests(unittest.TestCase):
         draft = f.state["checkpoint"]
         _, expected = f.store.verify_checkpoint(f.state, draft)
         plan = deepcopy(f.state["plan_draft"])
-        budget = deepcopy(f.state["stages"]["P2"])
+        scope_before = deepcopy(f.state["stages"]["P2"])
         maintenance.submit_request(f.store, f.state["run_id"], issue_id="review-completed-selection-draft", tasks=[
             {"stage": "P2", "node": "root", "action": "review", "fields": [],
              "reason": "Independently review the current completed selection draft"}])
@@ -640,8 +639,7 @@ class CurrentReturnsTests(unittest.TestCase):
         f.accept(review, self.result(review))
         self.assertEqual(f.state["selected_designs"], plan)
         self.assertEqual((f.state["stage"], f.state["role"]), ("P3", "worker"))
-        self.assertEqual(f.state["stages"]["P2"]["calls"], budget["calls"] + 1)
-        self.assertEqual(f.state["stages"]["P2"]["deadline"], budget["deadline"])
+        self.assertEqual(f.state["stages"]["P2"]["calls"], scope_before["calls"] + 1)
         self.assertEqual(f.store.verify_checkpoint(f.state, draft)[1]["files"], expected["files"])
 
     def test_maintenance_preserves_unfinished_upstream_draft(self):
@@ -658,14 +656,14 @@ class CurrentReturnsTests(unittest.TestCase):
             value["META_DATA"]["Version"] += 1
             write_yaml(directory / "root.yaml", value, parser_root=f.backend.rules)
         f.accept(writer, self.result(writer, decision="continue", write=partial))
-        draft, budget = f.state["checkpoint"], deepcopy(f.state["stages"]["P3"])
+        draft, scope_before = f.state["checkpoint"], deepcopy(f.state["stages"]["P3"])
         maintenance.submit_request(f.store, f.state["run_id"], issue_id="review-unfinished-root-draft", tasks=[
             {"stage": "P3", "node": "root", "action": "review", "fields": [],
              "reason": "Review the root only after its ordinary authoring completes"}])
         f.state = maintenance.consume_requests(f.store, f.state)
         f.state = maintenance.mark_drained(f.store, f.state)
         self.assertEqual(f.state["checkpoint"], draft)
-        self.assertEqual(f.state["stages"]["P3"], budget)
+        self.assertEqual(f.state["stages"]["P3"], scope_before)
         continuing = f.prepare(stage="P3", role="worker")
         self.assertNotIn("purpose", continuing)
         self.assertEqual(continuing["base_checkpoint"], draft)
@@ -679,7 +677,7 @@ class CurrentReturnsTests(unittest.TestCase):
             f.step(stage=stage, role="worker")
             f.step(stage=stage, role="reviewer")
         f.step(stage="P4", role="worker")
-        plan, budget = deepcopy(f.state["plan_draft"]), deepcopy(f.state["stages"]["P4"])
+        plan, scope_before = deepcopy(f.state["plan_draft"]), deepcopy(f.state["stages"]["P4"])
         maintenance.submit_request(f.store, f.state["run_id"], issue_id="review-selection-before-writing-review", tasks=[
             {"stage": "P2", "node": "root", "action": "review", "fields": [],
              "reason": "Recheck selection while retaining the pending writing-plan candidate"}])
@@ -689,7 +687,7 @@ class CurrentReturnsTests(unittest.TestCase):
         f.accept(review, self.result(review))
         self.assertEqual((f.state["stage"], f.state["role"]), ("P4", "reviewer"))
         self.assertEqual(f.state["plan_draft"], plan)
-        self.assertEqual(f.state["stages"]["P4"], budget)
+        self.assertEqual(f.state["stages"]["P4"], scope_before)
         f.step(stage="P4", role="reviewer")
         self.assertEqual(f.state["writing_plan"], plan)
 

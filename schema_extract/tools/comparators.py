@@ -41,14 +41,16 @@ def declarations(lock: dict) -> list[dict]:
     result = {}
     for binding in lock["source"]["bindings"]["acceptance"]:
         path = binding["path"]
-        text = regular_file(source_root(lock), path).read_text(encoding="utf-8")
-        if not RELATIVE_TO.search(text):
+        # Code and prose remain evidence for independent review. A JSON-like
+        # member in those materials does not declare the whole file as JSON.
+        if Path(path).suffix.lower() != ".json":
             continue
+        text = regular_file(source_root(lock), path).read_text(encoding="utf-8")
         decoder = json.JSONDecoder(parse_float=Decimal)
         try:
             document = json.loads(text, parse_float=Decimal)
         except ValueError as exc:
-            raise ExtractError(f"explicit relative_to declarations require readable acceptance JSON: {path}") from exc
+            raise ExtractError(f"invalid acceptance JSON: {path}") from exc
         fields = iter(re.finditer(r'"tolerance"\s*:\s*(?=\{)', text))
         newlines = [match.start() for match in re.finditer("\n", text)]
         for name, rule in _rules(document):

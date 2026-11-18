@@ -11,8 +11,8 @@ from uuid import UUID
 
 from .audit import parse_events, usage_summary
 from .common import ExtractError, digest, read_json, write_json
-from .processes import GATE_PROTOCOL, gate_reaped, launch_not_started, process_alive, process_table, terminate_owned
-from .stages import NODE_STOPS, call_view, node_signature, owner_for, scope_for, scope_key
+from .processes import GATE_PROTOCOL, gate_reaped, launch_not_started, process_alive, process_table, observe_owned, terminate_owned
+from .stages import NODE_STOPS, call_exhaustion, call_view, node_signature, owner_for, scope_for, scope_key
 
 
 HARD_RECOVERY_STOPS = {"external_confirmation", "adjudication_already_used", "interrupted_single_decision",
@@ -61,6 +61,10 @@ def _exit(attempt):
     if (value.get("attempt_sha256") != digest(attempt) or value.get("launch_id") != launch["launch_id"] or
             (value.get("exit_code") is not None and type(value["exit_code"]) is not int)):
         raise ExtractError("exit record differs from its registered invocation")
+    if value.get("exit_source") == "cli-exit.json":
+        native = native_exit(attempt)
+        if native is None or native.get("descendants_reaped") is not True or value["exit_code"] != native["exit_code"]:
+            raise ExtractError("settled exit differs from the native gate record")
     return value
 
 
@@ -99,14 +103,13 @@ def verified_result(attempt: dict, result: dict, termination: dict) -> dict:
     outcome = result.get("outcome")
     if not isinstance(outcome, str) or not outcome:
         raise ExtractError("saved result has no explicit outcome")
-    # Once the original terminal intent is unknown, later death cannot prove
-    # success or undo a possible timeout/cancellation.
+    # Unknown terminal intent cannot establish native success.
     if outcome == "termination_unconfirmed":
         outcome = "interrupted"
     recovered = read_result(attempt, exit_code=exit_code, termination=termination, outcome=outcome)
     if recovered["termination"].get("confirmed") is not True:
         raise ExtractError("recovery lacks confirmed descendant closure")
-    for field in ("run_id", "attempt_id", "backend", "model", "effort", "session_scope", "session_directory",
+    for field in ("run_id", "attempt_id", "backend", "model", "effort", "configuration_digest", "session_scope", "session_directory",
                   "executable", "cli_version", "launch_id", "attempt_sha256", "response_schema_digest", "prompt_sha256",
                   "cwd", "workspace", "cwd_before", "cwd_after"):
         if result.get(field) != recovered.get(field):
@@ -135,7 +138,10 @@ def _closed_ownership(attempt):
 def termination_observed(attempt: dict, result: dict | None, *, table=None, launch_state=None) -> bool:
     """Read-only exit evidence; never stop a live scope or treat silence as exit."""
     directory = Path(attempt["directory"])
-    table = process_table(cwd=directory) if table is None else table
+    try:
+        table = process_table() if table is None else table
+    except OSError:
+        return False
     process_path = directory / "process.json"
     if process_path.exists():
         try:
@@ -163,9 +169,8 @@ def termination_observed(attempt: dict, result: dict | None, *, table=None, laun
                 ("invocation.json", "launch.json", "process.json", "events.jsonl", "exit.json", "cli-exit.json", "result.json")) and result is None)
 
 
-def scoped_restart_evidence(store, state: dict, scope: str, *, table=None, automatic=True) -> dict:
+def scoped_restart_evidence(store, state: dict, scope: str, *, table=None) -> dict:
     """Bind one failed scope; sibling progress is not a change of authority."""
-    from .runner import _budget
     from .runtime import verify_execution
     verify_execution(store, state)
     if "scoped_recovery.v2" not in state.get("executor", {}).get("capabilities", []):
@@ -178,22 +183,18 @@ def scoped_restart_evidence(store, state: dict, scope: str, *, table=None, autom
             (stage == "P5" and node not in {item["id"] for item in state.get("selected_designs") or []})):
         raise ExtractError("retry scope is no longer current")
     call = {"stage": stage, "node": node, "role": None, "mode": "normal"}
-    owner, budget = owner_for(state, call), scope_for(state, call)
+    owner, scope_state = owner_for(state, call), scope_for(state, call)
     reason = owner.get("reason") or {}
     if (owner.get("mode", "normal") != "normal" or owner["status"] not in NODE_STOPS - {"blocked"} or
             reason.get("code") in HARD_RECOVERY_STOPS or
             any(item.endswith(":single_decision_used") for item in reason.get("scopes", []))):
         raise ExtractError("scope is not an ordinary recoverable failure")
-    if automatic and (reason.get("classification") != "transient_execution" or
-                      reason.get("code") != "cli_retry" or reason.get("scope") != scope or
-                      budget["cli_failures"] > state["config"]["retry_limit"]):
-        raise ExtractError("scope has no explicit transient failure within its original retry limit")
     call["role"] = owner["role"]
-    _, exhausted = _budget(call_view(state, call))
+    exhausted = call_exhaustion(call_view(state, call))
     if exhausted:
         raise ExtractError(exhausted)
     attempt_id = reason.get("attempt_id") or state.get("active_attempts", {}).get(scope)
-    if not attempt_id and not automatic:
+    if not attempt_id:
         usage = state.get("attempt_usage", {})
         attempt_id = next((key for key in reversed(state.get("attempts", []))
                            if usage.get(key, {}).get("stage") == stage and usage.get(key, {}).get("node") == node), None)
@@ -204,24 +205,16 @@ def scoped_restart_evidence(store, state: dict, scope: str, *, table=None, autom
     result = read_json(directory / "result.json") if (directory / "result.json").is_file() else None
     verify_execution(store, state, attempt=attempt)
     if (attempt["attempt_id"] != attempt_id or scope_key(attempt["stage"], attempt["node"]) != scope or
-            attempt["generation"] != (owner["generation"] if stage == "P5" else budget["generation"]) or
+            attempt["generation"] != (owner["generation"] if stage == "P5" else scope_state["generation"]) or
             attempt["mode"] != "normal" or attempt["role"] != owner["role"]):
         raise ExtractError("retry no longer matches its failed attempt identity")
     active = state.get("active_attempts", {}).get(scope)
     pending = attempt_id in {*state.get("unconfirmed_attempts", {}), *state.get("unsettled_attempts", {})}
     if active not in {None, attempt_id} or (active and attempt_id not in state.get("unconfirmed_attempts", {})):
         raise ExtractError("target scope still owns an invocation being processed")
-    if automatic and (pending or active or not result or digest(result) != reason.get("result_sha256") or
-                      retry_classification("cli_retry", result) != "transient_execution" or
-                      not result.get("termination", {}).get("confirmed")):
-        raise ExtractError("automatic retry requires a confirmed, settled transient failure")
     if not termination_observed(attempt, result, table=table,
                                 launch_state=state.get("unsettled_attempts", {}).get(attempt_id)):
         raise ExtractError("target failure process or descendant is live or unknown")
-    if automatic:
-        observed = verified_result(attempt, result, result["termination"])
-        if retry_classification("cli_retry", observed) != "transient_execution":
-            raise ExtractError("native recovery evidence does not confirm a transient execution failure")
     dependencies, sources = {}, {}
     if stage == "P5":
         entry = next(item for item in state["selected_designs"] if item["id"] == node)
@@ -247,7 +240,69 @@ def scoped_restart_evidence(store, state: dict, scope: str, *, table=None, autom
             "failure_observed_at": reason.get("observed_at") or (result or {}).get("completed_at")}
 
 
-def confirm_termination(attempt: dict, result: dict | None, *, launch_state=None) -> dict:
+def native_exit(attempt: dict) -> dict | None:
+    path = Path(attempt["directory"]) / "cli-exit.json"
+    if not path.is_file():
+        return None
+    launch, value = _launch(attempt), read_json(path)
+    if (any(value.get(key) != launch.get(key) for key in
+            ("protocol", "attempt_id", "attempt_sha256", "launch_id")) or
+            type(value.get("exit_code")) is not int):
+        raise ExtractError("native exit differs from its registered invocation")
+    return value
+
+
+def attempt_cancelled(state: dict, attempt: dict) -> bool:
+    return any(request.get("action") == "cancel" and
+               request.get("created_at", request.get("at", 0)) >= attempt["created_at"]
+               for request in state.get("control", {}).get("requests", {}).values())
+
+
+def complete_pending_result(state: dict, attempt: dict, result: dict | None, termination: dict) -> dict | None:
+    """Close provisional evidence from the real gate; finalized calls stay immutable."""
+    from .agent import read_result, settle_session
+    usage = state.get("attempt_usage", {}).get(attempt["attempt_id"], {})
+    if usage.get("settled") is True or attempt["attempt_id"] in state.get("accepted_receipts", {}):
+        return result
+    if not termination.get("confirmed") or not gate_reaped(attempt) or not termination_observed(attempt, result):
+        return result
+    evidence = usage.get("evidence", {})
+    previous = evidence.get("result.json")
+    if result and result.get("termination", {}).get("confirmed") is True:
+        if previous in {None, digest(result)}:
+            return result
+        exited = _exit(attempt)
+        if (exited.get("exit_source") != "cli-exit.json" or exited.get("previous_result_sha256") != previous or
+                exited.get("settled_result_sha256") != digest(result)):
+            raise ExtractError("settled result lacks its recorded provisional transition")
+        recovered = verified_result(attempt, result, termination)
+    else:
+        if result and previous not in {None, digest(result)}:
+            raise ExtractError("provisional result differs from its recorded evidence")
+        invocation, exited = _invocation(attempt), native_exit(attempt)
+        if result and (result.get("attempt_sha256") != digest(attempt) or result.get("launch_id") != invocation["launch_id"]):
+            raise ExtractError("provisional result does not bind the current invocation")
+        outcome = "cancelled" if attempt_cancelled(state, attempt) else invocation.get("terminal_outcome", "interrupted")
+        if outcome not in {"completed", "receipt_error", "cli_error", "cancelled", "session_mismatch"}:
+            outcome = "interrupted"
+        recovered = {**(result or {}), **read_result(attempt, exit_code=exited["exit_code"], termination=termination, outcome=outcome)}
+        recovered.update(elapsed_seconds=max((result or {}).get("elapsed_seconds", 0),
+                                            time.time() - invocation["started_at"]), completed_at=time.time(),
+                         timing_source="recovered elapsed through confirmed gate closure")
+        recovered["session_status"] = settle_session(attempt, result=recovered)["status"]
+        directory = Path(attempt["directory"])
+        write_json(directory / "exit.json", {"exit_code": exited["exit_code"], "exit_source": "cli-exit.json",
+                   "termination": termination, "launch_id": invocation["launch_id"], "attempt_sha256": digest(attempt),
+                   "previous_result_sha256": digest(result) if result else None, "settled_result_sha256": digest(recovered)})
+        write_json(directory / "result.json", recovered)
+    if usage:
+        evidence["result.json"] = digest(recovered)
+        for key in ("outcome", "session_status", "session_id", "completed_at", "trace", "recorded_usage", "usage"):
+            usage.pop(key, None)
+    return recovered
+
+
+def confirm_termination(attempt: dict, result: dict | None, *, launch_state=None, cancel=False) -> dict:
     """Missing ownership after launch is an explicit fence, never proof of exit."""
     directory = Path(attempt["directory"])
     try:
@@ -257,9 +312,12 @@ def confirm_termination(attempt: dict, result: dict | None, *, launch_state=None
                 raise ExtractError("process identity does not belong to this invocation launch")
             identity, known = process["identity"], process.get("descendants", [])
             if (type(identity.get("pid")) is not int or identity["pid"] <= 1 or
-                    identity["pid"] == os.getpid() or not isinstance(identity.get("started"), str)):
+                    identity["pid"] == os.getpid() or not isinstance(identity.get("start_token"), str)):
                 raise ExtractError("invalid invocation process identity")
-            confirmation = terminate_owned(identity, known, cwd=directory)
+            confirmation = (terminate_owned(identity, known) if cancel or native_exit(attempt) is not None
+                            else observe_owned(identity, known))
+            if confirmation.get("descendants") != known:
+                write_json(directory / "process.json", {**process, "descendants": confirmation.get("descendants", known)})
             if confirmation["confirmed"] and not _closed_ownership(attempt):
                 confirmation.update(confirmed=False, reason="invocation anchor exited without confirmed descendant closure")
         elif launch_not_started(attempt):
@@ -306,8 +364,7 @@ def account(state: dict, attempt: dict, elapsed: float, *, result=None, processi
     timing = entry.setdefault("timing", {"cli_seconds": None, "processing_seconds": None,
                                          "processing_estimated_seconds": None})
     if result is not None:
-        # Preserve the first persistent result binding. Reconciliation may add
-        # an in-memory termination confirmation; it does not rewrite that file.
+        # Provisional evidence may be completed before final settlement.
         evidence.setdefault("result.json", digest(result))
         if result.get("usage") is not None and "recorded_usage" not in entry:
             entry["usage"] = usage_summary(result["usage"])
@@ -342,10 +399,14 @@ def account(state: dict, attempt: dict, elapsed: float, *, result=None, processi
                                                      processing.get("estimated_seconds", 0))
         timing["processing_status"] = "partial" if processing.get("started_at") is not None else "conservative" if timing["processing_estimated_seconds"] else "reported"
     if final:
+        pending = {*state.get("active_attempts", {}).values(), *state.get("unconfirmed_attempts", {}),
+                   *state.get("unsettled_attempts", {})}
+        entry["settled"] = attempt["attempt_id"] not in pending
+        if not entry["settled"]:
+            return
         directory = Path(attempt["directory"])
-        # Only bounded, named records at this call's close; never historical
-        # directory walks or a second events.jsonl pass.
-        for name in ("invocation.json", "response.schema.json", "response.json", "exit.json", "cli-exit.json",
+        # Record only named evidence at this call's close.
+        for name in ("invocation.json", "response.schema.json", "response.json", "exit.json", "cli-exit.json", "cli-tmp/version.json",
                      "launch.json", "process.json", "termination.json", "receipt.json", "validated.json",
                      "check.json", "merge_check.json", "event.json",
                      "repair.json", "recovery.json", "rejected.json", "stale.json", "handoff.json"):
@@ -378,7 +439,7 @@ def elapsed_on_disk(attempt: dict, result: dict | None) -> float:
         elapsed = max(0.0, time.time() - attempt["created_at"])
     process = read_json(directory / "processing.json") if (directory / "processing.json").is_file() else {}
     # A crash during checking has no final timer sample. Charge its last open
-    # interval conservatively; the original wall-clock deadline also stays fixed.
+    # interval conservatively without changing invocation eligibility.
     elapsed += process.get("elapsed_seconds", 0.0)
     if process.get("started_at") is not None:
         elapsed += max(0.0, time.time() - process["started_at"])

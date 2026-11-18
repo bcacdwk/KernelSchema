@@ -99,7 +99,7 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
         verify_manifest(artifacts, checkpoint["files"])
         if store.load(state["run_id"]) != state:
             raise ExtractError("Runner state changed before publication")
-        with store.supervisor() as ledger:
+        with store.control_transaction() as ledger:
             if store.load(state["run_id"]) != state:
                 raise ExtractError("Runner context changed before the publication rename")
             if publication_barrier(store, state, ledger):

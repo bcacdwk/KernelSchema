@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import json
+import itertools
 import os
 from pathlib import Path
 import sys
@@ -15,7 +16,9 @@ from uuid import uuid4
 from schema_extract.tools.agent import AgentCLI, read_result, retire_session, settle_session
 from schema_extract.tools.backends import ClaudeBackend, CodexBackend
 from schema_extract.tools.common import ExtractError, read_json, write_json
-from schema_extract.tools.processes import process_alive, process_table
+from schema_extract.tools.processes import (gate_reaped, launch_not_started, observe_owned,
+                                           process_alive, process_identity, process_table, terminate_owned)
+from schema_extract.tools.recovery import confirm_termination, never_launched, recover_result, termination_observed
 
 
 FAKE = r'''
@@ -23,6 +26,9 @@ import json, os, subprocess, sys, time
 from pathlib import Path
 from uuid import uuid4
 if '--version' in sys.argv:
+    if (Path(__file__).parent / 'hang-version').exists():
+        (Path(os.environ['TMPDIR']) / 'version-pid').write_text(str(os.getpid()))
+        while True: time.sleep(1)
     print('extract-offline-cli 1')
     raise SystemExit()
 p = json.load(sys.stdin)
@@ -59,6 +65,9 @@ if p['role'] == 'worker':
     temporary.write_text('atomically changed')
     os.replace(temporary, target)
     checks['atomic_edit'] = target.read_text() == 'atomically changed'
+if p.get('action') == 'wait_for_release':
+    signal = Path(os.environ['TMPDIR']) / 'release-model'
+    while not signal.exists(): time.sleep(0.02)
 if p.get('action') == 'cwd_write':
     Path('unexpected').write_text('bad')
 helper = subprocess.run([p['check_command']],capture_output=True,text=True)
@@ -123,12 +132,43 @@ class BackendRuntimeTests(unittest.TestCase):
         write_json(directory / "attempt.json", result)
         return result
 
-    def invoke(self, attempt, *, action="normal", cancel=None, on_process=lambda _: None, timeout=15):
+    def invoke(self, attempt, *, action="normal", cancel=None, on_process=lambda _: None):
         prompt = json.dumps({"attempt_id": attempt["attempt_id"], "host": str(self.host), "parent_pid": os.getpid(),
                              "sticky": attempt["attempt_id"], "action": action, "workspace": attempt["workspace"],
                              "role": attempt["role"], "source": str(self.source / "frozen.txt"), "check_command": attempt["check_command"]})
         return AgentCLI(backend=attempt["backend"], executable=str(self.fake), model=attempt["model"]).run(
-            attempt=attempt, prompt=prompt, schema=self.schema, timeout=timeout, cancel_event=cancel, on_process=on_process)
+            attempt=attempt, prompt=prompt, schema=self.schema, cancel_event=cancel, on_process=on_process)
+
+    def wait_closed(self, attempt, result, outcome):
+        process = read_json(Path(attempt["directory"]) / "process.json")
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            termination = observe_owned(process["identity"], process["descendants"])
+            if termination["confirmed"] and (gate_reaped(attempt) or launch_not_started(attempt)):
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("synthetic invocation did not close")
+        try:
+            _, status = os.waitpid(process["identity"]["pid"], os.WNOHANG)
+            exit_code = os.waitstatus_to_exitcode(status)
+        except ChildProcessError:
+            exit_code = (read_json(Path(attempt["directory"]) / "cli-exit.json")["exit_code"]
+                         if gate_reaped(attempt) else result["exit_code"])
+        settled = read_result(attempt, exit_code=exit_code, termination=termination, outcome=outcome)
+        settled["session_status"] = settle_session(attempt, result=settled)["status"]
+        return settled
+
+    def cancel_on_file(self, path, cancel):
+        def trigger():
+            deadline = time.monotonic() + 8
+            while not path.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            cancel.set()
+        thread = threading.Thread(target=trigger)
+        thread.start()
+        self.addCleanup(thread.join, 9)
+        return thread
 
     def test_real_cwd_atomic_workspace_and_exact_resume_for_both_backends_and_roles(self):
         for backend in ("claude", "codex"):
@@ -165,6 +205,32 @@ class BackendRuntimeTests(unittest.TestCase):
         self.assertEqual(result["session_status"], "retired")
         following = self.attempt()
         self.assertEqual(self.invoke(following)["outcome"], "cli_error")
+
+    def test_session_preflight_failure_is_bound_unstarted_evidence(self):
+        first = self.attempt()
+        completed = self.invoke(first)
+        session_path = Path(first["session_directory"]) / "session.json"
+        original = session_path.read_bytes()
+        attempt = self.attempt()  # Same scope, but missing the exact completed UUID.
+        result = self.invoke(attempt)
+        self.assertEqual(result["outcome"], "cli_error")
+        self.assertIn("exact registered role session UUID", result["error"])
+        self.assertEqual(result["session_status"], "not_started")
+        self.assertIsNone(result["exit_code"])
+        self.assertTrue(never_launched(attempt, result))
+        self.assertTrue(termination_observed(attempt, result))
+        termination = confirm_termination(attempt, result)
+        self.assertTrue(termination["confirmed"])
+        self.assertEqual(recover_result(attempt, result, termination)["session_status"], "not_started")
+        self.assertEqual(session_path.read_bytes(), original)
+        for name in ("launch.json", "process.json", "exit.json", "cli-exit.json", "events.jsonl"):
+            self.assertFalse((Path(attempt["directory"]) / name).exists(), name)
+        resumed = self.invoke(self.attempt(session_id=completed["session_id"]))
+        self.assertEqual(resumed["outcome"], "completed")
+        self.assertEqual(resumed["session_id"], completed["session_id"])
+        unknown = self.attempt(stage="P2")
+        self.assertFalse(confirm_termination(unknown, None, launch_state="dispatched")["confirmed"])
+        self.assertFalse(termination_observed(unknown, None, launch_state="dispatched"))
 
     def test_codex_native_output_is_distinct_and_bound_to_last_message(self):
         attempt = self.attempt(backend="codex", role="reviewer")
@@ -207,25 +273,21 @@ class BackendRuntimeTests(unittest.TestCase):
         for outcome in ("completed", "receipt_error"):
             self.assertEqual(read_result(attempt, exit_code=1, termination={"confirmed": True}, outcome=outcome)["outcome"], "cli_error")
             self.assertEqual(read_result(attempt, exit_code=0, termination={"confirmed": False}, outcome=outcome)["outcome"], "termination_unconfirmed")
-        for outcome in ("timeout", "cancelled", "termination_unconfirmed"):
+        for outcome in ("cancelled", "termination_unconfirmed"):
             self.assertEqual(read_result(attempt, exit_code=0, termination={"confirmed": True}, outcome=outcome)["outcome"], outcome)
 
     def test_cancel_kills_detached_descendants_before_retiring_session(self):
         attempt = self.attempt()
         cancel = threading.Event()
         heartbeat = Path(attempt["directory"]) / "cli-tmp/heartbeat"
-        def trigger():
-            deadline = time.monotonic() + 8
-            while not heartbeat.exists() and time.monotonic() < deadline:
-                time.sleep(0.02)
-            time.sleep(0.6)
-            cancel.set()
-        thread = threading.Thread(target=trigger)
-        thread.start()
+        self.cancel_on_file(heartbeat, cancel)
         result = self.invoke(attempt, action="daemon", cancel=cancel)
-        thread.join(timeout=1)
+        self.assertIn(result["outcome"], {"cancelled", "termination_unconfirmed"}, result)
+        self.assertTrue(all(item["signal"] == "SIGKILL" for item in result["termination"]["actions"]))
+        if not result["termination"]["confirmed"]:
+            self.assertEqual(result["session_status"], "fenced")
+        result = self.wait_closed(attempt, result, "cancelled")
         self.assertEqual(result["outcome"], "cancelled", result)
-        self.assertTrue(result["termination"]["confirmed"])
         self.assertTrue(heartbeat.exists())
         stamp = heartbeat.stat().st_mtime_ns
         time.sleep(0.15)
@@ -241,6 +303,7 @@ class BackendRuntimeTests(unittest.TestCase):
         attempt = self.attempt()
         cancel = threading.Event()
         result = self.invoke(attempt, cancel=cancel, on_process=lambda _: cancel.set())
+        result = self.wait_closed(attempt, result, "cancelled")
         self.assertEqual(result["outcome"], "cancelled")
         self.assertTrue(result["termination"]["confirmed"])
         self.assertEqual(read_json(Path(attempt["directory"]) / "launch.json")["status"], "not_started")
@@ -256,7 +319,8 @@ class BackendRuntimeTests(unittest.TestCase):
 
     def test_successful_cli_also_reaps_detached_descendants(self):
         attempt = self.attempt()
-        result = self.invoke(attempt, action="orphan", timeout=5)
+        result = self.invoke(attempt, action="orphan")
+        result = self.wait_closed(attempt, result, "completed")
         self.assertEqual(result["outcome"], "completed", result)
         self.assertTrue(result["termination"]["confirmed"])
         self.assertEqual(read_json(Path(attempt["directory"]) / "cli-exit.json")["exit_code"], 0)
@@ -266,36 +330,40 @@ class BackendRuntimeTests(unittest.TestCase):
 
     def test_cancel_ordinary_child(self):
         attempt = self.attempt()
-        result = self.invoke(attempt, action="child", timeout=0.8)
-        self.assertEqual(result["outcome"], "timeout", result)
+        cancel = threading.Event()
+        self.cancel_on_file(Path(attempt["directory"]) / "cli-tmp/heartbeat", cancel)
+        result = self.invoke(attempt, action="child", cancel=cancel)
+        result = self.wait_closed(attempt, result, "cancelled")
+        self.assertEqual(result["outcome"], "cancelled", result)
         self.assertTrue(result["termination"]["confirmed"])
 
-    def test_timeout_and_unconfirmed_termination_keep_the_session_fence(self):
+    def test_unconfirmed_termination_keeps_the_session_fence(self):
         attempt = self.attempt()
-        result = self.invoke(attempt, action="daemon", timeout=0.8)
-        self.assertEqual(result["outcome"], "timeout")
-        self.assertTrue(result["termination"]["confirmed"])
-        self.assertEqual(result["session_status"], "retired")
-        attempt = self.attempt()
-        with patch("schema_extract.tools.agent.terminate_owned", return_value={"confirmed": False, "actions": [], "survivors": []}):
+        with patch("schema_extract.tools.agent.observe_owned", return_value={"confirmed": False, "actions": [], "survivors": []}):
             result = self.invoke(attempt)
         self.assertEqual(result["outcome"], "termination_unconfirmed")
         self.assertEqual(result["session_status"], "fenced")
-        with self.assertRaisesRegex(ExtractError, "termination recovery"):
-            self.invoke(self.attempt())
+        session_path = Path(attempt["session_directory"]) / "session.json"
+        original = session_path.read_bytes()
+        following = self.attempt()
+        rejected = self.invoke(following)
+        self.assertTrue(never_launched(following, rejected))
+        self.assertIn("termination recovery", rejected["error"])
+        self.assertEqual(session_path.read_bytes(), original)
 
     def test_registered_scope_and_missing_backend_never_use_defaults(self):
         first = self.attempt()
         result = self.invoke(first)
         wrong = self.attempt(stage="P2", session_id=result["session_id"])
         wrong["session_directory"] = first["session_directory"]
-        with self.assertRaisesRegex(ExtractError, "scope differs"):
-            self.invoke(wrong)
+        rejected = self.invoke(wrong)
+        self.assertTrue(never_launched(wrong, rejected))
+        self.assertIn("scope differs", rejected["error"])
         missing = self.attempt()
         missing.pop("backend")
         with self.assertRaises(ExtractError):
             AgentCLI(backend="claude", executable=str(self.fake), model=missing["model"]).run(
-                attempt=missing, prompt="", schema=self.schema, timeout=5)
+                attempt=missing, prompt="", schema=self.schema)
 
     def test_controlled_commands_preserve_model_and_do_not_load_customizations(self):
         cli = ClaudeBackend()
@@ -336,6 +404,92 @@ class BackendRuntimeTests(unittest.TestCase):
         self.assertFalse(saved["features"]["hooks"])
         self.assertFalse(saved["features"]["multi_agent"])
         self.assertEqual(saved["project_doc_max_bytes"], 0)
+
+    def test_claude_default_output_is_fixed_and_environment_fingerprinted(self):
+        (self.auth / "settings.json").write_text(json.dumps({"env": {
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "4096", "MAX_THINKING_TOKENS": "1"}}))
+        home = self.root / "default-home"
+        home.mkdir()
+        backend = ClaudeBackend()
+        with patch.dict(os.environ, {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8192"}):
+            environment, fingerprint = backend.environment(home, "max")
+        self.assertEqual(environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "128000")
+        self.assertEqual(environment["CLAUDE_CODE_EFFORT_LEVEL"], "max")
+        self.assertNotIn("MAX_THINKING_TOKENS", environment)
+        self.assertNotIn("CLAUDE_CODE_MAX_OUTPUT_TOKENS", CodexBackend().environment(home, "xhigh")[0])
+        with patch.dict(os.environ, {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384"}):
+            self.assertEqual(backend.environment(home, "max")[1], fingerprint)
+        first = self.attempt()
+        result = self.invoke(first)
+        self.assertEqual(result["outcome"], "completed", result)
+        self.assertNotIn("max_output_tokens", result)
+        changed = self.attempt(session_id=result["session_id"])
+        with patch("schema_extract.tools.backends.CLAUDE_MAX_OUTPUT_TOKENS", 65536):
+            rejected = self.invoke(changed)
+        self.assertTrue(never_launched(changed, rejected))
+        self.assertIn("output configuration changed", rejected["error"])
+
+    def test_large_elapsed_time_is_only_an_accounting_value(self):
+        attempt = self.attempt()
+        with patch("schema_extract.tools.agent.time.monotonic", side_effect=itertools.count(0, 1000000)):
+            result = self.invoke(attempt)
+        self.assertEqual(result["outcome"], "completed", result)
+        self.assertGreater(result["elapsed_seconds"], 1000000)
+
+    def test_version_mismatch_stops_before_model_execution(self):
+        attempt = self.attempt()
+        attempt["cli_version"] = "different-registered-version"
+        write_json(Path(attempt["directory"]) / "attempt.json", attempt)
+        result = self.invoke(attempt)
+        self.assertIn("CLI version differs", result["error"])
+        closed = self.wait_closed(attempt, result, "cli_error")
+        self.assertTrue(closed["termination"]["confirmed"])
+        self.assertTrue(launch_not_started(attempt))
+        self.assertFalse((Path(attempt["session_directory"]) / "home/session-fixture.json").exists())
+
+    def test_version_query_is_owned_cancellable_and_never_reaches_model(self):
+        (self.root / "hang-version").touch()
+        attempt, cancel = self.attempt(), threading.Event()
+        self.cancel_on_file(Path(attempt["directory"]) / "cli-tmp/version-pid", cancel)
+        result = self.invoke(attempt, cancel=cancel)
+        self.assertIn(result["outcome"], {"cancelled", "termination_unconfirmed"})
+        self.assertTrue(result["termination"]["actions"])
+        closed = self.wait_closed(attempt, result, "cancelled")
+        self.assertTrue(closed["termination"]["confirmed"])
+        self.assertTrue(launch_not_started(attempt))
+        self.assertFalse((Path(attempt["session_directory"]) / "home/session-fixture.json").exists())
+        self.assertEqual((Path(attempt["directory"]) / "events.jsonl").read_bytes(), b"")
+
+    def test_observation_failure_does_not_terminate_a_running_model(self):
+        attempt = self.attempt()
+        real_owned = __import__("schema_extract.tools.agent", fromlist=["owned_processes"]).owned_processes
+        release = Path(attempt["directory"]) / "cli-tmp/release-model"
+        calls = 0
+        def failing_observation(identity, known):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                release.touch()
+                raise OSError("synthetic proc observation failure")
+            return real_owned(identity, known)
+        with patch("schema_extract.tools.agent.owned_processes", side_effect=failing_observation), \
+                patch("schema_extract.tools.agent.terminate_owned", wraps=terminate_owned) as terminate:
+            result = self.invoke(attempt, action="wait_for_release")
+        self.assertEqual(result["outcome"], "completed", result)
+        self.assertIn("synthetic proc observation failure", result["process_observation_error"])
+        terminate.assert_not_called()
+
+    def test_proc_identity_errors_are_unknown_and_reused_pid_is_not_signalled(self):
+        identity = process_identity(os.getpid())
+        self.assertIn("start_token", identity)
+        self.assertNotIn("started", identity)
+        with patch("schema_extract.tools.processes._linux_process", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                process_table()
+        stale = {**identity, "start_token": identity["start_token"] + "0"}
+        with patch("schema_extract.tools.processes.signal_process") as deliver:
+            self.assertEqual(terminate_owned(stale, include_anchor=True)["actions"], [])
+        deliver.assert_not_called()
 
 
 if __name__ == "__main__":

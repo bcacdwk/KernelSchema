@@ -14,7 +14,7 @@ from .snapshots import frozen_invocation, verify_executor, verify_run_inputs
 STATE_FORMAT = "schema_extract.run.v2"
 EXECUTOR_CAPABILITIES = ("summary.v1", "state_guard.v1", "hold.v1", "scoped_restart.v1",
                          "scoped_recovery.v2", "audit.v1", "proposal.v1",
-                         "budget_extension.v1", "frozen_execution.v1", "current_maintenance.v1",
+                         "call_extension.v1", "frozen_execution.v1", "current_maintenance.v1",
                          "design_region_derivation.v1")
 _BOUNDARY = ContextVar("schema_extract_execution_boundary", default=None)
 

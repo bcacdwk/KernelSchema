@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 import shutil
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -55,7 +56,7 @@ class ReviewEvaluationTests(unittest.TestCase):
         class RecordedAgent:
             def __init__(self, **kwargs):
                 constructors.append(kwargs)
-            def run(self, *, attempt, prompt, schema, timeout):
+            def run(self, *, attempt, prompt, schema, cancel_event=None):
                 calls.append(deepcopy(attempt))
                 test.assertEqual(schema['properties']['attempt_id']['enum'],[attempt['attempt_id']])
                 test.assertIn(attempt['workspace'], prompt)
@@ -74,12 +75,35 @@ class ReviewEvaluationTests(unittest.TestCase):
             self.assertTrue(report['passed'],report)
             self.assertEqual(report['config']['model'],'qwen3.8-max[1m]' if backend=='claude' else 'explicit-codex-model')
             self.assertEqual(report['config']['effort'],'max' if backend=='claude' else 'high')
+            self.assertNotIn('max_output_tokens', report['config'])
+            self.assertNotIn('call_seconds', report['config'])
+            self.assertEqual(report['config']['max_calls_per_case'], 1)
         self.assertEqual([item['backend'] for item in constructors],['claude','codex'])
         self.assertEqual(len({item['session_directory'] for item in calls}),4)
         self.assertTrue(all(item['writable_files']==[] and item['session_id'] is None for item in calls))
         for attempt in calls:
             self.assertEqual(read_json(Path(attempt['directory'])/'attempt.json'),attempt)
             self.assertEqual(attempt['session_scope']['role'],'reviewer')
+            self.assertNotIn('max_output_tokens', attempt)
+
+    def test_cancel_event_stops_after_the_active_case(self):
+        cancel, calls = threading.Event(), []
+        test = self
+        class CancellingAgent:
+            def __init__(self, **kwargs):
+                pass
+            def run(self, *, attempt, prompt, schema, cancel_event=None):
+                test.assertIs(cancel_event, cancel)
+                calls.append(attempt["attempt_id"])
+                cancel.set()
+                return {"outcome": "cancelled", "response": None, "termination": {"confirmed": True}}
+        with patch("schema_extract.tools.review_eval.AgentCLI", CancellingAgent):
+            report = evaluate(self.suite, self.directory / "cancelled", REPO,
+                              agent_binary="/usr/bin/true", cancel_event=cancel)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(report["cancelled"])
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["cases"][0]["grade"]["reason"], "cancelled")
 
     def test_codex_does_not_receive_implicit_qwen_or_max(self):
         with self.assertRaisesRegex(ExtractError,'explicit model and effort'):

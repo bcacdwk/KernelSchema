@@ -30,6 +30,8 @@
 
 逐输出核对验收比较对象、相对误差基准（包括 `relative_to`）、计算精度、阈值及非有限值处理，并将验收材料中的输出对应到当前 Contract 的全部输出。返回位置和具有不同判据的状态输出分别核实；名称转换不能丢掉任何已有声明。worker 和 reviewer 各自读取声明并选择实际依据，阅读材料不等于执行 GPU 验收。
 
+提案的 `comparisons` 覆盖验收 `.json` 中每个具名输出的 `tolerance.relative_to` 声明：`output` 填当前 `Golden_reference.Tolerance` 的精确键名，`source_output` 填验收输出名，`evidence` 索引覆盖该声明行的本次 `source_evidence`。无此类 JSON 声明时填 `[]`。比较器代码和 Markdown 按普通来源证据核实；其他 Contract 事实写入正文与 conclusions。
+
 对应 `Golden_reference.Tolerance` 保留来源给出的判据。来源明确给出完整公式（例如逐元素 `abs(candidate-reference) <= 0.01 + 0.05*abs(candidate)`）时写出该判据，并说明未声明的计算精度或 NaN/Inf 行为；若仅给出 `elementwise`、`atol=0.01`、`rtol=0.05`、`relative_to=candidate` 等标签而未声明组合公式，只保留已知项并注明公式缺失，不能推成加和公式或推断计算精度、非有限值政策。
 
 材料未声明的比较器事实按[验收来源记录](../../../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)和[来源缺项](../roles/reviewer.md#来源缺项)处理。已有判据完整保留；未知公式、基准、归一化或检查路由不自行补齐，也不能用“没有 override”、reference 内部算术或 schema 默认值作依据。当前计算与设计可确定时，说明限制后继续；必须猜测当前关系时阻塞具体范围，已知事实写错或遗漏则退修。

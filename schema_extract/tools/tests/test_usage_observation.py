@@ -1,6 +1,7 @@
 """Native accounting scopes, bounded Codex evidence, and attempt deduplication."""
 
 from copy import deepcopy
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -137,7 +138,7 @@ class UsageObservationTests(unittest.TestCase):
             relative = Path("sessions/2024/01/01") / ("rollout-" + session + ".jsonl")
             native = home / relative
             native.parent.mkdir(parents=True)
-            with sqlite3.connect(home / "state_5.sqlite") as db:
+            with closing(sqlite3.connect(home / "state_5.sqlite")) as db, db:
                 db.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT)")
                 db.execute("INSERT INTO threads VALUES (?, ?)", (session, str(home / relative)))
             previous = tokens(0, 0, 0)
@@ -169,6 +170,24 @@ class UsageObservationTests(unittest.TestCase):
                     self.assertIsNone(total["cost"])
                     previous = cumulative
 
+    def test_locked_sqlite_index_falls_back_without_busy_wait(self):
+        session = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as temporary:
+            _, invocation, home = native_context(Path(temporary), session)
+            native = home / "sessions/2024/01/01" / ("rollout-" + session + ".jsonl")
+            native.parent.mkdir(parents=True)
+            native.write_text("")
+            connection = sqlite3.connect(home / "state_5.sqlite")
+            try:
+                connection.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT)")
+                connection.commit()
+                connection.execute("BEGIN EXCLUSIVE")
+                with patch.object(observation.sqlite3, "connect", wraps=sqlite3.connect) as connect:
+                    self.assertEqual(observation._locate(home, session, invocation["started_at"]), native)
+                self.assertEqual(connect.call_args.kwargs["timeout"], 0)
+            finally:
+                connection.close()
+
     def test_native_index_rejects_paths_identities_and_other_scopes(self):
         session = "11111111-1111-4111-8111-111111111111"
         other = "22222222-2222-4222-8222-222222222222"
@@ -185,7 +204,7 @@ class UsageObservationTests(unittest.TestCase):
                               event("task_complete", turn_id="first")])
             native.write_bytes(contents)
             indexed = home / relative
-            with sqlite3.connect(home / "state_5.sqlite") as db:
+            with closing(sqlite3.connect(home / "state_5.sqlite")) as db, db:
                 db.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT)")
                 db.execute("INSERT INTO threads VALUES (?, ?)", (session, str(indexed)))
             events = Path(attempt["directory"]) / "events.jsonl"
@@ -195,13 +214,13 @@ class UsageObservationTests(unittest.TestCase):
             for path in (root / relative, indexed.parent / ".." / indexed.name,
                          indexed.with_name("rollout-" + other + ".jsonl"), Path("/home/other/.codex") / relative):
                 with self.subTest(index_path=path):
-                    with sqlite3.connect(home / "state_5.sqlite") as db:
+                    with closing(sqlite3.connect(home / "state_5.sqlite")) as db, db:
                         db.execute("UPDATE threads SET rollout_path=?", (str(path),))
                     start = observation.begin_usage_observation(attempt, invocation, home=home)
                     observed = observation.finish_usage_observation(start, parsed, result)
                     self.assertIn("native_index_identity_conflict", observed["issues"])
                     self.assertIsNone(observed["additive_tokens"]["input_tokens"])
-            with sqlite3.connect(home / "state_5.sqlite") as db:
+            with closing(sqlite3.connect(home / "state_5.sqlite")) as db, db:
                 db.execute("UPDATE threads SET rollout_path=?", (str(indexed),))
             for mode in ("metadata", "symlink", "home", "scope", "result_scope"):
                 with self.subTest(mode=mode):

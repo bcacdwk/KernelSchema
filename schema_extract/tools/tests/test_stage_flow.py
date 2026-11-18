@@ -1,21 +1,28 @@
 """Six-stage orchestration with real Template gates and a deterministic backend."""
 
+from contextlib import contextmanager
 from copy import deepcopy
+import json
 from pathlib import Path
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
 from jsonschema import validate
 
+from schema_extract.tools.agent import AgentCLI
 from schema_extract.tools.artifacts import (DESIGN_REGIONS, load_yaml, resolve_workspace,
                                             source_context, write_yaml)
-from schema_extract.tools.common import ExtractError, StaleResult, manifest, read_json, rules_root, write_json
+from schema_extract.tools.common import ExtractError, SupervisorBusy, StaleResult, manifest, read_json, rules_root, write_json
 from schema_extract.tools.inputs import SourceTree
 from schema_extract.tools.prompts import build_prompt
 from schema_extract.tools.receipts import REOPEN_TARGETS, proposal_schema
-from schema_extract.tools.runner import DEFAULT_CONFIG, _interrupted, _recover_call, accept_result, run
+from schema_extract.tools.recovery import account, confirm_termination, never_launched
+from schema_extract.tools.runner import DEFAULT_CONFIG, _interrupted, _receive, _recover_call, _resume_failed_scopes, accept_result, run
 from schema_extract.tools.snapshots import freeze_inputs
 from schema_extract.tools.stages import (affected_nodes, effective_nodes, next_calls, required_conclusions,
                                         scope_key, selection_signature, settle)
@@ -130,7 +137,7 @@ class FixtureBackend:
                                     "evidence": [0], "recovery_condition": "Update the explicit directory scope"}]
         return value
 
-    def run(self, *, attempt, prompt, schema, timeout, cancel_event=None):
+    def run(self, *, attempt, prompt, schema, cancel_event=None):
         self.calls.append(deepcopy(attempt))
         if attempt["role"] == "worker":
             self.write(attempt)
@@ -162,9 +169,9 @@ class StageFlowTests(unittest.TestCase):
                          "reference": {"path": "kernel.py", "symbol": "reference"}, "io": [deepcopy(locator)],
                          "acceptance": [deepcopy(locator)], "scope": [deepcopy(locator)]}
 
-    def create(self, nodes=("root",), *, backend="claude", writing=None):
-        config = {**DEFAULT_CONFIG, "backend": backend, "agent_binary": "/usr/bin/true",
-                  "adjudication_seconds": 30, "retry_limit": 2}
+    def create(self, nodes=("root",), *, backend="claude", writing=None, agent_binary="/usr/bin/true"):
+        config = {**DEFAULT_CONFIG, "backend": backend, "agent_binary": agent_binary,
+                  "retry_limit": 2}
         if backend == "codex":
             config.update(model="fixture-codex", worker_effort="high", reviewer_effort="high")
         self.store = Store(self.directory / ("state-" + backend))
@@ -178,11 +185,11 @@ class StageFlowTests(unittest.TestCase):
     def prepare(self, *, node=None, stage=None, role=None):
         call = next(item for item in next_calls(self.state) if (node is None or item["node"] == node) and
                     (stage is None or item["stage"] == stage) and (role is None or item["role"] == role))
-        return self.store.prepare_attempt(self.state, call["session_id"], call=call, timeout_seconds=60)
+        return self.store.prepare_attempt(self.state, call["session_id"], call=call)
 
     def result(self, attempt):
         value = self.backend.run(attempt=attempt, prompt=build_prompt(self.state, self.lock, attempt),
-                                 schema=proposal_schema(attempt, source_files=self.lock["source"]["files"]), timeout=60)
+                                 schema=proposal_schema(attempt, source_files=self.lock["source"]["files"]))
         write_json(Path(attempt["directory"]) / "result.json", value)
         return value
 
@@ -300,6 +307,87 @@ class StageFlowTests(unittest.TestCase):
                 self.assertEqual(read_json(finished)["status"], "not_dispatched")
                 if stage == "P5":
                     self.assertNotIn("writing_started", self.state["nodes"][node])
+
+    def test_runner_keeps_completed_call_when_supervisor_is_busy(self):
+        self.create()
+        transaction = self.store.supervisor
+        attempts = []
+        @contextmanager
+        def briefly_busy():
+            attempts.append(None)
+            if len(attempts) <= 2:
+                raise SupervisorBusy("fixture contention")
+            with transaction() as ledger:
+                yield ledger
+        author = self.backend.run
+        def pause_after_call(**kwargs):
+            result = author(**kwargs)
+            self.store.request_control(self.state["run_id"], "pause")
+            return result
+        with (patch.object(self.store, "supervisor", briefly_busy),
+              patch.object(self.backend, "run", side_effect=pause_after_call)):
+            self.state = run(self.store, self.state["run_id"], transport=self.backend)
+        self.assertEqual((self.state["status"], self.state["role"]), ("paused", "reviewer"))
+        self.assertEqual(len(self.backend.calls), 1)
+        self.assertEqual(len(self.state["accepted_receipts"]), 1)
+        self.assertFalse(self.state["active_attempts"])
+        self.assertTrue(self.state["attempt_usage"][self.backend.calls[0]["attempt_id"]]["settled"])
+
+    def test_cancel_closes_original_call_before_explicit_resume(self):
+        binary = self.directory / "waiting-cli"
+        marker = self.directory / "model-started"
+        binary.write_text("#!" + sys.executable + "\nimport pathlib, sys, time\n"
+                          "if '--version' in sys.argv:\n print('waiting-fixture')\n sys.exit(0)\n"
+                          + "pathlib.Path(" + repr(str(marker)) + ").touch()\nwhile True: time.sleep(0.05)\n")
+        binary.chmod(0o755)
+        self.create(agent_binary=str(binary))
+        failures = []
+        def cancel_started():
+            until = time.monotonic() + 8
+            while not marker.exists() and time.monotonic() < until:
+                time.sleep(0.01)
+            if not marker.exists():
+                failures.append("fake CLI did not start")
+            self.store.request_control(self.state["run_id"], "cancel")
+        watcher = threading.Thread(target=cancel_started)
+        watcher.start()
+        self.state = run(self.store, self.state["run_id"])
+        watcher.join()
+        self.assertEqual(failures, [])
+        self.assertEqual(self.state["status"], "cancelled")
+        self.assertEqual(len(self.state["attempts"]), 1)
+        attempt_id = self.state["attempts"][0]
+        directory = self.store.run_dir(self.state["run_id"]) / "attempts" / attempt_id
+        attempt = read_json(directory / "attempt.json")
+        result = read_json(directory / "result.json")
+        until = time.monotonic() + 8
+        while time.monotonic() < until:
+            if confirm_termination(attempt, result)["confirmed"]:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("cancelled fake CLI descendants did not close")
+        author = self.backend.run
+        def pause_new_call(**kwargs):
+            response = author(**kwargs)
+            self.store.request_control(self.state["run_id"], "pause")
+            return response
+        with patch.object(self.backend, "run", side_effect=pause_new_call):
+            self.state = run(self.store, self.state["run_id"], transport=self.backend, resume=True)
+        self.assertEqual((self.state["status"], self.state["role"]), ("paused", "reviewer"))
+        self.assertEqual(self.state["stages"]["P1"]["calls"], 2)
+        self.assertEqual(self.state["stages"]["P1"]["invalid_receipts"], 0)
+        self.assertTrue(self.state["attempt_usage"][attempt_id]["settled"])
+        usage = self.state["attempt_usage"][attempt_id]
+        total = usage["timing"]["cli_seconds"] + (usage["timing"]["processing_seconds"] or 0)
+        self.assertGreaterEqual(usage["elapsed_seconds"], total)
+        self.assertEqual(read_json(directory / "finished.json")["elapsed_seconds"], usage["elapsed_seconds"])
+        self.assertNotIn(attempt_id, self.state["accepted_receipts"])
+        self.assertFalse(self.state["active_attempts"])
+        self.assertFalse(self.state["unconfirmed_attempts"])
+        self.assertFalse(self.state["unsettled_attempts"])
+        self.assertEqual(self.backend.calls[0]["role"], "worker")
+        self.assertIsNone(self.backend.calls[0]["session_id"])
 
     def test_p2_review_cannot_change_the_worker_selection(self):
         self.create()
@@ -497,6 +585,98 @@ class StageFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(ExtractError, "fixed repository"):
             self.accept(attempt, {**result, "response": self.backend.proposal(attempt)})
         self.assertEqual(self.store.load(self.state["run_id"]), original)
+
+    def test_native_session_survives_rejected_source_range_and_resumes_exactly(self):
+        source = self.directory / "source/kernel.py"
+        source_lines = len(source.read_text().splitlines())
+        fake = self.directory / "native-cli"
+        fake.write_text("#!" + sys.executable + "\n" + '''
+import json, sys
+from pathlib import Path
+from uuid import uuid4
+if '--version' in sys.argv:
+    print('native-session-fixture')
+    raise SystemExit()
+response = json.load(sys.stdin)
+saved = Path.home() / 'session-fixture.json'
+if saved.exists():
+    session = json.loads(saved.read_text())
+    assert sys.argv[sys.argv.index('--resume') + 1] == session
+else:
+    assert '--resume' not in sys.argv
+    session = str(uuid4())
+    saved.write_text(json.dumps(session))
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': session}))
+print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                  'session_id': session, 'structured_output': response}))
+''')
+        fake.chmod(0o755)
+        self.create(agent_binary=str(fake))
+        self.step(stage="P1", role="worker")
+        self.step(stage="P1", role="reviewer")
+        approved = deepcopy(self.state["accepted_receipts"])
+        cli = AgentCLI(backend="claude", executable=str(fake), model=self.state["config"]["model"])
+        session_id = None
+        for count in (1, 2):
+            attempt = self.prepare(stage="P2", role="worker")
+            self.assertEqual(attempt["session_id"], session_id)
+            self.backend.write(attempt)
+            proposal = self.backend.proposal(attempt)
+            proposal["source_evidence"][0]["line_end"] = source_lines + 1
+            result = cli.run(attempt=attempt, prompt=json.dumps(proposal),
+                             schema=proposal_schema(attempt, source_files=self.lock["source"]["files"]))
+            self.assertEqual(result["outcome"], "completed")
+            self.assertTrue(result["native_status"]["success"])
+            session_id = result["session_id"]
+            self.state = _receive(self.store, self.state, self.lock, attempt, result, None)
+            self.assertEqual(self.state["status"], "invalid_receipt")
+            self.assertIn(f"source_evidence[0] kernel.py:1-{source_lines + 1}", self.state["reason"]["summary"])
+            self.assertIn(f"file has {source_lines} lines", self.state["reason"]["summary"])
+            self.assertEqual(self.state["sessions"]["P2"]["worker"], session_id)
+            self.assertEqual(self.store.load(self.state["run_id"])["sessions"]["P2"]["worker"], session_id)
+            self.assertEqual(self.state["stages"]["P2"]["calls"], count)
+            self.assertEqual(self.state["accepted_receipts"], approved)
+            self.assertFalse(self.state["active_attempts"])
+            self.assertFalse(self.state["unconfirmed_attempts"])
+            self.assertEqual(result["response"], proposal)
+            self.state["unsettled_attempts"].pop(attempt["attempt_id"], None)
+            _resume_failed_scopes(self.state)
+            self.store.save(self.state)
+        # Reproduce the old lost-ledger UUID in this fixture. A new preflight
+        # failure must settle its own call without altering the prior session.
+        self.state["sessions"]["P2"]["worker"] = None
+        attempt = self.prepare(stage="P2", role="worker")
+        session_path = Path(attempt["session_directory"]) / "session.json"
+        original_session = session_path.read_bytes()
+        result = cli.run(attempt=attempt, prompt="{}",
+                         schema=proposal_schema(attempt, source_files=self.lock["source"]["files"]))
+        self.assertTrue(never_launched(attempt, result))
+        elapsed = result["elapsed_seconds"]
+        account(self.state, attempt, elapsed, result=result)
+        self.store.save(self.state)
+        self.state = _receive(self.store, self.state, self.lock, attempt, result, None)
+        self.state["unsettled_attempts"].pop(attempt["attempt_id"], None)
+        account(self.state, attempt, elapsed, result=result, final=True)
+        self.assertNotEqual(self.state["status"], "termination_unconfirmed")
+        self.assertFalse(self.state["active_attempts"])
+        self.assertFalse(self.state["unconfirmed_attempts"])
+        self.assertEqual(self.state["stages"]["P2"]["calls"], 3)
+        self.assertEqual(session_path.read_bytes(), original_session)
+        self.assertTrue(self.state["attempt_usage"][attempt["attempt_id"]]["settled"])
+        self.assertEqual(self.state["attempt_usage"][attempt["attempt_id"]]["elapsed_seconds"], elapsed)
+
+    def test_native_completion_cannot_adopt_another_scopes_session(self):
+        self.create()
+        self.step(stage="P1", role="worker")
+        self.step(stage="P1", role="reviewer")
+        attempt = self.prepare(stage="P2", role="worker")
+        result = self.result(attempt)
+        result["session_id"] = self.state["sessions"]["P1"]["worker"]
+        self.state = _receive(self.store, self.state, self.lock, attempt, result, None)
+        self.assertEqual(self.state["status"], "invalid_receipt")
+        self.assertIn("independent sessions", self.state["reason"]["summary"])
+        self.assertIsNone(self.state["sessions"]["P2"]["worker"])
+        self.assertNotIn(attempt["attempt_id"], self.state["accepted_receipts"])
 
 
 if __name__ == "__main__":

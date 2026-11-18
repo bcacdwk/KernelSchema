@@ -1,7 +1,7 @@
 """Real final publication with current stage gates and deterministic review input."""
 
 from copy import deepcopy
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from io import StringIO
 from pathlib import Path
 import shutil
@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from schema_extract.tools import cli
 from schema_extract.tools.artifacts import check_complete, load_yaml, write_yaml
-from schema_extract.tools.common import ExtractError, manifest, read_json, rules_root, write_json
+from schema_extract.tools.common import ExtractError, SupervisorBusy, manifest, read_json, rules_root, write_json
 from schema_extract.tools.publication import publish
 from schema_extract.tools.runner import run
 from schema_extract.tools.runtime import verify_execution
@@ -126,6 +126,44 @@ class CurrentDeliveryTests(unittest.TestCase):
         self.assertEqual(f.state["exports"][-1]["status"], "controlled")
         self.assertEqual(f.state["control"]["action"], "pause")
 
+    def test_publication_lock_retry_rechecks_new_pause_before_rename(self):
+        from uuid import uuid4
+        from schema_extract.tools import publication
+        f = self.fixture
+        f.create()
+        f.state.update(status="ready", stage="P6", role="reviewer", merged_checkpoint=f.state["checkpoint"])
+        f.state["stages"]["P6"].update(status="approved", approval={"attempt_id": "fixture"})
+        f.store.save(f.state)
+        _, checkpoint = f.store.verify_checkpoint(f.state)
+        attempt_id = str(uuid4())
+        attempt = {"stage": "P6", "role": "reviewer", "backend": "claude", "model": "fixture",
+                   "effort": "max", "session_scope": {"stage": "P6", "role": "reviewer"}}
+        write_json(f.store.run_dir(f.state["run_id"]) / "attempts" / attempt_id / "attempt.json", attempt)
+        receipt = {"identity": {"attempt_id": attempt_id}}
+        transaction, contended = f.store.supervisor, []
+        @contextmanager
+        def busy_then_pause():
+            if not contended:
+                contended.append(True)
+                f.store.request_control(f.state["run_id"], "pause")
+                raise SupervisorBusy("publication contention")
+            with transaction() as ledger:
+                yield ledger
+        checked = {"exit_code": 0, "excluded_nodes": [], "checked_nodes": [],
+                   "design_resolution": {"nodes": {}}, "diagnostics": []}
+        with (patch.object(publication, "verify_execution", return_value=f.lock),
+              patch.object(f.store, "verify_approval", return_value=(receipt, checkpoint)),
+              patch("schema_extract.tools.runner._final_inputs"),
+              patch.object(publication, "check_complete", return_value=checked),
+              patch.object(publication, "validate_artifact_sources"),
+              patch.object(f.store, "supervisor", busy_then_pause),
+              patch.object(publication, "rename_new") as rename):
+            result = publish(f.store, f.state, Path(f.state["output"]))
+        self.assertEqual(result["publication"]["status"], "controlled")
+        rename.assert_not_called()
+        self.assertFalse(Path(f.state["output"]).exists())
+        self.assertEqual(f.store.control_requests(f.state["run_id"])[-1]["action"], "pause")
+
     def test_native_evidence_archive_uses_preserved_originals_and_is_read_only(self):
         import json
         import os
@@ -153,14 +191,14 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_
        'cacheCreationInputTokens':0,'outputTokens':3,'costUSD':0.0}}}))
 """)
         binary.chmod(0o755)
-        config = {**DEFAULT_CONFIG, "agent_binary": str(binary), "adjudication_seconds": 30}
+        config = {**DEFAULT_CONFIG, "agent_binary": str(binary)}
         f.store = Store(f.directory / "state")
         f.store.initialize()
         f.lock = freeze_inputs(f.store.root, f.source, f.bindings, ["kernel.py"], config)
         f.state = f.store.create(f.lock, f.directory / "output")
         author = test_stage_flow.FixtureBackend(f.lock, [{"id":"root", "instance":"kernel.py::copy(instance=root)"}], [])
         class NativeFixture:
-            def run(self, *, attempt, prompt, schema, timeout, cancel_event=None):
+            def run(self, *, attempt, prompt, schema, cancel_event=None):
                 if attempt["role"] == "worker":
                     author.write(attempt)
                 response = author.proposal(attempt)
@@ -168,7 +206,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_
                 # proposal schema, native stream and scoped cwd are real.
                 return AgentCLI(backend="claude", executable=str(binary), model=config["model"]).run(
                     attempt=attempt, prompt=json.dumps({"frozen_prompt":prompt, "fixture_response":response}),
-                    schema=schema, timeout=timeout, cancel_event=cancel_event)
+                    schema=schema, cancel_event=cancel_event)
         private = f.directory / "private-configuration"
         private.mkdir()
         with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR":str(private)}):
@@ -226,7 +264,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_
                   'structured_output':json.load(sys.stdin)}))
 """)
         binary.chmod(0o755)
-        config = {**DEFAULT_CONFIG, "agent_binary": str(binary), "adjudication_seconds": 30, "retry_limit": 2}
+        config = {**DEFAULT_CONFIG, "agent_binary": str(binary), "retry_limit": 2}
         f.store = Store(f.directory / "state")
         f.store.initialize()
         f.lock = freeze_inputs(f.store.root, f.source, f.bindings, ["kernel.py"], config)
@@ -242,7 +280,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_
                 def invoke():
                     return AgentCLI(backend="claude", executable=str(binary), model=config["model"]).run(
                         attempt=attempt, prompt=json.dumps(author.proposal(attempt)),
-                        schema=proposal_schema(attempt, source_files=f.lock["source"]["files"]), timeout=15)
+                        schema=proposal_schema(attempt, source_files=f.lock["source"]["files"]))
                 if mode == "setup_failure":
                     with patch("schema_extract.tools.agent.subprocess.check_output", side_effect=subprocess.CalledProcessError(75, [str(binary), "--version"])):
                         result = invoke()

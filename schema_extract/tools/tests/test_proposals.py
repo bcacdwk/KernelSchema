@@ -222,6 +222,79 @@ class ProposalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             read_evidence(self.source, "acceptance.json", 1, 1, quote_offset=len(line))
 
+    def test_multiline_evidence_preserves_ranges_and_exact_short_quotes(self):
+        source = self.source / "kernel.py"
+        source.write_text(source.read_text() + "# Relevant fixed source context\n" * 37)
+        self.lock["source"]["files"] = manifest(self.source)
+        for end in (13, 38):
+            with self.subTest(end=end):
+                for key in ("source_evidence", "artifact_evidence"):
+                    self.proposal[key][0].update(line_end=end, quote_offset=7)
+                original = deepcopy(self.proposal)
+                receipt = self.normalize()
+                self.assertEqual(validate_receipt(receipt, self.state(), self.lock, self.attempt,
+                                                 self.artifacts, []), receipt)
+                self.assertEqual(self.proposal, original)
+                self.assertEqual(receipt["source_evidence"][0]["source_id"], self.lock["source"]["id"])
+                for key, root, hashes in (("source_evidence", self.source, self.lock["source"]["files"]),
+                                          ("artifact_evidence", self.artifacts, self.attempt["dependency_digests"])):
+                    anchor = receipt[key][0]
+                    selected = "\n".join((root / anchor["path"]).read_text().splitlines()[:end])
+                    self.assertEqual((anchor["line_start"], anchor["line_end"]), (1, end))
+                    self.assertEqual(anchor["sha256"], hashes[anchor["path"]])
+                    self.assertEqual(anchor["quote"], selected[7:327])
+                    self.assertLessEqual(len(anchor["quote"]), 320)
+
+    def test_evidence_requires_real_bounds_and_valid_offsets(self):
+        receipt = self.normalize()
+        for key, root in (("source_evidence", self.source), ("artifact_evidence", self.artifacts)):
+            path = self.proposal[key][0]["path"]
+            lines = (root / path).read_text().splitlines()
+            for start, end in ((0, 1), (2, 1), (1, len(lines) + 1)):
+                with self.subTest(key=key, start=start, end=end):
+                    proposal = deepcopy(self.proposal)
+                    proposal[key][0].update(line_start=start, line_end=end)
+                    with self.assertRaises(ExtractError) as caught:
+                        self.normalize(proposal)
+                    self.assertIn(f"{key}[0] {path}:{start}-{end}", str(caught.exception))
+                    self.assertIn(f"file has {len(lines)} lines", str(caught.exception))
+                    invalid = deepcopy(receipt)
+                    invalid[key][0].update(line_start=start, line_end=end)
+                    with self.assertRaisesRegex(ExtractError, f"file has {len(lines)} lines"):
+                        validate_receipt(invalid, self.state(), self.lock, self.attempt, self.artifacts, [])
+            for offset in (-1, len(lines[0]), True, 0.5):
+                with self.subTest(key=key, offset=offset):
+                    proposal = deepcopy(self.proposal)
+                    proposal[key][0]["quote_offset"] = offset
+                    with self.assertRaisesRegex(ExtractError, "quote_offset"):
+                        self.normalize(proposal)
+                    with self.assertRaisesRegex(ValueError, "quote_offset"):
+                        read_evidence(root, path, 1, 1, quote_offset=offset)
+        for start, end in ((True, 1), (1, 1.0)):
+            with self.subTest(start=start, end=end), self.assertRaisesRegex(ValueError, "invalid evidence range"):
+                read_evidence(self.source, "kernel.py", start, end)
+
+    def test_evidence_requires_allowed_sources_and_authentic_quotes(self):
+        for key, root in (("source_evidence", self.source), ("artifact_evidence", self.artifacts)):
+            (root / "unlisted.txt").write_text("Unlisted evidence\n")
+            proposal = deepcopy(self.proposal)
+            proposal[key][0]["path"] = "unlisted.txt"
+            with self.subTest(key=key), self.assertRaisesRegex(ExtractError, "allowed values"):
+                self.normalize(proposal)
+            (root / "unlisted.txt").unlink()
+        (self.source / "linked.py").symlink_to(self.source / "kernel.py")
+        for path in ("../source/kernel.py", str(self.source / "kernel.py"), "linked.py"):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                read_evidence(self.source, path, 1, 1)
+        receipt = self.normalize()
+        for key in ("source_evidence", "artifact_evidence"):
+            for field, value in (("quote", "invented excerpt"), ("quote", "x" * 321),
+                                 ("quote", " "), ("sha256", "0" * 64)):
+                invalid = deepcopy(receipt)
+                invalid[key][0][field] = value
+                with self.subTest(key=key, field=field, value=value), self.assertRaises(ExtractError):
+                    validate_receipt(invalid, self.state(), self.lock, self.attempt, self.artifacts, [])
+
     def test_audit_checkpoint_identity_is_stable_across_processes(self):
         # Isolate storage IO; keep the real audit selection and serialization.
         # Changing a process hash seed must not change an archive's identity.

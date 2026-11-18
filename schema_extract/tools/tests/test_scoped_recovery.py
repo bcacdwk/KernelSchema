@@ -14,7 +14,6 @@ from schema_extract.tools.runner import _consume_scope_retries, _reconcile_orpha
 from schema_extract.tools.stages import (new_node, new_scope, next_calls, node_signature,
                                         selection_signature, writing_signature)
 from schema_extract.tools.store import Store
-from schema_extract.tools.wakeup import Clock
 
 
 class ScopedRecoveryTests(unittest.TestCase):
@@ -40,11 +39,10 @@ class ScopedRecoveryTests(unittest.TestCase):
             "stages": {key: new_scope() for key in ("P1", "P2", "P3", "P4", "P5", "P6")},
             "executor": {"capabilities": ["scoped_recovery.v2"], "digest": "frozen-executor"}, "input_fingerprint": "original-inputs",
             "checkpoint": "merged", "merged_checkpoint": "merged", "reopening": None, "reopen_requests": {},
-            "config": {"operator_seconds": 3600, "stage_seconds": 3600, "call_seconds": 60,
-                       "backend": "claude", "agent_binary": "/usr/bin/false", "model": "offline-fixture",
+            "config": {"backend": "claude", "agent_binary": "/usr/bin/false", "model": "offline-fixture",
                        "worker_effort": "max", "reviewer_effort": "max",
-                       "adjudication_seconds": 30, "max_calls": 12, "retry_limit": 2},
-            "deadline": time.time() + 3600, "active_attempts": {"P5:b": self.sibling},
+                       "revision_limit": 5, "max_calls": 12, "retry_limit": 2},
+            "active_attempts": {"P5:b": self.sibling},
             "unconfirmed_attempts": {}, "unsettled_attempts": {self.sibling: "dispatched"},
             "control": {"action": None, "requests": {}, "resume_status": None}, "sessions": {},
             "attempt_usage": {self.attempt_id: {"stage": "P5", "node": "a", "elapsed_seconds": 7, "settled": True}},
@@ -81,8 +79,8 @@ class ScopedRecoveryTests(unittest.TestCase):
             mocker.start()
             self.addCleanup(mocker.stop)
 
-    def test_request_survives_sibling_revision_and_preserves_its_fence_and_budget(self):
-        request = monitor.request_restart(self.store, self.run_id, "P5:a", self.store.root, automatic=False)
+    def test_request_survives_sibling_revision_and_preserves_its_fence_and_counts(self):
+        request = monitor.request_restart(self.store, self.run_id, "P5:a", self.store.root)
         self.assertEqual(request["delivery"], "active_runner")
         self.state["nodes"]["b"]["stage"]["elapsed_seconds"] += 9
         self.store.save(self.state)
@@ -100,55 +98,23 @@ class ScopedRecoveryTests(unittest.TestCase):
     def test_actual_source_change_and_later_pause_prevent_dispatch(self):
         self.files["root.yaml"] = "changed-root"
         with self.assertRaisesRegex(ExtractError, "dependency changed"):
-            monitor.request_restart(self.store, self.run_id, "P5:a", self.store.root, automatic=False)
+            monitor.request_restart(self.store, self.run_id, "P5:a", self.store.root)
         self.files["root.yaml"] = "approved-root"
-        request = monitor.request_restart(self.store, self.run_id, "P5:a", self.store.root, automatic=False)
+        request = monitor.request_restart(self.store, self.run_id, "P5:a", self.store.root)
         self.store.request_control(self.run_id, "pause")
         state, _ = _consume_scope_retries(self.store, self.state, {}, {self.sibling: object()})
         self.assertEqual(state["nodes"]["a"]["status"], "cli_error")
         self.assertEqual(state["control"]["action"], "pause")
         self.assertEqual(self.store.read_supervisor()["retries"][request["id"]]["status"], "superseded")
 
-    def _clock_request_without_ack(self):
-        now = [time.time()]
-        clock = Clock(self.store, self.store.root, now=lambda: now[0], sender=lambda *_: str(uuid4()))
-        with patch.object(monitor, "inspect_runs", return_value=[]):
-            clock.start(str(uuid4()), [self.run_id], auto_restart_limit=2, launch=False)
-        row = {"run_id": self.run_id, "status": "running", "state_revision": 1,
-               "anomalies": [{"classification": "transient_execution", "scope": "P5:a"}]}
-        now[0] += 31
-        with patch.object(monitor, "inspect_runs", return_value=[row]):
-            result = clock.tick()
-        self.assertEqual(result["observation"]["status"], "observed")
-        ledger = self.store.read_supervisor()
-        self.assertIsNone(ledger["clock"]["reminder"]["ack"])
-        request = next(iter(ledger["retries"].values()))
-        self.assertEqual(request["status"], "authorized")
-        return clock, request
-
-    def test_clock_observation_recovers_without_ack(self):
-        _, request = self._clock_request_without_ack()
-        state, _ = _consume_scope_retries(self.store, self.state, {}, {self.sibling: object()})
-        self.assertEqual(state["nodes"]["a"]["status"], "draft")
-        self.assertEqual(self.store.read_supervisor()["retries"][request["id"]]["status"], "consumed")
-
-    def test_clock_stop_revokes_pending_request(self):
-        clock, request = self._clock_request_without_ack()
-        clock.stop()
-        state, _ = _consume_scope_retries(self.store, self.state, {}, {self.sibling: object()})
-        self.assertEqual(state["nodes"]["a"]["status"], "cli_error")
-        self.assertEqual(self.store.read_supervisor()["retries"][request["id"]]["status"], "superseded")
-
-    def test_orphan_timeout_keeps_healthy_sibling_and_original_budget(self):
+    def test_old_healthy_orphans_keep_sibling_fences_and_original_counts(self):
         self.state["active_attempts"]["P5:a"] = self.attempt_id
-        self.state["deadline"] = 105
         directory = self.store.run_dir(self.run_id) / "attempts" / self.sibling
         directory.mkdir()
         sibling = {**self.attempt, "attempt_id": self.sibling, "node": "b", "created_at": 90,
-                   "timeout_seconds": 20, "directory": str(directory), "workspace": str(directory / "workspace")}
+                   "directory": str(directory), "workspace": str(directory / "workspace")}
         write_json(directory / "attempt.json", sibling)
-        write_json(Path(self.attempt["directory"]) / "attempt.json",
-                   {**self.attempt, "created_at": 50, "timeout_seconds": 20})
+        write_json(Path(self.attempt["directory"]) / "attempt.json", {**self.attempt, "created_at": 50})
         before = deepcopy(self.state)
         observed = []
         def reconcile(store, state, lock, *, scopes):
@@ -158,20 +124,18 @@ class ScopedRecoveryTests(unittest.TestCase):
             return state, []
         with patch("schema_extract.tools.runner.termination_observed", return_value=False), \
                 patch("schema_extract.tools.runner._reconcile", side_effect=reconcile), \
-                patch("schema_extract.tools.runner.time.time", return_value=100):
+                patch("schema_extract.tools.runner.time.time", return_value=10**12):
             state, _ = _reconcile_orphans(self.store, self.state, {}, {}, set())
+        self.assertEqual(observed, [])
+        self.assertEqual(state, before)
+        with patch("schema_extract.tools.runner.termination_observed", side_effect=lambda a, *_, **kw: a["node"] == "a"), \
+                patch("schema_extract.tools.runner._reconcile", side_effect=reconcile):
+            state, _ = _reconcile_orphans(self.store, state, {}, {}, set())
         self.assertEqual(observed, [{"P5:a"}])
         self.assertEqual(state["active_attempts"], {"P5:b": self.sibling})
         self.assertEqual(state["nodes"], before["nodes"])
         self.assertEqual(state["attempt_usage"], before["attempt_usage"])
-        self.assertEqual((state["deadline"], state["config"]), (before["deadline"], before["config"]))
-        # The run's original deadline also bounds a sibling whose own saved
-        # invocation timeout has not yet elapsed.
-        with patch("schema_extract.tools.runner.termination_observed", return_value=False), \
-                patch("schema_extract.tools.runner._reconcile", side_effect=reconcile), \
-                patch("schema_extract.tools.runner.time.time", return_value=106):
-            _reconcile_orphans(self.store, state, {}, {}, set())
-        self.assertEqual(observed, [{"P5:a"}, {"P5:b"}])
+        self.assertEqual(state["config"], before["config"])
 
 
 if __name__ == "__main__":

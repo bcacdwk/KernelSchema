@@ -78,7 +78,7 @@ def _locate(home, session_id, started_at):
     database = home / "state_5.sqlite"
     if database.is_file():
         try:
-            with _open(database), closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=0.2)) as connection:
+            with _open(database), closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=0)) as connection:
                 row = connection.execute("SELECT rollout_path FROM threads WHERE id=?", (session_id,)).fetchone()
             if row:
                 path = Path(row[0])

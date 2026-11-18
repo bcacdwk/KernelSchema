@@ -2,8 +2,10 @@
 
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -11,7 +13,7 @@ from schema_extract.tools import monitor
 from schema_extract.tools.audit import _Evidence, _verify_attempt, usage_summary, usage_totals
 from schema_extract.tools.common import ExtractError, digest, manifest, read_json, sha256, write_json
 from schema_extract.tools.recovery import (account, confirm_termination, handoff_session,
-                                           recover_result, termination_observed, verified_result)
+                                           recover_result, termination_observed, verified_result, complete_pending_result)
 from schema_extract.tools.stages import new_scope
 from schema_extract.tools.tests import test_backends_runtime
 
@@ -24,7 +26,7 @@ class CurrentRecoveryTests(unittest.TestCase):
 
     def attempt(self, **options):
         value = self.fixture.attempt(**options)
-        value.update(session_group=value["stage"] + ":root:normal", input_fingerprint="fixed")
+        value.update(session_group=value["stage"] + ":root:normal", input_fingerprint="fixed", created_at=time.time())
         write_json(Path(value["directory"]) / "attempt.json", value)
         return value
 
@@ -92,10 +94,97 @@ class CurrentRecoveryTests(unittest.TestCase):
                 with self.assertRaises(ExtractError):
                     verified_result(attempt, result, termination)
                 truncated.write_bytes(original)
-                # A complete stream cannot reverse a previously recorded timeout.
-                interrupted = {**result, "outcome": "timeout"}
-                self.assertEqual(recover_result(attempt, interrupted, termination)["outcome"], "timeout")
+                # A complete stream cannot reverse a previously recorded cancellation.
+                interrupted = {**result, "outcome": "cancelled"}
+                self.assertEqual(recover_result(attempt, interrupted, termination)["outcome"], "cancelled")
                 self.assertEqual(read_json(Path(attempt["session_directory"]) / "session.json")["status"], "retired")
+
+    def test_pending_cancel_settles_from_real_gate_and_finalized_records_stay_fixed(self):
+        attempt = self.attempt()
+        cancel = threading.Event()
+        self.fixture.cancel_on_file(Path(attempt["directory"]) / "cli-tmp/heartbeat", cancel)
+        result = self.fixture.invoke(attempt, action="daemon", cancel=cancel)
+        state = self.state(attempt)
+        state["control"] = {"requests": {"cancel": {"action": "cancel", "created_at": time.time()}}}
+        state["active_attempts"] = {"P1": attempt["attempt_id"]}
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            termination = confirm_termination(attempt, result)
+            if termination["confirmed"]:
+                break
+            time.sleep(0.02)
+        self.assertTrue(termination["confirmed"])
+        directory = Path(attempt["directory"])
+        pending = {**result, "exit_code": None, "outcome": "termination_unconfirmed", "termination": {"confirmed": False}}
+        write_json(directory / "result.json", pending)
+        exit_record = read_json(directory / "exit.json")
+        write_json(directory / "exit.json", {**exit_record, "exit_code": None, "termination": {"confirmed": False}})
+        account(state, attempt, pending["elapsed_seconds"], result=pending)
+        interrupted_state = deepcopy(state)
+        settled = complete_pending_result(state, attempt, pending, termination)
+        self.assertEqual(complete_pending_result(interrupted_state, attempt, settled, termination), settled)
+        self.assertEqual(interrupted_state["attempt_usage"], state["attempt_usage"])
+        self.assertEqual(settled["outcome"], "cancelled")
+        self.assertEqual(settled["exit_code"], read_json(directory / "cli-exit.json")["exit_code"])
+        self.assertEqual(settled["session_status"], "retired")
+        self.assertEqual(read_json(directory / "exit.json")["exit_source"], "cli-exit.json")
+        state["active_attempts"].clear()
+        account(state, attempt, settled["elapsed_seconds"], result=settled, final=True)
+        before = self.records(directory)
+        self.assertEqual(complete_pending_result(state, attempt, settled, termination), settled)
+        self.assertEqual(self.records(directory), before)
+        self.assertTrue(state["attempt_usage"][attempt["attempt_id"]]["settled"])
+        self.assertEqual(state["stages"]["P1"]["calls"], 3)
+
+    def test_monitor_needs_current_process_and_gate_proof_for_recorded_exit(self):
+        attempt = self.attempt()
+        result = self.fixture.invoke(attempt)
+        directory = Path(attempt["directory"])
+        store = SimpleNamespace(run_dir=lambda _: directory.parent.parent)
+        view = {"run_id": attempt["run_id"], "unsettled_attempts": {attempt["attempt_id"]: "dispatched"}}
+        def status():
+            return monitor._attempt_observation(store, view, attempt["attempt_id"], {}, time.time())["status"]
+        self.assertTrue(result["termination"]["confirmed"])
+        self.assertEqual(status(), "terminated")
+        path = directory / "process.json"
+        process = read_json(path)
+        invalid = deepcopy(process)
+        invalid["identity"].pop("start_token")
+        write_json(path, invalid)
+        self.assertEqual(status(), "unknown")
+        write_json(path, process)
+        path = directory / "cli-exit.json"
+        write_json(path, {**read_json(path), "descendants_reaped": False})
+        self.assertEqual(status(), "unknown")
+
+    def test_scope_retry_closes_provisional_result_and_accounts_it_once(self):
+        from schema_extract.tools.runner import _settle_scope_retry
+        attempt = self.attempt()
+        result = self.fixture.invoke(attempt)
+        directory = Path(attempt["directory"])
+        pending = {**result, "elapsed_seconds": 0.01, "exit_code": None,
+                   "outcome": "termination_unconfirmed", "termination": {"confirmed": False}}
+        write_json(directory / "result.json", pending)
+        state = self.state(attempt)
+        state.update(status="cli_error", active_attempts={"P1": attempt["attempt_id"]},
+                     unsettled_attempts={attempt["attempt_id"]: "dispatched"})
+        store = SimpleNamespace(run_dir=lambda _: directory.parent.parent, save=lambda _: None)
+        request = {"id": "scope-retry", "attempt_id": attempt["attempt_id"], "scope": "P1"}
+        def interrupt(_store, current, _lock, _attempt, recovered, _termination, _reason, **_options):
+            self.assertTrue(recovered["termination"]["confirmed"])
+            current["active_attempts"].clear()
+            return current
+        with patch("schema_extract.tools.runner._interrupted", side_effect=interrupt):
+            _settle_scope_retry(store, state, {}, request)
+        saved = read_json(directory / "result.json")
+        usage = deepcopy(state["attempt_usage"])
+        entry = usage[attempt["attempt_id"]]
+        self.assertTrue(entry["settled"])
+        self.assertNotEqual(entry["outcome"], "termination_unconfirmed")
+        self.assertEqual(entry["evidence"]["result.json"], digest(saved))
+        self.assertEqual(entry["elapsed_seconds"], saved["elapsed_seconds"])
+        account(state, attempt, saved["elapsed_seconds"], result=saved, final=True)
+        self.assertEqual(state["attempt_usage"], usage)
 
     def test_missing_result_retires_private_binding_only_after_confirmed_exit(self):
         attempt = self.attempt()
@@ -147,13 +236,14 @@ class CurrentRecoveryTests(unittest.TestCase):
         self.assertEqual(resumed["response"]["sticky"], first["attempt_id"])
         directory = Path(following["directory"])
         termination = confirm_termination(following, resumed)
-        recovered = recover_result(following, {**resumed, "outcome": "timeout"}, termination)
-        self.assertEqual((recovered["outcome"], recovered["session_status"]), ("timeout", "retired"))
+        recovered = recover_result(following, {**resumed, "outcome": "cancelled"}, termination)
+        self.assertEqual((recovered["outcome"], recovered["session_status"]), ("cancelled", "retired"))
         session = read_json(Path(following["session_directory"]) / "session.json")
         self.assertEqual(session["status"], "retired")
         self.assertIsNone(session["session_id"])
-        with self.assertRaisesRegex(ExtractError, "exact registered"):
-            self.fixture.invoke(self.attempt(session_id=result["session_id"]))
+        failed = self.fixture.invoke(self.attempt(session_id=result["session_id"]))
+        self.assertEqual((failed["outcome"], failed["termination"]["reason"]), ("cli_error", "not_started"))
+        self.assertIn("exact registered", failed["error"])
     def test_lost_gate_without_closed_descendant_evidence_stays_fenced(self):
         from schema_extract.tools.agent import read_result
         attempt = self.attempt()
@@ -356,7 +446,7 @@ class CurrentScopeRecoveryTests(unittest.TestCase):
         stub = f.directory / "temporary-cli"
         stub.write_text("#!" + sys.executable + "\nimport sys\nif '--version' in sys.argv:\n print('offline-exit-75')\n sys.exit(0)\nsys.exit(75)\n")
         stub.chmod(0o755)
-        config = {**DEFAULT_CONFIG, "agent_binary": str(stub), "adjudication_seconds": 30, "retry_limit": 2}
+        config = {**DEFAULT_CONFIG, "agent_binary": str(stub), "retry_limit": 2}
         f.store = Store(f.directory / "state")
         f.store.initialize()
         f.lock = freeze_inputs(f.store.root, f.source, f.bindings, ["kernel.py"], config)
@@ -373,7 +463,7 @@ class CurrentScopeRecoveryTests(unittest.TestCase):
         f.store.save(f.state)
         result = AgentCLI(backend="claude", executable=str(stub), model=config["model"]).run(
             attempt=attempt, prompt=build_prompt(f.state, f.lock, attempt),
-            schema=proposal_schema(attempt, source_files=f.lock["source"]["files"]), timeout=15)
+            schema=proposal_schema(attempt, source_files=f.lock["source"]["files"]))
         self.assertEqual((result["outcome"], result["exit_code"]), ("cli_error", 75))
         account(f.state, attempt, result["elapsed_seconds"], result=result)
         f.state = _receive(f.store, f.state, f.lock, attempt, result, None)
@@ -381,7 +471,6 @@ class CurrentScopeRecoveryTests(unittest.TestCase):
         account(f.state, attempt, result["elapsed_seconds"], result=result, final=True)
         f.store.save(f.state)
         self.assertEqual(f.state["nodes"]["failed"]["status"], "cli_error", f.state["nodes"]["failed"].get("reason"))
-        monitor.configure_auto_restart(f.store, [f.state["run_id"]], 1)
         with patch.object(monitor, "start_background", return_value={"status": "deferred"}):
             request = monitor.request_restart(f.store, f.state["run_id"], "P5:failed", test_stage_flow.REPO)
             self.assertEqual(monitor.request_restart(f.store, f.state["run_id"], "P5:failed", test_stage_flow.REPO)["id"], request["id"])
@@ -391,18 +480,17 @@ class CurrentScopeRecoveryTests(unittest.TestCase):
         evidence = monitor.restart_evidence(f.store, f.state, "P5:failed")
         self.assertEqual(evidence["failure_id"], request["failure_id"])
         self.assertIn("sibling", effective_nodes(f.state))
-        # Make the already authorized retry due; time changes no budget or
+        # Make the already authorized retry due; time changes no call limits or
         # consumed-call accounting. The Runner remains the sole state writer.
         with patch("schema_extract.tools.runner.time.time", return_value=request["next_due_at"] + 1):
             with f.store.writer(f.state["run_id"]):
                 f.state, _ = _consume_scope_retries(f.store, f.state, f.lock, {})
         self.assertEqual(f.state["nodes"]["failed"]["status"], "draft")
         scope_after = f.state["nodes"]["failed"]["stage"]
-        for key in ("calls", "elapsed_seconds", "cli_failures", "deadline", "adjudications", "signoffs"):
+        for key in ("calls", "elapsed_seconds", "cli_failures", "adjudications", "signoffs"):
             self.assertEqual(scope_after[key], scope_before[key], key)
         ledger = f.store.read_supervisor()
         self.assertEqual(ledger["retries"][request["id"]]["status"], "consumed")
-        self.assertEqual(ledger["auto_restart"]["used"][f.state["run_id"]], 1)
 
         # A resumed call whose gate cannot exec has not received its recovery
         # context. Keep that same handoff available for the next actual call.
@@ -412,7 +500,7 @@ class CurrentScopeRecoveryTests(unittest.TestCase):
         try:
             result = AgentCLI(backend="claude", executable=str(stub), model=config["model"]).run(
                 attempt=resumed, prompt=build_prompt(f.state, f.lock, resumed),
-                schema=proposal_schema(resumed, source_files=f.lock["source"]["files"]), timeout=15,
+                schema=proposal_schema(resumed, source_files=f.lock["source"]["files"]),
                 on_process=lambda _: stub.unlink(missing_ok=True))
         finally:
             stub.write_bytes(executable)
@@ -462,7 +550,7 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
                   'session_id': session, 'structured_output': json.load(sys.stdin)}))
 """)
         binary.chmod(0o755)
-        config = {**DEFAULT_CONFIG, "agent_binary": str(binary), "adjudication_seconds": 30, "retry_limit": 2}
+        config = {**DEFAULT_CONFIG, "agent_binary": str(binary), "retry_limit": 2}
         f.store = Store(f.directory / "runtime")
         f.store.initialize()
         f.lock = freeze_inputs(f.store.root, f.source, f.bindings, ["kernel.py"], config)
@@ -482,7 +570,7 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
                     response["summary"] = ""
                 result = AgentCLI(backend="claude", executable=str(binary), model=config["model"]).run(
                     attempt=attempt, prompt=json.dumps(response),
-                    schema=proposal_schema(attempt, source_files=f.lock["source"]["files"]), timeout=15)
+                    schema=proposal_schema(attempt, source_files=f.lock["source"]["files"]))
                 self.assertEqual(result["outcome"], "completed")
                 account(f.state, attempt, result["elapsed_seconds"], result=result)
                 f.state = _receive(f.store, f.state, f.lock, attempt, result, None)

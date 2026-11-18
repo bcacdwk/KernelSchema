@@ -17,7 +17,7 @@
 
 交付含 raw `root.yaml`、当前选定的其他完整 YAML、中文 `dispatch.md` 和 `.extraction/receipt.json`；含 root 最多十份完整设计，在保留关键知识前提下越少越好，每份须有独特完整价值。只有 root 也保留目录。共享 Contract 只在 root 定义，root Design 三区全本地，其他设计通过本地定义与实际整区 `from` 形成完整有效内容。参数、局部变化与已知组合按 [common 的唯一记录格式](schema_docs/0.common.md#选择条件与索引)整理，不因此逐条取得完整 YAML 身份。
 
-Supervisor 在授权目标内决定来源、输出、预算、恢复和限域维护请求；Runner 唯一写运行状态、调用结算、checkpoint、合入与原子发布。worker 只写本次许可产物，reviewer 始终只读，阶段调用均不委派子代理（见[角色与会话](schema_extract/README.md#角色与会话)）。中断恢复先用 `status RUN_UUID --full` 核实停止原因与在途调用结清（终止未确认保持 fence），沿用原冻结身份与已用预算接续；未交付固定 run 的 `maintain` 仅针对已选 P1–P5 且须显式给出 `fields` 上限（`fields: []` 的 `review` 仅做只读复核，进入退修 `patch` 须非空），不替代未完成阶段与最终新的 P6。
+Supervisor 在授权目标内决定来源、输出、调用次数、恢复和限域维护请求；Runner 唯一写运行状态、调用结算、checkpoint、合入与原子发布。worker 只写本次许可产物，reviewer 始终只读，阶段调用均不委派子代理（见[角色与会话](schema_extract/README.md#角色与会话)）。中断恢复先用 `status RUN_UUID --full` 核实停止原因与在途调用结清（终止未确认保持 fence），沿用原冻结身份与已用次数接续；未交付固定 run 的 `maintain` 仅针对已选 P1–P5 且须显式给出 `fields` 上限（`fields: []` 的 `review` 仅做只读复核，进入退修 `patch` 须非空），不替代未完成阶段与最终新的 P6。
 
 `ready` 仅表示当前 P6 终审通过，不等于已发布；无控制或维护屏障时由 Runner 自动核验并原子发布（`published: true`）。若接手时 `ready` 但 `published: false`，先用 `inspect --run RUN_UUID --json` 核对 `publication`、`control`、`global_hold` 与 `maintenance_request`（权威运行状态及已应用的 `maintenance` 详情查 `status RUN_UUID --full`），再按[恢复与交付](schema_extract/README.md#恢复与交付)和[发布协议](schema_extract/tools/README.md#发布与独立视图)释放屏障、`resume` 重放发布，或在目标冲突时保留双方内容并用 `export` 另交新目录。
 

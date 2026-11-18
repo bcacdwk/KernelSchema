@@ -195,15 +195,16 @@ def normalize_response(value: dict, lock: dict, attempt: dict, artifacts: Path) 
     submitted = {attempt["node"] + ".yaml": files[attempt["node"] + ".yaml"]} if attempt["stage"] == "P5" else files
     def anchors(key, root, hashes):
         result = []
-        for selection in value[key]:
+        for index, selection in enumerate(value[key]):
             path = selection["path"]
+            location = f"{key}[{index}] {path}:{selection['line_start']}-{selection['line_end']}"
             if path not in hashes:
-                raise ExtractError("evidence is outside the fixed manifest: " + path)
+                raise ExtractError(f"{location}: evidence is outside the fixed manifest")
             try:
                 anchor = read_evidence(root, path, selection["line_start"], selection["line_end"],
                                        quote_offset=selection["quote_offset"], expected_sha256=hashes[path])
             except (OSError, ValueError) as exc:
-                raise ExtractError(f"{key}: {exc}") from exc
+                raise ExtractError(f"{location}: {exc}") from exc
             if key == "source_evidence":
                 anchor.update(source_id=lock["source"]["id"], category=selection["category"])
             result.append({**anchor, "note": selection["note"]})
@@ -257,8 +258,8 @@ def _anchor(evidence: dict, directory: Path, hashes: dict) -> None:
     except UnicodeError as exc:
         raise ExtractError(f"evidence is not UTF-8: {name}") from exc
     first, last, quote = evidence["line_start"], evidence["line_end"], evidence["quote"]
-    if not 1 <= first <= last <= len(lines) or last - first >= 12:
-        raise ExtractError(f"invalid evidence range (maximum 12 lines): {name}:{first}-{last}")
+    if not 1 <= first <= last <= len(lines):
+        raise ExtractError(f"invalid evidence range (file has {len(lines)} lines): {name}:{first}-{last}")
     if not quote.strip() or len(quote) > 320:
         raise ExtractError(f"evidence quote does not match cited lines or exceeds 320 characters: {name}:{first}-{last}")
     if quote not in "\n".join(lines[first - 1:last]):

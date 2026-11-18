@@ -9,11 +9,10 @@ import shlex
 import sys
 
 from .artifacts import _same, design_context, load_root, load_yaml
-from .budget import call_limit
 from .common import ExtractError, digest, manifest, read_json, regular_file, rules_root, seal, sha256, source_root, write_json
 from .receipts import REOPEN_TARGETS, call_identity, required_artifact_evidence
 from .snapshots import frozen_reader
-from .stages import STAGES, effective_nodes, owner_for, read_specs, required_conclusions, scope_for
+from .stages import STAGES, call_limit, effective_nodes, owner_for, read_specs, required_conclusions, scope_for
 
 
 PROMPT_ROOT = "schema_extract/prompt"
@@ -277,8 +276,8 @@ def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | N
                                 "purpose": "historical_baseline"}
                                if attempt.get("baseline_context_checkpoint") else None),
         reading_order=["current_specs", "current_artifacts", "fixed_source", "process_records"], check_command=shlex.quote(attempt["check_command"]),
-        budget={**{key: scope.get(key) for key in ("revisions", "continues", "receipt_repairs", "cli_failures", "calls", "deadline")},
-                "call_seconds": attempt.get("timeout_seconds"), "max_calls": call_limit(state), "revision_limit": state["config"]["revision_limit"]})
+        calls={**{key: scope.get(key) for key in ("revisions", "continues", "receipt_repairs", "cli_failures", "calls")},
+               "max_calls": call_limit(state), "revision_limit": state["config"]["revision_limit"]})
     locating.update(resolution)
     if attempt["stage"] in REOPEN_TARGETS and attempt.get("mode", "normal") == "normal" and attempt.get("purpose") != "maintenance":
         eligible = {"P5:" + node for node in attempt.get("source_identities", {}) if node not in {"root", attempt["node"]}}

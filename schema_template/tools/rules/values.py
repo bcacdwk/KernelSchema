@@ -491,8 +491,8 @@ def local_repository_errors(files, documents, *, skip_hardware=False):
     def git(root, *arguments, missing=False):
         try:
             result = subprocess.run(["git", "--literal-pathspecs", "-C", str(root), *arguments],
-                                    capture_output=True, text=True, encoding="utf-8", timeout=10)
-        except (OSError, UnicodeError, subprocess.TimeoutExpired) as error:
+                                    capture_output=True, text=True, encoding="utf-8")
+        except (OSError, UnicodeError) as error:
             raise ToolError(f"{root}: cannot inspect the local repository: {error}") from error
         if result.returncode and not missing:
             raise ToolError(f"{root}: cannot inspect the local repository: {result.stderr.strip()[:200]}")

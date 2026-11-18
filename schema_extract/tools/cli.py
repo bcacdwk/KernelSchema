@@ -10,12 +10,12 @@ from pathlib import Path
 import sys
 
 from . import __version__
-from .common import ExtractError, RunnerBusy, digest, read_json, rules_root
+from .common import ExtractError, RunnerBusy, SupervisorBusy, digest, read_json, rules_root
 from .runner import DEFAULT_CONFIG, export_checkpoint, run, summary
 from .runtime import frozen_run_invocation
 from .store import Store
 from . import monitor
-from .budget import CAPABILITY as BUDGET_CAPABILITY, addition
+from .stages import validate_add_calls
 
 
 CATEGORIES = {"schema_docs", "schema_template", "kernel_wiki", "extract_workflow", "extract_tools"}
@@ -97,7 +97,7 @@ def parser() -> argparse.ArgumentParser:
     extract.add_argument("--output", type=Path)
     extract.add_argument("--output-root", type=Path)
     launch = extract.add_mutually_exclusive_group()
-    launch.add_argument("--queue", action="store_true", help="freeze and queue only; resume starts the fixed-budget run")
+    launch.add_argument("--queue", action="store_true", help="freeze and queue only; resume starts the frozen run")
     launch.add_argument("--background", action="store_true", help="durably register and start a detached frozen Runner")
     extract.add_argument("--repo", type=Path, default=Path.cwd(), help="catalog/Git source repository")
     extract.add_argument("--state-root", type=Path, help="separate v2 store (default: REPO/.schema_extract/v2)")
@@ -109,13 +109,13 @@ def parser() -> argparse.ArgumentParser:
                          help="stage backend (default: claude); Codex requires explicit model and role efforts")
     extract.add_argument("--model", help="stage model (Claude default: qwen3.8-max[1m])")
     extract.add_argument("--agent-binary", help="executable for the selected stage backend")
-    for option in ("revision_limit", "operator_seconds", "stage_seconds", "call_seconds", "max_calls"):
+    for option in ("revision_limit", "max_calls"):
         extract.add_argument("--" + option.replace("_", "-"), type=int, default=DEFAULT_CONFIG[option],
-                             help="finite call budget per stage, and per P5 node; includes reserved adjudication calls" if option == "max_calls" else None)
+                             help="finite call limit per stage, and per P5 node; includes reserved adjudication calls" if option == "max_calls" else None)
     for name, help_text in (("status", "read a saved run without advancing it"),
                             ("pause", "request a pause at invocation boundaries"),
                             ("cancel", "request termination of all started invocations"),
-                            ("resume", "resume the frozen run; add finite budget only with explicit options"),
+                            ("resume", "resume the frozen run; add calls only with an explicit option"),
                             ("export", "export the final reviewed checkpoint to another destination"),
                             ("candidates", "read confirmed framework issues and their original candidates"),
                             ("maintain", "request bounded review or correction within the current frozen run")):
@@ -135,7 +135,7 @@ def parser() -> argparse.ArgumentParser:
         if name == "resume":
             command.add_argument("--hold", help="release only the named global hold")
             command.add_argument("--scope", help="recover one failed scope, such as P5:node, through its existing Runner")
-            _budget_options(command)
+            _call_options(command)
     for name in ("issues", "inspect"):
         command = sub.add_parser(name, help="read-only framework registry" if name == "issues" else "read-only run summaries")
         command.add_argument("--repo", type=Path, default=Path.cwd())
@@ -155,7 +155,6 @@ def parser() -> argparse.ArgumentParser:
     evaluation.add_argument("--agent-binary")
     evaluation.add_argument("--model")
     evaluation.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"))
-    evaluation.add_argument("--call-seconds", type=int, default=240)
     evaluation.add_argument("--case", action="append", dest="cases")
     evaluation.add_argument("--repo", type=Path, default=rules_root(), help="rules to freeze for this evaluation")
     audit = sub.add_parser("audit", help="read recorded usage/session evidence; explicitly verify or archive selected evidence")
@@ -170,7 +169,7 @@ def parser() -> argparse.ArgumentParser:
     audit.add_argument("--state-root", type=Path)
     watches = sub.add_parser("monitor", help="observe and control registered extraction runs")
     watch = watches.add_subparsers(dest="monitor_command", required=True)
-    scan = watch.add_parser("scan", help="one lightweight observation; no task is resumed by default")
+    scan = watch.add_parser("scan", help="one lightweight observation; no task is resumed")
     scan.add_argument("--run", nargs="+", dest="run_ids")
     scan.add_argument("--wake", metavar="ID", help="finish this accepted clock reminder")
     scan.add_argument("--thread", metavar="UUID", help="explicitly finish this thread's accepted unfinished reminder")
@@ -188,7 +187,6 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--thread", required=True, metavar="UUID")
         if name == "start":
             command.add_argument("--run", nargs="+", dest="run_ids")
-            command.add_argument("--auto-restart-limit", type=int, help="explicit persistent per-run authorization; never refunds use")
             command.add_argument("--codex-bin", help="Codex queue executable, or executable test substitute")
         elif name == "ack":
             command.add_argument("wake_id", metavar="ID")
@@ -205,9 +203,7 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def _budget_options(command):
-    command.add_argument("--add-seconds", type=int, default=0,
-                         help="explicitly extend operator and started scope deadlines from max(now, deadline); keep used time")
+def _call_options(command):
     command.add_argument("--add-calls", type=int, default=0,
                          help="explicitly add this many calls to each stage/node limit; keep used calls and decisions")
 
@@ -237,7 +233,7 @@ def _print_observations(rows, *, as_json=False):
               f"observed={row['observation']['status']} at={row['observation']['observed_at']:.0f} "
               f"executor={executor.get('version')}/{str(executor.get('digest') or 'unknown')[:12]} "
               f"gate={'v1' if row.get('gate_capable') else 'unsupported'} "
-              f"last={row.get('updated_at')} deadline={row.get('budget', {}).get('deadline')} "
+              f"last={row.get('updated_at')} "
               f"published={row.get('published')} checkpoint={row.get('checkpoint')}")
         for item in row.get("anomalies", []):
             print(f"  {item.get('classification')} {item.get('scope')}: {item.get('summary')} [{item.get('evidence')}]")
@@ -245,7 +241,7 @@ def _print_observations(rows, *, as_json=False):
                 print("  next: " + item["recovery_condition"])
 
 
-def _launch_context(store, state: dict, *, mode="resume", budget_addition=None) -> dict:
+def _launch_context(store, state: dict, *, mode="resume", add_calls=0) -> dict:
     token = os.environ.get("SCHEMA_EXTRACT_ENTRY_ID")
     entry = store.read_supervisor()["starts"].get(state["run_id"], {}).get("launch", {})
     if token and entry.get("id") == token and entry.get("status") == "claimed" and entry.get("identity", {}).get("pid") == os.getpid():
@@ -253,7 +249,23 @@ def _launch_context(store, state: dict, *, mode="resume", budget_addition=None) 
         if process_identity_matches(entry.get("identity"), monitor._identity()) is True:
             return entry
         raise ExtractError("claimed launcher process identity changed")
-    entry = monitor.reserve_launch(store, state, mode=mode, budget_addition=budget_addition)
+    if mode == "resume":
+        control = store.read_supervisor()["controls"].get(state["run_id"], {})
+        requests = {request["id"]: request for request in store.control_requests(state["run_id"])}
+        pending = {request_id for request_id, delivery in control.get("deliveries", {}).items()
+                   if not delivery.get("confirmed")}
+        pending.update(request_id for request_id, request in requests.items()
+                       if request["action"] == "cancel" and
+                       request["control_revision"] > entry.get("control_revision", 0) and
+                       not control.get("deliveries", {}).get(request_id, {}).get("confirmed"))
+        for request_id in sorted(pending):
+            request = requests.get(request_id)
+            if not request or request["action"] != "cancel":
+                raise ExtractError("pending cancel delivery has no matching control request")
+            delivery = monitor.deliver_cancel(store, request)
+            if not delivery.get("confirmed"):
+                raise ExtractError("cancel termination is pending; resume after owned processes have exited")
+    entry = monitor.reserve_launch(store, state, mode=mode, add_calls=add_calls)
     if not entry.get("reused") and entry.get("id"):
         os.environ["SCHEMA_EXTRACT_ENTRY_ID"] = entry["id"]
     return entry
@@ -304,7 +316,7 @@ def _registration_result(store, registration: dict, state: dict | None, *, queue
 def _busy_result(state: dict, entry: dict) -> int:
     print(json.dumps({"run_id": state["run_id"], "result": "already_running" if entry.get("reused") else "preserved",
                       "status": state["status"], "published": state["published"], "launch": entry,
-                      "next_step": "status " + state["run_id"] + " 查看原任务；本命令未执行到发布，也未追加预算。"}, ensure_ascii=False, indent=2))
+                      "next_step": "status " + state["run_id"] + " 查看原任务；本命令未执行到发布，也未追加调用次数。"}, ensure_ascii=False, indent=2))
     return 1
 
 
@@ -321,7 +333,7 @@ def main(argv=None) -> int:
             from .review_eval import evaluate
             report = evaluate(args.suite.resolve(), args.output.resolve(), args.repo, backend=args.backend,
                               agent_binary=args.agent_binary, model=args.model, effort=args.effort,
-                              call_seconds=args.call_seconds, selected=args.cases)
+                              selected=args.cases)
             return 0 if report["passed"] else 1
         if args.command == "audit":
             from .audit import _parent_fd, audit_run, format_audit
@@ -343,8 +355,7 @@ def main(argv=None) -> int:
                 else:
                     result = monitor.scan(store, args.run_ids)
             elif args.monitor_command == "start":
-                result = clock.start(args.thread, args.run_ids, auto_restart_limit=args.auto_restart_limit,
-                                     codex_binary=args.codex_bin)
+                result = clock.start(args.thread, args.run_ids, codex_binary=args.codex_bin)
             elif args.monitor_command == "ack":
                 result = clock.ack(args.wake_id, args.thread)
             elif args.monitor_command == "stop":
@@ -365,8 +376,8 @@ def main(argv=None) -> int:
         if args.command in {"pause", "resume"} and args.all:
             if getattr(args, "scope", None):
                 raise ExtractError("--scope requires a single run UUID")
-            if args.command == "resume" and (args.add_seconds or args.add_calls):
-                raise ExtractError("budget additions require a single run UUID; releasing a hold does not add budget")
+            if args.command == "resume" and args.add_calls:
+                raise ExtractError("call additions require a single run UUID; releasing a hold does not add calls")
             if args.run_id or (args.command == "resume" and not args.hold):
                 raise ExtractError("--all takes no run UUID; resume --all requires --hold ID")
             store = Store(state_root)
@@ -378,15 +389,15 @@ def main(argv=None) -> int:
         if args.command in {"pause", "resume"} and (not args.run_id or getattr(args, "hold", None)):
             raise ExtractError("single-run control requires a UUID; --hold requires --all")
         if args.command == "resume" and args.scope:
-            if args.add_seconds or args.add_calls:
-                raise ExtractError("scope recovery preserves existing credit; add budget with an explicit whole-run resume first")
+            if args.add_calls:
+                raise ExtractError("scope recovery preserves used calls; add calls with an explicit whole-run resume first")
             store = Store(state_root)
             state = store.load(args.run_id)
             if "scoped_recovery.v2" not in state.get("executor", {}).get("capabilities", []):
                 raise ExtractError("frozen executor lacks scoped_recovery.v2")
             command = ["resume", args.run_id, "--scope", args.scope, "--repo", str(args.repo), "--state-root", str(state_root)]
             _frozen_entry(store, state, command)
-            request = monitor.request_restart(store, args.run_id, args.scope, args.repo, automatic=False)
+            request = monitor.request_restart(store, args.run_id, args.scope, args.repo)
             print(json.dumps(request, ensure_ascii=False, indent=2))
             return 0 if request["status"] in {"authorized", "consumed"} and request.get("launch", {}).get("status") != "launch_failed" else 1
         if args.command == "_background":
@@ -430,13 +441,13 @@ def main(argv=None) -> int:
                 raise ExtractError("run input fingerprint differs from its lock")
             entry, request = None, None
             if args.command in {"resume", "export"}:
-                budget_addition = addition(args.add_seconds, args.add_calls) if args.command == "resume" else addition()
-                if any(budget_addition.values()):
-                    if BUDGET_CAPABILITY not in state.get("executor", {}).get("capabilities", []):
-                        raise ExtractError("this frozen executor cannot add budget")
-                    command.extend(["--add-seconds", str(args.add_seconds), "--add-calls", str(args.add_calls)])
+                add_calls = validate_add_calls(args.add_calls) if args.command == "resume" else 0
+                if add_calls:
+                    if "call_extension.v1" not in state.get("executor", {}).get("capabilities", []):
+                        raise ExtractError("this frozen executor cannot add calls")
+                    command.extend(["--add-calls", str(add_calls)])
                 store.assert_startable(args.run_id)
-                entry = _launch_context(store, state, mode=args.command, budget_addition=budget_addition)
+                entry = _launch_context(store, state, mode=args.command, add_calls=add_calls)
                 if entry.get("reused"):
                     return _busy_result(state, entry)
             elif args.command in {"pause", "cancel"}:
@@ -447,6 +458,13 @@ def main(argv=None) -> int:
                 if request is None:
                     request = store.request_control(args.run_id, args.command)
                     os.environ["SCHEMA_EXTRACT_CONTROL_REQUEST"] = request["id"]
+            if args.command == "cancel":
+                try:
+                    delivery = monitor.deliver_cancel(store, request)
+                except SupervisorBusy as exc:
+                    delivery = {"status": "pending", "confirmed": False, "evidence_committed": False, "reason": str(exc)}
+                print(json.dumps({"request": request, "delivery": delivery}, ensure_ascii=False, indent=2))
+                return 0 if delivery.get("confirmed") else 1
             _frozen_entry(store, state, command)
             if args.command == "maintain":
                 from .maintenance import submit_request
@@ -477,8 +495,7 @@ def main(argv=None) -> int:
                 code = 0 if state["status"] == "ready" and state["published"] else 1
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return code
-        config = {key: getattr(args, key) for key in ("backend", "agent_binary", "worker_effort", "reviewer_effort", "model", "revision_limit",
-                                                     "operator_seconds", "stage_seconds", "call_seconds", "max_calls")
+        config = {key: getattr(args, key) for key in ("backend", "agent_binary", "worker_effort", "reviewer_effort", "model", "revision_limit", "max_calls")
                   if getattr(args, key) is not None}
         if args.ids:
             if args.output or not args.output_root or not (args.background or args.queue):
@@ -522,6 +539,9 @@ def main(argv=None) -> int:
         state = run(store, state["run_id"], resume=True, queued_only=entry.get("mode") == "queued", launch_id=entry.get("id"))
         print(json.dumps(summary(store, state), ensure_ascii=False, indent=2))
         return 0 if state["status"] == "ready" and state["published"] else 1
+    except SupervisorBusy as exc:
+        print(json.dumps({"status": "busy", "committed": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
     except (ExtractError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

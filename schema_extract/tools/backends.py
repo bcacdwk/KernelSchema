@@ -19,6 +19,7 @@ from .common import ExtractError, digest
 DEFAULT_BACKEND = "claude"
 DEFAULT_MODEL = "qwen3.8-max[1m]"
 DEFAULT_EFFORT = "max"
+CLAUDE_MAX_OUTPUT_TOKENS = 128000
 TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "cache_creation_input_tokens", "output_tokens")
 CODEX_TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens")
 NETWORK_ENV = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"}
@@ -162,9 +163,10 @@ class ClaudeBackend:
             _copy_auth(source / ".credentials.json", config, ".credentials.json")
         environment.update(CLAUDE_CONFIG_DIR=str(home / ".claude"), CLAUDE_CODE_EFFORT_LEVEL=effort,
                            CLAUDE_CODE_SAFE_MODE="1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
-                           DISABLE_AUTOUPDATER="1")
+                           DISABLE_AUTOUPDATER="1", CLAUDE_CODE_MAX_OUTPUT_TOKENS=str(CLAUDE_MAX_OUTPUT_TOKENS))
         # Model aliases, fixed thinking budgets, hooks and arbitrary inherited env never enter this environment.
-        return environment, digest({key: environment[key] for key in CLAUDE_ENV | NETWORK_ENV if key in environment})
+        return environment, digest({key: environment[key] for key in
+                                    CLAUDE_ENV | NETWORK_ENV | {"CLAUDE_CODE_MAX_OUTPUT_TOKENS"} if key in environment})
 
     def command(self, executable: str, *, model: str, effort: str, role: str,
                 session_id: str | None, schema: dict, cwd: Path, workspace: Path, schema_path: Path,
