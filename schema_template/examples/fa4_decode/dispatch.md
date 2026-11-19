@@ -4,18 +4,18 @@
 
 固定来源：`KernelSchema@3d64ad35900a0e6a66d6f93da34108fbceba0daf:kernel_wiki/aka-four-problems-20261019/fa4_decode/aka_solution`（v55）。下文 host 指 `qoder_greenfield_decode_attention/operator.py`，paged 指 `gqa_decode_paged.py`，combine 指 `gqa_decode.py`；不混用 44 题主批次的相近实现。
 
-唯一共享 Contract 保存在 `root.yaml`：`B=1..17`，`Q in {1,4}`，`Q <= L_b <= 131072`，16/1 heads、`D=256`、`page=64`、FP8 E4M3FN 输入与 BF16 原位输出；完整 ABI、`None` 参数和误差判据以 YAML 为准。测试输入构造中的连续独占页、随机幅度及具体 shape 列表不构成额外 Contract 限制；源码支持但题目未启用的 E5M2、其他页/头/tile、sink、LSE 与 BLASST 不在本目录范围。
+唯一共享 Contract 保存在 `root.yaml`：`B=1..17`，`Q in {1,4}`，`Q <= L_b <= 131072`，16/1 heads、`D=256`、`page=64`、FP8 E4M3FN 输入与 BF16 原位输出；完整 ABI、`None` 参数和误差判据以 YAML 为准。源码支持但题目未启用的 E5M2、其他页/头/tile、sink、LSE 与 BLASST 不在本目录范围。
 
-四份完整 YAML 各代表一套关键机制配置，均限定已建立 native launcher、相同张量对象/签名/线程与当前设备、非 stream capture 的稳态调用，不以 `root` 默认覆盖其余 host 分支。既有实验证据仅覆盖所记录的 30 个样例。两项源码限制原样保留，不补同步或清零：普通 global combine 会读取空 split 未覆写的 `opartial` 槽，跨布局复用 workspace 时不保证旧值有限；PageIndex 下一组预取早于 V-turn 等待，同槽覆写晚于 V 捕获未获证明（详见[案例 README](README.md)）。
+四份完整 YAML 均限定已建立 native launcher、相同张量对象/签名/线程与当前设备、非 stream capture 的稳态调用，`root` 不默认覆盖其余 host 分支。源码限制：普通（非 compact）global combine 会读取空 split 未覆写的 `opartial` 槽，跨布局复用 workspace 时不保证旧值有限；PageIndex 下一组预取早于 V-turn 等待，同槽覆写晚于 V 捕获未获证明（见[案例 README](README.md)）。
 
 ## 完整设计
 
 | 设计 | 具体机制与保留理由 | 关系 |
 | --- | --- | --- |
-| [root](root.yaml) | Q4、S9、单 softmax WG；独立 CTA 物化 FP32 O/M/L，独立 query-head combine | 唯一 Contract；三区本地；shape_valid[14] 的 B15/L31420/P4067 |
-| [q4_cluster](q4_cluster.yaml) | Q4、S16；cluster 蝶形 max/sum，zero_done，BF16 contribution reduce-add | 三区本地；shape_valid[0] 的 B1/L17844/P279 |
-| [q4_direct](q4_direct.yaml) | Q4、S1；CTA 内归一化并直接输出，保留 N1 空 parity | 三区本地；域内 B1/L64/P1，未在30个历史样例中运行 |
-| [q1_global](q1_global.yaml) | Q1、S16；两个 softmax WG 交替 maximum mutex，分别生产 L parity | Math_reshape 整区来自 root，参数绑定到本节点；其余本地；shape_valid[1] 的 B16/L31413/P4344 |
+| [root](root.yaml) | Q4、S9、单 softmax WG；独立 CTA 物化 FP32 O/M/L，独立 query-head combine | 阅读入口，保存唯一 Contract |
+| [q4_cluster](q4_cluster.yaml) | Q4、S16；cluster 蝶形 max/sum，zero_done，BF16 contribution reduce-add | 独立完整定义 |
+| [q4_direct](q4_direct.yaml) | Q4、S1；CTA 内归一化并直接输出，保留 N1 空 parity | 独立完整定义 |
+| [q1_global](q1_global.yaml) | Q1、S16；两个 softmax WG 交替 maximum mutex，分别生产 L parity | Math_reshape 整区引用 root，其余本地定义 |
 
 ## 变体与组合
 
@@ -34,11 +34,11 @@
 ### Q1 的 cluster 与 direct（组合）
 
 - 基线：[q1_global](q1_global.yaml) 的 `SOFTMAXEVEN/SOFTMAXODD`、`maximum`、`p_hi/p_lo`、`exponentialsum`，以及 [q4_cluster](q4_cluster.yaml) 的 cluster 统计/zero_done/output 或 [q4_direct](q4_direct.yaml) 的单块 normalization/output。
-- 差异与联动：将 `q1_global` 的双 softmax WG 主循环（`querytile=1`、`packedcolumns=16`、512 线程、无 Q4 寄存器重分布）直接接入 `q4_cluster` 的蝶形归并或 `q4_direct` 的 CTA 内直接输出；交接接口仍为每列 FP32 max/sum 与双奇偶分子，`N=1` 时 `SOFTMAXODD` 仅发送空指数和奇偶通知而不执行第二次 softmax。
-- 条件与依据：host `_compile_kernel:269–290` 与 `_select_policy` 实际选用这两组搭配（如 cluster 对应 `shape_valid[2]` 的 `B=1, L=17845, S=16`，direct 对应域内 `B=1, L=64, S=1`）；paged `:621–681,1568–1579,1726–1790`。仅记录源码实际启用的组合，不外推任意开发开关配对。
+- 差异与联动：将 `q1_global` 的双 softmax WG 主循环（`querytile=1`、`packedcolumns=16`、512 线程、无 Q4 寄存器重分布）接入 `q4_cluster` 的蝶形归并或 `q4_direct` 的 CTA 内直接输出；交接接口仍为每列 FP32 max/sum 与双奇偶分子，`N=1` 时 `SOFTMAXODD` 仅发送空指数和奇偶通知而不执行第二次 softmax。
+- 条件与依据：host `_compile_kernel:269–290` 与 `_select_policy` 实际启用这两组搭配（如 cluster 对应 `B=1, L=17845, S=16`，direct 对应 `B=1, L=64, S=1`）；paged `:621–681,1568–1579,1726–1790`。
 
 ### 首次调用与 native launcher（局部）
 
 - 基线：[root](root.yaml)、[q1_global](q1_global.yaml)、[q4_cluster](q4_cluster.yaml)、[q4_direct](q4_direct.yaml) 的提交、out 和 workspace；global 同时包含 `PARTIAL/COMBINE`。
-- 差异与联动：cache miss 时先正常执行一次 fmha；若允许建立 native launcher，则克隆当前 `out`，通过 TVM FFI 再执行同一 fmha 并设备同步，在 FP32 下计算差范数 `delta` 与首次输出范数 `denominator`，要求分段误差（`denominator > 1e-6` 时取 `delta / denominator`，否则取 `delta`）`<= 1e-2`。未通过或抛异常时拷回原 `out`；通过则缓存 weakref、签名、线程与 keepalive。只有后续命中才对应 YAML 描述的单次稳态 FFI 调用，首次调用的额外执行、同步、比较与可能回滚仍属实际调用开销。
-- 条件与依据：host `:474–583,652–843`（分段探测见 `:556–562`）。stream capture 下不建立 native launcher，沿用同一 kernel 组织直接运行。该探测阈值不是 Contract 的 `atol/rtol` 验收判据，也不能据此将首次调用与稳态调用视为等成本。
+- 差异与联动：cache miss 时先正常执行一次 fmha；若允许建立 native launcher，则克隆当前 `out`，通过 TVM FFI 再执行同一 fmha 并设备同步，在 FP32 下计算差范数 `delta` 与首次输出范数 `denominator`，要求分段误差（`denominator > 1e-6` 时取 `delta / denominator`，否则取 `delta`）`<= 1e-2`。未通过或抛异常时拷回原 `out`；通过则缓存 weakref、签名、线程与 keepalive。仅后续命中对应 YAML 描述的单次稳态 FFI 调用。
+- 条件与依据：host `:474–583,652–843`（分段探测见 `:556–562`）。stream capture 下不建立 native launcher，沿用原 kernel 路径运行；`1e-2` 仅为 launcher 探测阈值，不是 Contract 容差。

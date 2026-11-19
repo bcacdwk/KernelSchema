@@ -10,7 +10,7 @@
 
 资料不足时说明缺项及其影响，继续能够确定的部分；不编造参考入口、硬件保证、实验结果或设计定义。条件省略与允许保留的缺口分别按[算法验收记录](../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)、[硬件省略与占位](../schema_docs/2.contract.hardware_specification.md#省略与占位)和[数学缺项](../schema_docs/3.design.math_reshape.md#引用与缺项)表达。
 
-固定源码提取按 [P1](../schema_extract/prompt/phases/01_contract.md#第-3-段硬件占位)最小登记有据的执行单元，其余硬件保留占位，手工检查显式使用 `--read-only --skip-hardware`。Extract 的运行环境与角色权限见 [Supervisor 手册](../schema_extract/README.md)，阶段检查见[执行协议](../schema_extract/tools/README.md#规范化与检查)。
+固定源码提取按 [P1 硬件占位](../schema_extract/prompt/phases/01_contract.md#第-3-段硬件占位)完成 `Execution` 有据最小登记并保留其余硬件占位，手工检查显式使用 `--read-only --skip-hardware`。Extract 的运行环境与角色权限见 [Supervisor 手册](../schema_extract/README.md)，阶段检查见[执行协议](../schema_extract/tools/README.md#规范化与检查)。
 
 ### 2 创建文件或进入已有任务
 

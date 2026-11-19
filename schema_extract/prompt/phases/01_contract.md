@@ -30,11 +30,9 @@
 
 逐输出核对验收比较对象、相对误差基准（包括 `relative_to`）、计算精度、阈值及非有限值处理，并将验收材料中的输出对应到当前 Contract 的全部输出。返回位置和具有不同判据的状态输出分别核实；名称转换不能丢掉任何已有声明。worker 和 reviewer 各自读取声明并选择实际依据，阅读材料不等于执行 GPU 验收。
 
-提案的 `comparisons` 覆盖验收 `.json` 中每个具名输出的 `tolerance.relative_to` 声明：`output` 填当前 `Golden_reference.Tolerance` 的精确键名，`source_output` 填验收输出名，`evidence` 索引覆盖该声明行的本次 `source_evidence`。无此类 JSON 声明时填 `[]`。比较器代码和 Markdown 按普通来源证据核实；其他 Contract 事实写入正文与 conclusions。
+提案的 `comparisons` 绑定验收 `.json` 中每个具名输出的 `tolerance.relative_to` 声明：`output` 填当前 `Golden_reference.Tolerance` 的精确键名（同名验收输出须绑定该同名键），`source_output` 填解析后的验收输出身份（`input.state[<数字>]` 归并为 `input.state[*]`，其余用原输出名），`evidence` 索引本次 `category="acceptance"` 的 `source_evidence`，且按[提交与证据](../operations/response.md)截取的实际引文须覆盖并包含该 `"relative_to"` 声明文本。无此类 JSON 声明时填 `[]`；比较器代码和 Markdown 按普通来源证据独立核实，其他 Contract 事实写入正文与 conclusions。
 
-对应 `Golden_reference.Tolerance` 保留来源给出的判据。来源明确给出完整公式（例如逐元素 `abs(candidate-reference) <= 0.01 + 0.05*abs(candidate)`）时写出该判据，并说明未声明的计算精度或 NaN/Inf 行为；若仅给出 `elementwise`、`atol=0.01`、`rtol=0.05`、`relative_to=candidate` 等标签而未声明组合公式，只保留已知项并注明公式缺失，不能推成加和公式或推断计算精度、非有限值政策。
-
-材料未声明的比较器事实按[验收来源记录](../../../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)和[来源缺项](../roles/reviewer.md#来源缺项)处理。已有判据完整保留；未知公式、基准、归一化或检查路由不自行补齐，也不能用“没有 override”、reference 内部算术或 schema 默认值作依据。当前计算与设计可确定时，说明限制后继续；必须猜测当前关系时阻塞具体范围，已知事实写错或遗漏则退修。
+对应 `Golden_reference.Tolerance` 如实保留来源已声明的阈值、基准、完整公式或局部标签；验收 `.json` 声明了 `relative_to` 时，即使写出完整公式，对应文本仍须显式写出 `relative_to=<值>` 且不改动已声明的 `atol`/`rtol`。未提供的组合公式、基准、计算精度、非有限值处理、归一化或检查路由按[验收来源记录](../../../schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)和[来源缺项](../roles/reviewer.md#来源缺项)说明限制，不从局部标签、reference 内部算术或默认值自推。当前计算与设计可确定时保留限制继续；关键关系须靠猜测时阻塞具体范围，已知事实写错或遗漏则退修。
 
 写完后，读者应能不依赖 Design 理解标准答案。生成参数、函数签名和候选实现限制不能单独决定任务要求；分块、映射、缓冲、执行顺序和候选数学改写留给 Design。公式、dtype、range、default、symbol 和 tolerance 按算法规范填写，不自行增加字段。
 
@@ -42,17 +40,17 @@
 
 ### 第 3 段：硬件占位
 
-`CONTRACT.Hardware_specification.Execution` 使用 DOC2 已有的具名映射，最小登记给定材料或固定源码已明确使用的执行单元，作为后续 worker 与 role 的名称来源。在所属单元摘要中同时登记后续 `Storage.location` 需要引用的存储名称及范围，例如 thread 的 `register`、CTA 的 `smem`；纯存储不因此成为执行者。只填写有依据的执行层级、组成及所属资源作用域，不把某次 launch 的线程数或某个实现配置写成设备上限；保留每项的来源依据。后续需要补充单元或存储名时回 P1 更新唯一定义，不在 Design 中另造登记位置。
+`CONTRACT.Hardware_specification.Execution` 使用 DOC2 已有的具名映射，最小登记给定材料或固定源码明确使用的执行层级、组成及所属资源作用域，作为后续 worker 与 role 的名称来源；同时在所属单元摘要中登记 `Storage.location` 需引用的存储名称及范围（如 thread 的 `register`、CTA 的 `smem`），纯存储不因此成为执行者。保留每项来源依据，不把单次 launch 配置写成设备上限；后续需补充单元或存储名时回 P1 更新唯一定义，不在 Design 中另造登记位置。
 
-硬件区其余字段原样保留本次 [starter](../../../schema_template/starter.yaml) 的占位，不开展硬件资料搜索、能力或容量调查，不把这些资料缺口列为提取待办或阻塞理由。适用的 YAML 检查使用 `--read-only --skip-hardware`；worker/reviewer 人工核实执行单元登记的来源，不把跳过检查当作已获硬件保证。后续 Design 如实描述源码的运算、执行者和同步关系，登记单元或存储名称不证明设备规模、容量或原语能力，也不要求调查编译后的寄存器分配或取得无 spill 证明。下游引用与来源规则保持不变；已有源码事实因此无法合规表达时，按[框架问题](../roles/reviewer.md#发现问题与批准)定位受影响范围。
+硬件区其余字段原样保留本次 [starter](../../../schema_template/starter.yaml) 的占位，不开展硬件资料、能力或容量调查，也不把这类资料缺口列为待办或阻塞理由。适用 YAML 检查使用 `--read-only --skip-hardware`（手动调用 Template 检查同样须显式传这两个参数）；worker/reviewer 对照来源人工核实 `Execution` 登记，登记名称和跳过检查均不提供设备规模、容量或原语能力保证。已有源码事实因此无法合规表达时，按[框架问题](../roles/reviewer.md#发现问题与批准)定位受影响范围。
 
 每段写完保存，再按问题回查。非硬件资料不足或源码与要求不一致时，按[缺项边界](../../../EXTRACT_SCHEMA.md#来源缺项与验收边界)保留事实、定位字段和恢复条件。来源明确的转录错误可纠正；真实外部要求变更沿任务边界处理，不能为当前实现缩小 Contract。硬件与 GPU 豁免只适用于本次固定实现提取。
 
 ## reviewer：放行门槛
 
-按[当前文档验收](../roles/reviewer.md)先通读当前任务元数据、算法 Contract 与最小执行单元登记，再核对固定材料，完成四项判断。Design 草稿和 root 代表选择不在本阶段批准范围；后续仍须复核共享 Contract 与新内容是否一致。
+按[当前文档验收](../roles/reviewer.md)先通读当前任务元数据、算法 Contract 与 `Execution` 最小登记，再核对固定材料，完成四项判断。Design 草稿和 root 代表选择不在本阶段批准范围；后续仍须复核共享 Contract 与新内容是否一致。
 
-- 任务身份与来源准确，YAML 可解析；执行单元按已有字段登记且有来源依据，硬件区其余占位保持原样。
+- 任务身份与来源准确，YAML 可解析；执行单元及所需存储名/范围按已有字段登记且有来源依据，硬件区其余占位保持原样。
 - 外部数学、有效域、全部输出、边界、精度转换及副作用可独立理解，没有将实现限制或 Design 选择变成算法前提。
 - reference 可实际定位，每个输出的判据或验收来源记录均已覆盖，已知阈值、基准和检查未被遗漏或替换。
 - 来源缺口及不影响当前提取的理由有据，未被用于支持数值保证；实现覆盖不足与源码缺陷按事实保留。

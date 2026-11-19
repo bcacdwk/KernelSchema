@@ -6,7 +6,7 @@
 
 **理解算子：** [分类区别与阅读顺序](GUIDE.md) · [验证状态和性能口径](EVIDENCE.md)
 
-**Template 四题来源：** [FA4 prefill / decode、GDN prefill、QSA prefill 快照](aka-four-problems-20261019/README.md) · [入口与证据索引](../schema_discussion/template_examples_20261117/SOURCES.md)。该固定快照用于 Template 案例提取，独立于 44 题主批次，源码与验证记录不默认互换。
+**Template 四题来源：** [FA4 prefill / decode、GDN prefill、QSA prefill 快照](aka-four-problems-20261019/README.md) · [入口与证据索引](../schema_discussion/template_examples_20261117/SOURCES.md)。该固定快照用于 Template 案例提取，独立于 44 题主批次，源码与验证记录不互换。
 
 ## 按功能浏览
 
@@ -46,13 +46,13 @@ kernel_wiki/
     └── evidence/ / validation-20261021/
 ```
 
-44 题主批次内，一个算子只存一份完整材料；精度、阶段等维度通过索引交叉引用。稳定 ID 和原库内部相对路径均保留，便于追溯引用和复用整个 `candidate/`。各题还可能附带 `PRECISION.md`、`VARIANTS.md`、`USER_ACCEPTANCE.md` 和许可资料。
+主批次每题存一份完整材料，保留稳定 ID 与原库内部相对路径；部分题目另附 `PRECISION.md`、`VARIANTS.md`、`USER_ACCEPTANCE.md` 和许可资料。
 
-`catalog.json` 的 `summary` 是 Wiki 的计算概要，`source_description` 摘自导入的 `problem/metadata.json`，其中的 `〔…〕` 表示 Wiki 校注。核对合法输入时，沿条目的 `paths.shape_range` 查看动态参数域和跨字段约束。`paths.shape_cases` 列出固定用例。
+`catalog.json` 中 `summary` 为计算概要，`source_description` 摘自 `problem/metadata.json`（`〔…〕` 表示 Wiki 校注）；`paths.shape_range` 给出动态参数域与跨字段约束，`paths.shape_cases` 列出固定用例。
 
-若条目有 `paths.annotated_entrypoint`，可直接阅读修正了注释的源码。它与 `paths.entrypoint` 的导入原件逐行对应，`catalog.py check` 核对两者的 Python 语法树和内嵌 CUDA 的非注释内容。由当前 catalog 入口发起的新提取会冻结两份文件；原件仍是实现和 host 的绑定入口，校注只作阅读辅助，声明的校注路径缺失或不合法时明确报输入错误。旧提取是否包含校注，以其 `inputs.lock.json` 的 `source.files` 为准，不能由当前 catalog 推断。[展开式 FP8 MLA 校注版](annotations/mla_expanded_fp8/solution.py)
+若条目提供 `paths.annotated_entrypoint`（如[展开式 FP8 MLA 校注版](annotations/mla_expanded_fp8/solution.py)），可辅助阅读修正注释后的源码；导入原件 `paths.entrypoint` 仍是绑定入口，`catalog.py check` 核对两者行号与可执行内容一致。历史提取是否包含校注以各自 `inputs.lock.json` 为准，提取细节见 [EXTRACT_SCHEMA.md](../EXTRACT_SCHEMA.md)。
 
-44 题主批次来自 `/Users/hanyong/aka-cuda-operator-library`，于 2026-11-01 导入。除未列入源清单的 `.DS_Store` 缓存外，**1,266 个文件、51,906,145 字节均与源文件一致**。完整性信息见 [IMPORT.json](IMPORT.json)。
+44 题主批次于 2026-11-01 自 `/Users/hanyong/aka-cuda-operator-library` 原样导入，来源与清单摘要见 [IMPORT.json](IMPORT.json)。
 
 ## 命令行检索
 
@@ -92,8 +92,8 @@ python3 -B kernel_wiki/aka-cuda-operators-20261030/tools/verify.py
 python3 -B kernel_wiki/aka-cuda-operators-20261030/tools/test_metadata.py
 ```
 
-第一条检查索引同步、相对链接、原始清单和全部文件哈希；后两条执行原库的接口、证据绑定与元数据检查。原库检查器严格禁止 `.DS_Store` 等缓存；Finder 再次生成缓存时需清理该快照中的缓存后重试，不应修改证据文件。以上均不执行 GPU 评测。
+第一条检查索引同步、相对链接、原始清单和全部文件哈希；后两条执行原库的接口、证据绑定与元数据检查（均不运行 GPU）。
 
-新增版本时另建批次并保留来源与验收绑定。修正本 Wiki 的分类说明时，修改 `tools/catalog.py`，再运行 `python3 kernel_wiki/tools/catalog.py render`，审阅并应用其输出的补丁以同步三个派生索引。该命令本身不写文件，也不会刷新原库元数据。
+新增版本时另建批次并保留来源与验收绑定。修正本 Wiki 的分类说明时，修改 `tools/catalog.py` 后运行 `python3 kernel_wiki/tools/catalog.py render`，审阅并应用其输出的补丁以同步三个派生索引（不直接写文件，也不刷新原库元数据）。
 
-需要从实现提取设计时，进入仓库的 [EXTRACT_SCHEMA.md](../EXTRACT_SCHEMA.md)；产物归入 `schema_wiki/`，并引用本批次的实际源码路径。这次整理交付的是实现与证据资料库。
+从实现提取设计见 [EXTRACT_SCHEMA.md](../EXTRACT_SCHEMA.md)，成品归入 [schema_wiki](../schema_wiki/README.md) 并引用本批次实际源码路径。

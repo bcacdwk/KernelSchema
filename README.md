@@ -21,7 +21,7 @@ Kernel Schema 的核心出发点在于：压缩是智能的基础，对语义、
 
 新建与优化均由 Planner 按“数学改写 → 工作调度 → 微流水线”逐层收束并写入；下层发现前提问题时，返回最早受影响的上层修正并复查受影响部分。
 
-Schema Extract 通过唯一入口 `schema_extract/extract_yaml.py` 执行六阶段提取、独立审阅、按实际来源返回与原子发布（默认 Claude Code `qwen3.8-max[1m]` / `max`，各阶段与角色独立会话；Codex 可显式指定）。Linux 运行环境与操作命令见 [Supervisor 手册](schema_extract/README.md#开始一次试用)，角色与工具权限见[执行协议](schema_extract/tools/README.md#运行恢复与维护)。交付须核对目标与版本：`ready` 仅表示当前 P6 终审通过，`published: true` 才表示已原子发布到登记输出目录（若 `ready` 但 `published: false`，先用 `inspect --run RUN_UUID --json` 核对 `publication`、`control`、`global_hold` 与 `maintenance_request`，权威状态及已应用维护查 `status RUN_UUID --full`，再按[恢复与交付](schema_extract/README.md#恢复与交付)接续）；另目录 `export` 以 `exports[].status=published` 和目标 `.extraction/receipt.json` 为准，checkpoint、规则、批准及文件摘要须对应本次交付。正式输出目录见 [Schema Wiki](schema_wiki/README.md)。
+Schema Extract 通过唯一入口 `schema_extract/extract_yaml.py` 执行六阶段提取、独立审阅、按实际来源返回与 Runner 原子发布（默认 Claude Code `qwen3.8-max[1m]` / `max`，各阶段与角色独立会话；Codex 可显式指定）。Linux 运行环境与命令见 [Supervisor 手册](schema_extract/README.md#开始一次试用)，角色与工具权限见[执行协议](schema_extract/tools/README.md#运行恢复与维护)，正式输出目录见 [Schema Wiki](schema_wiki/README.md)。交付须核对目标状态与凭据：`ready` 仅表示当前 P6 终审通过，登记输出目录以 `published: true` 为准，另目录 `export` 以对应发布记录与目标 `.extraction/receipt.json` 为准；待发布或中断运行的排查与接续见[恢复与交付](schema_extract/README.md#恢复与交付)。
 
 ## 术语
 
@@ -133,4 +133,3 @@ Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape
 - **案例资料与来源缺口**：继续补齐 Wiki 绑定与源码中未获保证的关系，具体边界见[示例索引](schema_template/examples/README.md)；数值及性能验收按相应任务执行。
 - **更多转写与精简**：转写更多 SOTA kernel，收敛到最小交集原语。
 - **检查器与评估器**：在现有结构、具名关系及有限工作阶段内依赖检查之上，继续完善资源记账、跨工作阶段与更大规模的合法性和活性分析，以及尽量保序的性能估算。
-- **提取范围**：当前固定实现的 [Schema Extract](schema_extract/README.md) 任务不新增 GPU 正确性验收或实测；普通设计与实现任务仍按各自验收要求执行。

@@ -14,7 +14,7 @@ Supervisor 负责控制请求，Runner 是状态与合入的唯一写者。worke
 
 | 阶段 | worker 的职责 | 独立放行对象 |
 | --- | --- | --- |
-| P1 | root 的任务元数据、算法 Contract、有据 Execution 最小登记 | 全部输出及验收依据、任务和执行单元；其余硬件保留 starter |
+| P1 | root 的任务元数据、算法 Contract、有据 Execution 单元及存储名最小登记 | 全部输出及验收依据、任务和 Execution 最小登记；其余硬件保留 starter |
 | P2 | root Source/Dispatch/Version 与目录草案，提交 `{id, instance}` | 机制、具体 root、少量完整代表及记录去处；含 root ≤10 |
 | P3 | root 本地 Design 三区、必要 Realization、自身 when/Version | 完整 root 有效全文及当前目录范围 |
 | P4 | 目录与 `{id, wait_for}`，落实已定非 root 写作安排 | 完整 root、相关基线与有限未来计划 |
@@ -40,12 +40,12 @@ P6 先独立理解最终成果，再按必要 P2/P4/P5 回执和短交接反查�
 模型只返回本次动态 schema 的 `schema_extract.proposal.v1`，含精确 `attempt_id` nonce。Runner 从实际 bytes 生成完整 receipt 的身份、摘要与差异。
 
 - `decision`、`summary`、`conclusions` 表达本次判断；正常 worker 可 complete/continue/blocked，reviewer 可 approve/revise/blocked，适用阶段可 reopen。
-- `source_evidence` 选择真实阅读的相对 path、category、行范围、quote_offset 和 note。`artifact_evidence` 锚定本次实际审阅或提交的 raw（普通调用为 `workspace`，裁决 `select` 为所选候选 `materials/candidates/<checkpoint>`），不能用展开视图或规范化预览的位置。
-- conclusions/issues/framework_candidates 的 evidence 索引本次 source_evidence；当前文档的四项判断可由 artifact_evidence 支持，纯文档退修/阻塞使用相应 kind 与文件锚点，具体编码见[提交与证据](../prompt/operations/response.md)。reviewer 仍独立核查实际源码。
-- P1 comparisons 绑定逐输出验收；P2/P4 普通或维护 reviewer 独立认可后，approve 的 plan 保留 plan_draft；P6 revision_scope 限目录及明确非 root 字段，affected_nodes 登记受影响者并在批准时覆盖 pending_rechecks。
-- checks 只记亲自执行的命令及退出码；未执行时为空并说明。handoff 简短记录已定事项、必要依据、新事实去处与缺项。
+- `source_evidence` 锚定固定源码，`artifact_evidence` 锚定本次实际审阅或提交的 raw（普通调用为 `workspace`，裁决 `select` 为所选候选 `materials/candidates/<checkpoint>`，不用展开视图或规范化预览）；行范围、`quote_offset` 实际引文截取及本次证据索引规则见[提交与证据](../prompt/operations/response.md)。
+- `conclusions/issues/framework_candidates` 引用本次 `source_evidence`；当前文档的四项判断可由 `artifact_evidence` 支持，纯文档退修/阻塞使用相应 `kind` 与文件锚点，reviewer 仍独立核查实际源码。
+- P1 `comparisons` 绑定验收 `.json` 中具名输出的 `relative_to` 声明（编码与显式保留要求见 [P1](../prompt/phases/01_contract.md#第-2-段算法要求)）；P2/P4 普通或维护 reviewer 独立认可后，approve 的 `plan` 保留 `plan_draft`；P6 `revision_scope` 限目录及明确非 root 字段，`affected_nodes` 登记受影响者并在批准时覆盖 `pending_rechecks`。
+- `checks` 只记亲自执行的命令及退出码；未执行时为空并说明。`handoff` 简短记录已定事项、必要依据、新事实去处与缺项。
 
-普通调用的回执结构、必填判断/证据漏项及固定文件内的证据坐标错误，复用同一 scope 的有限 receipt repair；原角色补全并重交，每次完整校验，保留合法草稿及已用调用/修复次数。身份、权限、固定字节漂移及产物语义错误仍为硬错误；有效的退修/阻塞决定按原流程处理，工具不代写判断或证据。
+普通调用中进入回执补正诊断的提案结构错误、可补正结论/证据缺项及固定文件内的证据坐标错误，复用同一 scope 的有限 receipt repair：由原角色核实补正后重交并完整重验，保留合法草稿及已用调用/修复次数。未归入补正的门禁失败、身份或权限越界、固定字节漂移及产物错误直接拒绝；有效的退修/阻塞决定按原流程处理，工具不代写判断或证据。
 
 ## 规范化与检查
 
@@ -91,11 +91,9 @@ CLI 直接使用当前用户真实文件系统。Claude 的工具清单按角色
 
 启动门先登记身份再放行，并作为本次调用的 child-subreaper 保持脱离后代的归属。CLI 主进程的实际退出单独登记；正常结束或取消均由 Linux `/proc` 的进程身份与归属检查确认后代结清。未确认终止保持 fence。恢复重用同一 parser 和真实 exit，确认中断后退休私有 session，以 checkpoint 和短交接新建；确证未启动保留前次会话。
 
-当前维护只处理未交付的固定 run，由已有 Supervisor ledger、单写者排空与发布屏障执行。任务指定已选 P1–P5 的 `review` 或 `patch` 及 `fields`（`patch` 必填非空；`review` 无默认上限，填 `[]` 仅做只读复核，非空时作为退修进入 `patch` 的范围上限）；完整稿先审，未完成稿继续正常写作。维护不换来源、规则或执行器，不代替正常阶段和 P6。
+当前维护只处理未交付的固定 run，由已有 Supervisor ledger、单写者排空与发布屏障执行。任务显式指定已选 P1–P5 的 `review` 或 `patch` 及 `fields`（`patch` 必填非空；`review` 填 `[]` 仅做只读复核，非空时作为退修进入 `patch` 的范围上限）；完整稿先审，未完成稿继续正常写作。维护不换来源、规则或执行器，不代替正常阶段和 P6。
 
-`repair-runtime` 的入口和授权格式见 [Supervisor 手册](../README.md#恢复与交付)。prepare 封存原前沿、代码差异、目标执行器和只读核验；apply 提交前重核前沿及控制依据，在无在途调用和控制/维护屏障时以单一 writer 原子追加 execution binding。原输入锁、语义材料、checkpoint、批准来源、失败决定及计数不重写；后续会话按 binding 分开，普通 resume 继续原阶段责任。
-
-保存核验检查原 checkpoint/producer/base、保存证据、原调用已哈希材料中的文件/字段权限和批准来源；未完成诊断不形成批准。P5 各节点 draft 一并核验；P6 worker、裁决编辑和恢复保存共用节点 draft 更新规则，落后指针按当前完整候选及保存链恢复。目标 capsule 稳定读取完整材料，并发发布只复用已封印、无链接且内容完全匹配的结果。
+`repair-runtime` 的命令、状态门禁（未交付且未达 `ready`、调用与账目已结清且无控制/恢复/维护屏障）及授权格式见 [Supervisor 手册](../README.md#恢复与交付)。`prepare` 封存原前沿、代码差异、目标执行器及历史保存稿、文件/字段权限与批准来源的只读核验，返回 `plan.id`；`apply` 提交前重核前沿与控制依据，以单一 writer 原子追加 `execution_binding`。原输入锁、语义材料、checkpoint、批准来源、失败决定及计数不重写，未完成诊断不形成批准；后续会话按 binding 分开，经普通 `resume` 继续原阶段及 P6 门禁。
 
 ## 发布与独立视图
 
@@ -107,13 +105,13 @@ standalone 使用当前 Template 的完整目录校验与导出 API（不接收�
 
 ## usage、时间与证据封存
 
-用量按 attempt 去重，原始 provider 口径留在 result 和 ledger。requested/reported model/effort 分列；未知项保留 null。失败、取消、恢复和追加调用次数均保留已用账目。
+用量按 attempt 去重，原始 provider 口径与环境配置指纹留在 result 和 ledger。requested/reported model/effort 分列；未知项保留 null。失败、取消、恢复和追加调用次数均保留已用账目。
 
 Claude 的 `model_usage_since_last_result` 是原生本进程已报告增量；`usage` 仅主循环当前 turn，`modelUsage/total_cost_usd` 可随 resume 累计。没有增量时不把累计 session 值相加成调用总量。cache read/write 分列，不套 Codex 的缓存输入子集公式。
 
 Codex 原生 usage 与可选精确 UUID 的 native counter 观测分别保留。可证的根会话增量不自动代表全部模型调用，未观察到子会话也不记为零。CLI 报告成本不等于实际账单。
 
-墙钟、CLI、检查处理和等待时间分别记录；等待可与兄弟工作重叠。耗时与 token 只作统计，Template 检查结果须在提交前核验。
+墙钟、CLI、检查处理和等待时间分别记录；等待可与兄弟工作重叠。累计耗时与累计 token 用量只作账目统计，不作为提取预算（CLI 与服务端的单次输出及上下文容量限制仍有效）；Template 检查结果须在提交前核验。
 
 `audit --verify` 深验原生事件、exit、schema/nonce、原稿、最终 checkpoint 和来源证据。归档只收具体证据文件；Codex 额外收末条响应，私有认证及整个 CLI home 不进入包。包用于审计，不提供新的恢复或批准授权。
 

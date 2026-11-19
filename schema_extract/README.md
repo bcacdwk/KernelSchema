@@ -41,9 +41,9 @@ python3 schema_extract/extract_yaml.py status RUN_UUID
 
 角色路径相对 `directory`，`repository` 相对描述文件，省略为 `.`；`host` 省略时采用 entrypoint。来源目录中的 `schema-inputs.json` 也可用。未指定 `revision` 时冻结本地实际字节；指定时读取解析后的 Git commit。`--source 'git:<ref>:<directory>' --bindings FILE` 使用 `--repo` 指定的仓库。
 
-`acceptance` 可同时绑定 JSON 记录、比较器代码和 Markdown 说明。P1 严格解析 `.json` 文件，核验其中具名输出的 `tolerance.relative_to` 声明；其他材料由 worker 与独立 reviewer 按固定来源证据核实比较语义。
+`acceptance` 可同时绑定 JSON 记录、比较器代码和 Markdown 说明。P1 对 `.json` 中具名输出的 `tolerance.relative_to` 声明做机械绑定核验（编码与显式保留要求见 [P1](prompt/phases/01_contract.md#第-2-段算法要求)）；比较器代码与 Markdown 说明由 worker 和独立 reviewer 按固定来源证据核实比较语义。
 
-一个 run 固定以下身份，恢复与维护均沿用它们：
+一个 run 冻结以下身份（常规恢复与限域维护均沿用原身份）：
 
 | 身份 | 固定内容 |
 | --- | --- |
@@ -51,7 +51,7 @@ python3 schema_extract/extract_yaml.py status RUN_UUID
 | rules | schema_docs、starter、Template、完整 prompt 树及其引用 |
 | executor | 实际 Python 执行器、能力和后端配置 |
 
-快照含逐文件摘要与整体身份；脏本地源码以快照内独立 Git 引用定位，原仓库不变。来源、任务或语义规则改变时另建 run。extract 流程工具自身故障可按下述执行器修复入口保留进度续接，原输入锁及历史证据不改。annotated 源码只作为已登记的阅读辅助，事实仍回查固定实现。
+快照含逐文件摘要与整体身份；脏本地源码以快照内独立 Git 引用定位，原仓库不变。任务、算子来源或语义规则改变时另建 run；仅修复 Extract 工具自身故障时，可按下述 `repair-runtime` 入口登记新执行器并保留原进度、输入锁与历史证据续接。annotated 源码只作为已登记的阅读辅助，事实仍回查固定实现。
 
 默认状态目录为 `.schema_extract/v2`；`--state-root` 可以独立指定。`snapshots/` 保存输入，`runs/RUN_UUID/` 保存状态、attempt、原稿、规范化记录和 checkpoint，`supervisor.json` 保存控制请求。正式输出位置见 [Schema Wiki](../schema_wiki/README.md)。
 
@@ -73,7 +73,7 @@ python3 schema_extract/extract_yaml.py inspect --run RUN_UUID --json
 | `--revision-limit` | 每阶段或 P5 节点 5 次实质退修 |
 | `--max-calls` | 每阶段或节点 32 次，最少 4 次 |
 
-Claude backend（含 `review-eval`）默认请求单响应上限 128000 tokens，不继承主机同名输出设置，不设固定 thinking budget；实际上限由 CLI 和服务端决定。调用记录环境配置指纹和实际用量。
+Claude backend（含 `review-eval`）默认请求单响应上限 128000 tokens（不设固定 thinking budget）；单次输出与上下文容量仍受 CLI 和服务端实际限制，超限或调用错误按真实失败处理。
 
 显式 Codex 示例：
 
@@ -81,7 +81,7 @@ Claude backend（含 `review-eval`）默认请求单响应上限 128000 tokens�
 python3 schema_extract/extract_yaml.py extract --source /path/to/source.json --output /path/to/delivery --backend codex --model YOUR_MODEL --worker-effort high --reviewer-effort high
 ```
 
-调用次数覆盖续写、退修、失败，并预留一次裁决和签收。调用、阶段、整算子及检查不设时间上限，耗时与 token 只作统计。恢复、返回和重复 issue 不退还已用次数；需要追加时由 Supervisor 明确指定。
+调用次数覆盖续写、退修、失败，并预留一次裁决和签收；恢复、返回和重复 issue 不退还已用次数，需要追加时由 Supervisor 明确指定。Extract 不对单次调用、阶段、整算子或检查设时间上限，累计耗时与累计 token 用量只作统计，不作为提取预算。
 
 ## 角色与会话
 
@@ -113,11 +113,9 @@ P2 提交 `{id, instance}` 的有限选择，P4 提交 `{id, wait_for}` 的写�
 
 cancel 不等待刷盘；pause 允许当前调用自然完成。显式 resume 先复查未确认的取消交付，真实结清后才能启动。恢复核进程、真实 exit、原生结果、schema、nonce 和精确会话。真正中断的会话在确认终止后退休，保留 checkpoint 和短交接；确证未启动时可以保留前次有效会话。范围恢复绑定实际失败 attempt、当前实例和实际来源；健康兄弟继续。`--scope` 不接受次数追加。
 
-extract 工具修复采用 `repair-runtime prepare RUN --executor-tree TREE --issue-id ID --reason TEXT` 冻结并预检目标，`repair-runtime apply RUN --plan PLAN_ID --authorization FILE` 登记新执行器，再用普通 `resume RUN` 续原停点。TREE 从原 frozen rules 复制完整材料，只加入已审的 extract Python 修复；source、任务、Template、prompt 与语义规则保持原字节。入口仅处理当前格式、未交付、调用已结清且没有活动控制/维护屏障的 run；pause/cancel/hold 保持优先，原调用、计数及批准不变，新调用按独立冻结的执行器身份追溯。
+Extract 工具修复使用 `repair-runtime prepare RUN --executor-tree TREE --issue-id ID --reason TEXT` 冻结并预检目标（返回 `plan.id`），再用 `repair-runtime apply RUN --plan PLAN_ID --authorization FILE` 登记新执行器，最后执行普通 `resume RUN` 续接原停点。`TREE` 从原冻结 rules 复制完整材料，只加入已审的 `schema_extract` Python 修复；source、任务、Template、prompt 与语义规则保持原字节。该入口仅接受当前格式、未交付且未达 `ready`（尚未完成）、调用与账目已结清且无活动控制/恢复/维护屏障的 run；`pause/cancel/hold` 保持优先。预检核验原进度、历史权限与批准来源：合法草稿与有效批准保留，原调用账目、未完成诊断、失败状态和待审责任不变；`apply` 不产生批准也不自动 `resume`，新调用按新执行器身份追溯，后续仍须通过原阶段和 P6 门禁。
 
-授权文件包含 prepare 返回的 `plan_id`、`decision: continue_with_audit_marker`、`authority: user_instruction`、`scope: extract_tools_only`、真实指令 `summary` 和 `audit_points`，可引用同一会话已有的持续指令。每个审计点给出真实 `stage/attempt_id/detail`；尚未登记调用的停点使用 `attempt_id: null`、当前 stage，并在 detail 写明未启动调用。原工具问题、沿用进度和审计点进入交付 `.extraction/receipt.json` 的 `continuation_audit`，状态为 `pending_user_decision`；该标记不声称疑点已修复或独立审计已完成，用户决定后续额外检查或重来。
-
-预检先核保存稿、原调用、原文件/字段权限和批准来源，再报告完成度诊断。合法初始稿、worker continue、回执补正稿和确认终止后保存的稿均可保留；P5 核对各节点 draft，P6 在计划中登记落后指针供 apply 恢复。未完成诊断、失败状态和待签收责任保留；apply 不批准或自动 resume，后续仍须通过原阶段和 P6 门禁。
+授权文件填入 prepare 返回的 `plan.id`（字段名 `plan_id`）、`decision: continue_with_audit_marker`、`authority: user_instruction`、`scope: extract_tools_only`、真实指令 `summary` 和 `audit_points`（可引用同一会话已有的持续指令）。每个审计点给出真实 `stage/attempt_id/detail`；尚未登记调用的停点使用 `attempt_id: null`、当前 `stage`，并在 `detail` 写明未启动调用。原工具问题、沿用进度和审计点进入交付 `.extraction/receipt.json` 的 `continuation_audit`（状态 `pending_user_decision`）；该标记不表示疑点已修复或独立审计已完成，由用户决定后续额外检查或重跑。
 
 当前未交付 run 的有限维护：
 
@@ -129,7 +127,7 @@ python3 schema_extract/extract_yaml.py maintain RUN_UUID --issue-id copy-definit
 [{"stage":"P3","node":"root","action":"patch","fields":[{"path":"root.yaml","fields":["DESIGN.Math_reshape"]}],"reason":"修正已定位的计算定义"}]
 ```
 
-每项任务均包含 `stage/node/action/fields/reason`，仅针对当前已选的 P1–P5（`dispatch.md` 用 `{"path":"dispatch.md","fields":["*"]}`）。`patch` 须给非空文件/字段；`review` 无默认修补上限，填 `fields: []` 仅做只读复核（不可退修进入 `patch`），需允许退修修补时须预先填入 `fields` 上限。请求先阻挡新派发和发布，由同一 Runner 排空后执行。完整稿可先审，未完成稿继续普通写作；维护结束仍需正常阶段和新的 P6。已交付运行不能再通过维护改稿。
+每项任务均包含 `stage/node/action/fields/reason`，仅针对当前已选的 P1–P5（`dispatch.md` 用 `{"path":"dispatch.md","fields":["*"]}`）。`fields` 须显式给出：`patch` 必填非空文件/字段；`review` 填 `[]` 仅做只读复核（不可退修进入 `patch`），非空时作为允许退修修补的范围上限。请求先阻挡新派发和发布，由同一 Runner 排空后执行。完整稿可先审，未完成稿继续普通写作；维护结束仍需正常阶段和新的 P6。已交付运行不能再通过维护改稿。
 
 P6 通过达 `ready` 后，无控制或维护屏障时 Runner 自动核验当前批准、来源、完整目录与最终 checkpoint 并原子发布，保留已审字节。若接手时 `ready` 但 `published: false`，先用 `inspect --run RUN_UUID --json` 核对 `publication`、`control`、`global_hold` 与 `maintenance_request`（权威运行状态及已应用的 `maintenance` 详情查 `status RUN_UUID --full`）：全局 hold 先 `resume --all --hold ID` 释放；因暂停、取消或发布中断未提交状态时，执行 `resume RUN_UUID` 重放发布（目标已有相同完整结果时幂等成功）；目标已有不同内容（`publication.status=conflict`）时保留双方内容，改用 `export RUN_UUID --output /path/to/new/delivery` 另行交付，并以 `exports[].status=published` 和目标回执为准。
 
@@ -171,10 +169,8 @@ python3 schema_extract/extract_yaml.py monitor status
 python3 schema_extract/extract_yaml.py monitor stop
 ```
 
-提醒使用独立的 `codex queue --resume`。收到后按消息执行绑定线程的 `monitor ack`；返回 `accepted: true` 或 `reason: already_acknowledged` 时均执行一次同一提醒的 `monitor scan --wake ID --thread THREAD_UUID`（其余拒绝直接结束），以 `committed`/`reused` 为本轮完成依据。`stop` 只停提醒，不取消已启动提取。
+提醒通过独立的 `codex queue --resume` 投递；收到后按[提醒正文](prompt/operations/wakeup.md)执行绑定线程的 `monitor ack` 与 `monitor scan`，以 `clock.committed` 或 `reused` 为本轮完成依据。等待锁或中断未返回不等于未提交，可用同一提醒 ID 与 `monitor status` 核对续接。`superseded_run_ids` 标出已被更新观察超越的旧采样，不覆盖较新观察；人读时间采用北京时间（UTC+8）。`stop` 只停用提醒（保留的到期记录不再计时），不取消已启动提取。
 
-前台 monitor 等待控制锁满 1 秒后提示，其后每 30 秒最多提示一次；这是展示节流，没有等待超时预算。可中断后用同一提醒 ID 和 `monitor status` 核对、续接，不能把没有返回当作未提交。旧采样会标出 `superseded_run_ids`，不会覆盖较新的观察。人读时间使用北京时间（UTC+8）；monitor JSON 仅在输出副本补充 `*_display`，原 epoch 字段及 `inspect --json` 保持机器格式。
-
-monitor 只观察和提醒，恢复由 Supervisor 决定；Runner 保留普通有限错误重试。pause/cancel/hold 保持优先，提醒补送有固定上限。投递未结清时不重发，clock 继续观察；queue 挂住时不能保证同通道唤醒。
+monitor 只负责观察和提醒，恢复由 Supervisor 决定（Runner 自身的普通有限重试独立运行）；日志沉默或状态未变不授权终止。`pause/cancel/hold` 保持优先，提醒补送有固定上限；投递未结清时不重发，clock 继续观察，但 `queue` 挂住时不能保证同通道唤醒。
 
 框架候选由 `candidates RUN_UUID` 汇总，reviewer 确认项按稳定 ID 交 [issues](issues/README.md) 处理。离线测试与能力回归方法见[执行协议](tools/README.md#离线验证与能力回归)。

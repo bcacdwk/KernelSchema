@@ -10,11 +10,6 @@
 | 十算子文字审计、工作稿和脚本 | [20261109-ten-operator-text-audit](schema_extract/20261109-ten-operator-text-audit/) |
 | 已完成的实施设计 | [designs](schema_extract/designs/) |
 | 旧规范与草稿 | [schema_docs](schema_docs/) |
-| 已无对应源码的旧字节码缓存 | [generated_bytecode](generated_bytecode/) |
 | issue 调查原件 | [TRIAGE](issue_discussions/TRIAGE.md) · [Design 整区引用调查](issue_discussions/DESIGN_REGION_DERIVATION.md) |
 
-所有迁移文件保留原字节，旧 README、JSON、哈希、行号、命令及“当前/待办”均属于其记录时点。旧回执只覆盖其原文件摘要；不能据此批准当前成品、恢复运行或执行历史命令。归档文件的相对链接仍按其原目录解释，跨目录旧引用可通过[逐文件位置映射](../schema_audit_and_cleanup_20261119/cleanup/LOCATIONS.json)查找；更早的六算子迁移链见[原位置记录](schema_wiki/six-operators/LOCATIONS.json)。按文件摘要区分同路径的不同历史版本。
-
-两份 issue 调查在本次清理开始前已从工作树删除；这里保全的是 Git 提交 `24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2` 的原件，不代表恢复了未提交版本。更早的本机 TRIAGE 快照及其摘要见[补充来源记录](../schema_audit_and_cleanup_20261119/cleanup/preexisting_deletions.json)。Git 忽略的 `.schema_extract/` 运行证据保持原位置。
-
-清理范围、检查和必要例外见[清理报告](../schema_audit_and_cleanup_20261119/cleanup/REPORT.md)。
+归档文件保留原字节；其中的说明、哈希、行号、命令及状态均对应原记录时点，内部相对链接按原目录解释。跨目录迁移路径按文件摘要查[逐文件位置映射](../schema_audit_and_cleanup_20261119/cleanup/LOCATIONS.json)及更早的[六算子位置记录](schema_wiki/six-operators/LOCATIONS.json)。两份 issue 调查原件取自提交 `24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2`（补充来源见 [preexisting_deletions.json](../schema_audit_and_cleanup_20261119/cleanup/preexisting_deletions.json)）。
