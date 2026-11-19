@@ -28,7 +28,7 @@ reviewer 按[当前文档验收](../roles/reviewer.md)先读最终 raw 定义、
 
 reviewer 明确提出修改并确定范围后，才启动新的 P6 worker。读取当前完整产物、具体反馈和必要来源；写作按需使用 [P3 的逐段方法](03_root.md#节点逐段方法)。
 
-只改本次明确列出的文件与字段：`dispatch.md`，以及非 root 的 `DESIGN`、`REALIZATION`、`META_DATA.Source`、`META_DATA.Dispatch.when` 中的授权范围。root 保持只读，其任务、代表来源与定义问题分别返回 P1、P2、P3。普通参数、局部、组合及未展开独立候选的记录增补和实际共享摘要，由本 worker 集中更新目录。随实际内容更新版本，复查真实使用者和依赖该基线的记录，再提交全目录检查与独立终审。
+只改本次明确列出的文件与字段：`dispatch.md`，以及非 root 的 `DESIGN`、`REALIZATION`、`META_DATA.Source`、`META_DATA.Dispatch.when` 中的授权范围。root 保持只读，其任务、代表来源与定义问题分别返回 P1、P2、P3。普通参数、局部、组合及未展开独立候选的记录增补和实际共享摘要，由本 worker 集中更新目录。`META_DATA.Version` 随已授权的非 root 内容修改更新，属于隐含写权限，不单列于 `revision_scope`；Runner 校验版本。复查真实使用者和依赖该基线的记录，再提交全目录检查与独立终审。
 
 ## 回执与下一位
 

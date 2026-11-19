@@ -1,0 +1,19 @@
+{
+  "id": "p6-retained-scope-inventory",
+  "category": "extract_tools",
+  "problem": "P6只读reviewer无文件变化时仅加载root，却把该局部解析集合用作完整文件清单校验保留的非root修订范围，导致合法approve在回执判断前被误拒，旧冻结运行无法通过重复回执解除。",
+  "evidence": [
+    "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_extract/tools/artifacts.py::validate_artifacts/_validate_scope 在只读路径以局部new文档的id集合验证全目录revision_scope。",
+    "Sparse P6 attempt aa4176a8-3767-4ee4-b045-cb95b15c06fa 原生approve且revision_scope为空；before/after manifest一致，state保留dispatch.md与tcgen05_packed.yaml的合法已授权范围。冻结gate实际selected_ids仅root，拒收发生在生成receipt前；见schema_discussion/extract_six_full_20261118/P6_APPROVE_SCOPE.md。",
+    "当前源码改为从完整new_files YAML清单校验；两个定向P6测试通过，真实副本修复后gate、完整回执及四节点strict检查通过，权限/最终selected-manifest门禁保留。",
+    "20261119 06:05 UTC巡检确认FMHA也在P6发生同根误拒：reviewer返回approve且revision_scope为空，workspace与最新四文件checkpoint逐字节一致；state合法保留dispatch.md和mma_sync.yaml的DESIGN.Math_reshape授权。临时副本上原冻结artifact gate精确复现同一错误，当前修复gate通过且changed_files为空；live state字节未变。见schema_discussion/extract_six_full_20261118/FMHA_P6_SCOPE_REPRO.json。此验证未采纳旧回执、未形成正式P6批准、未启动恢复。",
+    "schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md：两项 P6 artifact 回归核对完整 inventory、未改文件与字段边界；schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md 确认第三轮仅删重复注释。"
+  ],
+  "proposal": "用完整文件清单验证保留的修订范围，局部解析只用于必要的内容检查；不将合法只读批准当作越权，也不放宽root只读或字段权限。",
+  "necessity": "已证实的错误会永久阻塞保留非root修订范围的旧P6运行，模型重交不能修复工具所用的错误文件集合。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.5.1",
+    "reason": "2.5.1 用完整 YAML inventory 核验 retained scope，局部解析继续承担内容检查；未改文件可被合法范围命名，未知文件、root 和受保护字段仍拒绝。第三轮只压短注释。Sparse 正常发布及 FMHA 自动失败后人工小修的历史分别保留，工具修复不补写旧 P6 批准，也不代替后续专项审计。"
+  }
+}

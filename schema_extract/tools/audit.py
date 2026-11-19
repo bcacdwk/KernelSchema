@@ -189,7 +189,7 @@ def _state(store, run_id, files=None):
     if (not isinstance(value, dict) or value.get("format") != STATE_FORMAT or
             value.get("run_id") != run_id or
             not {"active_attempts", "reopen_requests", "selected_designs", "writing_plan"} <= value.keys() or
-            any(key in value for key in ("continuation", "semantic_revision", "execution_binding", "imported_draft"))):
+            any(key in value for key in ("continuation", "semantic_revision", "imported_draft"))):
         raise ExtractError("audit requires a current frozen run record")
     store.execution_config(value)
     return value
@@ -835,6 +835,7 @@ def audit_run(store, run_id, *, attempt_id=None, session_id=None, verify=False, 
         waits = _waits(state, ledger, now)
         report = {"format": "schema_extract.audit.v1", "scope": scope, "observed_at": now,
                   "operator_id": state.get("operator_id"), "status": state["status"], "executor": state.get("executor"),
+                  "execution_binding": state.get("execution_binding"), "execution_bindings": state.get("execution_bindings", []),
                   "execution": {key: state["config"].get(key) for key in
                                 ("backend", "model", "worker_effort", "reviewer_effort", "agent_binary")},
                   "call_additions": deepcopy(state.get("call_additions", [])),

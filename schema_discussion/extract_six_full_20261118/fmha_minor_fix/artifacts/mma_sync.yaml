@@ -1,0 +1,258 @@
+META_DATA:
+  Name: fmha_mxfp8_qkv
+  Describe: Multi-head attention on E4M3 Q/K/V payloads with E8M0 block-32 scales, giving a BF16 output and optional FP32 log-sum-exp under causal/window masks
+  Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+  Version: 3
+  Dispatch:
+    id: mma_sync
+    when: head_dim = 128; the loaded binary cannot issue tcgen05 - not being arch-specific, its tcgen05 bodies are inert stubs and the host probe reports false, leaving this warp-level path the only reachable tensor-core one; and the plan stays fused, i.e. the source's split rule leaves nsplit = 1 (resident capacity 2*sm_count, sm_count host-queried, at this path's 112704-byte smem request; a two-way split is always refused), or the caller workspace is absent or too small
+DESIGN:
+  Math_reshape:
+    Thesis: Warp-level tensor cores do no block scaling, but one FP8 mma.sync k-step of 32 channels is exactly one MX block, so the E8M0 bytes fold in as a rank-1 rescale of each block's FP32 partial. V decodes once per group to exact BF16; score and accumulator stay in registers, fixing the tile at 64 rows
+    Rewrite:
+      - Name: Block-rescaled score by rank-1 E8M0 fold
+        Math: |
+          Per packed row (query token i, head h; worktile coordinates b, kh) and key group g with keys
+          j = probability_group_keys*g + n, the head_dim reduction splits into head_dim/scale_block_size blocks c of
+          scale_block_size channels x; block_c(i,j) = dot32(q_tensor[i,x], k_tensor[j,x]) over block c, one FP8
+          tensor-core product of the stored E4M3 payloads at their exact values with FP32 accumulation
+          q_sf[i,c] = 2^(sf_q[i,c] - e8m0_exponent_bias) and k_sf[j,c] = 2^(sf_k[j,c] - e8m0_exponent_bias) are exact
+          FP32 powers of two, k_sf[j,c] = 0 for j >= kv_len like its zero-filled payload row
+          r_(-1) = 0, r_c[i,j] = fma32(block_c(i,j) * q_sf[i,c], k_sf[j,c], r_(c-1)[i,j]), raw[i,j] = the last r_c:
+          each block's partial carries its own two scales, blocks accumulate in increasing c, and power-of-two scaling
+          is exact, so raw is the Contract's sum_x q*k up to FP32 rounding
+          score[i,j] = raw[i,j] * scale_softmax, and -inf for j outside visible(i)
+        Symbol:
+          q_sf: {meaning: FP32 power-of-two query scale per head_dim block, shape: [{dim_block: head_dim/scale_block_size}], dtype: fp32}
+          k_sf: {meaning: 'FP32 power-of-two key scale, 0 past kv_len', shape: [{dim_block: head_dim/scale_block_size}], dtype: fp32}
+          raw: {meaning: One row's unscaled FP32 group dot products, shape: [{key_token: probability_group_keys}], dtype: fp32}
+          score: {meaning: Contract's score over one row's key group, shape: [{key_token: probability_group_keys}], dtype: fp32}
+        Arithmetic:
+          Accumulate: One FP8 tensor-core product per block of scale_block_size channels, FP32 accumulated in hardware-defined order; blocks accumulate in increasing c
+        Ledger:
+          Baseline: Decode q and k to FP32 with a scale multiply per element and FMA-reduce the head_dim dot per (row, key)
+          Gain: 'Per (row, key): 2*head_dim decode multiplies -> 0; head_dim FP32 FMAs -> head_dim MACs on the FP8 tensor core, 2167 TFLOP/s measured here'
+          Cost: head_dim/scale_block_size fused rescale-adds and roundings per (row, key) per group; the whole score group stays live in registers
+      - Name: Group window over 64 packed rows
+        Math: |
+          A worktile at qtile has q0 = qtile * qph and packed rows r in [0, 64) mapping to query tokens
+          i = q0 + (r mod qph) and heads h = kh*group_count + floor(r/qph); with i_max = min(q0 + qph - 1, query_len - 1),
+          lo_min = max(q0 + kv_len - query_len - window_size_left, 0) under a left window else 0, hi_max =
+          min(i_max + kv_len - query_len, kv_len - 1) if is_causal else kv_len - 1, g_lo = floor(lo_min /
+          probability_group_keys) and g_hi = floor(hi_max / probability_group_keys)
+          For g outside [g_lo, g_hi] every key misses visible(i) for every tile row: group_max = -inf, update false,
+          p = p_q = 0, m/den/num unchanged; only [g_lo, g_hi] runs, entering with the Contract's t = -1 state, and it is
+          never empty because j = q0 + kv_len - query_len is visible for the tile's first row
+          group_max(g) = the maximum of the group's masked scores, exact and order-free; update, s, alpha, m and den
+          follow the Contract, alpha by CUDA expf; rows past query_len run it on zero scores and store nothing
+        Symbol:
+          g_lo: {meaning: First key group any tile row can see}
+          g_hi: {meaning: Last key group any tile row can see}
+          qph: {meaning: Query rows per packed 64-row worktile, binding: 'bind:DESIGN.Work_schedule::qph'}
+          m: {meaning: Contract's m carried by every holder of the row, shape: 'ref:CONTRACT.Algorithm_requirement::m.shape', dtype: 'ref:CONTRACT.Algorithm_requirement::m.dtype', retention: 'carry_forward (b,h,i); g=g_lo-1..g_hi', binding: 'ref:CONTRACT.Algorithm_requirement::m'}
+          den: {meaning: Contract's den carried beside m, shape: 'ref:CONTRACT.Algorithm_requirement::den.shape', dtype: 'ref:CONTRACT.Algorithm_requirement::den.dtype', retention: 'carry_forward (b,h,i); g=g_lo-1..g_hi', binding: 'ref:CONTRACT.Algorithm_requirement::den'}
+          num: {meaning: Contract's num as the register accumulator, shape: 'ref:CONTRACT.Algorithm_requirement::num.shape', dtype: 'ref:CONTRACT.Algorithm_requirement::num.dtype', retention: 'carry_forward (b,h,i); g=g_lo-1..g_hi', binding: 'ref:CONTRACT.Algorithm_requirement::num'}
+        Ledger:
+          Baseline: Run the Contract recurrence over every group 0..last_group in each worktile
+          Gain: Groups per worktile last_group + 1 -> g_hi - g_lo + 1; under causal masks early tiles run a few groups
+          Cost: Tail-tile padding rows, up to qph*group_count minus the live rows, run the full recurrence and store nothing
+      - Name: Delayed rescale and scalar-exponential probability
+        Math: |
+          bias is the Contract's probability bias, 16 here, read at runtime, not folded; s(g) and alpha(g) are the
+          group's Contract values, so an unmasked key has x = score - s(g) at most rescale_log2_threshold*ln(2), a
+          masked one x = -inf; m, s, alpha and the update test follow the Contract, alpha by the same expf
+          p[i,u] = expf(x) * bias with CUDA's scalar expf, pinned bit for bit to the reference's exp; the
+          power-of-two bias multiply adds no rounding, so p is the Contract's p with expf's one rounding
+          p_q[i,u] = the saturating RNE E4M3 conversion of p[i,u] read back at its exact value; saturation at
+          e4m3_max_norm = 448 is unreachable since p <= 16 * 2^4 = 256, and expf(-inf) = +0, so a masked key is 0
+          den(g) = den(g-1)*alpha(g) + the group's unrounded probabilities in the chain order of Arithmetic, and
+          num(g-1)*alpha(g) beside it; one test on whether any holder of the row has alpha(g) != 1 scales both
+          together and skips both otherwise, bit-identical since alpha(g) is 1 when m did not move
+        Arithmetic:
+          Accumulate: Per row the group's probabilities sum as eight FP32 chains by key mod 8, folded pairwise per group and across the row's four holders after the last
+        Ledger:
+          Baseline: Scalar expf per key, a runtime bias multiply and the Contract's one serial FP32 denominator chain
+          Gain: The shift, bias and denominator accumulation are written as key pairs, which an arch-specific build lowers to one packed instruction per pair
+          Cost: This build is not arch-specific, so the pairs lower back to scalar ops; the denominator's order still becomes an eight-chain tree
+      - Name: Numerator by BF16 PV on a decoded value tile
+        Math: |
+          v_bf16[j,x] = bf16(v_tensor[j,x] * 2^(sf_v[x, floor(j/scale_block_size)] - e8m0_exponent_bias))
+          An E4M3 payload carries four significant bits and the scale is a power of two, so the product needs five and
+          BF16 carries eight: the narrowing is exact wherever the value lies in BF16's range, which the prepared domain
+          guarantees since its scale bytes are the operand's own block magnitude rounded up to a power of two; a key past
+          kv_len decodes to 0 from its zero-filled payload
+          num(g)[i,x] = num(g-1)[i,x]*alpha(g) + sum_{u=0}^{group_size(g)-1} p_q[i,u] * v_bf16[probability_group_keys*g
+          + u, x], evaluated as probability_group_keys/16 sequential 16-key BF16 tensor-core products per group with
+          FP32 accumulation into the same accumulator, so the Contract's v decode is realized exactly and the only
+          rounding the numerator adds is that accumulation; a fully masked group has p_q = 0 and changes nothing
+        Symbol: {v_bf16: {meaning: Decoded BF16 value operand of one group, shape: [{key_token: probability_group_keys}, {value_dim: head_dim}], dtype: bf16}}
+        Arithmetic:
+          Accumulate: FP32 accumulation inside each BF16 product over its 16-key reduction, hardware-defined order; chunks and groups accumulate in increasing key order
+        Ledger:
+          Baseline: Decode V to FP32 with an E8M0 multiply per element and accumulate p_q * v with per-element FP32 FMAs
+          Gain: One decoded value tile serves all 64 rows instead of a decode per row; the numerator's MACs move to the BF16 tensor core
+          Cost: A 32768-byte BF16 tile materialized per group per CTA on top of its 16384-byte source, and BF16 peaks at 576 TFLOP/s against the FP8 path's 2167
+      - Name: Reciprocal normalization and LSE epilogue
+        Math: |
+          After the window's last group g_hi, per row: den(g_hi) is first completed by folding its eight chains into
+          one value, then
+            den(g_hi) > 0: inv = 1 / den(g_hi), one FP32 reciprocal, and o_tensor[b,h,i,x] = bf16(num(g_hi)[i,x] * inv)
+            den(g_hi) <= 0: o_tensor[b,h,i,x] = bf16(0)
+          The reciprocal multiply differs from the Contract's single division num/den by 1-2 FP32 ulp ahead of
+          the BF16 RNE conversion, which carries eight fewer mantissa bits
+          If lse_tensor is present: lse_tensor[b,h,i] = m(g_hi) + ln(den(g_hi)/bias) with CUDA logf when den(g_hi) > 0
+          and m(g_hi) is finite, else -inf; dividing by the power-of-two bias is exact and removes the bias den carries
+          Rows with i >= query_len accumulate state but store nothing; every live row writes its full o_tensor row and,
+          when requested, its lse element exactly once, and the path touches no workspace
+        Ledger:
+          Baseline: One FP32 division per output element
+          Gain: Divisions per row head_dim -> 1, replaced by one reciprocal and head_dim multiplies
+          Cost: 1-2 extra FP32 ulp on each numerator before the BF16 conversion, at most one BF16 ulp (0.39%) after it, far inside rtol
+  Work_schedule:
+    Thesis: 'One fused kernel, no scratch: one CTA owns one (query tile, batch x kv head) worktile of 64 packed rows, qph query rows by the group_count heads sharing a kv head, so one staged K/V group feeds them all. A thread holds two rows eight apart, so each row spans four lanes and reduces there'
+    Step:
+      MAIN:
+        Describe: Computes the attention output and optional log-sum-exp of 64 packed rows by the windowed delayed-rescale recurrence, in one kernel with no workspace
+        Decomposition:
+          Strategy: group_count = head_count/kv_head_count, a power of two; qph = 64/group_count; row r unpacks to i = q0 + (r mod qph), h = kh*group_count + floor(r/qph)
+          Partition:
+            qtile: {meaning: Tile of qph query rows x group_count heads, size: 'ceil_div(query_len, qph)', tile: 1}
+            kv_pair: {meaning: '(b, kh) pair, kv_pair = b*kv_head_count + kh', size: batch_count * kv_head_count, tile: 1}
+          Worktile:
+            Invariant:
+              q_rows: {meaning: E4M3 query payload of the 64 packed rows, shape: [{packed_row: 64}, {key_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::q_tensor.dtype'}
+              sfq_bytes: {meaning: 'E8M0 sf_q bytes of the 64 rows, read once', shape: [{packed_row: 64}, {sf_byte: head_dim/scale_block_size}], dtype: 'ref:CONTRACT.Algorithm_requirement::sf_q.dtype'}
+            Iteration:
+              k_block: {meaning: 'E4M3 key payload of group g in [g_lo, g_hi]', shape: [{key_token: probability_group_keys}, {key_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::k_tensor.dtype', direction: ascending}
+              v_block: {meaning: E4M3 value payload of the same group g, shape: [{key_token: probability_group_keys}, {value_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::v_tensor.dtype', direction: ascending}
+              sfk_atom: {meaning: E8M0 key-scale atom of group g (512 bytes), shape: [{byte: 512}], dtype: 'ref:CONTRACT.Algorithm_requirement::sf_k.dtype', direction: ascending}
+              sfv_atom: {meaning: E8M0 value-scale atom of group g (512 bytes), shape: [{byte: 512}], dtype: 'ref:CONTRACT.Algorithm_requirement::sf_v.dtype', direction: ascending}
+          Target:
+            Single_tile:
+              o_rows: {meaning: Output rows written in place into o_tensor, shape: [{packed_row: 64}, {value_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::o_tensor.dtype'}
+              lse_rows: {meaning: 'LSE of the live rows, only when lse_tensor exists', shape: [{packed_row: 64}], dtype: 'ref:CONTRACT.Algorithm_requirement::lse_tensor.dtype'}
+        Mapping:
+          Strategy: 'One 128-thread CTA, four warps: warp w owns rows [16*w, 16*w+16), each thread two rows eight apart; a row''s four lanes split its keys and channels'
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil_div(query_len, qph) * batch_count * kv_head_count
+        Schedule:
+          Strategy: Ascending order, query tile fastest, no lpt remap, so under a causal mask the widest group window falls in the last wave; errors surface post-submit
+          Worktile_order:
+            - {by: kv_pair, direction: ascending}
+            - {by: qtile, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: 'One role, four warps: every warp runs the group loop over its own 16 rows, phases separated by CTA rendezvous. Only memory overlaps - a two-deep cp.async ring stages the next group while this one decodes and computes. Registers hold the score group and the accumulator, capping the tile at 64 rows'
+    Step:
+      MAIN:
+        Index: {g: {meaning: Key-group iteration within this worktile, definition: [g_lo, g_hi + 1]}}
+        Storage:
+          q_tile: {meaning: 'Swizzle-staged E4M3 query payload, whole worktile', depth: 1, location: smem, shape: [{packed_row: 64}, {key_dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 8192}
+          k_ring: {meaning: Key payload tile of the staged key group, depth: 2, location: smem, shape: [{key_token: probability_group_keys}, {key_dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 32768, view: {k_block(g): {slot_index: (g - g_lo) % 2}}}
+          v_raw_ring: {meaning: Value payload tile of the staged key group, depth: 2, location: smem, shape: [{key_token: probability_group_keys}, {value_dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 32768, view: {v_block(g): {slot_index: (g - g_lo) % 2}}}
+          v_decoded: {meaning: Decoded BF16 value tile of the current group, depth: 1, location: smem, shape: [{key_token: probability_group_keys}, {value_dim: head_dim}],
+            dtype: bf16, total_size: 32768, view: {v_bf16(g): {}}}
+          sfk_raw_ring: {meaning: 512-byte E8M0 scale atom of the staged K group, depth: 2, location: smem, shape: [{byte: 512}],
+            dtype: uint8, total_size: 1024, view: {sfk_atom(g): {slot_index: (g - g_lo) % 2}}}
+          sfv_raw_ring: {meaning: 512-byte E8M0 key-block scale atom of staged V, depth: 2, location: smem, shape: [{byte: 512}],
+            dtype: uint8, total_size: 1024, view: {sfv_atom(g): {slot_index: (g - g_lo) % 2}}}
+          sfq_words: {meaning: FP32 query scale words of the whole worktile, depth: 1, location: smem, shape: [{dim_block: head_dim/scale_block_size}, {packed_row: 64}],
+            dtype: fp32, total_size: 1024, view: {q_sf: {}}}
+          sfk_words: {meaning: FP32 key scale words of the current group, depth: 1, location: smem, shape: [{dim_block: head_dim/scale_block_size}, {key_token: probability_group_keys}],
+            dtype: fp32, total_size: 2048, view: {k_sf(g): {}}}
+          sfv_words: {meaning: Packed BF16 value scale pairs of the current group, depth: 1, location: smem, shape: [{key_block: probability_group_keys/scale_block_size}, {channel_pair: head_dim/2}],
+            dtype: uint32, total_size: 1024, view: {v_sf(g): {}}}
+          score_regs: {meaning: The current group's scores per packed row, depth: 1, location: register, shape: [{packed_row: 64}, {key_token: probability_group_keys}],
+            dtype: fp32, total_size: 32768, view: {raw(g): {}, score(g): {}}}
+          o_regs: {meaning: FP32 output accumulator holding num, depth: 1, location: register, shape: [{packed_row: 64}, {value_dim: head_dim}],
+            dtype: fp32, total_size: 32768, view: {num(g): {}}}
+          p_frag: {meaning: E4M3-rounded probabilities of one 16-key chunk, depth: 1, location: register, shape: [{packed_row: 64}, {key_token: 16}],
+            dtype: bf16, total_size: 2048, view: {'p_q(g,kk)': {}}}
+          state_regs: {meaning: Carried per-row m and the holder's den partial, depth: 1, location: register, shape: [{packed_row: 64}, {value: 2}],
+            dtype: fp32, total_size: 512, view: {m: {region: {value: [0, 1]}}, den: {region: {value: [1, 2]}}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: The CTA's only role; its four warps each run the whole group loop over their own 16 packed rows, meeting at a CTA rendezvous at every phase boundary
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  sf_q: {execution_mode: serial, describe: 'Decode the worktile''s E8M0 sf_q bytes into sfq_words as exact FP32 q_sf, 0 for a row past query_len; done covers the publishing rendezvous'}
+                  o_init: {execution_mode: serial, describe: Set num in o_regs to 0 and the state in state_regs to m = -inf and den = 0 for both of the thread's rows; reads no input and no old value}
+                  sf_k: {execution_mode: serial, describe: 'Decode sfk_atom(g) into sfk_words as exact FP32 powers of two k_sf(g), one per dim_block and key, 0 for a key past kv_len'}
+                  sf_v: {execution_mode: serial, describe: 'Decode sfv_atom(g) into sfv_words as v_sf(g), the exact BF16 powers of two 2^(sf_v - e8m0_exponent_bias) per key block and channel pair'}
+                  v_bf16: {execution_mode: serial, describe: Multiply v_block(g)'s E4M3 payload pairs by v_sf(g) and write the exact BF16 product into the single-buffered v_decoded; done covers its rendezvous}
+                  score: {execution_mode: serial, describe: Scale raw(g) by scale_softmax and mask it to -inf outside the thread's rows' visible range; only a group straddling the warp's window tests}
+                  group_max: {execution_mode: serial, describe: 'Exact maximum of the thread''s 32 masked scores per row, then a four-lane butterfly across the lanes sharing it, so all four hold group_max(g)'}
+                  rescale: {execution_mode: serial, describe: 'Per row: the Contract''s update test, s(g) and alpha(g) by expf; one warp vote on alpha != 1 scales num and den together or skips both (1.0 is exact)'}
+                  probs: {execution_mode: serial, describe: 'For chunk kk''s 16 keys: p = expf(score - s(g)) * bias into the row''s two den chains, p_q = its saturating RNE E4M3 conversion re-decoded into p_frag'}
+                  den: {execution_mode: serial, describe: Fold the group's two chains into the carried den partial; done covers the closing rendezvous retiring every warp's reads of v_decoded and the raw slot}
+                  o_norm: {execution_mode: serial, describe: 'Fold the carried den across the row''s four lanes, take inv = 1/den, 0 when den <= 0, and multiply every num fragment by inv, converting to BF16 RNE'}
+                matmul:
+                  q_tile@k_block: {execution_mode: serial, describe: 'Per dim_block, one m16n8k32 E4M3 product of q_tile against the 8-key fragments of k_block(g), partials rank-1 rescaled by q_sf and k_sf(g) into raw(g)'}
+                  p_q@v_bf16: {execution_mode: serial, describe: 'Per 16-channel block, two m16n8k16 BF16 products of p_q(g,kk) in p_frag against v_bf16(g) loaded transposed from v_decoded into num in o_regs'}
+                load:
+                  q: {execution_mode: serial, describe: 'All 128 threads copy the 64 packed rows'' E4M3 query payload into q_tile''s swizzled 16-byte chunks, zero-filling rows past query_len'}
+                  kv_stage: {execution_mode: async_unordered, describe: 'cp.async of k_block(g), v_block(g) and both atoms into slot (g - g_lo) % 2, rows past kv_len zero-filled; done on its commit-group wait and rendezvous'}
+                store:
+                  o: {execution_mode: serial, describe: 'Live rows write their BF16 row into o_tensor as 4-byte fragments at the accumulator''s channel positions; den <= 0 writes zeros, padding rows nothing'}
+                  lse: {execution_mode: serial, describe: 'One lane per row writes m(g_hi) + ln(den/bias) by logf, or -inf when den <= 0 or m is not finite, into lse_tensor; no write when lse_tensor is absent'}
+            Pipe:
+              - load:kv_stage(g_lo)
+              - load:q
+              - compute:sf_q
+              - compute:o_init
+              - for(g):
+                  - if(g + 1 <= g_hi):
+                      - load:kv_stage(g + 1)
+                  - compute:sf_k(g)
+                  - compute:sf_v(g)
+                  - compute:v_bf16(g)
+                  - matmul:q_tile@k_block(g)
+                  - compute:score(g)
+                  - compute:group_max(g)
+                  - compute:rescale(g)
+                  - for(kk=0:probability_group_keys/16):
+                      - compute:probs(g,kk)
+                      - matmul:p_q@v_bf16(g,kk)
+                  - compute:den(g)
+              - compute:o_norm
+              - store:o
+              - store:lse
+            Waiting:
+              Prepared:
+                - '{issue compute:sf_k(g)} ← [{done load:kv_stage(g)}]'
+                - '{issue compute:sf_v(g)} ← [{done load:kv_stage(g)}]'
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: QK must be mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 on the stored E4M3 payloads, operands read by ldmatrix.sync.aligned.m8n8.x4 from the swizzled shared tiles, each 32-channel block's FP32 partial rank-1 rescaled by the two E8M0 words before it accumulates
+      Reason: One MMA k-step of 32 channels is exactly one MX block, which is what turns the Contract's per-block scales into a rank-1 fold of the partial accumulator instead of a decode of every operand; this family is the only tensor-core path the loaded binary can issue
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: PV must be mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 with ldmatrix.x4.trans over the decoded BF16 value tile; its A operand is the probability first rounded to E4M3 by cvt.rn.satfinite.e4m3x2.f32, then re-decoded to BF16 as a separate exact step
+      Reason: 'Numerator exactness needs both operands at their exact values: an E4M3 payload''s four significant bits times a power of two need five and BF16''s eight carry them, as they do the E4M3-rounded probability; the transposing load and m16n8 geometry make the score C fragment the PV A fragment'
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: K and V payloads and both scale atoms must be staged by 16-byte cp.async.cg using the source-size operand, 0 for a key row past kv_len, one commit group per key group, consumed by cp.async.wait_group 1 and a CTA barrier
+      Reason: The source-size zero fill realizes out-of-range keys with no mask on the payload path, and the single commit group is the declared done event covering all four copies of a group; a two-deep ring with one group in flight is what the schedule's Prepared edges assume
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: Launch 128 threads per CTA with an 112704-byte dynamic shared memory request, 112640 bytes of declared regions plus a 64-byte tail, under a two-blocks-per-SM launch bound
+      Reason: The footprint caps head_dim = 128 at two resident CTAs per SM (2 * 112704 within the 233472 bytes of shared memory per SM the host queries), and the register cap that follows is the one ptxas met without spilling; a 168-register cap spilled 1540 bytes
+    - Item: CONTRACT.Algorithm_requirement::p
+      Choice: The exponential realizing p must be CUDA's scalar expf, with the Contract's bias applied as a separate FP32 multiply
+      Reason: This path's declared equality with the reference's exp rests on the library expf, whose value is what the Contract quantizes to E4M3; it is source-measured at ~59% of the group loop, so it is the first thing an implementer would replace
+  Prefer:
+    - Item: DESIGN.Work_schedule::Flow
+      Choice: Capture the single launch as a CUDA graph on the second call with an equal key (24-slot LRU, 256-capture budget, side-stream capture, replay on the caller's stream, direct launch on any failure)
+      Reason: Host submit sits inside the measured window and this is the only launch the path makes; the key covers pointers, strides, geometry, mask flags and scale bits, and every remaining launch quantity derives from those fields plus device properties
+  Forbid:
+    - Item: CONTRACT.Algorithm_requirement::p
+      Choice: Substituting __expf or a bare ex2.approx for the scalar expf, or folding the bias into the exponential's shifted exponent bit pattern
+      Reason: __expf's ~5e-7 relative error flips about one E4M3 rounding in 6e4 and a flip on a high-weight key moves the output ~6%, outside rtol 0.05; the pattern fold differs from expf(x)*bias through sign-bit wrap on ~24% of the 2^32 patterns

@@ -1,0 +1,636 @@
+META_DATA:
+  Name: mla_expanded_fp8
+  Describe: Ragged expanded-MLA attention on prepared FP8 E4M3 Q/K (D192) and V (D128) with per-tensor scales, giving BF16 output and optional log2-space LSE.
+  Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py::Model.forward
+  Version: 5
+  Dispatch:
+    when: >-
+      The E4M3 weight path, the only one the frozen entry point reaches. At launch item_count*2 > sm_count*3, so the grid is sm_count persistent workers refilling from a device counter that holds 0 at entry. The active key and value bytes min(kv_heads*batch_count, sm_count)*max(kv_len)*320*4 stay within l2_bytes*3, with sm_count and l2_bytes queried at launch, so the ring keeps 4 slots. No request has q_len(b) < 128, so the table keeps longest-processing-time order
+CONTRACT:
+  Algorithm_requirement:
+    Constant:
+      qk_dim: {value: 192, meaning: Per-head channel count of Q and K}
+      value_dim: {value: 128, meaning: Per-head channel count of V and of the output}
+    Input:
+      query: {meaning: Ragged-packed query tokens; FP8 codes are exact, shape: [{token: total_q}, {head: heads}, {channel: qk_dim}], dtype: fp8_e4m3fn}
+      key: {meaning: Ragged-packed key tokens; FP8 codes are exact, shape: [{kv_token: total_kv}, {kv_head: kv_heads}, {channel: qk_dim}], dtype: fp8_e4m3fn}
+      value: {meaning: Ragged-packed value tokens; scaled by bmm2_scale, shape: [{kv_token: total_kv}, {kv_head: kv_heads}, {channel: value_dim}], dtype: fp8_e4m3fn}
+      workspace_buffer: {meaning: 'Caller scratch; may be overwritten, not a result', shape: [{byte: 134217728}], dtype: uint8}
+      seq_lens: {meaning: Per-request KV length kv_len(b), shape: [{request: batch_count}], dtype: int32, range: [1, 16384]}
+      max_q_len: {meaning: Declared max query length; metadata only, shape: [], dtype: python_int}
+      max_kv_len: {meaning: Declared max KV length; metadata only, shape: [], dtype: python_int}
+      bmm1_scale: {meaning: Positive composite scale applied to QK scores, shape: [], dtype: python_float, range: '> 0'}
+      bmm2_scale: {meaning: Positive per-tensor dequantization scale for V, shape: [], dtype: python_float, range: '> 0'}
+      o_sf_scale: {meaning: Unused output scale-factor ABI slot; passes -1.0, shape: [], dtype: python_float}
+      batch_size: {meaning: Declared request count; equals batch_count, shape: [], dtype: python_int}
+      window_left: {meaning: 'Left window width; -1 disables, domain fixes -1', shape: [], dtype: python_int, range: [-1, -1]}
+      cum_seq_lens_q: {meaning: Exclusive query-length prefix sums; 0 to total_q, shape: [{bound: batch_count+1}], dtype: int32}
+      cum_seq_lens_kv: {meaning: Exclusive KV-length prefix sums; 0 to total_kv, shape: [{bound: batch_count+1}], dtype: int32}
+      enable_pdl: {meaning: Unused dependent-launch ABI flag; passes False, shape: [], dtype: python_bool}
+      is_causal: {meaning: Selects bottom-right aligned causal masking, shape: [], dtype: python_bool}
+      return_lse: {meaning: 'Selects returning (out, lse) instead of out alone', shape: [], dtype: python_bool}
+      attention_sinks: {meaning: Per-head sink logits; None disables sinks, shape: [{head: heads}], dtype: fp32, nullable: true, default: None}
+      skip_softmax_threshold_scale_factor: {meaning: Unused softmax-threshold ABI slot; passes None, shape: [], dtype: python_none, default: None}
+      out: {meaning: 'Caller-owned BF16 destination, fully overwritten', shape: [{token: total_q}, {head: heads}, {channel: value_dim}], dtype: bf16}
+      lse: {meaning: Caller-owned FP32 LSE destination when present, shape: [{token: total_q}, {head: heads}], dtype: fp32, nullable: true, default: None}
+      sage_attn_sfs: {meaning: Unused SageAttention Python tuple object, shape: [], dtype: python_tuple, default: '(None, None, None, None)'}
+      num_elts_per_sage_attn_blk: {meaning: Unused SageAttention block-size Python tuple, shape: [{element: 4}], dtype: python_int, default: '(0, 0, 0, 0)'}
+      backend: {meaning: Unused backend selector ABI slot, shape: [], dtype: python_str, default: trtllm-gen}
+      q_seq_lens_cpu: {meaning: Unused CPU query-length ABI slot; passes None, shape: [], dtype: python_none, default: None}
+      kv_seq_lens_cpu: {meaning: Unused CPU KV-length ABI slot; passes None, shape: [], dtype: python_none, default: None}
+      use_fp16_softmax: {meaning: Unused FP16-softmax ABI toggle; passes None, shape: [], dtype: python_none, default: None}
+      uses_spcompress: {meaning: Unused spcompress ABI toggle; passes None, shape: [], dtype: python_none, default: None}
+      skip_all_rows_active_check: {meaning: Unused row-activity check toggle; passes True, shape: [], dtype: python_bool, default: true}
+    Output:
+      attention_output: {meaning: Attention result written in place into input out, shape: [{token: total_q}, {head: heads}, {channel: value_dim}], dtype: bf16}
+      lse_log2: {meaning: Log2 LSE written into input lse; None when absent, shape: [{token: total_q}, {head: heads}], dtype: fp32, nullable: true}
+    Compute:
+      - Name: ragged_geometry
+        Math: |
+          batch_count = batch_size = the request-axis length of seq_lens; batch_count >= 1.
+          cum_seq_lens_q[0] = cum_seq_lens_kv[0] = 0; both are nondecreasing and end at
+          total_q and total_kv, the token-axis sizes of query and key.
+          For 0 <= b < batch_count: q_len(b) = cum_seq_lens_q[b+1] - cum_seq_lens_q[b] and
+          kv_len(b) = cum_seq_lens_kv[b+1] - cum_seq_lens_kv[b] = seq_lens[b], 1 <= q_len(b) <= kv_len(b).
+          query row i of request b is global query token cum_seq_lens_q[b] + i, 0 <= i < q_len(b);
+          key position j is global KV token cum_seq_lens_kv[b] + j, 0 <= j < kv_len(b).
+          For query head 0 <= h < heads: kv_head(h) = h / (heads / kv_heads) in integer
+          division, where heads % kv_heads == 0.
+        Symbol:
+          q_len: {meaning: Integer query length q_len(b) of one request, shape: [], dtype: not_applicable}
+          kv_len: {meaning: Integer KV length kv_len(b) of one request, shape: [], dtype: not_applicable}
+          kv_head: {meaning: Integer KV-head index kv_head(h) of head h, shape: [], dtype: not_applicable}
+      - Name: support_domain
+        Math: |
+          Declared support domain (shape_range.json): 1 <= batch_count <= 32; heads ==
+          kv_heads in {12, 24, 32, 96, 128}; q_len(b) == kv_len(b) with 1 <= q_len(b) <= 16384;
+          total_q <= 16384; total_kv <= 1048576; window_left = -1; is_causal, return_lse and
+          the presence of attention_sinks vary independently.
+          All tensor inputs are contiguous and row-major in their declared axis order.
+      - Name: qk_score
+        Math: |
+          For each request b and query head h, score is the q_len(b) x kv_len(b) matrix with
+          score[i,j] = bmm1_scale * sum_{d=0}^{qk_dim-1} query[cum_seq_lens_q[b]+i, h, d] * key[cum_seq_lens_kv[b]+j, kv_head(h), d]
+          for 0 <= i < q_len(b) and 0 <= j < kv_len(b).
+          The FP8 inputs enter with their exact stored values; products and the sum accumulate in FP32.
+          b and h are independent of each other, and attention never crosses request boundaries.
+        Symbol: {score: {meaning: 'Unmasked QK logits of one (request, head) pair', shape: [{row: q_len}, {key: kv_len}], dtype: fp32}}
+      - Name: visibility_mask
+        Math: |
+          visible(i) = kv_len(b) - q_len(b) + i is the causal-aligned key position of query row i
+          (bottom-right alignment of the query block against the KV sequence).
+          allowed[i,j] holds when both conditions hold:
+            is_causal is False, or j <= visible(i);
+            window_left < 0, or j >= visible(i) - window_left.
+          The frozen domain fixes window_left = -1, so the window condition always holds there.
+          Because 1 <= q_len(b) <= kv_len(b), the allowed set of every row is nonempty:
+          j = 0 .. visible(i) when is_causal is True, and all 0 <= j < kv_len(b) otherwise.
+        Symbol: {allowed: {meaning: Boolean mask; true where row i may attend key j, shape: [{row: q_len}, {key: kv_len}], dtype: not_applicable}}
+      - Name: softmax_pv
+        Math: |
+          For each request b, head h and row i, in FP32:
+          m[i] = max_{j: allowed[i,j]} score[i,j]
+          p[i,j] = exp(score[i,j] - m[i]) if allowed[i,j]; otherwise 0
+          denom[i] = sum_{j=0}^{kv_len(b)-1} p[i,j]; the allowed set is nonempty and scores are
+          finite, so denom[i] >= 1.
+          o_acc[i,c] = sum_{j=0}^{kv_len(b)-1} p[i,j] * (bmm2_scale * value[cum_seq_lens_kv[b]+j, kv_head(h), c])
+          for 0 <= c < value_dim.
+        Symbol:
+          m: {meaning: 'Row maximum of allowed scores, one (b, h) pair', shape: [{row: q_len}], dtype: fp32}
+          denom: {meaning: Row sum of exp(score - m) over allowed keys, shape: [{row: q_len}], dtype: fp32}
+          o_acc: {meaning: Unnormalized weighted sum of dequantized values, shape: [{row: q_len}, {channel: value_dim}], dtype: fp32}
+      - Name: sinks_and_outputs
+        Math: |
+          base_lse[i] = m[i] + ln(denom[i]) is the natural-log unnormalized log-sum-exp of
+          the allowed scores of row i.
+          If attention_sinks is None: renorm[i] = 1 and lse_value[i] = base_lse[i] / ln(2).
+          Otherwise:
+            total_lse[i] = ln(exp(base_lse[i]) + exp(attention_sinks[h]))
+            renorm[i] = exp(base_lse[i] - total_lse[i]); lse_value[i] = total_lse[i] / ln(2)
+          out[cum_seq_lens_q[b]+i, h, c] = bf16((o_acc[i,c] / denom[i]) * renorm[i])
+          If the lse input is not None: lse[cum_seq_lens_q[b]+i, h] = lse_value[i]
+      - Name: writeback_and_return
+        Math: |
+          attention_output is the full content of the out tensor after the call; lse_log2 is
+          the full content of the lse tensor when lse is not None. Every position is written:
+          0 <= token < total_q, 0 <= h < heads, and 0 <= c < value_dim for attention_output.
+          The result is (out, lse) when return_lse is True and out alone otherwise, with
+          preserved tensor identity; the frozen caller provides an lse tensor exactly when
+          return_lse is True, so no lse storage is written when return_lse is False.
+          Side effects: workspace_buffer may be overwritten as scratch; no other input is
+          modified and no write occurs outside out, lse (when present) and workspace_buffer.
+    Golden_reference:
+      Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/reference.py::Model.forward
+      Tolerance:
+        attention_output: mutated_inputs.out; atol=.01, rtol=.05, mismatch=.005, rel_l2=.01; formula absent; no defaults
+        lse_log2: default entry atol=.01, rtol=.05, mismatch=0; lse routing/formula absent; no defaults
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      thread: Single instruction-executing lane; 32 threads form one warp inside a CTA.
+      warp: 32 threads executing in lockstep inside a CTA; the fixed source assigns specialized roles to whole warps and redistributes per-warp register budgets with setmaxnreg.
+      cta: Thread block scheduled onto one SM; owns the dynamic shared-memory allocation, the mbarrier objects and the tensor-memory (TMEM) allocation that the fixed source uses.
+      sm: Streaming multiprocessor hosting resident CTAs and providing their shared memory, TMEM and tensor-core execution; the fixed source keeps one resident CTA per SM and sizes its persistent grid by the SM count.
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: >-
+      Contract math kept, evaluated as a key-tiled online softmax whose weights are E4M3, so both products run on the FP8 tensor path and the value operand needs no conversion. A frozen running maximum removes most accumulator rescales and cancels in the outputs; rows of at most 32 keys stay exact
+    Rewrite:
+      - Name: Work-unit rows and their visible key range
+        Math: |
+          A work unit is one (b, q_tile, h) with qstart = q_tile*bq,
+          qend = min(qstart+bq, q_len(b)), q_valid = qend - qstart with
+          1 <= q_valid <= bq, kv_delta = kv_len(b) - q_len(b) >= 0 and
+          qrow_base = cum_seq_lens_q[b] + qstart; row r of the unit is absolute query
+          token qrow_base + r, 0 <= r < bq. For row r,
+            hi(r) = kv_len(b) - 1 when is_causal is False, else min(kv_len(b)-1, qstart+r+kv_delta)
+            lo(r) = unbounded below while window_left < 0, else hi(r) - window_left
+          and key j of request b is allowed for row r when lo(r) <= j <= hi(r). The
+          frozen domain fixes window_left = -1, so lo(r) is inactive there. hi(r) >= 0
+          for every written row, so each of them has at least one allowed key.
+        Symbol:
+          bq: {meaning: Query rows of one work unit, binding: 'bind:DESIGN.Work_schedule::bq'}
+          q_valid: {meaning: Query rows of this work unit that are written}
+      - Name: Key-tile traversal of one work unit
+        Math: |
+          vend = kv_len(b) when is_causal is False, else min(kv_len(b), qend + kv_delta).
+          kv_tile_count = max(1, ceil_div(vend, bk)); key tile i, 0 <= i < kv_tile_count,
+          covers the key positions {i*bk <= j < min((i+1)*bk, kv_len(b))} of request b at
+          absolute KV token kvrow_base + j, with kvrow_base = cum_seq_lens_kv[b].
+          Tiles at or above kv_tile_count are never evaluated - under is_causal every
+          j >= vend exceeds hi(r) of every written row, so its weight is 0 and it changes
+          no maximum, denominator or output. Tiles below it stay partially masked per
+          row. kv_len(b) >= 1 gives vend >= 1, hence kv_tile_count >= 1 and no work unit
+          has an empty key traversal.
+        Symbol:
+          bk: {meaning: Keys of one key tile, binding: 'bind:DESIGN.Work_schedule::bk'}
+          kv_tile_count: {meaning: Key tiles traversed by one work unit}
+        Ledger:
+          Baseline: Traverse all ceil_div(kv_len(b), bk) key tiles of a request for every query tile
+          Gain: Causal units stop at vend - the first query tile of a 16384-key request evaluates 1 key tile instead of 128, saving bq*bk*qk_dim MACs per skipped tile
+      - Name: Unscaled FP32 score tiles
+        Math: |
+          dot(i) is the bq x bk matrix with
+            dot(i)[r,j] = dot32(query[qrow_base+r, h, :], key[kvrow_base+i*bk+j, kv_head(h), :])
+          the E4M3 operands entering with exact stored values, products and sum in FP32. Query or
+          key positions past total_q or total_kv read as zero through the transfer's out-of-range
+          fill, so dot is defined on the whole box; such rows are never written, such columns masked.
+          Contract's score[r, i*bk+j] = bmm1_scale * dot(i)[r,j], with bmm1_scale folded into the
+          base-2 exponent of the weight step rather than applied to the tile, so the tile stays in
+          unscaled dot units and is never rescaled in place.
+            masked(i)[r,j] = dot(i)[r,j] when key i*bk+j is allowed for row r, else -FLT_MAX
+          Masking is applied to the formed tile, not the product: all bq*bk entries are evaluated.
+        Symbol:
+          dot: {meaning: Unscaled FP32 QK product tile of one key tile, shape: [{row: bq}, {key: bk}], dtype: fp32, retention: 'keep_value (b,q_tile,h,i)'}
+          masked: {meaning: Score tile with disallowed keys set to -FLT_MAX, shape: [{row: bq}, {key: bk}], dtype: fp32, retention: 'keep_value (b,q_tile,h,i)'}
+        Arithmetic:
+          Accumulate: dot(i) accumulates as six sequential k32 partial products per tile into one FP32 accumulator, four over channels [0,128) and two over [128,192)
+        Ledger:
+          Baseline: One native product over 256-channel operands obtained by zero-padding Q and K
+          Gain: Per key tile, evaluated MACs bq*bk*256 -> bq*bk*192 and k32 steps 8 -> 6, with no repack pass over Q or K
+      - Name: Frozen running maximum
+        Math: |
+          c = bmm1_scale * log2(e) converts a dot value into base-2 exponent units. Per
+          row r, over key tiles i = 0 .. kv_tile_count-1,
+            mu(-1)[r] = -inf
+            tile_max(i)[r] = max of masked(i)[r,j] over the bk keys, -FLT_MAX if none is allowed
+            cand(i)[r] = max(mu(i-1)[r], tile_max(i)[r])
+            bump(i)[r] holds iff mu(i-1)[r] == -inf or (cand(i)[r] - mu(i-1)[r]) * c > freeze_tol
+            mu(i)[r] = cand(i)[r] when bump(i)[r] holds, else mu(i-1)[r]
+            safe(i)[r] = 0 when mu(i)[r] == -inf, else mu(i)[r]
+            alpha(i)[r] = 0 when i == 0, else exp2((mu(i-1)[r] - safe(i)[r]) * c)
+          alpha(i)[r] == 1 exactly when i > 0 and bump(i)[r] is false.
+        Symbol:
+          mu: {meaning: Frozen running maximum of dot for one row, shape: [{row: bq}], dtype: fp32, retention: 'carry_forward (b,q_tile,h); i=-1..kv_tile_count-1'}
+          alpha: {meaning: Rescale factor of o_run when mu moves, shape: [{row: bq}], dtype: fp32, retention: 'keep_value (b,q_tile,h,i)'}
+          freeze_tol: {meaning: Base-2 drift tolerated before a maximum bump, value: 0.75}
+        Ledger:
+          Baseline: Bump the running maximum on every new tile maximum
+          Gain: A 32-row group whose alpha is uniformly 1.0 skips the read-modify-write of its o_run rows for that tile, 128 FP32 reads and writes -> 0
+          Cost: mu may lag the true row maximum by up to freeze_tol/c, which keeps weights above 1 and consumes the headroom reserved by p_scale_log2
+      - Name: E4M3 weights with a 2^8 pre-scale
+        Math: |
+          off(i)[r] = -safe(i)[r] * c + p_scale_log2, one FP32 value per row and key tile.
+          Per evaluated key of row r,
+            x(i)[r,j] = fma32(masked(i)[r,j], c, off(i)[r])   one FP32 rounding
+            u(i)[r,j] = exp2_f16(fp16(x(i)[r,j]))             FP16 argument and result
+            p(i)[r,j] = e4m3(u(i)[r,j])                       saturating conversion
+            d(i)[r] = the FP16 sum of u(i)[r,:] over the bk keys, widened to FP32
+          so u(i)[r,j] = 2^p_scale_log2 * exp(bmm1_scale * (dot(i)[r,j] - safe(i)[r])) for an
+          allowed key. A sentinel key gives x = -FLT_MAX*c + off, whose FP16 rounding is -inf
+          once FLT_MAX*c exceeds the largest finite FP16 value 65504 - a bound the frozen
+          bmm1_scale meets by many orders - so u = p = 0 there; p is the value-product multiplicand and u is not retained.
+        Symbol:
+          p: {meaning: 'E4M3 weight tile, the value-product multiplicand', shape: [{row: bq}, {key: bk}], dtype: fp8_e4m3fn, retention: 'keep_value (b,q_tile,h,i)'}
+          p_scale_log2: {meaning: Base-2 pre-scale of every weight, value: 8}
+        Arithmetic:
+          Approx: exp2_f16 is the FP16 approximate base-2 exponential of the FP16 rounding of x; bound unknown - no bound-bearing material is bound in this task
+          Accumulate: d(i) sums in FP16 as two packed chains, keys 4g and 4g+1 in the first and 4g+2 and 4g+3 in the second, each widened to FP32 before the two are added
+        Ledger:
+          Baseline: FP32 weights and an FP32 tile sum
+          Gain: Value-product multiplicand bytes per key tile bq*bk*4 -> bq*bk, and the value operand needs no conversion pass
+          Cost: Per key, FP16 argument rounding, approximate FP16 exp2 and E4M3 rounding, relative <= 2^-4 and never saturating as u <= 2^8 * 2^0.75 = 430.5 < 448
+      - Name: Tiled denominator and output recurrence
+        Math: |
+          den(-1)[r] = 0 and o_run(-1)[r,:] = 0 for every row; for key tile i,
+            den(i)[r] = fma32(den(i-1)[r], alpha(i)[r], d(i)[r])
+            o_run(i)[r,:] = mma32(p(i)[r,:], v(i), alpha(i)[r] * o_run(i-1)[r,:])
+          where v(i) is the bk x value_dim E4M3 value tile of key tile i, used with its
+          exact stored values and no conversion. For i == 0 the incoming accumulator is
+          not read - the product initializes o_run(0), which alpha(0) = 0 also expresses.
+          Both states carry the 2^p_scale_log2 factor of the weights and both are
+          re-initialized at the first key tile of every work unit. bmm2_scale is not
+          applied to v(i) either; it is factored into norm of the outputs step.
+        Symbol:
+          den: {meaning: Running denominator carrying the weight pre-scale, shape: [{row: bq}], dtype: fp32, retention: 'carry_forward (b,q_tile,h); i=-1..kv_tile_count-1'}
+          o_run: {meaning: 'Running unnormalized output rows, pre-scaled', shape: [{row: bq}, {channel: value_dim}], dtype: fp32, retention: 'carry_forward (b,q_tile,h); i=-1..kv_tile_count-1'}
+        Ledger:
+          Baseline: Form the full score row, then one maximum, one sum and one value product per row
+          Gain: Materialized score per unit is 3 stages of bq*bk*4 bytes instead of bq*kv_len(b)*4 - 192 KiB instead of 8 MiB at kv_len 16384
+          Cost: kv_tile_count-1 rescales of bq*value_dim FP32 accumulator entries per work unit, each avoided where alpha is 1
+      - Name: Outputs, sinks and log2 LSE
+        Math: |
+          With L = kv_tile_count - 1 and per row r, den_final[r] = den(L)[r], mu_final[r] = mu(L)[r],
+            base_nat[r] = bmm1_scale * mu_final[r] + ln(den_final[r]) - ln(2) * p_scale_log2
+            norm[r] = bmm2_scale / den_final[r] when den_final[r] > 0, else 0
+          With attention_sinks present and sk = attention_sinks[h],
+            total[r] = max(base_nat[r], sk) + ln(1 + exp(-|base_nat[r] - sk|))
+            norm[r] = norm[r] * exp(base_nat[r] - total[r]); lse_value[r] = total[r] * log2(e)
+          otherwise total[r] = base_nat[r] and lse_value[r] = base_nat[r] * log2(e).
+          For the q_valid written rows, out[qrow_base+r, h, :] = bf16(o_run(L)[r,:] * norm[r])
+          and lse[qrow_base+r, h] = lse_value[r] when the caller supplied lse, so lse_value
+          is Contract's lse_log2; rows with r >= q_valid are evaluated and never written.
+        Symbol:
+          den_final: {meaning: Row denominator of the last key tile, shape: [{row: bq}], dtype: fp32, retention: 'keep_value (b,q_tile,h)'}
+          mu_final: {meaning: Row frozen maximum of the last key tile, shape: [{row: bq}], dtype: fp32, retention: 'keep_value (b,q_tile,h)'}
+        Arithmetic:
+          Approx: ln, exp and the sink log-sum-exp use the FP32 approximate variants and the subnormal flushing the build selects; bound unknown, none is documented
+        Ledger:
+          Baseline: Recompute the row maximum and the row sum of exponentials over all keys for the LSE
+          Gain: The LSE and the normalization reuse mu and den of the recurrence - 0 extra key traversals and 0 extra score-tile reads per work unit
+      - Name: Exact FP32 path for rows of at most 32 keys
+        Math: |
+          tiny_unit holds when kv_tile_count == 1, q_len(b) <= 32 and hi(r) < 32 for every
+          r < 32. One vote per 32-row group decides it, so only rows [0,32) can select the
+          path and all of them do; q_len(b) <= 32 makes q_valid <= 32, so a tiny unit
+          writes no row outside that group. For each row r < 32 of a tiny unit, in FP32,
+            w[r,j] = exp2(fma32(dot(0)[r,j], c, -safe(0)[r] * c)) for allowed j, else 0
+            den_exact[r] = sum of w[r,j] over the allowed j ascending
+            o_exact[r,ch] = sum over the allowed j ascending of fma32(w[r,j], fp32(value[kvrow_base+j, kv_head(h), ch]), o_exact[r,ch])
+          starting from 0, for 0 <= ch < value_dim. These replace den and o_run for those
+          rows - den_final[r] = den_exact[r], norm[r] = bmm2_scale / den_exact[r] and
+          base_nat[r] = bmm1_scale * mu_final[r] + ln(den_exact[r]) with no ln(2) term.
+        Symbol:
+          o_exact: {meaning: Exact FP32 output rows of a tiny work unit, shape: [{row: 32}, {channel: value_dim}], dtype: fp32, retention: 'keep_value (b,q_tile,h)'}
+          den_exact: {meaning: Exact FP32 denominator of a tiny work unit, shape: [{row: 32}], dtype: fp32, retention: 'keep_value (b,q_tile,h)'}
+        Arithmetic:
+          Approx: exp2 here is the FP32 approximate base-2 exponential of the build, bound unknown as in the outputs step; the E4M3 to FP32 widening of value is exact
+          Accumulate: Both sums run strictly ascending in j on the FMA units, one FP32 fma per key and channel, with unquantized FP32 weights and no reassociation
+        Ledger:
+          Baseline: The quantized tiled path for every row
+          Gain: Weight quantization error of the affected rows 2^-4 relative -> 0, and no 2^p_scale_log2 headroom needed
+          Cost: Per tiny unit 32*32*value_dim FP32 FMAs move from the matrix to the FMA units and dot(0) is read twice; o_run(0) is still computed and discarded
+  Work_schedule:
+    Thesis: >-
+      One fused persistent kernel per call. A work unit is one (request, bq-row query tile, head) keeping its whole key range, so no partial result crosses a worker. The host resolves geometry into a dense weight-ordered table, costing one device-to-host sync; workers refill from one atomic counter
+    Step:
+      MAIN:
+        Describe: Compute the attention output rows and, when the caller supplied lse, the log2 LSE rows of one work unit from the Contract's FP8 query, key and value
+        Decomposition:
+          Strategy: bq = 128; bk = 128; item_count = heads * sum_b ceil_div(q_len(b), bq), one table entry per (h, b, q_tile). The device reads only the published entry
+          Partition: {item: {meaning: Entry of the host-built item table; one work unit, size: item_count, tile: 1, range: [1, null]}}
+          Worktile:
+            Invariant: {q_tile: {meaning: 'Query rows of this work unit, all qk_dim channels', shape: [{row: bq}, {channel: qk_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::query.dtype'}}
+            Iteration:
+              k_tile: {meaning: Key rows of one key tile for this kv head, shape: [{key: bk}, {channel: qk_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::key.dtype', direction: ascending}
+              v_tile: {meaning: Value rows of the same key tile, shape: [{key: bk}, {channel: value_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::value.dtype', direction: ascending}
+          Target:
+            Single_tile:
+              out_tile: {meaning: Attention output rows written into out, shape: [{row: q_valid}, {channel: value_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}
+              lse_tile: {meaning: 'Log2 LSE rows written into lse, when supplied', shape: [{row: q_valid}], dtype: 'ref:CONTRACT.Algorithm_requirement::lse.dtype'}
+        Mapping:
+          Strategy: sm_count is the device SM count queried at launch and equals the submitted worker count, as one worker fills all 512 tensor-memory columns of its SM
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: sm_count
+          Placement: {unit: sm, unit_count: 1}
+        Schedule:
+          Strategy: The host rebuilds and uploads the table before this step starts; its order is the dispatch and refill order, a stable sort by kv_tile_count descending
+          Worktile_order: [{by: item, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: {atomic_queue: 'One claim per work unit from a counter holding 0; claim v takes entry sm_count + v while < item_count, else the sentinel; v = item_count - 1 resets it'}
+            Exit: [sentinel]
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: >-
+      Five roles on one CTA overlap the two products of a key tile with its weight formation. The score ring has 3 stages because 3 stages plus the accumulator fill all 512 tensor-memory columns; the key and value ring has 4 and needs its own period-matched release. All ring counters span work units
+    Step:
+      MAIN:
+        Index:
+          t: {meaning: Local ordinal in this worker's work unit sequence, definition: worktile}
+          i: {meaning: Key-tile index within one work unit, definition: [0, kv_tile_count]}
+          n: {meaning: Key-tile ordinal across work units, definition: {flatten: [t, i]}}
+        Storage:
+          q_slot: {meaning: Single-buffered query tile of the current unit, depth: 1, location: smem, shape: [{row: 128}, {channel: 192}],
+            dtype: fp8_e4m3fn, total_size: 24576, view: {q_tile(t): {}}}
+          k_ring: {meaning: Key tile ring; one slot per in-flight key tile, depth: 4, location: smem, shape: [{key: 128}, {channel: 192}],
+            dtype: fp8_e4m3fn, total_size: 98304, view: {k_tile(n): {slot_index: n%4}}}
+          v_ring: {meaning: 'Value tile ring, slots released with k_ring', depth: 4, location: smem, shape: [{key: 128}, {channel: 128}],
+            dtype: fp8_e4m3fn, total_size: 65536, view: {v_tile(n): {slot_index: n%4}}}
+          score_prob: {meaning: Score and weight stages sharing tensor memory, depth: 3, location: tmem, shape: [{row: 128}, {column: 128}],
+            dtype: fp32, total_size: 196608, view: {dot(n): {slot_index: n%3}, p(n): {slot_index: n%3, region: {column: [32, 64]}}}}
+          o_slot: {meaning: 'Output accumulator, tensor-memory columns 384-511', depth: 1, location: tmem, shape: [{row: 128}, {column: 128}],
+            dtype: fp32, total_size: 65536, view: {o_run(t): {}}}
+          scale_relay: {meaning: 'Relay of alpha to CORRECTION, two slots', depth: 2, location: smem, shape: [{row: 128}],
+            dtype: fp32, total_size: 1024, view: {alpha(n): {slot_index: n%2}}}
+          den_final_slot: {meaning: Row denominator of the last key tile, depth: 1, location: smem, shape: [{row: 128}],
+            dtype: fp32, total_size: 512, view: {den_final(t): {}}}
+          mu_final_slot: {meaning: Row frozen maximum of the last key tile, depth: 1, location: smem, shape: [{row: 128}],
+            dtype: fp32, total_size: 512, view: {mu_final(t): {}}}
+          tiny_scratch: {meaning: 'Exact FP32 rows of a tiny unit, 130-float stride', depth: 1, location: smem, shape: [{row: 32}, {element: 130}],
+            dtype: fp32, total_size: 16640, view: {o_exact(t): {region: {element: [0, 128]}}}}
+          geo_slot: {meaning: Published geometry; roles latch before slot reuse, depth: 2, location: smem, shape: [{element: 10}],
+            dtype: int32, total_size: 80, view: {item_geo(t): {slot_index: t%2}}}
+          row_state: {meaning: Register copy of mu and den of the current tile, depth: 1, location: register, shape: [{row: 128}, {element: 2}],
+            dtype: fp32, total_size: 1024, view: {mu(i): {region: {element: [0, 1]}}, den(i): {region: {element: [1, 2]}}}}
+          score_regs: {meaning: Register copy of the masked score tile, depth: 1, location: register, shape: [{row: 128}, {key: 128}],
+            dtype: fp32, total_size: 65536, view: {masked(n): {}}}
+        Role:
+          SOFTMAX:
+            Info:
+              Describe: Own the row-wise softmax recurrence - read each score tile, form mu, alpha, the E4M3 weight tile and den, and publish the final row states of a unit
+              Member: warp[0:4]
+              Register: 248
+              Using_verb:
+                compute:
+                  bootstrap_geo: {execution_mode: serial, describe: 'Thread 0 copies the table entry worker_id into geo_slot slot 0 ahead of the prologue join, before any role has published geometry'}
+                  row_init: {execution_mode: serial, describe: Set mu = -inf and den = 0 for the new work unit and derive hi(r) and lo(r) from its geometry; reads no tile and no previous value}
+                  masked_score: {execution_mode: serial, describe: Read dot(n) from score_prob slot n%3 as two 64-column halves into score_regs and replace disallowed keys by -FLT_MAX; done covers both reads}
+                  row_scale: {execution_mode: serial, describe: 'Form tile_max, mu(n), alpha(n) and off(n) of the frozen-maximum step, write alpha(n) to scale_relay slot n%2 and notify CORRECTION of it'}
+                  prob: {execution_mode: serial, describe: 'Fused weight step - u and p in registers plus the FP16 tile sum d; the recurrence den(i) = fma32(den(i-1), alpha(i), d(i)) stays in row_state'}
+                  row_final: {execution_mode: serial, describe: 'Write mu_final and den_final; a tiny unit accumulates o_exact and den_exact from its single dot and v_tile, safe as later units hold one tile too'}
+                store: {prob: {execution_mode: serial, describe: 'Write p(n) from registers into columns [32,64) of score_prob slot n%3; done covers the write being visible to the value product'}}
+                await:
+                  prologue: {execution_mode: serial, describe: The single CTA-wide prologue join - notification objects initialized and the tensor-memory base recorded; its own bootstrap write precedes it}
+                  item_geo: {execution_mode: serial, describe: Wait for the geometry of work unit t in geo_slot slot t%2 and latch its fields; ordinal 0 arrives through the prologue join instead}
+                  score_ready: {execution_mode: serial, describe: Wait until the product of key tile n has completed and dot(n) is readable in score_prob slot n%3}
+                  o_released: {execution_mode: serial, describe: 'Wait until the previous unit epilogue has read o_slot, the final row states and tiny_scratch, or the initial credit when t = 0'}
+                  prob_slot_free: {execution_mode: serial, describe: 'Wait until the value product of tile n-3 has consumed columns [32,64) of slot n%3, so p(n) may be written there'}
+                  queue_end: {execution_mode: serial, describe: Wait for the publish following the last work unit of this worker and read the sentinel that ends it}
+                signal:
+                  publish: {execution_mode: serial, describe: 'Thread 0 arrives the publish notification of ordinal 0 after the prologue join, fixing the parity base; no role waits on it'}
+                  pop_request: {execution_mode: serial, describe: 'Thread 0 asks QUEUE for the geometry following this work unit, issued in its last key tile so the claim leaves the critical path'}
+                  prob_ready: {execution_mode: serial, describe: Notify ISSUER that p(n) is visible in score_prob slot n%3; one arrival per warp on a count-4 notification}
+                release: {score_slot: {execution_mode: serial, describe: 'Return the dot region of score_prob slot n%3 once both halves are read, so the product of tile n+3 may overwrite it; one arrival per warp'}}
+            Pipe:
+              - compute:bootstrap_geo
+              - await:prologue
+              - signal:publish(0)
+              - for(t):
+                  - if(t > 0):
+                      - await:item_geo(t)
+                  - compute:row_init(t)
+                  - for(n[t]):
+                      - if(i == kv_tile_count-1):
+                          - signal:pop_request(t)
+                      - await:score_ready(n)
+                      - compute:masked_score(n)
+                      - release:score_slot(n)
+                      - compute:row_scale(n)
+                      - compute:prob(n)
+                      - if(i == kv_tile_count-1):
+                          - await:o_released(t)
+                          - compute:row_final(t)
+                      - if(n >= 3):
+                          - await:prob_slot_free(n)
+                      - store:prob(n)
+                      - signal:prob_ready(n)
+              - await:queue_end
+            Waiting:
+              Prepared:
+                - '{done await:prologue} ← [{done QUEUE::compute:barrier_init}, {done ISSUER::acquire:tmem}]'
+                - '{done await:item_geo(t)} ← [{done QUEUE::compute:item_geo(t)}]'
+                - '{done await:score_ready(n)} ← [{done ISSUER::matmul:q_tile(t)@k_tile(n)}]'
+                - '{done await:o_released(t)} ← [{done CORRECTION::signal:o_credit}, {done CORRECTION::release:o_slot(t-1)}]'
+                - '{done await:queue_end} ← [{done QUEUE::compute:item_geo(t+1)}]'
+              Released: ['{done await:prob_slot_free(n)} ← [{done ISSUER::matmul:p(n-3)@v_tile(n-3)}]']
+          CORRECTION:
+            Info:
+              Describe: Rescale the output accumulator when mu moved, then form the outputs of a finished work unit - normalization, sinks, BF16 store and the log2 LSE
+              Member: warp[4:8]
+              Register: 160
+              Using_verb:
+                compute:
+                  rescale_o: {execution_mode: serial, describe: Multiply o_run in o_slot by alpha(n) from scale_relay slot n%2 in place in FP32; a warp whose 32 rows all hold 1.0 does no read or write}
+                  output_scale: {execution_mode: serial, describe: 'Read den_final(t) and mu_final(t) and form norm, base_nat, the sink log-sum-exp and lse_value of the outputs step for its 32 rows'}
+                store:
+                  out_tile: {execution_mode: async_unordered, describe: 'Drain o_run from o_slot in four 32-column blocks, scale by norm, pack BF16 and store the q_valid rows of out; in a tiny unit rows [0,32) read o_exact'}
+                  lse_value: {execution_mode: async_unordered, describe: 'Store lse_value for the q_valid rows into lse, which exists exactly when the caller supplied it; lse_present is that condition'}
+                await:
+                  prologue: {execution_mode: serial, describe: 'The single CTA-wide prologue join - notification objects initialized, tensor-memory base recorded and bootstrap geometry written'}
+                  item_geo: {execution_mode: serial, describe: Wait for the geometry of work unit t in geo_slot slot t%2 and latch its fields; ordinal 0 arrives through the prologue join instead}
+                  pv_complete: {execution_mode: serial, describe: 'Wait until the value product of key tile n has completed, so o_run holds its contribution'}
+                  scale_relay: {execution_mode: serial, describe: Wait until alpha(n) is visible in scale_relay slot n%2}
+                  queue_end: {execution_mode: serial, describe: Wait for the publish following the last work unit of this worker and read the sentinel that ends it}
+                signal:
+                  o_credit: {execution_mode: serial, describe: 'Give the initial release credit for o_slot, the final row states and tiny_scratch; at role start these regions have no previous reader'}
+                  o_rescaled: {execution_mode: serial, describe: Notify ISSUER that o_run is rescaled by alpha(n) and the next product may accumulate into it; one arrival per warp on a count-4 notification}
+                release: {o_slot: {execution_mode: serial, describe: 'Return o_slot, the final row states and tiny_scratch once this unit epilogue has read them; packing and global stores may still be in flight'}}
+            Pipe:
+              - await:prologue
+              - signal:o_credit
+              - for(t):
+                  - if(t > 0):
+                      - await:item_geo(t)
+                  - for(n[t,1:]):
+                      - await:pv_complete(n-1)
+                      - await:scale_relay(n)
+                      - compute:rescale_o(n)
+                      - signal:o_rescaled(n)
+                  - await:pv_complete(n[t,kv_tile_count-1])
+                  - compute:output_scale(t)
+                  - store:out_tile(t)
+                  - release:o_slot(t)
+                  - if(lse_present):
+                      - store:lse_value(t)
+              - await:queue_end
+            Waiting:
+              Prepared:
+                - '{done await:prologue} ← [{done QUEUE::compute:barrier_init}, {done ISSUER::acquire:tmem}, {done SOFTMAX::compute:bootstrap_geo}]'
+                - '{done await:item_geo(t)} ← [{done QUEUE::compute:item_geo(t)}]'
+                - '{done await:pv_complete(n-1)} ← [{done ISSUER::matmul:p(n-1)@v_tile(n-1)}]'
+                - '{done await:pv_complete(n[t,kv_tile_count-1])} ← [{done ISSUER::matmul:p(n[t,kv_tile_count-1])@v_tile(n[t,kv_tile_count-1])}]'
+                - '{done await:scale_relay(n)} ← [{done SOFTMAX::compute:row_scale(n)}]'
+                - '{issue compute:output_scale(t)} ← [{done SOFTMAX::compute:row_final(t)}]'
+                - '{done await:queue_end} ← [{done QUEUE::compute:item_geo(t+1)}]'
+          ISSUER:
+            Info:
+              Describe: Single in-order issue stream for both matrix products of a key tile and for the period-matched release of the key and value ring slots
+              Member: warp[8:9]
+              Register: 32
+              Using_verb:
+                matmul:
+                  q_tile@k_tile: {execution_mode: async_ordered, describe: 'Product of q_tile(t) in q_slot and k_tile(n) in k_ring slot n%4 into dot(n) in score_prob slot n%3, initializing it; covers channels 0 to 191'}
+                  p@v_tile: {execution_mode: async_ordered, describe: 'Product of p in score_prob columns [32,64) of the given slot and v_tile of the same tile in v_ring, accumulating into o_run in o_slot'}
+                await:
+                  prologue: {execution_mode: serial, describe: 'The single CTA-wide prologue join - notification objects initialized, bootstrap geometry written and the first query transfer issued'}
+                  item_geo: {execution_mode: serial, describe: Wait for the geometry of work unit t in geo_slot slot t%2 and latch its kv_tile_count; ordinal 0 arrives through the prologue join}
+                  q_tile: {execution_mode: serial, describe: 'Wait until the query tile of work unit t has fully landed in q_slot, as announced by its transfer byte count'}
+                  kv_tile: {execution_mode: serial, describe: 'Wait until k_tile(n) and v_tile(n) have fully landed in ring slot n%4, as announced by their shared transfer byte count'}
+                  score_free: {execution_mode: serial, describe: 'Wait until SOFTMAX has returned the dot region of score_prob slot n%3, so the product of tile n may overwrite it'}
+                  prob_ready: {execution_mode: serial, describe: 'Wait until p of the given key tile is visible in columns [32,64) of its score_prob slot'}
+                  o_rescaled: {execution_mode: serial, describe: Wait until CORRECTION has rescaled o_run by alpha of the given key tile and given its notification}
+                  o_released: {execution_mode: serial, describe: 'Wait until the previous unit epilogue has read o_slot, or the initial credit when t = 0, so the first product may initialize o_run'}
+                  queue_end: {execution_mode: serial, describe: Wait for the publish following the last work unit of this worker and read the sentinel that ends it}
+                acquire: {tmem: {execution_mode: serial, describe: 'Allocate all 512 tensor-memory columns once for this step, record the base for every role and give up the allocation permit'}}
+                release:
+                  kv_slot: {execution_mode: async_ordered, describe: 'Second completion commit covering ring slot n%4, so the key and value reads of both products are finished and the slot may be refilled'}
+                  tmem: {execution_mode: serial, describe: Deallocate the tensor-memory region after the CTA-wide exit join that every role reaches once its own work loop ended on the sentinel}
+            Pipe:
+              - acquire:tmem
+              - await:prologue
+              - for(t):
+                  - if(t > 0):
+                      - await:item_geo(t)
+                  - await:q_tile(t)
+                  - for(n[t]):
+                      - await:kv_tile(n)
+                      - if(n >= 3):
+                          - await:score_free(n)
+                      - matmul:q_tile(t)@k_tile(n)
+                      - if(i > 0):
+                          - await:prob_ready(n-1)
+                          - if(i > 1):
+                              - await:o_rescaled(n-1)
+                          - if(i == 1):
+                              - await:o_released(t)
+                          - matmul:p(n-1)@v_tile(n-1)
+                          - release:kv_slot(n-1)
+                  - await:prob_ready(n[t,kv_tile_count-1])
+                  - if(kv_tile_count > 1):
+                      - await:o_rescaled(n[t,kv_tile_count-1])
+                  - if(kv_tile_count == 1):
+                      - await:o_released(t)
+                  - matmul:p(n[t,kv_tile_count-1])@v_tile(n[t,kv_tile_count-1])
+                  - release:kv_slot(n[t,kv_tile_count-1])
+              - await:queue_end
+              - release:tmem
+            Waiting:
+              Prepared:
+                - '{done await:prologue} ← [{done QUEUE::compute:barrier_init}, {done SOFTMAX::compute:bootstrap_geo}, {issue LOADER::load:q_tile(0)}]'
+                - '{done await:item_geo(t)} ← [{done QUEUE::compute:item_geo(t)}]'
+                - '{done await:q_tile(t)} ← [{done LOADER::load:q_tile(t)}]'
+                - '{done await:kv_tile(n)} ← [{done LOADER::load:kv_tile(n)}]'
+                - '{done await:prob_ready(n-1)} ← [{done SOFTMAX::signal:prob_ready(n-1)}]'
+                - '{done await:prob_ready(n[t,kv_tile_count-1])} ← [{done SOFTMAX::signal:prob_ready(n[t,kv_tile_count-1])}]'
+                - '{done await:o_rescaled(n-1)} ← [{done CORRECTION::signal:o_rescaled(n-1)}]'
+                - '{done await:o_rescaled(n[t,kv_tile_count-1])} ← [{done CORRECTION::signal:o_rescaled(n[t,kv_tile_count-1])}]'
+                - '{done await:o_released(t)} ← [{done CORRECTION::signal:o_credit}, {done CORRECTION::release:o_slot(t-1)}]'
+                - '{done await:queue_end} ← [{done QUEUE::compute:item_geo(t+1)}]'
+              Released: ['{done await:score_free(n)} ← [{done SOFTMAX::release:score_slot(n-3)}]']
+          LOADER:
+            Info:
+              Describe: Issue every asynchronous transfer into shared memory - the prologue query tile, the key and value ring slots and the guarded query prefetch
+              Member: warp[9:10]
+              Register: 32
+              Using_verb:
+                load:
+                  q_tile: {execution_mode: async_unordered, describe: 'Initialize the query completion object and fill q_slot with the unit''s query tile by two channel-segment transfers, ordinal 0 reading the table'}
+                  kv_tile: {execution_mode: async_unordered, describe: 'Fill ring slot n%4 with k_tile(n) by two transfers and v_tile(n) by one, announced together as 40960 bytes; done covers all three'}
+                await:
+                  prologue: {execution_mode: serial, describe: 'The single CTA-wide prologue join - notification objects, tensor-memory base and bootstrap geometry visible; its own transfer precedes it'}
+                  item_geo: {execution_mode: serial, describe: Wait for the geometry of work unit t in geo_slot slot t%2 and latch kvrow_base and kv_head; ordinal 0 arrives through the prologue join}
+                  kv_slot: {execution_mode: serial, describe: 'Wait until ring slot n%4 is free for refill, four key tiles after the slot was filled'}
+                  next_item: {execution_mode: serial, describe: 'Wait for the geometry published after this work unit, latch its row base and head, and read item_valid(t+1), false when that publish is the sentinel'}
+                  q_consumed: {execution_mode: serial, describe: 'Wait until the product of the last key tile of work unit t has consumed q_slot, so the single query buffer may be refilled'}
+            Pipe:
+              - load:q_tile(0)
+              - await:prologue
+              - for(t):
+                  - if(t > 0):
+                      - await:item_geo(t)
+                  - for(n[t]):
+                      - if(n >= 4):
+                          - await:kv_slot(n)
+                      - load:kv_tile(n)
+                  - await:next_item(t)
+                  - if(item_valid(t+1)):
+                      - await:q_consumed(t)
+                      - load:q_tile(t+1)
+            Waiting:
+              Prepared:
+                - '{done await:prologue} ← [{done QUEUE::compute:barrier_init}, {done ISSUER::acquire:tmem}, {done SOFTMAX::compute:bootstrap_geo}]'
+                - '{done await:item_geo(t)} ← [{done QUEUE::compute:item_geo(t)}]'
+                - '{done await:next_item(t)} ← [{done QUEUE::compute:item_geo(t+1)}]'
+              Released:
+                - '{done await:kv_slot(n)} ← [{done ISSUER::release:kv_slot(n-4)}]'
+                - '{done await:q_consumed(t)} ← [{done ISSUER::matmul:q_tile(t)@k_tile(n[t,kv_tile_count-1])}]'
+          QUEUE:
+            Info:
+              Describe: Serve the refill - initialize the step's notification objects, then turn each request into one atomic claim and publish its geometry
+              Member: warp[10:11]
+              Register: 32
+              Using_verb:
+                compute:
+                  barrier_init: {execution_mode: serial, describe: 'Thread 0 initializes every notification object of this step except the query transfer''s, with its arrival count, and fences them before any wait'}
+                  item_geo: {execution_mode: serial, describe: 'Thread 0 claims one entry, resets the counter at item_count - 1, publishes ordinal t+1 or the sentinel into geo_slot (t+1)%2, replacing ordinal t-1'}
+                await: {pop_request: {execution_mode: serial, describe: Wait for the claim request that SOFTMAX issues during work unit t; request t publishes ordinal t+1}}
+            Pipe:
+              - compute:barrier_init
+              - for(t):
+                  - await:pop_request(t)
+                  - compute:item_geo(t+1)
+            Waiting:
+              Prepared: ['{done await:pop_request(t)} ← [{done SOFTMAX::signal:pop_request(t)}]']
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN.ISSUER
+      Choice: Matrix operations issued by this single warp in one in-order stream, each with a completion notification that also covers every earlier product of that stream
+      Reason: The weight tile shares tensor-memory columns with the score tile of its stage and is rewritten three tiles later; the design relies on issue order to keep the value product of tile n reading p(n) before the score product of tile n+3 reaches that stage
+    - Item: DESIGN.Work_schedule::MAIN.Mapping
+      Choice: Launch 384 threads per worker in 12 warps, warp 11 carrying no role, redistribute the per-thread register budget per role with a warp-group reallocation, and request 209920 bytes of dynamic shared memory as an opt-in attribute before the first launch
+      Reason: The role union covers 11 warps and the registered regions total 207184 of the 209920 shared-memory bytes, the rest holding notification objects and padding; one resident worker per SM depends on both figures
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.SOFTMAX
+        - DESIGN.Tile_pipeline::MAIN.CORRECTION
+      Choice: Execute every tensor-memory read warp-converged, with all 32 lanes of the reading warp taking part regardless of row validity, and predicate only the global stores
+      Reason: The aligned tensor-memory load primitive diverging inside a warp stalls the CTA, and q_valid < bq makes fully populated reads unavoidable on a partial work unit
+    - Item: DESIGN.Work_schedule::MAIN.Schedule.Worker_assignment.Refill
+      Choice: Keep the counter in a device allocation that outlives the call, zero it once at allocation and rely on the in-kernel reset of the last claim; join the table upload to the launch stream with an event and leave no host operation after the launch
+      Reason: The claim protocol needs the value 0 at every launch entry and the table must be visible before its first read; completion of the submitted work is announced only inside the kernel, so host order proves nothing about it
+    - Item: DESIGN.Tile_pipeline::MAIN.LOADER
+      Choice: Two tensor-map transfers for the query tile and for each key tile, over channels [0,128) and [128,192), and one for the value tile, all announced on the destination transfer byte count
+      Reason: The 192-channel operands are not a native transfer box, so the segment split keeps them in their stored layout and still gives each load action one completion guarantee
+    - Item: DESIGN.Work_schedule::MAIN.Schedule
+      Choice: Read seq_lens, cum_seq_lens_q and cum_seq_lens_kv with asynchronous device-to-host copies on a non-blocking side stream and synchronize that stream, with no event joining the caller's current stream to it; upload the table on the side stream and join only the launch to it
+      Reason: Those three metadata tensors must already be complete when the copies are issued and this design supplies no join, so their readiness rests on caller ordering - the frozen protocol restores every input before each call; only the upload is event-joined to the launch
+  Prefer:
+    - Item: DESIGN.Math_reshape::p
+      Choice: One fused register chain per key pair - FP32 to FP16 conversion, FP16 approximate base-2 exponential, saturating E4M3 pack - preserving the per-element operations and rounding of the weight step
+      Reason: Avoids a register round trip of the score tile and a separate pack pass in the role that sets the pace, about 5 fewer issue slots per key pair
+    - Item: DESIGN.Work_schedule::MAIN.Schedule
+      Choice: Place the uploaded table in a persisting-L2 access-policy window - raise the persisting limit once, capped at 1 MiB, set the window on the upload stream, and set it best-effort on the caller's current stream, clearing the error when that stream rejects attributes
+      Reason: Each worker reads its table entry once right after the upload, and without persisting placement the caller's cache-eviction traffic dislodges the fresh lines so every read goes cold; the design stays correct without it, and this is its only touch of caller stream state
+  Forbid:
+    - Item: DESIGN.Tile_pipeline::MAIN.LOADER
+      Choice: Gating the refill of a key and value ring slot on the value-product completion notification instead of the dedicated release of that slot
+      Reason: The ring holds 4 slots while that notification has period 3, so waiter and commit cadences accumulate unbounded phase skew and the parity wait aliases into a deadlock
+    - Item: DESIGN.Math_reshape::dot
+      Choice: Zero-padding the 192-channel operands to 256, or repacking them into a contiguous operand buffer, to obtain one native product per key tile
+      Reason: The two channel segments already cover 192 channels in the stored layout; padding to 256 adds one third to the evaluated MACs and a repack pass adds a full read and write of Q and K

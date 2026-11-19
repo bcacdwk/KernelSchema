@@ -1,0 +1,572 @@
+META_DATA:
+  Name: fmha_mxfp8_qkv
+  Describe: Multi-head attention on E4M3 Q/K/V payloads with E8M0 block-32 scales, giving a BF16 output and optional FP32 log-sum-exp under causal/window masks
+  Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+  Version: 3
+  Dispatch:
+    id: split_kv
+    when: head_dim = 128; the loaded binary issues tcgen05; the caller's workspace meets the planned size and the planner splits the key range, so nsplit > 1 with base = ceil_div(query_len, qph128) * batch_count * kv_head_count < 2 * sm_count, n_group > 1, sm_count host-queried; the span selects the flat scan; 2 * query_len * group_count > ceil_div(query_len, qph128) * 128, so no padding-skip row order; rows_total >= 2 * sm_count or nsplit < 8 selects the narrow combine; K/V admit tensor maps
+DESIGN:
+  Math_reshape:
+    Thesis: The delayed maximum makes the softmax state path dependent, so no chunk can name a safe reference alone. Materializing every group maximum and replaying the recurrence exactly lets each chunk use the single pass's own state, so its probabilities stay bit-identical and the merge is exact
+    Rewrite:
+      - Name: Block-scaled score tile, one readout per pass
+        Math: |
+          Per packed row (query token i, head h; worktile coordinates b, kh) and group g holding keys
+          j = probability_group_keys*g + n, the score tile carries raw[i,j] = sum_c sum_{x in block c}
+            q_payload[i,x] * k_payload[j,x] * 2^(sf_q[i,c] - e8m0_exponent_bias) * 2^(sf_k[j,c]
+            - e8m0_exponent_bias), in FP32 over the 4 blocks c of 32 channels with both E8M0 factors inside
+            the block-scaled product, so raw is the Contract's sum_x q*k rounded in FP32
+          Keys outside visible(i) take raw = -inf at readout; the scale applies at consumption, the
+            probability path forming score = raw * scale per element and a group maximum taking
+            (max raw) * scale, equal because scale > 0 is order-preserving and -inf * scale stays -inf
+          The key range is read out twice but never twice inside one pass: the group-maximum pass reads
+            it for the maximum, the chunk pass for the probabilities, and both recompute the same raw
+        Symbol: {raw: {meaning: One row's masked unscaled FP32 group dot products, shape: [{key_token: probability_group_keys}], dtype: fp32}}
+        Arithmetic:
+          Accumulate: One block-scaled FP32 product per 32-channel block; blocks accumulate sequentially in increasing x; intra-block addition order is hardware-defined
+        Ledger:
+          Baseline: One fused pass reading each materialized score tile once, serving both the group maximum and the probabilities from row registers
+          Gain: The chunk pass drops the maximum reduction; it reads only the probabilities it consumes and keeps its numerator in head_dim registers
+          Cost: Score dot products per row per group head_dim*probability_group_keys MACs -> 2x that; the score tile is 128 columns wide in both passes
+      - Name: Row index and the tile's group window
+        Math: |
+          row = (b*head_count + h)*query_len + i is the flat index of a live row and
+          rows_total = batch_count*head_count*query_len counts them; n_group = last_group + 1 is the
+          group count of the whole key range
+          A worktile at qtile covers rows i in [q0, min(q0 + qph128, query_len)), q0 = qtile*qph128,
+          with i_max = min(q0 + qph128, query_len) - 1; its group window is
+            lo_min = max(q0 + kv_len - query_len - window_size_left, 0) with a left window else 0,
+            hi_max = min(i_max + kv_len - query_len, kv_len - 1) if is_causal else kv_len - 1,
+            g_lo = floor(lo_min / probability_group_keys), g_hi = floor(hi_max / probability_group_keys)
+          The window is never empty because the first live row's diagonal key lies inside it, and rows
+          with i >= query_len are dead: they follow every formula but publish nothing
+        Symbol:
+          n_group: {meaning: Group count covering the whole key range, value: last_group + 1}
+          rows_total: {meaning: Live row count of the whole call, value: batch_count*head_count*query_len}
+          g_lo: {meaning: First key group any row of this tile can see}
+          g_hi: {meaning: Last key group any row of this tile can see}
+          qph128: {meaning: Query rows per packed 128-row worktile, binding: 'bind:DESIGN.Work_schedule::qph128'}
+      - Name: Materialized group maximum over the key range
+        Math: |
+          gmax_table[g][row] = group_max(g) for g_lo <= g <= g_hi and -inf for every other g of
+          [0, n_group), where group_max is the Contract's maximum of the masked scaled score
+          This pass covers [g_lo, g_hi] in gm_nsplit ranges of gm_chunk_len = ceil_div(g_hi - g_lo + 1,
+          gm_nsplit) groups: chunk z owns [gm_lo, gm_hi] = [g_lo + z*gm_chunk_len, min(gm_lo
+          + gm_chunk_len - 1, g_hi)], empty once gm_lo > g_hi. Chunk 0 writes the -inf head and the
+          last chunk the -inf tail, so every entry of every live row is written exactly once and the
+          replay below reads no unwritten slot
+          group_max = -inf makes (group_max - m) > rescale_log2_threshold*ln(2) false, so the padded
+          entries cannot move the replayed state
+        Symbol:
+          gm_nsplit: {meaning: Key-range chunks of the group-maximum pass, binding: 'bind:DESIGN.Work_schedule::gm_nsplit'}
+          gm_chunk_len: {meaning: Groups one group-maximum chunk covers, value: 'ceil_div(g_hi - g_lo + 1, gm_nsplit)'}
+          gm_lo: {meaning: First group this group-maximum chunk covers}
+          gm_hi: {meaning: Last group this group-maximum chunk covers}
+          gmax_table: {meaning: Materialized Contract group_max per group and row, shape: [{group: n_group}, {row: rows_total}], dtype: fp32, retention: keep_value invocation}
+        Ledger:
+          Baseline: Derive each group maximum inside the single fused pass and keep it in a row register
+          Gain: The key range becomes splittable; this pass stages no value operand, holds no probability tile and issues no second product
+          Cost: rows_total*n_group*4 bytes of gmax_table written once and read once, and the whole score product over [g_lo, g_hi] computed a second time
+      - Name: Exact replay of the delayed maximum
+        Math: |
+          Per row, m_table[g][row] reproduces the Contract's m(g) for every g of [0, n_group) by walking
+          the whole range in increasing g from m(-1) = -inf:
+            m_table[g][row] = gmax_table[g][row] if gmax_table[g][row] - m_table[g-1][row] >
+              rescale_log2_threshold*ln(2), else m_table[g-1][row]
+          m_tail[row] = m_table[n_group - 1][row], which is m(last_group) because the groups above g_hi
+          are -inf and never update the state
+          The comparison, its operands and their order are the Contract's and a NaN comparison is false,
+          so an all-masked prefix stays -inf as the Contract's does and the replay is bit-identical to
+          the state a single pass would carry. One thread owns one row, so the chain is thread-local
+          and needs no reduction, but it stays serial in g by construction
+        Symbol:
+          m_table: {meaning: The Contract's m(g) materialized per group and row, shape: [{group: n_group}, {row: rows_total}], dtype: fp32, retention: keep_value invocation}
+          m_tail: {meaning: 'Final replayed normalizer per row, m(last_group)', shape: [{row: rows_total}], dtype: fp32, retention: keep_value invocation}
+        Ledger:
+          Baseline: Every chunk walks the groups before its own to derive its entry state itself
+          Gain: The walk runs once per row instead of once per (row, chunk), and a chunk then reads one float per group instead of recomputing a maximum
+          Cost: rows_total*n_group*4 bytes of m_table written and read back, plus a chain of n_group dependent steps per row that nothing parallelizes
+      - Name: Chunk window and replayed rescale
+        Math: |
+          [g_lo, g_hi] is cut into nsplit ranges of chunk_len = ceil_div(g_hi - g_lo + 1, nsplit)
+          groups: chunk z owns [c_lo, c_hi] with c_lo = g_lo + z*chunk_len and c_hi = min(c_lo
+          + chunk_len - 1, g_hi); a chunk whose c_lo exceeds g_hi owns no group and keeps num = den = 0
+          Chunk z enters with the Contract's t = c_lo - 1 state: m(c_lo - 1) = m_table[c_lo - 1][row]
+          when c_lo > 0, else -inf, and num = den = 0. For g in [c_lo, c_hi] the rescale data is
+          replayed rather than derived from this group's own scores: s(g) = m_table[g][row] if finite
+          else 0, and alpha(g) = exp(m(g-1) - s(g)) if m(g-1) is finite else 0, with an exact CUDA
+          expf, m(g-1) being what the previous iteration of this chunk carried; the update test is
+          never re-evaluated here. num and den then follow the Contract's Output accumulation over
+          this chunk's groups only, so num(c_hi) and den(c_hi) are the single pass's own accumulators
+        Symbol:
+          nsplit: {meaning: Key-range chunks the chunk pass launches with, binding: 'bind:DESIGN.Work_schedule::nsplit'}
+          chunk_len: {meaning: Groups one chunk covers, value: 'ceil_div(g_hi - g_lo + 1, nsplit)'}
+          c_lo: {meaning: First group of this chunk}
+          c_hi: {meaning: Last group of this chunk}
+          num: {meaning: The Contract's num over this chunk's groups only, shape: 'ref:CONTRACT.Algorithm_requirement::num.shape', dtype: 'ref:CONTRACT.Algorithm_requirement::num.dtype', retention: 'carry_forward (b,h,i); g=c_lo-1..c_hi', binding: 'ref:CONTRACT.Algorithm_requirement::num'}
+          den: {meaning: The Contract's den over this chunk's groups only, shape: 'ref:CONTRACT.Algorithm_requirement::den.shape', dtype: 'ref:CONTRACT.Algorithm_requirement::den.dtype', retention: 'carry_forward (b,h,i); g=c_lo-1..c_hi', binding: 'ref:CONTRACT.Algorithm_requirement::den'}
+        Ledger:
+          Baseline: One pass over [g_lo, g_hi] per worktile, taking s(g) and alpha(g) from a maximum it just reduced itself
+          Gain: Groups per CTA span -> chunk_len while CTAs go base -> base*nsplit, filling the resident slots a starved geometry leaves empty
+          Cost: Two extra strided global loads per row (entry state plus the one-group-ahead prefetch); the group maximum is still paid by the pass above
+      - Name: Biased probability and E4M3 quantization
+        Math: |
+          bias = 16 at head_dim = 128 (the Contract's bias) and s(g) is this chunk's replayed
+          normalizer; for every unmasked key x = raw * scale - s(g) is at most rescale_log2_threshold*ln(2)
+          Each row takes the group as 64 key pairs; each pair evaluates x as two FP32 RNE results in one
+          packed pair and p[i,u] = exp_bias4(x), i.e. 2^4 * exp(x) in CUDA expf's exact operation sequence
+          with 2^4 folded into its two range-reduction magic constants and the low-order correction
+          product dropped (Arithmetic); exp_bias4(-inf) = +0, so masked keys contribute exactly zero
+          p_q[i,u] = a saturating RNE E4M3 pair conversion of (p[i,u], p[i,u+1]); saturation at
+          e4m3_max_norm = 448 is unreachable since p <= 16 * 2^4 = 256, and the value product reads p_q
+          exactly. den(g) = den(g-1)*alpha(g) + chunk sums in key order; per 32-key chunk four packed
+          partial chains absorb the sixteen pair results and combine as ((c0+c1)+(c2+c3)), bias included
+        Arithmetic:
+          Approx: 'Drops expf''s low-order term x*1.926e-8: deviation <= |x|*1.335e-8 <= 3.71e-8 for x <= 4*ln(2), worst ~1.1 ulp; exact at x = 0, +0 at -inf'
+          Accumulate: Packed FP32 RNE pair adds; the four-chain chunk tree reassociates the den sum by ~1e-7 relative, too small to flip any p_q rounding
+        Ledger:
+          Baseline: Scalar expf per key with a runtime bias multiply and one serial FP32 denominator chain
+          Gain: Exponential-path instructions per key pair 16 -> 11 (packed steps, folded bias); denominator chain depth per 32-key chunk 16 -> 4
+          Cost: The declared exponential deviation up to ~1.1 FP32 ulp on the admissible domain; three extra packed adds per chunk
+      - Name: Numerator by block-scaled product in registers
+        Math: |
+          num(g)[i,x] = num(g-1)[i,x]*alpha(g) + sum_u p_q[i,u] * v[b,kh, probability_group_keys*g + u, x],
+          one tensor-core product per group: four sequential 32-key k-steps multiply the group's E4M3
+          probability tile by the staged V payload with FP32 accumulation; V's key-axis E8M0 bytes enter
+          as the B-side block scales, realizing the Contract's v decode 2^(sf_v - e8m0_exponent_bias)
+          exactly, and the A-side scale is the constant unit word, the bias sitting inside p_q
+          The group's product lands in the same tensor-memory columns its own scores just vacated and is
+          read back into the owning row's register accumulator, so the accumulate predicate is off for
+          the first k-step of every group, no accumulator lives in tensor memory, and the readback adds
+          num(g-1)*alpha(g) is a read-modify-write of that accumulator, run only for rows whose
+          alpha != 1; a row at alpha = 1 multiplies by exactly 1.0, an empty chunk issues no product
+        Ledger:
+          Baseline: Decode V to FP32 by explicit E8M0 multiplies and accumulate p_q * v with per-row FMAs, or hold the numerator in tensor memory across groups
+          Gain: V decode multiplies per group head_dim*probability_group_keys -> 0; a tensor-memory accumulator -> 0, which keeps this form at two CTAs per SM
+          Cost: The product is read out of tensor memory into registers every group, and the rare rescale is a head_dim-register read-modify-write per firing row
+      - Name: Chunk weight and weighted partials
+        Math: |
+          At the end of its chunk, per row: chunk_weight = exp(m(c_hi) - m_tail[row]) when both are
+          finite, else 0, with CUDA expf. m is non-decreasing, so chunk_weight <= 1, and an empty chunk
+          keeps the 0 it started with
+          num_part[z][row][x] = num(c_hi)[i,x] * chunk_weight and den_part[z][row] = den(c_hi)[i] *
+          chunk_weight, one FP32 RNE multiply per element, written for every live row of every chunk,
+          so the merge sees exactly nsplit contributions per row; rows with i >= query_len are written
+          by nobody
+        Symbol:
+          chunk_weight: {meaning: Factor re-expressing a chunk against m_tail, shape: [{row: rows_total}], dtype: fp32}
+          num_part: {meaning: Weighted numerator partial of one chunk, shape: [{split: nsplit}, {row: rows_total}, {value_dim: head_dim}], dtype: fp32, retention: keep_value invocation}
+          den_part: {meaning: Weighted denominator partial of one chunk, shape: [{split: nsplit}, {row: rows_total}], dtype: fp32, retention: keep_value invocation}
+        Ledger:
+          Baseline: Keep each chunk's accumulators against its own local reference and re-derive a common one at the merge
+          Gain: One multiply per partial element makes every chunk share the single reference m_tail, so the merge is a plain sum with no state left to reconcile
+          Cost: nsplit*rows_total*(head_dim + 1)*4 bytes of partials materialized, written once and read once
+      - Name: Merge and final normalization
+        Math: |
+          Per row: total_num[x] = sum_{z=0}^{nsplit-1} num_part[z][row][x] and
+          total_den = sum_{z=0}^{nsplit-1} den_part[z][row], both in ascending z
+            total_den > 0: inv = 1 / total_den, one FP32 reciprocal, and o_tensor[b,h,i,x] =
+              bf16(total_num[x] * inv);  total_den <= 0: o_tensor[b,h,i,x] = bf16(0)
+          If lse_tensor is present: lse_tensor[b,h,i] = m_tail[row] + ln(total_den * 2^-4) when
+          total_den > 0 and m_tail[row] is finite, else -inf, with CUDA logf; the factor 2^-4 is exact
+          Because chunk_weight re-expressed every chunk against the one reference m_tail[row],
+          total_num and total_den are the single pass's num(last_group) and den(last_group) up to that
+          one multiply and the chunk sums' reassociation. Every live row's output and lse element are
+          written exactly once, by the one CTA owning that row
+        Arithmetic:
+          Accumulate: Both merge sums run in ascending chunk order, one FP32 add per chunk, reassociating the single pass's key-order sum by ~1e-7 relative
+        Ledger:
+          Baseline: One reciprocal, one BF16 conversion and one LSE per row inside the attention kernel, with no partial traffic at all
+          Gain: The output producer becomes one CTA per row, so the merge is nsplit adds per channel with the reciprocal and conversion paid once
+          Cost: One extra FP32 multiply per partial element and a reassociated merge sum, both far inside rtol 0.05 on a BF16 output
+  Work_schedule:
+    Thesis: Four submissions replace the fused one - materialize every group maximum, replay the recurrence one thread per row, accumulate each key chunk from the replayed state into weighted partials, and merge them per output row - filling the resident slots a starved geometry leaves empty
+    Step:
+      GMAX:
+        Describe: Materializes the masked scaled maximum of every row's scores for every group of the key range, so the scan replays the recurrence without a score
+        Decomposition:
+          Strategy: group_count = head_count/kv_head_count, qph128 = 128/group_count; row r at q0 maps to i = q0 + (r mod qph128), h = kh*group_count + floor(r/qph128)
+          Partition:
+            qtile: {meaning: Tile of qph128 query rows x group_count heads, size: 'ceil_div(query_len, qph128)', tile: 1}
+            kv_pair: {meaning: '(b, kh) pair, kv_pair = b*kv_head_count + kh', size: batch_count * kv_head_count, tile: 1}
+            gm_chunk: {meaning: Key-range chunk of the group-maximum pass, size: gm_nsplit, tile: 1, range: [3, null]}
+          Worktile:
+            Invariant:
+              q_rows: {meaning: E4M3 query payload of the 128 packed rows, shape: [{packed_row: 128}, {key_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::q_tensor.dtype'}
+              sfq_words: {meaning: 'E8M0 sf_q words of the 128 rows, read once', shape: [{packed_row: 128}, {sf_byte: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::sf_q.dtype'}
+            Iteration:
+              k_block: {meaning: 'E4M3 key payload of group g in [gm_lo, gm_hi]', shape: [{key_token: probability_group_keys}, {key_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::k_tensor.dtype', direction: ascending}
+              sfk_atom: {meaning: E8M0 key-scale atom of group g (512 bytes), shape: [{key_token: probability_group_keys}, {sf_byte: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::sf_k.dtype', direction: ascending}
+          Target:
+            Single_tile:
+              gmax_chunk: {meaning: 'This chunk''s slice of gmax_table, 128 rows', shape: [{group: gm_chunk_len}, {packed_row: 128}], dtype: fp32}
+              gmax_pad: {meaning: '-inf gmax_table entries outside [g_lo, g_hi]', shape: [{group: n_group}, {packed_row: 128}], dtype: fp32}
+        Mapping:
+          Strategy: One 128-thread CTA; thread r, TMEM lane r and packed row r are one identity, so a row's maximum needs no cross-lane reduction
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil_div(query_len, qph128) * batch_count * kv_head_count * gm_nsplit
+        Schedule:
+          Strategy: gm_nsplit = max(nsplit, min(floor(2 * sm_count / (ceil_div(query_len, qph128) * batch_count * kv_head_count)), floor(n_group / 2))); natural order
+          Worktile_order:
+            - {by: gm_chunk, direction: ascending}
+            - {by: kv_pair, direction: ascending}
+            - {by: qtile, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+      SCAN:
+        Describe: Replays the Contract's delayed-maximum recurrence over gmax_table for every row, materializing m_table and m_tail for the chunk pass and combine
+        Decomposition:
+          Strategy: scan_block = 256 if n_group < 128, else the finest of 32, 64 and 128 with ceil_div(rows_total, scan_block) <= sm_count, else 256
+          Partition: {row_block: {meaning: Block of consecutive flat row indices, size: rows_total, tile: scan_block}}
+          Worktile:
+            Iteration: {gmax_row: {meaning: This block's rows of gmax_table for group g, shape: [{group: 1}, {row: scan_block}], dtype: fp32, direction: ascending}}
+          Target:
+            Single_tile:
+              m_chunk: {meaning: 'This block''s columns of m_table, every group', shape: [{group: n_group}, {row: scan_block}], dtype: fp32}
+              m_tail_rows: {meaning: This block's rows of m_tail, shape: [{row: scan_block}], dtype: fp32}
+        Mapping:
+          Strategy: Within worker c the thread at position x owns row c*scan_block + x; threads past rows_total return before the walk, so the last worker may idle
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil_div(rows_total, scan_block)
+        Schedule:
+          Strategy: The block size makes the grid one resident wave - this walk is load-latency bound, so more SMs mean more outstanding requests in flight
+          Worktile_order: [{by: row_block, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+      SPLIT:
+        Describe: Accumulates its own key-range chunk's numerator and denominator for 128 packed rows from the replayed state, and writes chunk-weighted partials
+        Decomposition:
+          Strategy: The row map and the window [g_lo, g_hi] are the group-maximum pass's; chunk z owns the [c_lo, c_hi] of Math_reshape. Dead rows store nothing
+          Partition:
+            qtile: {meaning: Tile of qph128 query rows x group_count heads, size: 'ceil_div(query_len, qph128)', tile: 1}
+            kv_pair: {meaning: '(b, kh) pair, kv_pair = b*kv_head_count + kh', size: batch_count * kv_head_count, tile: 1}
+            split: {meaning: Key-range chunk of the chunk pass, size: nsplit, tile: 1, range: [3, 128]}
+          Worktile:
+            Invariant:
+              q_rows: {meaning: E4M3 query payload of the 128 packed rows, shape: [{packed_row: 128}, {key_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::q_tensor.dtype'}
+              sfq_words: {meaning: 'E8M0 sf_q words of the 128 rows, read once', shape: [{packed_row: 128}, {sf_byte: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::sf_q.dtype'}
+            Iteration:
+              k_block: {meaning: 'E4M3 key payload of group g in [c_lo, c_hi]', shape: [{key_token: probability_group_keys}, {key_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::k_tensor.dtype', direction: ascending}
+              sfk_atom: {meaning: E8M0 key-scale atom of group g (512 bytes), shape: [{key_token: probability_group_keys}, {sf_byte: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::sf_k.dtype', direction: ascending}
+              v_block: {meaning: E4M3 value payload of the same group g, shape: [{key_token: probability_group_keys}, {value_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::v_tensor.dtype', direction: ascending}
+              sfv_atom: {meaning: E8M0 value-scale atom of group g (512 bytes), shape: [{value_dim: head_dim}, {sf_byte: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::sf_v.dtype', direction: ascending}
+              m_slice: {meaning: 'Replayed running maximum, read a group ahead', shape: [{group: 1}, {packed_row: 128}], dtype: fp32, direction: ascending}
+          Target:
+            Single_tile:
+              num_part_chunk: {meaning: This chunk's weighted numerator partial, shape: [{packed_row: 128}, {value_dim: head_dim}], dtype: fp32}
+              den_part_chunk: {meaning: This chunk's weighted denominator partial, shape: [{packed_row: 128}], dtype: fp32}
+        Mapping:
+          Strategy: One 128-thread CTA; thread r, TMEM lane r and packed row r are one identity, so the recurrence and the row's accumulator both stay thread-local
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil_div(query_len, qph128) * batch_count * kv_head_count * nsplit
+        Schedule:
+          Strategy: 'nsplit is the planner''s runtime count: at least 3, at most floor(n_group / 2) so a chunk keeps two groups, and capped by a 384 MB partial bound'
+          Worktile_order:
+            - {by: split, direction: ascending}
+            - {by: kv_pair, direction: ascending}
+            - {by: qtile, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+      COMBINE:
+        Describe: Sums the per-chunk weighted partials of one output row, normalizes them, and writes that row of o_tensor in place together with its lse element
+        Decomposition:
+          Strategy: The grid addresses one row as (q_row, head, batch), so the flat row index needs no runtime division; head_dim = 128 equals the block size
+          Partition:
+            q_row: {meaning: One query token, size: query_len, tile: 1}
+            head: {meaning: One query head, size: head_count, tile: 1}
+            batch: {meaning: One request, size: batch_count, tile: 1}
+          Worktile:
+            Invariant: {den_row: {meaning: This row's per-chunk weighted denominator partials, shape: [{split: nsplit}], dtype: fp32}}
+            Iteration: {num_row: {meaning: One chunk's weighted numerator for this row, shape: [{split: 1}, {value_dim: head_dim}], dtype: fp32, direction: ascending}}
+          Target:
+            Single_tile:
+              o_row: {meaning: 'This row of o_tensor, written in place', shape: [{value_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::o_tensor.dtype'}
+              lse_row: {meaning: 'This row''s log-sum-exp, when lse_tensor exists', shape: [], dtype: 'ref:CONTRACT.Algorithm_requirement::lse_tensor.dtype'}
+            Tile_reduction: {dimension: split, input: ['ref:DESIGN.Math_reshape::num_part', 'ref:DESIGN.Math_reshape::den_part'], output: [o_row, lse_row], method: 'ref:DESIGN.Math_reshape::Merge and final normalization'}
+        Mapping:
+          Strategy: 128 threads, one output channel each; every thread reduces the same denominator total from shared memory, so no cross-thread reduction
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: query_len * head_count * batch_count
+        Schedule:
+          Strategy: The narrow form is used where the row count alone fills the machine; a wider block would add a sixteen-warp barrier per row for nothing
+          Worktile_order:
+            - {by: batch, direction: ascending}
+            - {by: head, direction: ascending}
+            - {by: q_row, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch:
+        - {step: [GMAX]}
+        - {step: [SCAN], start_after: GMAX.launch_ready}
+        - {step: [SPLIT], start_after: SCAN.launch_ready}
+        - {step: [COMBINE], start_after: SPLIT.launch_ready}
+      Handoff:
+        gmax_table: {producer: GMAX, consumer: [SCAN], storage: global}
+        m_table: {producer: SCAN, consumer: [SPLIT], storage: global, wait_at: SPLIT.scan_wait}
+        m_tail: {producer: SCAN, consumer: [SPLIT, COMBINE], storage: global, wait_at: SPLIT.scan_wait}
+        num_part: {producer: SPLIT, consumer: [COMBINE], storage: global}
+        den_part: {producer: SPLIT, consumer: [COMBINE], storage: global}
+  Tile_pipeline:
+    Thesis: One role per kernel. The group-maximum pass pipelines, issuing the next product at the foot of the current iteration under the rendezvous retiring its score readout. The chunk pass is sequential, its value product reusing the 128 columns its scores just vacated
+    Step:
+      GMAX:
+        Index: {g: {meaning: Key-group iteration within this worktile, definition: [gm_lo, gm_hi + 1]}}
+        Storage:
+          q_tile: {meaning: 'Swizzle-staged E4M3 query payload, whole worktile', depth: 1, location: smem, shape: [{packed_row: 128}, {key_dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 16384}
+          k_ring: {meaning: Key payload tile of the staged key group, depth: 3, location: smem, shape: [{key_token: probability_group_keys}, {key_dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 49152, view: {k_block(g): {slot_index: (g - gm_lo) % 3}}}
+          sfk_ring: {meaning: 512-byte E8M0 scale atom of the staged key group, depth: 3, location: smem, shape: [{byte: 512}],
+            dtype: uint8, total_size: 1536, view: {sfk_atom(g): {slot_index: (g - gm_lo) % 3}}}
+          s_tile: {meaning: '128-column FP32 score tile, one group at a time', depth: 1, location: tmem, shape: [{row: 128}, {column: 128}],
+            dtype: fp32, total_size: 65536}
+          sf_cols: {meaning: E8M0 scale columns of this pass's one product, depth: 1, location: tmem, shape: [{row: 128}, {column: 48}],
+            dtype: uint32, total_size: 24576, view: {sfa_q: {region: {column: [0, 4]}}, sfb_k(g): {region: {column: [8 + 8*(g % 2), 12 + 8*(g % 2)]}}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: The CTA's only role; four warps stage key operands, run the block-scaled product and reduce the score tile to one maximum per row
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  sfa_q: {execution_mode: serial, describe: 'Warps 0-3 write each row''s E8M0 sf_q word to sfa_q, a dead row taking the unit word; done covers the store wait. No probability-side scale'}
+                  sfb_k: {execution_mode: serial, describe: Proxy fence and rendezvous after k_block(g) lands publish q_tile and K(g); warps 0-3 replicate the atom into sfb_k's parity slot g % 2}
+                  group_max: {execution_mode: serial, describe: 'Masks its row''s 128 scores from s_tile to -inf outside visible(i), takes their maximum times scale; done covers the readout rendezvous'}
+                matmul: {q_tile@k_block: {execution_mode: async_unordered, describe: 'Elected thread issues four block-scaled K=32 products of q_tile by k_block(g) into s_tile, scales sfa_q and sfb_k(g); the first overwrites'}}
+                load:
+                  q: {execution_mode: serial, describe: All 128 threads copy the packed rows' E4M3 query payload into q_tile's swizzled chunks; rows past query_len contribute zeros}
+                  k_block: {execution_mode: async_unordered, describe: 'Elected thread bulk-copies group g''s K tile and 512-byte atom into slot (g - gm_lo) % 3 on that slot''s mbarrier; nothing past g_hi, no V staged'}
+                store:
+                  gmax: {execution_mode: serial, describe: 'Live rows write gmax_table[g][row]; dead rows write nothing'}
+                  gmax_head: {execution_mode: serial, describe: 'Chunk 0 alone writes -inf into gmax_table[g][row] for every g < g_lo of its live rows, before any staging'}
+                  gmax_tail: {execution_mode: serial, describe: 'Chunk gm_nsplit - 1 alone writes -inf into gmax_table[g][row] for every g of (g_hi, n_group) of its live rows'}
+                signal: {launch_permit: {execution_mode: serial, describe: 'Every thread grants this step''s launch_ready to the scan grid at exit, after its own writes; per-thread, so an early return does not withhold it'}}
+                acquire: {tmem: {execution_mode: serial, describe: 'One warp reserves the 256 TMEM columns, publishes the base via a shared slot and a CTA rendezvous, then relinquishes the permit'}}
+                release: {tmem: {execution_mode: serial, describe: 'After a rendezvous proves all TMEM reads retired, one warp returns the 256 columns'}}
+            Pipe:
+              - if(gm_chunk == 0):
+                  - store:gmax_head
+              - if(gm_chunk == gm_nsplit - 1):
+                  - store:gmax_tail
+              - if(gm_lo <= gm_hi):
+                  - load:k_block(gm_lo)
+              - acquire:tmem
+              - load:q
+              - compute:sfa_q
+              - if(gm_lo <= gm_hi):
+                  - load:k_block(gm_lo + 1)
+                  - compute:sfb_k(gm_lo)
+                  - matmul:q_tile@k_block(gm_lo)
+              - for(g):
+                  - if(g + 2 <= gm_hi):
+                      - load:k_block(g + 2)
+                  - if(g + 1 <= gm_hi):
+                      - compute:sfb_k(g + 1)
+                  - compute:group_max(g)
+                  - store:gmax(g)
+                  - if(g + 1 <= gm_hi):
+                      - matmul:q_tile@k_block(g + 1)
+              - release:tmem
+              - signal:launch_permit
+            Waiting:
+              Prepared:
+                - '{issue compute:sfb_k(g)} ← [{done load:k_block(g)}]'
+                - '{issue compute:group_max(g)} ← [{done matmul:q_tile@k_block(g)}]'
+              Released:
+                - '{issue load:k_block(g + 2)} ← [{done matmul:q_tile@k_block(g - 1)}]'
+                - '{issue matmul:q_tile@k_block(g + 1)} ← [{done compute:group_max(g)}]'
+      SCAN:
+        Index: {g: {meaning: Key-group index over the whole key range, definition: [0, n_group]}}
+        Role:
+          MAIN:
+            Info:
+              Describe: The CTA's only role; one thread per row walks the whole group range and writes that row's replayed state, with no shared memory and no barrier
+              Member: warp[0:scan_block/32]
+              Using_verb:
+                compute: {m_state: {execution_mode: serial, describe: 'Reads gmax_table[g][row], applies the Contract''s delayed-maximum update to a register state and writes m_table[g][row]; loads batched far ahead'}}
+                store: {m_tail: {execution_mode: serial, describe: 'Writes the state carried out of group n_group - 1 into m_tail[row], once per row'}}
+                await: {gmax: {execution_mode: serial, describe: 'First act - waits for the group-maximum grid to complete and its writes to be visible; every thread waits, out-of-range ones then return'}}
+                signal: {launch_permit: {execution_mode: serial, describe: 'Grants this step''s launch_ready to the chunk grid right after await:gmax and before the serial walk, so that grid''s prologue overlaps this tail'}}
+            Pipe:
+              - await:gmax
+              - signal:launch_permit
+              - for(g):
+                  - compute:m_state(g)
+              - store:m_tail
+      SPLIT:
+        Index: {g: {meaning: Key-group iteration within this worktile, definition: [c_lo, c_hi + 1]}}
+        Event:
+          scan_wait: ['{done MAIN[0]::await:scan}']
+        Storage:
+          q_tile: {meaning: 'Swizzle-staged E4M3 query payload, whole worktile', depth: 1, location: smem, shape: [{packed_row: 128}, {key_dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 16384}
+          k_ring: {meaning: Key payload tile of the staged key group, depth: 2, location: smem, shape: [{key_token: probability_group_keys}, {key_dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 32768, view: {k_block(g): {slot_index: (g - c_lo) % 2}}}
+          v_ring: {meaning: Value payload tile of the staged key group, depth: 2, location: smem, shape: [{key_token: probability_group_keys}, {value_dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 32768, view: {v_block(g): {slot_index: (g - c_lo) % 2}}}
+          sfk_ring: {meaning: 512-byte E8M0 scale atom of the staged key group, depth: 2, location: smem, shape: [{byte: 512}],
+            dtype: uint8, total_size: 1024, view: {sfk_atom(g): {slot_index: (g - c_lo) % 2}}}
+          sfv_ring: {meaning: 512-byte E8M0 key-block scale atom of staged V, depth: 2, location: smem, shape: [{byte: 512}],
+            dtype: uint8, total_size: 1024, view: {sfv_atom(g): {slot_index: (g - c_lo) % 2}}}
+          s_tile: {meaning: 'Group''s score tile, then its value product', depth: 1, location: tmem, shape: [{row: 128}, {column: 128}],
+            dtype: fp32, total_size: 65536, view: {s(g): {}, pv(g): {}}}
+          sf_cols: {meaning: E8M0 scale-factor columns of the two products, depth: 1, location: tmem, shape: [{row: 128}, {column: 32}],
+            dtype: uint32, total_size: 16384, view: {sfa_q: {region: {column: [0, 4]}}, sfb_k: {region: {column: [8, 12]}}, sfa_p: {region: {column: [16, 20]}}, sfb_v: {region: {column: [24, 28]}}}}
+          p_tmem: {meaning: 'E4M3 probability tile, four keys per word', depth: 1, location: tmem, shape: [{row: 128}, {column: 32}],
+            dtype: uint32, total_size: 16384}
+          o_regs: {meaning: 'This chunk''s FP32 numerator, one row per thread', depth: 1, location: register, shape: [{packed_row: 128}, {value_dim: head_dim}],
+            dtype: fp32, total_size: 65536, view: {num: {}}}
+          state_regs: {meaning: 'Carried per-row m_prev, m_cur, m_next and den', depth: 1, location: register, shape: [{packed_row: 128}, {value: 4}],
+            dtype: fp32, total_size: 2048, view: {m_prev: {region: {value: [0, 1]}}, m_cur: {region: {value: [1, 2]}}, m_next: {region: {value: [2, 3]}}, den: {region: {value: [3, 4]}}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: The CTA's only role; four warps stage operands and run the row-local softmax of this chunk's groups, then write the weighted partials
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  sfa_q: {execution_mode: serial, describe: 'Warps 0-3 write each row''s sf_q word to sfa_q and the unit word to sfa_p, the bias already sitting inside p_q; done covers the wait'}
+                  sfb_k: {execution_mode: serial, describe: 'After the rendezvous proving group g''s operands landed, warps 0-3 replicate the key atom into sfb_k, its only reader being this product'}
+                  sfb_v: {execution_mode: serial, describe: 'In the same block, warps 0-3 replicate the value atom into sfb_v, which no product has read yet since this value product issues later'}
+                  o_init: {execution_mode: serial, describe: 'Clears this row''s head_dim-element accumulator in o_regs; reads no input and no old value, realizing num(c_lo - 1) = 0'}
+                  rescale: {execution_mode: serial, describe: 'Reads m_prev as m(g-1), m_cur as m(g) for s(g)/alpha(g); scales den and o_regs where alpha != 1; rotates m_prev<-m_cur, m_cur<-m_next'}
+                  probs: {execution_mode: serial, describe: 'Reads this row''s 128 scores from s(g), masks to -inf outside visible(i), forms p and p_q, writes p_tmem and adds four chains into den'}
+                  o_acc: {execution_mode: serial, describe: Reads this row's product back from pv(g) in four 32-column chunks into o_regs; done covers all four warps' readouts of those columns}
+                  chunk_weight: {execution_mode: serial, describe: 'Forms exp(m_prev - m_tail[row]), m_prev being m(c_hi) after the last rescale, 0 if either is not finite or the chunk is empty'}
+                matmul:
+                  q_tile@k_block: {execution_mode: serial, describe: 'Elected thread issues four block-scaled K=32 products of q_tile by k_block(g) into s(g), scales sfa_q and sfb_k; waited before probs(g)'}
+                  p_q@v_block: {execution_mode: serial, describe: 'Elected thread issues four block-scaled K=32 products into pv(g), A = p_q(g) from p_tmem, B = v_block(g), scales unit sfa_p and sfb_v'}
+                load:
+                  q: {execution_mode: serial, describe: All 128 threads copy the packed rows' E4M3 query payload into q_tile's swizzled chunks; rows past query_len contribute zeros}
+                  k_block: {execution_mode: async_unordered, describe: 'Elected thread bulk-copies group g''s K tile and 512-byte atom into slot (g - c_lo) % 2, armed with v_block(g) on one slot mbarrier'}
+                  v_block: {execution_mode: async_unordered, describe: 'The same thread''s bulk copy of group g''s V tile and key-block atom into slot (g - c_lo) % 2, completed by that same slot mbarrier'}
+                  m_init: {execution_mode: serial, describe: 'After await:scan, reads m_table[c_lo - 1][row] into m_prev (-inf at c_lo = 0) and m_table[c_lo][row] into m_cur for a non-empty chunk'}
+                  m_next: {execution_mode: async_unordered, describe: 'Prefetches m_table[g + 1][row] into the m_next region, one group ahead of the rescale(g + 1) that reads it as m_cur; at g = c_hi reads nothing'}
+                  m_tail: {execution_mode: serial, describe: 'Reads m_tail[row] after the last group'}
+                store:
+                  part_a: {execution_mode: serial, describe: Stages each row's weighted o_regs into a pitched tile over the retired operand region; all threads then write 16-byte chunks to num_part}
+                  part_b: {execution_mode: serial, describe: 'One thread per row writes den * chunk_weight into den_part[split][row]; an empty chunk writes exactly zero'}
+                await: {scan: {execution_mode: serial, describe: 'Waits for the scan grid and its writes, below the K/V prime, TMEM reservation, query staging, scale writes and accumulator clear'}}
+                signal: {launch_permit: {execution_mode: serial, describe: 'Every thread grants this step''s launch_ready to the combine grid at exit, this grid being sized to about one wave; per-thread, launch only'}}
+                acquire: {tmem: {execution_mode: serial, describe: 'One warp reserves the 256 TMEM columns, publishes the base via a shared slot and a CTA rendezvous, then relinquishes the permit'}}
+                release: {tmem: {execution_mode: serial, describe: 'After a rendezvous proves all TMEM reads retired, one warp returns the 256 columns'}}
+            Pipe:
+              - if(c_lo <= c_hi):
+                  - load:k_block(c_lo)
+                  - load:v_block(c_lo)
+              - acquire:tmem
+              - load:q
+              - compute:sfa_q
+              - compute:o_init
+              - await:scan
+              - load:m_init
+              - for(g):
+                  - load:m_next(g)
+                  - if(g + 1 <= c_hi):
+                      - load:k_block(g + 1)
+                      - load:v_block(g + 1)
+                  - compute:sfb_k(g)
+                  - compute:sfb_v(g)
+                  - matmul:q_tile@k_block(g)
+                  - compute:rescale(g)
+                  - compute:probs(g)
+                  - matmul:p_q@v_block(g)
+                  - compute:o_acc(g)
+              - load:m_tail
+              - compute:chunk_weight
+              - store:part_a
+              - store:part_b
+              - release:tmem
+              - signal:launch_permit
+            Waiting:
+              Prepared:
+                - '{issue compute:sfb_k(g)} ← [{done load:k_block(g)}]'
+                - '{issue compute:sfb_v(g)} ← [{done load:v_block(g)}]'
+                - '{issue compute:rescale(g)} ← [{done load:m_next(g)}]'
+              Released:
+                - '{issue load:k_block(g + 1)} ← [{done matmul:q_tile@k_block(g - 1)}]'
+                - '{issue load:v_block(g + 1)} ← [{done matmul:p_q@v_block(g - 1)}]'
+                - '{issue matmul:p_q@v_block(g)} ← [{done compute:probs(g)}]'
+                - '{issue load:m_next(g)} ← [{done compute:rescale(g - 1)}]'
+      COMBINE:
+        Storage:
+          den_smem: {meaning: This row's per-chunk denominator partials, depth: 1, location: smem, shape: [{split: 128}],
+            dtype: fp32, total_size: 512, view: {den_row: {region: {split: [0, nsplit]}}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: The CTA's only role; 128 threads own the 128 output channels of one row, sum that row's chunk partials and write both outputs
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  num_sum: {execution_mode: serial, describe: 'Thread d sums num_part[split][row][d] over all chunks ascending, eight loads in flight per round, issued before the den_smem rendezvous'}
+                  total_den: {execution_mode: serial, describe: 'Begins at the rendezvous publishing den_smem, sums the nsplit denominator partials ascending and forms inv = 1 / total_den, else 0'}
+                load: {den_part: {execution_mode: async_unordered, describe: 'One thread per chunk copies this row''s den_part[split][row] into that chunk''s den_smem slot, so one round covers the denominator'}}
+                store:
+                  o: {execution_mode: serial, describe: 'Thread d writes bf16(total_num * inv), or bf16(0) when total_den <= 0, into o_tensor[b, h, i, d]'}
+                  lse: {execution_mode: serial, describe: 'Thread 0 writes m_tail[row] + ln(total_den * 2^-4), or -inf when total_den <= 0 or m_tail is not finite, into lse_tensor; absent means no write'}
+                await: {split: {execution_mode: serial, describe: First act of this kernel - waits for the chunk grid to complete and its partials and m_tail to be visible}}
+            Pipe:
+              - await:split
+              - load:den_part
+              - compute:num_sum
+              - compute:total_den
+              - store:o
+              - store:lse
+            Waiting:
+              Prepared: ['{issue compute:total_den} ← [{done load:den_part}]']
+REALIZATION:
+  Require:
+    - Item:
+        - DESIGN.Tile_pipeline::GMAX.MAIN
+        - DESIGN.Tile_pipeline::SPLIT.MAIN
+      Choice: Products must be tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale.scale_vec::1X - K-major UMMA descriptors (128-B swizzle, LBO 16, SBO 1024) for q_tile@k_block, TMEM-A with MN-major B for p_q@v_block - completed by tcgen05.commit into mbarriers
+      Reason: FP32 accumulation with hardware E8M0 block scales, the TMEM A operand and the async done events behind every wait in both loops exist only in this family; the reducing tcgen05.ld that replaces the maximum's FMNMX tree is .sync.aligned, so the mask choice must be warp-uniform
+    - Item:
+        - DESIGN.Tile_pipeline::GMAX.MAIN
+        - DESIGN.Tile_pipeline::SPLIT.MAIN
+      Choice: K/V staging must be single-thread cp.async.bulk.tensor.4d against host-cached CUtensorMaps (UINT8, SWIZZLE_128B, box {128,1,128,1}, zero OOB fill), each 512-byte atom on cp.async.bulk 1-D riding the same per-slot mbarrier
+      Reason: Both operands are armed at one point of the iteration here, so one expect_tx per slot counting tile plus atom bytes is the declared done event; splitting the accounting as the deferred-PV fused form must would wait on bytes never copied against that phase
+    - Item:
+        - DESIGN.Tile_pipeline::GMAX.MAIN
+        - DESIGN.Tile_pipeline::SPLIT.MAIN
+      Choice: One warp must take the 256 columns via tcgen05.alloc, publish the base via shared memory and a rendezvous, relinquish, and dealloc before exit; generic-proxy smem writes read by descriptors need fence.proxy.async.shared::cta
+      Reason: TMEM has no implicit allocation or proxy visibility, and the runtime's occupancy calculation is TMEM-blind, so without the handshake a co-resident CTA touches columns it does not own and a product reads stale operand bytes
+    - Item:
+        - DESIGN.Tile_pipeline::GMAX.MAIN
+        - DESIGN.Tile_pipeline::SPLIT.MAIN
+      Choice: Launch both attention passes with 128 threads under a two-blocks-per-SM bound, requesting 69632 bytes of dynamic smem for the group-maximum layout and 102912 for the chunk layout, grown by the host until resident_blocks * 256 <= 512
+      Reason: TMEM, not smem, caps residency at two CTAs per SM here and tcgen05.alloc blocks once the 512 columns are handed out; the padded request pins the occupancy resident = 2 * sm_count assumes, and the unused regions keep the layout byte-identical with its siblings
+    - Item: DESIGN.Work_schedule::Flow
+      Choice: The three successors must carry the programmatic stream serialization attribute; the wait is cudaGridDependencySynchronize and the trigger cudaTriggerProgrammaticLaunchCompletion, both per-thread, and the chunk pass's wait stays below its prologue
+      Reason: The chain pays three dependent-launch boundaries inside the measured window, and trigger position is the mechanism - exit placement for the two attention passes, whose grids are sized to one resident wave, and right after the entry wait for the scan, worth about +1.8% alone
+    - Item: DESIGN.Work_schedule::Flow
+      Choice: The five handoff arrays must sit in one caller-supplied workspace at the planner's 256-byte-aligned offsets - gmax_table, an unused segment region, m_table, m_tail, num_part, den_part - sized by the same plan the forward derives
+      Reason: The caller allocates at preparation time and the forward only tests the size, so a short buffer silently routes the call to the fused design; the reserved segment region belongs to the two-pass scan and dropping it would move every later offset
+    - Item: CONTRACT.Algorithm_requirement::p
+      Choice: The exponential realizing p must be the packed f32x2 sequence replicating CUDA expf's range reduction, with the declared low-order term dropped and 2^4 folded into the two magic constants
+      Reason: Math_reshape's declared path and error bound are tied to exactly this sequence, and bit-identity with the fused design's probabilities - what makes the merge an exact reweighting - holds only if both use it
+  Prefer:
+    - Item: DESIGN.Work_schedule::Flow
+      Choice: Cache the two tensor-map descriptors across calls keyed on base, strides and extents, and capture the four-launch chain as a CUDA graph on the second call with an equal key, replayed on the caller's stream, direct launch on any failure
+      Reason: Host submit sits inside the measured window four times over on this chain and replay saves a measured 1-2.2 us per call. Every launch quantity derives from key fields plus device properties, so a replay relaunches the identical four grids on current tensor contents
+    - Item: DESIGN.Tile_pipeline::SCAN.MAIN
+      Choice: Batch the group-maximum loads 64, then 16, then one deep ahead of the dependent recurrence in named registers, under a two-blocks-per-SM launch bound
+      Reason: This walk is load-latency bound (long_scoreboard 48.9% at IPC 0.72) and limited by how many 128-byte requests one SM keeps in flight; without the bound ptxas sank the loads to their uses at 32 registers, and an array instead of named scalars goes to local memory
+  Forbid:
+    - Item: DESIGN.Math_reshape::num_part
+      Choice: Narrowing the numerator partials to BF16 or FP16 to halve the partial traffic
+      Reason: Measured to exceed the frozen tolerance on 3 of 4 seeds of a legal peaked-distribution geometry, where max_mismatch_fraction = 0 makes one element a failure; the shape range does not bind distribution to geometry, so no gate repairs it. FP32 costs about +0.64%
+    - Item: DESIGN.Tile_pipeline::SPLIT.MAIN
+      Choice: Reading another chunk's m_tail or replayed state inside the chunk pass to avoid publishing it from the scan
+      Reason: The chunks of one launch run concurrently with no cross-CTA ordering, so such a read races the write it depends on; the chain already delivers the value through m_tail, produced by the scan and read only after a grid-completion wait

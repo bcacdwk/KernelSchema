@@ -1,0 +1,462 @@
+META_DATA:
+  Name: dual_cache_latent_bf16
+  Describe: Sparse latent attention that gathers each query token's listed rows from sliding-window and compressed BF16 KV pools into one joint softmax
+  Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu::tc_attn_kernel
+  Version: 2
+  Dispatch:
+    id: tcgen05_packed
+    when: >-
+      head_count < 64 inputs, one packed tcgen05 submission, no key split, 'a'-suffix DSV4_TCGEN05 build only: gt in {2, 4, 8} is the largest power of two whose gt*head_count rows fit the 64-row tile, whose gt*index_width positions fit the 2560-entry union and whose groups fill a wave. One CTA owns gt consecutive tokens and their heads as 64 (token, head) rows and walks the deduplicated key union in ascending 64-key chunks, writing BF16 rows directly. A narrowed launch starts on a group boundary
+DESIGN:
+  Math_reshape:
+    Thesis: >-
+      Packing gt tokens into the M=64 instruction shape as (token, head) rows lets them share one deduplicated union of their selected rows: a row's key list becomes a membership bit over a common chunk sequence. Costs the union build, a mask byte per entry and score work on other members' keys
+    Rewrite:
+      - Name: Packed rows and per-member key sets
+        Math: |
+          The worktile owns the gt consecutive tokens tk0 = group*gt, toks = min(gt, total_query_tokens - tk0)
+          of them existing, as nrows = toks*head_count <= 64 instruction rows. Row r is token
+          tk(r) = tk0 + (r >> log2(head_count)) and head hd(r) = r mod head_count; rows r >= nrows are
+          padding: zero query row, no output write. Per member g, swa_count(g) = min(visible(g), swa_window),
+          total(g) = min(sparse_topk_lens[tk0+g], index_width), N(g) = swa_count(g) + max(total(g) - swa_window, 0)
+          and N(g) = 0 for g >= toks. Position j of member g selects slot(g,j) = sparse_indices[tk0+g, j] for
+          j < swa_count(g), else sparse_indices[tk0+g, swa_window + j - swa_count(g)], from pool(g,j) =
+          swa_kv_cache or compressed_kv_cache accordingly, and is valid when slot(g,j) >= 0. A key is
+          kappa(g,j) = (pool(g,j), max(slot(g,j), 0)), so equal row numbers in the two pools differ.
+        Symbol:
+          gt: {meaning: Tokens packed into one worktile, binding: 'bind:DESIGN.Work_schedule::gt'}
+          toks: {meaning: Members existing in this worktile's group}
+          nrows: {meaning: 'Rows holding a real (token, head) pair'}
+        Ledger:
+          Baseline: >-
+            One token per CTA with head_count instruction rows and its own gathered key list
+          Gain: >-
+            CTAs per gt tokens gt -> 1; instruction rows per CTA head_count -> nrows
+          Cost: >-
+            Rows past nrows still evaluate both GEMMs on a zero query row and are discarded at the output
+      - Name: Deduplicated group union and chunk range
+        Math: |
+          The group walks one list of its members' valid keys, not gt separate lists. With count(g, kappa)
+          the number of member g's valid positions holding key kappa, union_key has nkeys entries in which
+          kappa appears 1 + sum_g max(count(g, kappa) - 1, 0) times and member_mask[u] is the set of members
+          attending entry u, in gt bits. Each member meets each of its keys once per occurrence, the Contract's
+          one term per repeat, while kv_row(u), the pool row named by union_key[u], is fetched once per entry.
+          Entry order and member assignment follow the build's atomics, not the input: determined are nkeys,
+          the (kappa, member) multiset and each member's multiplicity. Sliding-window entries hold logical
+          positions [0, nswa_u) and compressed ones [nswa_u, nkeys), so a run changes pool only at nswa_u.
+          chunk_count = ceil_div(nkeys, kc); chunk c covers kc*c <= u < min(kc*(c+1), nkeys), u >= nkeys
+          padding with an empty mask; chunk_mask(c)[i] = member_mask[kc*c + i]; nkeys = 0 gives chunk_count = 0.
+        Symbol:
+          kc: {meaning: Keys per chunk, binding: 'bind:DESIGN.Work_schedule::kc'}
+          nkeys: {meaning: Entries of the group's deduplicated union}
+          nswa_u: {meaning: Union entries drawn from the sliding-window pool}
+          chunk_count: {meaning: Number of kc-key chunks of the group's union}
+          union_key: {meaning: 'Deduplicated (pool, row) union, pool-major', shape: [{entry: nkeys}], dtype: int32, retention: keep_value (group)}
+          member_mask: {meaning: Per-entry set of members attending that key, shape: [{entry: nkeys}], dtype: uint8, retention: keep_value (group)}
+          kv_rows: {meaning: 'Chunk c''s gathered union rows, key and value', shape: [{key: kc}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::swa_kv_cache.dtype', retention: 'keep_value (group,c)'}
+          chunk_mask: {meaning: 'Chunk c''s membership bytes, a slice of member_mask', shape: [{key: kc}], dtype: uint8, retention: 'keep_value (group,c)'}
+        Ledger:
+          Baseline: >-
+            gt independent per-token key lists: sum_g N(g) rows gathered and sum_g ceil_div(N(g), kc) chunks walked
+          Gain: >-
+            Per gt tokens rows gathered sum_g N(g) -> chunk_count*kc and chunks sum_g ceil_div(N(g), kc) -> chunk_count
+          Cost: >-
+            Union build 0 -> sum_g N(g) probes, one CAS and one position grant per distinct key, one extra entry per same-member repeat; union stores 5*nkeys
+      - Name: Split scores, member masking, lazy maximum
+        Math: |
+          log2e = 1.4426950408889634, qs = bmm1_scale * log2e, NEG_BIG = -3.0e38, RD = 1; sink2(h) =
+          sinks[h] * log2e with sinks, else -inf. Per row r, chunk c, position u: s_lo(c,r,u) =
+          dot32(query[tk(r), hd(r), :256], kv_row(u)[:256]) and s_hi(c,r,u) = dot32(query[tk(r), hd(r), 256:],
+          kv_row(u)[256:]), each one issuer's 16-step k-chain. keep(r,u) = r < nrows and member
+          g(r) = r >> log2(head_count) belongs to member_mask[u], padding carries an empty mask;
+          sc(c,r,u) = (s_lo + s_hi) * qs at keep(r,u), else -inf. mu(c,r) = max_u sc; m* = max(m(c-1,r), mu);
+          m(c,r) = NEG_BIG if m* <= NEG_BIG/2 (no valid key yet), else m(c-1,r) if m* - m(c-1,r) <= RD (lazy
+          hold), else m*. scale = exp2(m(c-1,r) - m(c,r)); pf = exp2(sc - m(c,r)), 0 where not keep;
+          pb = bf16(pf) RNE; l(c,r) = l(c-1,r)*scale + sum32_u pf; o(c,r,:) = mma32(pb(c,r,:), kv_rows(c), o(c-1,r,:)*scale);
+          init m(-1,r) = sink2(hd(r)) or NEG_BIG, l = 0, o = 0. exp2(-inf - NEG_BIG) = 0 keeps keyless rows finite, and m* - m <= RD bounds pf <= 2.
+        Symbol:
+          s_lo: {meaning: FP32 partial scores over latent dims 0-255, shape: [{key: kc}], dtype: fp32, retention: 'keep_value (group,r,c)'}
+          s_hi: {meaning: FP32 partial scores over latent dims 256-511, shape: [{key: kc}], dtype: fp32, retention: 'keep_value (group,r,c)'}
+          sc: {meaning: 'Summed, scaled, membership-masked chunk scores', shape: [{key: kc}], dtype: fp32, retention: 'keep_value (group,r,c)'}
+          pb: {meaning: Chunk probabilities rounded to BF16 for phase 2, shape: [{key: kc}], dtype: bf16, retention: 'keep_value (group,r,c)'}
+          m: {meaning: Lazy base-2 running maximum including the sink, shape: [], dtype: fp32, retention: 'carry_forward (group,r); c=-1..chunk_count-1'}
+          l: {meaning: Running base-2 normaliser of processed chunks, shape: [], dtype: fp32, retention: 'carry_forward (group,r); c=-1..chunk_count-1'}
+          o: {meaning: Unnormalised attention accumulator, shape: [{d: latent_dim}], dtype: fp32, retention: 'carry_forward (group,r); c=-1..chunk_count-1'}
+        Arithmetic:
+          Approx: >-
+            exp2 and the final divide compile --use_fast_math to ex2.approx.f32 / div.approx.f32; unknown: per-op bound, path gated at zero reference mismatches
+          Accumulate: >-
+            Two 16-step half-latent k-chains plus one add per score; four-way row folds; o by four 16-key steps; the union's race order varies chunk assignment
+        Ledger:
+          Baseline: >-
+            The Contract's two-pass evaluation: every score materialised in FP32, exact row max, flat sums
+          Gain: >-
+            Scores nrows*nkeys FP32 -> two kc-wide half buffers per chunk; one traversal of the shared union feeds max/l/o of all gt members
+          Cost: >-
+            pb BF16 rounding; one extra add and a reassociated dot per score; rows score all nkeys entries but keep only their member's, so up to gt-fold work
+      - Name: Normaliser completion, sink fold and output
+        Math: |
+          After the last chunk C = chunk_count - 1, per row r < nrows: l_final(r) = l(C,r) +
+          exp2(sink2(hd(r)) - m(C,r)), the sink's probability, 0 when sinks is None; m carried sink2 from
+          init and lagged the exact row maximum by at most RD, so l_final and o(C,r,:) are denominator and
+          acc scaled by one shared 2^(row_max - m(C,r)) factor that the quotient cancels. inv(r) =
+          bmm2_scale / l_final(r) when l_final(r) > 0, else 0. out[tk(r), hd(r), :] = bf16(o(C,r,:) * inv(r)),
+          one RNE narrowing per element, each written once, so a group's rows land interleaved by (token, head).
+          A member selecting nothing while another selects has keep false everywhere, so o(C,r,:) = 0 and
+          l_final(r) is 0 without sinks or 1 with them, giving the Contract's zero row through the same inv
+          path; l_final = 0 -> inv = 0 avoids a division by zero. At nkeys = 0 no chunk exists and all nrows
+          rows of the group are written as bf16 zero directly, the same answer for every member at once.
+  Work_schedule:
+    Thesis: >-
+      One CTA owns gt consecutive tokens and all their heads, builds their deduplicated key union once, then walks it as one ascending chunk iteration: one submission writes the final output, and one gathered row serves every member that selected it. The reversed walk puts the largest unions first
+    Step:
+      MAIN:
+        Describe: >-
+          Computes the joint softmax output rows of gt tokens' 64 (token, head) instruction rows over their deduplicated key union and writes them into out
+        Decomposition:
+          Strategy: >-
+            kc = 64; gt is the largest power of two with gt*head_count <= 64, gt*index_width <= 2560 and enough groups to fill a wave; the key range never splits
+          Partition: {group: {meaning: gt consecutive tokens and all their heads, size: total_query_tokens, tile: gt}}
+          Worktile:
+            Invariant:
+              query_block: {meaning: 'The group''s 64 (token, head) query rows', shape: [{row: 64}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::query.dtype'}
+              index_rows: {meaning: 'The group''s toks sparse_indices rows, staged', shape: [{member: gt}, {index: index_width}], dtype: 'ref:CONTRACT.Algorithm_requirement::sparse_indices.dtype'}
+            Iteration:
+              kv_rows: {meaning: 'One chunk''s kc gathered union rows, key and value', shape: [{key: kc}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::swa_kv_cache.dtype', direction: ascending}
+              chunk_mask: {meaning: One chunk's kc membership bytes, shape: [{key: kc}], dtype: uint8, direction: ascending}
+          Target:
+            Single_tile: {out_block: {meaning: Final BF16 rows of the group's nrows rows, shape: [{row: nrows}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}}
+        Mapping:
+          Strategy: >-
+            One CTA per group; 64/gt >= head_count collapses the head-block axis to one coordinate, and a caller-narrowed token range covers only its own groups
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil_div(total_query_tokens, gt)
+        Schedule:
+          Strategy: >-
+            Host asserts HND, non-null cum_seq_lens_q and the three reserved None slots; C++ asserts contiguity, dtypes, 512 channels, power-of-two head count
+          Worktile_order: [{by: group, direction: descending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: >-
+      Warp specialisation over an mbarrier parity ring, preceded by one collective segment where all 256 threads build the group's union over the two dead ring stages. Loaders then stream union chunks via gather4 while softmax warps own every MMA issue, and each row masks by its own member's bit
+    Step:
+      MAIN:
+        Index: {c: {meaning: Local chunk iteration within this worktile, definition: [0, chunk_count]}}
+        Storage:
+          query_tile: {meaning: 'Staged (token, head) query rows, operand layout', depth: 1, location: smem, shape: [{row: 64}, {d: latent_dim}],
+            dtype: bf16, total_size: 65536, view: {query_block: {}}}
+          kv_ring: {meaning: Union chunk rows; dead stages hold build and out, depth: 2, location: smem, shape: [{key: kc}, {d: latent_dim}],
+            dtype: bf16, total_size: 131072, view: {kv_rows(c): {slot_index: c%2}, hash_slots: {slot_index: 0}, index_rows: {slot_index: 1}, out_block: {slot_index: 0}}}
+          p_tile: {meaning: 'One chunk''s BF16 probabilities, phase-2 A operand', depth: 2, location: smem, shape: [{row: 64}, {key: kc}],
+            dtype: bf16, total_size: 16384, view: {pb(c): {slot_index: c%2}}}
+          softmax_ctrl: {meaning: 'Sink, init max, unread l slab, scale/inv channel', depth: 1, location: smem, shape: [{element: 256}],
+            dtype: fp32, total_size: 1024, view: {sink2: {region: {element: [0, 64]}}, m_init: {region: {element: [64, 128]}}, l_init: {region: {element: [128, 192]}}, row_scale: {region: {element: [192, 256]}}}}
+          validity: {meaning: Per-key membership byte of each gathered chunk, depth: 2, location: smem, shape: [{key: kc}],
+            dtype: uint8, total_size: 128, view: {chunk_mask(c): {slot_index: c%2}}}
+          union_set: {meaning: Union key list and membership bytes of the group, depth: 1, location: smem, shape: [{element: 3200}],
+            dtype: int32, total_size: 12800, view: {union_key: {region: {element: [0, 2560]}}, member_mask: {region: {element: [2560, 3200]}}}}
+          tmem_alloc: {meaning: 'Full 512 TMEM columns: accumulator, score halves', depth: 1, location: tmem, shape: [{lane: 128}, {column: 512}],
+            dtype: fp32, total_size: 262144, view: {o(c): {region: {column: [0, 256]}}, s_lo(c): {region: {column: [256 + 64*(c%2), 320 + 64*(c%2)]}}, s_hi(c): {region: {column: [384 + 64*(c%2), 448 + 64*(c%2)]}}}}
+          score_regs: {meaning: 'Summed masked scores of one chunk, per lane half', depth: 1, location: register, shape: [{row: 64}, {key: kc}],
+            dtype: fp32, total_size: 16384, view: {sc(c): {}}}
+          row_state: {meaning: 'Per-row lazy max and normaliser, both lane halves', depth: 1, location: register, shape: [{row: 64}, {element: 2}],
+            dtype: fp32, total_size: 512, view: {m(c): {region: {element: [0, 1]}}, l(c): {region: {element: [1, 2]}}}}
+        Role:
+          SOFTMAX:
+            Info:
+              Describe: >-
+                Warps 0-3: the group's online softmax, all three tensor-core issue points, this role's half of the collective prologue and the epilogue staging
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  meta:
+                    execution_mode: serial
+                    describe: >-
+                      Threads derive (group, first token, nrows) from the reversed block id; threads 0..gt-1 resolve each member's request, visible, swa_count and N
+                  union:
+                    execution_mode: serial
+                    describe: >-
+                      This role's 128 threads hash all member positions into the table over kv_ring slot 0, granting dense pool-major entries; done publishes nkeys
+                  protocol_init:
+                    execution_mode: serial
+                    describe: >-
+                      Thread 0 inits both stages' mbarrier words - kv-valid 1, score-ready 2, probability-ready 4, phase-2-retire 1, landing 128 - and the init fence
+                  state_init:
+                    execution_mode: serial
+                    describe: >-
+                      Threads 0..63 write softmax_ctrl: sink2 of the row's own head (or -inf), m_init = sink2 or NEG_BIG, l slab zeroed, row_scale = 1; rows load m(-1)
+                  row_max:
+                    execution_mode: serial
+                    describe: >-
+                      Lanes add their 32-column s_lo(c)/s_hi(c) TMEM slices into sc(c), scale by qs, mask by the row's member bit of chunk_mask(c) and reduce to mu
+                  p:
+                    execution_mode: serial
+                    describe: >-
+                      pf = exp2(sc - m(c)), 0 where the row's membership bit is clear; split sums; l(c) and m(c) go to row_state; lanes 0..15 publish row_scale
+                  rescale:
+                    execution_mode: serial
+                    describe: >-
+                      After pv_retired(c-1): warp-uniform gate on scale != 1; on fire all 16 rows multiply their o columns in tmem_alloc by their scale via TMEM ld/st
+                  p_tile:
+                    execution_mode: serial
+                    describe: >-
+                      Rounds this lane's 32 probabilities to BF16 into p_tile slot c%2's swizzled layout; an async-proxy fence orders them ahead of the MMA read
+                  out_finish:
+                    execution_mode: serial
+                    describe: >-
+                      After pv_final: l_final = l + exp2(sink2 - m); inv = bmm2_scale / l_final for rows below nrows with l_final > 0, else 0; published via row_scale
+                  out_stage:
+                    execution_mode: serial
+                    describe: >-
+                      Lanes read their o columns from tmem_alloc, multiply by inv and round to BF16 into the dead kv_ring staging, whose 1040 B rows span both slots
+                matmul:
+                  qk:
+                    execution_mode: async_unordered
+                    describe: >-
+                      Warp 1/2 lane 0 issue 16 m64n64k16 tcgen05.mma steps per latent half into s_lo(c)/s_hi(c); A = query_tile's 64 rows, B = kv_ring slot c%2
+                  pv:
+                    execution_mode: async_unordered
+                    describe: >-
+                      Warp 0 lane 0 once p_ready(c) fires: 8 m64n256k16 steps over p_tile c%2 and kv_ring c%2 into o; chunk 0's first overwrites; commit fills retire
+                load:
+                  query:
+                    execution_mode: async_unordered
+                    describe: >-
+                      This role's 128 threads cp.async their share of the 64 rows as 16B items into query_tile's swizzle, rows past nrows zero-filled; one group each
+                  index_rows:
+                    execution_mode: serial
+                    describe: >-
+                      This role's 128 threads cp.async the group's toks index rows into kv_ring slot 1 as one group, retire it and join the rendezvous publishing them
+                store:
+                  out:
+                    execution_mode: serial
+                    describe: >-
+                      This role's 128 threads take their strided share of the coalesced 16B copy-out of the nrows staged rows into out; kernel boundary gives visibility
+                  zero_rows:
+                    execution_mode: serial
+                    describe: >-
+                      Empty-union exit, own in-flight copies retired: this role's 128 threads take their strided share of zeroing the nrows*latent_dim out elements
+                await:
+                  query_landed:
+                    execution_mode: serial
+                    describe: >-
+                      wait_group 0 retires the thread's query group; proxy fence + CTA barrier publish query tile, protocol, state slabs and TMEM base to both roles
+                  kv_valid:
+                    execution_mode: serial
+                    describe: >-
+                      Waits the stage's kv-valid barrier, whose single loader arrival publishes chunk c's membership bytes; not the union rows' landing
+                  scores_ready:
+                    execution_mode: serial
+                    describe: >-
+                      Waits the stage's score-ready barrier, fired when both phase-1 commit groups retired, i.e. s_lo(c) and s_hi(c) are final
+                  pv_retired:
+                    execution_mode: serial
+                    describe: >-
+                      Waits chunk c's phase-2-retire barrier at stage parity; done certifies chunk c's MMAs finished with the accumulator and the ring slot
+                  pv_final:
+                    execution_mode: serial
+                    describe: >-
+                      Waits the last chunk's phase-2-retire barrier; the issuer's commit group covers all prior phase-2 MMAs, retiring ring and accumulator
+                  out_staged:
+                    execution_mode: serial
+                    describe: >-
+                      Final CTA barrier: publishes staged rows to all 256 threads and certifies every TMEM read finished before the release
+                signal:
+                  p_ready:
+                    execution_mode: serial
+                    describe: >-
+                      Each warp's lane 0 arrives on probability-ready (4 arrivals): frees phase 2's issue and releases slot c%2's score buffers to chunk c+2's phase 1
+            Pipe:
+              - compute:meta
+              - load:query
+              - load:index_rows
+              - compute:union
+              - if(chunk_count == 0):
+                  - store:zero_rows
+              - if(chunk_count > 0):
+                  - compute:protocol_init
+                  - compute:state_init
+                  - await:query_landed
+                  - for(c=0:chunk_count):
+                      - await:kv_valid(c)
+                      - matmul:qk(c)
+                      - await:scores_ready(c)
+                      - compute:row_max(c)
+                      - compute:p(c)
+                      - if(c > 0):
+                          - await:pv_retired(c-1)
+                          - compute:rescale(c)
+                      - compute:p_tile(c)
+                      - signal:p_ready(c)
+                      - matmul:pv(c)
+                  - await:pv_final
+                  - compute:out_finish
+                  - compute:out_stage
+                  - await:out_staged
+                  - store:out
+            Waiting:
+              Prepared:
+                - '{done compute:meta} ← [{issue LOADER::compute:meta}]'
+                - '{done load:index_rows} ← [{issue LOADER::load:index_rows}]'
+                - '{done compute:union} ← [{issue LOADER::compute:union}]'
+                - '{done await:query_landed} ← [{issue LOADER::await:query_landed}]'
+                - '{done await:kv_valid(c)} ← [{done LOADER::signal:kv_valid(c)}]'
+                - '{done await:scores_ready(c)} ← [{done matmul:qk(c)}]'
+                - '{done await:pv_retired(c)} ← [{done matmul:pv(c)}]'
+                - '{done await:pv_final} ← [{done matmul:pv(chunk_count-1)}]'
+                - '{done await:out_staged} ← [{issue LOADER::await:out_staged}]'
+                - '{issue matmul:qk(c)} ← [{done LOADER::load:kv(c)}]'
+              Released: ['{issue matmul:qk(c)} ← [{done signal:p_ready(c-2)}]']
+          LOADER:
+            Info:
+              Describe: >-
+                Warps 4-7: the 128 loader threads gathering union chunks into the ring by gather4, with an analytic cp.async fallback at the one pool boundary
+              Member: warp[4:8]
+              Using_verb:
+                compute:
+                  meta:
+                    execution_mode: serial
+                    describe: >-
+                      The loader threads derive the same coordinates from the reversed block id and join the publication barrier publishing the member table
+                  union:
+                    execution_mode: serial
+                    describe: >-
+                      This role's 128 threads take their stride of the same hash-and-grant build, then join the rendezvous; done covers union_key and member_mask
+                load:
+                  query:
+                    execution_mode: async_unordered
+                    describe: >-
+                      This role's 128 threads cp.async their share of the 64 rows as 16B items into query_tile's swizzle, rows past nrows zero-filled; one group each
+                  index_rows:
+                    execution_mode: serial
+                    describe: >-
+                      This role's 128 threads cp.async the group's toks index rows into kv_ring slot 1 as one group, retire it and join the rendezvous publishing them
+                  kv:
+                    execution_mode: async_unordered
+                    describe: >-
+                      Chunk c gather over the union: each thread arms 512 B on landing and issues one gather4 of four pool-major entries; 16 threads stage chunk_mask(c)
+                store:
+                  out:
+                    execution_mode: serial
+                    describe: >-
+                      This role's 128 threads take their strided share of the coalesced 16B copy-out of the nrows staged rows into out
+                  zero_rows:
+                    execution_mode: serial
+                    describe: >-
+                      Empty-union exit, own in-flight copies retired: this role's 128 threads take their strided share of zeroing the nrows*latent_dim out elements
+                await:
+                  query_landed:
+                    execution_mode: serial
+                    describe: >-
+                      wait_group 0 retires the thread's query group; the prologue CTA barrier publishes tile, protocol, state and TMEM base to both roles
+                  out_staged:
+                    execution_mode: serial
+                    describe: >-
+                      Final CTA barrier, loader side: arrives after the gather loop; done requires the softmax role's staged rows published
+                signal:
+                  kv_valid:
+                    execution_mode: serial
+                    describe: >-
+                      Loaders fence, rendezvous on their 128-thread named barrier, then the leader arrives on kv-valid, publishing chunk c's membership bytes
+                acquire:
+                  tmem:
+                    execution_mode: serial
+                    describe: >-
+                      Warp 4 allocates the CTA's 512 TMEM columns into a shared word and relinquishes permits; the prologue barrier publishes the base to both roles
+                release:
+                  tmem:
+                    execution_mode: serial
+                    describe: >-
+                      Warp 4 returns the 512-column allocation after the copy-out; the final barrier already certified every TMEM read finished
+            Pipe:
+              - compute:meta
+              - load:query
+              - load:index_rows
+              - compute:union
+              - if(chunk_count == 0):
+                  - store:zero_rows
+              - if(chunk_count > 0):
+                  - acquire:tmem
+                  - await:query_landed
+                  - load:kv(0)
+                  - for(c=0:chunk_count):
+                      - signal:kv_valid(c)
+                      - if(c+1 < chunk_count):
+                          - load:kv(c+1)
+                  - await:out_staged
+                  - store:out
+                  - release:tmem
+            Waiting:
+              Prepared:
+                - '{done compute:meta} ← [{done SOFTMAX::compute:meta}]'
+                - '{done load:index_rows} ← [{issue SOFTMAX::load:index_rows}]'
+                - '{done compute:union} ← [{issue SOFTMAX::compute:union}]'
+                - '{done await:query_landed} ← [{issue SOFTMAX::await:query_landed}]'
+                - '{done await:out_staged} ← [{done SOFTMAX::compute:out_stage}]'
+              Released:
+                - '{issue load:kv(0)} ← [{done SOFTMAX::compute:union}]'
+                - '{issue load:kv(c+1)} ← [{done SOFTMAX::matmul:pv(c-1)}]'
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN.SOFTMAX
+      Choice: >-
+        tcgen05.mma cta_group::1 kind::f16, FP32 accumulators, SWIZZLE_128B UMMA descriptors, per-issuing-thread tcgen05.commit groups, tcgen05.ld/st (32x32b and the 16x32bx2 score read) with their waits
+      Reason: >-
+        The TMEM-resident accumulator, the two disjoint completion barriers behind three issue points and the M=64 lane map giving a lane its row's two 32-column halves all rest on these; packing changes what a row means, not the instruction shape
+    - Item: DESIGN.Tile_pipeline::MAIN.LOADER
+      Choice: >-
+        cp.async.bulk.tensor.2d tile::gather4 against per-launch CUtensorMap encodings (SWIZZLE_128B, 64x1 box) built from the pools' row extents; each thread arms its own 512 B via arrive.expect_tx; the one chunk straddling the union's pool boundary uses 16 B cp.async
+      Reason: >-
+        load:kv's done is the landing barrier's transaction count and gather4's hardware swizzle writes byte-for-byte the layout the MMA descriptors assume; one instruction may name one tensor map, so the pool-major union and the analytic straddle test keep it legal
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.SOFTMAX
+        - DESIGN.Tile_pipeline::MAIN.LOADER
+      Choice: >-
+        Shared-memory open addressing for compute:union: an 8192-slot table of 64-bit words holding (key encoding + 1) over (position + 1) laid over kv_ring slot 0, atomicCAS to install, atomicExch to publish, atomicAdd on two counters for the pool-major position, atomicOr for the member bits
+      Reason: >-
+        The union's done guarantee is that each entry grants one position and carries its members' bits before a reader sees it; one word holding both halves is what removes a separate release/acquire fence pair, and no scratch outside the ring fits this budget
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.SOFTMAX
+        - DESIGN.Tile_pipeline::MAIN.LOADER
+      Choice: >-
+        Suspending mbarrier.try_wait.parity waits (no polled substitution), mbarrier.arrive, fence.proxy.async.shared::cta ahead of MMA-visible shared writes, a named bar.sync for the 128-loader rendezvous, stage-use parity reuse of the five barrier words per slot
+      Reason: >-
+        Every await/signal done guarantee of both roles resolves to these primitives, and the parity discipline is what lets the two-slot ring recycle its barriers safely across chunks
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: >-
+        Exactly 512 TMEM columns per CTA - accumulator [0, 256) as two lane-offset M=64 halves, score buffers [256, 384) and [384, 512) - and a 227,188-byte dynamic smem request, the unpacked tile's account plus the 12,816-byte union working set, against the device opt-in minus ~1 KiB static
+      Reason: >-
+        The stage-reuse edges, the union build's overlay of the two dead ring stages and the epilogue's staging overlay assume exactly this column map and footprint; an over-budget launch is rejected at the launcher's check rather than silently mis-laid-out
+    - Item: DESIGN.Work_schedule::MAIN.Decomposition
+      Choice: >-
+        Instantiate the tile once per packing factor gt in {2, 4, 8} and keep the launcher's checks that the plan's gt equals the tile's, that head_count is a power of two, and that a narrowed token range starts on a group boundary
+      Reason: >-
+        The grid is sized from the plan's gt, so a tile instantiated for another factor computes a fraction of the tokens and leaves the rest of out stale instead of failing, and a non-power-of-two head count has no exact row map
+    - Item: DESIGN.Math_reshape
+      Choice: >-
+        Compile --use_fast_math so exp2f and FP32 divides lower to the ex2.approx.f32 / div.approx.f32 declared in Arithmetic.Approx, and build for 'a'-suffix targets (the capability's sm_10Xa, else sm_100a) with DSV4_TCGEN05
+      Reason: >-
+        The declared numerics path is defined by those approximations, and the MMA, TMEM and gather4 instructions exist only on 'a' targets; a plain target folds every packed plan back to an mma.sync tile, so this design does not exist there
+    - Item: CONTRACT.Algorithm_requirement::sinks
+      Choice: >-
+        Python None reaches the extension as a zero-element FP32 tensor and the parameter builder maps zero numel to a null device pointer, which is what state_init's and out_finish's sink-less branches key on
+      Reason: >-
+        The frozen ABI accepts a tensor or None, and Math_reshape's sink case split has to be decided inside Params without adding a flag
+    - Item: DESIGN.Work_schedule::MAIN
+      Choice: >-
+        Keep the reduced host validation set of Schedule.Strategy: the device path dereferences cum_seq_lens_q, seq_lens, sparse_topk_lens and sparse_indices once per group member and assumes contiguous HND pools of 512 channels
+      Reason: >-
+        A violated unchecked precondition would be silent on device, and the frozen source keeps exactly this reduced set because host work sits inside the measured window
+  Prefer:
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.SOFTMAX
+        - DESIGN.Tile_pipeline::MAIN.LOADER
+      Choice: >-
+        In compute:union, issue each item's index load one item ahead of its hash work
+      Reason: >-
+        The build is index-load latency, not atomics: the frozen source prices the one-deep prefetch at 37-45% of the build, and a deterministic slot-order rebuild that drops the position grant and the spin at +12-15%

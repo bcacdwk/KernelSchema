@@ -1,0 +1,182 @@
+META_DATA:
+  Name: nvfp4_fused_moe
+  Describe: Routed NVFP4 mixture-of-experts forward with an explicit block-16 activation quantize-dequantize between FC1 and FC2 and a routing-weighted BF16 sum
+  Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward
+  Version: 2
+  Dispatch:
+    id: mega
+    when: no ids entry lies in [0, expert_count), so the dispatch-time routing histogram is empty, while token_count*slot_count <= 8192 and (token_count*slot_count)*hidden_dim <= 32000000, and the single mega-kernel submission is kept (promoted-default knob enabled, no rung override). The empty-routing statistic only selects this design - every execution re-reads the current ids, so a replay with routes mutated in place still produces the Contract output through the same direct path
+DESIGN:
+  Math_reshape:
+    Thesis: FP32 SIMT evaluation over raw routes - no grouping, no gathered operand, no packed activation, no per-route BF16 buffer. Weights decode on the fly; route atomics and token tickets replace submission boundaries, trading tensor-core rate and atomic traffic for one launch, no materialized operands
+    Rewrite:
+      - Name: Raw route space with per-route accumulator
+        Math: |
+          A route r = t*slot_count + k is work, valid when ids[t,k] is in [0, expert_count); the route_capacity routes split into chunk_count 32-wide intermediate chunks (intermediate_dim is a multiple of 32 in the declared domain). No grouping or gathering: route r reads its token's activation row and its expert's weights directly.
+          acc32[r,h], zero at every invocation entry, is route r's FP32 FC2 accumulator over every hidden channel; a valid route's chunk partials add into it by atomic FP32 addition in nondeterministic arrival order.
+          cnt[t], zero at every invocation entry, gains one arrival per completed valid unit of token t and reaches nvt(t)*chunk_count exactly when all of the token's partials have landed; nvt(t) is the number of valid routes of t.
+          The ticket finalize zeroes the consumed acc32 rows and resets cnt[t], so both buffers end each invocation as they began and no zeroing submission exists; a token with nvt(t) = 0 keeps zero rows and never triggers a ticket.
+        Symbol:
+          route_capacity: {meaning: Allocated rows of the route-indexed space, value: token_count*slot_count}
+          chunk_count: {meaning: 32-wide intermediate chunks of one route, value: intermediate_dim/32}
+          acc32: {meaning: FP32 FC2 accumulator of one raw route, shape: [{route: route_capacity}, {hidden: hidden_dim}], dtype: fp32, retention: keep_value invocation}
+          cnt: {meaning: Unit arrival counter of one token, shape: [{token: token_count}], dtype: int32, retention: keep_value invocation}
+          nvt: {meaning: Valid routes of one token}
+        Ledger:
+          Baseline: Group routes by expert into tiles; materialize gathered operands, packed activation and per-route BF16 results across separate submissions
+          Gain: Route-indexed intermediates -> 0 beyond acc32 (route_capacity*hidden_dim*4 bytes); submissions 7 -> 1 at the source's measured ~2-2.7 us per node
+          Cost: 0 -> route_capacity*hidden_dim*4 bytes of acc32 materialization; finalize adds one read and one zeroing pass, hidden_dim*4 bytes each per valid route
+      - Name: Exact per-token activation decode
+        Math: |
+          x_dec[t,h] = hidden_value[t,h], the Contract's exact decode (E2M1 level of each payload nibble times the exact FP32 value of its 16-channel E4M3 scale byte) in FP32; the product needs at most 6 significand bits, so the image is exact.
+          A worker forms it when its unit sequence reaches a token other than the one decoded last and reuses it over every later unit of that token; the range is contiguous over ascending routes, so each worker decodes each token at most once. Workers visiting one token form identical private copies; no global activation operand exists.
+        Symbol: {x_dec: {meaning: Exact FP32 decode of one token's activation row, shape: [{hidden: hidden_dim}], dtype: fp32, retention: keep_value (t)}}
+      - Name: Block-factored SIMT FP32 FC1 slice
+        Math: |
+          For a valid route r = t*slot_count + k of chunk s, e = ids[t,k], i0 = 32*s, the slice forms the FC1 pair of every offset il < 32 against the logical rows u = i0+il (up) and g = intermediate_dim+i0+il (gate) of expert e. For a row L, block b and chain q:
+            even[b] = sum32 over m = 0..7 of x_dec[t,16b+2m] * c1[L,16b+2m]
+            odd[b] = sum32 over m = 0..7 of x_dec[t,16b+2m+1] * c1[L,16b+2m+1]
+            chain[q] = the sum over j = 0..hidden_dim/512-1 ascending of fma32(sf1[L,32*j+q], even[32*j+q] + odd[32*j+q], partial), from 0
+            dot = sum32 over q = 0..31 of chain[q], a five-step XOR butterfly
+          up_r[il] is dot at L = u and gate_r[il] is dot at L = g, the Contract's up[t,k,i0+il] and gate[t,k,i0+il], one unit's values. hidden_dim is a multiple of 512 in the declared domain. c1[L,h] and sf1[L,b] are the prepared E2M1 code level of row L at channel h and its exact E4M3 block scale at b = floor(h/16); their product is the Contract's w1[e][L,h], addressed by prepared_row and the 128x4 swizzle.
+        Arithmetic:
+          Accumulate: Even and odd sums are ascending 8-term fma32 chains; x_dec times a code is exact (<= 8 significand bits); dot closes as a five-step XOR butterfly
+        Ledger:
+          Baseline: Block-scaled tensor-core products over 128-row route tiles of a pre-gathered activation operand
+          Gain: No gathering, tile map or staged operand images; weights stream straight from the prepared layout; one decode image serves every chunk of a token
+          Cost: 2*hidden_dim FMAs per (up,gate) pair replace tensor cores; each route reads its expert's FC1 rows alone, ~1.1*intermediate_dim*hidden_dim bytes
+      - Name: Clamp, activation and NVFP4 round trip to FP32
+        Math: |
+          For each chunk channel c < 32, up = up_r[c], gate = gate_r[c], alpha = gemm1_alpha[e], beta = gemm1_beta[e], limit = gemm1_clamp_limit[e] when present:
+            up_c = min(max(up, -limit), limit), gate_c = min(gate, limit) when present, else both unchanged
+            activation_type 3:  v = (gate_c * sig(alpha*gate_c)) * (up_c + beta)
+            activation_type 10: v = (alpha * th(gate_c*rcp_rn(alpha))) * sig(gate_c) * (beta * th(up_c*rcp_rn(beta)))
+            sig(x) = rcp_approx(1 + exp2_approx_ftz(x*L2E)); th(y) = fma32(sig(y+y), 2, -1); L2E = fp32(-log2 e)
+          Group g in {0,1} quantizes its channels c = 16g..16g+15 independently:
+            amax[g] = max abs(v) over the group, an order-free butterfly max tree
+            sf[g] = fp32(fp8_e4m3fn(min(amax[g] * fp32(1/6), 448))), RNE saturating, read back exactly
+            code[c] = e2m1_rne(v * rcp_rn(max(sf[g], 2^-126))), RNE saturating
+            aq[c] = e2m1_level(code[c]) * sf[g], exact; when sf[g] = 0 a signed zero; aq[c] is the Contract's act_q[t,k,i0+c], living only as one unit's shared FP32 numbers
+        Arithmetic:
+          Approx: sig and th use ex2.approx.ftz and rcp.approx with an unfolded prescale; source bounds sigmoid near 3e-7 relative, tanh near 1e-7 absolute
+          Accumulate: Quantize multiplies by rcp_rn(max(sf,2^-126)) instead of dividing (source bounds ~2e-6 flips per element); fp32(1/6) is rounded; dequantize is exact
+        Ledger:
+          Baseline: Store the activation as packed E2M1 payload plus E4M3 scales in global memory for a later tensor-core FC2 submission
+          Gain: The activation lives as 32 shared FP32 values per unit; the packed global buffer (9/16 byte per element) and its re-read are removed
+          Cost: One exact dequantize multiply per element, and FC2 consumes FP32 activations, giving up the packed tensor-core operand path
+      - Name: FC2 chunk partials merged by route atomics
+        Math: |
+          For every hidden channel h and chunk s of a valid route r with e = ids[t,k], and every intermediate channel i of the chunk:
+            w2d[i] = c2[i] * fp32(sf2[i]), the E2M1 level of the prepared FC2 payload code of output row h at channel i times its exact E4M3 scale at block floor(i/16), half_row the identity
+            chunk_sum = sum32 over i = 32s..32s+31 ascending of w2d[i] * aq[i-32s]
+          acc32[r,h] receives chunk_sum of every chunk by atomic FP32 addition in nondeterministic arrival order; within a chunk the 32 products form one ascending fma32 chain, so after all chunk_count arrivals acc32[r,h] is the Contract's FC2 inner sum at chunk granularity order.
+        Arithmetic:
+          Accumulate: 32 sequential fma32 per channel and chunk; w2d and aq are exact, so only additions round; the Contract fixes this sum's FP32 domain, not its order
+        Ledger:
+          Baseline: Materialize every route's FC2 result as BF16 globally and read it back slot_count times in a separate reduction submission
+          Gain: The per-route result buffer (route_capacity*hidden_dim*2 bytes) and its re-read are removed; partials fold into the accumulator
+          Cost: 0 -> chunk_count atomic full-hidden-row writes per valid route, <= route_capacity*chunk_count*hidden_dim*4 bytes; chunk arrival order nondeterministic
+      - Name: Ticket-gated routing reduction with self-clean
+        Math: |
+          The unit whose cnt[t] increment returns nvt(t)*chunk_count - 1 completes token t, the arrival protocol making every route's acc32 device-visible first. With r_j = t*slot_count + k_j the j-th valid route in ascending slot order, for every h:
+            acc[t,h] = the sum over j = 0..nvt(t)-1 ascending of fma32(fp32(bf16_rne(acc32[r_j,h])), scores[t,k_j], partial), from 0
+            output[t,h] = bf16(acc[t,h]), round to nearest even
+          bf16_rne(acc32[r_j,h]) is the Contract's per-route BF16 materialization, formed in registers and never stored; these are the Contract's acc and output with the route sum ascending, one fma32 per term. The worker then zeroes the acc32 elements it read and resets cnt[t] (self-clean).
+          A token with nvt(t) = 0 never triggers a ticket: the preparation pass writes hidden_dim zero BF16 elements to the row of every all-invalid token. Every output element is written exactly once, into the caller's output_buffer.
+        Ledger:
+          Baseline: A separate reduction submission summing the materialized per-route BF16 rows
+          Gain: No extra submission; each acc32 element is read exactly once and zeroed in place
+          Cost: A cross-worker ticket per unit (device fence, atomic increment, two rendezvous) and a strided 4-channel finalize window per thread
+  Work_schedule:
+    Thesis: One barrier-free submission replaces the node chain - one homogeneous worker program over contiguous slices of the raw (route, chunk) space, coupled only by per-route FP32 atomics and per-token tickets, no grid barrier or memset. Node cadence dominates this tiny routed scope; SIMT FP32 is the price
+    Step:
+      MAIN:
+        Describe: Per valid-route unit - FC1 slice, act QDQ, atomic FC2 partial into acc32, ticket; the token's last arrival reduces acc32 into its output row
+        Decomposition:
+          Strategy: Before the unit loop each worker zeroes route-less output rows and takes the census; an invalid route's unit produces nothing and skips the ticket
+          Partition:
+            route: {meaning: Raw route slot r = token*slot_count + slot, size: route_capacity, tile: 1}
+            chunk: {meaning: 32-wide intermediate channel slice of one route, size: chunk_count, tile: 1}
+          Target:
+            Single_tile:
+              acc32_part: {meaning: FC2 partial of the unit's route over all channels, shape: [{hidden: hidden_dim}], dtype: fp32}
+              output_row: {meaning: 'Token output row, written only by its last arrival', shape: [{hidden: hidden_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::output.dtype'}
+            Tile_reduction: {dimension: chunk, input: 'ref:DESIGN.Math_reshape::acc32', output: 'ref:DESIGN.Math_reshape::acc32', method: 'ref:DESIGN.Math_reshape::FC2 chunk partials merged by route atomics'}
+        Mapping:
+          Strategy: One CTA of 512 threads, 16 homogeneous warps; resident_cap is the literal 296, two CTAs per sm. The cap only re-partitions ranges, not which units run
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: min(worktile_count, resident_cap)
+        Schedule:
+          Strategy: units_per_worker = ceil_div(worktile_count, worker_count); trailing workers can hold an empty sequence - they still run the preparation pass and exit
+          Worktile_order:
+            - {by: route, direction: ascending}
+            - {by: chunk, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: 'min(worker_id*units_per_worker, worktile_count)', count: 'min(units_per_worker, max(0, worktile_count - worker_id*units_per_worker))'}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: One homogeneous role of 512 threads - phases advance by CTA rendezvous inside serial actions, the only cross-worker protocol is the fenced arrival ticket. Operands stream from global memory with no staging ring, keeping two CTAs resident per sm; overlap is limited to the warps' independent streams
+    Step:
+      MAIN:
+        Index: {t: {meaning: Local ordinal of this worker's unit sequence, definition: worktile}}
+        Storage:
+          x_image: {meaning: Padded FP32 decode of the current token's row, depth: 1, location: smem, shape: [{element: hidden_dim + hidden_dim/8}],
+            dtype: fp32, total_size: (hidden_dim + hidden_dim/8)*4, view: {x_dec: {}}}
+          ug_image: {meaning: 'The chunk''s 32 up/gate pairs, up even, gate odd', depth: 1, location: smem, shape: [{element: 64}],
+            dtype: fp32, total_size: 256}
+          aq_image: {meaning: The chunk's 32 dequantized activation values, depth: 1, location: smem, shape: [{element: 32}],
+            dtype: fp32, total_size: 128, view: {aq: {}}}
+          cta_scratch: {meaning: 'Census slots, nvalid, nvt, last flag, route list', depth: 1, location: smem, shape: [{slot: 19}],
+            dtype: int32, total_size: 76}
+          ticket_scores: {meaning: 'Scores of the staged valid routes, ascending slot', depth: 1, location: smem, shape: [{slot: 8}],
+            dtype: fp32, total_size: 32}
+        Role:
+          MAIN:
+            Info:
+              Describe: The single homogeneous role - all 16 warps run the preparation pass and the same unit program, with internal thread divisions named per action
+              Member: warp[0:16]
+              Using_verb:
+                compute:
+                  zero_output_rows: {execution_mode: serial, describe: 'Preparation - for every all-invalid token, strided by worker_id, the 512 threads write its output row as 16-byte zero vectors; only ids are read'}
+                  census: {execution_mode: serial, describe: Valid ids are counted over the whole route space by warp butterflies into 16 slots; thread 0 totals them to nvalid and zero nvalid ends the worker}
+                  unit_head: {execution_mode: serial, describe: 'Recover route r and chunk s from the Worktile_order numbering, read ids[r] and set valid_route(t) and fresh(t) against the last decoded token'}
+                  decode_x: {execution_mode: serial, describe: When fresh(t) - all threads decode the token's payload bytes into the padded x_image slot of x_dec and thread 0 counts nvt; done covers the rendezvous}
+                  fc1_slice: {execution_mode: serial, describe: '16 warps take 2 (up,gate) pairs each; lanes own 16-channel blocks, stream weight bytes and scales, and reduce by the FC1 formula into ug_image'}
+                  act_qdq: {execution_mode: serial, describe: 'Warp 0 takes the 32 chunk channels one per lane - clamp, activate and NVFP4 round trip by the Math step into aq_image; done covers the CTA rendezvous'}
+                  fc2_partial: {execution_mode: serial, describe: 'Threads own 4-channel windows strided by 2048, run the ascending FC2 chain over the weight slice and aq_image, and red-add into the route''s acc32 row'}
+                  finalize_token: {execution_mode: serial, describe: 'Thread 0 stages the token''s routes and scores; threads apply the Math route sum per window into the output row, zero acc32 as read and reset cnt'}
+                signal: {unit_arrived: {execution_mode: serial, describe: Every thread device-fences its acc32 adds before thread 0's cnt increment; the returned prior count sets the last-arrival flag; the winner re-fences}}
+            Pipe:
+              - compute:zero_output_rows
+              - compute:census
+              - if(nvalid > 0):
+                  - for(t):
+                      - compute:unit_head(t)
+                      - if(valid_route(t)):
+                          - if(fresh(t)):
+                              - compute:decode_x(t)
+                          - compute:fc1_slice(t)
+                          - compute:act_qdq(t)
+                          - compute:fc2_partial(t)
+                          - signal:unit_arrived(t)
+                          - if(last_arrival(t)):
+                              - compute:finalize_token(t)
+REALIZATION:
+  Require:
+    - Item:
+        - DESIGN.Math_reshape::acc32
+        - DESIGN.Math_reshape::cnt
+      Choice: Workspace buffers allocated zeroed once and reused across invocations; every token finalize zeroes the acc32 rows it consumed and resets its cnt entry, and no memset submission exists
+      Reason: The atomic chunk accumulation and the arrival target nvt*chunk_count are correct only against the zero baseline, and that invariant must also survive graph capture and replay of the single submission
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: Device-scope release and acquire memory fences around the arrival counter after the CUDA threadFenceReduction pattern - every thread fences its acc32 reductions before the rendezvous ordering thread 0's cnt increment, and the last-arriving worker fences again before any acc32 read
+      Reason: finalize_token consumes partials added by other workers' atomic reductions; the counter ordering alone does not make those additions device-visible
+    - Item: DESIGN.Work_schedule::MAIN
+      Choice: A 512-thread launch bound requiring two resident CTAs per SM, __launch_bounds__(512, 2), with the dynamic shared image of (hidden_dim + hidden_dim/8 + 96)*4 + 64 bytes kept inside the 48 KB default budget and no opt-in attribute
+      Reason: The one-wave grid cap resident_cap and the host-side eligibility gate assume this residency envelope, and this direct form deliberately omits the staged weight images that would need the opt-in budget
+    - Item: DESIGN.Math_reshape::Clamp, activation and NVFP4 round trip to FP32
+      Choice: Hardware saturating round-to-nearest-even conversions for the quantize step - cvt.rn.satfinite.e4m3x2 for the group scale and cvt.rn.satfinite.e2m1x2 for the codes
+      Reason: The rounding and saturation points declared for the quantize step are those of these conversions, not of a software table

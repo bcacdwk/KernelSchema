@@ -109,6 +109,8 @@ def submit_request(store, run_id: str, *, issue_id: str, tasks: list) -> dict:
 
 
 def consume_requests(store, state: dict) -> dict:
+    if not barrier(store, state):
+        return state
     with store.control_transaction() as ledger:
         request = _request(ledger, state["run_id"])
         if not request or request["status"] not in PENDING:

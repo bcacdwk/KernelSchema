@@ -1,0 +1,403 @@
+--- before/root.yaml
++++ current/root.yaml
+@@ -2,9 +2,9 @@
+   Name: nvfp4_fused_moe
+   Describe: Routed NVFP4 mixture-of-experts forward with an explicit block-16 activation quantize-dequantize between FC1 and FC2 and a routing-weighted BF16 sum
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward
+-  Version: 4
++  Version: 5
+   Dispatch:
+-    when: token_count*slot_count > 1536 and ceil_div(token_count*slot_count,128)*(hidden_dim/128)*max(1,intermediate_dim/256) >= 3072, and the multi-node chain is kept, so token_count*slot_count > 8192 or (token_count*slot_count)*hidden_dim > 32000000 or some ids entry lies in [0,expert_count), and the hidden_states payload is not entirely zero in magnitude
++    when: token_count*slot_count > 1536 and ceil_div(token_count*slot_count,128)*(hidden_dim/128)*max(1,intermediate_dim/256) >= 3072, with the seven-node chain, large routing preparation, eight-element finalize and PDL enabled as selected here; token_count*slot_count > 8192 or (token_count*slot_count)*hidden_dim > 32000000 or some ids entry lies in [0,expert_count), and the hidden_states payload is not entirely zero in magnitude
+ CONTRACT:
+   Algorithm_requirement:
+     Constant:
+@@ -93,6 +93,9 @@
+         Symbol:
+           up: {meaning: 'FC1 up half of one valid route, pre-activation', shape: [{token: token_count}, {slot: slot_count}, {intermediate: intermediate_dim}], dtype: fp32}
+           gate: {meaning: 'FC1 gate half of one valid route, pre-activation', shape: [{token: token_count}, {slot: slot_count}, {intermediate: intermediate_dim}], dtype: fp32}
++      - Name: Generated activation parameters
++        Math: |
++          The supplied input construction uses activation_type 10 with gemm1_alpha = 4 and gemm1_beta = 25; type 3 uses alpha in [0.5,2] and beta in [0,1]. Each parameter vector is constant across experts. Both branches are retained because the dynamic domain specifies SiTU while nine fixed cases construct type 3.
+       - Name: Clamp and activation
+         Math: |
+           alpha = gemm1_alpha[e] and beta = gemm1_beta[e] are per-expert values used exactly.
+@@ -108,12 +111,12 @@
+         Symbol: {act: {meaning: Activated FC1 value of one valid route, shape: [{token: token_count}, {slot: slot_count}, {intermediate: intermediate_dim}], dtype: fp32}}
+       - Name: Activation nvfp4 round trip
+         Math: |
+-          Every route quantizes its own activation independently, one group per nvfp4_block consecutive intermediate channels. For a valid route (t,s) and 0 <= b < intermediate_dim/nvfp4_block:
++          A valid route (t,s) quantizes independent groups of nvfp4_block consecutive channels, 0 <= b < intermediate_dim/nvfp4_block:
+             peak = max_{0<=u<nvfp4_block} abs(act[t,s,b*nvfp4_block+u])
+-            act_scale[t,s,b] = fp8_e4m3fn(clamp(peak / e2m1_max, 0, e4m3_max))
++            act_scale[t,s,b] = fp8_e4m3fn(clamp(fp32(peak * fp32(1/e2m1_max)), 0, e4m3_max))
+             normalized = act[t,s,b*nvfp4_block+u] / fp32(act_scale[t,s,b]) when act_scale[t,s,b] > 0, and 0 when it is 0
+             act_q[t,s,b*nvfp4_block+u] = e2m1_rne(normalized) * fp32(act_scale[t,s,b])
+-          The scale cast is round-to-nearest-even into fp8_e4m3fn after the clamp and the scale is read back as its exact FP32 value, so a zero scale forces its whole group to zero.
++          The reference multiplies by the rounded FP32 reciprocal of e2m1_max. The scale cast is round-to-nearest-even after the clamp and read back exactly; a zero scale forces its group to zero.
+           e2m1_rne(x) keeps the sign of x, rounds abs(x) to the nearest value of (0, 0.5, 1, 1.5, 2, 3, 4, 6), takes the level with the even code index on a tie, and saturates to 6 when abs(x) > 6.
+           This quantize-dequantize is the declared boundary between the activation and FC2: FC2 consumes act_q and never act.
+         Symbol:
+@@ -137,8 +140,8 @@
+     Golden_reference:
+       Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/reference.py::Model.forward
+       Tolerance:
+-        output: Source only, no defaults; atol=.01 rtol=.05 mismatch_fraction<=.001 rel_l2<=.01; formula absent
+-      Gap: Standard answer only inside the declared fixed domain; arguments marked inert are never read
++        output: Source-only atol=.01 rtol=.05; default mismatch=0; output-write mismatch=.001 rel_l2=.01
++      Gap: Comparator formulas and return/writeback mapping absent; source activation declarations differ
+   Hardware_specification:
+     Device:
+     Architecture:
+@@ -168,12 +171,11 @@
+     Rewrite:
+       - Name: Route grouping and padding
+         Math: |
+-          A route (t,s) is valid when ids[t,s] is in [0,expert_count); route_count counts the valid routes.
+-          counts[e] = valid routes selecting e; offs is its exclusive prefix with offs[expert_count] = route_count.
+-          route_position maps the valid routes onto [0,route_count), giving expert e the run [offs[e],offs[e]+counts[e]). The order inside an expert is an arbitrary permutation and is inert, as every value below depends on a route only through (t,s,e).
++          A route (t,s) is valid as in Contract; route_count counts them. counts[e] counts expert e and offs is its exclusive prefix, offs[expert_count] = route_count.
++          route_position maps valid routes onto [0,route_count), expert e owning [offs[e],offs[e]+counts[e]); order within an expert is an arbitrary permutation.
+           route_of[t,s] = route_position(t,s), or -1 when invalid; route_token[r], route_slot[r], route_expert[r] invert it.
+-          Tiles of bm rows cut each run: tile_offsets is the exclusive prefix of ceil(counts[e]/bm), tile_count = tile_offsets[expert_count], tile_expert[j] is the e holding j and tile_first[j] = (j-tile_offsets[tile_expert[j]])*bm.
+-          Tile j starts at row offs[tile_expert[j]]+tile_first[j]. A tile's rows past its valid count are padding: arbitrary bytes, or zero-filled past route_capacity, read but never stored, and neither E2M1 nor E4M3 traps.
++          tile_offsets is the exclusive prefix of ceil(counts[e]/bm), tile_count = tile_offsets[expert_count], tile_expert[j] owns j, tile_first[j] = (j-tile_offsets[tile_expert[j]])*bm.
++          Tile j starts at offs[tile_expert[j]]+tile_first[j]. Padding can overlap later experts' valid rows or the unwritten tail. Payload boxes zero-fill past route_capacity; scales repeat the first valid row. Padding accumulator lanes are discarded; neither encoding traps.
+         Symbol:
+           route_count: {meaning: Number of valid routes}
+           route_capacity: {meaning: Allocated rows of route-indexed buffers, value: token_count*slot_count}
+@@ -199,6 +201,7 @@
+             gathered_payload[r,:] = hidden_states[t,:] and gathered_scale[r,:] = hidden_states_scale[t,:]
+           a byte-exact copy with no decode and no rescale, so decode(gathered_payload[r], gathered_scale[r]) = hidden_value[t] by the Contract's decode. One token row is copied to each of its valid routes, and a token with no valid route is not read.
+           Rows r >= route_count are never written and keep whatever the buffer held before.
++          The gathered payload and scales occupy disjoint regions of one byte allocation: payload first, of size route_capacity*hidden_dim/2, then route_capacity*hidden_dim/16 scale bytes.
+         Symbol:
+           gathered_payload: {meaning: Activation payload in route order, shape: [{route: route_capacity}, {packed_hidden: hidden_dim/2}], dtype: uint8, retention: keep_value invocation}
+           gathered_scale: {meaning: Activation scales in route order, shape: [{route: route_capacity}, {hidden_block: hidden_dim/nvfp4_block}], dtype: fp8_e4m3fn, retention: keep_value invocation}
+@@ -216,25 +219,24 @@
+           Accumulate: FP32 accumulator, ascending block order, zeroed at the item's first group; intra-instruction grouping and rounding are the tensor core's own
+         Ledger:
+           Baseline: Decode both operands to BF16 and run a BF16 tensor-core product of the same tiles
+-          Gain: Operand bytes per stage halved, the decode pass removed, and the source measures about 2.5x the BF16 rate per K
+-          Cost: Each 16-channel group carries one E4M3 scale product instead of exact per-element weights
++          Gain: Operand bytes per element 2 -> 9/16 including scales, and the BF16 decode pass is removed
++          Cost: Tensor-core grouping and rounding differ from the reference FP32 dot products; no domain-wide numerical bound is supplied
+       - Name: Clamp, activation and NVFP4 quantize
+         Math: |
+-          For route r of tile j, e = tile_expert[j], alpha = gemm1_alpha[e], beta = gemm1_beta[e], limit = gemm1_clamp_limit[e] when present:
+-            gate_c = min(fc1_gate, limit), up_c = min(max(fc1_up,-limit),limit) when present, else both unchanged
+-            activation_type 3:  act = (gate_c * sig(gate_c, alpha*L2E)) * (up_c + beta)
+-            activation_type 10: act = (alpha * tan(gate_c*rcp_rn(alpha))) * sig(gate_c,L2E) * (beta * tan(up_c*rcp_rn(beta)))
+-            sig(x,k) = rcp_approx(1 + exp2_approx_ftz(x*k)); tan(y) = fma32(sig(y,2*L2E),2,-1); L2E = fp32(-log2(e))
+-          Per group b of nvfp4_block consecutive channels of one route:
+-            peak = max abs(act) over the group, an order-free tree
+-            act_scale[r,b] = fp8_e4m3fn(min(peak * fp32(1/e2m1_max), e4m3_max)), saturating
+-            act_code = e2m1_rne(act * rcp_rn(max(fp32(act_scale[r,b]), 2^-126))), saturating
+-          act_payload packs two act_code per byte with the even channel in the low nibble, so act_code*fp32(act_scale) is the Contract's act_q.
++          For route r of tile j, e = tile_expert[j]; alpha, beta and optional limit are the Contract's per-expert parameters. Apply its clamp to fc1_up/fc1_gate, giving up_c/gate_c.
++            type 3: act = (gate_c * sig(gate_c,fp32(alpha*L2E))) * (up_c + beta)
++            type 10: act = ((alpha*tan_pre(gate_c,k_gu))*sig(gate_c,L2E))*(beta*tan_pre(up_c,k_uu))
++            k_gu = fp32(rcp_rn(alpha)*fp32(2*L2E)); k_uu = fp32(rcp_rn(beta)*fp32(2*L2E))
++            sig(x,k) = rcp_approx(1 + exp2_approx_ftz(fp32(x*k))); tan_pre(x,k) = fma32(sig(x,k),2,-1); L2E = fp32(-1.44269504)
++          For each nvfp4_block-channel group b, peak = max abs(act) over its channels:
++            act_scale[r,b] = fp8_e4m3fn(min(peak*fp32(1/e2m1_max),e4m3_max)), saturating
++            act_code = e2m1_rne(act*rcp_rn(max(fp32(act_scale[r,b]),2^-126))), saturating
++          act_payload packs two codes per byte, even channel low; code times scale is the dequantized fc2 operand.
+         Symbol:
+           act_scale: {meaning: E4M3 scale of one activation block, shape: [{route: route_capacity}, {block: intermediate_dim/nvfp4_block}], dtype: fp8_e4m3fn, retention: keep_value invocation}
+           act_payload: {meaning: E2M1 activation codes at two per byte, shape: [{route: route_capacity}, {packed: intermediate_dim/2}], dtype: uint8, retention: keep_value invocation}
+         Arithmetic:
+-          Approx: sig and tan use ex2.approx.ftz and rcp.approx with the log2e prescale folded in; source bounds sigmoid near 3e-7 relative, tanh near 1e-7 absolute
++          Approx: sig and tan_pre use ex2.approx.ftz and rcp.approx with folded prescales; source comments report small sampled errors, not a domain-wide bound
+           Accumulate: peak is an order-free max tree; the quantize step multiplies by rcp_rn of the scale instead of dividing, and 1/e2m1_max is a rounded constant
+         Ledger:
+           Baseline: Materialize the activated FC1 value as FP32 and quantize it in a separate pass
+@@ -244,7 +246,7 @@
+         Math: |
+           fc2[r,h] = bsprod of row r of (act_payload, act_scale) against the prepared row h of expert tile_expert[j] in (gemm2_weights, gemm2_weights_scale), with L = intermediate_dim, for the routes r of tile j. For the (t,s) with route_of[t,s] = r it is the Contract's inner sum of that route, because act_code*fp32(act_scale) is act_q.
+           rout[r,h] = bf16(fc2[r,h]), round to nearest even, is materialized for every valid route and is what the routing reduction consumes; fc2 itself is never stored.
+-          A tile's rows past its valid route count read act_payload bytes FC1 never wrote, and their fc2 and rout are not stored.
++          A padding row can read a later expert's valid act_payload row, an unwritten tail row, or zero fill beyond route_capacity. Its scales repeat this tile's first valid row. GEMM2 discards that row's result; it never overwrites a later expert's rout row.
+         Symbol: {rout: {meaning: Per-route FC2 result as BF16, shape: [{route: route_capacity}, {hidden: hidden_dim}], dtype: bf16, retention: keep_value invocation}}
+         Ledger:
+           Baseline: Keep each route's FC2 result in FP32, or reduce routes into the token output where they are produced
+@@ -541,7 +543,7 @@
+                 compute:
+                   setup: {execution_mode: serial, describe: Thread 0 initializes the ring and item barriers with their arrival counts and warp 0 allocates the TMEM columns; done covers the CTA rendezvous}
+                   sfa_stage: {execution_mode: serial, describe: 'Store the register set into the sfa slot and fence it, issue the next stage''s load unless this is the item''s last, then arrive on the stage barrier'}
+-                load: {sf_rows: {execution_mode: serial, describe: 'Prime both register sets of sf_prefetch with this item''s first two stages, 16 scale bytes per row, from gathered_scale'}}
++                load: {sf_rows: {execution_mode: serial, describe: 'Prime both sf_prefetch sets from gathered_scale, 16 bytes per row for the first two stages; padding rows repeat the tile''s first valid scale row'}}
+                 await:
+                   predecessor: {execution_mode: serial, describe: Grid-wide wait every warp of the CTA runs before the roles diverge; done covers this role reaching it}
+                   scale_slot_free: {execution_mode: serial, describe: Wait until the tensor-core scale copy of stage g-2 has read the sfa slot that g reuses}
+@@ -711,7 +713,7 @@
+                 compute:
+                   setup: {execution_mode: serial, describe: Thread 0 initializes the ring and item barriers with their arrival counts and warp 0 allocates the TMEM columns; done covers the CTA rendezvous}
+                   sfa_stage: {execution_mode: serial, describe: 'Store the register set into the sfa slot and fence it, issue the next stage''s load unless this is the item''s last, then arrive on the stage barrier'}
+-                load: {sf_rows: {execution_mode: serial, describe: 'Prime both register sets of sf_prefetch with this item''s first two stages, 16 scale bytes per row, from act_scale'}}
++                load: {sf_rows: {execution_mode: serial, describe: 'Prime min(2,intermediate_dim/256) stages in sf_prefetch from act_scale, 16 bytes per row; padding rows repeat the tile''s first valid scale row'}}
+                 await:
+                   predecessor: {execution_mode: serial, describe: Grid-wide wait every warp of the CTA runs before the roles diverge; done covers this role reaching it}
+                   scale_slot_free: {execution_mode: serial, describe: Wait until the tensor-core scale copy of stage g-2 has read the sfa slot that g reuses}
+--- before/split_k.yaml
++++ current/split_k.yaml
+@@ -2,7 +2,7 @@
+   Name: nvfp4_fused_moe
+   Describe: Routed NVFP4 mixture-of-experts forward with an explicit block-16 activation quantize-dequantize between FC1 and FC2 and a routing-weighted BF16 sum
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward
+-  Version: 1
++  Version: 2
+   Dispatch:
+     id: split_k
+     when: token_count*slot_count <= 1536 and token_count <= 128 and token_count*slot_count >= 32, and the wide GEMM2 leaf with the bulk drain is kept, so the route tile count read from the ids of the call that fixes the launch set, summed over experts as ceil(valid routes of the expert / 128), times (hidden_dim/128)*max(1,intermediate_dim/256) is at least 3072, and the multi-node chain is kept, so some ids entry lies in [0,expert_count) and the hidden_states payload is not entirely zero in magnitude
+@@ -12,12 +12,11 @@
+     Rewrite:
+       - Name: Route grouping and padding
+         Math: |
+-          A route (t,s) is valid when ids[t,s] is in [0,expert_count); route_count counts them.
+-          counts[e] = valid routes selecting e; offs is its exclusive prefix, offs[expert_count] = route_count.
+-          route_position maps the valid routes onto [0,route_count), giving expert e the run [offs[e],offs[e]+counts[e]); the order inside an expert is an inert permutation, as every value below depends on a route only through (t,s,e).
++          A route (t,s) is valid as in Contract; route_count counts them. counts[e] counts expert e and offs is its exclusive prefix, offs[expert_count] = route_count.
++          route_position maps valid routes onto [0,route_count), expert e owning [offs[e],offs[e]+counts[e]); order within an expert is an arbitrary permutation.
+           route_of[t,s] = route_position(t,s), or -1 when invalid; route_token[r], route_slot[r], route_expert[r] invert it.
+-          Tiles of bm rows cut each run: tile_offsets is the exclusive prefix of ceil(counts[e]/bm), tile_count = tile_offsets[expert_count], tile_expert[j] holds j's expert, tile_first[j] = (j-tile_offsets[tile_expert[j]])*bm, tile_rows(j) = min(bm, counts[tile_expert[j]]-tile_first[j]).
+-          Tile j starts at row offs[tile_expert[j]]+tile_first[j]. Its rows past tile_rows(j) are padding: not fetched, not stored, no E2M1 or E4M3 trap. Rows r >= route_count belong to no tile.
++          tile_offsets is the exclusive prefix of ceil(counts[e]/bm); tile_count = tile_offsets[expert_count]. tile_expert[j] owns j, tile_first[j] = (j-tile_offsets[tile_expert[j]])*bm, tile_rows(j) = min(bm,counts[tile_expert[j]]-tile_first[j]).
++          Tile j starts at offs[tile_expert[j]]+tile_first[j]. Rows past tile_rows(j) are padding and never stored by this tile; rows r >= route_count belong to no valid route. FC1 and fc2 stage padding differently as defined below; neither encoding traps.
+         Symbol:
+           route_count: {meaning: Number of valid routes}
+           route_capacity: {meaning: Allocated rows of route-indexed buffers, value: token_count*slot_count}
+@@ -41,11 +40,11 @@
+       - Name: Direct clipped activation operand
+         Math: |
+           No route-ordered copy of the activations exists. The FC1 operand rows are the Contract's hidden_states and hidden_states_scale themselves, addressed through route_token: row r of a tile reads token route_token[r], so decoding the fetched bytes gives hidden_value[route_token[r]] by the Contract's decode, with no rescale and no rearrangement.
+-          A stage fetches only the rows of its tile below tile_rows(j), four rows per gather box, so padding rows never leave the input tensor and a token with no valid route is never read.
++          A stage issues ceil(tile_rows(j)/4) four-row gather boxes. The last box repeats the tile's first valid token in any excess rows; later boxes are omitted. Only valid rows' scales are fetched, so omitted payload rows and padding scales retain shared-slot bytes. A token with no valid route is never read.
+           Each of a tile's split_count*(intermediate_dim/64) items fetches those rows over its own channel range.
+         Ledger:
+           Baseline: Copy each valid route's payload and scale bytes once into a route-ordered buffer, then box 128 contiguous rows of it per stage
+-          Gain: 0 instead of route_capacity*(hidden_dim/2 + hidden_dim/16) bytes copied and re-read; a stage fetches 4*ceil(tile_rows(j)/4) rows, not bm
++          Gain: No route-ordered allocation or copy of route_capacity*hidden_dim*9/16 bytes; each stage fetches 4*ceil(tile_rows(j)/4) payload rows
+           Cost: A stage issues ceil(tile_rows(j)/4) four-row boxes instead of one contiguous box, and each of a tile's items re-fetches those rows
+       - Name: Block-scaled packed product in two slices
+         Math: |
+@@ -80,7 +79,7 @@
+             gate_c = min(fc1_gate, limit), up_c = min(max(fc1_up,-limit),limit) when present, else both unchanged
+             activation_type 3:  act = (gate_c * sig(alpha*gate_c)) * (up_c + beta)
+             activation_type 10: act = (alpha * tanh(rcp_rn(alpha)*gate_c)) * sig(gate_c) * (beta * tanh(rcp_rn(beta)*up_c))
+-            sig(x) = rcp_approx(1 + exp2_approx_ftz(x*L2E)); tanh(x) = fma32(sig(2*x),2,-1); L2E = fp32(-log2(e))
++            sig(x) = rcp_approx(1 + exp2_approx_ftz(x*L2E)); tanh(x) = fma32(sig(2*x),2,-1); L2E = fp32(-1.44269504)
+           Per group b of nvfp4_block channels of one route, peak = max abs(act) over the group, an order-free tree across its four quarters:
+             act_scale[r,b] = fp8_e4m3fn(min(peak * fp32(1/e2m1_max), e4m3_max)), saturating
+             act_code = e2m1_rne(act * rcp_rn(max(fp32(act_scale[r,b]), 2^-126))), saturating
+@@ -89,7 +88,7 @@
+           act_scale: {meaning: E4M3 scale of one activation block, shape: [{route: route_capacity}, {block: intermediate_dim/nvfp4_block}], dtype: fp8_e4m3fn, retention: keep_value invocation}
+           act_payload: {meaning: E2M1 activation codes at two per byte, shape: [{route: route_capacity}, {packed: intermediate_dim/2}], dtype: uint8, retention: keep_value invocation}
+         Arithmetic:
+-          Approx: sig and tanh use ex2.approx.ftz and rcp.approx; the argument prescale is two rounded steps, which the source bounds within 1.5 ulp of the folded form
++          Approx: sig and tanh use ex2.approx.ftz and rcp.approx; their non-folded prescales differ from root, and source comments give no domain-wide bound
+           Accumulate: peak is an order-free max tree; the quantize multiplies by rcp_rn of the scale instead of dividing, and 1/e2m1_max is a rounded constant
+         Ledger:
+           Baseline: Clamp, activate and quantize in the GEMM1 epilogue from the item's own accumulator
+@@ -99,7 +98,7 @@
+         Math: |
+           fc2[r,h] = bsprod of row r of (act_payload, act_scale) against the prepared row h of expert tile_expert[j] in (gemm2_weights, gemm2_weights_scale), with L = intermediate_dim, for the routes r of tile j. For the (t,s) with route_of[t,s] = r it is the Contract's inner sum of that route, because act_code*fp32(act_scale) is act_q.
+           rout[r,h] = bf16(fc2[r,h]), round to nearest even, is materialized for every valid route and is what the routing reduction consumes; fc2 itself is never stored.
+-          A tile's rows past tile_rows(j) read act_payload bytes no valid route produced, and their fc2 and rout are not stored.
++          A padding row can read a later expert's valid act_payload row, an ACT-produced or unwritten tail row, or zero fill beyond route_capacity. Its scales repeat this tile's first valid row. GEMM2 discards that row's result; it never overwrites a later expert's rout row.
+         Symbol: {rout: {meaning: Per-route FC2 result as BF16, shape: [{route: route_capacity}, {hidden: hidden_dim}], dtype: bf16, retention: keep_value invocation}}
+         Ledger:
+           Baseline: Keep each route's FC2 result in FP32, or reduce routes into the token output where they are produced
+@@ -460,7 +459,7 @@
+               Using_verb:
+                 compute: {act_qdq: {execution_mode: serial, describe: 'Sum the loaded slices ascending, then clamp, activate and quantize four channels by the Math_reshape step, sharing the group maximum by shuffle'}}
+                 load:
+-                  partials: {execution_mode: async_unordered, describe: Issue the split_count float4 loads of the thread's four up and four gate values from part before the expert lookup resolves; done covers them}
++                  partials: {execution_mode: async_unordered, describe: 'Issue 2*split_count float4 loads, one up and one gate vector per slice, for this thread''s four channels before the expert lookup; done covers them'}
+                   route_expert: {execution_mode: serial, describe: 'Read route_expert of this thread''s route row and set expert_valid when it lies in [0,expert_count)'}
+                 store:
+                   act_payload: {execution_mode: serial, describe: The lanes holding quarter 0 or 2 of a block write one 4-byte word holding their own four codes and the next quarter's four}
+@@ -509,7 +508,7 @@
+                 compute:
+                   setup: {execution_mode: serial, describe: Thread 0 initializes the ring and item barriers with their arrival counts and warp 0 allocates the TMEM columns; done covers the CTA rendezvous}
+                   sfa_stage: {execution_mode: serial, describe: 'Store the register set into the sfa slot and fence it, issue the next stage''s load unless this is the item''s last, then arrive on the stage barrier'}
+-                load: {sf_rows: {execution_mode: serial, describe: 'Prime both register sets of sf_prefetch with this item''s first two stages, 16 scale bytes per row, from act_scale'}}
++                load: {sf_rows: {execution_mode: serial, describe: 'Prime min(2,intermediate_dim/256) stages in sf_prefetch from act_scale, 16 bytes per row; padding rows repeat the tile''s first valid scale row'}}
+                 await:
+                   predecessor: {execution_mode: serial, describe: Grid-wide wait every warp of the CTA runs before the roles diverge; done covers this role reaching it}
+                   scale_slot_free: {execution_mode: serial, describe: Wait until the tensor-core scale copy of stage g-2 has read the sfa slot that g reuses}
+@@ -699,11 +698,12 @@
+         - DESIGN.Tile_pipeline::GEMM2
+       Choice: Two resident CTAs per sm, with 256 allocated TMEM columns and 106640 bytes of dynamic shared memory for GEMM1 and 114960 for GEMM2
+       Reason: The ring, scale and sink regions the roles use are sized to that residency, and a wider TMEM allocation would halve it
+-    - Item: DESIGN.Tile_pipeline::ACT.MAIN
+-      Choice: The non-folded activation chain with no launch-bounds annotation, so ptxas stays at or below 85 registers per thread and three 256-thread CTAs remain resident per sm
+-      Reason: The folded prescale reached 90 registers and dropped residency to two blocks, and an explicit bound forced 40 to 68 bytes of spills; both measured slower here
+     - Item:
+         - DESIGN.Math_reshape::act_scale
+         - DESIGN.Math_reshape::act_payload
+       Choice: Hardware round-to-nearest-even saturating conversions, to fp8_e4m3fn for the group scale and to E2M1 for the codes
+       Reason: The rounding and saturation points declared for the quantize step are those of these conversions, not of a software table
++  Prefer:
++    - Item: DESIGN.Tile_pipeline::ACT.MAIN
++      Choice: Compile the non-folded activation without a launch-bounds annotation; register count and residency remain toolchain-dependent
++      Reason: Source measurements report higher register use with folded prescales and spills under an explicit bound; neither observation guarantees a compiler budget
+--- before/mega.yaml
++++ current/mega.yaml
+@@ -2,13 +2,13 @@
+   Name: nvfp4_fused_moe
+   Describe: Routed NVFP4 mixture-of-experts forward with an explicit block-16 activation quantize-dequantize between FC1 and FC2 and a routing-weighted BF16 sum
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward
+-  Version: 2
++  Version: 3
+   Dispatch:
+     id: mega
+-    when: no ids entry lies in [0, expert_count), so the dispatch-time routing histogram is empty, while token_count*slot_count <= 8192 and (token_count*slot_count)*hidden_dim <= 32000000, and the single mega-kernel submission is kept (promoted-default knob enabled, no rung override). The empty-routing statistic only selects this design - every execution re-reads the current ids, so a replay with routes mutated in place still produces the Contract output through the same direct path
++    when: the call fixing the launch set has no ids entry in [0,expert_count), token_count*slot_count <= 8192 and (token_count*slot_count)*hidden_dim <= 32000000, with the single direct mega-kernel submission selected. Each replay re-reads current ids; nonempty replays execute the direct arithmetic below, whose general numerical acceptance is not established by the empty-routing selection
+ DESIGN:
+   Math_reshape:
+-    Thesis: FP32 SIMT evaluation over raw routes - no grouping, no gathered operand, no packed activation, no per-route BF16 buffer. Weights decode on the fly; route atomics and token tickets replace submission boundaries, trading tensor-core rate and atomic traffic for one launch, no materialized operands
++    Thesis: FP32 SIMT evaluation over raw routes, without grouping or gathered, packed-activation or per-route BF16 materialization. Weights decode on the fly; route atomics and token tickets replace submission boundaries, trading tensor-core rate and atomic traffic for one launch
+     Rewrite:
+       - Name: Raw route space with per-route accumulator
+         Math: |
+@@ -24,7 +24,7 @@
+           nvt: {meaning: Valid routes of one token}
+         Ledger:
+           Baseline: Group routes by expert into tiles; materialize gathered operands, packed activation and per-route BF16 results across separate submissions
+-          Gain: Route-indexed intermediates -> 0 beyond acc32 (route_capacity*hidden_dim*4 bytes); submissions 7 -> 1 at the source's measured ~2-2.7 us per node
++          Gain: No writes to grouped-route intermediates; one submission, while the source workspace still allocates unused route, act and rout slabs
+           Cost: 0 -> route_capacity*hidden_dim*4 bytes of acc32 materialization; finalize adds one read and one zeroing pass, hidden_dim*4 bytes each per valid route
+       - Name: Exact per-token activation decode
+         Math: |
+@@ -47,22 +47,22 @@
+           Cost: 2*hidden_dim FMAs per (up,gate) pair replace tensor cores; each route reads its expert's FC1 rows alone, ~1.1*intermediate_dim*hidden_dim bytes
+       - Name: Clamp, activation and NVFP4 round trip to FP32
+         Math: |
+-          For each chunk channel c < 32, up = up_r[c], gate = gate_r[c], alpha = gemm1_alpha[e], beta = gemm1_beta[e], limit = gemm1_clamp_limit[e] when present:
++          For chunk channel c < 32, up = up_r[c], gate = gate_r[c], alpha = gemm1_alpha[e], beta = gemm1_beta[e], limit = gemm1_clamp_limit[e] when present:
+             up_c = min(max(up, -limit), limit), gate_c = min(gate, limit) when present, else both unchanged
+             activation_type 3:  v = (gate_c * sig(alpha*gate_c)) * (up_c + beta)
+             activation_type 10: v = (alpha * th(gate_c*rcp_rn(alpha))) * sig(gate_c) * (beta * th(up_c*rcp_rn(beta)))
+-            sig(x) = rcp_approx(1 + exp2_approx_ftz(x*L2E)); th(y) = fma32(sig(y+y), 2, -1); L2E = fp32(-log2 e)
++            sig(x) = rcp_approx(1 + exp2_approx_ftz(x*L2E)); th(y) = fma32(sig(y+y), 2, -1); L2E = fp32(-1.44269504)
+           Group g in {0,1} quantizes its channels c = 16g..16g+15 independently:
+             amax[g] = max abs(v) over the group, an order-free butterfly max tree
+             sf[g] = fp32(fp8_e4m3fn(min(amax[g] * fp32(1/6), 448))), RNE saturating, read back exactly
+             code[c] = e2m1_rne(v * rcp_rn(max(sf[g], 2^-126))), RNE saturating
+             aq[c] = e2m1_level(code[c]) * sf[g], exact; when sf[g] = 0 a signed zero; aq[c] is the Contract's act_q[t,k,i0+c], living only as one unit's shared FP32 numbers
+         Arithmetic:
+-          Approx: sig and th use ex2.approx.ftz and rcp.approx with an unfolded prescale; source bounds sigmoid near 3e-7 relative, tanh near 1e-7 absolute
+-          Accumulate: Quantize multiplies by rcp_rn(max(sf,2^-126)) instead of dividing (source bounds ~2e-6 flips per element); fp32(1/6) is rounded; dequantize is exact
++          Approx: sig and th use ex2.approx.ftz and rcp.approx with unfolded prescales; source comments report sampled estimates, not a domain-wide bound
++          Accumulate: Quantize multiplies by rcp_rn(max(sf,2^-126)) instead of dividing; fp32(1/6) is rounded; dequantize is exact
+         Ledger:
+           Baseline: Store the activation as packed E2M1 payload plus E4M3 scales in global memory for a later tensor-core FC2 submission
+-          Gain: The activation lives as 32 shared FP32 values per unit; the packed global buffer (9/16 byte per element) and its re-read are removed
++          Gain: The activation lives as 32 shared FP32 values per unit; packed global writes and reads of 9/16 byte per element are removed
+           Cost: One exact dequantize multiply per element, and FC2 consumes FP32 activations, giving up the packed tensor-core operand path
+       - Name: FC2 chunk partials merged by route atomics
+         Math: |
+@@ -74,7 +74,7 @@
+           Accumulate: 32 sequential fma32 per channel and chunk; w2d and aq are exact, so only additions round; the Contract fixes this sum's FP32 domain, not its order
+         Ledger:
+           Baseline: Materialize every route's FC2 result as BF16 globally and read it back slot_count times in a separate reduction submission
+-          Gain: The per-route result buffer (route_capacity*hidden_dim*2 bytes) and its re-read are removed; partials fold into the accumulator
++          Gain: Per-route BF16 writes and reads are removed; partials fold into acc32, while the source's allocated rout slab is unused
+           Cost: 0 -> chunk_count atomic full-hidden-row writes per valid route, <= route_capacity*chunk_count*hidden_dim*4 bytes; chunk arrival order nondeterministic
+       - Name: Ticket-gated routing reduction with self-clean
+         Math: |
+@@ -169,7 +169,7 @@
+     - Item:
+         - DESIGN.Math_reshape::acc32
+         - DESIGN.Math_reshape::cnt
+-      Choice: Workspace buffers allocated zeroed once and reused across invocations; every token finalize zeroes the acc32 rows it consumed and resets its cnt entry, and no memset submission exists
++      Choice: Allocate acc32 and cnt zeroed, and reuse their workspace only after the preceding invocation has completed its self-clean; each token finalize zeroes its consumed rows and resets cnt, without a memset submission
+       Reason: The atomic chunk accumulation and the arrival target nvt*chunk_count are correct only against the zero baseline, and that invariant must also survive graph capture and replay of the single submission
+     - Item: DESIGN.Tile_pipeline::MAIN
+       Choice: Device-scope release and acquire memory fences around the arrival counter after the CUDA threadFenceReduction pattern - every thread fences its acc32 reductions before the rendezvous ordering thread 0's cnt increment, and the last-arriving worker fences again before any acc32 read
+--- before/dispatch.md
++++ current/dispatch.md
+@@ -6,7 +6,7 @@
+ 
+ 固定实现是 AKA 候选，`problem/solution.py` 只是生产对照，不在提取范围内。入口 `candidate/solution.py::Model.forward` 只承担 host 工作：从张量 shape 推导规模（`T`、`K` 取自 ids，`E` 取自 gemm1_weights 第 0 维，`I = N1/2`，`H = packed 轴 * 2`），校验三个权重与 scale 的形状一致，要求调用者提供结果缓冲（Contract 的 Input `output_buffer`；Output `output` 就是这同一对象，被覆写后放进单元素列表返回），选择 rung，按 rung 分配 workspace，组装 `MoEABI` 后调用 `candidate/nvfp4_moe.cu` 的 `moe_run`。全部数值工作在 `nvfp4_moe.cu`；`nvfp4_fast.c` 只把已发布的 identity 校验搬到 C 层，不绑定任何数值。按 CONVENTIONS，整个 `candidate/` 一起复用。
+ 
+-实现门槛属于设计范围而非 Contract：`E <= 256`、`H % 128 == 0`、`I % 64 == 0`、`N1 % 128 == 0`，packed-NVFP4 家族另需 `_rung7_ok`，即 `H % 256 == 0` 且 `I % 256 == 0`。声明域的四组几何 (2048,768,128)、(4096,768,128)、(4096,1536,128)、(7168,256,256) 全部满足，因此本目录的设计在声明域内不因这些门槛再收窄；`when` 只需承担 rung 选择条件，不需要复述门槛。root.yaml 已按此把门槛留在目录、把工具链与拒绝条件写进 `REALIZATION`，Contract 内没有任何门槛。
++实现门槛属于设计范围而非 Contract：`E <= 256`、`H % 128 == 0`、`I % 64 == 0`、`N1 % 128 == 0`，packed-NVFP4 家族另需 `_rung7_ok`，即 `H % 256 == 0` 且 `I % 256 == 0`。声明域的四组几何 (2048,768,128)、(4096,768,128)、(4096,1536,128)、(7168,256,256) 全部满足，因此本目录的设计在声明域内不因这些门槛再收窄；`when` 记录代表方案的输入与必要调用条件，不需要复述这些几何门槛。root.yaml 已按此把门槛留在目录、把工具链与拒绝条件写进 `REALIZATION`，Contract 内没有任何门槛。
+ 
+ ### 声明域内实际可达的配置
+ 
+@@ -32,27 +32,31 @@
+ 
+ 6. CUDA graph 捕获与 host identity 缓存属于调用边界，不改提交身份。`moe_run` 把 ABI 全字段（除 `stream`）连同所有进程级 knob 哈希成 key，同 key 第二次出现时把整条 launch 序列捕获成图并重放；重放执行同一批 kernel、读同一批指针上的当前字节，不 memoize 任何数值。host 侧 `_hot` 用 15 个对象/标量的 identity 校验命中预建 ABI，`_fast` 是 37 项 id-tuple 的 dict，`nvfp4_fast.c` 在 C 层做同一校验。任何不匹配都回落到完整校验的慢路径并重建 ABI、重捕图；`_c()` 产生拷贝时不发布缓存。PDL 属性默认开启，`nroutes >= 49152` 时关闭。
+ 
+-7. capture-time 统计只选 kernel，不改数值。G2GATE 在 shape 上界与下界跨越 3072 阈值时把 `ids` 读回 host 数真实 route tile，用于在 WS3 与单体 GEMM2 叶子之间选择；MEGA-92 的 empty 判据与 zero-capture 探针同理，且都只在慢路径 publish 时算一次。三者的正确性都不依赖统计：GEMM2 各叶子写同一批字节，MEGA 的 unit 循环每次读真实 ids 并做 CTA 级 census，零前缀每次重放由 `k_zero_verify` 从当前字节重判。因此 root.yaml 的 `Dispatch.when` 用输入条件（含"payload 幅值非全零"）而不是统计结果或用例编号来划范围。
++7. capture-time 统计只选 kernel，不改数值。G2GATE 在 shape 上界与下界跨越 3072 阈值时把 `ids` 读回 host 数真实 route tile，用于在 WS3 与单体 GEMM2 叶子之间选择；MEGA-92 的 empty 判据与 zero-capture 探针同理，且都只在慢路径 publish 时算一次。三者都在 device 重读当前数据：GEMM2 重建 tile 图，MEGA 重新 census 并可进入非空 direct 路径，零前缀由 `k_zero_verify` 重判。这个事实不证明不同数值路径在整个域内通过验收，尤其空路由观测不证明 MEGA 的非空重放。root 的 `when` 另外明确保留所选准备、finalize 和 PDL 配置。
+ 
+ ### 未收范围与已知缺口
+ 
+ rungs 0–6（warp-mma 阶梯与 tcgen05 bf16 家族，配 `k_decode_hidden` 解出 bf16 激活、GEMM1 写 fp32 `fc1`、`k_act` 再写 bf16 `act`）的中间表示与 fam-2 确实不同，但只在 `_rung7_ok` 失败时可达，声明域内永不选中；本次不交付完整 schema，也不改称参数或局部变化，按域外 fallback 家族如实记录。一批 override-only 探针同样不交付：82/83（PFTMA）、89/90/93/94（NIPRE）、95（SK4）、98（NPAIR 的 AMODE 2 SK2 形式）、100（PP）、101/102（MBH）、103/104、105（EPI8）、88（FUSE）、96（SELFPREP），源码逐条记录了实测判定（多为 REJECTED 或等待配对 A/B）；其中机制上值得留的差额已按下面的记录表达。`nvfp4_moe_base.cu`、`_d81.cu`、`_j18.cu`、`_t80.cu` 与 `solution_base_host.py`、`solution_d81.py`、`solution_j18.py`、`solution_t80.py` 是历史 A/B 快照：四个 host 的 `_SRC` 都仍指向 `nvfp4_moe.cu`，而它们的 `_ABI_FIELDS` 比当前 `MoEABI` 短（缺 `small_thresh`、`zflag`、`zflag_host`，46 项对 49 项），因此不与当前 device ABI 相容，不能作为独立实现入口，只用于 lineage。
+ 
+-P2 交 P3 定向核实的调用边界已全部核实并落在 root.yaml：graph 重放与 identity 缓存只改 host 路径，`moe_run` 要么重放已捕获的节点集、要么 eager 直发同一序列，两图 clean 分支需要非零 `zflag_host` 而 root 的 `when` 已排除，故任何缓存命中都不改变提交身份；A 操作数图只按 `Rmax` 行编码，越界 box 被裁剪并零填充而非越界读，`GATHER` 从不写 `r >= route_count` 的行，E2M1 与 E4M3 都不 trap，这正是 `Math_reshape` 声明的 padding 契约；`tma_set` 以指针与几何为 key 并缓存 refused，故 in-place 变更安全、被拒几何每次响亮失败；GEMM2 `EPI` 每 warp 在 retire 会合前的 `await:stores_drained`（`cp.async.bulk.wait_group 0`）使 `GEMM2.kernel_done` 蕴含 `rout` 全局可见，正是 `FINALIZE` 的 `await:predecessor` 所消费的。
++P2 交 P3 定向核实的调用边界已全部核实并落在 root.yaml：graph 重放与 identity 缓存只改 host 路径，`moe_run` 要么重放已捕获的节点集、要么 eager 直发同一序列，两图 clean 分支需要非零 `zflag_host` 而 root 的 `when` 已排除，故任何缓存命中都不改变提交身份；连续 A payload 图按 `Rmax` 行编码，界外零填充；tile 的 padding 可读下一专家有效行或 allocation 尾部，A scale 则重复该 tile 的首个有效行。`GATHER` 不写 `r >= route_count`，GEMM epilogue 不存 padding lane；split_k 的 gather4 最后一个 box 可能重复首个有效 token，后续 box 才不发射；`tma_set` 以指针与几何为 key 并缓存 refused，故 in-place 变更安全、被拒几何每次响亮失败；GEMM2 `EPI` 每 warp 在 retire 会合前的 `await:stores_drained`（`cp.async.bulk.wait_group 0`）使 `GEMM2.kernel_done` 蕴含 `rout` 全局可见，正是 `FINALIZE` 的 `await:predecessor` 所消费的。
+ 
+ 沿用 P1 的两项来源缺口：activation 域矛盾（`shape_range.json` 写死 'situ'，`shape_cases.json` 的九个用例构造 type-3）由 Contract 的并集回答，两式在同一 `EPI` 内、不改变任何机制识别或代表选择；验收比较器公式缺失只影响外部通过边界，`Golden_reference.Tolerance` 照实记为 source-only。另有两项本目录照实保留：`Hardware_specification` 除 `Execution` 的 thread/warp/cta/sm/grid 登记外仍是占位，root.yaml 的 `resident_cap`、2 CTA/SM 与 TMEM、shared 预算按源码常量手工核对而非由硬件登记推出；源码自述的 rung 间 bit-exact 论断本次未独立验证，Design 未依赖它，只在记录中作为源码已述的取舍依据出现。
++
++MEGA 的 `acc32` 与 `cnt` 只在分配时清零，后续依赖每次 finalize 自清。因此复用同一 workspace 要等待前一次调用完成；源码没有为同一缓存 workspace 的跨 stream 并发复用另加同步，该并发用法不由本设计保证。host 仍分配未消费的 route/act/rout slabs，所以省去中间量物化不等于省掉所有分配。
+ 
+ MEGA 侧另有两条来源限制照实保留。其一，host 的 `rung_ok(92)` 只检查 `hidden_dim % 256 == 0`，而 `k_mega_body` 的 FC1 块循环迭代 `hidden_dim >> 9` 次、每次由 32 个 lane 各覆盖 16 个 hidden 通道即共 512 个，因此实际需要 `hidden_dim % 512 == 0`：256 的奇数倍会让尾部通道静默不进点积。声明域的三值 2048/4096/7168 都是 512 的倍数，故该缺口在本目录范围内不可达；mega.yaml 的 `Block-factored SIMT FP32 FC1 slice` 已把 512 倍数写成声明域事实，来源本身没有把它登记成门槛，本目录也不代为补造。其二，mega 的 ticket finalize 只 stage 8 个 slot 的 route 与分数（shared 数组 8 项，staging 循环是 `k < slot_count && k < 8`），而 ticket 目标 `nvt*chunk_count` 与 finalize 的 route 循环用的 `nvt` 都按全部 `slot_count` 个数统计，因此它依赖 Contract 声明域的 `slot_count = 8`（`shape_range.json` 把 topk 固定为 8），与 host 的 `K == 8` 门同源；`slot_count > 8` 会让 finalize 迭代到未 stage 的槽位、读过期 shared 值。
+ 
+ ## 完整设计
+ 
+-当前完整设计集合含 root 共三份，未超十份上限。三份的 `when` 按 host 的 promoted 选择互斥——fused 带 `route_capacity > 1536`、SK 带 `route_capacity <= 1536` 且保留带 bulk drain 的 WS3 GEMM2 叶子、MEGA 的 capture-time 空路由带——但都不是最大成立域：root 只承认 host 无需回读真实 route tile 就能判定的形状上界，SK 带里 `ws_g2` 为假的配对与 payload 全零的输入都落在三份 `when` 之外。这些差额由下面的记录承担：GEMM2 的 57/44/23 三条叶子记录加组合轴记录承担 `ws_g2` 为假的配对（固定用例 0 与 1 属此），零输入验证前缀记录承担 payload 全零（固定用例 9 属此），路由准备、finalize 宽度、ACT 切片形式等记录承担同一带内的其余已选与对照形式。域外与未 promoted 的内容——rungs 0–6 家族、一批 override-only 探针、四份历史 A/B 快照——按"未收范围与已知缺口"如实说明，不交付完整 schema，也不改称参数或局部变化。精确参数、`when` 与修订号以各 YAML 为准，本表摘要只用于辨认机制与保留理由。
++当前完整设计集合含 root 共三份。每份 YAML 固定自己的工作组织和参数，`when` 表示这套完整方案的输入与必要调用条件，不等于原 host 默认 selector，也不会自动应用目录中的变体。root 选择大路径准备、8 元素 finalize 与开启的 PDL；split_k 选择单块准备、SK=2、WS3 bulk-drain GEMM2、4 元素 finalize；mega 选择 direct 单提交。Contract 的任务域不因这些代表配置改变，完整 YAML 没有覆盖全部默认分支，差额由下方参数、局部与组合记录说明。
++
++root 的已选配置在固定源码中可实际选择：经 `candidate/solution.py::Model.forward`，保留其 97/81 叶子门与非零输入条件，同时在进程启动前设置 `NVFP4_MOE_SMALL_THRESH=1`、`NVFP4_MOE_FIN16MB=1024`、`NVFP4_MOE_PDL=1`、`NVFP4_MOE_PDL_BIG_R=-1`，其余开关取正文对应默认值、不覆盖 CFG/CFG2。前者经 ABI 使 `run_pipeline` 取 COUNT/SCAN_TILES/SCATTER；1 GiB 阈值高于声明域最大的 `route_capacity*hidden_dim*2`，且 `token_count > 192` 排除 fin4，故取 fin8；负的 PDL 大形状门关闭自动禁用，`launch_pdl` 保留属性。这些是已有源码控制，不要求更改 kernel；该强制选择组合没有单独的性能记录，原默认分支的 NCU 与耗时只说明对应来源样本，不能作为这套完整配置的性能保证。默认环境只在对应门都成立时逐项命中 root，例如 fixed 3；fixed 4/5/7 需应用 fin16 参数记录，fixed 6 另需 PDL 关闭记录。以 `(T,H,I,E)=(256,4096,1536,128)`、非空非零输入为例，形状项已为 3072，但默认准备仍是小路径，因此不能把默认调用冒称七节点正文。
+ 
+ | 设计 | 具体机制与保留理由 | 关系 |
+ | --- | --- | --- |
+-| [root](root.yaml) | fused band 的 promoted 默认，已是完整正文：七节点流水线（`COUNT`/`SCAN_TILES`/`SCATTER`/`GATHER`/`GEMM1`/`GEMM2`/`FINALIZE`）加 WS3 七 warp 角色分工（`PRODA`/`PRODB`/`MMA`/`EPI`）的 block-scaled NVFP4 tcgen05 GEMM。GEMM1 是 rung 97（BN=64、STAGES=3/SFS=2、AMODE=2 预聚集 A、SK=1、DEEP、CPHOIST/EARLYDONE、SFCH+SFPF=2、NPAIR），A 操作数由 `GATHER`（`k_gather_f`）先按 route 序物化成 `gathered_payload`/`gathered_scale`，每 stage 一个 2-D box；clamp/activation/QDQ 融进 `EPI` 直接写 packed `act_payload`/`act_scale`。GEMM2 是 rung 81（BN=128、TSTORE、DEEP、EPITB/CPHOIST/EARLYDONE），输出 per-route BF16 的 `rout`，`FINALIZE`（8 元素/线程的 `k_finalize`）做路由加权 fp32 求和与最后一次 bf16。路由准备取四节点大路径（`SCATTER` 叶子 `k_scatter_agg`），因为 `small_thresh` 在 (3000,6500] 且直方图非空时降到 3000、更大的 R 直接超过 6500。保留理由：声明域内 `route_capacity > 1536` 的唯一 promoted GEMM1 路径，机制最完整，也是本目录多数记录的基线。承担范围以 YAML 的 `when` 为准：`route_capacity > 1536`、`ceil_div(route_capacity,128)*(hidden_dim/128)*max(1,intermediate_dim/256) >= 3072`、多节点链保留（`route_capacity > 8192` 或 `route_capacity*hidden_dim > 32e6` 或存在有效 ids），且 payload 幅值非全零。它写成输入条件而非用例编号，第二项用的又是 host 无需 capture-time 回读即可判定 `ws_g2` 的形状上界：上界跨越 3072 阈值时 `ws_g2` 改由真实 route-tile 数决定，集中路由下同一形状可能落到单体叶子 44，root 保守地把这一带排除给下面的记录。十个固定用例中 3/4/5/6/7 落入（形状上界项分别是 6144/3584/6144/24576/4608，都无需回读即判定 `ws_g2`，GEMM2 取 81）；fixed 4 的 ncu 剖面逐节点对上这份正文：`k_count` → `k_scan_tiles` → `k_scatter_agg` → `k_gather_f` → `k_gemm_f4_ws2`(97) → `k_gemm_f4_ws2d`(81) → `k_finalize16`，前六个节点与正文逐一对应，末节点是下面 finalize 宽度记录里 16 元素那一档。fixed 9 的 host 选择仍是这条多节点链（GEMM1=97、大路径 prep、8 元素 `k_finalize`）再叠加零前缀，却被 `when` 排除两次——payload 全零，且形状上界项 `32*16*3 = 1536 < 3072`（host 那里 `ws_g2` 得靠 capture-time 真实 tile 数才取真），故只由零输入验证前缀记录承担；它的 ncu 剖面只出现 `k_zero_verify`，正是 ZERO2 的 clean 图。0/1/2 属 SK 带，8 走 MEGA。 | 阅读入口，保存唯一 Contract；[split_k](split_k.yaml) 与 [mega](mega.yaml) 与它并列，三区都本地定义、没有 `from`，下面全部记录以这三份中的一份或多份为基线或对照。 |
+-| [split_k](split_k.yaml) | SK 带的 promoted 默认：GEMM1 是 rung 99，即 97 的 WS3 主体加 SK=2、AMODE=3 clipped `tile::gather4`、SFCH+SFPF=2 与 NPAIR，并固定关掉 CPHOIST 与 EARLYDONE。相对 root 的实质差异有三处且互相咬合：A 操作数不再预聚集（`GATHER` 节点与 `gathered_payload`/`gathered_scale` 都不存在，改为每 stage `nbox = max(1, min(32, ceil(tile_rows/4)))` 条四行 box 直取 `hidden_states`，`expect_tx` 按同一 nbox 计字节，padding 行永不出 L2）；item 空间变成 (tile, k-slice, n-tile)，`Work_schedule::GEMM1` 的 `Partition` 多一维 `k_slice`、网格 x 维乘 `split_count`、`Tile_pipeline::GEMM1` 的 `Index.ks` 上界变成 `hidden_dim/(256*split_count)`；GEMM1 `EPI` 不再产 act，而是把 raw fp32 切片部分和写进 `part`，由新增的 `ACT` step（`k_act_packed<true,2>`）按切片升序归约后再做 clamp/activation/QDQ，`route_expert` 在此取得消费者。路由准备只有一个单块 `PREPARE`（SK 带恒走小路径），GEMM2 与 `FINALIZE` 的机制同 root。保留理由：split-K 的部分结果与跨 kernel 归并按 common 需要完整方案——工作划分、act 的生产者与 A 操作数来源同时改变，不能只当作 rung 参数。承担范围以 YAML 的 `when` 为准：`route_capacity <= 1536` 且 `token_count <= 128` 且 `route_capacity >= 32`，且保留带 bulk drain 的 WS3 GEMM2 叶子——即由定住 launch 集那次调用的 ids 读出的真实 route tile 数（每专家 `ceil(有效路由/128)` 求和）乘 `(hidden_dim/128)*max(1,intermediate_dim/256)` 至少 3072——且存在有效 ids、payload 幅值非全零。十个固定用例中只有 fixed 2 落入（T=128、R=1024、H=4096、I=768；其 ncu 剖面正是这份设计的五条提交：`k_prepare_small` → `k_gemm_f4_ws2`(99) → `k_act_packed` → `k_gemm_f4_ws2d`(81) → `k_finalize4`）。fixed 0（R=8：`hi_units` 只有 384，`ws_g2` 假，且 `route_capacity < 32` 也不满足 drain map）与 fixed 1（R=256、hotspot 只有 8 个真实 tile，8*48 = 384 < 3072，`ws_g2` 假）实际取 GEMM1=99 配 GEMM2 单体叶子 44 与 4 元素 `k_finalize4`——两者的 ncu 剖面与 fixed 2 只差一个 kernel，`k_gemm_f4_ws2d` 换成 `k_gemm_f4_tma`——是有意留在 `when` 之外的配对，由"GEMM2 单体 128 线程叶子"与"GEMM1 与 GEMM2 叶子的组合轴"两条记录共同承担；fixed 9 的 payload 全零同样在 `when` 之外，由零输入验证前缀记录承担。 | 与 root 并列，共享 root 保存的唯一 Contract；三区全部本地定义，没有 `from`。GEMM2 与 `FINALIZE` 用与 root 同名的对象（`PRODA`/`PRODB`/`MMA`/`EPI`、`sink`、`rout`），叶子按 shape 取同一批 81/57/44/23；`FINALIZE` 取 4 元素形式，因为其 `when` 要求 `token_count <= 128`。 |
+-| [mega](mega.yaml) | MEGA 单核，empty-capture 范围的 promoted 默认（rung 92，`k_mega_direct` = `k_mega_body<false>`）：一个 barrier-free kernel 取代整条链。工作单元是 (raw route `r = t*slot_count+k`, `intermediate_dim` 的 32 宽 chunk `s`)，网格 `min(296, route_capacity*chunk_count)` × 512 线程，每 CTA 领取一段连续 unit 并 stride 遍历；pass 0 给无任何有效路由的 token 写零输出行，随后 CTA 级 census 在 `nvalid == 0` 时整体返回。每 unit 内：token 变化时把 `x_dec` 解码成 padded shared fp32，16 个 warp 各算 2 对 (up,gate) 的 SIMT fp32 点积（`phys_row`/`sf_offset` 直接寻址 prepared 布局，h 升序链），act+QDQ 复用 `k_act_packed` 的算术并反量化回 fp32，GEMM2 部分和以 `red.add.f32` 累进 per-route `acc32`；最后 per-token arrival ticket（`cnt`，threadFenceReduction 模式）让完成该 token 最后一个 unit 的 CTA 执行 `finalize_token`（按 k 升序 `bf16(acc32)*score` 求和写 `output_buffer` 的该行）并自清 acc32 行与计数器。保留理由：主计算、工作划分、输出形成与协作全部不同，没有 route-tile 图、没有 prep/gather/act/finalize 节点，也不使用 `rout` 与 packed act 中间量。承担范围以 YAML 的 `when` 为准：全部 ids 无效使 capture-time 路由直方图为空，且 `route_capacity <= 8192`、`route_capacity*hidden_dim <= 32e6`、promoted 默认旋钮开着且无 rung override；两个上界必须用 `route_capacity` 而不是有效路由数——本范围内后者恒为 0，用它写会让上界成为空条件，把 host 永不选 MEGA 的输入也算进承担范围。固定用例中只有 8（empty routing、T=256、R=2048、H=2048）落入，其 ncu 剖面自始至终只有 `k_mega_direct` 一个 kernel；非空重放走同一 kernel 的 direct 路径，正确性不依赖 capture-time 统计。 | 与 root 并列，共享 root 保存的唯一 Contract；三区全部本地定义，没有 `from`，也没有可与 root 或 split_k 共享的整区。只有一条 `Flow.Launch` 提交，没有 PDL 链、memset 节点或 tensor map。 |
++| [root](root.yaml) | 七节点 `COUNT`/`SCAN_TILES`/`SCATTER`/`GATHER`/`GEMM1`/`GEMM2`/`FINALIZE`。GEMM1 取 rung 97：BN=64、STAGES=3/SFS=2、预聚集 A、SK=1、NPAIR、DEEP、SFCH/SFPF 与 folded activation；GEMM2 取 rung 81：BN=128、TSTORE、DEEP、成对排空与提前归还 accumulator。finalize 固定每线程 8 元素，PDL 开启。保留完整的 packed tensor-core 主路径；精确范围见 YAML 的 `when`，实际源码选择方式见上段。 | 阅读入口，保存唯一 Contract；三区本地定义。其余准备、finalize 与 PDL 配置均是下文显式变体，不隐式修改正文。 |
++| [split_k](split_k.yaml) | SK 带的 promoted 默认：GEMM1 是 rung 99，即 97 的 WS3 主体加 SK=2、AMODE=3 clipped `tile::gather4`、SFCH+SFPF=2 与 NPAIR，并固定关掉 CPHOIST 与 EARLYDONE。相对 root 的实质差异有三处且互相咬合：A 操作数不再预聚集（`GATHER` 节点与 `gathered_payload`/`gathered_scale` 都不存在，改为每 stage `nbox = max(1, min(32, ceil(tile_rows/4)))` 条四行 box 直取 `hidden_states`，`expect_tx` 按同一 nbox 计字节，末个 box 的多余行重读首个有效 token，其后整 box 不发射）；item 空间变成 (tile, k-slice, n-tile)，`Work_schedule::GEMM1` 的 `Partition` 多一维 `k_slice`、网格 x 维乘 `split_count`、`Tile_pipeline::GEMM1` 的 `Index.ks` 上界变成 `hidden_dim/(256*split_count)`；GEMM1 `EPI` 不再产 act，而是把 raw fp32 切片部分和写进 `part`，由新增的 `ACT` step（`k_act_packed<true,2>`）按切片升序归约后再做 clamp/activation/QDQ，`route_expert` 在此取得消费者。路由准备只有一个单块 `PREPARE`（SK 带恒走小路径），GEMM2 与 `FINALIZE` 的机制同 root。保留理由：split-K 的部分结果与跨 kernel 归并按 common 需要完整方案——工作划分、act 的生产者与 A 操作数来源同时改变，不能只当作 rung 参数。承担范围以 YAML 的 `when` 为准：`route_capacity <= 1536` 且 `token_count <= 128` 且 `route_capacity >= 32`，且保留带 bulk drain 的 WS3 GEMM2 叶子——即由定住 launch 集那次调用的 ids 读出的真实 route tile 数（每专家 `ceil(有效路由/128)` 求和）乘 `(hidden_dim/128)*max(1,intermediate_dim/256)` 至少 3072——且存在有效 ids、payload 幅值非全零。十个固定用例中只有 fixed 2 落入（T=128、R=1024、H=4096、I=768；其 ncu 剖面正是这份设计的五条提交：`k_prepare_small` → `k_gemm_f4_ws2`(99) → `k_act_packed` → `k_gemm_f4_ws2d`(81) → `k_finalize4`）。fixed 0（R=8：`hi_units` 只有 384，`ws_g2` 假，且 `route_capacity < 32` 也不满足 drain map）与 fixed 1（R=256、hotspot 只有 8 个真实 tile，8*48 = 384 < 3072，`ws_g2` 假）实际取 GEMM1=99 配 GEMM2 单体叶子 44 与 4 元素 `k_finalize4`——两者的 ncu 剖面与 fixed 2 只差一个 kernel，`k_gemm_f4_ws2d` 换成 `k_gemm_f4_tma`——是有意留在 `when` 之外的配对，由"GEMM2 单体 128 线程叶子"与"GEMM1 与 GEMM2 叶子的组合轴"两条记录共同承担；fixed 9 的 payload 全零同样在 `when` 之外，由零输入验证前缀记录承担。 | 与 root 并列，共享 root 保存的唯一 Contract；三区全部本地定义，没有 `from`。GEMM2 与 `FINALIZE` 用与 root 同名的对象（`PRODA`/`PRODB`/`MMA`/`EPI`、`sink`、`rout`），正文固定叶子 81，57/44/23 是目录中的替代配置；`FINALIZE` 取 4 元素形式，因为其 `when` 要求 `token_count <= 128`。 |
++| [mega](mega.yaml) | MEGA 单核，empty-capture 范围的 promoted 默认（rung 92，`k_mega_direct` = `k_mega_body<false>`）：一个 barrier-free kernel 取代整条链。工作单元是 (raw route `r = t*slot_count+k`, `intermediate_dim` 的 32 宽 chunk `s`)，网格 `min(296, route_capacity*chunk_count)` × 512 线程，每 CTA 领取一段连续 unit 并逐项升序遍历；pass 0 给无任何有效路由的 token 写零输出行，随后 CTA 级 census 在 `nvalid == 0` 时整体返回。每 unit 内：token 变化时把 `x_dec` 解码成 padded shared fp32，16 个 warp 各算 2 对 (up,gate) 的 SIMT fp32 点积（`phys_row`/`sf_offset` 直接寻址 prepared 布局，32 条跨 block 的累加链加 XOR butterfly），act+QDQ 复用 `k_act_packed` 的算术并反量化回 fp32，GEMM2 部分和以 `red.add.f32` 累进 per-route `acc32`；最后 per-token arrival ticket（`cnt`，threadFenceReduction 模式）让完成该 token 最后一个 unit 的 CTA 执行 `finalize_token`（按 k 升序 `bf16(acc32)*score` 求和写 `output_buffer` 的该行）并自清 acc32 行与计数器。保留理由：主计算、工作划分、输出形成与协作全部不同，没有 route-tile 图、没有 prep/gather/act/finalize 节点，也不使用 `rout` 与 packed act 中间量。承担范围以 YAML 的 `when` 为准：全部 ids 无效使 capture-time 路由直方图为空，且 `route_capacity <= 8192`、`route_capacity*hidden_dim <= 32e6`、promoted 默认旋钮开着且无 rung override；两个上界必须用 `route_capacity` 而不是有效路由数——本范围内后者恒为 0，用它写会让上界成为空条件，把 host 永不选 MEGA 的输入也算进承担范围。固定用例中只有 8（empty routing、T=256、R=2048、H=2048）落入，其 ncu 剖面自始至终只有 `k_mega_direct` 一个 kernel；非空重放重新执行同一 kernel 的 direct 算术，空路由样本不证明该分支在整个数值域通过验收。 | 与 root 并列，共享 root 保存的唯一 Contract；三区全部本地定义，没有 `from`，也没有可与 root 或 split_k 共享的整区。只有一条 `Flow.Launch` 提交，没有 PDL 链、memset 节点或 tensor map。 |
+ 
+ ## 变体与组合
+ 
+@@ -84,7 +88,7 @@
+ 
+ - 基线：并列两份。[root](root.yaml) 的 `DESIGN.Work_schedule::COUNT`、`SCAN_TILES`、`SCATTER` 三个 step 与 `Tile_pipeline` 中对应的 `MAIN` 角色，`counts` 交接上的 `initialize: 0` 表达那次同时清零 `counts` 与 fill 计数器的 memset，不是独立提交；[split_k](split_k.yaml) 的 `DESIGN.Work_schedule::PREPARE` 与 `DESIGN.Tile_pipeline::PREPARE.MAIN`（`compute:stage_ids`/`histogram`/`expert_scan`/`scatter`/`tile_map` 五段）。本条的小路径相对 root 是变化，相对 split_k 则是已选正文，这里说明它各自的适用条件。
+ - 差异与联动：小路径 `k_prepare_small` 把三个 step 合成一次提交——一个 1024 线程 block 完成 stage ids → warp-private 直方图 → 跨 warp 前缀 → `scanNW<32>` 专家扫描 → scatter → tile 图，并顺带清零 fused split-K 计数器；root 的大路径把它拆成 memset 加 `COUNT`（shared 两级直方图，每 block 每专家一次全局 atomic）加 `SCAN_TILES`（扫描与 tile 图合并进一个 block）加 `SCATTER`（`k_scatter_agg`）。两条路径写同一组 `counts`、`offs`、`tile_offsets`、`tile_expert`、`tile_first`、`route_of`、`route_token`、`route_slot`、`route_expert`，专家内 route 顺序都是任意置换，下游只读这个元组。
+-- 条件与依据：`small_thresh` 默认 6500，`route_capacity` 落在 (3000,6500] 且 capture-time 直方图非空时取 3000；root 的 `when` 带内固定用例 3/9（R=4096、skewed 非空）因此走大路径，4/5/6/7 超过 6500 也走大路径，所以 root.yaml 以大路径为正文；这个判断不变。但 root 的 `when` 带内 `1536 < route_capacity <= 3000`（以及 (3000,6500] 且直方图为空、又因 `route_capacity*hidden_dim > 32e6` 没被 MEGA 接走）仍走小路径，这部分差额由本记录承担。SK 带则恒走小路径：`route_capacity <= 1536` 小于 `small_thresh` 的任何可达取值（3000 或 6500，或 env 覆盖），而 device 侧的判据就是 `route_capacity <= small_thresh`，因此 `k_prepare_small` 正是 [split_k](split_k.yaml) `DESIGN.Work_schedule::PREPARE` 的正文而非备选——root 的三个 step 合成一条提交，`Flow.Launch` 只剩五条，`Handoff` 里的路由元组（`counts`/`offs`/`tile_offsets`/`tile_expert`/`tile_first`/`route_of`/`route_token`/`route_expert`）生产者都是 `PREPARE`，`counts` 上也没有 `initialize: 0`（单块 shared 直方图不需要那次全局清零 memset）。两条路径确定性地产出相同的 `counts`、`offs`、`tile_offsets`、`tile_expert`、`tile_first`——整数求和、`scanNW` 扫描与 `ceil(counts[e]/bm)` 的 tile 图都与顺序无关。但 `route_of`/`route_token`/`route_slot`/`route_expert` 只保证专家内置换等价，不逐字节相同：小路径的位置是跨 warp 前缀基址加 warp 内 shared `atomicAdd` 的到达序，大路径的 `SCATTER` 先以全局 `atomicAdd(&fill[x])` 按 block 到达序为每 block-专家预留连续区间、再用 shared rank 取块内槽位，所以其置换连 run-to-run 都不保证可复现（`k_scatter` 同理）。输出字节仍不变：每条 route 的 GEMM 值与它占的槽位无关，`FINALIZE` 经 `route_of` 按固定 slot 升序求和，重排专家内位置改不了任何输出。因此 `small_thresh` 只是性能旋钮，不能当作确定性或可复现开关，专家内 route 序也不能用于任何顺序论证（含 split-K 的切片序，那是按 `part` 的切片下标升序，与此无关）。源码注释称两条 prep 路径 bit-identical，本目录按上述更强的事实记录。
++- 条件与依据：`small_thresh` 默认 6500，`route_capacity` 落在 (3000,6500] 且 capture-time 直方图非空时取 3000；GEMM1 fused 带内固定用例 3/9（R=4096、skewed 非空）因此走大路径，4/5/6/7 超过 6500 也走大路径，所以 root.yaml 以大路径为正文；这个判断不变。但在 root 的输入形状范围内，默认 selector 对 `1536 < route_capacity <= 3000`（以及 (3000,6500] 且直方图为空、又因 `route_capacity*hidden_dim > 32e6` 没被 MEGA 接走）仍走小路径；这不满足 root 已选的大路径调用条件，其差额由本记录承担。SK 带则恒走小路径：`route_capacity <= 1536` 小于 `small_thresh` 的任何可达取值（3000 或 6500，或 env 覆盖），而 device 侧的判据就是 `route_capacity <= small_thresh`，因此 `k_prepare_small` 正是 [split_k](split_k.yaml) `DESIGN.Work_schedule::PREPARE` 的正文而非备选——root 的三个 step 合成一条提交，`Flow.Launch` 只剩五条，`Handoff` 里的路由元组（`counts`/`offs`/`tile_offsets`/`tile_expert`/`tile_first`/`route_of`/`route_token`/`route_expert`）生产者都是 `PREPARE`，`counts` 上也没有 `initialize: 0`（单块 shared 直方图不需要那次全局清零 memset）。两条路径确定性地产出相同的 `counts`、`offs`、`tile_offsets`、`tile_expert`、`tile_first`——整数求和、`scanNW` 扫描与 `ceil(counts[e]/bm)` 的 tile 图都与顺序无关。但 `route_of`/`route_token`/`route_slot`/`route_expert` 只保证专家内置换等价，不逐字节相同：小路径的位置是跨 warp 前缀基址加 warp 内 shared `atomicAdd` 的到达序，大路径的 `SCATTER` 先以全局 `atomicAdd(&fill[x])` 按 block 到达序为每 block-专家预留连续区间、再用 shared rank 取块内槽位，所以其置换连 run-to-run 都不保证可复现（`k_scatter` 同理）。输出字节仍不变：每条 route 的 GEMM 值与它占的槽位无关，`FINALIZE` 经 `route_of` 按固定 slot 升序求和，重排专家内位置改不了任何输出。因此 `small_thresh` 只是性能旋钮，不能当作确定性或可复现开关，专家内 route 序也不能用于任何顺序论证（含 split-K 的切片序，那是按 `part` 的切片下标升序，与此无关）。源码注释称两条 prep 路径 bit-identical，本目录按上述更强的事实记录。
+ 
+ ### 准备与聚集的等价实现选择（参数）
+ 
+@@ -96,7 +100,7 @@
+ 
+ - 基线：并列两份，方向相反。[root](root.yaml) 的 `DESIGN.Work_schedule::FINALIZE`（`Partition` 的 `token`/`hidden_block` tile 1024、`Worker_count = token_count * ceil_div(hidden_dim,1024)`）与 `Tile_pipeline::FINALIZE.MAIN`（`compute:weighted_sum` 读八个 rout 值、`store:output` 写 16 字节 chunk），正文是 8 元素/线程的 `k_finalize`；[split_k](split_k.yaml) 的 `DESIGN.Work_schedule::FINALIZE`（`hidden_block` tile 512、`Worker_count = token_count * ceil_div(hidden_dim,512)`）与 `Tile_pipeline::FINALIZE.MAIN`（四个 rout 值、8 字节 chunk），正文是 4 元素/线程的 `k_finalize4`。两份的 `Math_reshape`"Routing-weighted output reduction"相同。
+ - 差异与联动：三个宽度是同一机制的不同取值——`k_finalize4`（4 元素/线程，`hidden_block` 变 512、块数翻倍）、`k_finalize`（8 元素/线程，1024）、`k_finalize16`（16 元素/线程，`hidden_block` 变 2048、store 用 streaming `.cs`）。每元素算术与沿 slot 升序的 route 顺序不变，只是 (token, hidden) 到线程的映射、`Partition` 的 tile 大小与网格宽度变；三者都按 `dim3(ceil(nfin/128), token_count)` × 128 线程启动，`nfin` 分别是 `hidden_dim/4`、`hidden_dim/8`、`hidden_dim/16`。
+-- 条件与依据：选择门是 `route_capacity*hidden_dim*2 >= fin16_mb()<<20`（默认 40MB）取 16，否则 `fin_wide()`（默认开）且 `token_count <= fin_tmax()`（默认 128）取 4，否则取 8。相对 root 基线：16 在带内可达（固定用例 4/5/6/7 的 `route_capacity*hidden_dim*2` 分别约 117MB/67MB/268MB/50MB，fixed 4 的 ncu 剖面末节点确实是 `k_finalize16`），4 不可达（root 的 `when` 要求 `route_capacity > 1536` 且声明域 `slot_count = 8`，迫使 `token_count > 192`），所以 root.yaml 取未加门的 8 元素形式为正文——fixed 3 的剖面末节点正是 `k_finalize`。相对 split_k 基线：4 元素是正文（其 `when` 的 `token_count <= 128` 正是 fin4 的门，fixed 0/1/2 的剖面末节点都是 `k_finalize4`），8 元素是 SK 带里 `128 < token_count <= 192` 的变化（`route_capacity <= 1536` 仍成立，例如 `token_count = 192`、`slot_count = 8` 给 `route_capacity = 1536`），16 元素在带内不可达，因为 `route_capacity*hidden_dim*2 <= 1536*7168*2 ≈ 22MB < 40MB`。三个 knob（`fin16_mb`、`fin_wide`、`fin_tmax`）都混进 graph key。
++- 条件与依据：选择门是 `route_capacity*hidden_dim*2 >= fin16_mb()<<20`（默认 40MB）取 16，否则 `fin_wide()`（默认开）且 `token_count <= fin_tmax()`（默认 128）取 4，否则取 8。相对 root 基线：16 在带内可达（固定用例 4/5/6/7 的 `route_capacity*hidden_dim*2` 分别约 117MB/67MB/268MB/50MB，fixed 4 的 ncu 剖面末节点确实是 `k_finalize16`），4 不可达（root 的 `when` 要求 `route_capacity > 1536` 且声明域 `slot_count = 8`，迫使 `token_count > 192`），root.yaml 因而把 8 元素形式列为显式已选调用条件，默认命中 fin16 时需应用本记录——fixed 3 的剖面末节点正是 `k_finalize`。相对 split_k 基线：4 元素是正文（其 `when` 的 `token_count <= 128` 正是 fin4 的门，fixed 0/1/2 的剖面末节点都是 `k_finalize4`），8 元素是 SK 带里 `128 < token_count <= 192` 的变化（`route_capacity <= 1536` 仍成立，例如 `token_count = 192`、`slot_count = 8` 给 `route_capacity = 1536`），16 元素在带内不可达，因为 `route_capacity*hidden_dim*2 <= 1536*7168*2 ≈ 22MB < 40MB`。三个 knob（`fin16_mb`、`fin_wide`、`fin_tmax`）都混进 graph key。
+ 
+ ### GEMM 环深与 scale 通路旋钮（参数）
+ 
+@@ -107,7 +111,7 @@
+ ### ACT 的切片归约形式（参数）
+ 
+ - 基线：[split_k](split_k.yaml) 的 `DESIGN.Work_schedule::ACT`（`Partition` 的 `act_item`、`Target.Tile_reduction` 沿 `k_slice`）、`DESIGN.Tile_pipeline::ACT.MAIN`（`load:partials`、`load:route_expert`、`compute:act_qdq` 与其 `Waiting.Prepared`），以及 `DESIGN.Math_reshape` 的"Slice reduction of the FC1 partials"与符号 `part`。
+-- 差异与联动：已选形式是编译期切片数的 load hoist（`k_act_packed<true,2>`，即 SKT=2）：切片地址不依赖 `route_expert`，所以全部切片 load 先发，`route_expert`/alpha/beta/limit 在其在途时才解析，把原本两次串行的 DRAM 往返重叠——这正是 `ACT.MAIN` 的 `Waiting.Prepared` 中 `{issue compute:act_qdq} ← [{done load:partials}]` 与 `Pipe` 里 `load:partials` 先于 `load:route_expert` 所表达的。对照形式 SKT=0（`NVFP4_MOE_ACTV2=0` 恢复）用运行时循环按 `split_count` 逐切片加载：归约方法、切片升序与每切片先 up 后 gate 的次序、`part` 的 shape 与 dtype、`act_payload`/`act_scale` 的输出都不变，源码称两者 bit-identical（本次未独立验证），改变的只是 `load:partials` 的发射位置与它相对 `load:route_expert` 的次序。
++- 差异与联动：已选形式是编译期切片数的 load hoist（`k_act_packed<true,2>`，即 SKT=2）：切片地址不依赖 `route_expert`，所以全部切片 load 先发，`route_expert`/alpha/beta/limit 在其在途时才解析，允许 partial load 与 expert lookup 重叠，共 `2*split_count` 条 float4 load（每切片 up/gate 各一条）——这正是 `ACT.MAIN` 的 `Waiting.Prepared` 中 `{issue compute:act_qdq} ← [{done load:partials}]` 与 `Pipe` 里 `load:partials` 先于 `load:route_expert` 所表达的。对照形式 SKT=0（`NVFP4_MOE_ACTV2=0` 恢复）用运行时循环按 `split_count` 逐切片加载：归约方法、切片升序与每切片先 up 后 gate 的次序、`part` 的 shape 与 dtype、`act_payload`/`act_scale` 的输出都不变，源码称两者 bit-identical（本次未独立验证），改变的只是 `load:partials` 的发射位置与它相对 `load:route_expert` 的次序。
+ - 条件与依据：`act_v2()` 在 `NVFP4_MOE_ACTV2` 未设时返回 1，函数体内注释记为 PROMOTED on this tree（dv_b39fedfe0b3e，配对同 job、各 shape bit-exact：fixed_0 0.956、fixed_1 0.926、fixed_2 0.978、domain_5 0.994，never worse）；`k_act_packed` 与该函数上方各留有一句"Knob default OFF"是残留注释，以代码默认值与 PROMOTED 注释为准。SKT 按 `sk` 取 2/4/8、其他值落回 0，split_k 的 `split_count = 2` 故取 2；旋钮混进 graph key。
+ 
+ ### SK 带内已研究的其余 split-K 形式（局部）
+@@ -143,7 +147,7 @@
+ ### 网格上限、PDL 与 eager/图重放（参数）
+ 
+ - 基线：并列两份。[root](root.yaml) 的 `DESIGN.Work_schedule::GEMM1`/`GEMM2` 的 `Mapping`（`resident_cap` 与 `Worker_count` 的 `min(tile_bound, ...)` 形式、`Preassigned` 的 start/stride）、`Flow.Launch` 的 `start_after: launch_ready` 与 `Flow.Handoff` 的 `ready: kernel_done`，以及调用边界；[split_k](split_k.yaml) 的 `DESIGN.Work_schedule::GEMM1`/`GEMM2` 的 `Mapping` 与 `Preassigned`（同一 capped 持久网格，只是 GEMM1 的 item 数乘了 `split_count`）、`Flow.Launch` 的五条 `start_after: launch_ready`，其 `REALIZATION` 也登记了 griddepcontrol 一条。MEGA 不在此列：它只有一条不经 `launch_pdl` 的提交，网格上限由上面的 MEGA 记录承担。
+-- 差异与联动：持久网格上限（自动 2 CTA/SM = 296，`capped_grid_tc3` 给三 CTA 的 rung 用 1.5 倍）只改 `gridDim.y`，item 循环按 `gridDim.x*gridDim.y` 步进，因此只改划分、不改哪些 item 执行；PDL 属性默认开、`nroutes >= 49152` 时关，kernel 内的 `griddepcontrol.wait`/`trigger` 保证可见性（`REALIZATION` 已绑定），值不变——root.yaml 的 `Flow` 取的是 PDL-on 形式，摘掉属性后同一 `Flow` 在更强的流序下仍成立；`NVFP4_MOE_NO_GRAPH=1` 或 key 未连续命中两次时走 eager 直发同一提交序列。
++- 差异与联动：持久网格上限（自动 2 CTA/SM = 296，`capped_grid_tc3` 给三 CTA 的 rung 用 1.5 倍）只改 `gridDim.y`，item 循环按 `gridDim.x*gridDim.y` 步进，因此只改划分、不改哪些 item 执行；PDL 属性默认开、`nroutes >= 49152` 时关，kernel 内的 `griddepcontrol.wait`/`trigger` 保证可见性（`REALIZATION` 已绑定），值不变——root.yaml 的 `Flow` 固定 PDL-on。关闭 PDL 的变体把相邻提交的启动边改为 `kernel_done`，局部 predecessor/trigger 成为已满足等待与空操作，并取消开启 PDL 属性的 Require；Handoff 的完成可见性不变；`NVFP4_MOE_NO_GRAPH=1` 或 key 未连续命中两次时走 eager 直发同一提交序列。
+ - 条件与依据：这些 knob 全部混进 graph key；warp-mma 阶梯不加网格上限（其 CTA 小、网格是唯一并行度），但该家族在声明域内不可达。
+ 
+ ### host 调用缓存层级（参数）

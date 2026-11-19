@@ -1,0 +1,425 @@
+META_DATA:
+  Name: fmha_mxfp8_qkv
+  Describe: Multi-head attention on E4M3 Q/K/V payloads with E8M0 block-32 scales, giving a BF16 output and optional FP32 log-sum-exp under causal/window masks
+  Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+  Version: 8
+  Dispatch:
+    when: head_dim = 128; the loaded binary issues tcgen05 (arch probe passes); the plan stays fused (nsplit = 1, or the caller workspace absent or too small); ceil_div(query_len, 128*kv_head_count/head_count) * batch_count * kv_head_count > 2 * sm_count, sm_count the host-queried device SM count (148 on the profiled device), with a preparation-fixed mask active (is_causal or window_size_left >= 0); K/V bases and strides admit tensor-map descriptors, so staging uses bulk tensor copies
+CONTRACT:
+  Algorithm_requirement:
+    Constant:
+      scale_block_size: {value: 32, meaning: Elements sharing one E8M0 scale}
+      e8m0_exponent_bias: {value: 127, meaning: Exponent bias of an E8M0 scale byte}
+      probability_group_keys: {value: 128, meaning: Keys in one probability quantization group}
+      rescale_log2_threshold: {value: 4, meaning: Normalizer update threshold in log2 units}
+      e4m3_max_norm: {value: 448, meaning: Largest finite fp8_e4m3fn magnitude}
+    Input:
+      q_tensor: {meaning: 'E4M3 query payload; BHSD logical, BSHD strided', shape: [{batch: batch_count}, {head: head_count}, {query_token: query_len}, {key_dim: head_dim}], dtype: fp8_e4m3fn}
+      k_tensor: {meaning: 'E4M3 key payload; BHSD logical, BSHD strided', shape: [{batch: batch_count}, {kv_head: kv_head_count}, {key_token: kv_len}, {key_dim: head_dim}], dtype: fp8_e4m3fn}
+      v_tensor: {meaning: 'E4M3 value payload; BHSD logical, BSHD strided', shape: [{batch: batch_count}, {kv_head: kv_head_count}, {key_token: kv_len}, {value_dim: head_dim}], dtype: fp8_e4m3fn}
+      sf_q: {meaning: E8M0 query scale bytes in F8_128x4 atom order, shape: [{byte_row: batch_count*head_count*ceil(query_len/128)*128}, {byte_col: head_dim/scale_block_size}], dtype: uint8}
+      sf_k: {meaning: E8M0 key scale bytes in F8_128x4 atom order, shape: [{byte_row: batch_count*kv_head_count*ceil(kv_len/128)*128}, {byte_col: head_dim/scale_block_size}], dtype: uint8}
+      sf_v: {meaning: E8M0 value scale bytes in F8_128x4 atom order, shape: [{byte_row: batch_count*kv_head_count*ceil(kv_len/128)*4}, {byte_col: head_dim}], dtype: uint8}
+      o_buffer: {meaning: Caller buffer overwritten in place by o_tensor, shape: [{batch: batch_count}, {head: head_count}, {query_token: query_len}, {value_dim: head_dim}], dtype: bf16}
+      lse_buffer: {meaning: Caller buffer overwritten in place by lse_tensor, shape: [{batch: batch_count}, {head: head_count}, {query_token: query_len}], dtype: fp32, nullable: true, default: None}
+      workspace: {meaning: Caller scratch buffer; contents are not outputs, shape: [{byte: workspace_size}], dtype: uint8, nullable: true, default: None}
+      seq_kv_lens: {meaning: KV length per request; present when not causal, shape: [{batch: batch_count}], dtype: int32, nullable: true, default: None}
+      is_causal: {meaning: Enables the bottom-right aligned causal mask, shape: [], dtype: bool, default: false}
+      window_size_left: {meaning: Left window W; absent or -1 keeps every key, shape: [], dtype: int64, nullable: true, range: [-1, 262143], default: None}
+      scale_softmax: {meaning: Ignored per-call scale; None allowed, shape: [], dtype: fp32, nullable: true, default: None}
+      sinks: {meaning: Absent; attention sinks are outside this task, shape: [], dtype: python_none, default: None}
+      seq_q_lens: {meaning: Absent; ragged query lengths are outside it, shape: [], dtype: python_none, default: None}
+      current_stream: {meaning: Absent; the launch uses the current stream, shape: [], dtype: python_none, default: None}
+      amax_o: {meaning: Absent; output amax is outside this task, shape: [], dtype: python_none, default: None}
+      descale_q: {meaning: Absent; per-tensor FP8 descaling is unused, shape: [], dtype: python_none, default: None}
+      descale_k: {meaning: Absent; per-tensor FP8 descaling is unused, shape: [], dtype: python_none, default: None}
+      descale_v: {meaning: Absent; per-tensor FP8 descaling is unused, shape: [], dtype: python_none, default: None}
+      scale_o: {meaning: Absent; output scaling is outside this task, shape: [], dtype: python_none, default: None}
+      block_table: {meaning: Absent; paged KV is outside this task, shape: [], dtype: python_none, default: None}
+      block_table_v: {meaning: Absent; paged KV is outside this task, shape: [], dtype: python_none, default: None}
+      gate: {meaning: Absent; gated attention is outside this task, shape: [], dtype: python_none, default: None}
+      sf_o: {meaning: Absent; quantized output scales are unused, shape: [], dtype: python_none, default: None}
+    Output:
+      o_tensor: {meaning: 'Attention output; o_buffer itself, overwritten', shape: [{batch: batch_count}, {head: head_count}, {query_token: query_len}, {value_dim: head_dim}], dtype: bf16}
+      lse_tensor: {meaning: Per-row log-sum-exp; lse_buffer itself if not None, shape: [{batch: batch_count}, {head: head_count}, {query_token: query_len}], dtype: fp32, nullable: true}
+    Compute:
+      - Name: Request domain
+        Math: |
+          1 <= batch_count <= 16, 1 <= query_len <= 8192, 1 <= kv_len <= 262144, query_len <= kv_len
+          batch_count*query_len <= 16384 and batch_count*kv_len <= 1048576
+          head_dim in {128, 256} and (head_count, kv_head_count, head_dim) in {(8,2,128), (8,2,256),
+            (8,8,128), (8,8,256), (16,1,128), (16,1,256), (16,4,128), (32,8,128)}
+          head_count is a multiple of kv_head_count, and kh = floor(h / (head_count / kv_head_count))
+            is the kv head query head h reads, so head_count / kv_head_count query heads share it
+          head_dim is a multiple of 128, so head_dim/scale_block_size is an integer and a multiple of 4
+          workspace_size is the scratch byte count requested at preparation and may be 0
+          Indices below are b for batch, h for query head, i for query token, j for key and x for
+            channel; the batch and head axes are independent, so each (b, h) pair computes its own rows
+      - Name: Scale byte address
+        Math: |
+          Each sf buffer is one flat byte array; n % d is the remainder
+          f8_128x4(r, c, bands, atom_col) = (floor(r/128)*bands + atom_col)*512 + (r%32)*16 + floor((r%128)/32)*4 + c%4
+          sf_q and sf_k: per group g an [rp, cp] byte grid, r a token row, c a head_dim block,
+            cp = head_dim/scale_block_size, rp = ceil(query_len/128)*128 for sf_q, ceil(kv_len/128)*128 for sf_k,
+            address = g*rp*cp + f8_128x4(r, c, cp/4, c/4), g = b*head_count + h for sf_q and b*kv_head_count + kh for sf_k
+          sf_v: the transposed grid, rows r = output channels, columns c = scale_block_size-key blocks; with
+            cp = ceil(kv_len/128)*4 and g = b*kv_head_count + kh the address is f8_128x4(r, c, batch_count*kv_head_count*cp/4, g*(cp/4) + c/4)
+          sf_q[r,c], sf_k[r,c] and sf_v[r,c] below denote those bytes, each read only inside its own grid:
+            sf_q at r < query_len and c < cp, sf_k at r < kv_len and c < cp, sf_v at r < head_dim and
+            c < ceil(kv_len/scale_block_size); the padded rows and columns outside them are never read
+      - Name: MXFP8 operand decode
+        Math: |
+          Each operand value is its E4M3 payload times the power-of-two scale of its own block:
+          q[b,h,i,x] = q_tensor[b,h,i,x] * 2^(sf_q[i, floor(x/scale_block_size)] - e8m0_exponent_bias)
+          k[b,kh,j,x] = k_tensor[b,kh,j,x] * 2^(sf_k[j, floor(x/scale_block_size)] - e8m0_exponent_bias)
+          v[b,kh,j,x] = v_tensor[b,kh,j,x] * 2^(sf_v[x, floor(j/scale_block_size)] - e8m0_exponent_bias)
+          The blocks of q and k run along head_dim and those of v along the key axis, so one scale
+            covers scale_block_size consecutive elements of the operand it multiplies
+          FP8 payloads enter FP32 arithmetic at their exact values; scale construction and products
+            follow FP32 arithmetic, including its representability limits
+        Symbol:
+          q: {meaning: Decoded FP32 query operand, shape: 'ref:q_tensor.shape', dtype: fp32}
+          k: {meaning: Decoded FP32 key operand, shape: 'ref:k_tensor.shape', dtype: fp32}
+          v: {meaning: Decoded FP32 value operand, shape: 'ref:v_tensor.shape', dtype: fp32}
+      - Name: Masked scaled score
+        Math: |
+          scale = prepared_scale = fp32(head_dim^(-0.5)), fixed at instance preparation in this domain;
+            the per-call scale_softmax is ignored whether None or present, and no separate
+            alignment flag is honored, so the causal bound below is always bottom-right aligned
+          visible(i) = {j : 0 <= j < kv_len, j <= i + kv_len - query_len if is_causal, and
+            j >= i + kv_len - query_len - window_size_left if window_size_left >= 0}
+          An absent or -1 window_size_left removes nothing, and both masks intersect when both are on
+          score[b,h,i,j] = scale * sum_{x=0}^{head_dim-1} q[b,h,i,x] * k[b,kh,j,x] if j in visible(i), else -inf
+          visible(i) is never empty here because j = i + kv_len - query_len satisfies both bounds
+        Symbol:
+          prepared_scale: {meaning: FP32 softmax scale fixed at instance preparation, shape: [], dtype: fp32}
+          score: {meaning: Masked scaled attention logit, shape: [{batch: batch_count}, {head: head_count}, {query_token: query_len}, {key_token: kv_len}], dtype: fp32}
+          visible: {meaning: Keys one query row may attend, shape: not_applicable, dtype: not_applicable}
+      - Name: Log-sum-exp output
+        Math: |
+          If lse_buffer is None then lse_tensor is None, nothing is written for it and only
+            o_tensor receives a result; otherwise lse_tensor is lse_buffer itself
+          With top = max_{j in visible(i)} score[b,h,i,j] for a nonempty visible(i):
+            lse_tensor[b,h,i] = top + ln(sum_{j in visible(i)} exp(score[b,h,i,j] - top))
+          An empty visible(i) would give lse_tensor[b,h,i] = -inf; the declared domain excludes it
+          LSE uses the unquantized FP32 score, so the probability rounding below never reaches it
+      - Name: Delayed rescale probability groups
+        Math: |
+          Per row (b,h,i): bias = 16 if head_dim = 128, and 1 if head_dim = 256
+          key_group(t) = {j : probability_group_keys*t <= j < min(probability_group_keys*(t+1), kv_len)},
+            0 <= t <= last_group = ceil(kv_len/probability_group_keys) - 1, visited in increasing key order
+          group_size(t) counts the keys of key_group(t) and u indexes them, so j = probability_group_keys*t + u
+          group_max(t) = max_{j in key_group(t)} score[b,h,i,j], m(-1) = -inf, and
+            update(t) = group_max(t) - m(t-1) > rescale_log2_threshold*ln(2), false when both are -inf
+          m(t) = group_max(t) if update(t), else m(t-1); s(t) = m(t) if m(t) is finite, else 0
+          alpha(t) = exp(m(t-1) - s(t)) if m(t-1) is finite, else 0
+          p[i,u] = exp(score[b,h,i, probability_group_keys*t + u] - s(t)) * bias for 0 <= u < group_size(t), 0 when masked
+          p_q[i,u] = fp8_e4m3fn(clamp(p[i,u], 0, e4m3_max_norm)) read back at its exact FP32 value
+        Symbol:
+          key_group: {meaning: Keys of one probability group, shape: not_applicable, dtype: not_applicable}
+          last_group: {meaning: Integer index of the last group, shape: [], dtype: not_applicable}
+          group_size: {meaning: Integer key count of one group, shape: [], dtype: not_applicable}
+          m: {meaning: Row normalizer carried into group t, shape: [{batch: batch_count}, {head: head_count}, {query_token: query_len}], dtype: fp32}
+          s: {meaning: Normalizer actually used in group t, shape: 'ref:m.shape', dtype: fp32}
+          alpha: {meaning: Rescale factor for earlier accumulations, shape: 'ref:m.shape', dtype: fp32}
+          p: {meaning: Unrounded probability by within-group position, shape: [{batch: batch_count}, {head: head_count}, {query_token: query_len}, {group_key: probability_group_keys}], dtype: fp32}
+          p_q: {meaning: E4M3-rounded probability by the same position, shape: 'ref:p.shape', dtype: fp8_e4m3fn}
+      - Name: Output accumulation
+        Math: |
+          num(-1)[i,x] = 0 and den(-1)[i] = 0 for every row (b,h,i)
+          num(t)[i,x] = num(t-1)[i,x]*alpha(t) + sum_{u=0}^{group_size(t)-1} p_q[i,u] * v[b,kh, probability_group_keys*t + u, x]
+          den(t)[i] = den(t-1)[i]*alpha(t) + sum_{u=0}^{group_size(t)-1} p[i,u]
+          The numerator accumulates the E4M3-rounded probability and the denominator the unrounded
+            one, so the two sums use different values of the same probability
+          A fully masked group has p = p_q = 0 and leaves both accumulations unchanged
+          At t = last_group: o_tensor[b,h,i,x] = bf16(num(t)[i,x] / den(t)[i]) if den(t)[i] > 0, else bf16(0)
+        Symbol:
+          num: {meaning: Accumulated rounded-probability value sum, shape: 'ref:o_tensor.shape', dtype: fp32}
+          den: {meaning: Accumulated unrounded probability sum, shape: 'ref:m.shape', dtype: fp32}
+      - Name: Writes, scratch and inert arguments
+        Math: |
+          The call returns None; o_tensor is o_buffer itself and lse_tensor is lse_buffer itself,
+            both written in place without reading their old values; no output is allocated by the call
+          The written region is the whole logical o_buffer and, when lse_buffer is not None,
+            the whole lse_buffer
+          q_tensor, k_tensor, v_tensor, sf_q, sf_k, sf_v and seq_kv_lens are read only; when present,
+            seq_kv_lens holds kv_len for every request and changes nothing
+          workspace may be written as scratch and its contents are neither outputs nor compared;
+            caller storage outside the output buffers and workspace must not change
+          The prepared instance also fixes the BF16 output dtype and leaves per-tensor FP8 scaling,
+            output amax, paged key/value storage, ragged lengths and attention sinks disabled
+    Golden_reference:
+      Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/problem/reference.py::Model.forward
+      Tolerance:
+        o_tensor: Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0; no formula/relative basis; no defaults
+        lse_tensor: Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0; no formula/relative basis; no defaults
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      cta: Thread block launched as one grid element; owns its smem shared memory and its explicitly allocated tmem tensor-memory columns
+      warp: 32 threads of one CTA, the granularity the fixed source derives as threadIdx.x >> 5
+      thread: Single CUDA thread, one lane of a warp; register names thread-local design values, not a compiled register count or no-spill guarantee
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: Block-scaled products consume E4M3 payloads and E8M0 scales directly, so no decoded operand materializes; one thread owns one packed row, so the delayed-rescale recurrence stays thread-local; with the numerator in tensor memory, freed registers hold a whole score group, read exactly once
+    Rewrite:
+      - Name: Block-scaled score tile, single readout
+        Math: |
+          Per packed row (query token i, head h; worktile coordinates b, kh) and group g with keys
+          j = probability_group_keys*g + n, the two 64-key halves hf in {0,1} each accumulate in FP32 over the
+          4 blocks c of 32 channels: raw[i,j] = sum_c sum_{x in block c} q_payload[i,x] * k_payload[j,x]
+            * 2^(sf_q[i,c] - e8m0_exponent_bias) * 2^(sf_k[j,c] - e8m0_exponent_bias), both E8M0 factors
+          applied inside the block-scaled product, so raw is the Contract's sum_x q*k rounded in FP32
+          At readout, keys outside visible(i) take raw = -inf; the 128 masked values stay in row registers,
+            read from the score tile exactly once, serving both the maximum and the probabilities
+          The scale applies at consumption: the probability path forms score = raw * scale per element, and
+          group_max takes (max raw) * scale, equal because scale > 0 is order-preserving and -inf * scale
+          stays -inf
+        Symbol: {raw: {meaning: One row's masked unscaled FP32 group dot products, shape: [{key_token: probability_group_keys}], dtype: fp32}}
+        Arithmetic:
+          Accumulate: One block-scaled FP32 product per 32-channel block; blocks accumulate sequentially in increasing x; intra-block addition order is hardware-defined
+        Ledger:
+          Baseline: Decode q and k to FP32 by explicit scale multiplies, FMA-reduce the dots, and read the materialized score tile twice per group, once per softmax pass
+          Gain: 'Per (row, key): 2 decode multiplies -> 0 (hardware block scaling); per row per group: score-tile FP32 reads 2 x 128 -> 1 x 128'
+          Cost: One N=128 product -> two N=64 products plus one extra CTA rendezvous per group; 128 live score registers per thread across the half exchange
+      - Name: Group window, thread-local delayed rescale
+        Math: |
+          A worktile at coordinate qtile covers rows i in [q0, min(q0 + qph128, query_len)), q0 = qtile *
+          qph128, i_max = min(q0 + qph128 - 1, query_len - 1); its group window is lo_min = max(q0 + kv_len
+          - query_len - window_size_left, 0) with a left window else 0, hi_max = min(i_max + kv_len - query_len,
+          kv_len - 1) if is_causal else kv_len - 1, g_lo = floor(lo_min / probability_group_keys), and
+          g_hi = floor(hi_max / probability_group_keys)
+          For g outside [g_lo, g_hi] every key of key_group(g) misses visible(i) for every tile row: group_max
+          = -inf, update false, p = p_q = 0, m/den/num unchanged; only [g_lo, g_hi] is evaluated, entering with
+          the Contract's t = -1 state (m = -inf, den = 0, num = 0); the window is never empty because the first
+          live row's diagonal key lies inside it; the row's final normalizer is m(g_hi)
+          group_max(g) = (max of the group's masked raw) * scale; update/s/alpha/m/den follow the Contract's recurrence, alpha evaluated by CUDA expf
+        Symbol:
+          g_lo: {meaning: First key group any tile row can see}
+          g_hi: {meaning: Last key group any tile row can see}
+          qph128: {meaning: Query rows per packed 128-row worktile, binding: 'bind:DESIGN.Work_schedule::qph128'}
+          m: {meaning: Contract's m carried in the owning row's thread, shape: 'ref:CONTRACT.Algorithm_requirement::m.shape', dtype: 'ref:CONTRACT.Algorithm_requirement::m.dtype', retention: 'carry_forward (b,h,i); g=g_lo-1..g_hi', binding: 'ref:CONTRACT.Algorithm_requirement::m'}
+          den: {meaning: Contract's den carried beside m in that thread, shape: 'ref:CONTRACT.Algorithm_requirement::den.shape', dtype: 'ref:CONTRACT.Algorithm_requirement::den.dtype', retention: 'carry_forward (b,h,i); g=g_lo-1..g_hi', binding: 'ref:CONTRACT.Algorithm_requirement::den'}
+          num: {meaning: Contract's num as the tensor-memory accumulator, shape: 'ref:CONTRACT.Algorithm_requirement::num.shape', dtype: 'ref:CONTRACT.Algorithm_requirement::num.dtype', retention: 'carry_forward (b,h,i); g=g_lo-1..g_hi', binding: 'ref:CONTRACT.Algorithm_requirement::num'}
+        Ledger:
+          Baseline: Run the Contract recurrence over every group 0..last_group in each worktile
+          Gain: Groups evaluated per worktile last_group + 1 -> g_hi - g_lo + 1; under causal masks early tiles run a few groups, the widest ceil(kv_len/128)
+          Cost: Tail-tile padding rows (up to 128 minus the live rows) run the full recurrence and store nothing
+      - Name: Biased probability and E4M3 quantization
+        Math: |
+          bias = 16 at head_dim = 128 (the Contract's probability bias); s(g) and alpha(g) are the group's
+          Contract values; for every unmasked key x = raw * scale - s(g) is at most rescale_log2_threshold * ln(2)
+          Each row processes the group as 64 key pairs; each pair evaluates x as two FP32 RNE results in one
+          packed pair, and p[i,u] = exp_bias4(x), an implementation of 2^4 * exp(x) using expf-style range reduction
+          with 2^4 folded into its two range-reduction magic constants and the low-order correction product
+          dropped (Arithmetic); exp_bias4(-inf) = +0, so masked keys contribute exactly zero to both sums
+          p_q[i,u] = a saturating RNE E4M3 pair conversion of (p[i,u], p[i,u+1]); saturation at
+          e4m3_max_norm = 448 is unreachable since p <= 16 * 2^4 = 256; PV reads p_q at its exact value
+          den(g) = den(g-1)*alpha(g) + chunk sums in key order; per 32-key chunk four packed partial chains
+          absorb the sixteen pair results and combine as ((c0+c1)+(c2+c3)), so den carries the same bias as p
+        Arithmetic:
+          Approx: Drops the x*1.925963e-8 correction; x <= 4*ln(2) does not bound |x|, so the source-comment ~1.1 ulp estimate is not a full-domain bound; +0 at -inf
+          Accumulate: Packed FP32 RNE pair adds in a four-chain chunk tree; den reassociation does not feed p_q, but can change normalization and LSE
+        Ledger:
+          Baseline: Scalar expf per key with a runtime bias multiply and one serial FP32 denominator chain
+          Gain: Exponential-path instructions per key pair 16 -> 11 (packed steps, folded bias); denominator chain depth per 32-key chunk 16 -> 4
+          Cost: Approximation can change probabilities and E4M3 rounding; no full-domain output error bound is established; three extra packed adds per chunk
+      - Name: Numerator by block-scaled PV product
+        Math: |
+          num(g)[i,x] = num(g-1)[i,x]*alpha(g) + sum_u p_q[i,u] * v[b,kh, probability_group_keys*g + u, x],
+          evaluated as one tensor-core product per group: four sequential 32-key k-steps multiply the group's
+          E4M3 probability tile by the staged V payload with FP32 accumulation; V's key-axis E8M0 bytes enter
+          as the B-side block scales, realizing the Contract's v decode 2^(sf_v - e8m0_exponent_bias) exactly,
+          and the A-side scale is the constant unit word because the bias already sits inside p_q
+          The product accumulates across groups into the same tensor-memory columns; the accumulate predicate
+          is off only for the first k-step of the window's first group, whose product overwrites the
+          uninitialized accumulator and realizes num(g_lo - 1) = 0 without reading it
+          num(g-1)*alpha(g) is a read-modify-write of the accumulator, run only for g > g_lo and only while
+          some row of a warp has alpha != 1; rows with alpha = 1 multiply by exactly 1.0
+        Ledger:
+          Baseline: Decode V to FP32 by explicit E8M0 multiplies and accumulate p_q * v with per-row FMAs into a register-resident numerator
+          Gain: V decode multiplies per group head_dim*128 -> 0 (hardware B-side scaling); accumulation moves to the tensor core; 128 accumulator registers -> 0
+          Cost: The rare rescale becomes a tensor-memory read-modify-write of 128 columns per firing warp (source-measured fire rate ~1e-6 per row per group)
+      - Name: Reciprocal normalization and LSE epilogue
+        Math: |
+          After the window's last group g_hi, per row:
+            den(g_hi) > 0: inv = 1 / den(g_hi), one FP32 reciprocal, and o_tensor[b,h,i,x] =
+              bf16(num(g_hi)[i,x] * inv)
+            den(g_hi) <= 0: o_tensor[b,h,i,x] = bf16(0)
+          The reciprocal and multiply introduce separate FP32 rounding before BF16 conversion;
+            this operation sequence need not match the Contract's single division num/den
+          If lse_tensor is present: lse_tensor[b,h,i] = m(g_hi) + ln(den(g_hi) * 2^-4) when den(g_hi) > 0
+            and m(g_hi) is finite, else -inf, with CUDA logf; the exact factor 2^-4 removes den's bias
+          Rows with i >= query_len accumulate state but store nothing; every live row writes its full
+            o_tensor row and, when requested, its lse element exactly once; the path touches no workspace
+        Ledger:
+          Baseline: One FP32 division per output element
+          Gain: Divisions per row head_dim -> 1, replaced by one reciprocal and head_dim multiplies
+          Cost: Separate reciprocal/multiply rounding; the source's 1-2 FP32 ulp estimate does not prove output acceptance under the unavailable comparator
+  Work_schedule:
+    Thesis: 'One fused kernel, no scratch: one CTA owns one (query tile, batch x kv head) worktile; packing the group_count heads sharing a kv head into 128 rows lets one staged K/V group feed them all, and thread r owning row r keeps the recurrence thread-local; CTAs dispatch longest-first, a bijection'
+    Step:
+      MAIN:
+        Describe: Computes the attention output and optional log-sum-exp of 128 packed rows by the windowed delayed-rescale recurrence, in one kernel with no workspace
+        Decomposition:
+          Strategy: qph128 = 128/group_count; group_count = head_count/kv_head_count; row r at q0 maps to i = q0 + r mod qph128, h = kh*group_count + floor(r/qph128)
+          Partition:
+            qtile: {meaning: Tile of qph128 query rows x group_count heads, size: 'ceil_div(query_len, qph128)', tile: 1}
+            kv_pair: {meaning: '(b, kh) pair, kv_pair = b*kv_head_count + kh', size: batch_count * kv_head_count, tile: 1}
+          Worktile:
+            Invariant:
+              q_rows: {meaning: E4M3 query payload of the 128 packed rows, shape: [{packed_row: 128}, {key_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::q_tensor.dtype'}
+              sfq_words: {meaning: 'E8M0 sf_q words of the 128 rows, read once', shape: [{packed_row: 128}, {sf_byte: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::sf_q.dtype'}
+            Iteration:
+              k_block: {meaning: 'E4M3 key payload of group g in [g_lo, g_hi]', shape: [{key_token: probability_group_keys}, {key_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::k_tensor.dtype', direction: ascending}
+              sfk_atom: {meaning: E8M0 key-scale atom of group g (512 bytes), shape: [{key_token: probability_group_keys}, {sf_byte: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::sf_k.dtype', direction: ascending}
+              v_block: {meaning: E4M3 value payload of the same group g, shape: [{key_token: probability_group_keys}, {value_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::v_tensor.dtype', direction: ascending}
+              sfv_atom: {meaning: E8M0 value-scale atom of group g (512 B), shape: [{value_dim: head_dim}, {sf_byte: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::sf_v.dtype', direction: ascending}
+          Target:
+            Single_tile:
+              o_rows: {meaning: Output rows written in place into o_tensor, shape: [{packed_row: 128}, {value_dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::o_tensor.dtype'}
+              lse_rows: {meaning: 'LSE of live rows, only when lse_tensor exists', shape: [{packed_row: 128}], dtype: 'ref:CONTRACT.Algorithm_requirement::lse_tensor.dtype'}
+        Mapping:
+          Strategy: One 128-thread CTA; thread r, TMEM lane r and packed row r are one identity, so row reductions are thread-local; one elected thread issues async work
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil_div(query_len, qph128) * batch_count * kv_head_count
+        Schedule:
+          Strategy: sm_count = host-queried device SM count; masked multi-wave launches order CTAs longest-first, a bijection; launch errors surface post-submit
+          Worktile_order:
+            - {by: qtile, direction: descending}
+            - {by: kv_pair, direction: descending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: 'One role, four warps; per group: QK(g), one readout, exponentials, PV(g) issue. PV(g-1) retires mid-iteration g, overlapping tensor work with g''s staging and QK halves, freeing the V slot and scale column next needed. The single 64-column score tile halves TMEM readout for one rendezvous per half'
+    Step:
+      MAIN:
+        Index: {g: {meaning: Key-group iteration within this worktile, definition: [g_lo, g_hi + 1]}}
+        Storage:
+          q_tile: {meaning: 'Swizzle-staged E4M3 query payload, whole worktile', depth: 1, location: smem, shape: [{packed_row: 128}, {key_dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 16384}
+          k_ring: {meaning: Key payload tile of the staged key group, depth: 2, location: smem, shape: [{key_token: probability_group_keys}, {key_dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 32768, view: {k_block(g): {slot_index: (g - g_lo) % 2}}}
+          v_ring: {meaning: Value payload tile of the staged key group, depth: 2, location: smem, shape: [{key_token: probability_group_keys}, {value_dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 32768, view: {v_block(g): {slot_index: (g - g_lo) % 2}}}
+          sfk_ring: {meaning: 512-byte E8M0 scale atom of the staged K group, depth: 2, location: smem, shape: [{byte: 512}],
+            dtype: uint8, total_size: 1024, view: {sfk_atom(g): {slot_index: (g - g_lo) % 2}}}
+          sfv_ring: {meaning: 512-byte E8M0 key-block scale atom of staged V, depth: 2, location: smem, shape: [{byte: 512}],
+            dtype: uint8, total_size: 1024, view: {sfv_atom(g): {slot_index: (g - g_lo) % 2}}}
+          s_tile: {meaning: '64-column FP32 score tile, both halves in turn', depth: 1, location: tmem, shape: [{row: 128}, {column: 64}],
+            dtype: fp32, total_size: 32768}
+          sf_cols: {meaning: E8M0 scale-factor columns of the two products, depth: 1, location: tmem, shape: [{row: 128}, {column: 32}],
+            dtype: uint32, total_size: 16384, view: {sfa_q: {region: {column: [0, 4]}}, sfb_k: {region: {column: [8, 12]}}, sfa_p: {region: {column: [16, 20]}}, sfb_v: {region: {column: [24, 28]}}}}
+          o_tmem: {meaning: FP32 output accumulator holding num, depth: 1, location: tmem, shape: [{row: 128}, {column: head_dim}],
+            dtype: fp32, total_size: 65536}
+          p_tmem: {meaning: 'E4M3 probability tile, four keys per word', depth: 1, location: tmem, shape: [{row: 128}, {column: 32}],
+            dtype: uint32, total_size: 16384}
+          score_regs: {meaning: 'Masked raw scores of the current group, per row', depth: 1, location: register, shape: [{packed_row: 128}, {key_token: probability_group_keys}],
+            dtype: fp32, total_size: 65536}
+          state_regs: {meaning: Carried per-row softmax state m and den, depth: 1, location: register, shape: [{packed_row: 128}, {value: 2}],
+            dtype: fp32, total_size: 1024, view: {m: {region: {value: [0, 1]}}, den: {region: {value: [1, 2]}}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: The CTA's only role; four warps stage operands, compute row-local softmax of the 128 packed rows and write outputs; thread r owns row r throughout
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  sfa_q: {execution_mode: serial, describe: Warps 0-3 write each row's E8M0 sf_q word (dead rows take the unit word) to sfa_q and the constant unit word to sfa_p; done covers the store wait}
+                  sfb_k: {execution_mode: serial, describe: Proxy fence + rendezvous after k_block(g) lands publish q_tile and K(g); warps 0-3 replicate the atom into sfb_k across the four lane subpartitions}
+                  sfb_v: {execution_mode: serial, describe: 'After v_block(g) lands and PV(g-1), the slot''s last reader, retired (none at g_lo), warps 0-3 replicate the atom into sfb_v''s four subpartitions'}
+                  score_regs: {execution_mode: serial, describe: 'Load own row''s half-hf scores from s_tile, mask non-visible keys to -inf into score_regs, exact half max; hf=0 ends at the rendezvous freeing s_tile'}
+                  rescale: {execution_mode: serial, describe: 'Per row: merge half maxima into group_max(g), Contract update test, s(g)/alpha(g), den *= alpha; if g > g_lo and any alpha != 1, rescale o_tmem'}
+                  probs: {execution_mode: serial, describe: 'Per pair: p = exp_bias4(raw*scale - s(g)); den adds four packed chains per chunk; p_q writes p_tmem; done covers store wait and publish rendezvous'}
+                  o_norm: {execution_mode: serial, describe: 'After the last PV retired, read own row from o_tmem in four 32-column chunks, multiply by inv = 1/den (0 if den <= 0), convert to BF16 RNE'}
+                matmul:
+                  q_tile@k_block: {execution_mode: serial, describe: 'Four block-scaled N=64 K=32 products of q_tile by K half hf into s_tile; scales sfa_q, sfb_k words 2hf, 2hf+1; done on the committed all-warp wait'}
+                  p_q@v_block: {execution_mode: async_unordered, describe: 'Four block-scaled K=32 products into o_tmem; A = p_q(g) in p_tmem, B = V(g), scales unit sfa_p / sfb_v; g_lo''s first k-step overwrites, rest add'}
+                load:
+                  q: {execution_mode: serial, describe: All 128 threads copy the packed rows' E4M3 query payload into q_tile's swizzled chunks; rows past query_len contribute zeros; done means tile in smem}
+                  k_block: {execution_mode: async_unordered, describe: 'Bulk copy of group g''s K tile plus its 512-byte E8M0 atom into slot (g-g_lo)%2, done on the slot''s transaction barrier; keys past kv_len zero-fill'}
+                  v_block: {execution_mode: async_unordered, describe: 'Value twin of load:k_block into slot (g-g_lo)%2 on the V ring''s own barrier; in-loop issues follow PV(g-1)''s retirement, which frees that slot'}
+                store:
+                  o: {execution_mode: serial, describe: 'Live rows (i < query_len) write the BF16 row in 16-byte vectors into o_tensor[b, h, i, :]; dead rows write nothing'}
+                  lse: {execution_mode: serial, describe: 'Live rows store m(g_hi) + ln(den * 2^-4), or -inf when den <= 0 or m non-finite, into lse_tensor[b, h, i]; no write when lse_tensor is absent'}
+                acquire: {tmem: {execution_mode: serial, describe: 'One warp reserves the 256 TMEM columns, publishes the base via a shared slot and CTA rendezvous, then relinquishes the permit; done means base visible'}}
+                release: {tmem: {execution_mode: serial, describe: 'After a rendezvous proves all TMEM reads retired, one warp returns the 256 columns; kernel exit then makes o and lse visible to the caller'}}
+            Pipe:
+              - load:k_block(g_lo)
+              - load:v_block(g_lo)
+              - acquire:tmem
+              - load:q
+              - compute:sfa_q
+              - for(g):
+                  - if(g + 1 <= g_hi):
+                      - load:k_block(g + 1)
+                  - compute:sfb_k(g)
+                  - for(hf=0:2):
+                      - matmul:q_tile@k_block(g,hf)
+                      - compute:score_regs(g,hf)
+                  - if(g + 1 <= g_hi):
+                      - load:v_block(g + 1)
+                  - compute:sfb_v(g)
+                  - compute:rescale(g)
+                  - compute:probs(g)
+                  - matmul:p_q@v_block(g)
+              - compute:o_norm
+              - store:o
+              - store:lse
+              - release:tmem
+            Waiting:
+              Prepared:
+                - '{issue compute:sfb_k(g)} ← [{done load:k_block(g)}]'
+                - '{issue compute:sfb_v(g)} ← [{done load:v_block(g)}]'
+                - '{issue compute:rescale(g)} ← [{done matmul:p_q@v_block(g-1)}]'
+                - '{issue compute:o_norm} ← [{done matmul:p_q@v_block(g)}]'
+              Released:
+                - '{issue load:v_block(g+1)} ← [{done matmul:p_q@v_block(g-1)}]'
+                - '{issue compute:sfb_v(g)} ← [{done matmul:p_q@v_block(g-1)}]'
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: Products must be tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale.scale_vec::1X - K-major UMMA descriptors (128-B swizzle, LBO 16, SBO 1024) for q_tile@k_block, TMEM-A with MN-major B for p_q@v_block - completed by tcgen05.commit into mbarriers; TMEM traffic via tcgen05.ld/st under their waits
+      Reason: The FP32 accumulation with hardware E8M0 block scales, the TMEM A operand and the async done events behind the deferred-PV edges exist only in this family; the waits are the primitives behind the declared done of readouts, atom writes and probability stores
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: K/V staging must be single-thread cp.async.bulk.tensor.4d against host-cached CUtensorMaps (UINT8, SWIZZLE_128B, box {128,1,128,1}, zero OOB fill), atoms on cp.async.bulk 1-D, each operand completed by its own per-slot mbarrier armed with expect_tx for exactly that copy's bytes
+      Reason: Staged bytes must match what the UMMA descriptors read, zero fill realizes keys past kv_len, and the split per-operand barriers are the declared done events - a merged accounting cannot serve a schedule arming V half an iteration after K, below PV(g-1)'s retirement
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: One warp must take the 256 columns via tcgen05.alloc, publish the base via shared memory and a rendezvous, relinquish, and dealloc before exit; generic-proxy smem writes read by descriptors need fence.proxy.async.shared::cta; TMEM-access rendezvous need tcgen05.fence::before/after_thread_sync
+      Reason: TMEM has no implicit allocation or proxy visibility; without the handshake and fences a co-resident CTA touches columns it does not own and a product reads stale operand bytes, surfacing as single wrong output elements
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: 'Launch 128 threads per CTA with a 102912-byte dynamic smem request: 83968 bytes live plus 18944 reserved (unused smem P region, Q-atom region, exchange scratch, slack), within the 2-block-per-SM register budget; the host grows the request until resident_blocks * 256 TMEM columns <= 512'
+      Reason: The runtime does not account TMEM in residency; padding caps potential residency at two CTAs per SM, without guaranteeing attained occupancy. Reserved regions keep ring offsets byte-identical with sibling layouts
+    - Item: CONTRACT.Algorithm_requirement::p
+      Choice: The exponential realizing p must be the packed f32x2 sequence replicating CUDA expf's range reduction, with the declared low-order term dropped and 2^4 folded into the two magic constants
+      Reason: This fixes the extracted operation sequence; the source reports bias-fold equivalence, but its unavailable exhaustive harness and NO_KTINY estimate do not establish a full-domain error bound
+  Prefer:
+    - Item: DESIGN.Work_schedule::Flow
+      Choice: Cache the two tensor-map descriptors across calls keyed on base, strides and extents (8 slots), and capture the single launch as a CUDA graph on the second call with an equal key (24-slot LRU, 256-capture budget, side-stream capture, replay on the caller's stream, direct launch on any failure)
+      Reason: Host submit and encoding sit inside the measured window; replay saves a measured 1-2.2 us per call. Remaining launch quantities (qph128, kernel form, dispatch order) derive from key fields plus device properties, so replay relaunches the identical grid on current tensor contents
+  Forbid:
+    - Item: CONTRACT.Algorithm_requirement::p
+      Choice: Folding the 2^4 bias into the shifted exponent bit pattern instead of the magic constants, or substituting __expf or a bare ex2.approx for the declared exponential
+      Reason: Source comments report a ~24% pattern-fold mismatch and __expf-induced E4M3 flips with ~6% output changes in their experiments; these motivate the retained choice, not a new full-domain measurement
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: Merging the K and V staging completion into one shared per-group barrier accounting
+      Reason: The schedule arms V(g+1) mid-iteration, only after PV(g-1) freed its slot, while K(g+1) is armed at the loop top; one shared expect_tx would wait on bytes never copied against that phase

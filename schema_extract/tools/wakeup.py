@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import os
 from pathlib import Path
@@ -45,9 +45,47 @@ def _uuid(value: str, label="thread") -> str:
 
 def _alive(identity, table=None) -> bool | None:
     try:
-        return process_alive(identity, process_table() if table is None else table)
+        if table is None:
+            if not isinstance(identity, dict) or type(identity.get("pid")) is not int or identity["pid"] <= 1:
+                return None
+            current = process_identity(identity["pid"])
+            table = {identity["pid"]: current} if current else {}
+        return process_alive(identity, table)
     except OSError:
         return None
+
+
+def format_beijing_time(timestamp) -> str:
+    if timestamp is None:
+        return "未记录"
+    return datetime.fromtimestamp(timestamp, timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S 北京时间（UTC+8）")
+
+
+def clock_display(result: dict) -> dict:
+    """Add human-readable times to an output copy, never to scheduler evidence."""
+    result = deepcopy(result)
+
+    def times(record, keys):
+        if isinstance(record, dict):
+            for key in keys:
+                if key in record:
+                    record[key + "_display"] = format_beijing_time(record[key])
+
+    for record in (result, result.get("clock")):
+        if not isinstance(record, dict):
+            continue
+        times(record, ("observed_at", "next_due_at"))
+        if record.get("enabled") is False and record.get("next_due_at") is not None:
+            record["next_due_at_display"] += "（已停用，保留记录）"
+        for key in ("check", "last_scan"):
+            times(record.get(key), ("started_at", "due_at", "ack_at", "observed_at", "completed_at"))
+        reminder = record.get("reminder")
+        times(reminder, ("due_at", "next_attempt_at", "first_queued_at", "last_queued_at"))
+        if isinstance(reminder, dict):
+            times(reminder.get("ack"), ("at",))
+        times(record.get("ack"), ("at",))
+        times(record.get("daemon"), ("heartbeat_at",))
+    return result
 
 
 def _clock(ledger: dict) -> dict:
@@ -106,14 +144,19 @@ class QueueError(ExtractError):
 
 
 class Clock:
-    def __init__(self, store, repo: Path, *, now=None, sender=None):
+    def __init__(self, store, repo: Path, *, now=None, sender=None, on_wait=None):
         self.store, self.repo = store, Path(repo).resolve()
         self.now = now or time.time
         self.sender = sender
+        self.on_wait = on_wait
         self.stopping = threading.Event()
         self.launch_id = None
         self.inflight = None
         self.observation_claim = None
+
+    def _transaction(self, phase):
+        callback = (lambda elapsed: self.on_wait(phase, elapsed)) if self.on_wait else None
+        return self.store.control_transaction(on_wait=callback)
 
     @property
     def lock_path(self) -> Path:
@@ -248,12 +291,13 @@ class Clock:
         clock = _clock(self.store.read_supervisor())
         started = self.now()
         rows = monitor.inspect_runs(self.store, clock.get("run_ids"))
+        observed_at = self.now()
         with self.store.supervisor() as ledger:
             clock = _clock(ledger)
             if not _matches(clock, binding) or clock["last_check_number"] >= 0:
                 return
             now = self.now()
-            result = monitor.record_scan(ledger, rows, now)
+            result = monitor.record_scan(ledger, rows, observed_at)
             check = self._complete(clock, result, 0, f"initial-{clock['generation']}", started, now)
             clock["next_observation_at"] = now + OBSERVATION_SECONDS
 
@@ -276,8 +320,8 @@ class Clock:
 
     def ack(self, wake_id: str, thread: str) -> dict:
         thread = _uuid(thread)
-        now = self.now()
-        with self.store.supervisor() as ledger:
+        with self._transaction("ack") as ledger:
+            now = self.now()
             clock = _clock(ledger)
             if not clock.get("enabled"):
                 return {"accepted": False, "reason": "disabled"}
@@ -297,10 +341,9 @@ class Clock:
         """Only an explicit thread can finish that thread's accepted reminder."""
         thread = _uuid(thread)
         identity = process_identity(os.getpid())
-        table = process_table()
         if identity is None:
             raise ExtractError("cannot establish scan process identity")
-        with self.store.supervisor() as ledger:
+        with self._transaction("scan_claim") as ledger:
             clock = _clock(ledger)
             if not clock.get("enabled") or thread != clock["thread_id"]:
                 raise ExtractError("clock disabled or scan thread does not match")
@@ -312,7 +355,7 @@ class Clock:
             if not _current(clock, item, self.now()) or (wake_id and item["id"] != wake_id) or not item.get("ack"):
                 raise ExtractError("scan requires the current accepted reminder; acknowledge it first")
             previous = item.get("scan")
-            if previous and _alive(previous.get("owner"), table) is not False:
+            if previous and _alive(previous.get("owner")) is not False:
                 return {"runs": [], "changes": [], "anomalies": [], "clock": {"committed": False,
                         "status": "scan_busy", "id": item["id"], "owner": previous.get("owner")}}
             claim = {"id": str(uuid4()), "owner": identity, "started_at": self.now()}
@@ -320,7 +363,8 @@ class Clock:
             wake_id, binding, selected = item["id"], _binding(clock), clock.get("run_ids")
         try:
             rows = monitor.inspect_runs(self.store, selected)
-            with self.store.supervisor() as ledger:
+            observed_at = self.now()
+            with self._transaction("scan_commit") as ledger:
                 clock = _clock(ledger)
                 item = clock.get("reminder")
                 if (not _matches(clock, binding) or not item or item["id"] != wake_id or
@@ -328,11 +372,11 @@ class Clock:
                     return {"runs": rows, "changes": [], "anomalies": [],
                             "clock": {"committed": False, "status": "scan_invalidated", "id": wake_id}}
                 now = self.now()
-                result = monitor.record_scan(ledger, rows, now)
+                result = monitor.record_scan(ledger, rows, observed_at)
                 check = self._complete(clock, result, item["number"], wake_id, claim["started_at"], now)
                 result["clock"] = {"committed": True, "check": deepcopy(check), "next_due_at": clock["next_due_at"]}
         except Exception as exc:
-            with self.store.supervisor() as ledger:
+            with self._transaction("scan_cleanup") as ledger:
                 clock = _clock(ledger)
                 item = clock.get("reminder")
                 if item and item["id"] == wake_id and item.get("scan", {}).get("id") == claim["id"]:
@@ -369,13 +413,14 @@ class Clock:
         self.observation_claim = claim["id"]
         try:
             rows = monitor.inspect_runs(self.store, selected)
+            observed_at = self.now()
             with self.store.supervisor() as ledger:
                 clock = _clock(ledger)
                 if (not _matches(clock, _binding(claim)) or clock.get("observation_claim", {}).get("id") != claim["id"]):
                     return {"status": "invalidated"}
                 now = self.now()
-                result = monitor.record_scan(ledger, rows, now)
-                clock["last_observation"] = {**claim, "completed_at": now, "run_count": len(rows),
+                result = monitor.record_scan(ledger, rows, observed_at)
+                clock["last_observation"] = {**claim, "observed_at": observed_at, "completed_at": now, "run_count": len(rows),
                                              "anomaly_count": len(result["anomalies"])}
                 clock.update(next_observation_at=now + OBSERVATION_SECONDS,
                              observation_cursor=(offset + len(selected)) % max(1, len(run_ids)))
@@ -398,7 +443,7 @@ class Clock:
         where = ["--repo", clock["repo"], "--state-root", str(self.store.root)]
         ack = shlex.join([*entry, "ack", item["id"], "--thread", clock["thread_id"], *where])
         status = shlex.join([*entry, "status", *where])
-        due = datetime.fromtimestamp(item["due_at"], timezone.utc).isoformat()
+        due = format_beijing_time(item["due_at"])
         context = {"reminder_id": item["id"], "thread_id": clock["thread_id"], "due_at": due,
                    "ack_command": ack, "status_command": status}
         scan = shlex.join([*entry, "scan", "--wake", item["id"], "--thread", clock["thread_id"], *where])

@@ -2,9 +2,7 @@
 
 运行 `python3 schema_extract/extract_yaml.py candidates <run-uuid> --repo <当前仓库>` 查看本任务已接受回执中的候选和同一稳定 ID 的已有决定；`python3 schema_extract/extract_yaml.py issues --repo <当前仓库>` 读取全部待决项与历史决定。这两个命令不修改提取状态或台账。
 
-六项真实提取后的[长期分类与处理方案](archive/TRIAGE.md)逐项区分继续处理、保留现有修复和来源限制；已归档不等于无需复核。发现决定与实际实现不符时，沿用原稳定 ID 补充证据并修正决定。框架修复与历史产物修订分别验收，部分采纳的剩余事项不能因归档而省略。
-
-批次收口时，Supervisor 逐个读取本批各 run 的 `candidates`；只将 reviewer 确认项作为正式待办，按根因和稳定 ID 查重后登记或记录已有决定，未解决项保持待决。`ready` 和证据审计通过不代表框架候选已处理，也不代替算子结果的表达质量验收。
+批次验收时，Supervisor 逐个读取各 run 的 `candidates`；只将 reviewer 确认项作为正式待办，按根因和稳定 ID 查重后登记或记录已有决定，未解决项保持待决。`ready` 和证据审计通过不代表框架候选已处理，也不代替算子结果的表达质量验收。
 
 阶段回执的 framework_candidates 仅含 id、scope、summary、evidence，编码见[提交与证据](../prompt/operations/response.md)。worker 提候选，reviewer 独立核实后以同一 ID 写回；仅有 worker 提报时状态为 candidate，有 reviewer 确认且 ID 合法时为 confirmed。原候选、确认依据和已有决定一起保留，Supervisor 再整理为本目录格式，阶段角色不直接写台账。
 

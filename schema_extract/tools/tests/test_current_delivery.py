@@ -246,7 +246,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_
         import sys
         from schema_extract.tools.agent import AgentCLI
         from schema_extract.tools.audit import audit_run
-        from schema_extract.tools.recovery import account
+        from schema_extract.tools.recovery import account, confirm_termination, complete_pending_result
         from schema_extract.tools.receipts import proposal_schema
         from schema_extract.tools.runner import DEFAULT_CONFIG, _receive
         from schema_extract.tools.snapshots import freeze_inputs
@@ -282,11 +282,20 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_
                         attempt=attempt, prompt=json.dumps(author.proposal(attempt)),
                         schema=proposal_schema(attempt, source_files=f.lock["source"]["files"]))
                 if mode == "setup_failure":
-                    with patch("schema_extract.tools.agent.subprocess.check_output", side_effect=subprocess.CalledProcessError(75, [str(binary), "--version"])):
+                    with patch("schema_extract.tools.backends.ClaudeBackend.environment", side_effect=OSError("offline prelaunch failure")):
                         result = invoke()
                     self.assertEqual(result["outcome"], "cli_error")
                 else:
+                    import time
                     result = invoke()
+                    deadline = time.monotonic() + 5
+                    while True:
+                        termination = confirm_termination(attempt, result)
+                        if termination["confirmed"] or time.monotonic() >= deadline:
+                            break
+                        time.sleep(0.01)
+                    self.assertTrue(termination["confirmed"])
+                    result = complete_pending_result(f.state, attempt, result, termination)
                     self.assertEqual(result["outcome"], "completed")
                 account(f.state, attempt, result["elapsed_seconds"], result=result)
                 f.state = _receive(f.store, f.state, f.lock, attempt, result, None)

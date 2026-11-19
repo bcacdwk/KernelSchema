@@ -1,0 +1,252 @@
+{
+  "scope": "CPU finite examples of source math, address regions, dispatch and identities; no GPU or full-domain correctness claim",
+  "source_identity": {
+    "commit": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+    "file_count": 26,
+    "all_match": true
+  },
+  "gram_rounding": {
+    "k": [
+      0.123046875,
+      0.376953125,
+      0.61328125
+    ],
+    "fp32_dot": 0.5333480834960938,
+    "stored_bf16_gram": 0.53515625,
+    "beta": 0.10000000149011612,
+    "system_with_gram_rounding": 0.053466796875,
+    "system_without": 0.05322265625
+  },
+  "zero_padded_scan": {
+    "valid_g": [
+      -2.5639898777008057,
+      -4.752813816070557,
+      -0.7293564677238464
+    ],
+    "last_valid_b": -8.046159744262695,
+    "tail_unique_values": [
+      -8.046160697937012,
+      -8.046159744262695
+    ],
+    "claim": "zero padding does not make the FP32 b tail bitwise flat"
+  },
+  "segmented_feedback": {
+    "shape": {
+      "H": 2,
+      "HV": 4,
+      "N": 1,
+      "T": 3072,
+      "sm_count": 148,
+      "G": 3
+    },
+    "g": -0.007445916999131441,
+    "initial_bf16_scalar": 4194304.0,
+    "beta_nonzero_token": 2047,
+    "beta_value": 0.5,
+    "a_seg": [
+      0.0004882817738689482,
+      0.0004882817738689482,
+      0.0004882817738689482
+    ],
+    "b_seg": [
+      2048.002197265625,
+      0.0,
+      0.0
+    ],
+    "serial_segment2_entry": 0.5000020265579224,
+    "composed_segment2_entry": 1.000002145767212,
+    "serial_bf16_first_output_segment2": 0.0439453125,
+    "composed_bf16_first_output_segment2": 0.087890625,
+    "absolute_output_difference": 0.0439453125,
+    "claim": "scalar decay gate accepts but feedback omission changes state/output well beyond FP32 reassociation; CPU exp/rounding are not a CUDA bitwise emulator"
+  },
+  "storage": {
+    "root.yaml": {
+      "L2NORM": {},
+      "PREP": {
+        "smem": 66304,
+        "register": 16384
+      },
+      "CHAIN": {
+        "register": 49152,
+        "smem": 121856
+      }
+    },
+    "segmented.yaml": {
+      "L2NORM": {},
+      "PREP": {
+        "smem": 66304,
+        "register": 16384
+      },
+      "PASS_A": {
+        "register": 16384,
+        "smem": 143360
+      },
+      "PASS_C": {
+        "register": 24576,
+        "smem": 163840
+      }
+    }
+  },
+  "source_smem_allocations": {
+    "vtt32_depth2": {
+      "stage_bytes": 48128,
+      "dynamic_bytes": 123024,
+      "epilogue_capacity_bytes": 16896
+    },
+    "vtt16_depth3": {
+      "stage_bytes": 46080,
+      "dynamic_bytes": 165016,
+      "epilogue_capacity_bytes": 8704
+    },
+    "vtt64_depth2": {
+      "stage_bytes": 52224,
+      "dynamic_bytes": 151696,
+      "epilogue_capacity_bytes": 33280
+    },
+    "vtt32_depth3": {
+      "stage_bytes": 48128,
+      "dynamic_bytes": 171160,
+      "epilogue_capacity_bytes": 16896
+    }
+  },
+  "y_scratch_region": {
+    "reserved_bytes": 5120,
+    "actual_value_bytes": 2048,
+    "actual_value_max_byte": 2543,
+    "old_view_bytes": 4096,
+    "new_view_exactly_covers_value": true
+  },
+  "packed_planes": {
+    "tiles": 10,
+    "elements": 2560,
+    "bytes": 5120,
+    "exact_unique_coverage": true
+  },
+  "dispatch_examples": {
+    "root": {
+      "vtt": 32,
+      "G": 1,
+      "gqa": false,
+      "perm": false,
+      "depth": 2,
+      "average_chunks_meta": 4,
+      "slots_ub": 5
+    },
+    "segmented_g2": {
+      "vtt": 16,
+      "G": 2,
+      "gqa": false,
+      "perm": false,
+      "depth": 3,
+      "average_chunks_meta": 32,
+      "slots_ub": 33
+    },
+    "segmented_g3": {
+      "vtt": 16,
+      "G": 3,
+      "gqa": false,
+      "perm": false,
+      "depth": 3,
+      "average_chunks_meta": 48,
+      "slots_ub": 49
+    },
+    "segmented_gqa": {
+      "vtt": 16,
+      "G": 4,
+      "gqa": true,
+      "perm": false,
+      "depth": 3,
+      "average_chunks_meta": 128,
+      "slots_ub": 129
+    },
+    "wide_segment": {
+      "vtt": 64,
+      "G": 4,
+      "gqa": true,
+      "perm": false,
+      "depth": 2,
+      "average_chunks_meta": 256,
+      "slots_ub": 257
+    },
+    "ragged_empty_segment": {
+      "vtt": 16,
+      "G": 2,
+      "gqa": false,
+      "perm": false,
+      "depth": 3,
+      "average_chunks_meta": 32,
+      "slots_ub": 66
+    }
+  },
+  "empty_segment": {
+    "chunks": 1,
+    "G": 2,
+    "segment_chunk_counts": [
+      0,
+      1
+    ],
+    "empty_a_seg": 1,
+    "amax_exceeds_theta": true,
+    "full_output_owner": "segment 0 reruns all chunks"
+  },
+  "mini_tail_event_witness": {
+    "edges": [
+      [
+        "mini_barrier",
+        "read_k0_w0"
+      ],
+      [
+        "read_k0_w0",
+        "state_update_w0"
+      ],
+      [
+        "state_update_w0",
+        "final_write_w0"
+      ],
+      [
+        "final_write_w0",
+        "epilogue_barrier"
+      ],
+      [
+        "mini_barrier",
+        "read_k0_w1"
+      ],
+      [
+        "read_k0_w1",
+        "state_update_w1"
+      ],
+      [
+        "state_update_w1",
+        "final_write_w1"
+      ],
+      [
+        "final_write_w1",
+        "epilogue_barrier"
+      ]
+    ],
+    "conflicting_events": [
+      "read_k0_w1",
+      "final_write_w0"
+    ],
+    "ordered_in_either_direction": false
+  },
+  "vt64_mini_final_alias": {
+    "dispatch": {
+      "vtt": 64,
+      "G": 1,
+      "gqa": true,
+      "perm": false,
+      "depth": 2,
+      "average_chunks_meta": 65,
+      "slots_ub": 66
+    },
+    "last_local_chunk": 64,
+    "stage_slot": 0,
+    "writer_warp": 0,
+    "reader_warp": 1,
+    "shared_byte_offset": 32,
+    "source_order": "both accesses follow the mini-path barrier; no intervening CTA retirement barrier precedes epilogue overwrite",
+    "scope": "finite source-address conflict and absent ordering; not a measured CUDA race"
+  }
+}

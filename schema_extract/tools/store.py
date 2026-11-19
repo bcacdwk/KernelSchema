@@ -61,9 +61,11 @@ class Store:
                 attempt.get("input_fingerprint") != state["input_fingerprint"] or
                 attempt.get("attempt_id") not in state["attempts"]):
             raise ExtractError("attempt does not belong to the current frozen run")
-        return {"source_lock": lock, "rules_lock": lock, "executor_lock": lock,
+        from .runtime import executor_lock
+        executor = executor_lock(self, state, attempt, lock=lock)
+        return {"source_lock": lock, "rules_lock": lock, "executor_lock": executor,
                 "identity": {"source_fingerprint": lock["fingerprint"], "rules_id": lock["rules"]["id"],
-                             "executor_rules_id": lock["rules"]["id"]}}
+                             "executor_rules_id": executor["rules"]["id"]}}
 
     def initialize(self) -> None:
         marker = self.root / "format.json"
@@ -130,13 +132,16 @@ class Store:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
     @contextmanager
-    def control_transaction(self):
+    def control_transaction(self, *, on_wait=None):
+        started = time.monotonic() if on_wait is not None else None
         while True:
             transaction = self.supervisor()
             try:
                 ledger = transaction.__enter__()
                 break
             except SupervisorBusy:
+                if on_wait is not None:
+                    on_wait(time.monotonic() - started)
                 time.sleep(0.05)
         try:
             yield ledger
@@ -395,6 +400,8 @@ class Store:
                     "input_fingerprint": state["input_fingerprint"], "files": files}
         if call is not None:
             identity.update({key: call[key] for key in ("maintenance_task_id", "purpose", "maintenance_step") if key in call})
+        if state.get("execution_binding"):
+            identity["execution_binding"] = state["execution_binding"]
         if preparation:
             identity["preparation"] = preparation
         identity["selection_signature"] = state.get("selection_signature")
@@ -428,6 +435,8 @@ class Store:
         for key in ("run_id", "input_fingerprint"):
             if info[key] != state[key]:
                 raise ExtractError(f"checkpoint {key} mismatch")
+        if info.get("execution_binding") and info["execution_binding"] not in state.get("execution_bindings", []):
+            raise ExtractError("checkpoint belongs to an unknown executor binding")
         artifact_manifest(directory / "artifacts", expected=info["files"])
         verify_manifest(directory / "artifacts", info["files"])
         return directory / "artifacts", info
@@ -450,6 +459,8 @@ class Store:
         verify_execution(self, state, attempt=invocation)
         if any(approval[key] != invocation[key] for key in ("stage", "node", "attempt_id", "input_fingerprint")):
             raise ExtractError("approval scope differs from its invocation")
+        if approval.get("execution_binding") != invocation.get("execution_binding"):
+            raise ExtractError("approval executor differs from its original invocation")
         if approval["generation"] != invocation["generation"] or approval["plan_revision"] != invocation["plan_revision"]:
             raise ExtractError("approval invocation generation/revision identity changed")
         from .receipts import call_identity
@@ -859,6 +870,8 @@ class Store:
         call = call or next_call(state)
         if call is None:
             raise ExtractError("no dependency-ready call can be prepared")
+        if state.get("execution_binding"):
+            call = {**call, "execution_binding": state["execution_binding"]}
         key = scope_key(call["stage"], call["node"])
         if key in state["active_attempts"]:
             raise ExtractError("cannot prepare a second attempt before confirmed termination")
@@ -925,6 +938,8 @@ class Store:
         if checkpoint.get("preparation"):
             invocation["preparation"] = deepcopy(checkpoint["preparation"])
         invocation.update({key: call[key] for key in ("maintenance_task_id", "purpose", "maintenance_step") if key in call})
+        if state.get("execution_binding"):
+            invocation["execution_binding"] = state["execution_binding"]
         if call["stage"] == "P5" and state["nodes"][call["node"]].get("baseline_context_checkpoint"):
             invocation["baseline_context_checkpoint"] = state["nodes"][call["node"]]["baseline_context_checkpoint"]
         if mode == "adjudicate":
@@ -1151,6 +1166,7 @@ def summary(store: Store, state: dict) -> dict:
     return {key: state.get(key) for key in ("run_id", "operator_id", "status", "stage", "role", "node",
                                           "checkpoint", "output", "published", "reason")} | {
         "format": SUMMARY_FORMAT, "input_fingerprint": state["input_fingerprint"],
+        "execution_binding": state.get("execution_binding"),
         "source_identity": deepcopy(state.get("source_identity")),
         "execution": {key: state.get("config", {}).get(key) for key in
                       ("backend", "worker_effort", "reviewer_effort", "model", "agent_binary")},

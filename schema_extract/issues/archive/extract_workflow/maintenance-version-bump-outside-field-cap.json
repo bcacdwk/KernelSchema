@@ -1,0 +1,18 @@
+{
+  "id": "maintenance-version-bump-outside-field-cap",
+  "category": "extract_workflow",
+  "problem": "限域维护和P6修改范围未清楚区分Version的隐含更新权与显式字段清单，曾出现误称Runner代填版本及P6单列Version被拒收的情况。",
+  "evidence": [
+    "FMHA worker及独立reviewer确认该ID；artifacts.py:_erase_fields默认排除META_DATA.Version，_versions要求获准内容变动时版本递增，Runner只校验。",
+    "当前维护提示已补齐一句现有职责说明，见schema_extract/prompt/operations/maintenance.md及schema_discussion/extract_six_full_20261118/MAINTENANCE_VERSION_GUIDANCE.md。",
+    "Sparse P6 reviewer在revision_scope中显式列META_DATA.Version被冻结validator拒收；原方案仅改目录和tcgen05_packed，不含root写入。公开resume续原reviewer重交，当前P6阶段提示补明版本随授权内容更新、不单列scope；六项边界检查通过，权限/版本函数AST未改。见schema_discussion/extract_six_full_20261118/P6_VERSION_SCOPE.md。",
+    "schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md 和 schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：P6 权限回归及原六项版本边界依据保留；schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md 复核仅合并重复 Version 说明，未削弱隐含写权或校验。"
+  ],
+  "proposal": "在维护与P6既有写权限段落明确worker依公共版本规则更新Version，属于授权内容变更的隐含写权，P6 revision_scope只列实际内容字段；Runner负责检查。",
+  "necessity": "避免为已有隐含写权反复判断或失败检查，不增加字段或更改版本规则。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.5.1",
+    "reason": "2.5.1 的维护和 P6 提示明确：worker 随获准内容更新 Version，Runner 只校验，P6 不将 Version 单列 revision_scope。第三轮仅合并重复说明；root 只读、显式内容范围与版本校验均保留，未新增写入口或放宽权限。"
+  }
+}

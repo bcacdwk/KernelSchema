@@ -88,6 +88,17 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Schema Extract v2: P1-P6 extraction with concurrent ready nodes and an independently approved checkpoint.")
     result.add_argument("--version", action="version", version=f"Schema Extract {__version__}")
     sub = result.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    repair = sub.add_parser("repair-runtime", help="prepare or apply a reviewed executor-only patch without resetting progress")
+    repair.add_argument("operation", choices=("prepare", "apply", "probe"))
+    repair.add_argument("run_id")
+    repair.add_argument("--executor-tree", type=Path)
+    repair.add_argument("--issue-id")
+    repair.add_argument("--reason")
+    repair.add_argument("--plan")
+    repair.add_argument("--authorization", type=Path,
+                        help="user instruction to continue this exact plan with delivery audit markers")
+    repair.add_argument("--repo", type=Path, default=Path.cwd())
+    repair.add_argument("--state-root", type=Path)
     extract = sub.add_parser("extract", help="freeze inputs and independently approve all six stages")
     select = extract.add_mutually_exclusive_group(required=True)
     select.add_argument("--id", dest="operator_id")
@@ -222,6 +233,7 @@ def _print_observations(rows, *, as_json=False):
     if as_json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return
+    from .wakeup import format_beijing_time
     for row in rows:
         if row.get("error"):
             print(f"{row['run_id']} unknown: {row['error']}")
@@ -230,10 +242,10 @@ def _print_observations(rows, *, as_json=False):
         print(f"{row['run_id']} {row.get('operator_id')} {row.get('disposition', row.get('status'))} {row.get('stage')} "
               f"nodes={row.get('completed_node_count')}/{row.get('planned_node_count')} "
               f"active={len(row.get('active_attempts', {}))} "
-              f"observed={row['observation']['status']} at={row['observation']['observed_at']:.0f} "
+              f"observed={row['observation']['status']} at={format_beijing_time(row['observation']['observed_at'])} "
               f"executor={executor.get('version')}/{str(executor.get('digest') or 'unknown')[:12]} "
               f"gate={'v1' if row.get('gate_capable') else 'unsupported'} "
-              f"last={row.get('updated_at')} "
+              f"last={format_beijing_time(row.get('updated_at'))} "
               f"published={row.get('published')} checkpoint={row.get('checkpoint')}")
         for item in row.get("anomalies", []):
             print(f"  {item.get('classification')} {item.get('scope')}: {item.get('summary')} [{item.get('evidence')}]")
@@ -320,11 +332,46 @@ def _busy_result(state: dict, entry: dict) -> int:
     return 1
 
 
+def _monitor_wait():
+    last = {}
+    def waiting(phase, elapsed):
+        if elapsed >= 1 and (phase not in last or elapsed - last[phase] >= 30):
+            print(f"monitor {phase}: 正在等待控制锁（{elapsed:.0f} 秒）；可中断，随后用同一提醒 ID 和 monitor status 核对并续接。",
+                  file=sys.stderr, flush=True)
+            last[phase] = elapsed
+    return waiting
+
+
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     try:
         args.repo = args.repo.resolve()
         state_root = (getattr(args, "state_root", None) or args.repo / ".schema_extract/v2").resolve()
+        if args.command == "repair-runtime":
+            from . import executor_repairs
+            store = Store(state_root)
+            if args.operation == "prepare":
+                if not args.executor_tree or not args.issue_id or not args.reason:
+                    raise ExtractError("repair preparation requires --executor-tree, --issue-id and --reason")
+                result = executor_repairs.prepare(store, args.run_id, tree=args.executor_tree.resolve(),
+                                                   issue_id=args.issue_id, reason=args.reason)
+            elif args.operation == "probe":
+                result = executor_repairs.probe(store, store.load(args.run_id))
+            else:
+                if not args.plan or not args.authorization:
+                    raise ExtractError("repair application requires --plan and --authorization")
+                from .snapshots import frozen_invocation
+                target = read_json(store.run_dir(args.run_id) / "runtime_repairs" / "plans" /
+                                   executor_repairs._id(args.plan) / "target.lock.json")
+                review = args.authorization.expanduser().resolve()
+                arguments, directory, environment = frozen_invocation(target, ["repair-runtime", "apply", args.run_id,
+                    "--plan", args.plan, "--authorization", str(review), "--state-root", str(state_root)])
+                if rules_root() != directory:
+                    os.chdir(directory)
+                    os.execve(sys.executable, arguments, environment)
+                result = executor_repairs.apply(store, args.run_id, plan_id=args.plan, review=read_json(review))
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         if args.command == "standalone":
             from .standalone import create_view
             print(json.dumps(create_view(args.source, args.output, args.repo), ensure_ascii=False, indent=2))
@@ -344,9 +391,9 @@ def main(argv=None) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else format_audit(result))
             return 1 if result["verification"]["status"] == "incomplete" or (result["archive"] and result["archive"]["status"] != "archived") else 0
         if args.command == "monitor":
-            from .wakeup import Clock
+            from .wakeup import Clock, clock_display
             store = Store(state_root)
-            clock = Clock(store, args.repo)
+            clock = Clock(store, args.repo, on_wait=_monitor_wait())
             if args.monitor_command == "scan":
                 if args.wake or args.thread:
                     if args.run_ids:
@@ -362,13 +409,16 @@ def main(argv=None) -> int:
                 result = clock.stop()
             else:
                 result = clock.status()
+            shown = clock_display(result)
             if args.monitor_command != "scan" or args.json:
-                print(json.dumps(result, ensure_ascii=False, indent=2))
+                print(json.dumps(shown, ensure_ascii=False, indent=2))
             else:
                 _print_observations(result["runs"])
                 print(f"changes={len(result['changes'])} anomalies={len(result['anomalies'])}")
+                if result.get("superseded_run_ids"):
+                    print("以下 run 的本次采样已被更新观察超过：" + ", ".join(result["superseded_run_ids"]))
                 if result.get("clock"):
-                    print(json.dumps(result["clock"], ensure_ascii=False))
+                    print(json.dumps(shown["clock"], ensure_ascii=False))
             return 0
         if args.command == "_clock":
             from .wakeup import Clock

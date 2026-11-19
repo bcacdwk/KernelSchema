@@ -9,7 +9,7 @@ from .common import ExtractError, regular_file, rules_root, source_root
 from .artifacts import (artifact_manifest, design_context, region_evidence_lines, resolve_workspace,
                         validate_index, validate_plan, validate_revision_scope)
 from .comparators import validate_comparisons
-from .reading import read_evidence
+from .reading import EvidenceSelectionError, read_evidence
 from .stages import DOCUMENT_CONCLUSIONS, STAGES, node_signature, required_conclusions, scope_key
 
 
@@ -31,14 +31,14 @@ IDENTITY_FIELDS = ("run_id", "attempt_id", "input_fingerprint", "stage", "role",
 
 
 class ReceiptFormatError(ExtractError):
-    """A scoped proposal may repair JSON shape or an identified artifact layout error."""
+    """Proposal shape, required judgments or evidence selection needs model resubmission."""
 
 
 def call_identity(attempt: dict) -> dict:
     return {key: attempt[key] for key in (*IDENTITY_FIELDS,
             *(key for key in ("mode", "generation", "node_signature", "selection_signature", "writing_signature",
                               "backend", "model", "effort", "session_scope", "source_identities",
-                              "maintenance_task_id", "purpose", "maintenance_step") if key in attempt))}
+                              "maintenance_task_id", "purpose", "maintenance_step", "execution_binding") if key in attempt))}
 
 
 REOPEN_TARGETS = {"P2": {"P1"}, "P3": {"P1", "P2"}, "P4": {"P1", "P2", "P3"},
@@ -203,6 +203,8 @@ def normalize_response(value: dict, lock: dict, attempt: dict, artifacts: Path) 
             try:
                 anchor = read_evidence(root, path, selection["line_start"], selection["line_end"],
                                        quote_offset=selection["quote_offset"], expected_sha256=hashes[path])
+            except EvidenceSelectionError as exc:
+                raise ReceiptFormatError(f"{location}: {exc}") from exc
             except (OSError, ValueError) as exc:
                 raise ExtractError(f"{location}: {exc}") from exc
             if key == "source_evidence":
@@ -387,7 +389,7 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
         _anchor(evidence, artifacts, files)
     for item in [*value["conclusions"], *value["issues"], *value["framework_candidates"]]:
         if any(index < 0 or index >= len(value["source_evidence"]) for index in item["evidence"]):
-            raise ExtractError("conclusion/issue evidence index is outside source_evidence")
+            raise ReceiptFormatError("conclusion/issue evidence index is outside source_evidence")
     final = value["decision"] in {"complete", "approve"}
     if final:
         if resolution and resolution.get("diagnostic"):
@@ -395,13 +397,13 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
         categories = {entry["category"] for entry in value["source_evidence"]}
         required = set(STAGES[attempt["stage"]]["evidence"])
         if not required <= categories:
-            raise ExtractError("missing source evidence categories: " + ", ".join(sorted(required - categories)))
+            raise ReceiptFormatError("missing source evidence categories: " + ", ".join(sorted(required - categories)))
         for category in required:
             key = "entrypoint" if category == "implementation" else category
             locators = bindings[key] if isinstance(bindings[key], list) else [bindings[key]]
             if not any(item["category"] == category and item["path"] in {entry["path"] for entry in locators}
                        for item in value["source_evidence"]):
-                raise ExtractError(f"missing bound {category} entry anchor")
+                raise ReceiptFormatError(f"missing bound {category} entry anchor")
         artifact_subjects = set()
         if attempt["role"] == "reviewer":
             required_files = required_artifact_evidence(state, attempt, files, resolution=resolution)
@@ -420,15 +422,15 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
                     and (item["evidence"] or item["subject"] in artifact_subjects)}
         required_subjects = set(required_conclusions(attempt))
         if not required_subjects <= subjects:
-            raise ExtractError("missing supported stage conclusions: " + ", ".join(sorted(required_subjects - subjects)))
+            raise ReceiptFormatError("missing supported stage conclusions: " + ", ".join(sorted(required_subjects - subjects)))
         if attempt["stage"] == "P1" and attempt.get("mode", "normal") != "adjudicate":
             validate_comparisons(value, lock, semantic_artifacts, parser_root=parser_root)
     if attempt["role"] == "reviewer":
         required_artifacts = required_artifact_evidence(state, attempt, files, resolution=resolution)
         if not required_artifacts <= {item["path"] for item in value["artifact_evidence"]}:
-            raise ExtractError("reviewer must cite all stage artifacts")
+            raise ReceiptFormatError("reviewer must cite all stage artifacts")
         if not value["source_evidence"]:
-            raise ExtractError("reviewer needs actual source evidence")
+            raise ReceiptFormatError("reviewer needs actual source evidence")
         if final and attempt["stage"] == "P5" and not resolution.get("diagnostic"):
             resolved = resolve_workspace(semantic_artifacts, parser_root=parser_root, nodes=[attempt["node"]])
             _validate_derivation_anchors(resolved, [attempt["node"]], value["artifact_evidence"])

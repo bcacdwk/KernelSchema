@@ -1,0 +1,18 @@
+{
+  "id": "location-storage-level-registration",
+  "category": "extract_workflow",
+  "problem": "DOC5要求Storage.location沿用硬件区名称，而提取P1仅要求最小登记执行单元及所属资源作用域；register等纯存储层级在硬件占位下如何登记，缺少明确指引。",
+  "evidence": [
+    "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_docs/5.design.tile_pipeline.md:352,361,365,524 明列register等存储位置，同时要求沿用硬件规格名称。",
+    "同版本 schema_extract/prompt/phases/01_contract.md:45-47 只登记源码明确的执行单元、组成及所属资源作用域，其余硬件保持占位；下游无权直接改Contract。",
+    "GEMM P3 worker与独立reviewer确认：sb_regs、row_acc采用register，固定fp8gg_umma.cu:813-815,832-836支持寄存器状态；Contract已列smem/tmem但未列register。reviewer认可其为已有开放取值，不阻塞产物。",
+    "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：GEMM 全目录只读检查退出 0；schema_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/.extraction/issue-review-20261119.json 保存精确两字段变化、root/wide 寄存器来源和 unchanged wide/dispatch，当前字节及 DOC5 删减复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+  ],
+  "proposal": "明确提取时存储层级的命名与登记口径，区分名称登记和硬件能力调查；不新增字段或要求调查寄存器容量。",
+  "necessity": "减少P1和下游对同一存储名称的反复判断；当前已有register取值不因这一说明问题停止提取。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.5.1",
+    "reason": "2.5.1 对齐 DOC2、DOC5 和 P1：在所属执行单元摘要登记有据存储名称及范围，Storage.location 沿用；纯存储不必另设 Execution 键，也不成为 worker/role。GEMM thread 摘要已补 thread-local register，第三、四轮限域复核通过；不推定容量、编译后分配或无 spill，原 P6 仍只覆盖原字节。"
+  }
+}

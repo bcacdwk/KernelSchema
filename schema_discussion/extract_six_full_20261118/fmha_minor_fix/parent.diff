@@ -1,0 +1,58 @@
+--- parent/root.yaml
++++ delivery/root.yaml
+@@ -2,7 +2,7 @@
+   Name: fmha_mxfp8_qkv
+   Describe: Multi-head attention on E4M3 Q/K/V payloads with E8M0 block-32 scales, giving a BF16 output and optional FP32 log-sum-exp under causal/window masks
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+-  Version: 6
++  Version: 7
+   Dispatch:
+     when: head_dim = 128; the loaded binary issues tcgen05 (arch probe passes); the plan stays fused (nsplit = 1, or the caller workspace absent or too small); ceil_div(query_len, 128*kv_head_count/head_count) * batch_count * kv_head_count > 2 * sm_count, sm_count the host-queried device SM count (148 on the profiled device), with a preparation-fixed mask active (is_causal or window_size_left >= 0); K/V bases and strides admit tensor-map descriptors, so staging uses bulk tensor copies
+ CONTRACT:
+@@ -180,7 +180,7 @@
+         Math: |
+           Per packed row (query token i, head h; worktile coordinates b, kh) and group g with keys
+           j = probability_group_keys*g + n, the two 64-key halves hf in {0,1} each accumulate in FP32 over the
+-          4 blocks c of 32 keys: raw[i,j] = sum_c sum_{x in block c} q_payload[i,x] * k_payload[j,x]
++          4 blocks c of 32 channels: raw[i,j] = sum_c sum_{x in block c} q_payload[i,x] * k_payload[j,x]
+             * 2^(sf_q[i,c] - e8m0_exponent_bias) * 2^(sf_k[j,c] - e8m0_exponent_bias), both E8M0 factors
+           applied inside the block-scaled product, so raw is the Contract's sum_x q*k rounded in FP32
+           At readout, keys outside visible(i) take raw = -inf; the 128 masked values stay in row registers,
+@@ -190,7 +190,7 @@
+           stays -inf
+         Symbol: {raw: {meaning: One row's masked unscaled FP32 group dot products, shape: [{key_token: probability_group_keys}], dtype: fp32}}
+         Arithmetic:
+-          Accumulate: One block-scaled FP32 product per 32-key block; blocks accumulate sequentially in increasing x; intra-block addition order is hardware-defined
++          Accumulate: One block-scaled FP32 product per 32-channel block; blocks accumulate sequentially in increasing x; intra-block addition order is hardware-defined
+         Ledger:
+           Baseline: Decode q and k to FP32 by explicit scale multiplies, FMA-reduce the dots, and read the materialized score tile twice per group, once per softmax pass
+           Gain: 'Per (row, key): 2 decode multiplies -> 0 (hardware block scaling); per row per group: score-tile FP32 reads 2 x 128 -> 1 x 128'
+--- parent/split_kv.yaml
++++ delivery/split_kv.yaml
+@@ -2,7 +2,7 @@
+   Name: fmha_mxfp8_qkv
+   Describe: Multi-head attention on E4M3 Q/K/V payloads with E8M0 block-32 scales, giving a BF16 output and optional FP32 log-sum-exp under causal/window masks
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+-  Version: 2
++  Version: 3
+   Dispatch:
+     id: split_kv
+     when: head_dim = 128; the loaded binary issues tcgen05; the caller's workspace meets the planned size and the planner splits the key range, so nsplit > 1 with base = ceil_div(query_len, qph128) * batch_count * kv_head_count < 2 * sm_count, n_group > 1, sm_count host-queried; the span selects the flat scan; 2 * query_len * group_count > ceil_div(query_len, qph128) * 128, so no padding-skip row order; rows_total >= 2 * sm_count or nsplit < 8 selects the narrow combine; K/V admit tensor maps
+@@ -15,7 +15,7 @@
+           Per packed row (query token i, head h; worktile coordinates b, kh) and group g holding keys
+           j = probability_group_keys*g + n, the score tile carries raw[i,j] = sum_c sum_{x in block c}
+             q_payload[i,x] * k_payload[j,x] * 2^(sf_q[i,c] - e8m0_exponent_bias) * 2^(sf_k[j,c]
+-            - e8m0_exponent_bias), in FP32 over the 4 blocks c of 32 keys with both E8M0 factors inside
++            - e8m0_exponent_bias), in FP32 over the 4 blocks c of 32 channels with both E8M0 factors inside
+             the block-scaled product, so raw is the Contract's sum_x q*k rounded in FP32
+           Keys outside visible(i) take raw = -inf at readout; the scale applies at consumption, the
+             probability path forming score = raw * scale per element and a group maximum taking
+@@ -24,7 +24,7 @@
+             it for the maximum, the chunk pass for the probabilities, and both recompute the same raw
+         Symbol: {raw: {meaning: One row's masked unscaled FP32 group dot products, shape: [{key_token: probability_group_keys}], dtype: fp32}}
+         Arithmetic:
+-          Accumulate: One block-scaled FP32 product per 32-key block; blocks accumulate sequentially in increasing x; intra-block addition order is hardware-defined
++          Accumulate: One block-scaled FP32 product per 32-channel block; blocks accumulate sequentially in increasing x; intra-block addition order is hardware-defined
+         Ledger:
+           Baseline: One fused pass reading each materialized score tile once, serving both the group maximum and the probabilities from row registers
+           Gain: The chunk pass drops the maximum reduction; it reads only the probabilities it consumes and keeps its numerator in head_dim registers

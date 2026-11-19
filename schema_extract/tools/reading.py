@@ -10,6 +10,10 @@ import sys
 import tempfile
 
 
+class EvidenceSelectionError(ValueError):
+    """The file is verified, but the caller's range or excerpt needs correction."""
+
+
 def stage_check(record: dict, *, workspace: Path | None = None, rules: Path | None = None,
                 baseline: Path | None = None, source: Path | None = None) -> dict:
     """Preview only: a worker's normalization never writes to the attempt workspace."""
@@ -112,13 +116,13 @@ def read_evidence(root: Path, path: str, start_line: int, end_line: int,
     lines = data.decode("utf-8").splitlines()
     if (type(start_line) is not int or type(end_line) is not int or
             not 1 <= start_line <= end_line <= len(lines)):
-        raise ValueError(f"invalid evidence range (file has {len(lines)} lines)")
+        raise EvidenceSelectionError(f"invalid evidence range (file has {len(lines)} lines)")
     selected = "\n".join(lines[start_line - 1:end_line])
     if type(quote_offset) is not int or not 0 <= quote_offset < len(selected):
-        raise ValueError("quote_offset must select a character within the evidence range")
+        raise EvidenceSelectionError("quote_offset must select a character within the evidence range")
     quote = selected[quote_offset:quote_offset + 320]
     if not quote.strip():
-        raise ValueError("evidence excerpt is empty; select the relevant range/quote_offset")
+        raise EvidenceSelectionError("evidence excerpt is empty; select the relevant range/quote_offset")
     return {"path": path, "sha256": file_hash, "line_start": start_line,
             "line_end": end_line, "quote": quote}
 

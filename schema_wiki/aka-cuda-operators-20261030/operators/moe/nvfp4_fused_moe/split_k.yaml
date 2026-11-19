@@ -1,0 +1,709 @@
+META_DATA:
+  Name: nvfp4_fused_moe
+  Describe: Routed NVFP4 mixture-of-experts forward with an explicit block-16 activation quantize-dequantize between FC1 and FC2 and a routing-weighted BF16 sum
+  Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py::Model.forward
+  Version: 2
+  Dispatch:
+    id: split_k
+    when: token_count*slot_count <= 1536 and token_count <= 128 and token_count*slot_count >= 32, and the wide GEMM2 leaf with the bulk drain is kept, so the route tile count read from the ids of the call that fixes the launch set, summed over experts as ceil(valid routes of the expert / 128), times (hidden_dim/128)*max(1,intermediate_dim/256) is at least 3072, and the multi-node chain is kept, so some ids entry lies in [0,expert_count) and the hidden_states payload is not entirely zero in magnitude
+DESIGN:
+  Math_reshape:
+    Thesis: Both operands stay packed NVFP4 and the tensor core applies the block-16 scales, so no decoded array exists. Routes are grouped per expert, the FC1 reduction is cut into two channel slices a separate node reduces, and its activation operand comes from clipped gather boxes
+    Rewrite:
+      - Name: Route grouping and padding
+        Math: |
+          A route (t,s) is valid as in Contract; route_count counts them. counts[e] counts expert e and offs is its exclusive prefix, offs[expert_count] = route_count.
+          route_position maps valid routes onto [0,route_count), expert e owning [offs[e],offs[e]+counts[e]); order within an expert is an arbitrary permutation.
+          route_of[t,s] = route_position(t,s), or -1 when invalid; route_token[r], route_slot[r], route_expert[r] invert it.
+          tile_offsets is the exclusive prefix of ceil(counts[e]/bm); tile_count = tile_offsets[expert_count]. tile_expert[j] owns j, tile_first[j] = (j-tile_offsets[tile_expert[j]])*bm, tile_rows(j) = min(bm,counts[tile_expert[j]]-tile_first[j]).
+          Tile j starts at offs[tile_expert[j]]+tile_first[j]. Rows past tile_rows(j) are padding and never stored by this tile; rows r >= route_count belong to no valid route. FC1 and fc2 stage padding differently as defined below; neither encoding traps.
+        Symbol:
+          route_count: {meaning: Number of valid routes}
+          route_capacity: {meaning: Allocated rows of route-indexed buffers, value: token_count*slot_count}
+          bm: {meaning: Route rows in one tile, binding: 'bind:DESIGN.Work_schedule::bm'}
+          counts: {meaning: Valid routes per expert, shape: [{expert: expert_count}], dtype: int32, retention: keep_value invocation}
+          offs: {meaning: Exclusive route prefix per expert, shape: [{expert: expert_count+1}], dtype: int32, retention: keep_value invocation}
+          tile_count: {meaning: Number of nonempty route tiles}
+          tile_bound: {meaning: Upper bound on the route tile count, value: 'ceil_div(route_capacity,bm) + min(expert_count,route_capacity)'}
+          tile_offsets: {meaning: Exclusive tile prefix per expert, shape: [{expert: expert_count+1}], dtype: int32, retention: keep_value invocation}
+          tile_expert: {meaning: Expert owning each route tile, shape: [{tile: tile_count}], dtype: int32, retention: keep_value invocation}
+          tile_first: {meaning: First route of a tile inside its expert, shape: [{tile: tile_count}], dtype: int32, retention: keep_value invocation}
+          tile_rows: {meaning: Valid route rows of one route tile}
+          route_of: {meaning: Position of each route slot, shape: [{token: token_count}, {slot: slot_count}], dtype: int32, retention: keep_value invocation}
+          route_token: {meaning: Token of a positioned route; the FC1 operand row, shape: [{route: route_capacity}], dtype: int32, retention: keep_value invocation}
+          route_slot: {meaning: Slot of a positioned route; unread here, shape: [{route: route_capacity}], dtype: int32, retention: keep_value invocation}
+          route_expert: {meaning: Expert of a positioned route; read by ACT, shape: [{route: route_capacity}], dtype: int32, retention: keep_value invocation}
+        Ledger:
+          Baseline: Evaluate every route from its own token row, fetching the expert weights per route
+          Gain: One expert's weights serve a contiguous run of up to bm routes, addressed as offsets of one buffer
+          Cost: 0 -> about 16*route_capacity bytes of index arrays per call, plus the per-expert and per-tile offsets
+      - Name: Direct clipped activation operand
+        Math: |
+          No route-ordered copy of the activations exists. The FC1 operand rows are the Contract's hidden_states and hidden_states_scale themselves, addressed through route_token: row r of a tile reads token route_token[r], so decoding the fetched bytes gives hidden_value[route_token[r]] by the Contract's decode, with no rescale and no rearrangement.
+          A stage issues ceil(tile_rows(j)/4) four-row gather boxes. The last box repeats the tile's first valid token in any excess rows; later boxes are omitted. Only valid rows' scales are fetched, so omitted payload rows and padding scales retain shared-slot bytes. A token with no valid route is never read.
+          Each of a tile's split_count*(intermediate_dim/64) items fetches those rows over its own channel range.
+        Ledger:
+          Baseline: Copy each valid route's payload and scale bytes once into a route-ordered buffer, then box 128 contiguous rows of it per stage
+          Gain: No route-ordered allocation or copy of route_capacity*hidden_dim*9/16 bytes; each stage fetches 4*ceil(tile_rows(j)/4) payload rows
+          Cost: A stage issues ceil(tile_rows(j)/4) four-row boxes instead of one contiguous box, and each of a tile's items re-fetches those rows
+      - Name: Block-scaled packed product in two slices
+        Math: |
+          Neither operand is decoded. For packed codes ac, bc and E4M3 scales as, bs over a reduction length L that is a multiple of nvfp4_block, with kb = floor(k/nvfp4_block):
+            bsprod(ac,as,bc,bs)[m,n] = sum32 over kb ascending of fp32(as[m,kb]) * fp32(bs[n,kb]) * sum_{u=0}^{nvfp4_block-1} e2m1(ac[m,kb*nvfp4_block+u]) * e2m1(bc[n,kb*nvfp4_block+u])
+          the FP32 accumulator being zeroed before kb = 0; one instruction advances nvfp4_block*4 channels, inner sum and scale products included.
+          The FC1 reduction splits into split_count slices of hidden_dim/split_count channels.
+          For tile j, slice sl and n-tile channels n, part[sl,r,n] is bsprod over slice sl of the row r activation operand against prepared row n of expert tile_expert[j], and part[sl,r,intermediate_dim+n] the same against row intermediate_dim+n, written only below tile_rows(j).
+          For the (t,s) with route_of[t,s] = r, the ascending sum over sl of part[sl,r,n] is the Contract's up[t,s,n] and of the gate column its gate[t,s,n].
+        Symbol:
+          split_count: {meaning: Channel slices of the FC1 hidden reduction, value: 2}
+          part: {meaning: FP32 slice partial of the up and gate of one route, shape: [{slice: split_count}, {route: route_capacity}, {channel: 2*intermediate_dim}], dtype: fp32, retention: keep_value invocation}
+        Arithmetic:
+          Accumulate: FP32 accumulator, ascending block order, zeroed at the item's first group; each slice keeps its own, added in ascending slice order downstream
+        Ledger:
+          Baseline: One item per (tile, n-tile) accumulating all hidden_dim/256 stages in one accumulator and quantizing it in place
+          Gain: Items tile_count*(intermediate_dim/64) -> split_count times that, each accumulator chain hidden_dim/256 -> hidden_dim/(256*split_count) stages
+          Cost: 0 -> split_count*route_capacity*2*intermediate_dim FP32 partial elements written once and read once
+      - Name: Slice reduction of the FC1 partials
+        Math: |
+          For a route r, a group b of nvfp4_block consecutive intermediate channels and a channel u of that group:
+            fc1_up = the sum over sl ascending of part[sl,r,b*nvfp4_block+u], from 0
+            fc1_gate = the sum over sl ascending of part[sl,r,intermediate_dim+b*nvfp4_block+u], from 0
+          so the slice sums cover the hidden reduction in ascending channel order, joined by split_count-1 FP32 adds per element.
+          The reduction ranges over all route_capacity rows. Rows at or past route_count are produced by no item and hold what part kept: their route_expert is outside [0,expert_count) and they are dropped, or it is a stale in-range id and their activation bytes land in a row no fc2 tile stores.
+        Ledger:
+          Baseline: One accumulator per route holding the whole hidden reduction, quantized by the epilogue that produced it
+          Cost: 0 -> split_count*route_capacity*2*intermediate_dim*4 bytes of FP32 partials read once, and split_count-1 extra FP32 adds per element
+      - Name: Clamp, activation and NVFP4 quantize
+        Math: |
+          For route r, e = route_expert[r], alpha = gemm1_alpha[e], beta = gemm1_beta[e], limit = gemm1_clamp_limit[e] when present:
+            gate_c = min(fc1_gate, limit), up_c = min(max(fc1_up,-limit),limit) when present, else both unchanged
+            activation_type 3:  act = (gate_c * sig(alpha*gate_c)) * (up_c + beta)
+            activation_type 10: act = (alpha * tanh(rcp_rn(alpha)*gate_c)) * sig(gate_c) * (beta * tanh(rcp_rn(beta)*up_c))
+            sig(x) = rcp_approx(1 + exp2_approx_ftz(x*L2E)); tanh(x) = fma32(sig(2*x),2,-1); L2E = fp32(-1.44269504)
+          Per group b of nvfp4_block channels of one route, peak = max abs(act) over the group, an order-free tree across its four quarters:
+            act_scale[r,b] = fp8_e4m3fn(min(peak * fp32(1/e2m1_max), e4m3_max)), saturating
+            act_code = e2m1_rne(act * rcp_rn(max(fp32(act_scale[r,b]), 2^-126))), saturating
+          act_payload packs two act_code per byte with the even channel in the low nibble, so act_code*fp32(act_scale) is the Contract's act_q.
+        Symbol:
+          act_scale: {meaning: E4M3 scale of one activation block, shape: [{route: route_capacity}, {block: intermediate_dim/nvfp4_block}], dtype: fp8_e4m3fn, retention: keep_value invocation}
+          act_payload: {meaning: E2M1 activation codes at two per byte, shape: [{route: route_capacity}, {packed: intermediate_dim/2}], dtype: uint8, retention: keep_value invocation}
+        Arithmetic:
+          Approx: sig and tanh use ex2.approx.ftz and rcp.approx; their non-folded prescales differ from root, and source comments give no domain-wide bound
+          Accumulate: peak is an order-free max tree; the quantize multiplies by rcp_rn of the scale instead of dividing, and 1/e2m1_max is a rounded constant
+        Ledger:
+          Baseline: Clamp, activate and quantize in the GEMM1 epilogue from the item's own accumulator
+          Gain: One pass over route_capacity*(intermediate_dim/nvfp4_block) groups with four threads each, not a drain inside a tile epilogue
+          Cost: Every activation argument is scaled by two rounded multiplies instead of one folded constant
+      - Name: Fc2 product and per-route BF16
+        Math: |
+          fc2[r,h] = bsprod of row r of (act_payload, act_scale) against the prepared row h of expert tile_expert[j] in (gemm2_weights, gemm2_weights_scale), with L = intermediate_dim, for the routes r of tile j. For the (t,s) with route_of[t,s] = r it is the Contract's inner sum of that route, because act_code*fp32(act_scale) is act_q.
+          rout[r,h] = bf16(fc2[r,h]), round to nearest even, is materialized for every valid route and is what the routing reduction consumes; fc2 itself is never stored.
+          A padding row can read a later expert's valid act_payload row, an ACT-produced or unwritten tail row, or zero fill beyond route_capacity. Its scales repeat this tile's first valid row. GEMM2 discards that row's result; it never overwrites a later expert's rout row.
+        Symbol: {rout: {meaning: Per-route FC2 result as BF16, shape: [{route: route_capacity}, {hidden: hidden_dim}], dtype: bf16, retention: keep_value invocation}}
+        Ledger:
+          Baseline: Keep each route's FC2 result in FP32, or reduce routes into the token output where they are produced
+          Gain: Route result bytes 4 -> 2 per element
+          Cost: One extra BF16 rounding per element, and route_capacity*hidden_dim*2 bytes written then re-read
+      - Name: Routing-weighted output reduction
+        Math: |
+          For every token t and hidden channel h:
+            acc[t,h] = the sum over s ascending of fma32(fp32(rout[route_of[t,s],h]), scores[t,s], partial), from 0
+          skipping every s whose route_of[t,s] is -1, so an invalid route contributes exactly 0; output[t,h] = bf16(acc[t,h]).
+          These are the Contract's acc and output with the route sum fixed to ascending slot order, which the Contract leaves unspecified. fp32(x) is the exact widening of a BF16 value, and output is written for every (t,h) whether or not any route is valid.
+        Arithmetic:
+          Accumulate: Each route term is one fma32 of the widened BF16 value and its score, so the product is not rounded before the running sum
+        Ledger:
+          Baseline: Accumulate the score-weighted route results into the output atomically, as the reference does
+          Gain: A fixed ascending slot order per element, one BF16 rounding, and no read-modify-write of output
+          Cost: rout is read slot_count times per token instead of being reduced where it is produced
+  Work_schedule:
+    Thesis: One submission per node, each free to launch at its predecessor's permission rather than its completion, so preambles overlap. One block builds the routing map; both GEMMs read it through a persistent capped grid; FC1 items are (tile, slice, n-tile), doubling the workers feeding the activation node
+    Step:
+      PREPARE:
+        Describe: 'Build the whole routing map in one block: expert counts, route and tile offsets, every route''s position and tuple, and the tile map'
+        Decomposition:
+          Strategy: 32 warp ranges over the route list; warp-private histograms, a cross-warp prefix per expert and a 32-warp scan publish counts and both offsets
+          Partition: {}
+          Target:
+            Single_tile:
+              counts: {meaning: Valid routes per expert, shape: [{expert: expert_count}], dtype: int32}
+              offs: {meaning: Exclusive route prefix per expert, shape: [{expert: expert_count+1}], dtype: int32}
+              tile_offsets: {meaning: Exclusive tile prefix per expert, shape: [{expert: expert_count+1}], dtype: int32}
+              tile_expert: {meaning: Expert owning each route tile, shape: [{tile: tile_count}], dtype: int32}
+              tile_first: {meaning: First route of a tile inside its expert, shape: [{tile: tile_count}], dtype: int32}
+              route_of: {meaning: Position of each route slot, shape: [{token: token_count}, {slot: slot_count}], dtype: int32}
+              route_token: {meaning: Token of each positioned route, shape: [{route: route_capacity}], dtype: int32}
+              route_slot: {meaning: Slot of each positioned route, shape: [{route: route_capacity}], dtype: int32}
+              route_expert: {meaning: Expert of each positioned route, shape: [{route: route_capacity}], dtype: int32}
+        Mapping:
+          Strategy: One block of 1024 threads; the staged ids, histogram, scan and positions stay in shared memory, whose dynamic part is sized by route_capacity
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: 1
+        Schedule:
+          Worker_assignment:
+            Preassigned: {start: 0, count: 1}
+            Refill: none
+            Exit: assigned_done
+      GEMM1:
+        Describe: Multiply each route tile's activation rows of one channel slice by its expert's FC1 weight and store the raw FP32 slice partials of both halves
+        Decomposition:
+          Strategy: bm = 128 route rows per tile; split_count slices cut the hidden_dim/256 stages evenly, so hidden_dim/256 is a multiple of it; a stage is 256 channels
+          Partition:
+            tile: {meaning: One existing route tile, size: tile_count, tile: 1, range: [0, tile_bound]}
+            k_slice: {meaning: One channel slice of the hidden reduction, size: split_count, tile: 1}
+            n_tile: {meaning: Block of intermediate channels, size: intermediate_dim, tile: 64}
+          Worktile:
+            Iteration:
+              a_payload: {meaning: Activation payload rows fetched for this stage, shape: [{route: bm}, {byte: 128}], dtype: uint8, direction: ascending}
+              a_scale: {meaning: Activation scales of the same fetched rows, shape: [{route: bm}, {scale_block: 16}], dtype: fp8_e4m3fn, direction: ascending}
+              b_payload: {meaning: FC1 payload of 128 prepared rows; up then gate, shape: [{row: 128}, {byte: 128}], dtype: uint8, direction: ascending}
+              b_scale: {meaning: FC1 scales of those rows in one fused image, shape: [{row: 128}, {scale_block: 16}], dtype: fp8_e4m3fn, direction: ascending}
+          Target:
+            Single_tile: {part: {meaning: FP32 slice partials of this item's columns, shape: [{route: bm}, {channel: 128}], dtype: fp32}}
+        Mapping:
+          Strategy: resident_cap is two CTAs per sm of the device; the capped grid only partitions items and never changes which items run
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: items_per_tile*min(tile_bound, max(1, floor(resident_cap/items_per_tile)))
+        Schedule:
+          Strategy: items_per_tile = split_count*(intermediate_dim/64); items number tile*items_per_tile + k_slice*(intermediate_dim/64) + n_tile, bounded by tile_count
+          Worktile_order:
+            - {by: tile, direction: ascending}
+            - {by: k_slice, direction: ascending}
+            - {by: n_tile, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, stride: worker_count}
+            Refill: none
+            Exit: assigned_done
+      ACT:
+        Describe: Reduce the FP32 slice partials of every route block in ascending slice order, then clamp, activate and quantize them into the packed activation
+        Decomposition:
+          Strategy: One thread per quarter of a 16-channel block of a route, quarters fastest; the four threads of a block share its maximum and one writes its scale byte
+          Partition: {act_item: {meaning: One quarter of a route's activation block, size: route_capacity*(intermediate_dim/nvfp4_block)*4, tile: 256}}
+          Target:
+            Single_tile:
+              act_payload: {meaning: Packed activation codes of this worktile, shape: [{block: 64}, {byte: 8}], dtype: uint8}
+              act_scale: {meaning: Group scale of those 64 route blocks, shape: [{block: 64}], dtype: fp8_e4m3fn}
+            Tile_reduction: {dimension: k_slice, input: 'ref:DESIGN.Math_reshape::part', output: ['ref:DESIGN.Math_reshape::act_payload', 'ref:DESIGN.Math_reshape::act_scale'], method: 'ref:DESIGN.Math_reshape::Slice reduction of the FC1 partials'}
+        Mapping:
+          Strategy: One thread per item with no grid stride; a thread whose item index passes route_capacity*(intermediate_dim/nvfp4_block)*4 has no work
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil_div(route_capacity*(intermediate_dim/nvfp4_block)*4, 256)
+        Schedule:
+          Worktile_order: [{by: act_item, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+      GEMM2:
+        Describe: Multiply each route tile's packed activation by its expert's FC2 weight and materialize every route's result as BF16
+        Decomposition:
+          Strategy: bm = 128 route rows per tile, the same tiles GEMM1 used; a stage advances 256 intermediate channels of one 128-column operand
+          Partition:
+            tile: {meaning: One existing route tile, size: tile_count, tile: 1, range: [0, tile_bound]}
+            n_tile: {meaning: Block of hidden channels, size: hidden_dim, tile: 128}
+          Worktile:
+            Iteration:
+              a_payload: {meaning: Packed activation payload of the tile rows, shape: [{route: bm}, {byte: 128}], dtype: uint8, direction: ascending}
+              a_scale: {meaning: Activation group scales of the tile rows, shape: [{route: bm}, {scale_block: 16}], dtype: fp8_e4m3fn, direction: ascending}
+              b_payload: {meaning: FC2 payload of 128 prepared rows, shape: [{row: 128}, {byte: 128}], dtype: uint8, direction: ascending}
+              b_scale: {meaning: FC2 scales of those prepared rows, shape: [{row: 128}, {scale_block: 16}], dtype: fp8_e4m3fn, direction: ascending}
+          Target:
+            Single_tile: {rout: {meaning: BF16 route results of the tile, shape: [{route: bm}, {hidden: 128}], dtype: bf16}}
+        Mapping:
+          Strategy: resident_cap is two CTAs per sm of the device; the capped grid only partitions items and never changes which items run
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: (hidden_dim/128)*min(tile_bound, max(1, floor(resident_cap/(hidden_dim/128))))
+        Schedule:
+          Strategy: Items number tile*(hidden_dim/128) + n_tile, bounded by the device tile_count; the leaf is fixed by the ids of the launch-setting call
+          Worktile_order:
+            - {by: tile, direction: ascending}
+            - {by: n_tile, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, stride: worker_count}
+            Refill: none
+            Exit: assigned_done
+      FINALIZE:
+        Describe: Sum each token's routed BF16 results weighted by their routing scores and write that token's output row
+        Decomposition:
+          Partition:
+            token: {meaning: One output row, size: token_count, tile: 1}
+            hidden_block: {meaning: Block of hidden channels, size: hidden_dim, tile: 512}
+          Target:
+            Single_tile: {output: {meaning: This token's channels in the block, shape: [{hidden: 512}], dtype: 'ref:CONTRACT.Algorithm_requirement::output.dtype'}}
+        Mapping:
+          Strategy: One thread per 4-channel chunk of the block; a thread whose chunk passes hidden_dim/4 has no work
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: token_count * ceil_div(hidden_dim, 512)
+        Schedule:
+          Worktile_order:
+            - {by: token, direction: ascending}
+            - {by: hidden_block, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch:
+        - {step: [PREPARE]}
+        - {step: [GEMM1], start_after: PREPARE.launch_ready}
+        - {step: [ACT], start_after: GEMM1.launch_ready}
+        - {step: [GEMM2], start_after: ACT.launch_ready}
+        - {step: [FINALIZE], start_after: GEMM2.launch_ready}
+      Handoff:
+        counts: {producer: PREPARE, consumer: [GEMM1, GEMM2], storage: global, ready: PREPARE.kernel_done}
+        offs: {producer: PREPARE, consumer: [GEMM1, GEMM2], storage: global, ready: PREPARE.kernel_done}
+        tile_offsets: {producer: PREPARE, consumer: [GEMM1, GEMM2], storage: global, ready: PREPARE.kernel_done}
+        tile_expert: {producer: PREPARE, consumer: [GEMM1, GEMM2], storage: global, ready: PREPARE.kernel_done}
+        tile_first: {producer: PREPARE, consumer: [GEMM1, GEMM2], storage: global, ready: PREPARE.kernel_done}
+        route_of: {producer: PREPARE, consumer: [FINALIZE], storage: global, ready: PREPARE.kernel_done}
+        route_token: {producer: PREPARE, consumer: [GEMM1], storage: global, ready: PREPARE.kernel_done}
+        route_expert: {producer: PREPARE, consumer: [ACT], storage: global, ready: PREPARE.kernel_done}
+        part: {producer: GEMM1, consumer: [ACT], storage: global, ready: GEMM1.kernel_done}
+        act_payload: {producer: ACT, consumer: [GEMM2], storage: global, ready: ACT.kernel_done}
+        act_scale: {producer: ACT, consumer: [GEMM2], storage: global, ready: ACT.kernel_done}
+        rout: {producer: GEMM2, consumer: [FINALIZE], storage: global, ready: GEMM2.kernel_done}
+  Tile_pipeline:
+    Thesis: Both GEMMs split seven warps into two operand producers, one tensor-core issuer and four epilogue warps coupled only by mbarriers, with a three-deep payload ring, a two-deep scale ring and one accumulator per item; the boundary hoist stays off in this range. The other three nodes are single roles
+    Step:
+      PREPARE:
+        Storage:
+          ids_stage: {meaning: Staged expert id of every route slot, depth: 1, location: smem, shape: [{route: route_capacity}],
+            dtype: int32, total_size: 4*route_capacity}
+          warp_table: {meaning: Warp-private per-expert counters and bases, depth: 1, location: smem, shape: [{warp: 32}, {expert: 256}],
+            dtype: int32, total_size: 32768}
+        Role:
+          MAIN:
+            Info:
+              Describe: Build the routing map and the tile map of the whole call in one block
+              Member: warp[0:32]
+              Using_verb:
+                compute:
+                  stage_ids: {execution_mode: serial, describe: 'Read the route_capacity ids into ids_stage, 16 bytes at a time where the pointer allows it, and zero warp_table; done covers the block rendezvous'}
+                  histogram: {execution_mode: serial, describe: Each warp counts the valid ids of its own contiguous route range into its warp_table row; done covers the block rendezvous}
+                  expert_scan: {execution_mode: serial, describe: 'Publish counts from each expert column of warp_table turned into per-warp bases, then scan them into offs and tile_offsets; done covers the rendezvous'}
+                  scatter: {execution_mode: serial, describe: 'Take each position from its warp base and the per-expert rank, then write route_token, route_slot, route_expert and route_of, or -1 when invalid'}
+                  tile_map: {execution_mode: serial, describe: Search the shared tile offsets for every tile of the call and write tile_expert and tile_first}
+                await: {predecessor: {execution_mode: serial, describe: Grid-wide wait until every prior submission has completed and flushed its writes; done covers the whole CTA}}
+                signal: {launch_dependents: {execution_mode: serial, describe: One warp per CTA permits the successor submission to launch; the grid signals once every CTA has run it}}
+            Pipe:
+              - await:predecessor
+              - signal:launch_dependents
+              - compute:stage_ids
+              - compute:histogram
+              - compute:expert_scan
+              - compute:scatter
+              - compute:tile_map
+      GEMM1:
+        Index:
+          t: {meaning: Local ordinal of this worker's items, definition: worktile}
+          ks: {meaning: k stage inside one item, definition: [0, hidden_dim/(256*split_count)]}
+          g: {meaning: Stage ordinal across items, definition: {flatten: [t, ks]}}
+        Storage:
+          a_ring: {meaning: Staged activation payload rows of one stage, depth: 3, location: smem, shape: [{route: 128}, {byte: 128}],
+            dtype: uint8, total_size: 49152, view: {a_payload(g): {slot_index: g%3}}}
+          b_ring: {meaning: FC1 payload stages; up rows then gate rows, depth: 3, location: smem, shape: [{row: 128}, {byte: 128}],
+            dtype: uint8, total_size: 49152, view: {b_payload(g): {slot_index: g%3}}}
+          sfa_ring: {meaning: Staged activation scale blocks, depth: 2, location: smem, shape: [{element: 2048}],
+            dtype: uint8, total_size: 4096, view: {a_scale(g): {slot_index: g%2}}}
+          sfb_ring: {meaning: Staged fused weight scale blocks, depth: 2, location: smem, shape: [{element: 2048}],
+            dtype: uint8, total_size: 4096, view: {b_scale(g): {slot_index: g%2}}}
+          sf_tmem: {meaning: Tensor-core scale columns of one stage, depth: 2, location: tmem, shape: [{row: 128}, {column: 32}],
+            dtype: fp32, total_size: 32768, view: {sf_a(g): {slot_index: g%2, region: {column: [0, 16]}}, sf_b(g): {slot_index: g%2, region: {column: [16, 32]}}}}
+          accumulator: {meaning: FP32 up and gate slice partial of one item, depth: 1, location: tmem, shape: [{route: 128}, {column: 128}],
+            dtype: fp32, total_size: 65536}
+          sf_prefetch: {meaning: Lookahead register set of activation scale rows, depth: 2, location: register, shape: [{lane: 32}, {row: 4}, {byte: 16}],
+            dtype: uint8, total_size: 4096, view: {sf_regs(ks): {slot_index: ks%2}}}
+        Role:
+          PRODA:
+            Info:
+              Describe: Stage the activation scale bytes of every stage into the scale ring one stage ahead of their use, fetching only the tile's valid route rows
+              Member: warp[0:1]
+              Using_verb:
+                compute:
+                  setup: {execution_mode: serial, describe: Thread 0 initializes the ring and item barriers with their arrival counts and warp 0 allocates the TMEM columns; done covers the CTA rendezvous}
+                  sfa_stage: {execution_mode: serial, describe: 'Store the fetched rows into the sfa slot and fence it, clipped rows keep the slot''s prior bytes, issue the next stage''s load unless last, then arrive'}
+                load: {sf_rows: {execution_mode: serial, describe: 'Prime both sf_prefetch sets with this item''s first two stages, 16 bytes per row, from the hidden_states_scale rows route_token names below tile_rows'}}
+                await:
+                  predecessor: {execution_mode: serial, describe: Grid-wide wait every warp of the CTA runs before the roles diverge; done covers this role reaching it}
+                  scale_slot_free: {execution_mode: serial, describe: Wait until the tensor-core scale copy of stage g-2 has read the sfa slot that g reuses}
+                  retire: {execution_mode: serial, describe: CTA-wide rendezvous after the last item; done covers every role having reached it}
+                signal: {launch_dependents: {execution_mode: serial, describe: One warp per CTA permits the successor submission to launch; the grid signals once every CTA has run it}}
+                release: {tmem: {execution_mode: serial, describe: Warp 0 returns the allocated TMEM columns once the retire rendezvous has closed every role's reads}}
+            Pipe:
+              - await:predecessor
+              - signal:launch_dependents
+              - if(worktile_count > 0):
+                  - compute:setup
+                  - for(t):
+                      - load:sf_rows(t)
+                      - for(g[t]):
+                          - if(g >= 2):
+                              - await:scale_slot_free(g)
+                          - compute:sfa_stage(g)
+                  - await:retire
+                  - release:tmem
+            Waiting:
+              Released:
+                - '{done await:scale_slot_free(g)} ← [{done MMA::signal:stage_retired(g-2)}]'
+                - '{issue release:tmem} ← [{done PRODB::await:retire}, {done MMA::await:retire}, {done EPI::await:retire}]'
+          PRODB:
+            Info:
+              Describe: Stage operand payloads by bulk tensor copy, the activation rows by clipped four-row gather boxes, and the weight scales by async copies
+              Member: warp[1:2]
+              Using_verb:
+                load:
+                  a_payload: {execution_mode: async_unordered, describe: 'Lane 0 arms the barrier with (128 + 4*nbox) 128-byte rows, nbox = max(1, min(32, ceil(tile_rows(j)/4))); lanes below nbox gather four rows each'}
+                  b_payload: {execution_mode: async_unordered, describe: 'Lane 0 issues two 64-row boxes over the prepared FC1 weight of tile_expert, the up half then the gate half, into one b_ring slot'}
+                  b_scale: {execution_mode: async_unordered, describe: All 32 lanes copy this stage's weight scale bytes into the sfb slot as one fused 128-row image and arm their arrival; done covers the staged bytes}
+                await:
+                  predecessor: {execution_mode: serial, describe: Grid-wide wait every warp of the CTA runs before the roles diverge; done covers this role reaching it}
+                  setup: {execution_mode: serial, describe: Take part in the CTA rendezvous that follows barrier initialization and TMEM allocation}
+                  payload_slot_free: {execution_mode: serial, describe: Wait until the tensor-core products of stage g-3 have read the payload slots that g reuses}
+                  scale_slot_free: {execution_mode: serial, describe: Wait until the tensor-core scale copy of stage g-2 has read the sfb slot that g reuses}
+                  retire: {execution_mode: serial, describe: CTA-wide rendezvous after the last item; done covers every role having reached it}
+            Pipe:
+              - await:predecessor
+              - if(worktile_count > 0):
+                  - await:setup
+                  - for(t):
+                      - for(g[t]):
+                          - if(g >= 3):
+                              - await:payload_slot_free(g)
+                          - load:a_payload(g)
+                          - load:b_payload(g)
+                          - if(g >= 2):
+                              - await:scale_slot_free(g)
+                          - load:b_scale(g)
+                  - await:retire
+            Waiting:
+              Prepared: ['{done await:setup} ← [{done PRODA::compute:setup}]']
+              Released:
+                - '{done await:payload_slot_free(g)} ← [{done MMA::signal:stage_retired(g-3)}]'
+                - '{done await:scale_slot_free(g)} ← [{done MMA::signal:stage_retired(g-2)}]'
+          MMA:
+            Info:
+              Describe: Copy each stage's scales into TMEM and issue the fused block-scaled products of this item's channel slice
+              Member: warp[2:3]
+              Using_verb:
+                compute: {sf_tmem: {execution_mode: serial, describe: One elected lane copies this stage's activation and weight scale blocks from shared memory into the sf_tmem columns of slot g%2}}
+                matmul: {a_payload@b_payload: {execution_mode: async_ordered, describe: 'Four products of a_ring g%3 and b_ring g%3 with sf_a(g), sf_b(g); the item''s first writes the accumulator, the rest add, so it holds a slice partial'}}
+                await:
+                  predecessor: {execution_mode: serial, describe: Grid-wide wait every warp of the CTA runs before the roles diverge; done covers this role reaching it}
+                  setup: {execution_mode: serial, describe: Take part in the CTA rendezvous that follows barrier initialization and TMEM allocation}
+                  stage_full: {execution_mode: serial, describe: 'Wait until the stage barrier of g has the fetched activation rows, both weight payload boxes, both scale blocks and all producer arrivals'}
+                  accumulator_free: {execution_mode: serial, describe: 'Wait until all four epilogue warps have released the accumulator of item t-1, so this item may overwrite it'}
+                  retire: {execution_mode: serial, describe: CTA-wide rendezvous after the last item; done covers every role having reached it}
+                signal:
+                  stage_retired: {execution_mode: serial, describe: 'Commit all products issued so far; the arrival retires stage g, freeing its payload slot and, cumulatively, its scale slot'}
+                  accumulator_full: {execution_mode: serial, describe: Commit at the item's end; the arrival means every product of item t has retired and the slice partial is readable}
+            Pipe:
+              - await:predecessor
+              - if(worktile_count > 0):
+                  - await:setup
+                  - for(t):
+                      - if(t > 0):
+                          - await:accumulator_free(t)
+                      - for(g[t]):
+                          - await:stage_full(g)
+                          - compute:sf_tmem(g)
+                          - matmul:a_payload(g)@b_payload(g)
+                          - signal:stage_retired(g)
+                      - signal:accumulator_full(t)
+                  - await:retire
+            Waiting:
+              Prepared:
+                - '{done await:setup} ← [{done PRODA::compute:setup}]'
+                - '{done await:stage_full(g)} ← [{done PRODA::compute:sfa_stage(g)}, {done PRODB::load:a_payload(g)}, {done PRODB::load:b_payload(g)}, {done PRODB::load:b_scale(g)}]'
+                - '{done signal:stage_retired(g)} ← [{done matmul:a_payload(g)@b_payload(g)}]'
+              Released: ['{done await:accumulator_free(t)} ← [{done EPI::signal:accumulator_free(t-1)}]']
+          EPI:
+            Info:
+              Describe: Drain the item's accumulator by row quadrant and store its raw FP32 slice partials
+              Member: warp[3:7]
+              Using_verb:
+                load:
+                  tmem_up: {execution_mode: async_unordered, describe: Read 32 accumulator columns of the up half for this warp's 32 rows into registers}
+                  tmem_gate: {execution_mode: async_unordered, describe: Read the matching 32 columns of the gate half into registers}
+                store: {part: {execution_mode: async_unordered, describe: Write this chunk's 32 up and 32 gate FP32 values per lane into slice k_slice of part at the item's columns; lanes past tile_rows(j) write nothing}}
+                await:
+                  predecessor: {execution_mode: serial, describe: Grid-wide wait every warp of the CTA runs before the roles diverge; done covers this role reaching it}
+                  setup: {execution_mode: serial, describe: Take part in the CTA rendezvous that follows barrier initialization and TMEM allocation}
+                  accumulator_full: {execution_mode: serial, describe: Wait until the products of item t have retired and the accumulator is readable by all four warps}
+                  tmem_drain: {execution_mode: serial, describe: 'Wait for this chunk''s two 32-column accumulator reads, the up half and the gate half, issued back to back'}
+                  retire: {execution_mode: serial, describe: CTA-wide rendezvous after the last item; done covers every role having reached it}
+                signal: {accumulator_free: {execution_mode: serial, describe: Each of the four warps arrives once both of its chunk reads and both of its partial stores have been issued; the global writes may still be in flight}}
+            Pipe:
+              - await:predecessor
+              - if(worktile_count > 0):
+                  - await:setup
+                  - for(t):
+                      - await:accumulator_full(t)
+                      - for(c=0:2):
+                          - load:tmem_up(t,c)
+                          - load:tmem_gate(t,c)
+                          - await:tmem_drain(t,c)
+                          - store:part(t,c)
+                      - signal:accumulator_free(t)
+                  - await:retire
+            Waiting:
+              Prepared:
+                - '{done await:setup} ← [{done PRODA::compute:setup}]'
+                - '{done await:accumulator_full(t)} ← [{done MMA::signal:accumulator_full(t)}]'
+                - '{done await:tmem_drain(t,c)} ← [{done load:tmem_up(t,c)}, {done load:tmem_gate(t,c)}]'
+      ACT:
+        Role:
+          MAIN:
+            Info:
+              Describe: Reduce the slice partials of one quarter of one 16-channel activation block and write that block's packed codes and scale
+              Member: warp[0:8]
+              Using_verb:
+                compute: {act_qdq: {execution_mode: serial, describe: 'Sum the loaded slices ascending, then clamp, activate and quantize four channels by the Math_reshape step, sharing the group maximum by shuffle'}}
+                load:
+                  partials: {execution_mode: async_unordered, describe: 'Issue 2*split_count float4 loads, one up and one gate vector per slice, for this thread''s four channels before the expert lookup; done covers them'}
+                  route_expert: {execution_mode: serial, describe: 'Read route_expert of this thread''s route row and set expert_valid when it lies in [0,expert_count)'}
+                store:
+                  act_payload: {execution_mode: serial, describe: The lanes holding quarter 0 or 2 of a block write one 4-byte word holding their own four codes and the next quarter's four}
+                  act_scale: {execution_mode: serial, describe: The lane holding quarter 0 of a block writes that block's scale byte}
+                await: {predecessor: {execution_mode: serial, describe: Grid-wide wait until every prior submission has completed and flushed its writes; done covers the whole CTA}}
+                signal: {launch_dependents: {execution_mode: serial, describe: One warp per CTA permits the successor submission to launch; the grid signals once every CTA has run it}}
+            Pipe:
+              - await:predecessor
+              - signal:launch_dependents
+              - load:partials
+              - load:route_expert
+              - if(expert_valid):
+                  - compute:act_qdq
+                  - store:act_payload
+                  - store:act_scale
+            Waiting:
+              Prepared: ['{issue compute:act_qdq} ← [{done load:partials}]']
+      GEMM2:
+        Index:
+          t: {meaning: Local ordinal of this worker's items, definition: worktile}
+          ks: {meaning: k stage inside one item, definition: [0, intermediate_dim/256]}
+          g: {meaning: Stage ordinal across items, definition: {flatten: [t, ks]}}
+        Storage:
+          a_ring: {meaning: Packed activation payload stages, depth: 3, location: smem, shape: [{route: 128}, {byte: 128}],
+            dtype: uint8, total_size: 49152, view: {a_payload(g): {slot_index: g%3}}}
+          b_ring: {meaning: FC2 payload stages, depth: 3, location: smem, shape: [{row: 128}, {byte: 128}],
+            dtype: uint8, total_size: 49152, view: {b_payload(g): {slot_index: g%3}}}
+          sfa_ring: {meaning: Staged activation scale blocks, depth: 2, location: smem, shape: [{element: 2048}],
+            dtype: uint8, total_size: 4096, view: {a_scale(g): {slot_index: g%2}}}
+          sfb_ring: {meaning: Staged weight scale blocks, depth: 2, location: smem, shape: [{element: 2048}],
+            dtype: uint8, total_size: 4096, view: {b_scale(g): {slot_index: g%2}}}
+          sf_tmem: {meaning: Tensor-core scale columns of one stage, depth: 2, location: tmem, shape: [{row: 128}, {column: 32}],
+            dtype: fp32, total_size: 32768, view: {sf_a(g): {slot_index: g%2, region: {column: [0, 16]}}, sf_b(g): {slot_index: g%2, region: {column: [16, 32]}}}}
+          accumulator: {meaning: FP32 hidden product of one item, depth: 1, location: tmem, shape: [{route: 128}, {column: 128}],
+            dtype: fp32, total_size: 65536}
+          sf_prefetch: {meaning: Lookahead register set of activation scale rows, depth: 2, location: register, shape: [{lane: 32}, {row: 4}, {byte: 16}],
+            dtype: uint8, total_size: 4096, view: {sf_regs(ks): {slot_index: ks%2}}}
+          sink: {meaning: Quadrant staging image of one drain chunk, depth: 4, location: smem, shape: [{row: 32}, {byte: 64}],
+            dtype: uint8, total_size: 8192, view: {sink_image(q): {slot_index: q}}}
+        Role:
+          PRODA:
+            Info:
+              Describe: Stage the activation scale bytes of every stage into the scale ring one stage ahead of their use
+              Member: warp[0:1]
+              Using_verb:
+                compute:
+                  setup: {execution_mode: serial, describe: Thread 0 initializes the ring and item barriers with their arrival counts and warp 0 allocates the TMEM columns; done covers the CTA rendezvous}
+                  sfa_stage: {execution_mode: serial, describe: 'Store the register set into the sfa slot and fence it, issue the next stage''s load unless this is the item''s last, then arrive on the stage barrier'}
+                load: {sf_rows: {execution_mode: serial, describe: 'Prime min(2,intermediate_dim/256) stages in sf_prefetch from act_scale, 16 bytes per row; padding rows repeat the tile''s first valid scale row'}}
+                await:
+                  predecessor: {execution_mode: serial, describe: Grid-wide wait every warp of the CTA runs before the roles diverge; done covers this role reaching it}
+                  scale_slot_free: {execution_mode: serial, describe: Wait until the tensor-core scale copy of stage g-2 has read the sfa slot that g reuses}
+                  retire: {execution_mode: serial, describe: CTA-wide rendezvous after the last item; done covers every role having reached it}
+                signal: {launch_dependents: {execution_mode: serial, describe: One warp per CTA permits the successor submission to launch; the grid signals once every CTA has run it}}
+                release: {tmem: {execution_mode: serial, describe: Warp 0 returns the allocated TMEM columns once the retire rendezvous has closed every role's reads}}
+            Pipe:
+              - await:predecessor
+              - signal:launch_dependents
+              - if(worktile_count > 0):
+                  - compute:setup
+                  - for(t):
+                      - load:sf_rows(t)
+                      - for(g[t]):
+                          - if(g >= 2):
+                              - await:scale_slot_free(g)
+                          - compute:sfa_stage(g)
+                  - await:retire
+                  - release:tmem
+            Waiting:
+              Released:
+                - '{done await:scale_slot_free(g)} ← [{done MMA::signal:stage_retired(g-2)}]'
+                - '{issue release:tmem} ← [{done PRODB::await:retire}, {done MMA::await:retire}, {done EPI::await:retire}]'
+          PRODB:
+            Info:
+              Describe: Stage each stage's operand payloads by bulk tensor copy and its weight scales by async chunk copies
+              Member: warp[1:2]
+              Using_verb:
+                load:
+                  a_payload: {execution_mode: async_unordered, describe: 'Lane 0 arms the stage barrier with both operands'' byte count and issues one 128-row box from act_payload, padding rows included'}
+                  b_payload: {execution_mode: async_unordered, describe: Lane 0 issues one 128-row box over the prepared FC2 weight of tile_expert into b_ring}
+                  b_scale: {execution_mode: async_unordered, describe: All 32 lanes copy this stage's weight scale bytes into the sfb slot and arm their arrival on the stage barrier; done covers the staged bytes}
+                await:
+                  predecessor: {execution_mode: serial, describe: Grid-wide wait every warp of the CTA runs before the roles diverge; done covers this role reaching it}
+                  setup: {execution_mode: serial, describe: Take part in the CTA rendezvous that follows barrier initialization and TMEM allocation}
+                  payload_slot_free: {execution_mode: serial, describe: Wait until the tensor-core products of stage g-3 have read the payload slots that g reuses}
+                  scale_slot_free: {execution_mode: serial, describe: Wait until the tensor-core scale copy of stage g-2 has read the sfb slot that g reuses}
+                  retire: {execution_mode: serial, describe: CTA-wide rendezvous after the last item; done covers every role having reached it}
+            Pipe:
+              - await:predecessor
+              - if(worktile_count > 0):
+                  - await:setup
+                  - for(t):
+                      - for(g[t]):
+                          - if(g >= 3):
+                              - await:payload_slot_free(g)
+                          - load:a_payload(g)
+                          - load:b_payload(g)
+                          - if(g >= 2):
+                              - await:scale_slot_free(g)
+                          - load:b_scale(g)
+                  - await:retire
+            Waiting:
+              Prepared: ['{done await:setup} ← [{done PRODA::compute:setup}]']
+              Released:
+                - '{done await:payload_slot_free(g)} ← [{done MMA::signal:stage_retired(g-3)}]'
+                - '{done await:scale_slot_free(g)} ← [{done MMA::signal:stage_retired(g-2)}]'
+          MMA:
+            Info:
+              Describe: Copy each stage's scales into TMEM and issue the block-scaled products; the boundary hoist stays off here as route_capacity < 16*expert_count
+              Member: warp[2:3]
+              Using_verb:
+                compute: {sf_tmem: {execution_mode: serial, describe: One elected lane copies this stage's activation and weight scale blocks from shared memory into the sf_tmem columns of slot g%2}}
+                matmul: {a_payload@b_payload: {execution_mode: async_ordered, describe: 'Four products of a_ring g%3, b_ring g%3 with sf_a(g), sf_b(g); the item''s first writes the accumulator without reading the prior value, the rest add'}}
+                await:
+                  predecessor: {execution_mode: serial, describe: Grid-wide wait every warp of the CTA runs before the roles diverge; done covers this role reaching it}
+                  setup: {execution_mode: serial, describe: Take part in the CTA rendezvous that follows barrier initialization and TMEM allocation}
+                  stage_full: {execution_mode: serial, describe: 'Wait until the stage barrier of g has both operand payloads, both scale blocks and all producer arrivals'}
+                  accumulator_free: {execution_mode: serial, describe: 'Wait until all four epilogue warps have released the accumulator of item t-1, so this item may overwrite it'}
+                  retire: {execution_mode: serial, describe: CTA-wide rendezvous after the last item; done covers every role having reached it}
+                signal:
+                  stage_retired: {execution_mode: serial, describe: 'Commit all products issued so far; the arrival retires stage g, freeing its payload slot and, cumulatively, its scale slot'}
+                  accumulator_full: {execution_mode: serial, describe: Commit at the item's end; the arrival means every product of item t has retired and the accumulator is readable}
+            Pipe:
+              - await:predecessor
+              - if(worktile_count > 0):
+                  - await:setup
+                  - for(t):
+                      - if(t > 0):
+                          - await:accumulator_free(t)
+                      - for(g[t]):
+                          - await:stage_full(g)
+                          - compute:sf_tmem(g)
+                          - matmul:a_payload(g)@b_payload(g)
+                          - signal:stage_retired(g)
+                      - signal:accumulator_full(t)
+                  - await:retire
+            Waiting:
+              Prepared:
+                - '{done await:setup} ← [{done PRODA::compute:setup}]'
+                - '{done await:stage_full(g)} ← [{done PRODA::compute:sfa_stage(g)}, {done PRODB::load:a_payload(g)}, {done PRODB::load:b_payload(g)}, {done PRODB::load:b_scale(g)}]'
+                - '{done signal:stage_retired(g)} ← [{done matmul:a_payload(g)@b_payload(g)}]'
+              Released: ['{done await:accumulator_free(t)} ← [{done EPI::signal:accumulator_free(t-1)}]']
+          EPI:
+            Info:
+              Describe: Drain the item's accumulator by row quadrant in pairs and write each valid route's BF16 result
+              Member: warp[3:7]
+              Using_verb:
+                compute: {rout_bf16: {execution_mode: serial, describe: 'Round this chunk''s 32 accumulators to BF16 nearest even in registers, one rout element per accumulator column'}}
+                load: {tmem_chunk: {execution_mode: async_unordered, describe: Read 32 accumulator columns for this warp's 32 rows into registers}}
+                store:
+                  rout_bulk: {execution_mode: async_unordered, describe: 'quadrant_full means this warp''s 32 rows are all valid; stage the chunk in the sink slot, publish it, then lane 0 issues one bulk store into rout'}
+                  rout_masked: {execution_mode: async_unordered, describe: 'Write the chunk straight to rout from the lanes whose route is valid, used when the quadrant is not full'}
+                await:
+                  predecessor: {execution_mode: serial, describe: Grid-wide wait every warp of the CTA runs before the roles diverge; done covers this role reaching it}
+                  setup: {execution_mode: serial, describe: Take part in the CTA rendezvous that follows barrier initialization and TMEM allocation}
+                  accumulator_full: {execution_mode: serial, describe: Wait until the products of item t have retired and the accumulator is readable by all four warps}
+                  tmem_drain: {execution_mode: serial, describe: 'Wait for the two 32-column reads of this pair, issued back to back so one latency covers both chunks'}
+                  sink_free: {execution_mode: serial, describe: Wait until the previous bulk store of this warp's sink slot has consumed it; the global write may still be in flight}
+                  stores_drained: {execution_mode: serial, describe: 'Once per warp at grid exit, wait until every bulk store has completed globally, which is what the successor submission observes'}
+                  retire: {execution_mode: serial, describe: CTA-wide rendezvous after the last item; done covers every role having reached it}
+                signal: {accumulator_free: {execution_mode: serial, describe: Each of the four warps arrives once its last pair's accumulator reads have retired; the stores may still be in flight}}
+            Pipe:
+              - await:predecessor
+              - if(worktile_count > 0):
+                  - await:setup
+                  - for(t):
+                      - await:accumulator_full(t)
+                      - for(cp=0:2):
+                          - load:tmem_chunk(t,2*cp)
+                          - load:tmem_chunk(t,2*cp+1)
+                          - await:tmem_drain(t,cp)
+                          - if(cp == 1):
+                              - signal:accumulator_free(t)
+                          - for(c=2*cp:2*cp+2):
+                              - compute:rout_bf16(t,c)
+                              - if(quadrant_full):
+                                  - await:sink_free(t,c)
+                                  - store:rout_bulk(t,c)
+                              - if(not quadrant_full):
+                                  - store:rout_masked(t,c)
+                  - await:stores_drained
+                  - await:retire
+            Waiting:
+              Prepared:
+                - '{done await:setup} ← [{done PRODA::compute:setup}]'
+                - '{done await:accumulator_full(t)} ← [{done MMA::signal:accumulator_full(t)}]'
+                - '{done await:tmem_drain(t,cp)} ← [{done load:tmem_chunk(t,2*cp)}, {done load:tmem_chunk(t,2*cp+1)}]'
+                - '{done await:stores_drained} ← [{done store:rout_bulk(t,c)}]'
+      FINALIZE:
+        Role:
+          MAIN:
+            Info:
+              Describe: Reduce one block of a token's hidden channels over that token's routes and write the output
+              Member: warp[0:4]
+              Using_verb:
+                compute: {weighted_sum: {execution_mode: serial, describe: 'Each thread reads its token''s route_of and scores, then accumulates fp32 of its four rout values times the score in ascending slot order from zero'}}
+                store: {output: {execution_mode: async_unordered, describe: Round the four accumulators to BF16 nearest even and write the thread's 8-byte output chunk; every element is written}}
+                await: {predecessor: {execution_mode: serial, describe: Grid-wide wait until every prior submission has completed and flushed its writes; done covers the whole CTA}}
+                signal: {launch_dependents: {execution_mode: serial, describe: One warp per CTA permits the successor submission to launch; the grid signals once every CTA has run it}}
+            Pipe:
+              - await:predecessor
+              - signal:launch_dependents
+              - compute:weighted_sum
+              - store:output
+REALIZATION:
+  Require:
+    - Item:
+        - DESIGN.Tile_pipeline::GEMM1.MMA
+        - DESIGN.Tile_pipeline::GEMM2.MMA
+      Choice: tcgen05.mma kind::mxf4nvf4 with block_scale scale_vec::4X over shared-memory operands and a TMEM accumulator, the scale blocks staged into TMEM by tcgen05.cp 32x128b.warpx4 in the layout that instruction requires
+      Reason: The design keeps both operands packed and applies the E4M3 block scales inside the product; no other primitive gives that numeric path or that scale placement
+    - Item: DESIGN.Tile_pipeline::GEMM1.MMA
+      Choice: One m128n128k64 product per kset covering the fused up and gate columns, not a pair of 64-column products
+      Reason: The B image is staged as 128 contiguous rows, so the fused form halves the issuer's serial chain per stage, which is the padded-pipe cost of this band
+    - Item:
+        - DESIGN.Work_schedule::GEMM1
+        - DESIGN.Work_schedule::GEMM2
+      Choice: Multi-dimensional TMA boxes whose row algebra equals the Contract's prepared_row, encoded through cuTensorMapEncodeTiled reached from cudart; refuse the launch when a map cannot be encoded
+      Reason: Neither step has a cp.async staging path and GEMM1 is the only producer of the FP32 partials, so an unencodable operand map has no correct fallback
+    - Item: DESIGN.Tile_pipeline::GEMM1.PRODB
+      Choice: tile::gather4 over a plain 2-D UINT8 map of hidden_states boxed 128 bytes by one row, the four row coordinates given per instruction; refuse the launch when hidden_dim/2 is not a multiple of 16 or is under 128 bytes
+      Reason: This design keeps no route-ordered activation buffer, so the gather map is the only A operand path and has no fallback
+    - Item: DESIGN.Tile_pipeline::GEMM2.EPI
+      Choice: A byte-view bulk tensor store map over rout, 64 bytes by 32 rows, requiring hidden_dim >= 64 and route_capacity >= 32; refuse the launch without it
+      Reason: The bulk drain is the only store path of a full quadrant, and a partial quadrant must keep the masked store
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: griddepcontrol.wait at every node entry and griddepcontrol.launch_dependents from one warp, with the programmatic serialization attribute on each launch
+      Reason: This is what makes launch_ready earlier than kernel_done while keeping the handoff visibility the Flow declares
+    - Item:
+        - DESIGN.Tile_pipeline::GEMM1
+        - DESIGN.Tile_pipeline::GEMM2
+      Choice: mbarrier phase parity for the ring and item handshakes, the stage barrier counting 34 arrivals plus the announced bytes, and tcgen05.commit for cumulative retirement
+      Reason: Producers and issuer never meet at a block barrier, and the arrival count is fixed while the announced byte term follows the clipped box count
+    - Item:
+        - DESIGN.Tile_pipeline::GEMM1
+        - DESIGN.Tile_pipeline::GEMM2
+      Choice: Two resident CTAs per sm, with 256 allocated TMEM columns and 106640 bytes of dynamic shared memory for GEMM1 and 114960 for GEMM2
+      Reason: The ring, scale and sink regions the roles use are sized to that residency, and a wider TMEM allocation would halve it
+    - Item:
+        - DESIGN.Math_reshape::act_scale
+        - DESIGN.Math_reshape::act_payload
+      Choice: Hardware round-to-nearest-even saturating conversions, to fp8_e4m3fn for the group scale and to E2M1 for the codes
+      Reason: The rounding and saturation points declared for the quantize step are those of these conversions, not of a software table
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::ACT.MAIN
+      Choice: Compile the non-folded activation without a launch-bounds annotation; register count and residency remain toolchain-dependent
+      Reason: Source measurements report higher register use with folded prescales and spills under an explicit bound; neither observation guarantees a compiler budget

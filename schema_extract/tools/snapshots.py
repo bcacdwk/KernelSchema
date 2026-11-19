@@ -11,7 +11,7 @@ import subprocess
 import sys
 from uuid import uuid4
 
-from .common import ExtractError, digest, fsync_directory, read_json, rules_root, seal, sha256, sync_tree, verify_manifest, write_json
+from .common import ExtractError, digest, fsync_directory, read_json, regular_file, rules_root, seal, sha256, sync_tree, verify_manifest, write_json
 from .inputs import SourceTree
 
 
@@ -106,9 +106,9 @@ def _version(tree: SourceTree, files: dict[str, str], frozen: Path, bindings=Non
     return identity
 
 
-def _reuse_snapshot(lock: dict) -> dict:
+def _reuse_snapshot(lock: dict, *, lock_name="inputs.lock.json") -> dict:
     destination = Path(lock["snapshot"])
-    existing = read_json(destination / "inputs.lock.json")
+    existing = read_json(destination / lock_name)
     if existing != lock:
         raise ExtractError("snapshot identity collision")
     verify_snapshot(existing)
@@ -179,6 +179,13 @@ def freeze_inputs(state_root: Path, tree: SourceTree, bindings: dict, names: lis
 
 def verify_snapshot(lock: dict) -> None:
     root = Path(lock["snapshot"])
+    if lock.get("format") == "schema_extract.executor.v1":
+        identity = {key: value for key, value in lock.items() if key not in {"snapshot", "fingerprint"}}
+        if (digest(identity) != lock["fingerprint"] or digest(lock["rules"]["files"]) != lock["rules"]["id"] or
+                read_json(root / "executor.lock.json") != lock):
+            raise ExtractError("executor snapshot identity changed")
+        verify_manifest(root / "rules", lock["rules"]["files"])
+        return
     if read_json(root / "inputs.lock.json") != lock:
         raise ExtractError("input lock changed")
     for kind in ("source", "rules"):
@@ -198,6 +205,61 @@ def verify_snapshot(lock: dict) -> None:
                        "config": lock["config"], "policy": "skip-hardware"})
     if expected != lock["fingerprint"]:
         raise ExtractError("input fingerprint mismatch")
+
+
+def freeze_executor_patch(state_root: Path, original: dict, tree: Path) -> dict:
+    """Freeze explicit Python changes while retaining every original semantic byte."""
+    verify_snapshot(original)
+    tree = tree.resolve()
+    names = set(original["rules"]["files"]) | set(rule_files(tree, require_specs=False))
+    bodies = {}
+    for name in sorted(names):
+        path = regular_file(tree, name)
+        data = path.read_bytes()
+        executable = name.startswith("schema_extract/") and name.endswith(".py")
+        if not executable and sha256(data) != original["rules"]["files"].get(name):
+            raise ExtractError("executor patch cannot change semantic rules: " + name)
+        bodies[name] = data
+    if names != set(original["rules"]["files"]) | set(rule_files(tree, require_specs=False)):
+        raise ExtractError("executor file inventory changed during snapshot")
+    for name, data in bodies.items():
+        path = regular_file(tree, name)
+        if path.read_bytes() != data:
+            raise ExtractError("executor changed during snapshot: " + name)
+    files = {name: sha256(data) for name, data in bodies.items()}
+    identity = {"format": "schema_extract.executor.v1", "original_input_fingerprint": original["fingerprint"],
+                "rules": {"id": digest(files), "files": files}}
+    fingerprint = digest(identity)
+    parent = state_root.resolve() / "executors"
+    parent.mkdir(parents=True, exist_ok=True)
+    destination = parent / fingerprint
+    lock = {**identity, "fingerprint": fingerprint, "snapshot": str(destination)}
+    if destination.exists():
+        return _reuse_snapshot(lock, lock_name="executor.lock.json")
+    temporary = parent / (".building-" + uuid4().hex)
+    try:
+        for name, data in bodies.items():
+            path = temporary / "rules" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        write_json(temporary / "executor.lock.json", lock)
+        seal(temporary)
+        sync_tree(temporary)
+        try:
+            os.rename(temporary, destination)
+        except OSError as error:
+            if error.errno not in {errno.EEXIST, errno.ENOTEMPTY, errno.EACCES, errno.EPERM} or not destination.is_dir():
+                raise
+            return _reuse_snapshot(lock, lock_name="executor.lock.json")
+        fsync_directory(parent)
+        fsync_directory(parent.parent)
+    finally:
+        if temporary.exists():
+            for path in temporary.rglob("*"):
+                path.chmod(0o755 if path.is_dir() else 0o644)
+            temporary.chmod(0o755)
+            shutil.rmtree(temporary)
+    return lock
 
 
 def verify_executor(lock: dict) -> None:

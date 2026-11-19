@@ -1,0 +1,17 @@
+{
+  "id": "monitor-beijing-time-display",
+  "category": "extract_tools",
+  "problem": "巡检提醒与面向用户的状态简报使用UTC或混用UTC/北京时间，用户需要自行换算，时间表述不统一。",
+  "evidence": [
+    "schema_extract/tools/wakeup.py:400 使用 datetime.fromtimestamp(item['due_at'], timezone.utc).isoformat() 生成提醒中的到期时间。",
+    "2026-11-19用户明确要求巡检时间统一表述为UTC+8，即北京时间；本次先简单登记issue，具体实现后续处理。",
+    "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：test_time_display_preserves_machine_values_and_limits_its_scope 及 CLI 显示/节流回归通过；当前入口为 wakeup.py::format_beijing_time/clock_display 和 cli.py 的 monitor 输出分支，复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+  ],
+  "proposal": "仅调整巡检工具及简报面向用户的时间展示：统一转换为北京时间（UTC+8）并明确标注时区，正确处理跨日。内部时间戳、间隔计算、实际触发时刻及ack/scan身份保持不变，避免把展示换算变成调度偏移。",
+  "necessity": "简单的时间展示一致性改进，减少换算和误读；当前仅记录为待办，不修改运行中的巡检工具。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.5.1",
+    "reason": "2.5.1 的提醒和 monitor 人读输出统一固定 UTC+8；monitor JSON 仅在输出深拷贝的白名单字段补显示值。跨日、跨年、None 和已停用时保留的到期记录均有覆盖；原 epoch、提醒 ID、间隔、调度及 inspect --json 保持不变。不设置进程 TZ，也不回写偏移后的时间戳。"
+  }
+}

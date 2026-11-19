@@ -200,17 +200,23 @@ def properties(check: CheckContext, plan: dict[str, Any], contract_objects: dict
 
 
 def contract(check: CheckContext, algorithm: dict[str, Any], path: str) -> dict[str, Any]:
-    objects, order, locations = {}, {}, {}
+    objects, order = {}, {}
     constants = algorithm.get("Constant", {})
-    names = set(constants)
+    locations = {name: field_path(path + ".Constant", name) for name in constants}
     groups = [(algorithm[field], -1, field) for field in ("Input", "Output")]
     groups += [(step.get("Symbol", {}), i, f"Compute[{i}].Symbol")
                for i, step in enumerate(algorithm["Compute"])]
     for group, index, label in groups:
         for name, obj in group.items():
             location = field_path(f"{path}.{label}", name)
-            check.require(name not in names, location, "duplicate Contract object name")
-            names.add(name)
+            if name in locations:
+                hint = ("Keep both the caller-provided Input and the result Output with distinct names; "
+                        "if the Input is a write-back destination, describe the relationship in "
+                        "Output.meaning and the existing Compute entries."
+                        if label == "Output" and name in algorithm["Input"] else "")
+                check.require(False, location,
+                              f"duplicate Contract object name {name!r}; already defined at {locations[name]}",
+                              hint=hint)
             objects[name], order[name], locations[name] = obj, index, location
             if label in ("Input", "Output") and obj["dtype"] == "python_none":
                 check.require(obj["shape"] == [], location + ".shape",
@@ -234,7 +240,7 @@ def contract(check: CheckContext, algorithm: dict[str, Any], path: str) -> dict[
             if isinstance(size, str) and IDENTIFIER.fullmatch(size) and size not in constants:
                 check.require(LOWER_NAME.fullmatch(size) is not None, field_path(f"{location}.shape[{i}]", key),
                               "runtime extent names must be lowercase")
-                check.require(size not in names, field_path(f"{location}.shape[{i}]", key),
+                check.require(size not in locations, field_path(f"{location}.shape[{i}]", key),
                               "a runtime extent cannot also name a Contract object")
                 extents.add(size)
         bounds = obj.get("range")

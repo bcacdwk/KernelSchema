@@ -1,0 +1,433 @@
+--- before/root.yaml
++++ current/root.yaml
+@@ -3,5 +3,5 @@
+   Describe: Multi-head attention on E4M3 Q/K/V payloads with E8M0 block-32 scales, giving a BF16 output and optional FP32 log-sum-exp under causal/window masks
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+-  Version: 7
++  Version: 8
+   Dispatch:
+     when: head_dim = 128; the loaded binary issues tcgen05 (arch probe passes); the plan stays fused (nsplit = 1, or the caller workspace absent or too small); ceil_div(query_len, 128*kv_head_count/head_count) * batch_count * kv_head_count > 2 * sm_count, sm_count the host-queried device SM count (148 on the profiled device), with a preparation-fixed mask active (is_causal or window_size_left >= 0); K/V bases and strides admit tensor-map descriptors, so staging uses bulk tensor copies
+@@ -27,5 +27,5 @@
+       is_causal: {meaning: Enables the bottom-right aligned causal mask, shape: [], dtype: bool, default: false}
+       window_size_left: {meaning: Left window W; absent or -1 keeps every key, shape: [], dtype: int64, nullable: true, range: [-1, 262143], default: None}
+-      scale_softmax: {meaning: Softmax scale fixed at instance preparation, shape: [], dtype: fp32}
++      scale_softmax: {meaning: Ignored per-call scale; None allowed, shape: [], dtype: fp32, nullable: true, default: None}
+       sinks: {meaning: Absent; attention sinks are outside this task, shape: [], dtype: python_none, default: None}
+       seq_q_lens: {meaning: Absent; ragged query lengths are outside it, shape: [], dtype: python_none, default: None}
+@@ -76,6 +76,6 @@
+           The blocks of q and k run along head_dim and those of v along the key axis, so one scale
+             covers scale_block_size consecutive elements of the operand it multiplies
+-          FP8 payloads enter FP32 arithmetic at their exact values and every scale is a power of two,
+-            so these products need no widening and add no rounding
++          FP8 payloads enter FP32 arithmetic at their exact values; scale construction and products
++            follow FP32 arithmetic, including its representability limits
+         Symbol:
+           q: {meaning: Decoded FP32 query operand, shape: 'ref:q_tensor.shape', dtype: fp32}
+@@ -84,6 +84,6 @@
+       - Name: Masked scaled score
+         Math: |
+-          scale = scale_softmax, fixed at instance preparation and equal to head_dim^(-0.5) in the
+-            prepared domain; the per-call argument of the same name is ignored, and no separate
++          scale = prepared_scale = fp32(head_dim^(-0.5)), fixed at instance preparation in this domain;
++            the per-call scale_softmax is ignored whether None or present, and no separate
+             alignment flag is honored, so the causal bound below is always bottom-right aligned
+           visible(i) = {j : 0 <= j < kv_len, j <= i + kv_len - query_len if is_causal, and
+@@ -93,4 +93,5 @@
+           visible(i) is never empty here because j = i + kv_len - query_len satisfies both bounds
+         Symbol:
++          prepared_scale: {meaning: FP32 softmax scale fixed at instance preparation, shape: [], dtype: fp32}
+           score: {meaning: Masked scaled attention logit, shape: [{batch: batch_count}, {head: head_count}, {query_token: query_len}, {key_token: kv_len}], dtype: fp32}
+           visible: {meaning: Keys one query row may attend, shape: not_applicable, dtype: not_applicable}
+@@ -139,10 +140,11 @@
+         Math: |
+           The call returns None; o_tensor is o_buffer itself and lse_tensor is lse_buffer itself,
+-            both written in place, and caller storage outside the two buffers must not change
++            both written in place without reading their old values; no output is allocated by the call
+           The written region is the whole logical o_buffer and, when lse_buffer is not None,
+             the whole lse_buffer
+           q_tensor, k_tensor, v_tensor, sf_q, sf_k, sf_v and seq_kv_lens are read only; when present,
+             seq_kv_lens holds kv_len for every request and changes nothing
+-          workspace may be written as scratch and its contents are neither outputs nor compared
++          workspace may be written as scratch and its contents are neither outputs nor compared;
++            caller storage outside the output buffers and workspace must not change
+           The prepared instance also fixes the BF16 output dtype and leaves per-tensor FP8 scaling,
+             output amax, paged key/value storage, ragged lengths and attention sinks disabled
+@@ -156,7 +158,7 @@
+     Architecture:
+     Execution:
+-      cta: Thread block launched as one grid element; owns the shared memory its launch allocates
++      cta: Thread block launched as one grid element; owns its smem shared memory and its explicitly allocated tmem tensor-memory columns
+       warp: 32 threads of one CTA, the granularity the fixed source derives as threadIdx.x >> 5
+-      thread: Single CUDA thread, one lane of a warp; the fixed source gives each its own register arrays
++      thread: Single CUDA thread, one lane of a warp; register names thread-local design values, not a compiled register count or no-spill guarantee
+     Feature:
+       mechanism: null
+@@ -207,5 +209,5 @@
+           the Contract's t = -1 state (m = -inf, den = 0, num = 0); the window is never empty because the first
+           live row's diagonal key lies inside it; the row's final normalizer is m(g_hi)
+-          group_max(g) = (max of the group's masked raw) * scale, exact; update/s/alpha/m/den follow the Contract, alpha by an exact CUDA expf
++          group_max(g) = (max of the group's masked raw) * scale; update/s/alpha/m/den follow the Contract's recurrence, alpha evaluated by CUDA expf
+         Symbol:
+           g_lo: {meaning: First key group any tile row can see}
+@@ -224,5 +226,5 @@
+           Contract values; for every unmasked key x = raw * scale - s(g) is at most rescale_log2_threshold * ln(2)
+           Each row processes the group as 64 key pairs; each pair evaluates x as two FP32 RNE results in one
+-          packed pair, and p[i,u] = exp_bias4(x), i.e. 2^4 * exp(x) in CUDA expf's exact operation sequence
++          packed pair, and p[i,u] = exp_bias4(x), an implementation of 2^4 * exp(x) using expf-style range reduction
+           with 2^4 folded into its two range-reduction magic constants and the low-order correction product
+           dropped (Arithmetic); exp_bias4(-inf) = +0, so masked keys contribute exactly zero to both sums
+@@ -232,10 +234,10 @@
+           absorb the sixteen pair results and combine as ((c0+c1)+(c2+c3)), so den carries the same bias as p
+         Arithmetic:
+-          Approx: 'Drops expf''s low-order term x*1.926e-8: deviation <= |x|*1.335e-8 <= 3.71e-8 for x <= 4*ln(2), worst ~1.1 ulp; exact at x = 0, +0 at -inf'
+-          Accumulate: Packed FP32 RNE pair adds; the four-chain chunk tree reassociates the den sum by ~1e-7 relative, too small to flip any p_q rounding
++          Approx: Drops the x*1.925963e-8 correction; x <= 4*ln(2) does not bound |x|, so the source-comment ~1.1 ulp estimate is not a full-domain bound; +0 at -inf
++          Accumulate: Packed FP32 RNE pair adds in a four-chain chunk tree; den reassociation does not feed p_q, but can change normalization and LSE
+         Ledger:
+           Baseline: Scalar expf per key with a runtime bias multiply and one serial FP32 denominator chain
+           Gain: Exponential-path instructions per key pair 16 -> 11 (packed steps, folded bias); denominator chain depth per 32-key chunk 16 -> 4
+-          Cost: The declared exponential deviation up to ~1.1 FP32 ulp on the admissible domain; three extra packed adds per chunk
++          Cost: Approximation can change probabilities and E4M3 rounding; no full-domain output error bound is established; three extra packed adds per chunk
+       - Name: Numerator by block-scaled PV product
+         Math: |
+@@ -260,6 +262,6 @@
+               bf16(num(g_hi)[i,x] * inv)
+             den(g_hi) <= 0: o_tensor[b,h,i,x] = bf16(0)
+-          The reciprocal multiply differs from the Contract's single division num/den by 1-2 FP32
+-            ulp ahead of the BF16 RNE conversion, which carries eight fewer mantissa bits
++          The reciprocal and multiply introduce separate FP32 rounding before BF16 conversion;
++            this operation sequence need not match the Contract's single division num/den
+           If lse_tensor is present: lse_tensor[b,h,i] = m(g_hi) + ln(den(g_hi) * 2^-4) when den(g_hi) > 0
+             and m(g_hi) is finite, else -inf, with CUDA logf; the exact factor 2^-4 removes den's bias
+@@ -269,5 +271,5 @@
+           Baseline: One FP32 division per output element
+           Gain: Divisions per row head_dim -> 1, replaced by one reciprocal and head_dim multiplies
+-          Cost: 1-2 extra FP32 ulp on each numerator before the BF16 conversion, at most one BF16 ulp (0.39%) after it, far inside rtol
++          Cost: Separate reciprocal/multiply rounding; the source's 1-2 FP32 ulp estimate does not prove output acceptance under the unavailable comparator
+   Work_schedule:
+     Thesis: 'One fused kernel, no scratch: one CTA owns one (query tile, batch x kv head) worktile; packing the group_count heads sharing a kv head into 128 rows lets one staged K/V group feed them all, and thread r owning row r keeps the recurrence thread-local; CTAs dispatch longest-first, a bijection'
+@@ -407,8 +409,8 @@
+     - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+       Choice: 'Launch 128 threads per CTA with a 102912-byte dynamic smem request: 83968 bytes live plus 18944 reserved (unused smem P region, Q-atom region, exchange scratch, slack), within the 2-block-per-SM register budget; the host grows the request until resident_blocks * 256 TMEM columns <= 512'
+-      Reason: The runtime does not account TMEM in residency; the padded request and launch bounds pin the two-CTA-per-SM occupancy the TMEM map and dispatch assume, and the reserved regions keep ring offsets byte-identical with sibling forms sharing this layout
++      Reason: The runtime does not account TMEM in residency; padding caps potential residency at two CTAs per SM, without guaranteeing attained occupancy. Reserved regions keep ring offsets byte-identical with sibling layouts
+     - Item: CONTRACT.Algorithm_requirement::p
+       Choice: The exponential realizing p must be the packed f32x2 sequence replicating CUDA expf's range reduction, with the declared low-order term dropped and 2^4 folded into the two magic constants
+-      Reason: Math_reshape's declared path and error bound are tied to exactly this sequence; the fold is bit-identical to multiplying by 16 because the shift wrap refuting it needs x >= 86.6, unreachable for x <= 4*ln(2)
++      Reason: This fixes the extracted operation sequence; the source reports bias-fold equivalence, but its unavailable exhaustive harness and NO_KTINY estimate do not establish a full-domain error bound
+   Prefer:
+     - Item: DESIGN.Work_schedule::Flow
+@@ -418,5 +420,5 @@
+     - Item: CONTRACT.Algorithm_requirement::p
+       Choice: Folding the 2^4 bias into the shifted exponent bit pattern instead of the magic constants, or substituting __expf or a bare ex2.approx for the declared exponential
+-      Reason: The pattern-space fold is exhaustively refuted (differs from expf(x)*16 on ~24% of 2^32 patterns via sign-bit wrap); __expf's ~5e-7 error flips ~1 E4M3 rounding in 6e4, and a heavy-key flip moves the output ~6%, outside rtol
++      Reason: Source comments report a ~24% pattern-fold mismatch and __expf-induced E4M3 flips with ~6% output changes in their experiments; these motivate the retained choice, not a new full-domain measurement
+     - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+       Choice: Merging the K and V staging completion into one shared per-group barrier accounting
+--- before/mma_sync.yaml
++++ current/mma_sync.yaml
+@@ -3,5 +3,5 @@
+   Describe: Multi-head attention on E4M3 Q/K/V payloads with E8M0 block-32 scales, giving a BF16 output and optional FP32 log-sum-exp under causal/window masks
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+-  Version: 3
++  Version: 4
+   Dispatch:
+     id: mma_sync
+@@ -9,5 +9,5 @@
+ DESIGN:
+   Math_reshape:
+-    Thesis: Warp-level tensor cores do no block scaling, but one FP8 mma.sync k-step of 32 channels is exactly one MX block, so the E8M0 bytes fold in as a rank-1 rescale of each block's FP32 partial. V decodes once per group to exact BF16; score and accumulator stay in registers, fixing the tile at 64 rows
++    Thesis: Warp-level tensor cores do no block scaling, but one FP8 mma.sync k-step of 32 channels is exactly one MX block, so the E8M0 bytes fold in as a rank-1 rescale of each block's FP32 partial. V decodes once per group to BF16; score and accumulator stay in registers, fixing the tile at 64 rows
+     Rewrite:
+       - Name: Block-rescaled score by rank-1 E8M0 fold
+@@ -21,6 +21,6 @@
+           r_(-1) = 0, r_c[i,j] = fma32(block_c(i,j) * q_sf[i,c], k_sf[j,c], r_(c-1)[i,j]), raw[i,j] = the last r_c:
+           each block's partial carries its own two scales, blocks accumulate in increasing c, and power-of-two scaling
+-          is exact, so raw is the Contract's sum_x q*k up to FP32 rounding
+-          score[i,j] = raw[i,j] * scale_softmax, and -inf for j outside visible(i)
++          is exact when representable, so raw implements the Contract's sum_x q*k with this FP32 rounding order
++          score[i,j] = raw[i,j] * prepared_scale, and -inf for j outside visible(i)
+         Symbol:
+           q_sf: {meaning: FP32 power-of-two query scale per head_dim block, shape: [{dim_block: head_dim/scale_block_size}], dtype: fp32}
+@@ -32,5 +32,5 @@
+         Ledger:
+           Baseline: Decode q and k to FP32 with a scale multiply per element and FMA-reduce the head_dim dot per (row, key)
+-          Gain: 'Per (row, key): 2*head_dim decode multiplies -> 0; head_dim FP32 FMAs -> head_dim MACs on the FP8 tensor core, 2167 TFLOP/s measured here'
++          Gain: 'Per (row, key): 2*head_dim decode multiplies -> 0; head_dim MACs move to FP8 tensor cores; source comments report 2167 TFLOP/s'
+           Cost: head_dim/scale_block_size fused rescale-adds and roundings per (row, key) per group; the whole score group stays live in registers
+       - Name: Group window over 64 packed rows
+@@ -62,6 +62,6 @@
+           group's Contract values, so an unmasked key has x = score - s(g) at most rescale_log2_threshold*ln(2), a
+           masked one x = -inf; m, s, alpha and the update test follow the Contract, alpha by the same expf
+-          p[i,u] = expf(x) * bias with CUDA's scalar expf, pinned bit for bit to the reference's exp; the
+-          power-of-two bias multiply adds no rounding, so p is the Contract's p with expf's one rounding
++          p[i,u] = expf(x) * bias with CUDA's scalar expf and a separate FP32 multiply; the source
++          intends to match the reference's exp, but the frozen materials do not prove cross-build bit identity
+           p_q[i,u] = the saturating RNE E4M3 conversion of p[i,u] read back at its exact value; saturation at
+           e4m3_max_norm = 448 is unreachable since p <= 16 * 2^4 = 256, and expf(-inf) = +0, so a masked key is 0
+@@ -78,12 +78,12 @@
+         Math: |
+           v_bf16[j,x] = bf16(v_tensor[j,x] * 2^(sf_v[x, floor(j/scale_block_size)] - e8m0_exponent_bias))
+-          An E4M3 payload carries four significant bits and the scale is a power of two, so the product needs five and
+-          BF16 carries eight: the narrowing is exact wherever the value lies in BF16's range, which the prepared domain
+-          guarantees since its scale bytes are the operand's own block magnitude rounded up to a power of two; a key past
+-          kv_len decodes to 0 from its zero-filled payload
++          A finite E4M3 payload carries at most four significant bits; power-of-two scaling does not add bits.
++          BF16 carries eight, so a normal finite product is exact; subnormal products must also lie on its
++          representable grid. The scale-generation rule alone is not a range or underflow proof for every input;
++          the BF16 multiplication remains an explicit narrowing. A key past kv_len decodes from zero-filled payload
+           num(g)[i,x] = num(g-1)[i,x]*alpha(g) + sum_{u=0}^{group_size(g)-1} p_q[i,u] * v_bf16[probability_group_keys*g
+           + u, x], evaluated as probability_group_keys/16 sequential 16-key BF16 tensor-core products per group with
+-          FP32 accumulation into the same accumulator, so the Contract's v decode is realized exactly and the only
+-          rounding the numerator adds is that accumulation; a fully masked group has p_q = 0 and changes nothing
++          FP32 accumulation into the same accumulator. Where v decoding is exact, this realizes the Contract's
++          value operand; BF16 narrowing outside that condition is an additional numerical difference
+         Symbol: {v_bf16: {meaning: Decoded BF16 value operand of one group, shape: [{key_token: probability_group_keys}, {value_dim: head_dim}], dtype: bf16}}
+         Arithmetic:
+@@ -92,5 +92,5 @@
+           Baseline: Decode V to FP32 with an E8M0 multiply per element and accumulate p_q * v with per-element FP32 FMAs
+           Gain: One decoded value tile serves all 64 rows instead of a decode per row; the numerator's MACs move to the BF16 tensor core
+-          Cost: A 32768-byte BF16 tile materialized per group per CTA on top of its 16384-byte source, and BF16 peaks at 576 TFLOP/s against the FP8 path's 2167
++          Cost: A 32768-byte BF16 tile per group per CTA on top of 16384 source bytes; source comments report BF16 at 576 TFLOP/s versus FP8 at 2167
+       - Name: Reciprocal normalization and LSE epilogue
+         Math: |
+@@ -99,6 +99,6 @@
+             den(g_hi) > 0: inv = 1 / den(g_hi), one FP32 reciprocal, and o_tensor[b,h,i,x] = bf16(num(g_hi)[i,x] * inv)
+             den(g_hi) <= 0: o_tensor[b,h,i,x] = bf16(0)
+-          The reciprocal multiply differs from the Contract's single division num/den by 1-2 FP32 ulp ahead of
+-          the BF16 RNE conversion, which carries eight fewer mantissa bits
++          The reciprocal and multiply introduce separate FP32 rounding before BF16 conversion;
++          this operation sequence need not match the Contract's single division num/den
+           If lse_tensor is present: lse_tensor[b,h,i] = m(g_hi) + ln(den(g_hi)/bias) with CUDA logf when den(g_hi) > 0
+           and m(g_hi) is finite, else -inf; dividing by the power-of-two bias is exact and removes the bias den carries
+@@ -108,5 +108,5 @@
+           Baseline: One FP32 division per output element
+           Gain: Divisions per row head_dim -> 1, replaced by one reciprocal and head_dim multiplies
+-          Cost: 1-2 extra FP32 ulp on each numerator before the BF16 conversion, at most one BF16 ulp (0.39%) after it, far inside rtol
++          Cost: Separate reciprocal/multiply rounding; the source's 1-2 FP32 ulp estimate does not prove output acceptance under the unavailable comparator
+   Work_schedule:
+     Thesis: 'One fused kernel, no scratch: one CTA owns one (query tile, batch x kv head) worktile of 64 packed rows, qph query rows by the group_count heads sharing a kv head, so one staged K/V group feeds them all. A thread holds two rows eight apart, so each row spans four lanes and reduces there'
+@@ -177,6 +177,6 @@
+           p_frag: {meaning: E4M3-rounded probabilities of one 16-key chunk, depth: 1, location: register, shape: [{packed_row: 64}, {key_token: 16}],
+             dtype: bf16, total_size: 2048, view: {'p_q(g,kk)': {}}}
+-          state_regs: {meaning: Carried per-row m and the holder's den partial, depth: 1, location: register, shape: [{packed_row: 64}, {value: 2}],
+-            dtype: fp32, total_size: 512, view: {m: {region: {value: [0, 1]}}, den: {region: {value: [1, 2]}}}}
++          state_regs: {meaning: Each row's four holders carry m and a den partial, depth: 1, location: register, shape: [{packed_row: 64}, {holder: 4}, {value: 2}],
++            dtype: fp32, total_size: 2048, view: {m: {region: {value: [0, 1]}}, den: {region: {value: [1, 2]}}}}
+         Role:
+           MAIN:
+@@ -189,7 +189,7 @@
+                   o_init: {execution_mode: serial, describe: Set num in o_regs to 0 and the state in state_regs to m = -inf and den = 0 for both of the thread's rows; reads no input and no old value}
+                   sf_k: {execution_mode: serial, describe: 'Decode sfk_atom(g) into sfk_words as exact FP32 powers of two k_sf(g), one per dim_block and key, 0 for a key past kv_len'}
+-                  sf_v: {execution_mode: serial, describe: 'Decode sfv_atom(g) into sfv_words as v_sf(g), the exact BF16 powers of two 2^(sf_v - e8m0_exponent_bias) per key block and channel pair'}
+-                  v_bf16: {execution_mode: serial, describe: Multiply v_block(g)'s E4M3 payload pairs by v_sf(g) and write the exact BF16 product into the single-buffered v_decoded; done covers its rendezvous}
+-                  score: {execution_mode: serial, describe: Scale raw(g) by scale_softmax and mask it to -inf outside the thread's rows' visible range; only a group straddling the warp's window tests}
++                  sf_v: {execution_mode: serial, describe: 'Decode sfv_atom(g) into sfv_words as v_sf(g), BF16 scale pairs for 2^(sf_v - e8m0_exponent_bias) per key block and channel pair'}
++                  v_bf16: {execution_mode: serial, describe: Multiply v_block(g) pairs by v_sf(g) in BF16 into v_decoded; Math_reshape states when exact; done covers the publishing rendezvous}
++                  score: {execution_mode: serial, describe: Scale raw(g) by prepared_scale and mask it to -inf outside the thread's rows' visible range; only a group straddling the warp's window tests}
+                   group_max: {execution_mode: serial, describe: 'Exact maximum of the thread''s 32 masked scores per row, then a four-lane butterfly across the lanes sharing it, so all four hold group_max(g)'}
+                   rescale: {execution_mode: serial, describe: 'Per row: the Contract''s update test, s(g) and alpha(g) by expf; one warp vote on alpha != 1 scales num and den together or skips both (1.0 is exact)'}
+@@ -239,5 +239,5 @@
+     - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+       Choice: PV must be mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 with ldmatrix.x4.trans over the decoded BF16 value tile; its A operand is the probability first rounded to E4M3 by cvt.rn.satfinite.e4m3x2.f32, then re-decoded to BF16 as a separate exact step
+-      Reason: 'Numerator exactness needs both operands at their exact values: an E4M3 payload''s four significant bits times a power of two need five and BF16''s eight carry them, as they do the E4M3-rounded probability; the transposing load and m16n8 geometry make the score C fragment the PV A fragment'
++      Reason: E4M3 values have at most four significant bits, unchanged by power-of-two scaling; BF16 V exactness also needs the stated representability condition. The E4M3 probability decodes exactly; transposing loads map score C fragments to PV A fragments
+     - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+       Choice: K and V payloads and both scale atoms must be staged by 16-byte cp.async.cg using the source-size operand, 0 for a key row past kv_len, one commit group per key group, consumed by cp.async.wait_group 1 and a CTA barrier
+@@ -245,8 +245,8 @@
+     - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+       Choice: Launch 128 threads per CTA with an 112704-byte dynamic shared memory request, 112640 bytes of declared regions plus a 64-byte tail, under a two-blocks-per-SM launch bound
+-      Reason: The footprint caps head_dim = 128 at two resident CTAs per SM (2 * 112704 within the 233472 bytes of shared memory per SM the host queries), and the register cap that follows is the one ptxas met without spilling; a 168-register cap spilled 1540 bytes
++      Reason: The host uses shared-memory capacity to estimate residency; on the source's 233472-byte device this footprint allows two CTAs. The reported no-spill and 168-register-cap spill results are historical compilation observations, not guarantees for this fallback build
+     - Item: CONTRACT.Algorithm_requirement::p
+       Choice: The exponential realizing p must be CUDA's scalar expf, with the Contract's bias applied as a separate FP32 multiply
+-      Reason: This path's declared equality with the reference's exp rests on the library expf, whose value is what the Contract quantizes to E4M3; it is source-measured at ~59% of the group loop, so it is the first thing an implementer would replace
++      Reason: The scalar library call fixes this path's extracted probability sequence; the source reports expf at ~59% of its measured group loop, but that observation does not prove bit identity with every reference build
+   Prefer:
+     - Item: DESIGN.Work_schedule::Flow
+@@ -256,3 +256,3 @@
+     - Item: CONTRACT.Algorithm_requirement::p
+       Choice: Substituting __expf or a bare ex2.approx for the scalar expf, or folding the bias into the exponential's shifted exponent bit pattern
+-      Reason: __expf's ~5e-7 relative error flips about one E4M3 rounding in 6e4 and a flip on a high-weight key moves the output ~6%, outside rtol 0.05; the pattern fold differs from expf(x)*bias through sign-bit wrap on ~24% of the 2^32 patterns
++      Reason: Source comments report __expf-induced E4M3 flips with ~6% output changes and a ~24% pattern-fold mismatch; these historical experiments motivate the retained sequence, without a new full-domain or fallback-build validation
+--- before/split_kv.yaml
++++ current/split_kv.yaml
+@@ -3,11 +3,11 @@
+   Describe: Multi-head attention on E4M3 Q/K/V payloads with E8M0 block-32 scales, giving a BF16 output and optional FP32 log-sum-exp under causal/window masks
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/solution.py::Model.forward
+-  Version: 3
++  Version: 4
+   Dispatch:
+     id: split_kv
+-    when: head_dim = 128; the loaded binary issues tcgen05; the caller's workspace meets the planned size and the planner splits the key range, so nsplit > 1 with base = ceil_div(query_len, qph128) * batch_count * kv_head_count < 2 * sm_count, n_group > 1, sm_count host-queried; the span selects the flat scan; 2 * query_len * group_count > ceil_div(query_len, qph128) * 128, so no padding-skip row order; rows_total >= 2 * sm_count or nsplit < 8 selects the narrow combine; K/V admit tensor maps
++    when: head_dim = 128; binary issues tcgen05; sufficient workspace and planned nsplit > 1; base = ceil_div(query_len, qph128)*batch_count*kv_head_count < 2*sm_count, sm_count host-queried; non-fused one-pass flat scan; each nonempty GMAX chunk has >=8 groups; 2*query_len*group_count > ceil_div(query_len, qph128)*128 excludes padding-skip row order; nsplit <= 128 and (rows_total >= 2*sm_count or nsplit < 8) select narrow combine; K/V admit tensor maps
+ DESIGN:
+   Math_reshape:
+-    Thesis: The delayed maximum makes the softmax state path dependent, so no chunk can name a safe reference alone. Materializing every group maximum and replaying the recurrence exactly lets each chunk use the single pass's own state, so its probabilities stay bit-identical and the merge is exact
++    Thesis: The delayed maximum makes softmax state path dependent. Materializing group maxima and replaying the recurrence supplies each chunk's entry state; chunks retain the same probability sequence for the same scores and states, while FP32 reweighting and merge reassociate the accumulation
+     Rewrite:
+       - Name: Block-scaled score tile, one readout per pass
+@@ -96,8 +96,8 @@
+           when c_lo > 0, else -inf, and num = den = 0. For g in [c_lo, c_hi] the rescale data is
+           replayed rather than derived from this group's own scores: s(g) = m_table[g][row] if finite
+-          else 0, and alpha(g) = exp(m(g-1) - s(g)) if m(g-1) is finite else 0, with an exact CUDA
++          else 0, and alpha(g) = exp(m(g-1) - s(g)) if m(g-1) is finite else 0, evaluated by CUDA
+           expf, m(g-1) being what the previous iteration of this chunk carried; the update test is
+           never re-evaluated here. num and den then follow the Contract's Output accumulation over
+-          this chunk's groups only, so num(c_hi) and den(c_hi) are the single pass's own accumulators
++          this chunk's groups only; these are partial accumulators, not the full prefix values of a single pass
+         Symbol:
+           nsplit: {meaning: Key-range chunks the chunk pass launches with, binding: 'bind:DESIGN.Work_schedule::nsplit'}
+@@ -116,5 +116,5 @@
+           normalizer; for every unmasked key x = raw * scale - s(g) is at most rescale_log2_threshold*ln(2)
+           Each row takes the group as 64 key pairs; each pair evaluates x as two FP32 RNE results in one
+-          packed pair and p[i,u] = exp_bias4(x), i.e. 2^4 * exp(x) in CUDA expf's exact operation sequence
++          packed pair and p[i,u] = exp_bias4(x), an implementation of 2^4 * exp(x) using expf-style range reduction
+           with 2^4 folded into its two range-reduction magic constants and the low-order correction
+           product dropped (Arithmetic); exp_bias4(-inf) = +0, so masked keys contribute exactly zero
+@@ -124,10 +124,10 @@
+           partial chains absorb the sixteen pair results and combine as ((c0+c1)+(c2+c3)), bias included
+         Arithmetic:
+-          Approx: 'Drops expf''s low-order term x*1.926e-8: deviation <= |x|*1.335e-8 <= 3.71e-8 for x <= 4*ln(2), worst ~1.1 ulp; exact at x = 0, +0 at -inf'
+-          Accumulate: Packed FP32 RNE pair adds; the four-chain chunk tree reassociates the den sum by ~1e-7 relative, too small to flip any p_q rounding
++          Approx: Drops the x*1.925963e-8 correction; x <= 4*ln(2) does not bound |x|, so the source-comment ~1.1 ulp estimate is not a full-domain bound; +0 at -inf
++          Accumulate: Packed FP32 RNE pair adds in a four-chain chunk tree; den reassociation does not feed p_q, but can change normalization and LSE
+         Ledger:
+           Baseline: Scalar expf per key with a runtime bias multiply and one serial FP32 denominator chain
+           Gain: Exponential-path instructions per key pair 16 -> 11 (packed steps, folded bias); denominator chain depth per 32-key chunk 16 -> 4
+-          Cost: The declared exponential deviation up to ~1.1 FP32 ulp on the admissible domain; three extra packed adds per chunk
++          Cost: Approximation can change probabilities and E4M3 rounding; no full-domain output error bound is established; three extra packed adds per chunk
+       - Name: Numerator by block-scaled product in registers
+         Math: |
+@@ -139,5 +139,5 @@
+           The group's product lands in the same tensor-memory columns its own scores just vacated and is
+           read back into the owning row's register accumulator, so the accumulate predicate is off for
+-          the first k-step of every group, no accumulator lives in tensor memory, and the readback adds
++          the first k-step of every group; the readback adds the product to the register accumulator
+           num(g-1)*alpha(g) is a read-modify-write of that accumulator, run only for rows whose
+           alpha != 1; a row at alpha = 1 multiplies by exactly 1.0, an empty chunk issues no product
+@@ -172,13 +172,13 @@
+           total_den > 0 and m_tail[row] is finite, else -inf, with CUDA logf; the factor 2^-4 is exact
+           Because chunk_weight re-expressed every chunk against the one reference m_tail[row],
+-          total_num and total_den are the single pass's num(last_group) and den(last_group) up to that
+-          one multiply and the chunk sums' reassociation. Every live row's output and lse element are
++          total_num and total_den represent the same real-arithmetic sums; FP32 rescale products,
++          chunk weights and reassociation need not reproduce a single pass bitwise. Every live row's output and lse element are
+           written exactly once, by the one CTA owning that row
+         Arithmetic:
+-          Accumulate: Both merge sums run in ascending chunk order, one FP32 add per chunk, reassociating the single pass's key-order sum by ~1e-7 relative
++          Accumulate: Both merge sums run in ascending chunk order, one FP32 add per chunk; no uniform relative bound is established for the signed numerator sum
+         Ledger:
+           Baseline: One reciprocal, one BF16 conversion and one LSE per row inside the attention kernel, with no partial traffic at all
+           Gain: The output producer becomes one CTA per row, so the merge is nsplit adds per channel with the reciprocal and conversion paid once
+-          Cost: One extra FP32 multiply per partial element and a reassociated merge sum, both far inside rtol 0.05 on a BF16 output
++          Cost: FP32 weighting and reassociation; cancellation and the unavailable comparator prevent inferring output acceptance from the BF16 dtype
+   Work_schedule:
+     Thesis: Four submissions replace the fused one - materialize every group maximum, replay the recurrence one thread per row, accumulate each key chunk from the replayed state into weighted partials, and merge them per output row - filling the resident slots a starved geometry leaves empty
+@@ -442,5 +442,5 @@
+                   rescale: {execution_mode: serial, describe: 'Reads m_prev as m(g-1), m_cur as m(g) for s(g)/alpha(g); scales den and o_regs where alpha != 1; rotates m_prev<-m_cur, m_cur<-m_next'}
+                   probs: {execution_mode: serial, describe: 'Reads this row''s 128 scores from s(g), masks to -inf outside visible(i), forms p and p_q, writes p_tmem and adds four chains into den'}
+-                  o_acc: {execution_mode: serial, describe: Reads this row's product back from pv(g) in four 32-column chunks into o_regs; done covers all four warps' readouts of those columns}
++                  o_acc: {execution_mode: serial, describe: Adds this row's product from pv(g) in four 32-column chunks to o_regs; done covers all four warps' readouts of those columns}
+                   chunk_weight: {execution_mode: serial, describe: 'Forms exp(m_prev - m_tail[row]), m_prev being m(c_hi) after the last rescale, 0 if either is not finite or the chunk is empty'}
+                 matmul:
+@@ -537,5 +537,5 @@
+         - DESIGN.Tile_pipeline::SPLIT.MAIN
+       Choice: K/V staging must be single-thread cp.async.bulk.tensor.4d against host-cached CUtensorMaps (UINT8, SWIZZLE_128B, box {128,1,128,1}, zero OOB fill), each 512-byte atom on cp.async.bulk 1-D riding the same per-slot mbarrier
+-      Reason: Both operands are armed at one point of the iteration here, so one expect_tx per slot counting tile plus atom bytes is the declared done event; splitting the accounting as the deferred-PV fused form must would wait on bytes never copied against that phase
++      Reason: This source arms one shared expect_tx per slot for its issued tile and atom bytes; SPLIT waits for both operands there, while GMAX stages only K. The declared completion follows this accounting
+     - Item:
+         - DESIGN.Tile_pipeline::GMAX.MAIN
+@@ -547,5 +547,5 @@
+         - DESIGN.Tile_pipeline::SPLIT.MAIN
+       Choice: Launch both attention passes with 128 threads under a two-blocks-per-SM bound, requesting 69632 bytes of dynamic smem for the group-maximum layout and 102912 for the chunk layout, grown by the host until resident_blocks * 256 <= 512
+-      Reason: TMEM, not smem, caps residency at two CTAs per SM here and tcgen05.alloc blocks once the 512 columns are handed out; the padded request pins the occupancy resident = 2 * sm_count assumes, and the unused regions keep the layout byte-identical with its siblings
++      Reason: The 256-column allocation caps residency at two CTAs per SM; host padding enforces that upper bound in its occupancy calculation, not a guarantee of attained occupancy. Reserved regions preserve sibling layout offsets
+     - Item: DESIGN.Work_schedule::Flow
+       Choice: The three successors must carry the programmatic stream serialization attribute; the wait is cudaGridDependencySynchronize and the trigger cudaTriggerProgrammaticLaunchCompletion, both per-thread, and the chunk pass's wait stays below its prologue
+@@ -556,5 +556,5 @@
+     - Item: CONTRACT.Algorithm_requirement::p
+       Choice: The exponential realizing p must be the packed f32x2 sequence replicating CUDA expf's range reduction, with the declared low-order term dropped and 2^4 folded into the two magic constants
+-      Reason: Math_reshape's declared path and error bound are tied to exactly this sequence, and bit-identity with the fused design's probabilities - what makes the merge an exact reweighting - holds only if both use it
++      Reason: The same sequence preserves probability evaluation for equal scores and replayed states; it does not make FP32 weighted partials bit-identical to fused accumulation or supply a full-domain error bound
+   Prefer:
+     - Item: DESIGN.Work_schedule::Flow
+--- before/dispatch.md
++++ current/dispatch.md
+@@ -5,7 +5,7 @@
+ **收录范围。** 当前目录含三份完整设计：[root](root.yaml)、[split_kv](split_kv.yaml)、[mma_sync](mma_sync.yaml)；含 root 共三份，低于十份上限，root 唯一，没有未计划的草稿、备份 YAML，也没有改名、换扩展名或另藏目录继续交付的额外完整方案。三份互不派生，三个 Design 区域各自本地定义、没有任何整区 `from`，引用图因此无环；非 root 节点按规则省略 CONTRACT，共享的只有 root 保存的 Contract。三份各有独特完整设计价值：root 是 block-scaled 单内核 fused，split_kv 是跨内核状态物化与加权归并，mma_sync 是可移植 warp-level 路径；不为提供共享区域增加没有独立价值的文件。
+ 
+-**路由与三者关系。** 路由只述机制族，具体条件以各 YAML 的 `when` 为准：加载的二进制是 arch-specific、tcgen05 可用时，plan 保持 fused 的几何走 [root](root.yaml)，成本模型定价 split 更便宜且调用方 workspace 足够的几何走 [split_kv](split_kv.yaml)；二进制非 arch-specific（tcgen05 kernel body 是 inert stub、host 探针返回假）时，唯一可达的 tensor-core 路径是 [mma_sync](mma_sync.yaml)。三份的 `when` 互不重叠：root 与 split_kv 都要求 tcgen05 可用，而在 fused/split 与 base 对 2*sm_count 的大小上相反，mma_sync 要求 tcgen05 不可用；root 没有隐式兜底。三者关系是：共同 Contract 的 Request domain 含 head_dim ∈ {128,256}（shape_range 的八组 (head_count, kv_head_count, head_dim) 三元组）；本次任务要求交付的完整设计是 P2/P4 已定的这三份，均已落实并各自通过独立审阅；目录实际收录范围小于 Contract 有效域——三份 `when` 都只承担 head_dim = 128 的子域，下列子域没有任何完整 `when` 覆盖，只由变体记录承担，而记录不产生完整 schema 身份：head_dim = 256 的全部几何（“head_dim=256 fused 形式”“head_dim=256 与 split-KV 组合”“mma.sync 的 head_dim=256 形式”三条）；单波 D=128 fused 的 key-split、group-split 与 QK64=0 顺序形式（各自条目）；tensor-map descriptor 不可用时的 cp.async 降级（“K/V 物化”）；PSK、wide combine、融合 scan 与两遍 scan（各自条目）；派发序取 lpt=0/2/3 的 fused 几何，含无准备期掩码因而 lpt=0 的多波几何（“CTA 派发序 lpt”）。这些子域的实现事实都在源码里可达，只是本目录不为它们各交一份完整 YAML。
++**路由与三者关系。** 路由只述机制族，具体条件以各 YAML 的 `when` 为准：加载的二进制是 arch-specific、tcgen05 可用时，plan 保持 fused 的几何走 [root](root.yaml)，成本模型定价 split 更便宜且调用方 workspace 足够的几何走 [split_kv](split_kv.yaml)；二进制非 arch-specific（tcgen05 kernel body 是 inert stub、host 探针返回假）时，唯一可达的 tensor-core 路径是 [mma_sync](mma_sync.yaml)。三份的 `when` 互不重叠：root 与 split_kv 都要求 tcgen05 可用，而在 fused/split 与 base 对 2*sm_count 的大小上相反，mma_sync 要求 tcgen05 不可用；root 没有隐式兜底。三者关系是：共同 Contract 的 Request domain 含 head_dim ∈ {128,256}（shape_range 的八组 (head_count, kv_head_count, head_dim) 三元组）；本次任务要求交付的完整设计是 P2/P4 已定的这三份，已由原提取选定；当前字节另经本轮用户授权的同一 worker/reviewer 人工审修，未产生新 Runner P6 批准；目录实际收录范围小于 Contract 有效域——三份 `when` 都只承担 head_dim = 128 的子域，下列子域没有任何完整 `when` 覆盖，只由变体记录承担，而记录不产生完整 schema 身份：head_dim = 256 的全部几何（“head_dim=256 fused 形式”“head_dim=256 与 split-KV 组合”“mma.sync 的 head_dim=256 形式”三条）；单波 D=128 fused 的 key-split、group-split 与 QK64=0 顺序形式（各自条目）；tensor-map descriptor 不可用时的 cp.async 降级（“K/V 物化”）；PSK、wide combine、融合 scan 与两遍 scan，以及任一非空 GM chunk 不足 8 组而使用顺序体的几何（各自条目）；派发序取 lpt=0/2/3 的 fused 几何，含无准备期掩码因而 lpt=0 的多波几何（“CTA 派发序 lpt”）。这些子域的实现事实都在源码里可达，只是本目录不为它们各交一份完整 YAML。
+ 
+-**调用与路径事实（影响理解与使用）。** `solution.py::Model.forward` 只解析 softmax scale 并把 14 个位置参数交给扩展：scale、causal、window 全部在准备期固定（`window_left` 为 None 或任何负哨兵都视为无左窗口），每次调用的 `scale_softmax` 实参被忽略；`sinks/seq_q_lens/amax_o/descale_q,k,v/scale_o/block_table/block_table_v/gate/sf_o` 不进内核，与 Contract 登记的 inert 参数一致；`current_stream=None` 传 -1 由 C++ 取当前流。C++ 侧顺序固定为 `fmha_mxfp8_forward`（TORCH_CHECK 校验、填 Params、`plan_geometry`）→ 可选 CUDA Graph 查找/捕获/重放 → `launch_sequence`（本次 forward 的全部 kernel launch）。TORCH_CHECK 拒绝 head_dim ∉ {128,256}、head_count 不是 kv_head_count 的整数倍、空 batch/序列、head_dim 轴不连续、三个 scale 缓冲字节数与 F8_128x4 不符。solution.py 依次以 `TORCH_CUDA_ARCH_LIST = {major}.{minor}a → {major}.{minor} → auto` 编译，只有 arch-specific 镜像定义 `FMHA_TCG_ARCH`（否则所有 tcgen05 kernel body 是 inert stub）；`compile()` 调一次 `tcg_available()` 并缓存，因此 tcgen05 与 mma.sync 两条路径之间的选择由加载的二进制决定，不是输入的函数。workspace 由调用方在准备期经 `scratch_workspace_bytes()` → `workspace_bytes(B,H,KH,Sq,Skv,D,causal,window_left,has_window)` 分配，与 forward 用同一个 `plan_geometry`，两处不会分歧；forward 只检查 `numel() >= plan.workspace`，不足时静默改走 fused。`use_split = use_tc && nsplit>1 && workspace 存在且足够`。CUDA Graph 缓存的是 launch 序列而不是结果：key 覆盖指针、stride、几何、掩码、scale 位与 `nsplit/gm_nsplit/use_split/maps_valid/workspace_bytes` 等字段，同 key 第二次调用才在侧流上只记录不执行地捕获，随后在调用方 stream 上重放，捕获或重放失败退回直接 launch，累计捕获达上限后永久直接 launch；`launch_sequence` 内故意不做错误检查，由 `fmha_mxfp8_forward` 在提交后统一 `cudaGetLastError`。split 链每个后继内核在入口处 `cudaGridDependencySynchronize()`（PDL）等待；等待侧的唯一例外是 scan → split 边界（`fmha_pdl_scan_wait()` 下移到首次读 p.mstate 之前），[split_kv](split_kv.yaml) 已按真实位置落实为 Tile_pipeline Step.SPLIT 的 Event.scan_wait 与 await:scan（排在 K/V prime、TMEM 预留、Q staging、scale 写与累加器清零之下），不是入口等待。trigger 侧按内核有三种实测位置：GM 与 split 两个 tcgen05 内核在退出前 trigger（入口 trigger 会让后继从恰好一个常驻波的网格里抢走槽位，s5 实测 -5.5% 被否决，全套 x0.9929 对退出位置的 x1.0062）；scan_flat 与 scan（pass B）在入口等待完成后、串行递推开始前 trigger——scan 是单 CTA、不可能被后继饿死，早释放让 split 的 TMEM alloc、Q payload staging 与 Q scale 写重叠 scan 的串行尾部，该边界独自值约 +1.8% 全套 geomean（三个其他边界合计的三倍），是这条链 PDL 收益的大头；segmax 在入口 trigger（其后继是 scan 的单 CTA，早 launch 不抢任何槽位，见“两遍 scan 变体”条目）。
++**调用与路径事实（影响理解与使用）。** `solution.py::Model.forward` 只解析 softmax scale 并把 14 个位置参数交给扩展：scale、causal、window 全部在准备期固定（`window_left` 为 None 或任何负哨兵都视为无左窗口），每次调用的 `scale_softmax` 实参可为 None 且被忽略，Contract 将其与真正参与计算的 `prepared_scale` 分开；`sinks/seq_q_lens/amax_o/descale_q,k,v/scale_o/block_table/block_table_v/gate/sf_o` 不进内核，与 Contract 登记的 inert 参数一致；`current_stream=None` 传 -1 由 C++ 取当前流。C++ 侧顺序固定为 `fmha_mxfp8_forward`（TORCH_CHECK 校验、填 Params、`plan_geometry`）→ 可选 CUDA Graph 查找/捕获/重放 → `launch_sequence`（本次 forward 的全部 kernel launch）。TORCH_CHECK 拒绝 head_dim ∉ {128,256}、head_count 不是 kv_head_count 的整数倍、空 batch/序列、head_dim 轴不连续、三个 scale 缓冲字节数与 F8_128x4 不符。solution.py 依次以 `TORCH_CUDA_ARCH_LIST = {major}.{minor}a → {major}.{minor} → auto` 编译，只有 arch-specific 镜像定义 `FMHA_TCG_ARCH`（否则所有 tcgen05 kernel body 是 inert stub）；`compile()` 调一次 `tcg_available()` 并缓存，因此 tcgen05 与 mma.sync 两条路径之间的选择由加载的二进制决定，不是输入的函数。workspace 由调用方在准备期经 `scratch_workspace_bytes()` → `workspace_bytes(B,H,KH,Sq,Skv,D,causal,window_left,has_window)` 分配，与 forward 用同一个 `plan_geometry`，两处不会分歧；forward 只检查 `numel() >= plan.workspace`，不足时静默改走 fused。`use_split = use_tc && nsplit>1 && workspace 存在且足够`。CUDA Graph 缓存的是 launch 序列而不是结果：key 覆盖指针、stride、几何、掩码、scale 位与 `nsplit/gm_nsplit/use_split/maps_valid/workspace_bytes` 等字段，同 key 第二次调用才在侧流上只记录不执行地捕获，随后在调用方 stream 上重放，捕获或重放失败退回直接 launch，累计捕获达上限后永久直接 launch；`launch_sequence` 内故意不做错误检查，由 `fmha_mxfp8_forward` 在提交后统一 `cudaGetLastError`。split 链每个后继内核在入口处 `cudaGridDependencySynchronize()`（PDL）等待；等待侧的唯一例外是 scan → split 边界（`fmha_pdl_scan_wait()` 下移到首次读 p.mstate 之前），[split_kv](split_kv.yaml) 已按真实位置落实为 Tile_pipeline Step.SPLIT 的 Event.scan_wait 与 await:scan（排在 K/V prime、TMEM 预留、Q staging、scale 写与累加器清零之下），不是入口等待。trigger 侧按内核有三种实测位置：GM 与 split 两个 tcgen05 内核在退出前 trigger（入口 trigger 会让后继从恰好一个常驻波的网格里抢走槽位，s5 实测 -5.5% 被否决，全套 x0.9929 对退出位置的 x1.0062）；scan_flat 与 scan（pass B）在入口等待完成后、串行递推开始前 trigger——来源测量中的小 scan 网格早释放，让 split 的 TMEM alloc、Q payload staging 与 Q scale 写重叠 scan 的串行尾部，该边界独自值约 +1.8% 全套 geomean（三个其他边界合计的三倍），是这条链 PDL 收益的大头；segmax 在入口 trigger（其后继是来源测量中的小 scan 网格，来源据此采用早 launch，见“两遍 scan 变体”条目）。
+ 
+ **不可达的来源路径（只保留来源事实，不建设计、不改称参数）。** Contract 的八组 (head_count, kv_head_count, head_dim) 给出 G = head_count/kv_head_count ∈ {1,4,16}，全部是 2 的幂且 ≤ 64，`plan_geometry` 恒置 use_tc，故 scalar 路径 `fmha_scalar_kernel<CPT>`（一 warp 一 query row、warp shuffle 归约 QK、标量 FP32 FMA 做 PV）在 Contract 有效域内不可达，只服务 Contract 之外的几何；默认构建下 `FMHA_TCG_MIN_T=1`、`FMHA_TCG_PAD_T=1` 使 pad 门与 T 门恒真，`use_tcg = (D==128||D==256) && tcg_available()`，而 `use_tcv = (D==256) && tcg_ok && !use_tcg` 是矛盾式，Phase E（mma.sync QK + tcgen05 PV）恒不可达，保留为来源中的死分支。若共享 Contract 的有效域被放宽（例如允许非 2 的幂 G），这两个可达性判断需重新核对。
+@@ -13,5 +13,5 @@
+ **只记录存在与默认值、不为其建设的实验臂。** 以下编译期开关是已测量否决或仅供 A/B 的臂，默认构建下不改变任何被选实例：`FMHA_GM_QK64=0`、`FMHA_PARTIALS_BF16=0`（见“partial 写出与格式”条目）、`FMHA_SCAN_B1B2=0`、`FMHA_COMBINE_DSLICE=0`、`FMHA_CTA_PHASE_STAGGER=0`、`FMHA_RED_MAX_SEQ=0`、`FMHA_FORCE_KEY_SPLIT_D128=0`、`FMHA_GSPLIT_FORCE_D128=0`、`FMHA_TCG_QK_AHEAD=0`、`FMHA_TMA_PIPE_D128=0`、`FMHA_SPLIT_MAX=0`（不施加额外上限）、`FMHA_FUSED_KSPLIT_D128/D256` 的 KSPLIT=4 臂（agv1 实测否决）。其否决测量随相应条目或源码注释保留。
+ 
+-**已知缺口与边界（继承，非阻塞）。** 外部验收器的比较公式与相对误差基准未提供（P1 登记的来源缺项），Contract `Tolerance` 在 root 中保留来源记录并须原样交付，该缺口只影响外部测试边界，不影响本目录取舍。源码注释引用的 harness/实验报告（results/summaries/…）不在冻结快照内，相关数值界已由 P2/P3 按注释内常数独立复推，本目录只转述有源码注释依据的测量。共享 Contract 的 `Hardware_specification` Device/Architecture/Feature 仍是 P1 已批准的占位状态：root 的容量条件已写成设计自持参数 sm_count（`device_sm_count()` host 查询；实测设备 148 SM，ncu 材料见证），split_kv/mma_sync 的容量类条件（resident、combine 选择、lpt 门）同样在各自 YAML 中按设计自持参数落实，不当成 Contract 已登记的硬件事实。“mma.sync 与 split-KV 的组合”带一处 head_dim=128 与 256 两条链共有的来源缺陷，见该组合条目，按事实保留、不补造初始化或隔离保证。
++**已知缺口与边界（继承，非阻塞）。** 外部验收器本体及其完整比较语义未提供，Contract `Tolerance` 保留 metadata.json 的阈值来源记录，不自行采用默认比较式。固定 `candidate/fmha_common.cuh:242–251` 的作者实验注释另载 `max |actual-ref|/(atol+rtol*|actual|)`，分母采用 actual；这说明该实验的度量，不能确认它就是正式 Golden 验收器。源码引用的 harness/实验报告（results/summaries/…）不在冻结快照内，下文性能、编译和数值实验数字均为来源报告，未在本轮复现，不证明完整动态域通过验收。特别是 `fmha_tcg_ptx.cuh:691–696` 从 `x≤4ln2` 推出 `|x|≤4ln2` 的推导不成立，故 root/split_kv 不再宣称 NO_KTINY 的全域 ~1.1 ulp 上界；分母重结合、带符号分子归并和倒数归一也不据此声称必在容差内。共享 Contract 的 `Hardware_specification` Device/Architecture/Feature 仍是 P1 已批准的占位状态：root 的容量条件已写成设计自持参数 sm_count（`device_sm_count()` host 查询；实测设备 148 SM，ncu 材料见证），split_kv/mma_sync 的容量类条件（resident、combine 选择、lpt 门）同样在各自 YAML 中按设计自持参数落实，不当成 Contract 已登记的硬件事实。“mma.sync 与 split-KV 的组合”带一处 head_dim=128 与 256 两条链共有的来源缺陷，见该组合条目，按事实保留、不补造初始化或隔离保证。 本轮审修记录见 [.extraction/schema-audit-20261119.json](.extraction/schema-audit-20261119.json)；原 [receipt](.extraction/receipt.json) 只证明此前交付字节，原 `invalid_receipt / P6 / published:false` 与全部历史 audit marker 保持原意。
+ 
+ ## 完整设计
+@@ -21,5 +21,5 @@
+ | [root](root.yaml) | tcgen05 block-scaled 单内核 fused attention。实例 fmha_tcg_kernel<128, PASS_FUSED, KSPLIT=1, TMA=1, QK64=1>（launch_sequence fused 分支经 launch_tcg<128, PASS_FUSED, 1, true> 启动，grid=(qtiles128, B*KH)、block=128、p.lpt=1；ncu shape 7 见证，shape 1 跑同一模板实例但 lpt=2、不在其 when 内，归“CTA 派发序 lpt”条目）：一个 CTA 覆盖 128 个打包行（qph128 = 128/G 个 query row × 共享同一 kv head 的 G 个 query head），128 线程且 TMEM lane == 一个 query row，QK、softmax、PV 全程无跨 lane 归约；每 128-key 组发两次 N=64 的 block_scale MMA 写入同一 64 列 score tile，每个分数只从 TMEM 读出一次（该形式 O 在 TMEM，128 个分数才能整组驻留寄存器），按 Contract 的 4·ln2 阈值做延迟 rescale，概率经 cvt.rn.satfinite.e4m3x2（饱和即 clamp 到 448，RNE）写入 TMEM 的 P tile，PV 以 V 的 key 轴 E8M0 作 SFB、SFA_P 恒为 1.0 累加进 TMEM 的 O；epilogue 逐行 1/den 归一，原地写 bf16 o_tensor（即 o_buffer）与 fp32 lse_tensor（mstate + log(den/bias)）。保留理由：硬件 block scaling 直接吃 E4M3+E8M0，替代 rank-1 rescale 与 V 解码，是本任务主计算机制的载体，也是默认构建下 D=128 多波 fused 几何的唯一路径。 | 阅读入口，保存唯一 Contract；精确参数、when（含容量与 descriptor 条件）与修订号以 root.yaml 为准 |
+ | [split_kv](split_kv.yaml) | tcgen05 split-KV 多内核方案。源码实例：launch_sequence 的 use_tcg && use_split 分支在 head_dim=128、scan_fused=false 时的四内核链——launch_tcg<128, PASS_GROUP_MAX, FMHA_GM_KSPLIT_D128=1>（gm_grid=(qtiles128, B*KH, gm_nsplit)，p.nsplit 临时改为 gm_nsplit）→ pdl_launch(fmha_scan_flat_kernel, flat_grid, scan_block_size(rows,T)) → launch_tcg_split<128, 1, false, false>（grid=(qtiles128, B*KH, nsplit)）→ launch_combine<128>(…, bf16=false, fwgt=false)，即 fmha_combine_kernel<128,false,false>；ncu shape 9 见证完整链。机制（源码的 bm/mstate/mtail/part_a/part_b 在 YAML 中依次登记为 gmax_table、m_table、m_tail、num_part、den_part）：GM pass 把每组 masked scaled 最大值物化到 bm[group][row]（有效组区间之外的组对该 CTA 每一行全被掩码、其最大值就是 -inf，由首/末 split 写 -inf 头尾，scan 因此见到完全初始化的数组，且 (b−m)>4·ln2 对 b=−inf 恒假、延迟状态不受影响）；flat scan 每行一线程按 Contract 的同一延迟递推逐组重放出 mstate[group][row] 与 mtail[row]；split pass 把本 CTA 的有效组区间按 nsplit 再切、以 mstate[cLo−1] 为初态累加，按 exp(m_chunk_end − mtail) 加权写 part_a[split][row][D] 与 part_b[split][row]；combine 每输出一行一个 CTA 求和、1/total_b 归一并写 O 与 LSE。保留理由：延迟最大值使 softmax 状态路径依赖，键区间切分不能朴素合并（split pass 不能独立算出安全参考点）；这套“物化组最大值 + 精确重放 + 加权归并”改变了输出生产者（combine 而非 attention 内核写 O/LSE）、工作轴（新增 key-split 维与 scan/combine 的按行分解）与提交链（四次 launch 加 PDL 边界加 workspace 状态交接），root 加差额说明无法表达。 | 与 root 并列的独立完整方案，三个 Design 区域全部本地定义、无整区 `from`，Contract 解析到 root；与 root 共用 Contract 的延迟 rescale 递推，与两个组合条目共用内核模板族；精确参数、when 与修订号以 split_kv.yaml 为准 |
+-| [mma_sync](mma_sync.yaml) | 可移植 warp-level tensor-core 方案。源码实例：fmha_tc_kernel<128, WARP=4, PASS_FUSED, PVMODE=0>，由 launch_sequence 的 use_tc && !use_split 分支经 launch_tc<128, 4> 启动，grid=(qtiles, B*KH)（qph=64/G 行分块）、block=32*4=128、dynamic smem=TcSmem<128,4,PASS_FUSED>::bytes；进入条件为 plan_geometry 置 use_tc 而 tcg_available() 为假，即加载的二进制非 arch-specific。机制：一个 CTA 覆盖 BM=64 行，每线程持同一 warp 内相距 8 行的两个行 fragment（rowA = w*16 + (lane>>2)、rowB = rowA+8），两套 softmax 状态并行；QK 用 mma.sync.aligned.m16n8k32 e4m3 直接吃 E4M3 payload，一个 k-step=32 恰为一个 MX block，E8M0 scale 以 sq[row,blk]*sk[key,blk] 的 rank-1 方式折进各 block 的部分累加器（2 的幂缩放精确，和在累加顺序内等于 FP32 参考值）；V 先解码成 BF16（折入 key 轴 E8M0；E4M3×2^e 只有四个有效位，BF16 中精确）存共享内存，PV 用 mma.sync m16n8k16 bf16 配 ldmatrix.x4.trans；概率路径对 Contract 递推位忠实（标量 expf、4·ln2 延迟 rescale、runtime bias、cvt.rn.satfinite.e4m3x2 进分子、未舍入 FP32 进分母）；K/V/scale atom 由 cp.async 两级流水 staging；输出累加器在寄存器，epilogue 行内 4-lane shuffle 归约分母后 1/den 写 bf16 O 与 LSE。保留理由：这是加载的二进制发不出 tcgen05 时 Contract 有效域内唯一的 tensor-core 路径，其主要计算（rank-1 scale 折算、V 解码、跨 lane fragment 归约）与工作分配（BM=64、每线程两行、无 TMEM）都与 root 不同，需要独立贯通。 | 与 root 并列的独立完整方案，三个 Design 区域全部本地定义、无整区 `from`，Contract 解析到 root；进入条件（非 arch-specific 构建）与 root 的 when 不相交；精确参数、when 与修订号以 mma_sync.yaml 为准；head_dim=256 的同族实例见“mma.sync 的 head_dim=256 形式”条目，与 split 链的组合及其来源缺陷见“mma.sync 与 split-KV 组合”条目 |
++| [mma_sync](mma_sync.yaml) | 可移植 warp-level tensor-core 方案。源码实例：fmha_tc_kernel<128, WARP=4, PASS_FUSED, PVMODE=0>，由 launch_sequence 的 use_tc && !use_split 分支经 launch_tc<128, 4> 启动，grid=(qtiles, B*KH)（qph=64/G 行分块）、block=32*4=128、dynamic smem=TcSmem<128,4,PASS_FUSED>::bytes；进入条件为 plan_geometry 置 use_tc 而 tcg_available() 为假，即加载的二进制非 arch-specific。机制：一个 CTA 覆盖 BM=64 行，每线程持同一 warp 内相距 8 行的两个行 fragment（rowA = w*16 + (lane>>2)、rowB = rowA+8），两套 softmax 状态并行；QK 用 mma.sync.aligned.m16n8k32 e4m3 直接吃 E4M3 payload，一个 k-step=32 恰为一个 MX block，E8M0 scale 以 sq[row,blk]*sk[key,blk] 的 rank-1 方式折进各 block 的部分累加器（携带同一通道块 scale，FP32 累加次序可与参考不同）；V 先解码成 BF16（折入 key 轴 E8M0；有限 E4M3×2^e 至多四个有效位；BF16 精确性还要求结果可表示，不能只由 scale 生成规则推出）存共享内存，PV 用 mma.sync m16n8k16 bf16 配 ldmatrix.x4.trans；概率路径实现 Contract 的同形递推，跨构建逐位等同性未由现有材料证明（标量 expf、4·ln2 延迟 rescale、runtime bias、cvt.rn.satfinite.e4m3x2 进分子、未舍入 FP32 进分母）；K/V/scale atom 由 cp.async 两级流水 staging；输出累加器在寄存器，epilogue 行内 4-lane shuffle 归约分母后 1/den 写 bf16 O 与 LSE。保留理由：这是加载的二进制发不出 tcgen05 时 Contract 有效域内唯一的 tensor-core 路径，其主要计算（rank-1 scale 折算、V 解码、跨 lane fragment 归约）与工作分配（BM=64、每线程两行、无 TMEM）都与 root 不同，需要独立贯通。 | 与 root 并列的独立完整方案，三个 Design 区域全部本地定义、无整区 `from`，Contract 解析到 root；进入条件（非 arch-specific 构建）与 root 的 when 不相交；精确参数、when 与修订号以 mma_sync.yaml 为准；head_dim=256 的同族实例见“mma.sync 的 head_dim=256 形式”条目，与 split 链的组合及其来源缺陷见“mma.sync 与 split-KV 组合”条目 |
+ 
+ ## 变体与组合
+@@ -30,5 +30,5 @@
+ 
+ - 基线：[root](root.yaml) 的 DESIGN 三区——Tile_pipeline::MAIN 的存储（k_ring/v_ring/s_tile/o_tmem/p_tmem/sf_cols）与 Role.MAIN 各动词、Work_schedule::MAIN 的 Mapping/Schedule、Math_reshape 的 “Numerator by block-scaled PV product” 与 “Reciprocal normalization and LSE epilogue”。
+-- 差异与联动：实例 fmha_tcg_kernel<256, PASS_FUSED, KSPLIT=2, TMA=1>（launch_tcg<256, PASS_FUSED, 2>）。CTA 变为 128*KSPLIT=256 线程 = 两个 warpgroup：QK 仍单发覆盖整组 128 键，score 读出与 softmax 按 KHALF=64 键各半（组最大值经共享 scratch 由 tcg_combine_halves(MAX) 跨 warpgroup 合并——max 精确且次序无关，与单一 128 宽归约位相同）；概率各写 P tile 的自己键段，PV 仍由单线程每组发一次、覆盖全部 128 键 × D 列；o_tmem 移入 [128,384)、ALLOC=512 列 → 1 CTA/SM（root Require#4 的 tmem_safe_smem 预算按 512 列生效）；O 的 rescale 与 epilogue 读出按 OCOLS=D/KSPLIT=128 个通道分半（两 warpgroup 读同样 128 个 TMEM lane、不相交的列）；行分母在组末经 tcg_combine_halves(sum) 按 key 序折叠（重结合差 ~1e-7，在 rtol 0.05 内五个数量级，且概率先于分母舍入到 E4M3，翻不动量化）；DCH=2 个 128B swizzle chunk；bias 由 16 变 1（Contract 值），exp_bias4 的 L=0、magic-constant 折叠退化为无操作；SF_AHEAD（scale atom 三组超前于所属 tile、3 槽 smem 环 + TMEM 双奇偶槽，删去循环内第二个每组 CTA 宽 barrier；仅 D=256、KSPLIT=2、非 GM、非 GSPLIT，QK64 因列图冲突被算术排除）；MIDPIPE（qk6：QK(g+1) 在迭代中段发出、PV(g−1) 在同一中点退休，K 环三槽超前两组、SFB_V 三槽环，实测对控制位相同）。
++- 差异与联动：实例 fmha_tcg_kernel<256, PASS_FUSED, KSPLIT=2, TMA=1>（launch_tcg<256, PASS_FUSED, 2>）。CTA 变为 128*KSPLIT=256 线程 = 两个 warpgroup：QK 仍单发覆盖整组 128 键，score 读出与 softmax 按 KHALF=64 键各半（组最大值经共享 scratch 由 tcg_combine_halves(MAX) 跨 warpgroup 合并——max 精确且次序无关，与单一 128 宽归约位相同）；概率各写 P tile 的自己键段，PV 仍由单线程每组发一次、覆盖全部 128 键 × D 列；o_tmem 移入 [128,384)、ALLOC=512 列 → 1 CTA/SM（root Require#4 的 tmem_safe_smem 预算按 512 列生效）；O 的 rescale 与 epilogue 读出按 OCOLS=D/KSPLIT=128 个通道分半（两 warpgroup 读同样 128 个 TMEM lane、不相交的列）；行分母在组末经 tcg_combine_halves(sum) 按 key 序折叠（重结合不反馈到已生成的 E4M3 概率，但可改变归一结果与 LSE；不据此推定输出验收）；DCH=2 个 128B swizzle chunk；bias 由 16 变 1（Contract 值），exp_bias4 的 L=0、magic-constant 折叠退化为无操作；SF_AHEAD（scale atom 三组超前于所属 tile、3 槽 smem 环 + TMEM 双奇偶槽，删去循环内第二个每组 CTA 宽 barrier；仅 D=256、KSPLIT=2、非 GM、非 GSPLIT，QK64 因列图冲突被算术排除）；MIDPIPE（qk6：QK(g+1) 在迭代中段发出、PV(g−1) 在同一中点退休，K 环三槽超前两组、SFB_V 三槽环，实测对控制位相同）。
+ - 条件与依据：use_tcg && !use_split && D=256 时 FMHA_FUSED_KSPLIT_D256=2 恒选；lpt 规则与 root 相同但 slots=sm_count（1 CTA/SM）。ncu shape 4、6 实测 <256,0,2,1,0,0,0,0,0>。KSPLIT=4 臂已测量否决（agv1：s4 +1.8%、s6 +0.5%；D=128 上 s7/s1 +48%/+53%——独立流比 warp 数值钱）。类型判断（P2 交办）：两 warpgroup 的组成变化与每组跨 warpgroup 合并是围绕基线已有 step/role/存储的新决定加必要联动，边界外主体组织（单内核、一 CTA 一 worktile、组窗递推、派发序、epilogue 结构）仍成立，故记局部而非参数，也不构成新完整设计。
+ 
+@@ -78,6 +78,6 @@
+ 
+ - 基线：[root](root.yaml) 的 Math_reshape “Biased probability and E4M3 quantization”（exp_bias4：2^4 折进两个 magic 常量）与 REALIZATION Require#5、Forbid#1。
+-- 差异与联动：同一轴上三个开关：FMHA_BIAS_MAGIC_FOLD=1 为 root 当前值（2^4 折进 expf2_bias<4> 的 kmagic/kshift，nc、f、ex2(f) 不变而 d 恰大 2^4，两个乘积都精确、结果位相同，省每键对一次 packed 乘法）；取 0 回到独立的 f32x2_mul(pr, bias2) 后乘（结果仍位相同，只差指令数与构建期测量状态）。FMHA_UNIT_BIAS=1 让 bias 成为编译期常量 ProbabilityBias<D>（D=128 为 16、D=256 为 1），LSE 的 den/bias 变成乘以 0.0625f 的精确乘法。已否决取值 FMHA_FOLD_BIAS16：把 4<<23 直接加进移位后的位模式，2^32 模式穷举出 ~24% 经符号位回绕的差异（ex2），永久保持 0——与 root 的 REALIZATION Forbid#1 一致。
+-- 条件与依据：magic-constant 折叠的回绕反例需要 x >= 86.64，而 x = score − safe <= 4·ln2，不可达，故位相同成立；折叠只利好 D=128（D=256 的 bias=1、L=0，常量不变、codegen 无操作）。ls1/ls2 新树测量采纳为默认（s1 快态可复现、s9 −1.55~−1.62% 稳定，与 FMHA_LPT_PAIR_MODE=2 叠加）。
++- 差异与联动：同一轴上三个开关：FMHA_BIAS_MAGIC_FOLD=1 为 root 当前值（2^4 折进 expf2_bias<4> 的 kmagic/kshift，来源按 nc、f、ex2(f) 不变而 d 放大 2^4 解释其等价性，省每键对一次 packed 乘法）；取 0 回到独立的 f32x2_mul(pr, bias2) 后乘（来源测量报告结果位相同；本轮未取得该穷举 harness 或复现数据）。FMHA_UNIT_BIAS=1 让 bias 成为编译期常量 ProbabilityBias<D>（D=128 为 16、D=256 为 1），LSE 的 den/bias 变成乘以 0.0625f 的精确乘法。已否决取值 FMHA_FOLD_BIAS16：把 4<<23 直接加进移位后的位模式，2^32 模式穷举出 ~24% 经符号位回绕的差异（ex2），永久保持 0——与 root 的 REALIZATION Forbid#1 一致。
++- 条件与依据：来源指出正向符号回绕反例需要 x >= 86.64，而递推给出 x = score − safe <= 4·ln2；这排除该反例，未单独证明所有舍入、下溢情形逐位相同；折叠只利好 D=128（D=256 的 bias=1、L=0，常量不变、codegen 无操作）。ls1/ls2 新树测量采纳为默认（s1 快态可复现、s9 −1.55~−1.62% 稳定，与 FMHA_LPT_PAIR_MODE=2 叠加）。
+ 
+ ### 融合 scan 变体（局部）
+@@ -90,5 +90,5 @@
+ 
+ - 基线：[split_kv](split_kv.yaml) 的 Work_schedule Step.SCAN（Decomposition.Strategy 的 scan_block、Partition.row_block、Mapping.Worker_count）与 Tile_pipeline Step.SCAN 的 Role.MAIN（await:gmax、compute:m_state、store:m_tail、signal:launch_permit），当前值是 flat 单遍；其重放递推是 Math_reshape “Exact replay of the delayed maximum”，共享 Contract 的延迟递推见 [root](root.yaml) 的 CONTRACT.Algorithm_requirement Compute “Delayed rescale probability groups”。
+-- 差异与联动：以两次 launch 取代单内核——pass A fmha_segmax_kernel 以 (ceil(rows/256), nseg) 网格、256 线程，每行一线程对每 FMHA_SCAN_SEG=16 组一段求段最大值写 segmax[seg][row]；pass B fmha_scan_kernel 递推与 flat 相同，但按段先用 segmax 证明整段不可能触发 (b−m)>4·ln2（m 单调不减，段最大不足以跳变则段内逐组比较必全假）；被跳过的段只省去 load 与逐项比较，段内全部 mstate 条目仍写入入态常量 m——两个 scan 内核都全量物化 rows×T 的 mstate（split pass 重放 mstate[cLo−1] 初态与逐组预取依赖它无空洞），有可跳变段时先常量写到首个可跳变段、再从其起精确走；nseg = ceil(T/16)，workspace 的 off_segmax 区由此使用。PDL 边界联动：segmax 在入口 trigger（其后继是 scan 的单 CTA，早 launch 不抢槽位）；scan（pass B）与 scan_flat 相同，在入口等待后、串行递推前 trigger，split 侧对应的 fmha_pdl_scan_wait 下移到首次读 p.mstate 之前（见范围节）。
++- 差异与联动：以两次 launch 取代单内核——pass A fmha_segmax_kernel 以 (ceil(rows/256), nseg) 网格、256 线程，每行一线程对每 FMHA_SCAN_SEG=16 组一段求段最大值写 segmax[seg][row]；pass B fmha_scan_kernel 递推与 flat 相同，但按段先用 segmax 证明整段不可能触发 (b−m)>4·ln2（m 单调不减，段最大不足以跳变则段内逐组比较必全假）；被跳过的段只省去 load 与逐项比较，段内全部 mstate 条目仍写入入态常量 m——两个 scan 内核都全量物化 rows×T 的 mstate（split pass 重放 mstate[cLo−1] 初态与逐组预取依赖它无空洞），有可跳变段时先常量写到首个可跳变段、再从其起精确走；nseg = ceil(T/16)，workspace 的 off_segmax 区由此使用。PDL 边界联动：segmax 在入口 trigger（其后继是来源测量中的小 scan 网格，来源据此采用早 launch）；scan（pass B）与 scan_flat 相同，在入口等待后、串行递推前 trigger，split 侧对应的 fmha_pdl_scan_wait 下移到首次读 p.mstate 之前（见范围节）。
+ - 条件与依据：scan2p = T >= FMHA_SCAN_TWO_PASS_T(128) && rows_total <= FMHA_SCAN_TWO_PASS_ROWS(512) && 无左窗口（FMHA_SCAN_TWO_PASS_NOWIN=1），且仅在 scan_fused 为假时生效（融合 scan 优先；两遍门成立时 FSCAN 的 span 上限升到 160）。agw4 测量：T<128 时段设计的额外 launch 比省掉的 load 贵（s3 +8.92%、d3 +7.09%），T>=128 时取胜（s2 −1.80%/−4.03%、s5 −6.32%/−6.93%）。ncu shape 5 实测（segmax + scan，D=256 链），该 shape 因此在 head_dim 与 scan 形式两个维度上同时落在 split_kv 的 `when` 之外。
+ 
+@@ -102,5 +102,5 @@
+ 
+ - 基线：[split_kv](split_kv.yaml) 的 Work_schedule Step.COMBINE（Decomposition/Mapping/Schedule，当前值 narrow：fmha_combine_kernel<128, false, false>）与 Tile_pipeline Step.COMBINE 的 Storage.den_smem（shape [{split: 128}]，view den_row 取 [0, nsplit]）；归并公式在本节点是 Math_reshape “Merge and final normalization”，其 Contract 依据见 [root](root.yaml) 的 CONTRACT.Algorithm_requirement Compute “Output accumulation” 与 “Log-sum-exp output”。
+-- 差异与联动：narrow = 128 线程/CTA（FMHA_COMBINE_NARROW_BT），grid=(Sq,H,B) 每输出一行一个 CTA，每线程 D/128 个通道遍历全部 split（每轮 8 个独立 load），分母每 split 一线程载入 sB[128] 后升序求和；wide = fmha_combine_kernel_wide，128*FMHA_COMBINE_SP = 512 线程，四个 split-group 各取 chunk = ceil(nsplit/4) 个 split，组内部分和经 sPart[4][D/SL] 由 sg==0 的组做最终归约，分母每 split 一 lane 蝶形归约。两者的重结合差 <= ~1e-7（bf16 输出、rtol 0.05 下不可见）。末段归一相同：inv = 1/total_b、o = bf16(acc*inv)、lse = mtail + log(total_b/bias)（total_b<=0 或 mtail 非有限为 -inf）。FWGT/BF16 是两形态共有的模板轴（见融合 scan 与 partial 格式条目）。
++- 差异与联动：narrow = 128 线程/CTA（FMHA_COMBINE_NARROW_BT），grid=(Sq,H,B) 每输出一行一个 CTA，每线程 D/128 个通道遍历全部 split（每轮 8 个独立 load），分母每 split 一线程载入 sB[128] 后升序求和；wide = fmha_combine_kernel_wide，128*FMHA_COMBINE_SP = 512 线程，四个 split-group 各取 chunk = ceil(nsplit/4) 个 split，组内部分和经 sPart[4][D/SL] 由 sg==0 的组做最终归约，分母每 split 一 lane 蝶形归约。两者改变加法树；来源的 ~1e-7 描述不构成带符号分子在抵消时的全域相对误差界，也不能仅凭 BF16 输出与 rtol 推定不可见。末段归一相同：inv = 1/total_b、o = bf16(acc*inv)、lse = mtail + log(total_b/bias)（total_b<=0 或 mtail 非有限为 -inf）。FWGT/BF16 是两形态共有的模板轴（见融合 scan 与 partial 格式条目）。
+ - 条件与依据：host 规则 (rows < 2*sm_count && nsplit >= 8) || nsplit > 128——第二支是 narrow 的 sB 容量硬上限（nsplit <= FMHA_COMBINE_NARROW_BT，由 launch 位点显式保证而非跨文件推导）；FMHA_COMBINE_MAX_NSPLIT=512 是 wide 的正确性上限（chunk 不得超过 128），在 plan_geometry 钳制。pI25 实测：wide 在 rows 96/192/128 上 −5.2%/−3.4%/−1.0%，在 4096/8200/512 上 +42%/+20%/+10%。见证：shape 2、5 用 wide，shape 3、8、9 用 narrow。
+ 
+@@ -114,5 +114,5 @@
+ 
+ - 基线：[split_kv](split_kv.yaml) 的 Work_schedule Step.GMAX（Schedule.Strategy 的 gm_nsplit、Partition.gm_chunk）与 Tile_pipeline Step.GMAX（3 槽 k_ring/sfk_ring、单块 128 列 s_tile、Role.MAIN 的 Pipe 与 Waiting），当前值 launch_tcg<128, PASS_GROUP_MAX, FMHA_GM_KSPLIT_D128=1>；它物化的量见 Math_reshape “Materialized group maximum over the key range” 与 [root](root.yaml) 的 CONTRACT.Algorithm_requirement Compute “Delayed rescale probability groups” 的 group_max。
+-- 差异与联动：GM pass 无 V staging、无 P tile、无 PV（NEEDS_O 假），把 score tile 归约成每行一个 float 写 bm[grp][row]，故 256 列即 2 CTA/SM。KSPLIT 轴：FMHA_GM_KSPLIT_D128=1 / FMHA_GM_KSPLIT_D256=2（取 2 时两 warpgroup 各持 KHALF=64 键，max 经 oSb 合并——精确、与单一 128 宽归约位相同）。循环轴：当前取值就是 [split_kv](split_kv.yaml) Tile_pipeline Step.GMAX 的流水循环体——K 环 3 槽，QK(g+1) 在迭代脚部发出：group_max(g) 先求出最大、有效行写 bm[grp*rows_total+rowG]、KSPLIT==1 时一次 __syncthreads() 证明全部 warp 的分数读出已退休，随后才由 tid 0 tcg_pipe_qk + tcg_commit（fmha_tcg.cuh:4242-4252），即其 Pipe 里 matmul:q_tile@k_block(g+1) 排在 store:gmax(g) 之后、Released 边 “{issue matmul:q_tile@k_block(g + 1)} ← [{done compute:group_max(g)}]” 所固定的位置；其他取值是顺序体，运行期门为 (cHi−cLo) >= FMHA_PIPE_GM_MIN_GROUPS(7)（fmha_tcg.cuh:4093；7 出自 pI19 的 warm-protocol 测量，源码注明该常数早于 TIMING_PROTOCOL_V2 与 agx1，引用前须读其 provenance），span 不足即落回顺序体，D=256 因 FMHA_PIPE_GM_D256=0 恒走顺序体（PIPE_GM 的 constexpr 定义要求 D==128 或该开关非 0）。GM 没有概率 pass 可藏 MMA，两种体的等待都完全暴露。网格 z 取 gm_nsplit 而非 nsplit：gm = resident/base，只受 T/2 上限与 >= nsplit 下限约束（GM 不写 partial，每 CTA 成本只有 prologue；shape 5 实测 GM 在 64 CTA 网格对 148 SM 上花 18.0us、占 forward 17%，填满常驻槽位不增加 partial 流量）。FMHA_GM_QK64=1 时 GM 用 64 列形式只占 128 列（3 CTA/SM、gm 改按 3*sm_count/base）——默认关闭。
++- 差异与联动：GM pass 无 V staging、无 P tile、无 PV（NEEDS_O 假），把 score tile 归约成每行一个 float 写 bm[grp][row]，故 256 列对应最多 2 CTA/SM。KSPLIT 轴：FMHA_GM_KSPLIT_D128=1 / FMHA_GM_KSPLIT_D256=2（取 2 时两 warpgroup 各持 KHALF=64 键，max 经 oSb 合并——精确、与单一 128 宽归约位相同）。循环轴：当前完整 [split_kv](split_kv.yaml) 的 when 限定每个非空 GM chunk 至少 8 组；其 Tile_pipeline Step.GMAX 给出流水循环体——K 环 3 槽，QK(g+1) 在迭代脚部发出：group_max(g) 先求出最大、有效行写 bm[grp*rows_total+rowG]、KSPLIT==1 时一次 __syncthreads() 证明全部 warp 的分数读出已退休，随后才由 tid 0 tcg_pipe_qk + tcg_commit（fmha_tcg.cuh:4242-4252），即其 Pipe 里 matmul:q_tile@k_block(g+1) 排在 store:gmax(g) 之后、Released 边 “{issue matmul:q_tile@k_block(g + 1)} ← [{done compute:group_max(g)}]” 所固定的位置；其他取值是顺序体，运行期门为 (cHi−cLo) >= FMHA_PIPE_GM_MIN_GROUPS(7)（fmha_tcg.cuh:4093；7 出自 pI19 的 warm-protocol 测量，源码注明该常数早于 TIMING_PROTOCOL_V2 与 agx1，引用前须读其 provenance），span 不足即落回顺序体，D=256 因 FMHA_PIPE_GM_D256=0 恒走顺序体（PIPE_GM 的 constexpr 定义要求 D==128 或该开关非 0）。GM 没有概率 pass 可藏 MMA，两种体的等待都完全暴露。网格 z 取 gm_nsplit 而非 nsplit：gm = resident/base，只受 T/2 上限与 >= nsplit 下限约束（GM 不写 partial，每 CTA 成本只有 prologue；shape 5 实测 GM 在 64 CTA 网格对 148 SM 上花 18.0us、占 forward 17%，填满常驻槽位不增加 partial 流量）。FMHA_GM_QK64=1 时 GM 用 64 列形式只占 128 列（3 CTA/SM、gm 改按 3*sm_count/base）——默认关闭。
+ - 条件与依据：p.nsplit 在 GM launch 前后被临时设为 gm_nsplit（p 是 launch_sequence 自己的副本，不泄漏给 scan/split/combine，它们都读 pl.nsplit）。D=256 KSPLIT=2 实测 s5 −4.02%、d3 −2.56%（两轮同号）；D=128 KSPLIT=2 测量不定（s9 +0.82%、s2 +1.03%、d7 −2.82% 跨轮变号），按来源保持 1。
+ 
+@@ -120,5 +120,5 @@
+ 
+ - 基线：[mma_sync](mma_sync.yaml) 的三个 Design 区域——Math_reshape “Block-rescaled score by rank-1 E8M0 fold”（head_dim/scale_block_size 个 block 的 rank-1 折算）、“Delayed rescale and scalar-exponential probability” 与 “Reciprocal normalization and LSE epilogue”（runtime bias）、“Numerator by BF16 PV on a decoded value tile”（v_bf16 与寄存器累加器），Work_schedule Step.MAIN 的 Decomposition.Strategy（qph = 64/group_count）与 Mapping.Strategy（一 CTA 四 warp、每线程相距 8 行的两行），Tile_pipeline Step.MAIN 的 Storage（q_tile、k_ring/v_raw_ring、v_decoded、sfk_raw_ring/sfv_raw_ring、sfq_words/sfk_words/sfv_words、score_regs、o_regs）与 Role.MAIN 各动词。
+-- 差异与联动：同一 kernel 族的 head_dim=256 实例化 fmha_tc_kernel<256, WARP=4, PASS_FUSED, PVMODE=0>，由 launch_sequence 的 use_tc && !use_split 分支在 D != 128 时启动（fmha_mxfp8_qkv.cu:2035-2039），grid=(qtiles, B*KH)、block=32*4=128 不变。BM 仍 16*WARP=64，行打包、每线程两行 fragment 与组窗循环结构都不变；随 D 变的只是计数与常量：CQ = KB = D/32 由 4 变 8（QK 每行 8 个 32 通道 block 的 rank-1 折算），NTOT = D/8 由 16 变 32、NTP = D/16 由 8 变 16，寄存器累加器由每线程 NTOT*4 = 64 个 FP32 增至 128 个（o_regs 由 64 行×128 通道变 64 行×256 通道，score_regs 与 D 无关、不变）；K 与 V 的 E8M0 raw atom 各由 CQ*128 = 512 与 (D/128)*512 = 512 字节变 1024 字节（V 侧即两个 512 字节 atom），v_decoded 变 128×256 的 BF16；bias 由 ProbabilityBias<128>=16 变 ProbabilityBias<256>=1，正是 Contract “Delayed rescale probability groups” 按 head_dim 登记的两个值，故 p = expf(x)*1、LSE 的 den/bias 退化为精确的乘 1，上述两处 rewrite 的 bias 值改绑而递推位关系不变。容量后果：TcSmem<256,4,PASS_FUSED>::bytes = 225344（q_tile 16384，K 与 V 的原始 payload 各两槽、各 65536，BF16 v_decoded 65536，K 与 V 的 raw atom 区各 2048，解码后的 q/k/v scale 区 2048/4096/2048，末尾 64），超过每 SM 233472 字节的一半而不足全额，常驻由 2 CTA/SM 降为 1 CTA/SM——REALIZATION Require#4 的 112704 字节请求与“常驻两 CTA”的结论都随 D 改变（launch bound 仍是 FMHA_TC_MIN_BLOCKS=2，实际常驻被 smem 钉在 1，源码注释：footprint already caps D=256 at 1）；plan_geometry 的 split 规则用同一 TcSmem<256,4,PASS_SPLIT>（WANT_V 同真，字节数与 PASS_FUSED 相同）求 per_sm，故该几何下 resident 由 2*sm_count 减半为 sm_count，base < resident 更难成立、ns = resident/base 的上界也随之减半。
++- 差异与联动：同一 kernel 族的 head_dim=256 实例化 fmha_tc_kernel<256, WARP=4, PASS_FUSED, PVMODE=0>，由 launch_sequence 的 use_tc && !use_split 分支在 D != 128 时启动（fmha_mxfp8_qkv.cu:2035-2039），grid=(qtiles, B*KH)、block=32*4=128 不变。BM 仍 16*WARP=64，行打包、每线程两行 fragment 与组窗循环结构都不变；随 D 变的只是计数与常量：CQ = KB = D/32 由 4 变 8（QK 每行 8 个 32 通道 block 的 rank-1 折算），NTOT = D/8 由 16 变 32、NTP = D/16 由 8 变 16，寄存器设计槽位由每线程 NTOT*4 = 64 个 FP32 增至 128 个（不等于编译后总寄存器数）（o_regs 由 64 行×128 通道变 64 行×256 通道，score_regs 与 D 无关、不变）；K 与 V 的 E8M0 raw atom 各由 CQ*128 = 512 与 (D/128)*512 = 512 字节变 1024 字节（V 侧即两个 512 字节 atom），v_decoded 变 128×256 的 BF16；bias 由 ProbabilityBias<128>=16 变 ProbabilityBias<256>=1，正是 Contract “Delayed rescale probability groups” 按 head_dim 登记的两个值，故 p = expf(x)*1、LSE 的 den/bias 退化为精确的乘 1，上述两处 rewrite 的 bias 值改绑而递推位关系不变。容量后果：TcSmem<256,4,PASS_FUSED>::bytes = 225344（q_tile 16384，K 与 V 的原始 payload 各两槽、各 65536，BF16 v_decoded 65536，K 与 V 的 raw atom 区各 2048，解码后的 q/k/v scale 区 2048/4096/2048，末尾 64），超过每 SM 233472 字节的一半而不足全额，按该设备的 smem 容量估算，常驻上限由 2 CTA/SM 降为 1 CTA/SM——REALIZATION Require#4 的 112704 字节请求和容量估计随 D 改变（launch bound 仍是 FMHA_TC_MIN_BLOCKS=2；源码注释称 footprint already caps D=256 at 1，实际常驻还依赖编译资源）；plan_geometry 的 split 规则用同一 TcSmem<256,4,PASS_SPLIT>（WANT_V 同真，字节数与 PASS_FUSED 相同）求 per_sm，故该几何下 resident 由 2*sm_count 减半为 sm_count，base < resident 更难成立、ns = resident/base 的上界也随之减半。
+ - 条件与依据：进入条件与 mma_sync 的 `when` 相同（plan_geometry 置 use_tc，而 tcg_available() 为假，即加载的二进制非 arch-specific），差别只在 head_dim = 256；因此它既不在 mma_sync 的 `when`（限定 head_dim = 128）内，也不在 root 或 split_kv 的 `when` 内，属范围节列出的“head_dim = 256 全部几何”之一。类型判断：主要计算（rank-1 scale 折算、V 解码、跨 lane fragment 归约）、工作归属（BM=64、每线程两行）与主协作组织（相边界 CTA rendezvous、两级 cp.async 环）都不变，改变的只是 D 派生的循环与缓冲计数、bias 常量与常驻容量，故记参数；这与 root 的“head_dim=256 fused 形式（局部）”对称而判级不同，那一条改变了 warpgroup 组成并引入跨 warpgroup 合并。无 frozen 性能见证：performance/ncu 与 shapes 全部采自 tcgen05 构建，本条的 smem 与常驻数值是把 D=256、WARP=4、PASS_FUSED、PVMODE=0 代入 TcLayout 的 bytes 公式算得，不是实测。
+ 
+@@ -126,6 +126,6 @@
+ 
+ - 基线：[split_kv](split_kv.yaml) 的四内核链（Work_schedule Flow.Launch 的 GMAX → SCAN → SPLIT → COMBINE 与五条 global Handoff）与 [mma_sync](mma_sync.yaml) 的 fmha_tc_kernel<D,4,PASS>；共享 Contract 与延迟递推见 [root](root.yaml)。
+-- 差异与联动：launch_sequence 的 use_tc && use_split 分支把链的两个 tcgen05 pass 换成 fmha_tc_kernel<128,4,PASS_GROUP_MAX> 与 <128,4,PASS_SPLIT>（split 的 grid=(qtiles, B*KH, nsplit) 按 qph=64/G 分行，fmha_mxfp8_qkv.cu:1989 与 2005），scan 与 combine 内核完全共用，workspace 恒 FP32 布局、永不融合 scan（part_m 恒空，tc fallback epilogue 恒写 FP32）。head_dim=256 有对称的完整链（fmha_mxfp8_qkv.cu:2014-2032）：launch_tc<256,4>(PASS_GROUP_MAX, gm_grid) → 同一 scan（flat 或两遍，与 D=128 共用同一内核）→ launch_tc<256,4>(PASS_SPLIT, grid) → launch_combine<256>(bf16=false, fwgt=false)；GM 与 split 两个 pass 的 D=256 差额即上文“mma.sync 的 head_dim=256 形式”条目（PASS_GROUP_MAX 的 WANT_V 假，无 V 相关各区，其 smem 与常驻另按该分支算），resident 减半使该几何更难满足 nsplit>1。来源缺陷（两个 head_dim 分支共有，按事实保留，不补造初始化或隔离保证）：gm_grid.x 取 pl.qtiles128（fmha_mxfp8_qkv.cu:1979），而 fmha_tc_kernel（PVMODE=0）按 p.qph 分行、grid.x 取 pl.qtiles（cu:1950），于是 GM pass 只覆盖前 qtiles128*qph ≈ Sq/2 行；其余行的 bm——连首/末 split 应写的 -inf 头尾在内——从未被写入，scan 会读到未初始化的 workspace。qph = 64/G 与 gm_grid 的定义都不依赖 D，故该缺陷在 D=256 链上以完全相同的方式成立。
+-- 条件与依据：只在“非 arch-specific 构建（tcg_available 假）+ 需要 split 的几何（nsplit>1 且 workspace 足够）”下发生，head_dim=128 与 256 两条链同样受影响；默认认证构建（tcgen05）不受影响，已选 mma_sync 的 fused 实例也不受影响（其 grid 用 pl.qtiles、行列一致）。本组合只记录事实与缺陷、不交付完整 schema；缺陷已在 P2 的既有 issue 记录中定位。
++- 差异与联动：launch_sequence 的 use_tc && use_split 分支把链的两个 tcgen05 pass 换成 fmha_tc_kernel<128,4,PASS_GROUP_MAX> 与 <128,4,PASS_SPLIT>（split 的 grid=(qtiles, B*KH, nsplit) 按 qph=64/G 分行，fmha_mxfp8_qkv.cu:1989 与 2005），scan 与 combine 内核完全共用，workspace 恒 FP32 布局、永不融合 scan（part_m 恒空，tc fallback epilogue 恒写 FP32）。head_dim=256 有对称的完整链（fmha_mxfp8_qkv.cu:2014-2032）：launch_tc<256,4>(PASS_GROUP_MAX, gm_grid) → 同一 scan（flat 或两遍，与 D=128 共用同一内核）→ launch_tc<256,4>(PASS_SPLIT, grid) → launch_combine<256>(bf16=false, fwgt=false)；GM 与 split 两个 pass 的 D=256 差额即上文“mma.sync 的 head_dim=256 形式”条目（PASS_GROUP_MAX 的 WANT_V 假，无 V 相关各区，其 smem 与常驻另按该分支算），resident 减半使该几何更难满足 nsplit>1。来源缺陷（两个 head_dim 分支共有，按事实保留，不补造初始化或隔离保证）：gm_grid.x 取 pl.qtiles128（fmha_mxfp8_qkv.cu:1979），而 fmha_tc_kernel（PVMODE=0）按 p.qph 分行、grid.x 取 pl.qtiles（cu:1950），于是 GM pass 至多覆盖前 qtiles128*qph 行；当 qtiles128*qph < Sq 时，其余行的 bm——连首/末 split 应写的 -inf 头尾在内——从未被写入，scan 会读到未初始化的 workspace。短 Q 若 qtiles128*qph >= Sq 则没有这一行覆盖缺口。qph = 64/G 与 gm_grid 的定义都不依赖 D，故该缺陷在 D=256 链上以完全相同的方式成立。
++- 条件与依据：在“非 arch-specific 构建（tcg_available 假）+ 需要 split 的几何（nsplit>1 且 workspace 足够）+ qtiles128*qph < Sq”时发生，head_dim=128 与 256 两条链同样受影响；默认认证构建（tcgen05）不受影响，已选 mma_sync 的 fused 实例也不受影响（其 grid 用 pl.qtiles、行列一致）。本组合只记录事实与缺陷、不交付完整 schema；缺陷已在 P2 的既有 issue 记录中定位。
+ 
+ ### head_dim=256 与 split-KV 组合（组合）

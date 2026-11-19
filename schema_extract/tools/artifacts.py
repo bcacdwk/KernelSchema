@@ -594,7 +594,9 @@ def _validate_scope(stage, role, old_files, new_files, old, new, template, *, no
             raise ExtractError("P5 changed protected task or node identity")
         _versions(left, right, first_draft=first_draft)
     if stage == "P6":
-        validate_revision_scope(revision_scope or [], [{"id": node} for node in new])
+        # Retained scope includes unchanged files omitted from parsed documents.
+        validate_revision_scope(revision_scope or [],
+                                [{"id": Path(name).stem} for name in new_files if name.endswith(".yaml")])
         scopes = {item["path"]: item["fields"] for item in revision_scope or []}
         for name in changed:
             if name == "dispatch.md":

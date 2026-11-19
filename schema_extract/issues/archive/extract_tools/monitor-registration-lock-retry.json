@@ -1,0 +1,19 @@
+{
+  "id": "monitor-registration-lock-retry",
+  "category": "extract_tools",
+  "problem": "前台 monitor ack 与绑定 scan 的登记使用单次非阻塞控制锁；正常短争用也立即返回 busy/committed=false，使已送达提醒不能完成登记或巡检，需人工重试，未 ack 时还会按原间隔补送。",
+  "evidence": [
+    "schema_discussion/extract_six_full_20261118/MONITOR_LOCK.md 记录本批 check3 两次 ack 失败和随后原 scan 的一次 busy；同一提醒最终经公开 ack/scan 完成。两次 queue 已正常 queued，30 分钟间隔来自原有限补送规则，并非持锁等待 30 分钟。",
+    "当前工作树 schema_extract/tools/wakeup.py::Clock.ack 和 Clock.scan 的 claim、commit、异常清理共四处复用 Store.control_transaction；仅取锁失败后在锁外等待 0.05 秒，事务正文不重放。",
+    "schema_discussion/extract_six_full_20261118/MONITOR_REGISTRATION.md 记录 11 项隔离验证通过，覆盖锁竞争、stop/代际失效、claim 校验、观察不重复和其他控制的即时 busy；后续等锁观察补正及 12 项验证见 SOURCE_FIX_FINAL_REVIEW.md，并由 monitor-wait-stale-observation 单独记录正确性根因。",
+    "旧 reminder-ack-delay 处理认证配置事件与成功入队后未 ack 的有限补送，未处理控制锁登记失败；两项根因及原决定分别保留。",
+    "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：27 项 monitor 回归通过，含临时 flock、真实 SIGINT、同 wake 续接及 reused；Store/CLI 等待节流组合回归见 schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md，第三轮实现及测试字节未变，复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+  ],
+  "proposal": "仅让 ack 和绑定 scan 的四处登记复用既有锁外取锁重试；取得锁后校验当前身份、提醒、代际及 claim，不重试事务正文或业务拒绝。",
+  "necessity": "短锁竞争已造成重复登记劳动和巡检延迟。局部复用可避免白白耗掉本轮提醒处理机会，同时保留显式 ack/scan、次数与频率边界。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.5.1",
+    "reason": "2.5.1 的 ack、scan claim/commit/cleanup 仅重试取得控制锁，锁外通知前台等待；取得锁后重核身份与代际，不重放正文或业务拒绝。真实临时锁和 SIGINT 回归验证同一 wake 可核对续接及已提交结果 reused。其他控制保留即时 busy，持续锁等待仍无超时上界；第三轮未改该实现或测试。"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "id": "normalizer-diff-not-visible",
+  "category": "schema_template",
+  "problem": "长字符串规范化警告仅截取修改前后相同的开头，改动位于后文时无法从警告看出实际变更。",
+  "evidence": [
+    "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_template/tools/yaml_format.py 的 shown() 截取前100字符，identifier+reference 和 period 警告分别对整段 before/after 调用它。",
+    "2026-11-18 MoE P1 worker 与独立 reviewer 同 ID 确认；保存的 Compute[2].Math 为968字符，首差异位于第158字符，L→l 不在旧警告展示范围。",
+    "当前 schema_template/tools/yaml_format.py 改为首差异位置及局部上下文；真实案例重新规范化与保存产物逐字节一致，相关68项检查通过。报告为 schema_discussion/extract_six_full_20261118/NORMALIZER_WARNING.md。",
+    "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：Template 76 项回归包含首差异诊断；现有实现保留，第三、四轮未改代码，复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+  ],
+  "proposal": "使用短上下文显示实际修改处，注明首处差异的字符位置，保持原有规范化与warning类别。",
+  "necessity": "自动改正后应能核对实际改动，避免作者因相同前缀反复自检或猜测变化。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.5.1",
+    "reason": "2.5.1 保留首处 Unicode 字符差异位置、局部上下文及省略号提示，覆盖标识符/引用和句号变动。当前 Template 回归通过，未改规范化结果、warning 类别或字符预算，也未扩成完整 diff。"
+  }
+}

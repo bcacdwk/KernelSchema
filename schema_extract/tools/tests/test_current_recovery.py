@@ -283,7 +283,7 @@ class CurrentRecoveryTests(unittest.TestCase):
         import tempfile
         attempt = self.attempt()
         directory = Path(attempt["directory"])
-        with patch("schema_extract.tools.agent.subprocess.check_output", side_effect=subprocess.CalledProcessError(75, ["fake-cli", "--version"])):
+        with patch("schema_extract.tools.backends.ClaudeBackend.environment", side_effect=OSError("offline prelaunch failure")):
             result = self.fixture.invoke(attempt)
         termination = confirm_termination(attempt, result)
         self.assertEqual(verified_result(attempt, result, termination)["outcome"], "cli_error")
@@ -335,14 +335,28 @@ class CurrentRecoveryTests(unittest.TestCase):
                     write_json(directory / "invocation.json", invocation)
                     write_json(directory / "result.json", result)
 
+    def confirmed(self, attempt, result):
+        deadline = time.monotonic() + 5
+        while True:
+            termination = confirm_termination(attempt, result)
+            if termination["confirmed"] or time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        self.assertTrue(termination["confirmed"])
+        return termination
+
+    def completed(self, attempt):
+        result = self.fixture.invoke(attempt)
+        return complete_pending_result(self.state(attempt), attempt, result, self.confirmed(attempt, result))
+
     def test_setup_failure_keeps_the_previous_ready_session_and_usage_is_read_only(self):
         first = self.attempt()
-        result = self.fixture.invoke(first)
+        result = self.completed(first)
         self.assertEqual(result["outcome"], "completed")
         following = self.attempt(session_id=result["session_id"])
         session_path = Path(first["session_directory"]) / "session.json"
         before = session_path.read_bytes()
-        with patch("schema_extract.tools.agent.subprocess.check_output", side_effect=subprocess.CalledProcessError(75, ["fake-cli", "--version"])):
+        with patch("schema_extract.tools.backends.ClaudeBackend.environment", side_effect=OSError("offline prelaunch failure")):
             failed = self.fixture.invoke(following)
         self.assertEqual(failed["outcome"], "cli_error")
         self.assertEqual(session_path.read_bytes(), before)
@@ -380,7 +394,7 @@ class CurrentRecoveryTests(unittest.TestCase):
 
     def test_unstarted_gate_preserves_previous_session_even_when_result_is_missing(self):
         first = self.attempt()
-        initial = self.fixture.invoke(first)
+        initial = self.completed(first)
         self.assertEqual(initial["outcome"], "completed")
         session_id = initial["session_id"]
         session_path = Path(first["session_directory"]) / "session.json"
@@ -401,8 +415,9 @@ class CurrentRecoveryTests(unittest.TestCase):
                     finally:
                         self.fixture.fake.write_bytes(executable)
                         self.fixture.fake.chmod(0o755)
-                    self.assertEqual(result["outcome"], "cancelled" if interrupted == "before_release" else "cli_error")
-                    self.assertTrue(result["termination"]["confirmed"])
+                    expected = "cancelled" if interrupted == "before_release" else "cli_error"
+                    self.assertIn(result["outcome"], {expected, "termination_unconfirmed"})
+                    self.confirmed(attempt, result)
                     self.assertEqual(result["cwd_after"], [])
                     self.assertEqual(read_json(Path(attempt["directory"]) / "launch.json")["status"], "not_started")
                     self.assertEqual(read_json(session_path)["session_id"], session_id)
@@ -424,7 +439,7 @@ class CurrentRecoveryTests(unittest.TestCase):
                     session = read_json(session_path)
                     self.assertEqual((session["status"], session["session_id"]), ("ready", session_id))
                     self.assertEqual(session["retired_sessions"], [])
-        resumed = self.fixture.invoke(self.attempt(session_id=session_id))
+        resumed = self.completed(self.attempt(session_id=session_id))
         self.assertEqual((resumed["outcome"], resumed["session_id"]), ("completed", session_id))
         self.assertEqual(resumed["response"]["sticky"], first["attempt_id"])
 

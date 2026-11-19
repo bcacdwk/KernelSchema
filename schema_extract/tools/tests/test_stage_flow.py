@@ -586,7 +586,7 @@ class StageFlowTests(unittest.TestCase):
             self.accept(attempt, {**result, "response": self.backend.proposal(attempt)})
         self.assertEqual(self.store.load(self.state["run_id"]), original)
 
-    def test_native_session_survives_rejected_source_range_and_resumes_exactly(self):
+    def test_native_source_range_repairs_are_finite_and_resume_exactly(self):
         source = self.directory / "source/kernel.py"
         source_lines = len(source.read_text().splitlines())
         fake = self.directory / "native-cli"
@@ -617,7 +617,7 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
         approved = deepcopy(self.state["accepted_receipts"])
         cli = AgentCLI(backend="claude", executable=str(fake), model=self.state["config"]["model"])
         session_id = None
-        for count in (1, 2):
+        for count in (1, 2, 3):
             attempt = self.prepare(stage="P2", role="worker")
             self.assertEqual(attempt["session_id"], session_id)
             self.backend.write(attempt)
@@ -629,12 +629,15 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
             self.assertTrue(result["native_status"]["success"])
             session_id = result["session_id"]
             self.state = _receive(self.store, self.state, self.lock, attempt, result, None)
-            self.assertEqual(self.state["status"], "invalid_receipt")
+            self.assertEqual(self.state["status"], "running" if count <= 2 else "invalid_receipt")
+            self.assertEqual(self.state["reason"]["code"], "receipt_repair" if count <= 2 else "receipt_repair_limit_reached")
             self.assertIn(f"source_evidence[0] kernel.py:1-{source_lines + 1}", self.state["reason"]["summary"])
             self.assertIn(f"file has {source_lines} lines", self.state["reason"]["summary"])
             self.assertEqual(self.state["sessions"]["P2"]["worker"], session_id)
             self.assertEqual(self.store.load(self.state["run_id"])["sessions"]["P2"]["worker"], session_id)
             self.assertEqual(self.state["stages"]["P2"]["calls"], count)
+            self.assertEqual(self.state["stages"]["P2"]["receipt_repairs"], count)
+            self.assertEqual(self.state["stages"]["P2"]["invalid_receipts"], count)
             self.assertEqual(self.state["accepted_receipts"], approved)
             self.assertFalse(self.state["active_attempts"])
             self.assertFalse(self.state["unconfirmed_attempts"])
@@ -660,7 +663,7 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
         self.assertNotEqual(self.state["status"], "termination_unconfirmed")
         self.assertFalse(self.state["active_attempts"])
         self.assertFalse(self.state["unconfirmed_attempts"])
-        self.assertEqual(self.state["stages"]["P2"]["calls"], 3)
+        self.assertEqual(self.state["stages"]["P2"]["calls"], 4)
         self.assertEqual(session_path.read_bytes(), original_session)
         self.assertTrue(self.state["attempt_usage"][attempt["attempt_id"]]["settled"])
         self.assertEqual(self.state["attempt_usage"][attempt["attempt_id"]]["elapsed_seconds"], elapsed)

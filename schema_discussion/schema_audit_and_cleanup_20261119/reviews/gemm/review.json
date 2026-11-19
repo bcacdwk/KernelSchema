@@ -1,0 +1,371 @@
+{
+  "format": "schema_manual_review.v1",
+  "directory": "schema_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm",
+  "design_count": 2,
+  "manifest": {
+    "root.yaml": "a1402afda08375799ad5721cec10e3175e684022921ad9972ee1ab37f6e4639f",
+    "wide.yaml": "0cf0396f752ef8e3675175c5bcb179cd49a44fcc6c1cc5a93db64a8749bfce53",
+    "dispatch.md": "2f0faa4c0b61d9e39b002bbc0bfaf06b99f730c513c4e00edae4f3663a3e5b78"
+  },
+  "versions": {
+    "root.yaml": 5,
+    "wide.yaml": 2
+  },
+  "changed_files": [
+    "root.yaml",
+    "wide.yaml",
+    "dispatch.md"
+  ],
+  "findings": [
+    {
+      "id": "GEMM-S01",
+      "classification": "schema_error",
+      "status": "fixed",
+      "summary": "Count root/wide scale-prefetch replicas and register rotating drain buffers; retain source-level accounting boundary",
+      "files": [
+        "root.yaml",
+        "wide.yaml",
+        "dispatch.md"
+      ]
+    },
+    {
+      "id": "GEMM-S02",
+      "classification": "schema_error",
+      "status": "fixed",
+      "summary": "Release TMEM after all reads and before final 32 FFMAs; add promote_tail. Restore root cp.async wait before next B-scale prefetch",
+      "files": [
+        "root.yaml",
+        "wide.yaml",
+        "dispatch.md"
+      ]
+    },
+    {
+      "id": "GEMM-S03",
+      "classification": "schema_error",
+      "status": "fixed",
+      "summary": "Give scale actions and views (t,j) identities; baseline two-worktile graphs reproduce duplicate actions and final graphs pass",
+      "files": [
+        "root.yaml",
+        "wide.yaml"
+      ]
+    },
+    {
+      "id": "GEMM-S04",
+      "classification": "schema_error",
+      "status": "fixed",
+      "summary": "Correct per-call/per-output MAC units, rounding association claim, padded scale consumption and source arithmetic evidence boundaries",
+      "files": [
+        "root.yaml",
+        "wide.yaml",
+        "dispatch.md"
+      ]
+    },
+    {
+      "id": "GEMM-S05",
+      "classification": "schema_error",
+      "status": "fixed",
+      "summary": "Separate device enumeration from host D2H, identity requirements from object identity, and legal shape from resource/API success",
+      "files": [
+        "root.yaml",
+        "wide.yaml",
+        "dispatch.md"
+      ]
+    },
+    {
+      "id": "GEMM-S06",
+      "classification": "evidence_statement_error",
+      "status": "fixed",
+      "summary": "NCU raw CSV directly provides SM=148 and sample-specific resource limits; kernel names confirm selected instances",
+      "files": [
+        "dispatch.md",
+        "root.yaml",
+        "wide.yaml"
+      ]
+    },
+    {
+      "id": "GEMM-U01",
+      "classification": "reviewed_unchanged",
+      "status": "no_change_needed",
+      "summary": "Contract shape/value declarations, Input/Output roles and aliases, tuple element dtype, torch.dtype object and explicit frozen selectors remain valid"
+    },
+    {
+      "id": "GEMM-U02",
+      "classification": "reviewed_unchanged",
+      "status": "no_change_needed",
+      "summary": "Two complete designs have distinct end-to-end mechanisms; all six regions are local, Contract is shared from root; no design added or removed"
+    },
+    {
+      "id": "GEMM-L01",
+      "classification": "source_implementation_limit",
+      "status": "documented_not_changed",
+      "summary": "Weakref memo does not invalidate mutated tensor storage/metadata; indptr-content-based selector cache may be stale; device-0/global-cache assumptions remain"
+    },
+    {
+      "id": "GEMM-L02",
+      "classification": "source_numeric_limit",
+      "status": "documented_not_changed",
+      "summary": "Post-block FP32 scale multiplication can overflow/underflow differently from separate dequantization. Analytic zero-payload/2^100-scale example concerns explicit Schema values, not a claimed generator sample or GPU observation"
+    },
+    {
+      "id": "GEMM-L03",
+      "classification": "source_evidence_gap",
+      "status": "retained",
+      "summary": "External comparator formula/basis/nonfinite routing and full-domain arithmetic guarantee are unavailable in bound source; sampled certificates and NCU do not fill the gap"
+    }
+  ],
+  "source_evidence": [
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/input.py",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "3bfb3e91eceb44c0f5b9b41749bf45fe456a8e88a6583577b8d809723abddb5d",
+      "symbols": "make; _make_inputs; writable_views; replay_tensors",
+      "lines": "21-88",
+      "supports": "Frozen ABI, explicit selectors, stored scale layout, output guards and alias"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/shape_range.json",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "3358bce185d8a90e94ee3f84677d01fca2709760ee1c324fca6226a1160efc04",
+      "symbols": "",
+      "lines": "1-222",
+      "supports": "Dynamic correlated shape domain, group sizes and 4-alignment"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/shape_cases.json",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "bd005a46a14a6b3f2b59bc95aa086195ec5bbc1696314b6f66a7a62f8735e845",
+      "symbols": "",
+      "lines": "",
+      "supports": "10 fixed workloads; selector arithmetic"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/metadata.json",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "e508f91f862e7276bccf11b6f3ad34e91952910c08bc1f6f800efacccff45955",
+      "symbols": "benchmark_contract; validation; performance_objective",
+      "lines": "",
+      "supports": "Write contract, source-only tolerance and sampled acceptance scope"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/reference.py",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "304a60ad870b5282b0d1431c95b769b079ccc2249bddce371db2c024af7a2c78",
+      "symbols": "expected; Model.forward",
+      "lines": "8-31",
+      "supports": "FP32 dequantization, TF32 disabled, BF16 conversion and returned out alias"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate/solution.py",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "42f4ab2c8507fe2f1565f7371ba188d295475abd814f9a1289ea25d8e757272c",
+      "symbols": "_Engines; Model._validate; Model.forward",
+      "lines": "134-338",
+      "supports": "Actual ABI, device 0, identity caches, host launch and broader API defaults"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate/fp8gg_bind.cpp",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "514317ed7fb53a59d3ba182fc1644c3af52f249acecf70d5b5db6aa2e93afc81",
+      "symbols": "try_launch6; store_memo",
+      "lines": "62-121",
+      "supports": "Weakref-only cache matching and cached pointer/dimension use"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate/fp8gg_umma.cu",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "6489014fba41d624c943b4eb9934e41f909c7cf676fa32515b5b1561321a5fd5",
+      "symbols": "umma_gemm<0>",
+      "lines": "305-514;785-1065",
+      "supports": "Root schedule, stage/tmem/barrier memory and epilogue scale/drain/release/store order"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate/fp8gg_umma.cu",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "6489014fba41d624c943b4eb9934e41f909c7cf676fa32515b5b1561321a5fd5",
+      "symbols": "umma_wide<4,32768,0>",
+      "lines": "1111-1400",
+      "supports": "Wide schedule, replicated scale values, four drain batches and shared half staging"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate/fp8gg_umma.cu",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "6489014fba41d624c943b4eb9934e41f909c7cf676fa32515b5b1561321a5fd5",
+      "symbols": "sched_policy; fp8umma_run",
+      "lines": "1539-1885",
+      "supports": "Real selectors, SM-dependent counts, graph/map caching and fallbacks"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/performance/SELECTION.json",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "f65086773a0d9b81e1d1d761e5510b7d1c0ff537f214e2158b807b0a8b22875f",
+      "symbols": "candidate_files; contract_files; ncu_evidence",
+      "lines": "",
+      "supports": "Source digests and fixed capture environment"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/performance/CERTIFIED_BEST.json",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "3f2adbf3dbcafec26585dc51763f1e80413dc293386c698ca51f14e84e158e20",
+      "symbols": "release; fixed; domain",
+      "lines": "",
+      "supports": "Historical sample acceptance and external checker identity without its definition"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/performance/ncu/result.json",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "54a3a861a1877e43f47a3ab3d7b116182f9a2e2bcfdccfa9f6866684f8696536",
+      "symbols": "shapes",
+      "lines": "",
+      "supports": "Actual kernel names per fixed case; fixed capture provenance"
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/performance/SUMMARY.json",
+      "ref": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "504664bb77e78a790b33a78c9f9a5f758d6eb005124145a15cf30ca5bb12edcc",
+      "symbols": "measurements",
+      "lines": "",
+      "supports": "Kernel-sum objective excludes CPU, compilation and copy-engine DMA"
+    },
+    {
+      "path": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/gemm/ncu_source_excerpt.json",
+      "sha256": "0ee6d0e3d5bebc2b5163a2cc5f4d3fac715d85812ea775e0f359ef3da5b8e49a",
+      "supports": "All ten fixed CSV files, five captures each: 148 SM, dynamic shared memory, driver reserve, occupancy and registers; sample-limited"
+    }
+  ],
+  "checks": [
+    {
+      "command": [
+        "/opt/venv/python3.13.12/bin/python3",
+        "-B",
+        "schema_template/check_yaml.py",
+        "schema_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/root.yaml",
+        "--read-only",
+        "--skip-hardware",
+        "--graph",
+        "check",
+        "--all",
+        "--set",
+        "pair_count=6",
+        "--set",
+        "kb_count=12",
+        "--set",
+        "full_rows(0)=1",
+        "--set",
+        "full_rows(1)=0",
+        "--worktiles",
+        "2"
+      ],
+      "exit_code": 0,
+      "log": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/gemm/graph-final.log",
+      "log_sha256": "13c45c299eb6dd81a3f46399a4326dee90c25ed2584ce8dd42898b99df109b11",
+      "stage": "graph-final",
+      "input_manifest": {
+        "root.yaml": "a1402afda08375799ad5721cec10e3175e684022921ad9972ee1ab37f6e4639f",
+        "wide.yaml": "0cf0396f752ef8e3675175c5bcb179cd49a44fcc6c1cc5a93db64a8749bfce53",
+        "dispatch.md": "2f0faa4c0b61d9e39b002bbc0bfaf06b99f730c513c4e00edae4f3663a3e5b78"
+      }
+    },
+    {
+      "command": [
+        "/opt/venv/python3.13.12/bin/python3",
+        "-B",
+        "schema_template/check_yaml.py",
+        "schema_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/root.yaml",
+        "--read-only",
+        "--skip-hardware",
+        "--graph",
+        "check",
+        "--all",
+        "--set",
+        "pair_count=6",
+        "--set",
+        "kb_count=12",
+        "--worktiles",
+        "0"
+      ],
+      "exit_code": 0,
+      "log": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/gemm/graph-empty-final.log",
+      "log_sha256": "e0e24fa145666868b2e4e4caa6b7caab781031b76f477512aba48a01026de15f",
+      "stage": "graph-empty-final",
+      "input_manifest": {
+        "root.yaml": "a1402afda08375799ad5721cec10e3175e684022921ad9972ee1ab37f6e4639f",
+        "wide.yaml": "0cf0396f752ef8e3675175c5bcb179cd49a44fcc6c1cc5a93db64a8749bfce53",
+        "dispatch.md": "2f0faa4c0b61d9e39b002bbc0bfaf06b99f730c513c4e00edae4f3663a3e5b78"
+      }
+    },
+    {
+      "command": [
+        "/opt/venv/python3.13.12/bin/python3",
+        "-B",
+        "schema_template/check_yaml.py",
+        "schema_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/root.yaml",
+        "--read-only",
+        "--skip-hardware"
+      ],
+      "exit_code": 0,
+      "log": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/gemm/check-final.log",
+      "log_sha256": "d3dd8e931f4451ebd05e4d03d1b5e806b92c0fc4c6e35fa64aa0c235fca7270d",
+      "stage": "check-final",
+      "input_manifest": {
+        "root.yaml": "a1402afda08375799ad5721cec10e3175e684022921ad9972ee1ab37f6e4639f",
+        "wide.yaml": "0cf0396f752ef8e3675175c5bcb179cd49a44fcc6c1cc5a93db64a8749bfce53",
+        "dispatch.md": "2f0faa4c0b61d9e39b002bbc0bfaf06b99f730c513c4e00edae4f3663a3e5b78"
+      }
+    }
+  ],
+  "remaining_limits": [
+    "External tolerance numbers remain a Source only record; no default comparator interpretation or re-created acceptance.",
+    "No GPU, compiler, performance or numerical validation performed; finite graphs check representative local events only.",
+    "Tensor-core internal rounding/subnormal behavior and a full-domain error bound are not supplied by the fixed materials.",
+    "Source identity caches assume stable tensor storage/metadata and a device-0 environment; no kernel/host source repair was authorized.",
+    "Register byte counts describe named source buffers, not compiled allocation, peak liveness or absence of spills.",
+    "NCU SM/resource facts are limited to the recorded fixed ten shapes and five captures per shape."
+  ],
+  "record_path": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/gemm/REVIEW.md",
+  "record_sha256": "8336267adaf8e0b00792a9a080e92f58a54b1c2dccc83bc7a9283aac0b7ea91e",
+  "status": "manual_review_complete",
+  "completed_at_utc": "2026-11-19T10:45:38.849735+00:00",
+  "roles": {
+    "worker_agent": "/root/gemm_schema_review_xhigh",
+    "reviewer_agent": "/root/gemm_schema_review_xhigh",
+    "same_agent": true,
+    "requested_model": "gpt-6-astra",
+    "requested_effort": "xhigh",
+    "review_kind": "full source-based review followed by final artifact self-review",
+    "independent_runner_approval": false
+  },
+  "baseline_versions": {
+    "root.yaml": 4,
+    "wide.yaml": 1
+  },
+  "before_record": {
+    "path": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/gemm/before.json",
+    "sha256": "f0133565667aa848c7ee8f4b75cab1407bea97c65f4dc375801b13834579bfd4"
+  },
+  "source_manifest": {
+    "path": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/gemm/source_manifest.json",
+    "sha256": "a7d1d3b73cfe66d4fc7b92e5d0bdb9b04bca0431f36f841a2e4be78f2dab926f",
+    "file_count": 27,
+    "all_fixed_commit_bytes_match": true
+  },
+  "verification_record": {
+    "path": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/gemm/verification.json",
+    "sha256": "1d1bd379a6ae4f70f2d3b986425a5901dbdd20c3b5dfcde5c9dfed71809e7a3d"
+  },
+  "all_checks_record": {
+    "path": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/gemm/checks.json",
+    "sha256": "e1ba8d43db2502dd9156240fc4790261e3ad5e396c186c210bb25835f5657b9c"
+  },
+  "original_run_id": "06f3ed2c-daa0-46f0-a0dd-a7e1f4f4df31",
+  "original_extraction_metadata": {
+    ".extraction/receipt.json": "80b4d4eef02cd9bddfed0c50507c58339df31f5d6a669da0383ef6ace2020319",
+    ".extraction/issue-review-20261119.json": "0abcaad384bb8d5f88c621fc542307eecc977d4c5de555e18b956cbbaad9bba4"
+  },
+  "original_approval_scope": "Historical approved bytes only; neither the original receipt nor the earlier limited review approves this new manifest",
+  "cleanup_handoff": {
+    "extraction_metadata_unchanged": true,
+    "formal_process_residue": "Existing .extraction process records and prior P1/collection wording in dispatch are left for the authorized unified cleanup",
+    "preserve_current_limits": true,
+    "new_process_evidence_only_in_discussion": true
+  }
+}

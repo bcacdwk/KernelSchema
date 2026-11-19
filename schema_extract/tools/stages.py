@@ -126,15 +126,20 @@ def owner_for(state: dict, call: dict) -> dict:
 def session_group(state: dict, call: dict | None = None) -> str:
     call = call or state
     if call.get("purpose") == "maintenance":
-        return "maintenance:" + call["maintenance_task_id"] + ":" + call.get("maintenance_step", "review")
-    group = scope_key(call["stage"], call["node"])
-    return group if call.get("mode", "normal") == "normal" else group + ":" + call["mode"]
+        group = "maintenance:" + call["maintenance_task_id"] + ":" + call.get("maintenance_step", "review")
+    else:
+        group = scope_key(call["stage"], call["node"])
+        if call.get("mode", "normal") != "normal":
+            group += ":" + call["mode"]
+    return group + ":executor:" + state["execution_binding"] if state.get("execution_binding") else group
 
 
 def session_scope(call: dict) -> dict:
     operation = call.get("mode", "normal")
     if call.get("purpose") == "maintenance":
         operation = "maintenance:" + call["maintenance_task_id"] + ":" + call["maintenance_step"]
+    if call.get("execution_binding"):
+        operation += ":executor:" + call["execution_binding"]
     return {"stage": call["stage"], "node": call["node"], "role": call["role"], "operation": operation}
 
 
@@ -493,7 +498,7 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
                 "artifact_digests": validation.get("artifact_digests") or
                                     {item["path"]: item["sha256"] for item in receipt["artifacts"]},
                 "conclusions": receipt["conclusions"], "issues": receipt["issues"]}
-    approval.update({key: identity[key] for key in ("maintenance_task_id", "purpose", "maintenance_step")
+    approval.update({key: identity[key] for key in ("maintenance_task_id", "purpose", "maintenance_step", "execution_binding")
                      if key in identity})
     resolution = validation.get("design_resolution", {}).get("nodes", {}).get(node_id)
     if stage in {"P3", "P5"} and resolution:
@@ -550,6 +555,17 @@ def _approve(result: dict, receipt: dict, checkpoint_id: str, receipt_hash: str,
         resume_progress(result)
 
 
+def retain_p6_drafts(state: dict, checkpoint_id: str, changed_files) -> None:
+    """Retain actually validated final edits for a later node review."""
+    for name in changed_files:
+        node_id = name.removesuffix(".yaml")
+        if name.endswith(".yaml") and node_id != "root" and node_id in state["nodes"]:
+            node = state["nodes"][node_id]
+            if node.get("draft_checkpoint") != checkpoint_id:
+                node["last_draft_checkpoint"] = node.get("draft_checkpoint") or node.get("last_draft_checkpoint")
+                node["draft_checkpoint"] = checkpoint_id
+
+
 def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, *, validation: dict | None = None) -> dict:
     """No IO or model calls; identical saved inputs yield identical decisions."""
     if receipt["identity"].get("purpose") == "maintenance":
@@ -572,6 +588,8 @@ def advance(state: dict, receipt: dict, checkpoint_id: str, receipt_hash: str, *
     result["accepted_receipts"][attempt_id] = receipt_hash
     result["active_attempts"].pop(key)
     owner["reason"] = None
+    if stage == "P6" and (role == "worker" or validation.get("adjudication_changed")):
+        retain_p6_drafts(result, checkpoint_id, validation["changed_files"])
     if role == "worker":
         scope["candidates"].append({"checkpoint": checkpoint_id, "plan": deepcopy(receipt.get("plan")),
                                     "generation": identity.get("generation"), "node_signature": identity.get("node_signature")})

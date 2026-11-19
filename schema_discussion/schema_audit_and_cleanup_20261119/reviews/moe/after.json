@@ -1,0 +1,309 @@
+{
+  "format": "schema_manual_review.after.v1",
+  "operator_id": "nvfp4_fused_moe",
+  "directory": "schema_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe",
+  "design_count": 3,
+  "manifest": {
+    "mega.yaml": "7767af2f91d3834a8fd517cf073520fa268ae21d3fbbd34f18b3ac7938e21b35",
+    "root.yaml": "1527831435f256d911b0bfe1a3c8c24c14c2511b3f49e9febf1950192012279f",
+    "split_k.yaml": "43670ce7016c3f1689a701099d95d3694361ab79300caf9d064b4c5bdfa090b8",
+    "dispatch.md": "78c8bd28a9d3a2e2d89c7fbff974a217dd9d60157bc93236322ef9d3cdedac3a"
+  },
+  "versions": {
+    "mega.yaml": 3,
+    "root.yaml": 5,
+    "split_k.yaml": 2
+  },
+  "changed_files": [
+    "root.yaml",
+    "split_k.yaml",
+    "mega.yaml",
+    "dispatch.md"
+  ],
+  "findings": [
+    {
+      "id": "reference_scale_rounding",
+      "status": "fixed",
+      "files": [
+        "root.yaml"
+      ],
+      "conclusion": "Use FP32 multiplication by rounded 1/6, as reference.py does; CPU counterexample changes the E4M3 code."
+    },
+    {
+      "id": "folded_type10_prescale",
+      "status": "fixed",
+      "files": [
+        "root.yaml"
+      ],
+      "conclusion": "Match act_k_constants and activation2 rounding order; keep split_k/mega non-folded and name the literal L2E constant."
+    },
+    {
+      "id": "acceptance_configuration",
+      "status": "fixed",
+      "files": [
+        "root.yaml"
+      ],
+      "conclusion": "Retain both source-only tolerance configurations and explicitly leave their output application mapping unknown."
+    },
+    {
+      "id": "generated_activation_parameters",
+      "status": "fixed",
+      "files": [
+        "root.yaml"
+      ],
+      "conclusion": "Record input construction type/alpha/beta correlation and uniform per-expert vectors; preserve the supplied two-branch union."
+    },
+    {
+      "id": "partial_vector_load_count",
+      "status": "fixed",
+      "files": [
+        "split_k.yaml"
+      ],
+      "conclusion": "2*split_count float4 loads per ACT thread, one up and one gate per slice."
+    },
+    {
+      "id": "clipped_gather_partial_box",
+      "status": "fixed",
+      "files": [
+        "split_k.yaml"
+      ],
+      "conclusion": "Last partial four-row box repeats first valid token; later boxes are omitted and invalid scales remain unstaged."
+    },
+    {
+      "id": "padding_regions_and_sf_prime",
+      "status": "fixed",
+      "files": [
+        "root.yaml",
+        "split_k.yaml"
+      ],
+      "conclusion": "Padding can overlap valid later-expert rows; scales duplicate the first valid row; prime only one stage for I=256."
+    },
+    {
+      "id": "allocation_and_materialization",
+      "status": "fixed",
+      "files": [
+        "root.yaml",
+        "mega.yaml"
+      ],
+      "conclusion": "Correct packed byte ratio and gather backing regions; distinguish unmaterialized values from still allocated MEGA workspace slabs."
+    },
+    {
+      "id": "unproven_numeric_compiler_claims",
+      "status": "fixed",
+      "files": [
+        "root.yaml",
+        "split_k.yaml",
+        "mega.yaml"
+      ],
+      "conclusion": "Source comments/samples are not domain bounds; ACT no-launch-bounds is a toolchain-dependent preference."
+    },
+    {
+      "id": "root_complete_configuration_scope",
+      "status": "fixed",
+      "files": [
+        "root.yaml",
+        "dispatch.md"
+      ],
+      "conclusion": "Selected large prep, fin8 and PDL are explicit and reachable through existing source controls; default branch samples are distinguished."
+    },
+    {
+      "id": "mega_reuse_and_nonempty_replay",
+      "status": "fixed",
+      "files": [
+        "mega.yaml",
+        "dispatch.md"
+      ],
+      "conclusion": "Require workspace retirement before self-clean reuse, preserve cross-stream limitation and avoid inferring nonempty numerical acceptance from empty routing."
+    },
+    {
+      "id": "routing_tuple_and_output_identity",
+      "status": "no_change",
+      "files": [
+        "root.yaml"
+      ],
+      "conclusion": "Per-slot pair representation and caller buffer same-object return/full overwrite are source-backed; no nullable/default or NaN-domain expansion."
+    },
+    {
+      "id": "synchronization_and_effective_design",
+      "status": "no_change",
+      "files": [
+        "root.yaml",
+        "split_k.yaml",
+        "mega.yaml"
+      ],
+      "conclusion": "Checked ring retirement, accumulator/sink lifetimes, interstep visibility, three distinct designs, local origins and shared root Contract."
+    },
+    {
+      "id": "comparator_hardware_and_gpu_evidence",
+      "status": "remaining_material_gap",
+      "files": [
+        "all"
+      ],
+      "conclusion": "No external comparator formulas/mapping, full hardware validation, new GPU acceptance or performance proof supplied."
+    },
+    {
+      "id": "mega_source_scope_limits",
+      "status": "source_limit",
+      "files": [
+        "mega.yaml",
+        "dispatch.md"
+      ],
+      "conclusion": "H%512 and K=8 are required by source loops; declared geometries satisfy them. Shared workspace concurrency has no source synchronization."
+    }
+  ],
+  "source_evidence": [
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/solution.py",
+      "commit": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "0a71613fe4beec9314570cf128f2d455e91adf7182467c261a36ac11e45f0688",
+      "anchors": [
+        "Model.forward:1023-1605",
+        "_pick_cfg:506-873",
+        "_workspace:925-1004",
+        "ws_g2 and route_hist:1178-1311",
+        "MEGA and threshold gates:1393-1506"
+      ],
+      "bytes_match_fixed_commit": true
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/nvfp4_moe.cu",
+      "commit": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "cf0b42e2e4809cf71b2442f1b64285da4cc0a69214f43eb82efbdac938978f6f",
+      "anchors": [
+        "activation2/activation2_nf/act_k_constants:506-570",
+        "k_act_packed:1351-1455",
+        "phys_row/sf_offset:1849-1857",
+        "k_mega_body:1899-2257",
+        "f4_body_ws:4214-5376",
+        "A scale rows:4470-4535",
+        "gather4 tx and tok4:4550-4692",
+        "TSTORE drain:5140-5376",
+        "run_pipeline and finalizer selection:9078-9358",
+        "make_params act aliases:8842-8843"
+      ],
+      "bytes_match_fixed_commit": true
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/nvfp4_fast.c",
+      "commit": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "00659825f1c81a3335cec0c8f9fcdd047fa2bc38f244c9f67f35a6d8eb49ec93",
+      "anchors": [
+        "identity-checked cached call and return of original output list:55-74,220-263"
+      ],
+      "bytes_match_fixed_commit": true
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/input.py",
+      "commit": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "89f59e2aa765c2ea73ba9cfbcc9a4b33024aaf2bd8cc297c5c6017924ce4a71c",
+      "anchors": [
+        "guarded:47-51",
+        "prepare_weights:85-100",
+        "_make_inputs:102-113",
+        "writable_views/observable_inputs/replay_tensors:115-127"
+      ],
+      "bytes_match_fixed_commit": true
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/reference.py",
+      "commit": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "4fccbab4f84e063d70fc019d4ba77a63f3464b41fd5c5965aa2eb586e8289833",
+      "anchors": [
+        "nvfp4:38-45",
+        "weight:54-69",
+        "expected:71-93",
+        "Model.forward:97-103"
+      ],
+      "bytes_match_fixed_commit": true
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/metadata.json",
+      "commit": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "8bba953529b3a1bac45cecb044f431d56f9a8da43262de5b65bf19e5a15bcc9c",
+      "anchors": [
+        "benchmark_contract.correctness_tolerances",
+        "benchmark_contract.mutates_inputs/preserve_input_storage"
+      ],
+      "bytes_match_fixed_commit": true
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/shape_range.json",
+      "commit": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "8062f61f04a62abbca91e97f808ed6759b9a22f5bca01a194d873d3b10469449",
+      "anchors": [
+        "input_kwargs.properties and cross_field_invariants"
+      ],
+      "bytes_match_fixed_commit": true
+    },
+    {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/problem/shape_cases.json",
+      "commit": "24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2",
+      "sha256": "611c6e964f7f61cee003a24a8382a4ee553aa071ba0257cac781b6439429d4df",
+      "anchors": [
+        "fixed cases 0-9"
+      ],
+      "bytes_match_fixed_commit": true
+    }
+  ],
+  "checks": [
+    {
+      "record": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/moe/check_before.json",
+      "sha256": "691ea6d9c17fa74e53fef14a2e01e49cc6456931334fa55a17d05f211de846d1",
+      "result": 0
+    },
+    {
+      "record": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/moe/check_revision_1.json",
+      "sha256": "e813c2b059c9717345f6e5f3863297ee744228903b3aacb2f066fda2874a22de",
+      "result": 1
+    },
+    {
+      "record": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/moe/check_revision_2.json",
+      "sha256": "605fff7aeefab8eb18acada7152e5540c2a1998f2c4e9fa27a5f5a599ff07be7",
+      "result": 1
+    },
+    {
+      "record": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/moe/check_revision_3.json",
+      "sha256": "1ce3127c864a37d9db49d9791fb6cf494ae5c6b39ed282da29aed7ebc6f30f6e",
+      "result": 1
+    },
+    {
+      "record": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/moe/normalize.json",
+      "sha256": "3a0836200d9b4d69823d89b690be152c091b35a5c96cf2c66b828fccbc125dfc",
+      "result": 1
+    },
+    {
+      "record": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/moe/normalize_final.json",
+      "sha256": "bc469bc9adb0977ab557d924c5cdc2e5d41e99bc1907b1ec33f442ba6e43466c",
+      "result": 0
+    },
+    {
+      "record": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/moe/check_final.json",
+      "sha256": "691ea6d9c17fa74e53fef14a2e01e49cc6456931334fa55a17d05f211de846d1",
+      "result": 0
+    },
+    {
+      "record": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/moe/semantic_selfcheck.json",
+      "sha256": "86b4addb5dd22da054791f36e7b0eaff2e06c012f820959c3342adb4e56a02a4",
+      "result": "passed"
+    },
+    {
+      "record": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/moe/effective_readback.json",
+      "sha256": "b1c4f11b5f57e036efec91d8547c5ae4f8ae3129491521127661090e5d18e19a",
+      "result": "passed"
+    }
+  ],
+  "remaining_limits": [
+    "External comparison formulas and return/writeback mapping are unavailable; two source configurations are not merged into invented acceptance semantics.",
+    "Hardware checks explicitly skipped; storage arithmetic is checked against source, not a completed hardware model.",
+    "No CUDA execution, new P6, full numerical acceptance or new performance measurement; source bit-exact and approximation claims remain unverified globally.",
+    "MEGA source requires H divisible by 512 and K=8; declared domain satisfies these. Reusing one workspace concurrently on multiple streams is not synchronized by source.",
+    "Original formal process history and receipt are preserved for the final cleanup agent; no original approval is rebound to revised bytes."
+  ],
+  "record_path": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/moe/review.json",
+  "record_sha256": "697004f3acb676c0fd79503cf63d3c1cc4006b5da4037d97a0411f5ffe548a2d",
+  "report_path": "schema_discussion/schema_audit_and_cleanup_20261119/reviews/moe/REVIEW.md",
+  "report_sha256": "5109afbc39f2163c67786f1e62cc338b6f442d69ef8304b6b57d6b60515ff221",
+  "original_receipt_sha256": "c29a30444ede622a10b0eebb5318232e09ec41ee57911f5db4f49fab18acb842",
+  "new_extract_calls": 0,
+  "new_runner_p6": false
+}

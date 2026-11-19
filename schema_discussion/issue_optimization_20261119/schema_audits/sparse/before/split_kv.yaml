@@ -1,0 +1,450 @@
+META_DATA:
+  Name: dual_cache_latent_bf16
+  Describe: Sparse latent attention that gathers each query token's listed rows from sliding-window and compressed BF16 KV pools into one joint softmax
+  Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu
+  Version: 2
+  Dispatch:
+    id: split_kv
+    when: >-
+      Calls whose plan cuts each token's key range into segments: head blocks of 32, so head_count >= 32; splits > 1, at most 128 and at most what the bound scratch fits. Each (token, head-block, split) CTA walks one contiguous 64-key chunk segment, writes FP32 partial rows into workspace_buffer and never writes out; a second stream-ordered submission reduces every row's splits, folds the sink and writes all of out once. Requires a whole-batch launch, not a token range.
+DESIGN:
+  Math_reshape:
+    Thesis: >-
+      Cutting one token's chunk range into splits contiguous segments runs its serial softmax on that many CTAs, each handing over a base-2 max, normaliser and FP32 accumulator as a partial row. Costs an FP32 round trip through scratch and a second submission owning the sink fold and the only narrowing
+    Rewrite:
+      - Name: Fixed key slots, validity mask and chunk range
+        Math: |
+          With visible, total, swa_count = min(visible, swa_window) per the Contract (the kernel's
+          defensive clamps are in-domain identities) and nglob = max(total - swa_window, 0), N =
+          swa_count + nglob, the tile evaluates the fixed positions 0 <= j < N: slot(j) =
+          sparse_indices[t, j] for j < swa_count, else sparse_indices[t, swa_window + j - swa_count];
+          v(j) = slot(j) >= 0; pool(j) = swa_kv_cache for j < swa_count, else compressed_kv_cache;
+          kv_row(j) = row max(slot(j), 0) of pool(j), so masked positions still gather a discarded
+          row. sel_kv(t) drops exactly the v(j) = 0 positions in order, so each Contract sum equals
+          the sum over all j of the same term where v(j) = 1 and zero else, one term per repeated
+          index. chunk_count = ceil_div(N, kc); chunk c covers kc*c <= j < min(kc*(c+1), N), j >= N
+          padding with v = 0; in-domain N >= 1; kv_rows(c) is chunk c's gathered rows in order.
+        Symbol:
+          kc: {meaning: Keys per chunk, binding: 'bind:DESIGN.Work_schedule::kc'}
+          chunk_count: {meaning: Number of kc-key chunks of one token's key range}
+          kv_rows: {meaning: 'One chunk''s gathered rows, key and value operand', shape: [{key: kc}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::swa_kv_cache.dtype', retention: 'keep_value (t,c)'}
+        Ledger:
+          Baseline: >-
+            The Contract's compacted sel_kv list: selected_count rows gathered and evaluated per token
+          Gain: null
+          Cost: >-
+            Gathered rows per token selected_count -> chunk_count*kc of 1 KiB each; both GEMMs evaluate invalid and padded positions, masked afterwards
+      - Name: Key segments of the chunk range
+        Math: |
+          splits is fixed per call by the launcher, 2 <= splits <= 128. With
+          base_chunks = floor(chunk_count / splits) and extra_chunks = chunk_count - base_chunks * splits,
+          segment sp owns chunk_lo(sp) = sp * base_chunks + min(sp, extra_chunks) and
+          chunk_hi(sp) = chunk_lo(sp) + base_chunks + (sp < extra_chunks ? 1 : 0), evaluating
+          chunk_lo(sp) <= c < chunk_hi(sp): the first extra_chunks segments take one extra chunk, the
+          segments are disjoint, ascending and cover [0, chunk_count), and each holds base_chunks or
+          base_chunks + 1 chunks. Segment sp is empty exactly when chunk_lo(sp) >= chunk_hi(sp), which
+          base_chunks = 0 together with sp >= extra_chunks makes the trailing splits - chunk_count
+          segments; since in-domain N >= 1 gives chunk_count >= 1, segment 0 always holds at least one
+          chunk, and an empty segment still takes part in the merge through the sentinel below.
+        Symbol: {splits: {meaning: Key segments of one token's chunk range, binding: 'bind:DESIGN.Work_schedule::splits'}}
+        Ledger:
+          Baseline: >-
+            One worker walks all chunk_count chunks of a token, so that chain sets the token's latency
+          Gain: >-
+            Chunk chain per token chunk_count -> ceil_div(chunk_count, splits) chunks per CTA, run by distinct CTAs
+          Cost: >-
+            Empty segments 0 -> max(splits - chunk_count, 0) when splits > chunk_count, each still a launched CTA
+      - Name: Base-2 online softmax within one key segment
+        Math: |
+          log2e = 1.4426950408889634, qs = bmm1_scale * log2e, NEG_BIG = -3.0e38; sink2(h) =
+          sinks[h] * log2e with sinks, else -inf; exp2 of a qs-scaled difference equals the Contract's
+          exp of the natural one up to FP32 rounding. Per head h, segment sp, chunk c in it, j in c:
+          s(c,h,j) = qs * dot32(query[t,h,:], kv_row(j)) at v(j) = 1, else -inf; mu(c,h) = max_j s(c,h,j);
+          m(c,h) = max(m(c-1,h), mu(c,h)), then held at NEG_BIG if <= NEG_BIG/2 (no valid key yet),
+          keeping differences finite: exp2(-inf - NEG_BIG) = 0, exp2(NEG_BIG - NEG_BIG) = 1;
+          scale(c,h) = exp2(m(c-1,h) - m(c,h)); pf(c,h,j) = exp2(s(c,h,j) - m(c,h)), 0 masked;
+          pb(c,h,j) = bf16(pf(c,h,j)) RNE; l(c,h) = l(c-1,h)*scale(c,h) + sum32_j pf(c,h,j) on pf;
+          o(c,h,:) = mma32(pb(c,h,:), kv_rows(c), o(c-1,h,:)*scale(c,h)); init at c = chunk_lo(sp)-1 is
+          m = sink2(h) or NEG_BIG, l = 0, o = 0, so every segment carries the sink in its own maximum.
+        Symbol:
+          s: {meaning: Scaled masked scores of one chunk, shape: [{key: kc}], dtype: fp32, retention: 'keep_value (t,h,c)'}
+          pb: {meaning: Chunk probabilities rounded to BF16 for phase 2, shape: [{key: kc}], dtype: bf16, retention: 'keep_value (t,h,c)'}
+          m: {meaning: Running base-2 row maximum including the sink, shape: [], dtype: fp32, retention: 'carry_forward (t,h,sp); c=chunk_lo(sp)-1..chunk_hi(sp)-1'}
+          l: {meaning: Running base-2 normaliser of processed chunks, shape: [], dtype: fp32, retention: 'carry_forward (t,h,sp); c=chunk_lo(sp)-1..chunk_hi(sp)-1'}
+          o: {meaning: Unnormalised attention accumulator, shape: [{d: latent_dim}], dtype: fp32, retention: 'carry_forward (t,h,sp); c=chunk_lo(sp)-1..chunk_hi(sp)-1'}
+        Arithmetic:
+          Approx: >-
+            exp2 and final divides compile --use_fast_math to ex2.approx.f32 / div.approx.f32; unknown: per-op bound, path gated at zero reference mismatches
+          Accumulate: >-
+            32 ascending 16-term mma steps per score; lane/shuffle/cross-warp row-sum folds; rescaled chunkwise l and o; reassociations of Contract flat FP32 sums
+        Ledger:
+          Baseline: >-
+            The Contract's two-pass evaluation: every score materialised in FP32, exact row max, flat sums
+          Gain: >-
+            Score materialisation head_count*selected_count FP32 -> kc per head per step; one key traversal serves max, normaliser and accumulator
+          Cost: >-
+            pb adds one BF16 rounding of softmax weights; per chunk the rescale adds latent_dim multiplies per head; approximations per Arithmetic
+      - Name: Per-segment partial row in scratch
+        Math: |
+          At the end of segment sp, per head row h of the 32-row block: m_part(sp,h) =
+          m(chunk_hi(sp)-1,h), l_part(sp,h) = l(chunk_hi(sp)-1,h) and o_part(sp,h,:) =
+          o(chunk_hi(sp)-1,h,:). No sink probability is added to l_part and no scale is applied to
+          o_part, so the partial row carries the raw base-2 state of its own segment, while m_part
+          already holds sink2 through the init. All 32 block rows are written, head_count being a
+          multiple of 32 in this range, so every row the merge reads was produced.
+          An empty segment writes only m_part = NEG_BIG and l_part = 0
+          and leaves o_part unwritten; the scratch is never zeroed, so an unwritten o_part must never
+          reach a result, which the merge's l_part > 0 weight gate below enforces.
+        Symbol:
+          m_part: {meaning: 'Segment''s final base-2 maximum, sink included', shape: [], dtype: fp32, retention: 'keep_value (t,h,sp)'}
+          l_part: {meaning: 'Segment''s final base-2 normaliser, sink excluded', shape: [], dtype: fp32, retention: 'keep_value (t,h,sp)'}
+          o_part: {meaning: Segment's unnormalised accumulator row, shape: [{d: latent_dim}], dtype: fp32, retention: 'keep_value (t,h,sp)'}
+        Ledger:
+          Baseline: >-
+            One worker keeps m, l and o to its last chunk, folds the sink and writes the BF16 row itself
+          Gain: null
+          Cost: >-
+            Scratch per token and head block 0 -> splits * 16448 FP32 (65,792 B) written once and re-read once
+      - Name: Cross-segment merge, sink fold and output
+        Math: |
+          For token t and head h = head_block*32 + hrow with h < head_count, over 0 <= sp < splits:
+          m_all(h) = max_sp m_part(sp,h), order independent; w(h,sp) = l_part(sp,h) > 0 ?
+          exp2(m_part(sp,h) - m_all(h)) : 0; l_merge(h) = sum_sp w(h,sp) * l_part(sp,h), plus
+          exp2(sink2(h) - m_all(h)) when sinks is given and 0 when it is not; inv(h) = l_merge(h) > 0 ?
+          bmm2_scale / l_merge(h) : 0; merged(h,:) = sum of w(h,sp) * o_part(sp,h,:) over the sp with
+          w(h,sp) > 0, so a zero-weight segment's unwritten o_part is never used; out[t,h,:] =
+          bf16(merged(h,:) * inv(h)), one RNE narrowing per element, each written once. m_all is the
+          base-2 image of row_max and l_merge of denominator, so this is the Contract's normalisation
+          reassociated over segments. At selected_count(t) = 0 every l_part is 0, merged is 0 and
+          l_merge is 0 without sinks or 1 with them, giving the Contract's zero row.
+        Symbol:
+          w: {meaning: Rescaling weight of one segment, shape: [], dtype: fp32}
+          inv: {meaning: Output scale of one head row, shape: [], dtype: fp32}
+          merged: {meaning: Weighted sum of the segment accumulator rows, shape: [{d: latent_dim}], dtype: fp32}
+        Arithmetic:
+          Approx: >-
+            exp2 and the inv divide use the ex2.approx.f32 / div.approx.f32 path declared in the segment softmax step
+          Accumulate: >-
+            Segment sums reassociated as 4 strided group accumulations of one float4 latent slice plus one cross-group sum of the 4; the max is order independent
+        Ledger:
+          Baseline: >-
+            One worker's own l and o, sink folded locally, single BF16 narrowing at its own epilogue
+          Gain: null
+          Cost: >-
+            Per head, splits * latent_dim extra FP32 multiply-adds and a re-read of every partial row
+  Work_schedule:
+    Thesis: >-
+      Two submissions: one CTA per (token, 32-head block, key segment) walks its segment and writes an FP32 partial row to scratch; one CTA per output row merges its splits, folds the sink and writes out. Buys splits-fold parallelism on long key ranges, costs a partial round trip and a second launch.
+    Step:
+      ATTENTION:
+        Describe: >-
+          Computes one token's 32-head block over one contiguous segment of its chunk range and writes that segment's FP32 partial row into scratch
+        Decomposition:
+          Strategy: >-
+            kc = 64; splits in [2, 128] fixed per call, segment sp owning chunk_lo..chunk_hi; an empty segment still writes its sentinel and joins the merge
+          Partition:
+            token: {meaning: One query token's output rows, size: total_query_tokens, tile: 1}
+            key_split: {meaning: One contiguous segment of the chunk range, size: splits, tile: 1, range: [2, 128]}
+            head_block: {meaning: Block of 32 consecutive heads of one token, size: head_count, tile: 32}
+          Worktile:
+            Invariant:
+              query_block: {meaning: The 32 query rows of this token's head block, shape: [{head: 32}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::query.dtype'}
+              index_row: {meaning: 'Token''s sparse_indices row, re-read per chunk', shape: [{index: index_width}], dtype: 'ref:CONTRACT.Algorithm_requirement::sparse_indices.dtype'}
+            Iteration: {kv_rows: {meaning: 'One chunk''s kc gathered rows, key and value', shape: [{key: kc}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::swa_kv_cache.dtype', direction: ascending}}
+          Target:
+            Single_tile:
+              partial_acc: {meaning: This segment's unnormalised accumulator rows, shape: [{head: 32}, {d: latent_dim}], dtype: fp32}
+              partial_stats: {meaning: This segment's per-head maximum and normaliser, shape: [{head: 32}, {stat: 2}], dtype: fp32}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: total_query_tokens * ceil_div(head_count, 32) * splits
+        Schedule:
+          Strategy: >-
+            Host asserts HND, non-null cum_seq_lens_q, three reserved None slots; C++ asserts contiguity, dtypes, 512 channels; splits > 1 forbids a token range
+          Worktile_order:
+            - {by: token, direction: ascending}
+            - {by: key_split, direction: ascending}
+            - {by: head_block, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+      COMBINE:
+        Describe: >-
+          Merges the segments of one output row, folds the sink and the normaliser, and writes that row's final BF16 latent into out
+        Decomposition:
+          Strategy: >-
+            head_count is a multiple of 32 here, so every block-row coordinate owns a real head, no CTA exits early, and the merge covers each out row once
+          Partition:
+            token: {meaning: One query token's output rows, size: total_query_tokens, tile: 1}
+            head_block: {meaning: Block of 32 consecutive heads of one token, size: head_count, tile: 32}
+            head: {meaning: One head row inside the block, size: 32, tile: 1}
+          Worktile:
+            Invariant:
+              segment_vectors: {meaning: The segments' accumulator rows for one head, shape: [{split: splits}, {d: latent_dim}], dtype: fp32}
+              segment_states: {meaning: 'The segments'' maximum and normaliser, one head', shape: [{split: splits}, {stat: 2}], dtype: fp32}
+          Target:
+            Single_tile: {out_row: {meaning: Final BF16 latent row of one token and head, shape: [{d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}}
+            Tile_reduction: {dimension: key_split, input: [o_part, m_part, l_part], output: out, method: 'Cross-segment merge, sink fold and output'}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: total_query_tokens * ceil_div(head_count, 32) * 32
+        Schedule:
+          Strategy: >-
+            Grid and thread count follow metadata already resolved for ATTENTION; 512 threads give 4 segment-groups of 128 latent quads each
+          Worktile_order:
+            - {by: token, direction: ascending}
+            - {by: head_block, direction: ascending}
+            - {by: head, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch:
+        - {step: [ATTENTION]}
+        - {step: [COMBINE], start_after: ATTENTION.kernel_done}
+      Handoff:
+        o_part: {producer: ATTENTION, consumer: [COMBINE], storage: global}
+        m_part: {producer: ATTENTION, consumer: [COMBINE], storage: global}
+        l_part: {producer: ATTENTION, consumer: [COMBINE], storage: global}
+  Tile_pipeline:
+    Thesis: >-
+      ATTENTION: one symmetric eight-warp role, a three-slot cp.async ring overlapping the next gather with the current chunk, and all 32 phase-1 A-fragment steps in registers so no query tile is needed. COMBINE: one sixteen-warp role whose prefetched segment quads hide the max and weight round trip
+    Step:
+      ATTENTION:
+        Index: {c: {meaning: Chunk iteration inside this worktile's segment, definition: [chunk_lo, chunk_hi]}}
+        Storage:
+          kv_ring: {meaning: Gathered KV chunk rows; slot 0 doubles as staging, depth: 3, location: smem, shape: [{key: kc}, {d: latent_dim}],
+            dtype: bf16, total_size: 196608, view: {kv_rows(c): {slot_index: (c-chunk_lo)%3}, query_block: {slot_index: 0}, partial_block: {slot_index: 0}}}
+          p_tile: {meaning: 'One chunk''s BF16 probabilities, phase-2 A operand', depth: 1, location: smem, shape: [{head: 32}, {key: kc}],
+            dtype: bf16, total_size: 4096, view: {pb(c): {}}}
+          softmax_ctrl: {meaning: Softmax running state and per-chunk warp slabs, depth: 1, location: smem, shape: [{element: 384}],
+            dtype: fp32, total_size: 1536, view: {m(c): {region: {element: [0, 32]}}, l(c): {region: {element: [32, 64]}}, scale(c): {region: {element: [64, 96]}}, sink2: {region: {element: [96, 128]}}, warp_max(c): {region: {element: [128, 256]}}, warp_sum(c): {region: {element: [256, 384]}}}}
+          validity: {meaning: Per-position validity byte of each gathered chunk, depth: 3, location: smem, shape: [{key: kc}],
+            dtype: uint8, total_size: 192, view: {v(c): {slot_index: (c-chunk_lo)%3}}}
+          q_fragments: {meaning: 'Register-cached phase-1 A fragments, k-steps 0-31', depth: 1, location: register, shape: [{k_step: 32}, {element: 2048}],
+            dtype: bf16, total_size: 131072, view: {a_frag(k): {region: {k_step: [k, k+1]}}}}
+          scores: {meaning: Per-warp FP32 dot-product slices of one chunk, depth: 1, location: register, shape: [{head: 32}, {key: kc}],
+            dtype: fp32, total_size: 8192, view: {s(c): {}}}
+          o_acc: {meaning: 'FP32 output accumulator, resident across chunks', depth: 1, location: register, shape: [{head: 32}, {d: latent_dim}],
+            dtype: fp32, total_size: 65536, view: {o(c): {}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: >-
+                Eight warps run every phase cooperatively: phase 1 as two head-row groups of four key-column warps, phase 2 with 64 output columns per warp
+              Member: warp[0:8]
+              Using_verb:
+                compute:
+                  meta:
+                    execution_mode: serial
+                    describe: >-
+                      Per thread: request via cum_seq_lens_q break, then seq_lens and topk; token, head_block and key split from blockIdx.x; N, chunk_lo, chunk_hi per Math
+                  init_state:
+                    execution_mode: serial
+                    describe: >-
+                      Threads 0..31 write softmax_ctrl: sink2 (or -inf without sinks), m = sink2 or NEG_BIG, l = 0, scale = 1; await(query_landed)'s barrier publishes
+                  q_fragments:
+                    execution_mode: serial
+                    describe: >-
+                      Each warp ldmatrix-caches all 32 a_frag steps of its row group into q_fragments, the four column warps duplicating; a final barrier frees ring slot 0
+                  o_init: {execution_mode: serial, describe: 'Zeroes all of o_acc, the segment recurrence''s o at chunk_lo - 1; reads no input and no old value'}
+                  row_max:
+                    execution_mode: serial
+                    describe: >-
+                      Scale scores by qs, -inf where validity v(c) is zero; shuffle plus warp_max slab and barrier reduce; threads 0..31 update m(c) and scale(c)
+                  p:
+                    execution_mode: serial
+                    describe: >-
+                      pf = exp2(s - m(c)), zero where masked; pb = bf16(pf) into p_tile; FP32 pf sums via shuffle, warp_sum slab and barriers; threads 0..31 fold l(c)
+                  partial_stage:
+                    execution_mode: serial
+                    describe: >-
+                      Warps write their o_acc tiles into partial_block, FP32 staging overlaid on ring slot 0 at the full latent_dim row stride; a CTA barrier publishes
+                matmul:
+                  qk:
+                    execution_mode: serial
+                    describe: >-
+                      32 k-steps of mma.sync m16n8k16 per warp's 16x16 slice: A = a_frag(k) from q_fragments for every k, B = ldmatrix of the kv_rows(c) slot
+                  pv:
+                    execution_mode: serial
+                    describe: >-
+                      Rescale the warp's 32x64 o_acc slice by scale(c); four 16-key mma.sync m16n8k16 steps: A = ldmatrix p_tile, B = ldmatrix.trans of the kv_rows(c) slot
+                load:
+                  query:
+                    execution_mode: async_unordered
+                    describe: >-
+                      256 threads cp.async the 32 query rows as 2048 16B items into ring slot 0's swizzle; one group; done when own copies land
+                  kv:
+                    execution_mode: async_unordered
+                    describe: >-
+                      Chunk c gather: read slot values, write validity bytes, cp.async 16B per item into the kv_rows(c) slot, one commit group; past chunk_hi commits empty
+                store:
+                  partial:
+                    execution_mode: serial
+                    describe: >-
+                      Threads 0..31 write m_part/l_part for all 32 rows; 256 threads copy partial_block as 4096 float4 to the scratch row; kernel boundary publishes
+                  sentinel:
+                    execution_mode: serial
+                    describe: >-
+                      Empty segment: threads 0..31 write m_part = NEG_BIG and l_part = 0 for all 32 block rows and no accumulator; the merge drops it by weight
+                await:
+                  query_landed:
+                    execution_mode: serial
+                    describe: >-
+                      cp.async.wait_group 0 retires the query group for every thread; one CTA barrier publishes ring slot 0's query rows and the softmax_ctrl initial state
+                  kv_landed:
+                    execution_mode: serial
+                    describe: >-
+                      wait_group 1 retires chunk c's group and leaves chunk c+1's in flight; one CTA barrier publishes kv_rows(c) and validity(c) and frees the slot of c+2
+                  chunk_release:
+                    execution_mode: serial
+                    describe: >-
+                      CTA barrier closing iteration c: every warp's reads of the kv_rows(c) slot, validity(c) and p_tile are done, releasing them for refill and staging
+            Pipe:
+              - compute:meta
+              - if(chunk_lo < chunk_hi):
+                  - load:query
+                  - compute:init_state
+                  - await:query_landed
+                  - compute:q_fragments
+                  - compute:o_init
+                  - load:kv(chunk_lo)
+                  - load:kv(chunk_lo+1)
+                  - for(c=chunk_lo:chunk_hi):
+                      - await:kv_landed(c)
+                      - load:kv(c+2)
+                      - matmul:qk(c)
+                      - compute:row_max(c)
+                      - compute:p(c)
+                      - matmul:pv(c)
+                      - await:chunk_release(c)
+                  - compute:partial_stage
+                  - store:partial
+              - if(chunk_lo >= chunk_hi):
+                  - store:sentinel
+      COMBINE:
+        Storage:
+          split_stats: {meaning: 'Per-segment maximum, normaliser, weight, inverse', depth: 1, location: smem, shape: [{element: 388}],
+            dtype: fp32, total_size: 1552, view: {m_part(sp): {region: {element: [0, 128]}}, l_part(sp): {region: {element: [128, 256]}}, w(sp): {region: {element: [256, 384]}}, inv: {region: {element: [384, 385]}}}}
+          group_scratch: {meaning: Per-group segment maximum and normaliser total, depth: 1, location: smem, shape: [{group: 4}, {stat: 2}],
+            dtype: fp32, total_size: 32, view: {group_max: {region: {stat: [0, 1]}}, group_total: {region: {stat: [1, 2]}}}}
+          group_vectors: {meaning: Per-group weighted latent slices before the sum, depth: 1, location: smem, shape: [{group: 4}, {element: 512}],
+            dtype: fp32, total_size: 8192}
+          prefetch_vectors: {meaning: Four segments' latent quads held across the merge, depth: 1, location: register, shape: [{quad: 4}, {element: 2048}],
+            dtype: fp32, total_size: 32768}
+          merge_acc: {meaning: This group's running weighted latent quad, depth: 1, location: register, shape: [{element: 2048}],
+            dtype: fp32, total_size: 8192, view: {merged: {region: {element: [0, 512]}}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: >-
+                Sixteen warps merge one output row: four groups of 128 threads each walk every fourth segment and own one float4 of the 512 latent columns
+              Member: warp[0:16]
+              Using_verb:
+                compute:
+                  row_max:
+                    execution_mode: serial
+                    describe: >-
+                      Group g maxes m_part over its strided segments into group_max, a barrier publishes it, then every thread takes m_all over the four groups
+                  weight:
+                    execution_mode: serial
+                    describe: >-
+                      Threads tid < splits write w = l_part > 0 ? exp2(m_part - m_all) : 0 into split_stats; a barrier publishes it
+                  normaliser:
+                    execution_mode: serial
+                    describe: >-
+                      Group g sums w * l_part into group_total; a barrier publishes it; thread 0 adds exp2(sink2 - m_all) with sinks, writes inv; a barrier publishes inv
+                  merge:
+                    execution_mode: serial
+                    describe: >-
+                      Adds w * o_part to merge_acc: four prefetched quads, value dropped where w = 0, then the rest in four-deep strides and a tail; w = 0 reads segment 0
+                  group_sum:
+                    execution_mode: serial
+                    describe: >-
+                      Each group publishes merge_acc into group_vectors; a barrier publishes them; threads 0..127 sum the four group slices into merged
+                load:
+                  prefetch:
+                    execution_mode: async_unordered
+                    describe: >-
+                      Each thread issues four unpredicated float4 loads of segments g, g+4, g+8 and g+12 of its latent quad into prefetch_vectors, zero past splits
+                  split_stats:
+                    execution_mode: serial
+                    describe: >-
+                      Threads tid < splits read m_part and l_part of segment tid for this head row from the scratch rows into split_stats
+                store:
+                  out:
+                    execution_mode: serial
+                    describe: >-
+                      Threads 0..127 narrow their float4 of merged by inv to BF16 and write out[token, head_block*32 + head, :] once; the kernel boundary gives visibility
+                await: {stats_published: {execution_mode: serial, describe: One CTA barrier publishes split_stats to all 512 threads}}
+            Pipe:
+              - load:prefetch
+              - load:split_stats
+              - await:stats_published
+              - compute:row_max
+              - compute:weight
+              - compute:normaliser
+              - compute:merge
+              - compute:group_sum
+              - store:out
+            Waiting:
+              Prepared: ['{issue compute:merge} ← [{done load:prefetch}]']
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::ATTENTION
+      Choice: >-
+        mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 for both GEMMs, ldmatrix.x4 and ldmatrix.x4.trans for the shared operands, and the 16-byte-chunk XOR swizzle (physical chunk = chunk ^ (row & 7)) shared by kv_ring, p_tile and the query staging
+      Reason: >-
+        Both GEMMs' BF16-input FP32-accumulate path, phase 2's transposed read of the value rows from the same gathered ring rows, and every ldmatrix fragment load assume these primitives and the conflict-free swizzle the storage account was sized for
+    - Item: DESIGN.Tile_pipeline::ATTENTION
+      Choice: >-
+        cp.async.cg.shared.global 16-byte copies with per-thread commit_group / wait_group accounting: one group per query and per chunk gather, an EMPTY commit for every ring slot advanced past chunk_hi, the query group retired by wait_group 0 and each chunk group by wait_group 1
+      Reason: >-
+        wait_group counts groups, not bytes: the query group is retired by 0 because nothing else is in flight at that point, and each chunk group by 1, which keeps the next chunk in flight - so dropping the empty commits would leave the segment's last real gather unretired and read before it lands
+    - Item: DESIGN.Tile_pipeline::ATTENTION
+      Choice: >-
+        256 threads per CTA at a one-CTA-per-SM launch bound, a 202,688-byte dynamic shared-memory request (storage account plus 256 bytes of slack) checked against the runtime opt-in maximum, and no query tile: the query is staged in kv_ring slot 0 and absorbed into 32 register-cached fragment steps
+      Reason: >-
+        A separate 32,768-byte query tile would need 235,456 bytes against a 231,424-byte budget, so the tile trades it for 128 registers of cached A fragments per thread on top of 64 accumulator registers; the slot-0 release barrier is what makes the reuse safe
+    - Item: DESIGN.Math_reshape
+      Choice: >-
+        Compile both kernels with --use_fast_math so exp2f and the FP32 divides lower to the ex2.approx.f32 / div.approx.f32 approximations declared in Arithmetic.Approx, on the sm_103a/sm_100a then plain sm_103/sm_100 gencode chain
+      Reason: >-
+        The declared numerics path of the segment softmax and of the merge's weight and inverse are defined by those approximations, and the tile must build on both the architecture-specific and the plain targets of the frozen build chain
+    - Item: DESIGN.Work_schedule.Flow.Handoff
+      Choice: >-
+        One scratch row of 32*512 + 2*32 = 16,448 FP32 per (token, head block, segment), resolved on the host: accumulator rows at the full latent_dim stride, then 32 maximum and 32 normaliser values at offset 32*512; row index ((token*splits + sp)*ceil_div(head_count,32) + head_block)
+      Reason: >-
+        The producer's staging copy and the consumer's row/stride arithmetic must agree on this exact layout, and one kernel instantiation serves both the FP32 and the pre-normalised FP16 partial formats through runtime parameters, so the shipped FP32 geometry is fixed by the host rather than by the tile
+    - Item: DESIGN.Work_schedule.Flow.Handoff
+      Choice: >-
+        Keep both zero-weight guards in the merge: the value of a prefetched quad is dropped rather than multiplied where w = 0, and a zero-weight strided load is redirected to segment 0's row; never rely on the scratch arriving zeroed
+      Reason: >-
+        An empty segment writes only its sentinels, so its vector bytes are stale, and workspace_buffer is a scratch input the caller restores between calls, so no host-side memset survives; segment 0 always holds a chunk in-domain, which is what makes its row a finite redirect target
+    - Item: DESIGN.Tile_pipeline::COMBINE
+      Choice: >-
+        512 threads per CTA under a two-blocks-per-SM launch bound, i.e. 64 registers per thread, a 9,776-byte static shared block and no dynamic shared memory; four segment-groups of 128 threads each own one float4 of the 512 latent columns
+      Reason: >-
+        The merge is bound by dependent-load latency rather than bandwidth, so its parallelism has to come from threads; the 64-register cap is what limits the prefetched quad depth to four, and only the first 128 threads own the merged output
+    - Item: DESIGN.Work_schedule.Flow.Launch
+      Choice: >-
+        Two plain stream-ordered launches on the caller's stream, with programmatic dependent launch (griddepcontrol.launch_dependents in ATTENTION, griddepcontrol.wait in COMBINE) left off
+      Reason: >-
+        COMBINE's start_after ATTENTION.kernel_done is discharged by the stream edge, which is also what gives the partial writes their visibility; the programmatic form is a measured loss in the frozen source and is not what this design submits
+    - Item: CONTRACT.Algorithm_requirement::workspace_buffer
+      Choice: >-
+        Host binds the caller's buffer as scratch only if it is a CUDA tensor of >= 32 MiB, else silently substitutes a private 32 MiB buffer cached per buffer object identity, and allocates a private FP32 buffer of exactly the plan size when the resolved plan needs more
+      Reason: >-
+        This submission reads and writes the scratch, and the segment count is capped by the bound capacity, so which buffer is bound decides both the partial layout's base address and how many segments the plan may take; identity caching assumes same object, same storage
+    - Item: CONTRACT.Algorithm_requirement::sinks
+      Choice: >-
+        Python None reaches the extension as a zero-element FP32 tensor and the parameter builder maps zero numel to a null device pointer, which is what the segment initial state and the merge's sink term both key on
+      Reason: >-
+        The frozen ABI accepts a tensor or None, and the sink case split has to be decided inside Params without adding a flag; here two separate submissions read the same pointer and must agree on the sink-less case
+    - Item: DESIGN.Work_schedule::ATTENTION
+      Choice: >-
+        Keep the reduced host validation set of Schedule.Strategy plus the split-path launch checks: the shared-memory request against the runtime opt-in maximum, a non-empty token range, and the refusal of any token range once splits > 1
+      Reason: >-
+        The merge grid is sized from total_query_tokens and head blocks, so a ranged attention launch would leave it reducing partial rows this call never produced; everything else the device path does not check stays the caller's guarantee and would be silent

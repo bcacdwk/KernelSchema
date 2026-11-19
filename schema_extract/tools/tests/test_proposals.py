@@ -135,7 +135,7 @@ class ProposalTests(unittest.TestCase):
             with self.subTest(subject=subject):
                 self.proposal = deepcopy(original)
                 self.proposal["conclusions"] = [item for item in self.proposal["conclusions"] if item["subject"] != subject]
-                with self.assertRaisesRegex(ExtractError, "missing supported stage conclusions"):
+                with self.assertRaisesRegex(ReceiptFormatError, "missing supported stage conclusions"):
                     validate_receipt(self.normalize(), state, self.lock, self.attempt, self.artifacts, [])
         self.proposal = deepcopy(original)
         self.proposal["artifact_evidence"] = [item for item in self.proposal["artifact_evidence"] if item["path"] != "branch.yaml"]
@@ -146,7 +146,29 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual(validate_receipt(self.normalize(), self.state(), self.lock, self.attempt,
                                          self.artifacts, [])["decision"], "approve")
         self.proposal["conclusions"] = [item for item in self.proposal["conclusions"] if item["subject"] not in DOCUMENT_CONCLUSIONS]
-        with self.assertRaisesRegex(ExtractError, "document_self_contained"):
+        with self.assertRaisesRegex(ReceiptFormatError, "document_self_contained"):
+            validate_receipt(self.normalize(), self.state(), self.lock, self.attempt, self.artifacts, [])
+
+    def test_missing_evidence_obligations_require_model_resubmission(self):
+        original = deepcopy(self.proposal)
+        self.proposal["source_evidence"][0]["category"] = "implementation"
+        with self.assertRaisesRegex(ReceiptFormatError, "missing source evidence categories: host"):
+            validate_receipt(self.normalize(), self.state(), self.lock, self.attempt, self.artifacts, [])
+        self.proposal = deepcopy(original)
+        (self.source / "entry.py").write_text("def route(x): return x\n")
+        self.lock["source"]["files"] = manifest(self.source)
+        self.lock["source"]["bindings"]["host"]["path"] = "entry.py"
+        with self.assertRaisesRegex(ReceiptFormatError, "missing bound host entry anchor"):
+            validate_receipt(self.normalize(), self.state(), self.lock, self.attempt, self.artifacts, [])
+        self.lock["source"]["bindings"]["host"]["path"] = "kernel.py"
+        self.proposal["conclusions"][0]["evidence"] = [1]
+        with self.assertRaisesRegex(ReceiptFormatError, "evidence index"):
+            validate_receipt(self.normalize(), self.state(), self.lock, self.attempt, self.artifacts, [])
+        self.proposal = deepcopy(original)
+        for conclusion in self.proposal["conclusions"]:
+            conclusion["evidence"] = [0]
+        self.proposal["artifact_evidence"].pop()
+        with self.assertRaisesRegex(ReceiptFormatError, "cite all stage artifacts"):
             validate_receipt(self.normalize(), self.state(), self.lock, self.attempt, self.artifacts, [])
 
     def test_p6_directory_evidence_does_not_replace_source_judgments(self):
@@ -208,8 +230,9 @@ class ProposalTests(unittest.TestCase):
         for path in (self.source / "kernel.py", self.artifacts / "root.yaml"):
             data = path.read_bytes()
             path.write_bytes(data + b"changed\n")
-            with self.subTest(path=path.name), self.assertRaises(ExtractError):
+            with self.subTest(path=path.name), self.assertRaises(ExtractError) as caught:
                 self.normalize()
+            self.assertNotIsInstance(caught.exception, ReceiptFormatError)
             path.write_bytes(data)
 
     def test_long_line_evidence_can_select_a_late_declaration_losslessly(self):
@@ -254,7 +277,7 @@ class ProposalTests(unittest.TestCase):
                 with self.subTest(key=key, start=start, end=end):
                     proposal = deepcopy(self.proposal)
                     proposal[key][0].update(line_start=start, line_end=end)
-                    with self.assertRaises(ExtractError) as caught:
+                    with self.assertRaises(ReceiptFormatError) as caught:
                         self.normalize(proposal)
                     self.assertIn(f"{key}[0] {path}:{start}-{end}", str(caught.exception))
                     self.assertIn(f"file has {len(lines)} lines", str(caught.exception))
@@ -279,8 +302,9 @@ class ProposalTests(unittest.TestCase):
             (root / "unlisted.txt").write_text("Unlisted evidence\n")
             proposal = deepcopy(self.proposal)
             proposal[key][0]["path"] = "unlisted.txt"
-            with self.subTest(key=key), self.assertRaisesRegex(ExtractError, "allowed values"):
+            with self.subTest(key=key), self.assertRaisesRegex(ExtractError, "allowed values") as caught:
                 self.normalize(proposal)
+            self.assertNotIsInstance(caught.exception, ReceiptFormatError)
             (root / "unlisted.txt").unlink()
         (self.source / "linked.py").symlink_to(self.source / "kernel.py")
         for path in ("../source/kernel.py", str(self.source / "kernel.py"), "linked.py"):

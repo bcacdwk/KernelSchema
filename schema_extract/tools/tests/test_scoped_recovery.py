@@ -107,6 +107,25 @@ class ScopedRecoveryTests(unittest.TestCase):
         self.assertEqual(state["control"]["action"], "pause")
         self.assertEqual(self.store.read_supervisor()["retries"][request["id"]]["status"], "superseded")
 
+    def test_rejected_proposal_reason_reaches_scoped_retry_once(self):
+        node = self.state["nodes"]["a"]
+        reason = {"code": "proposal_rejected", "attempt_id": self.attempt_id,
+                  "summary": "missing bound implementation entry anchor"}
+        node.update(status="invalid_receipt", reason=reason)
+        node["stage"].update(status="invalid_receipt", invalid_receipts=1)
+        self.store.save(self.state)
+        counters = deepcopy(node["stage"])
+        monitor.request_restart(self.store, self.run_id, "P5:a", self.store.root)
+        state, _ = _consume_scope_retries(self.store, self.state, {}, {self.sibling: object()})
+        saved = self.store.load(self.run_id)["nodes"]["a"]
+        self.assertEqual(saved["feedback"], [reason])
+        self.assertIsNone(saved["reason"])
+        self.assertIsNone(saved["approval"])
+        for key in ("calls", "invalid_receipts", "receipt_repairs"):
+            self.assertEqual(saved["stage"][key], counters[key])
+        replayed, _ = _consume_scope_retries(self.store, state, {}, {})
+        self.assertEqual(replayed["nodes"]["a"]["feedback"], [reason])
+
     def test_old_healthy_orphans_keep_sibling_fences_and_original_counts(self):
         self.state["active_attempts"]["P5:a"] = self.attempt_id
         directory = self.store.run_dir(self.run_id) / "attempts" / self.sibling

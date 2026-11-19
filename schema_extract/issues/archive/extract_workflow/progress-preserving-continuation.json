@@ -1,21 +1,29 @@
 {
   "id": "progress-preserving-continuation",
   "category": "extract_workflow",
-  "problem": "采用修复后的基础设施或规则时，现有 continue 路径不判断已有进度的受影响范围，就使全部阶段批准失效、撤下派生节点的有效完成状态并退回 P1。历史产物和用量虽然保留，仍需重复提取或独立审阅，缺少在兼容性有依据时从原阶段、节点或失败调用续接的正式路径。执行器升级、旧结论是否仍有效、是否需要重写产物被捆绑，局部维护也可能导致无关阶段重跑。",
+  "problem": "长任务遇到工具缺陷、执行器修复或规则变化时，缺少按实际影响从既有阶段、节点和候选稿续接的稳定约定。历史continue曾统一清批准并退回P1；2.4.0修复后，20261117精简又删除执行器换绑与跨身份承接，调查基线只剩固定执行器内恢复/维护。Supervisor因此容易把没有现成恢复入口、新执行身份、旧批准是否有效和是否需要重写产物捆绑，造成无依据的全流程重跑。仅保留旧文件供阅读，仍可能丢失有效进度并重复大量提取与审阅；已有issue的已解决状态也未随能力撤除更新。",
   "evidence": [
     "基线 58a4d92 的 continuation._scope/_inherit 统一清批准、撤下有效节点并回到 P1，保留旧用量和单次决定。",
     "schema_extract/tools/compatibility.py 对完整规则 manifest 与实际字节生成报告，独立 review 逐项绑定差异；runtime.py::upgrade_runtime 封存报告、审阅、原状态和执行锁，保留同一 run 的输入、批准与预算。",
     "2.3.0 集中合成场景验证 P1–P4 批准及已合入兄弟保留、重复登记幂等、新执行器推进后核验和基线 Store.load 拒绝新状态格式；test_cli_recovery.py 验证完整目标及独立审阅绑定。",
     "2.4.0 的 revisions/revision_control/maintenance 将同 run 语义上下文、调用边界请求、批准采纳、保稿维护与正常游标接续分开；默认 continue 生成待评估计划，full-restart 须显式理由。",
-    "test_semantic_revision.py 的 5 个隔离组合场景覆盖 P1/P2 未完保稿、P4 reviewer-first 全树保留、P5 父 patch/子 review/兄弟 keep、目标 prompt/checker 与原始/有效批准、runtime 交错 audit、drain/重复/P6 发布屏障和原计数。"
+    "test_semantic_revision.py 的 5 个隔离组合场景覆盖 P1/P2 未完保稿、P4 reviewer-first 全树保留、P5 父 patch/子 review/兄弟 keep、目标 prompt/checker 与原始/有效批准、runtime 交错 audit、drain/重复/P6 发布屏障和原计数。",
+    "20261117 精简记录 schema_discussion/extract_execution_20261117/PLAN.md 第36–42行明确移除执行器换绑、continue/revise 和跨身份批准 adoption；implementation/R3_B.md 记录对应实现与执行绑定切换测试退出。BRIEF.md 同时要求保留有价值的恢复且不建设旧版本兼容层，不能把后者等同放弃当前格式长任务的工具修复接续。",
+    "20261119调查基线2.5.1的 README.md 将来源/任务/规则/执行器变化统一指向另建run；tools/runtime.py 的 verify_execution 与 frozen_run_invocation 只接受原冻结执行器，tools/cli.py 的 resume/maintain 沿原冻结入口。current_maintenance、原批准与当前适用性核验仍在，但当时没有工具补丁换绑或跨run进度承接入口。",
+    "20261119 Sparse P6 工具误拒事件暴露当前缺口：完整候选和历史批准仍可核验，普通resume却无法采用已修 gate，Supervisor 曾因此选择从P1重建。独立复盘见 schema_discussion/extract_six_full_20261118/recovery_reassessment/SUPERVISOR_DECISION.md；保稿可行性与恢复边界见同目录 TECHNICAL_RECOVERY.md。两份报告的验证发生在副本，不能当作真实续接已完成。",
+    "同目录 RECOMMENDATION.md 记录主Supervisor的决策责任：提前限定仅现成公共接口，将新执行身份与全部阶段重做绑定，没有充分比较保进度修复和重复执行的剩余成本。新开的Sparse调用已按用户要求取消；续接应使用最后P6候选，并处理分支draft仍指早稿的潜在回退，不能只保留文件却回到旧进度。",
+    "20261119用户明确要求原技术调查子代理负责Sparse续接直到交付，同时强调续接机制本身仍需要讨论、须清楚记录为issue。已委派当前格式、同源码/同语义规则、未交付且调用已结清的执行器补丁续接实施与监管；实施授权不等于工具验收通过或本issue已解决。",
+    "20261119用户随后明确决定：本轮仅支持extract流程工具故障的修复续接；沿已有前提先完成，对出问题的阶段及潜在独立审计点随schema留标记，完成后知会用户，由用户决定是否复查/重来；不再把这些额外审计或产品选择前置为中途停等。其他issue修改等后续指挥。原话及执行边界见schema_discussion/extract_six_full_20261118/recovery_reassessment/USER_DECISION.md。",
+    "20261119真实收口：工具补丁续接已应用到Sparse与FMHA，原候选、旧调用及执行身份保留；Sparse仅增加一次正常P6后发布。FMHA新P6出现坐标和轴词问题，用户随后明确授权内部xhigh定点小修交付、不打回循环；其原自动reopen/invalid_receipt未被改成批准。六项逻辑交付证据见schema_discussion/extract_six_full_20261118/DELIVERY_INDEX.json，两项回执均携带pending_user_decision审计标记。",
+    "schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md 及 ROUND2_RUNTIME_TESTS.json 记录 30 个独立定向用例取得通过结果；test_executor_repairs/test_executor_snapshots 覆盖初始/P5/P6 保存稿、裁决待签收、原已哈希 scope、双次绑定、严格同内容封印复用与真实阶段审计点。第三轮 5 项定向检查及最终删减复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md；本轮不冒称完成 FMHA/Sparse 专项。"
   ],
-  "proposal": "将兼容执行器升级与未完成任务的连续语义修订分开；独立计划绑定完整差异、问题依据和真实 frontier，逐范围决定 keep/review/patch/reextract，保留自己的原稿和原预算，完成有限维护后继续实际未完成工作。",
-  "necessity": "优先级：高。用户明确认定这是一个很重要的问题。基础设施迭代频繁时，无差别回退会重复消耗源码阅读、模型调用、审阅时间和预算，延迟已有成果的交付，并使维护越频繁、重复工作越多。节省重跑不能依靠无条件继承已经失效的批准；可核验的兼容性与必要复核范围是本问题的核心。本轮落实未完成任务的连续修订，真实提取与巡检继续保持暂停。",
+  "proposal": "按用户已确定的目标，仅对extract工具自身故障提供保进度续接：记录真实工具修复及新旧执行身份，保留最新候选、原证据/历史批准和调用账，沿正常流程先完成。对故障阶段、继续沿用的前提及潜在独立审计点随交付留可追溯标记，完成后由用户决定额外检查或重来；不把额外语义审计、无现成入口或新执行身份转成默认重跑/中途决策。正常校验和真实最终结果保留，失败结果不冒充批准。规则语义、源码或任务变化不纳入本轮，其他issue不顺手修改。",
+  "necessity": "优先级：高。用户明确认定这是一个很重要的问题。基础设施迭代频繁时，无差别回退会重复消耗源码阅读、模型调用、审阅时间和预算，延迟已有成果的交付，并使维护越频繁、重复工作越多。节省重跑不能依靠无条件继承已经失效的批准；可核验的兼容性与必要复核范围是本问题的核心。20261119 再次要求区分执行身份、已有内容和批准适用性，评估当前格式任务采用工具修复后继续剩余工作的最小能力，不恢复庞大旧版本兼容系统。",
   "decision": {
-    "outcome": "resolved",
-    "version": "2.4.0",
-    "reason": "已实现未完成 run 的连续修订和隔离验证：原始证据与当前适用性分开，已有稿件优先保留，有据采纳、有限复核/修补后回到实际剩余工作。",
-    "adopted": "完整差异与独立审阅绑定、静止写锁登记、幂等升级及共用执行身份校验。\n角色会话退休重建，原有效进度与预算保留。\n调用边界请求与 drain、同 run 冻结语义上下文、独立 adoption、未知先 review 和未完草稿不假批准。\nP1–P4 局部目录合回完整树；P5 保留自己正文、刷新只读祖先，无关兄弟不重做。\n维护调用/时间及有限动作去重沿用原账目，安全暂停后可追加替代，P6 与发布共用屏障。",
-    "remaining": "仅覆盖请求时尚未完成的任务；已 ready/published/export 或提交发布的产物迁移不在本轮范围。\n真实旧 run 尚未采用本轮修订，历史失败提案、产物及批准未改写或自动重新接收。\n本轮使用合成历史证据及本地替身验证状态与接口，没有运行真实模型、提醒或 GPU；实际语义判断仍由独立 Reviewer 完成。"
+    "outcome": "partially_adopted",
+    "version": "2.5.1",
+    "reason": "2.5.1 已完成用户选定的 extract 工具故障续接范围；保稿真实性、原权限/批准来源与完成度诊断分开，未完成诊断不形成批准。第三轮删减未削弱执行绑定、最新 P6 草稿、提交前控制核验或交付审计标记。保留部分采纳是因为广义源码、任务及语义迁移未实现，不是仍待选择当前续接方案；原 2.4.0 能力及撤除依据保留为历史。",
+    "adopted": "同源码、任务和语义规则下，仅 extract Python 工具修复可 prepare/apply 后普通 resume。原 checkpoint、调用/批准来源与已哈希权限材料保持可核验，合法未完成稿交原阶段继续；普通、恢复和裁决保存共用最新 P6 draft 规则。绑定冻结完整目标并严格复用同内容封印；pause/cancel/hold、维护和在途 fence 保留。仅接受真实 user_instruction 的 continue_with_audit_marker，stage/attempt/null 对应实际停点，交付保留待审计事项；原批准、旧 response 和计数不改。",
+    "remaining": "源码、任务、语义规则变化及已发布产物迁移、通用旧版本兼容不在当前支持范围，未建设通用承接系统。FMHA/Sparse 原 continuation_audit 和自动流程历史保持原含义；用户已安排后续专项复核，本轮框架归档不宣称这些额外语义审计完成，也不再以前置产品决策或等待指挥阻塞既定工具续接范围。"
   }
 }

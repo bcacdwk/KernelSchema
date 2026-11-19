@@ -1,7 +1,11 @@
-"""Reminder delivery uses isolated state, a virtual clock and fake processes."""
+"""Reminder delivery, sampling and interruption use isolated state."""
 
 import fcntl
+import json
+import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -12,6 +16,7 @@ from uuid import uuid4
 from schema_extract.tools import audit, monitor, wakeup
 from schema_extract.tools.store import Store
 from schema_extract.tools.common import SupervisorBusy
+from schema_extract.tools.wakeup import _alive
 
 
 class ReminderFixture:
@@ -284,16 +289,191 @@ class WakeupRetryTests(unittest.TestCase):
         with self.assertRaisesRegex(wakeup.ExtractError, "not confirmed exited"):
             fixture.restart()
 
-    def test_busy_control_lock_does_not_ack_or_block_the_tick(self):
+    def test_ack_retries_lock_acquisition_while_tick_and_stop_remain_immediate(self):
         fixture = ReminderFixture(self.root / "busy", ["queued"])
         fixture.first_send()
+        before = fixture.reminder()
+        callbacks = []
+        fixture.clock.on_wait = lambda phase, elapsed: callbacks.append((phase, elapsed))
         with (fixture.store.root / "supervisor.lock").open("a") as held:
             fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.assertEqual(fixture.clock.tick()["status"], "busy")
             with self.assertRaises(SupervisorBusy):
-                fixture.clock.ack(fixture.wake_id, fixture.thread)
-        self.assertIsNone(fixture.reminder()["ack"])
-        self.assertTrue(fixture.clock.ack(fixture.wake_id, fixture.thread)["accepted"])
+                fixture.clock.stop()
+            self.assertIsNone(fixture.reminder()["ack"])
+
+            def unlock(delay):
+                fixture.now += delay
+                fcntl.flock(held, fcntl.LOCK_UN)
+
+            with patch("schema_extract.tools.store.time.sleep",
+                       side_effect=unlock) as wait:
+                self.assertTrue(fixture.clock.ack(fixture.wake_id, fixture.thread)["accepted"])
+        wait.assert_called_once_with(0.05)
+        self.assertEqual([phase for phase, _ in callbacks], ["ack"])
+        self.assertGreaterEqual(callbacks[0][1], 0)
+        self.assertEqual(fixture.reminder()["ack"]["at"], fixture.now)
+        self.assertEqual(fixture.reminder()["attempts"], before["attempts"])
+        self.assertEqual(fixture.clock.status()["next_due_at"], before["due_at"])
+        with patch("schema_extract.tools.store.time.sleep", side_effect=AssertionError("rejection must not retry")):
+            self.assertEqual(fixture.clock.ack(fixture.wake_id, fixture.thread)["reason"], "already_acknowledged")
+            self.assertEqual(fixture.clock.ack(fixture.wake_id, str(uuid4()))["reason"], "wrong_thread")
+
+    def test_scan_keeps_a_live_claim_created_while_waiting_for_the_lock(self):
+        fixture = ReminderFixture(self.root / "new-owner", ["queued"])
+        fixture.first_send()
+        fixture.clock.ack(fixture.wake_id, fixture.thread)
+        owner = wakeup.process_identity(123456789)
+        processes, after_claim = {}, []
+        with (fixture.store.root / "supervisor.lock").open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def claim_during_wait(delay):
+                fcntl.flock(held, fcntl.LOCK_UN)
+                processes[owner["pid"]] = owner
+                with fixture.store.supervisor() as ledger:
+                    ledger["clock"]["reminder"]["scan"] = {
+                        "id": str(uuid4()), "owner": owner, "started_at": fixture.now}
+                after_claim.append(fixture.store.read_supervisor())
+
+            with (patch.object(wakeup, "_alive", _alive),
+                  patch.object(wakeup, "process_table", side_effect=AssertionError("claim checks only its owner PID")),
+                  patch.object(wakeup, "process_identity", side_effect=lambda pid: owner if pid == os.getpid() else processes.get(pid)),
+                  patch.object(monitor, "inspect_runs", side_effect=AssertionError("occupied scan must not run")),
+                  patch("schema_extract.tools.store.time.sleep", side_effect=claim_during_wait) as wait):
+                result = fixture.clock.scan(fixture.wake_id, fixture.thread)
+        wait.assert_called_once_with(0.05)
+        self.assertEqual(result["clock"]["status"], "scan_busy")
+        self.assertEqual(fixture.store.read_supervisor(), after_claim[0])
+
+    def test_ack_rereads_stop_and_generation_changes_after_waiting(self):
+        for restart in (False, True):
+            with self.subTest(restart=restart):
+                fixture = ReminderFixture(self.root / str(restart), ["queued"])
+                fixture.first_send()
+                after_stop = []
+                with (fixture.store.root / "supervisor.lock").open("a") as held:
+                    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                    def invalidate(delay):
+                        fcntl.flock(held, fcntl.LOCK_UN)
+                        fixture.clock.stop()
+                        if restart:
+                            fixture.restart()
+                        after_stop.append(fixture.store.read_supervisor())
+
+                    with patch("schema_extract.tools.store.time.sleep", side_effect=invalidate) as wait:
+                        result = fixture.clock.ack(fixture.wake_id, fixture.thread)
+                wait.assert_called_once_with(0.05)
+                self.assertEqual(result, {"accepted": False, "reason": "stale_or_not_due" if restart else "disabled"})
+                self.assertEqual(fixture.store.read_supervisor(), after_stop[0])
+
+    def test_scan_retries_claim_commit_and_error_cleanup_without_repeating_inspection(self):
+        for phase in ("claim", "commit", "cleanup"):
+            with self.subTest(phase=phase):
+                fixture = ReminderFixture(self.root / phase, ["queued"])
+                fixture.first_send()
+                self.assertTrue(fixture.clock.ack(fixture.wake_id, fixture.thread)["accepted"])
+                callbacks = []
+                fixture.clock.on_wait = lambda phase, elapsed: callbacks.append((phase, elapsed))
+                with (fixture.store.root / "supervisor.lock").open("a") as held:
+                    if phase == "claim":
+                        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                    def inspect(*args):
+                        if phase != "claim":
+                            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        if phase == "cleanup":
+                            raise wakeup.ExtractError("fixture scan failed")
+                        return []
+
+                    with (patch.object(monitor, "inspect_runs", side_effect=inspect) as inspection,
+                          patch("schema_extract.tools.store.time.sleep",
+                                side_effect=lambda delay: fcntl.flock(held, fcntl.LOCK_UN)) as wait):
+                        if phase == "cleanup":
+                            with self.assertRaisesRegex(wakeup.ExtractError, "fixture scan failed"):
+                                fixture.clock.scan(fixture.wake_id, fixture.thread)
+                        else:
+                            self.assertTrue(fixture.clock.scan(fixture.wake_id, fixture.thread)["clock"]["committed"])
+                wait.assert_called_once_with(0.05)
+                self.assertEqual([name for name, _ in callbacks], ["scan_" + phase])
+                inspection.assert_called_once()
+                if phase == "cleanup":
+                    item = fixture.reminder()
+                    self.assertIsNotNone(item["ack"])
+                    self.assertNotIn("scan", item)
+                    self.assertEqual(item["scan_error"], "fixture scan failed")
+                    self.assertEqual(fixture.clock.status()["last_check_number"], 0)
+                else:
+                    self.assertEqual(fixture.clock.status()["last_check_number"], 1)
+                    self.assertTrue(fixture.clock.scan(fixture.wake_id, fixture.thread)["clock"]["reused"])
+
+    def test_delayed_commit_preserves_sampling_time_and_newer_observation(self):
+        fixture = ReminderFixture(self.root / "old-observation", ["queued"])
+        fixture.first_send()
+        fixture.clock.ack(fixture.wake_id, fixture.thread)
+        sampled_at = fixture.now
+        old = {"run_id": "operator", "state_revision": 1, "status": "running", "anomalies": [],
+               "observation": {"observed_at": sampled_at}}
+        with (fixture.store.root / "supervisor.lock").open("a") as held:
+            def inspect(*args):
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return [old]
+
+            def newer_observation(delay):
+                fcntl.flock(held, fcntl.LOCK_UN)
+                fixture.now += 60
+                with fixture.store.supervisor() as ledger:
+                    monitor.record_scan(ledger, [{**old, "state_revision": 2,
+                        "observation": {"observed_at": fixture.now}}], fixture.now)
+                fixture.now += 60
+
+            with (patch.object(monitor, "inspect_runs", side_effect=inspect) as inspection,
+                  patch("schema_extract.tools.store.time.sleep", side_effect=newer_observation)):
+                result = fixture.clock.scan(fixture.wake_id, fixture.thread)
+        inspection.assert_called_once()
+        self.assertEqual(result["observed_at"], sampled_at)
+        self.assertEqual(result["clock"]["check"]["completed_at"], sampled_at + 120)
+        self.assertEqual(result["clock"]["next_due_at"], sampled_at + 420)
+        self.assertEqual(result["superseded_run_ids"], ["operator"])
+        self.assertEqual(result["changes"], [])
+        latest = fixture.store.read_supervisor()["observations"]["latest"]["operator"]
+        self.assertEqual((latest["state_revision"], latest["observed_at"]), (2, sampled_at + 60))
+
+    def test_scan_rereads_stop_and_generation_changes_after_each_lock_wait(self):
+        for phase in ("claim", "commit"):
+            for restart in (False, True):
+                with self.subTest(phase=phase, restart=restart):
+                    fixture = ReminderFixture(self.root / (phase + str(restart)), ["queued"])
+                    fixture.first_send()
+                    self.assertTrue(fixture.clock.ack(fixture.wake_id, fixture.thread)["accepted"])
+                    after_stop = []
+                    with (fixture.store.root / "supervisor.lock").open("a") as held:
+                        if phase == "claim":
+                            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                        def inspect(*args):
+                            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            return []
+
+                        def invalidate(delay):
+                            fcntl.flock(held, fcntl.LOCK_UN)
+                            fixture.clock.stop()
+                            if restart:
+                                fixture.restart()
+                            after_stop.append(fixture.store.read_supervisor())
+
+                        with (patch.object(monitor, "inspect_runs", side_effect=inspect) as inspection,
+                              patch("schema_extract.tools.store.time.sleep", side_effect=invalidate) as wait):
+                            if phase == "claim":
+                                with self.assertRaisesRegex(wakeup.ExtractError, "clock disabled|current accepted reminder"):
+                                    fixture.clock.scan(fixture.wake_id, fixture.thread)
+                            else:
+                                result = fixture.clock.scan(fixture.wake_id, fixture.thread)
+                                self.assertEqual(result["clock"], {"committed": False, "status": "scan_invalidated", "id": fixture.wake_id})
+                    wait.assert_called_once_with(0.05)
+                    self.assertEqual(inspection.call_count, 0 if phase == "claim" else 1)
+                    self.assertEqual(fixture.store.read_supervisor(), after_stop[0])
 
     def test_initialization_lock_is_immediate_and_preserves_uninitialized_store(self):
         store = Store(self.root / "initializing")
@@ -305,6 +485,149 @@ class WakeupRetryTests(unittest.TestCase):
             self.assertFalse((store.root / "format.json").exists())
         store.initialize()
 
+
+
+class ObservationTimingTests(unittest.TestCase):
+    def test_per_run_sampling_order_and_liveness_do_not_depend_on_revision(self):
+        ledger = {"observations": {}}
+
+        def row(run_id, observed_at, alive=True):
+            return {"run_id": run_id, "state_revision": 1, "status": "running", "stage": "P1",
+                    "state_directory": "/fixture", "observation": {"observed_at": observed_at}, "anomalies": [],
+                    "runner_observation": {"lock": "held", "alive": alive}}
+
+        monitor.record_scan(ledger, [row("a", 100), row("b", 100)], 100)
+        result = monitor.record_scan(ledger, [row("a", 200, False)], 200)
+        self.assertEqual([item["run_id"] for item in result["changes"]], ["a"])
+        result = monitor.record_scan(ledger, [row("a", 150), row("b", 150)], 150)
+        self.assertEqual(result["superseded_run_ids"], ["a"])
+        self.assertEqual(result["changes"], [])
+        latest = ledger["observations"]["latest"]
+        self.assertEqual((latest["a"]["observed_at"], latest["b"]["observed_at"]), (200, 150))
+        self.assertFalse(latest["a"]["runner_observation"]["alive"])
+        self.assertEqual(ledger["observations"]["observed_at"], 200)
+        result = monitor.record_scan(ledger, [row("b", 399)], 999)
+        self.assertEqual(result["changes"], [])
+        self.assertEqual(result["anomalies"], [])
+        result = monitor.record_scan(ledger, [row("b", 400)], 1000)
+        self.assertEqual(result["anomalies"][0]["classification"], "possible_stall")
+
+    def test_time_display_preserves_machine_values_and_limits_its_scope(self):
+        stamp = 1798732800  # 2026-12-31 16:00 UTC.
+        self.assertEqual(wakeup.format_beijing_time(stamp), "2027-01-01 00:00:00 北京时间（UTC+8）")
+        self.assertEqual(wakeup.format_beijing_time(0), "1970-01-01 08:00:00 北京时间（UTC+8）")
+        self.assertEqual(wakeup.format_beijing_time(None), "未记录")
+        clock = {"generation": 1, "thread_id": str(uuid4()), "enabled": False, "next_due_at": stamp,
+                 "observed_at": stamp, "last_scan": {"completed_at": stamp, "observed_at": stamp - 90},
+                 "daemon": {"heartbeat_at": None}, "history": [{"due_at": stamp}],
+                 "runs": [{"observed_at": stamp}], "elapsed_seconds": 120}
+        clock["reminder"] = wakeup._item(clock, 1, stamp)
+        before = json.dumps(clock, sort_keys=True)
+        displayed = wakeup.clock_display(clock)
+        self.assertEqual(json.dumps(clock, sort_keys=True), before)
+        self.assertEqual(displayed["reminder"]["id"], wakeup._item(clock, 1, stamp)["id"])
+        self.assertEqual(displayed["next_due_at"], stamp)
+        self.assertIn("已停用", displayed["next_due_at_display"])
+        self.assertEqual(displayed["daemon"]["heartbeat_at_display"], "未记录")
+        self.assertEqual(displayed["history"], clock["history"])
+        self.assertEqual(displayed["runs"], clock["runs"])
+        self.assertNotIn("elapsed_seconds_display", displayed)
+        bound = wakeup.clock_display({"clock": {"check": clock["last_scan"], "next_due_at": stamp}})
+        self.assertEqual(bound["clock"]["check"]["observed_at"], stamp - 90)
+        self.assertIn("北京时间", bound["clock"]["check"]["completed_at_display"])
+
+    def test_single_pid_liveness_keeps_unknown_identity_conservative(self):
+        identity = {"pid": 123, "start_token": "linux:fixture:1", "stat": "S"}
+        with patch.object(wakeup, "process_table", side_effect=AssertionError("no full process scan")):
+            with patch.object(wakeup, "process_identity", return_value={**identity, "start_token": "linux:fixture:2"}):
+                self.assertIs(_alive(identity), False)
+            with patch.object(wakeup, "process_identity", side_effect=PermissionError("unreadable")):
+                self.assertIsNone(_alive(identity))
+            self.assertIsNone(_alive(None))
+
+
+class RealWakeupInterruptionTests(unittest.TestCase):
+    def wait_for_file(self, path, child):
+        until = time.monotonic() + 8
+        while not path.exists() and child.poll() is None and time.monotonic() < until:
+            time.sleep(0.01)
+        self.assertTrue(path.exists(), "child did not reach " + path.name)
+
+    def test_real_lock_wait_interrupt_and_same_wake_reconcile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for phase in ("ack", "scan_commit", "after_commit"):
+                with self.subTest(phase=phase):
+                    fixture = ReminderFixture(Path(temporary) / phase, ["queued"])
+                    fixture.first_send()
+                    if phase != "ack":
+                        fixture.clock.ack(fixture.wake_id, fixture.thread)
+                    root = fixture.store.root
+                    script = """
+import sys
+from pathlib import Path
+from schema_extract.tools import monitor, wakeup
+from schema_extract.tools.store import Store
+root, phase, wake, thread, now = sys.argv[1:]
+root = Path(root)
+def waiting(phase, elapsed):
+    (root / 'waiting').write_text(phase)
+def inspect(*args):
+    (root / 'inspected').write_text('once')
+    if phase == 'scan_commit':
+        sys.stdin.readline()
+    return []
+monitor.inspect_runs = inspect
+clock = wakeup.Clock(Store(root), root, now=lambda: float(now), on_wait=waiting)
+if phase == 'ack':
+    clock.ack(wake, thread)
+else:
+    clock.scan(wake, thread)
+    (root / 'committed').write_text('yes')
+    sys.stdin.readline()
+"""
+                    child = None
+                    with (root / "supervisor.lock").open("a") as held:
+                        if phase == "ack":
+                            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        before = (root / "supervisor.json").read_bytes()
+                        try:
+                            child = subprocess.Popen([sys.executable, "-B", "-c", script, str(root), phase,
+                                                      fixture.wake_id, fixture.thread, str(fixture.now)],
+                                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                     text=True)
+                            if phase == "scan_commit":
+                                self.wait_for_file(root / "inspected", child)
+                                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                child.stdin.write("continue\n")
+                                child.stdin.flush()
+                            self.wait_for_file(root / ("committed" if phase == "after_commit" else "waiting"), child)
+                            if phase != "after_commit":
+                                self.assertEqual((root / "waiting").read_text(), phase)
+                            child.send_signal(signal.SIGINT)
+                            stdout, stderr = child.communicate(timeout=8)
+                            self.assertNotEqual(child.returncode, 0)
+                            self.assertEqual(stdout, "")
+                            self.assertIn("KeyboardInterrupt", stderr)
+                            if phase == "ack":
+                                self.assertEqual((root / "supervisor.json").read_bytes(), before)
+                            elif phase == "scan_commit":
+                                state = fixture.store.read_supervisor()["clock"]
+                                self.assertEqual(state["last_check_number"], 0)
+                                self.assertIsNotNone(state["reminder"]["ack"])
+                                self.assertEqual(state["reminder"]["scan"]["owner"]["pid"], child.pid)
+                        finally:
+                            fcntl.flock(held, fcntl.LOCK_UN)
+                            if child is not None and child.poll() is None:
+                                child.kill()
+                                child.communicate(timeout=8)
+                    if phase == "ack":
+                        self.assertTrue(fixture.clock.ack(fixture.wake_id, fixture.thread)["accepted"])
+                    with patch.object(monitor, "inspect_runs", return_value=[]) as inspection:
+                        result = fixture.clock.scan(fixture.wake_id, fixture.thread)
+                        self.assertTrue(result["clock"].get("reused" if phase == "after_commit" else "committed"))
+                        self.assertTrue(fixture.clock.scan(fixture.wake_id, fixture.thread)["clock"]["reused"])
+                        self.assertEqual(inspection.call_count, 0 if phase == "after_commit" else 1)
+                    self.assertEqual(fixture.clock.status()["last_check_number"], 1)
 
 
 class QueueOwnershipTests(unittest.TestCase):

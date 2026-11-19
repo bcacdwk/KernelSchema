@@ -438,6 +438,25 @@ class ArtifactTransactions(unittest.TestCase):
         with self.assertRaises(ExtractError):
             validate_index(directory, selection("root"), parser_root=REPO)
 
+    def test_p6_retained_scope_covers_unchanged_artifacts(self):
+        before = self.task("before", {"root": self.base, "branch": self.branch("branch")})
+        after = self.copy(before, "after")
+        scope = [{"path": "dispatch.md", "fields": ["*"]},
+                 {"path": "branch.yaml", "fields": ["DESIGN.Math_reshape"]}]
+        reviewed = validate_artifacts("P6", "reviewer", before, after, STARTER, revision_scope=scope)
+        self.assertEqual(reviewed["changed_files"], [])
+        with (after / "dispatch.md").open("a") as stream:
+            stream.write("\nAn updated directory note.\n")
+        changed = validate_artifacts("P6", "worker", before, after, STARTER, revision_scope=scope)
+        self.assertEqual(changed["changed_files"], ["dispatch.md"])
+        with self.assertRaisesRegex(ExtractError, "outside stage scope"):
+            validate_artifacts("P6", "reviewer", before, after, STARTER, revision_scope=scope)
+        for denied in ({"path": "missing.yaml", "fields": ["DESIGN"]},
+                       {"path": "root.yaml", "fields": ["DESIGN"]},
+                       {"path": "branch.yaml", "fields": ["META_DATA.Dispatch.id"]}):
+            with self.subTest(scope=denied), self.assertRaises(ExtractError):
+                validate_artifacts("P6", "reviewer", before, before, STARTER, revision_scope=[denied])
+
     def test_p6_changes_are_limited_to_the_reviewed_fields(self):
         before = self.task("before", {"root": self.base, "branch": self.branch("branch")})
         original = self.copy(before, "original")

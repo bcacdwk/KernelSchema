@@ -1,0 +1,908 @@
+{
+  "records": {
+    "core-dump-in-snapshot": {
+      "id": "core-dump-in-snapshot",
+      "category": "extract_tools",
+      "problem": "系统把崩溃转储文件写进了冻结的规则目录。虽然原有源码和规则没有变化，目录多出的文件仍使六个 FMHA 节点无法通过完整性检查。",
+      "evidence": [
+        "历史 core-codex-linux-san 进入冻结 rules 后触发额外文件检查；移至诊断目录后清单恢复一致。",
+        "已知宿主 core_pattern 为 |/opt/coredump/coreWriter %P %e %t；管道 handler 的落盘行为不能由只读目录或 ulimit 推断。",
+        "schema_extract/tools/runtime.py::frozen_run_invocation、agent.py、processes.py 及 artifacts.py 将执行/诊断 cwd 放在 run/attempt；集中场景核验冻结调用 cwd 与 payload workspace。"
+      ],
+      "proposal": "将运行 cwd 与诊断文件放到 run/attempt，冻结目录仅供读取；保留严格 manifest，不修改宿主全局配置。",
+      "necessity": "一次系统崩溃不应连带打断其他提取任务。现场清理只是临时处理，还需要防止复发。",
+      "decision": {
+        "outcome": "partially_adopted",
+        "version": "2.3.0",
+        "reason": "已移出执行和诊断 cwd，并通过隔离进程场景；完整性检查仍拒绝额外文件。",
+        "adopted": "执行器、检查器和进程诊断使用 run/attempt 工作目录，冻结代码通过绝对入口与 PYTHONPATH 读取。",
+        "remaining": "未诱发真实 core，也未证明宿主 handler 在历史事件中的落盘原因或当前行为。\n旧快照与历史诊断文件未在本轮改写。"
+      },
+      "path": "schema_extract/issues/archive/extract_tools/core-dump-in-snapshot.json",
+      "status": "partially_adopted"
+    },
+    "failed-node-recovery": {
+      "id": "failed-node-recovery",
+      "category": "extract_tools",
+      "problem": "有些调用的进程已经退出，记录仍停在“未确认终止”。恢复单个失败节点时，又往往要等整个算子的其他调用结束。退出后的收尾和失败节点的重试不够方便，拖慢了后续工作。2026-11-18 复核已实现的 scoped 恢复又发现：消费请求时清除拒因，却未先传入下一次 feedback，使局部恢复缺少修稿依据。",
+      "evidence": [
+        "基线 58a4d92 的 restart_evidence 要求整个 run 无在途调用，活跃 Runner 的普通 resume 只返回 already_running。",
+        "原2.3.0实现由schema_extract/tools/runner.py::_consume_scope_retries/_reconcile_orphans的唯一写者结算目标范围并保留健康兄弟，当时仍使用attempt、阶段和算子截止约束；本条只保留历史依据，不描述当前时间策略。",
+        "schema_extract/tools/tests/test_scoped_recovery.py 的五个集中用例通过，覆盖兄弟进展、父变更/控制优先级、无 ack 消费、stop 撤销和原超时接管；本地进程场景覆盖 gate 登记失败及 leader 退出后代收尾。这是原 2.3.0 修复的验证记录。",
+        "schema_discussion/extract_six_full_20261118/RECEIPT_RECOVERY_0810.md：原冻结 scoped 消费在清除 owner.reason 前没有写入 feedback；本批选择已有 whole-run 路径保留拒因。当前工作树 runner.py::_consume_scope_retries 已与普通 resume 的去重反馈行为对齐，4 项定向检查覆盖反馈持久化、幂等重放以及计数/批准不变。",
+        "schema_discussion/extract_six_full_20261118/MOE_PARTIAL_RECOVERY.md：本批 P5 split_k 失败已经结清但 mega 健康在途；冻结局部恢复不能可靠携带拒因，因此需等健康兄弟自然完成后再核对 whole-run 恢复。报告没有实际执行丢反馈的 scoped 请求，不能记为已发生线上反馈丢失。",
+        "schema_discussion/extract_six_full_20261118/SOURCE_FIX_FINAL_REVIEW.md 复核当前 scoped 反馈修复；本次沿用原失败节点恢复 ID 补正已有能力的遗漏，不另建副本。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md：test_scoped_recovery 覆盖原拒因仅补一次、健康兄弟、来源变化、pause、次数及未知终止 fence；当前恢复测试使用真实 launch 前失败与 confirm_termination，第三轮删减复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+      ],
+      "proposal": "沿用 Runner 和 retries 账本提供 resume --scope；严格绑定失败身份与依赖，结算后有限恢复，未知终止保持 fence，重试不增加额度。消费 scoped 请求时，在清除拒因前按普通恢复相同的去重规则保留反馈。",
+      "necessity": "即使没有升级基础设施，普通调用失败也会遇到这个问题。已有可恢复的分支长时间等待，影响整个算子的完成时间；漏传拒因又会妨碍定点修稿，导致重复劳动或被迫等待 whole-run 恢复条件。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 的 scoped retry 在清除拒因前按普通恢复的去重规则补入 feedback，保留单范围身份、来源依赖、健康兄弟、终止结清、原调用次数及控制优先级。当前回归通过，第三轮只删测试中被覆盖的赋值，真实终止确认及断言仍执行。2.3.0 的超时接管仅作为历史依据，不作为当前恢复策略。"
+      },
+      "path": "schema_extract/issues/archive/extract_tools/failed-node-recovery.json",
+      "status": "resolved"
+    },
+    "maintenance-empty-poll-control-lock": {
+      "id": "maintenance-empty-poll-control-lock",
+      "category": "extract_tools",
+      "problem": "Runner 等待模型时每 0.1 秒消费维护请求；没有请求也进入全局控制事务，六个 Runner 可产生约每秒 60 次无用锁申请，干扰 ack、scan 和恢复等前台控制登记。",
+      "evidence": [
+        "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_extract/tools/runner.py 的事件等待循环重复调用 maintenance.consume_requests；maintenance.py 原实现无条件进入 control_transaction 后才判断请求。",
+        "schema_discussion/extract_six_full_20261118/MONITOR_LOCK.md：2026-11-18 07:06 的 440 次非阻塞锁探测中 106 次忙，候选持有者在六个 Runner 间轮换，间隙可取得锁；稍后读取的 maintenance_requests 与 controls 均为空。未保存两次历史 ack 失败瞬间的持锁 PID，不能给那两次失败指定具体持有者，也不能把采样比例当成精确占用率。",
+        "当前工作树 schema_extract/tools/maintenance.py::consume_requests 增加只读无请求返回，锁内重读、封印身份校验以及派发和发布屏障保留；MONITOR_LOCK.md 记录 3 项轮询及 2 项相邻定向验证通过。",
+        "schema_discussion/extract_six_full_20261118/MOE_RESUME_CONTENTION.md 记录本批旧冻结运行的三次 resume busy/committed=false 后原命令成功；未发现持续独占或新的重入根因。集中源审阅见 schema_discussion/extract_six_full_20261118/SOURCE_FIX_FINAL_REVIEW.md。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md：test_maintenance_polling 的空轮询、锁内重读及封印身份回归通过；schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md 核对第三轮未删除这些路径。"
+      ],
+      "proposal": "没有 requested/draining 维护请求时只读返回；存在请求时沿用原控制事务重新核验，保留派发和发布前的最新 ledger 门禁。",
+      "necessity": "空轮询造成实际控制登记失败、人工重试和推进延迟；减少无用写锁申请即可处理根因，无需改变维护授权或终止健康调用。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 保留无请求时的只读返回及锁内重读、封印身份和最终派发/发布屏障。第三轮未删这些检查；当前定向用例覆盖持锁空轮询、预读后请求变化及无效封印。历史短锁争用证据不推定持续死锁；本次源码验收不改写旧冻结运行。"
+      },
+      "path": "schema_extract/issues/archive/extract_tools/maintenance-empty-poll-control-lock.json",
+      "status": "resolved"
+    },
+    "monitor-beijing-time-display": {
+      "id": "monitor-beijing-time-display",
+      "category": "extract_tools",
+      "problem": "巡检提醒与面向用户的状态简报使用UTC或混用UTC/北京时间，用户需要自行换算，时间表述不统一。",
+      "evidence": [
+        "schema_extract/tools/wakeup.py:400 使用 datetime.fromtimestamp(item['due_at'], timezone.utc).isoformat() 生成提醒中的到期时间。",
+        "2026-11-19用户明确要求巡检时间统一表述为UTC+8，即北京时间；本次先简单登记issue，具体实现后续处理。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：test_time_display_preserves_machine_values_and_limits_its_scope 及 CLI 显示/节流回归通过；当前入口为 wakeup.py::format_beijing_time/clock_display 和 cli.py 的 monitor 输出分支，复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+      ],
+      "proposal": "仅调整巡检工具及简报面向用户的时间展示：统一转换为北京时间（UTC+8）并明确标注时区，正确处理跨日。内部时间戳、间隔计算、实际触发时刻及ack/scan身份保持不变，避免把展示换算变成调度偏移。",
+      "necessity": "简单的时间展示一致性改进，减少换算和误读；当前仅记录为待办，不修改运行中的巡检工具。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 的提醒和 monitor 人读输出统一固定 UTC+8；monitor JSON 仅在输出深拷贝的白名单字段补显示值。跨日、跨年、None 和已停用时保留的到期记录均有覆盖；原 epoch、提醒 ID、间隔、调度及 inspect --json 保持不变。不设置进程 TZ，也不回写偏移后的时间戳。"
+      },
+      "path": "schema_extract/issues/archive/extract_tools/monitor-beijing-time-display.json",
+      "status": "resolved"
+    },
+    "monitor-registration-lock-retry": {
+      "id": "monitor-registration-lock-retry",
+      "category": "extract_tools",
+      "problem": "前台 monitor ack 与绑定 scan 的登记使用单次非阻塞控制锁；正常短争用也立即返回 busy/committed=false，使已送达提醒不能完成登记或巡检，需人工重试，未 ack 时还会按原间隔补送。",
+      "evidence": [
+        "schema_discussion/extract_six_full_20261118/MONITOR_LOCK.md 记录本批 check3 两次 ack 失败和随后原 scan 的一次 busy；同一提醒最终经公开 ack/scan 完成。两次 queue 已正常 queued，30 分钟间隔来自原有限补送规则，并非持锁等待 30 分钟。",
+        "当前工作树 schema_extract/tools/wakeup.py::Clock.ack 和 Clock.scan 的 claim、commit、异常清理共四处复用 Store.control_transaction；仅取锁失败后在锁外等待 0.05 秒，事务正文不重放。",
+        "schema_discussion/extract_six_full_20261118/MONITOR_REGISTRATION.md 记录 11 项隔离验证通过，覆盖锁竞争、stop/代际失效、claim 校验、观察不重复和其他控制的即时 busy；后续等锁观察补正及 12 项验证见 SOURCE_FIX_FINAL_REVIEW.md，并由 monitor-wait-stale-observation 单独记录正确性根因。",
+        "旧 reminder-ack-delay 处理认证配置事件与成功入队后未 ack 的有限补送，未处理控制锁登记失败；两项根因及原决定分别保留。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：27 项 monitor 回归通过，含临时 flock、真实 SIGINT、同 wake 续接及 reused；Store/CLI 等待节流组合回归见 schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md，第三轮实现及测试字节未变，复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+      ],
+      "proposal": "仅让 ack 和绑定 scan 的四处登记复用既有锁外取锁重试；取得锁后校验当前身份、提醒、代际及 claim，不重试事务正文或业务拒绝。",
+      "necessity": "短锁竞争已造成重复登记劳动和巡检延迟。局部复用可避免白白耗掉本轮提醒处理机会，同时保留显式 ack/scan、次数与频率边界。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 的 ack、scan claim/commit/cleanup 仅重试取得控制锁，锁外通知前台等待；取得锁后重核身份与代际，不重放正文或业务拒绝。真实临时锁和 SIGINT 回归验证同一 wake 可核对续接及已提交结果 reused。其他控制保留即时 busy，持续锁等待仍无超时上界；第三轮未改该实现或测试。"
+      },
+      "path": "schema_extract/issues/archive/extract_tools/monitor-registration-lock-retry.json",
+      "status": "resolved"
+    },
+    "monitor-wait-stale-observation": {
+      "id": "monitor-wait-stale-observation",
+      "category": "extract_tools",
+      "problem": "monitor 登记允许等锁后，ack 仍可能写入取锁前的旧时间；scan 若复用等锁前的进程表，会把等待期间新出现的活 claim owner 误判为已退出并抢占 claim。后者涉及巡检所有权正确性，不只是等待耗时。",
+      "evidence": [
+        "schema_discussion/extract_six_full_20261118/SOURCE_FIX_FINAL_REVIEW.md：2026-11-19 集中核对工作树 monitor 锁重试改动，隔离测试先复现 ack 时间偏旧与活 claim 被抢占两项失败，再验证修正。没有线上 claim 被抢占、数据损坏或错误发布的现场证据，不能把模拟场景写成已发生事故。",
+        "当前工作树 schema_extract/tools/wakeup.py::Clock.ack 在取得控制锁后读取 self.now；Clock.scan 对当前 ledger 的已有 claim 调用 _alive 重新观察 owner，实际 run 观察仍在事务外。",
+        "schema_extract/tools/tests/test_wakeup_retry.py 的 WakeupRetryTests 与 schema_extract/tools/tests/test_monitor_evidence.py 的 CancelDeliveryTests.test_busy_does_not_register_or_signal_cancel 合计 12 项隔离验证通过；使用临时 state、虚拟时间及假发送器，未启动真实模型或 daemon。",
+        "monitor-registration-lock-retry 记录短竞争直接失败的可用性根因；本项记录等锁后仍采用旧观察的正确性缺陷，未重复旧 reminder-ack-delay 的补送问题。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：27 项 monitor 回归包含延迟提交、新旧采样、单 run 存活变化、分批观察及 unknown owner；第三轮未改代码和测试，复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+      ],
+      "proposal": "以实际取得锁后的时间登记 ack，并在判定当前 claim owner 时重新检查存活身份；保留提醒、线程、代际和 claim 校验，以及仅重试事务进入的边界。",
+      "necessity": "旧时间会失真签收时序；误抢活 claim 会导致并发 scan 重复观察、原 owner 提交失效及巡检归属错误。需要修复已复现的竞态，不能因尚未观察到线上事故而忽略。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 在取得锁后登记 ack 时间，按 boot/start 重新核实 claim owner，身份未知不抢占；实际采样与完成时间分开，逐 run 旧观察不覆盖 latest，采样元数据不制造 changes，下一次提醒按完成时刻计算。并发采样和真实锁等待回归通过；第三轮未改该实现或测试，未将隔离复现写成线上事故。"
+      },
+      "path": "schema_extract/issues/archive/extract_tools/monitor-wait-stale-observation.json",
+      "status": "resolved"
+    },
+    "p4-index-layout-hard-stop": {
+      "id": "p4-index-layout-hard-stop",
+      "category": "extract_tools",
+      "problem": "P4 的 dispatch 表格逐项符合结构化 plan 时，仅在表格与“覆盖缺口”标题之间插入解释段落，也会触发笼统的树/父节点/选择依据不一致错误并立即停止，模型缺少可定位的格式修复反馈。",
+      "evidence": [
+        "b5c8e87:schema_extract/tools/artifacts.py::index_prefix 将表格后紧邻的“## 覆盖缺口”标题作为同一字节前缀；validate_index 用 startswith 核对并对所有差异返回同一句 canonical approved plan table 错误。该代码在 2.2.2 试用中未改变。",
+        "b5c8e87:schema_extract/tools/runner.py::_receive 将 validate_index 的 ExtractError 交给 _reject，直接记录 invalid_receipt；仅 ReceiptFormatError 进入有限 receipt_repair。",
+        "2026-11-03，2.2.2 试用的 fp8_scaled_grouped_gemm 和 dual_cache_latent_bf16 两项 P4 worker 在补齐空 summary 后均被此门禁拒绝。已逐字符核对两份表格，节点、直接父、workload、difference、selection 与各自 plan 完全相同，首差异都是表后解释段落先于覆盖缺口标题。",
+        "对两份原稿的隔离副本只把覆盖缺口标题移到表格后，保留所有说明和缺口，再调用原 validate_index 均通过；没有修改原调用 workspace、checkpoint、回执或固定执行器。",
+        "本轮证据和隔离候选位于 .schema_extract/trials/six-families/checks/check-7-4.json 与 diagnostics/p4-index-layout/。",
+        "2.2.3:schema_extract/tools/tests/test_proposals.py 的 P4 回执测试覆盖标题错位的有限修复分类、修正后放行，以及计划值、父关系、空覆盖正文与额外 YAML 链接继续拒绝；python3 -B -m unittest discover -s schema_extract/tools/tests 共 21 项通过。",
+        "2.2.6：validate_index 独立核对 canonical plan 表格与真实覆盖段，允许表后解释段落及覆盖标题周围空行；注释/代码围栏中的伪标题不算覆盖，空覆盖、重复覆盖标题、错父关系及额外 YAML 链接仍拒绝。IndexLayoutError 及 receipts 中的特殊格式修复分支已移除。",
+        "2.2.6：最终 47 项提取回归通过；原 GEMM attempt f55b6b3f-a050-49df-bcc1-99266eeb747a 与 sparse attempt e864e50f-f49e-4caf-af6a-80d43e50d02a 的完整匹配 plan、表后带说明的失败稿在当前门禁下只读重放通过，前后哈希一致。"
+      ],
+      "proposal": "将稳定计划内容与说明段排版解耦：按同一 plan 的确定性表格核对节点、父关系、workload、差异和选择依据，再独立核对唯一且非空的覆盖段及链接。允许表后说明与标题周围空行，不为纯段落位置增加错误类型、模型修复调用或新的 Markdown 框架。",
+      "necessity": "同一纯布局问题已经中断两项独立提取，并因等待消耗阶段墙钟；明确诊断可减少重复推理和无效续跑，无需放宽任何来源或设计语义要求。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.6",
+        "reason": "2.2.3 的布局异常和有限修复曾解决即时停止；2.2.6 复核后取消了该排版义务，删除 IndexLayoutError 及专用回执分支，直接接受内容正确的说明段布局。计划表、父关系、实际覆盖和链接门禁保持有效。最终 47 项提取回归及两份真实失败稿的只读重放通过，原文件哈希未变。"
+      },
+      "path": "schema_extract/issues/archive/extract_tools/p4-index-layout-hard-stop.json",
+      "status": "resolved"
+    },
+    "p5-handoff-attempt-locator": {
+      "id": "p5-handoff-attempt-locator",
+      "category": "extract_tools",
+      "problem": "并发 P5 节点停止时，monitor 的 engineering_handoff 使用算子级 last_attempt_id 作为该节点的调用证据，可能指向另一个仍在运行的兄弟节点，误导定位。",
+      "evidence": [
+        "b5c8e87:schema_extract/tools/monitor.py::classify 中的 engineering_handoff.read_only_evidence 无条件拼接 run.last_attempt_id，没有按异常 scope 选择调用。",
+        "2026-11-03 的 MoE 巡检中，mono_arrival_mono 与 selfprep_redf 都因 missing bound implementation entry anchor 停止，交接却统一指向 c9ecb138-64c4-4927-a0ee-5823a182c220；该调用属于 w1_split_w1。",
+        "逐个核对已登记 attempt.json 后，两项正确调用分别为 7bbbf374-d1ae-496e-bee1-3b840c53be51 与 f71371d9-aa7e-420a-8470-c5f152db1263。两份回执只把 solution.py 标为 host，implementation 类仅引用 nvfp4_moe.cu；原来源门禁拒绝有据。",
+        "精确节点、调用、绑定入口、终止证据和恢复动作记录在 .schema_extract/trials/six-families/checks/check-7-9.json；未根据错误交接链接修改审阅门禁。",
+        "2.2.4 的提取回归共 29 项通过；修复、原例回放及维护记录见 .schema_extract/trials/six-families/post-batch/fixes-2.2.4.json。"
+      ],
+      "proposal": "按异常节点和阶段定位对应调用；没有可靠定位时仅列出状态文件与节点范围，避免给出算子级最近调用作为该节点证据。为两个并发节点的不同失败调用增加回归。",
+      "necessity": "定位错误会让维护者读取错误回执，甚至把正确的证据门禁误判为框架错误；需要使只读巡检报告与真实节点调用一致。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.4",
+        "reason": "2.2.4 的拒绝记录保存已登记 attempt_id，巡检优先引用该失败调用；旧 P5 记录缺少身份时仅给出状态文件与节点范围，不再误用兄弟节点的最近调用。并发两节点、旧记录回退、顺序阶段及真实 CLI 错 nonce 回归均通过。"
+      },
+      "path": "schema_extract/issues/archive/extract_tools/p5-handoff-attempt-locator.json",
+      "status": "resolved"
+    },
+    "p6-retained-scope-inventory": {
+      "id": "p6-retained-scope-inventory",
+      "category": "extract_tools",
+      "problem": "P6只读reviewer无文件变化时仅加载root，却把该局部解析集合用作完整文件清单校验保留的非root修订范围，导致合法approve在回执判断前被误拒，旧冻结运行无法通过重复回执解除。",
+      "evidence": [
+        "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_extract/tools/artifacts.py::validate_artifacts/_validate_scope 在只读路径以局部new文档的id集合验证全目录revision_scope。",
+        "Sparse P6 attempt aa4176a8-3767-4ee4-b045-cb95b15c06fa 原生approve且revision_scope为空；before/after manifest一致，state保留dispatch.md与tcgen05_packed.yaml的合法已授权范围。冻结gate实际selected_ids仅root，拒收发生在生成receipt前；见schema_discussion/extract_six_full_20261118/P6_APPROVE_SCOPE.md。",
+        "当前源码改为从完整new_files YAML清单校验；两个定向P6测试通过，真实副本修复后gate、完整回执及四节点strict检查通过，权限/最终selected-manifest门禁保留。",
+        "20261119 06:05 UTC巡检确认FMHA也在P6发生同根误拒：reviewer返回approve且revision_scope为空，workspace与最新四文件checkpoint逐字节一致；state合法保留dispatch.md和mma_sync.yaml的DESIGN.Math_reshape授权。临时副本上原冻结artifact gate精确复现同一错误，当前修复gate通过且changed_files为空；live state字节未变。见schema_discussion/extract_six_full_20261118/FMHA_P6_SCOPE_REPRO.json。此验证未采纳旧回执、未形成正式P6批准、未启动恢复。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md：两项 P6 artifact 回归核对完整 inventory、未改文件与字段边界；schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md 确认第三轮仅删重复注释。"
+      ],
+      "proposal": "用完整文件清单验证保留的修订范围，局部解析只用于必要的内容检查；不将合法只读批准当作越权，也不放宽root只读或字段权限。",
+      "necessity": "已证实的错误会永久阻塞保留非root修订范围的旧P6运行，模型重交不能修复工具所用的错误文件集合。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 用完整 YAML inventory 核验 retained scope，局部解析继续承担内容检查；未改文件可被合法范围命名，未知文件、root 和受保护字段仍拒绝。第三轮只压短注释。Sparse 正常发布及 FMHA 自动失败后人工小修的历史分别保留，工具修复不补写旧 P6 批准，也不代替后续专项审计。"
+      },
+      "path": "schema_extract/issues/archive/extract_tools/p6-retained-scope-inventory.json",
+      "status": "resolved"
+    },
+    "receipt-evidence-repair": {
+      "id": "receipt-evidence-repair",
+      "category": "extract_tools",
+      "problem": "合法来源内的证据位置错误及回执必填证据、结论漏项被归为普通拒收，未进入已有有限receipt repair，真实提取因此等待Supervisor恢复。",
+      "evidence": [
+        "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_extract/tools/reading.py 和 receipts.py 将证据选择与固定文件安全错误归为同类；既有 receipt_repair.md 已包含证据定位错误。",
+        "本批 GDN 缺四项文档结论、FMHA 缺绑定入口分类及 artifact末行越界，均在 native成功且调用结清后停止，receipt_repairs=0。证据定位与原运行记录见 schema_discussion/extract_six_full_20261118/RECEIPT_RECOVERY_0810.md、EVIDENCE_LINE_ENDS.md。",
+        "当前源码与30项定向验证见 schema_discussion/extract_six_full_20261118/RECEIPT_REPAIR_POLICY.md；覆盖原额度、精确会话、合法草稿、独立审阅和身份/权限硬边界。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md：test_receipt_repair_policy 与 test_executor_repairs 覆盖有限重交、真实 revise/blocked、合法保存稿及证据被改后的拒绝；删减复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+      ],
+      "proposal": "明确区分合法固定文件内的引用选择错误及回执义务漏项，复用原 ReceiptFormatError 与有限重交，不自动修改证据或放行候选。",
+      "necessity": "可定位的记录错误应在既有额度内交原角色补正，避免无必要的长时间停顿。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 将合法固定文件内的证据选择错误和回执必填判断漏项交原角色有限重交，每次仍完整校验并保留合法草稿、原会话与已用额度。真实 revise/blocked、身份、来源、权限和产物语义错误不转成可修格式。第三轮仅压短异常说明；补正稿的续接及保存证据篡改负例已验证。"
+      },
+      "path": "schema_extract/issues/archive/extract_tools/receipt-evidence-repair.json",
+      "status": "resolved"
+    },
+    "reminder-ack-delay": {
+      "id": "reminder-ack-delay",
+      "category": "extract_tools",
+      "problem": "历史提醒已按时进入线程，首次处理因 HTTP 403 结束且没有输出，约 11 小时 27 分钟后才签收。用户确认当时子代理 API key 未与主 Agent 同步，后续已同步修正。工具此前成功入队后只等 ack，缺少入队成功但未完成签收时的有限补送。",
+      "evidence": [
+        "历史 wake ID 为 check-19-32-7f69e904841a8d280897e1be，thread ID 为 01a1a720-26b8-7730-8358-60036c5c854d。2026-11-04 17:50:38.142 UTC 到期并开始发送，17:50:40.557 UTC 取得 queued 回执，message ID 为 01a1a7af-3548-78c2-a4b3-9a66ac3234c4。",
+        "该线程在 2026-11-04 17:50:40.616 UTC 已记录此提醒；turn ID 为 01a1a7af-3579-7f23-83fe-d94e67e5f84e。17:50:47.680 UTC 该 turn 以 HTTP 403 结束，错误报告模型配额限制，last_agent_message 为空；不能把全部等待时间称为队列未送达。",
+        "下一次 task_started 为 2026-11-05 05:17:13.325 UTC；ack 为 05:17:28.930 UTC，scan 完成为 05:18:11.307 UTC。queued→ack 约 11 小时 26 分 48 秒。",
+        "用户于 2026-11-05 确认：当时子代理的 API key 未更新，之后已将子代理与主 Agent 的 key 同步。该配置修正由用户完成；仓库仅记录确认事实，不读取、修改或保存 key 值。",
+        "schema_extract/tools/wakeup.py 的后台观察及已授权恢复独立于 ack；generation、hold、pause/cancel 和 clock stop 继续约束请求。",
+        "2.4.1 的 _next_send_at 供 tick、run 等待与 status 共用：最近 queued 后 1800 秒未 ack 则补送同 ID，uncertain/sending 后至少 120 秒；全部发送共用原总上限 3 次。",
+        "schema_extract/tools/tests/test_wakeup_retry.py 的 2 个集中隔离场景通过：1799/1800 秒补送边界、uncertain 的 120 秒间隔、最后尝试调度、重建不退款、耗尽仍观察、ack 阻止发送、scan 单次提交及重放、快速 ack/scan 或 stop 后晚回执只补事实、旧代际失效。验证使用临时 Store、假时间与队列，以及一次进程内假等待；未启动真实模型、后台 clock 或 queue。"
+      ],
+      "proposal": "保留与 ack 独立的有界后台观察及已授权恢复；成功入队但未 ack 时沿用同线程、同 wake ID 有限补送，所有结果共用发送次数，并保留显式 ack/scan 与控制优先级。",
+      "necessity": "任务能否无人值守地推进，取决于异常发生后是否有人或程序及时处理。需要弄清现有提醒能保证到哪一步。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.4.1",
+        "reason": "用户已完成历史 key 不同步的配置修正；本次工具侧补齐同 ID 有限补送及诊断，两个集中隔离场景通过，作为通用兜底收口。两者分别记录，不把历史配置问题或恢复原因继续列作待办，也不宣称绝对投递或主管处理保证。",
+        "adopted": "沿用 2.3.0 的后台观察与已授权恢复，不等待提醒 ack；恢复授权、语义修订和控制屏障保持原边界。\n最近 queued 后 1800 秒仍未 ack 时补送同 ID；最近 uncertain/sending 后仍等 120 秒，从该尝试结束或开始计算。全部发送共用总上限 3 次，重建时钟不退款。\nstatus 显示首次/最近 queued 时间、ack 后时长、下一次尝试和剩余次数；ack 前耗尽即报 queue_attempts_exhausted，即使已有 queued 回执。\nack、scan 完成及 stop/新代际优先；晚回执只补发送和消息事实。ack 后不补送，耗尽也不完成或推进周期，显式 scan 可续完且重放不重复推进。",
+        "remaining": "通用运行边界：同线程补送不保证实际送达或主管完成，不能解除服务端配额或认证限制；本次未增加外部渠道。\n验证边界：本轮没有真实端到端投递或主管处理验证，真实 .schema_extract/v2 状态保持不变。"
+      },
+      "path": "schema_extract/issues/archive/extract_tools/reminder-ack-delay.json",
+      "status": "resolved"
+    },
+    "artifact-only-issue-evidence": {
+      "id": "artifact-only-issue-evidence",
+      "category": "extract_workflow",
+      "problem": "退修或阻塞的问题可能仅陈述当前产物的提交格式、规范表达事实，但 2.2.8/2.2.9 的回执门禁一律要求 issues.evidence 含源码索引。已精确引用当前产物的有效问题因此被拒绝，或诱使 reviewer 添加与问题无关的源码引文。",
+      "evidence": [
+        "schema_extract/tools/receipts.py::receipt_schema 将 issues.evidence 定义为 source_evidence 的索引，同时已有独立的 artifact_evidence；normalize_response 和 _anchor 已验证后者的当前文件身份、范围及精确引文。",
+        "2.2.10 修订前的 receipts.py::validate_receipt 对 revise/blocked/reopen 统一要求至少一条 issue.evidence 非空，没有当前产物证据的分支；reviewer 另须提供真实 source_evidence 并引用本阶段全部必需产物。",
+        "MoE 两份真实 P4 reviewer 提案分别以 submission_format 描述空 proposal.plan 与 dispatch.md 非空节点表的提交缺项，scope 明确指向 dispatch.md，artifact_evidence 覆盖该表和 root.yaml，issues.evidence=[]；两次均被同一 evidence 门禁拒绝。这一事实不依赖判断其中的覆盖或源实现缺陷意见是否正确。",
+        "schema_extract/tools/tests/test_issue_evidence.py 用合法的当前文件与来源锚点复现该 P4 拒绝，并区分完整文件名、误匹配路径、缺失锚点、源码类问题、混合 issues、恢复条件和批准/重开门禁。"
+      ],
+      "proposal": "沿用现有回执字段，仅让 revise/blocked 中 submission_format、schema_conformance 的问题使用与 scope 完整相对文件名绑定的有效 artifact_evidence，issues.evidence 可为空。源码类问题不获得此例外，所有提供的源码索引继续校验；保留至少一条完整有据问题的原规则，以及 reviewer 的全部文件和真实源码要求。complete/approve、P4 计划校验和 reopen 的既有源码与单次重开规则不变。版本为 2.2.10，须经 Supervisor 验收并正式接续后用于新运行。",
+      "necessity": "有当前产物证据的文档类意见已连续被拒绝，重复消耗调用却没有推进实际 P4 审阅。应让证据指向其能证明的事实，同时继续拒绝无依据的源码意见；这项协议修复不批准 MoE 的语义结论，也不解决其尚未收口的失败接续设计。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.10",
+        "reason": "Supervisor 已验收限定的当前产物证据分支：仅 revise/blocked 的 submission_format、schema_conformance 可使用与 scope 完整相对文件名绑定且已验证的 artifact_evidence；保留原至少一条有据问题规则。源码索引、全部文件审阅、approve/P4 计划及 reopen 门禁保持。最终 39 项相关回归、62 项完整提取回归通过；两份真实拒绝提案只读重放及 Supervisor 的错误路径/源码类负例通过，原状态及输入字节未改变。本决定仅解决证据门禁，不批准 MoE 的语义意见、P4 计划或失败接续设计；采用须正式 continue 并独立重审。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/artifact-only-issue-evidence.json",
+      "status": "resolved"
+    },
+    "budget-and-usage-accounting": {
+      "id": "budget-and-usage-accounting",
+      "category": "extract_workflow",
+      "problem": "排队、暂停和维护等待都会消耗时间额度，但 token 用量又不能可靠汇总。我们能看到调用次数，却还难说清实际工作、等待和费用各占多少。",
+      "evidence": [
+        "原 operator/stage 墙钟预算包含排队和暂停；2.3.0 保留原 config、deadline、预留与 budget_extensions 语义。",
+        "schema_extract/tools/observation.py 独立记录有界 native ledger 与输出事件的根会话增量，audit.py 分列已知用量小计及重叠等待，recovery.account 保留高水位与原 usage v1。",
+        "固定格式回放验证 resume 差分、重复 counter/attempt 去重、缓存输入子集、缺 baseline 未知和等待并集；同 run 升级场景验证原预算/用量保留。",
+        "2.4.1 分列本 run 已登记 CLI attempts（含来源去重）的 root exact/partial/unknown；known_attempts 保留有据小计含义，全部 exact 才表示根范围完整。",
+        "同一有界 native 调用读取投影已识别委派工具/活动类型、事件锚点和关联 UUID；绑定调用的 forbidden/unknown 策略，observed/not_observed_in_range/unavailable 不代表子会话 token 完整。",
+        "2.4.1 的 tools/tests/test_usage_observation.py 两项集中离线固定回放通过：native resume 差分与重复计数、委派隐私投影及失败隔离、新旧审计摘要绑定、root 三类与继承来源去重、重叠区间拒绝；未运行真实模型、提醒时钟或旧任务。"
+      ],
+      "proposal": "保持原预算规则，独立观察可信根会话增量和有据等待；明确已知小计、未覆盖范围与未知费用。",
+      "necessity": "这些规则会影响预算追加，以及我们对重试、重跑成本的判断。需要先讨论清楚，不预先认定现有计时方式就是错误的。",
+      "decision": {
+        "outcome": "partially_adopted",
+        "version": "2.4.1",
+        "reason": "本轮统计契约与工具可观察证据缺口已收口：根范围完整性分列，委派身份仅作范围证据，audit 明示墙钟预算与费用缺失原因。观察失败不改变模型结果或抹掉已证明根增量，不回写旧 receipt/result；外部未知不构成待建计费系统。",
+        "adopted": "原 usage v1 保留，另存 usage-observation，记录 CLI 版本、调用前基线与事件身份。\n按来源/attempt 和会话计数区间去重；墙钟、CLI 累计、检查和已知等待分列。\nroot exact/partial/unknown 和委派范围证据进入审计；可选新字段保持旧 observation v1/summary 的字节及摘要兼容。\n保留 wall_clock_deadline、原 config/deadline/预留及追加规则；排队、暂停和维护等待继续耗预算，不退款或赠额。",
+        "remaining": "历史缺基线或缺采样保持 partial/unavailable；旧冻结执行器不会自动补采样，原显式运行层升级仅影响未来调用，不重跑旧任务或反写原结果。\n本范围未观察到委派或提示禁止委派均不证明 child=0；不扫描子会话或 provider 历史，子会话 token、完整调用用量及实付仍是外部未知。\n缺少可靠计价/账单来源，cost 保持 null；有据等待可能与兄弟工作并行，不能相减推出纯模型时间。这些边界不新增未来计费系统待办。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/budget-and-usage-accounting.json",
+      "status": "partially_adopted"
+    },
+    "conditional-flow-topology": {
+      "id": "conditional-flow-topology",
+      "category": "extract_workflow",
+      "problem": "产物在 thesis/describe 中声明某些 launch、handoff 或完成依赖不存在，结构字段却仍无条件列出它们，使用了现行 schema_docs 未授权的条件删除与改接语义。首先需要纠正提取对规范的遵循，尚不能由这类产物直接认定语言必须扩展；未提交的 kernel 也不能解释为已提交 kernel 内的 no-op。",
+      "evidence": [
+        "schema_docs/4.design.work_schedule.md:29、273、284、337：launch 条目对应一次提交，phase 有唯一提交身份，依赖列表表示共同满足；未定义以正文条件删去提交或改接依赖的规则。",
+        "schema_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/root.yaml:318-335：normalize/prep 和 normalize.kernel_done 依赖始终列出，describe 却在 flag=false 时删除 launch、handoff 与依赖。",
+        "schema_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/probe_dual.yaml:224-239：正文只提交 packed/mma 之一，flow 同时列出两者；probe 缺席时其完成边也由正文取消。该目录 root.yaml:269-279 同样用正文限定 S>1 才提交 combine。",
+        "schema_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/split_tcg.yaml:211-219、267-272：segment/segmax 仅在 TwoPass 时存在，否则 scan 改接 gm，但结构列出同一张 flow。",
+        "schema_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/ws_fused_ws.yaml:194-215：Small 的单准备 kernel、大准备链及可选 gather 共存于 flow，正文将它们解释为条件替代项。以上产物基线均为 KernelSchema@6e4ca91bd91d998cac99e8dadd83838e153c679d。",
+        "schema_template/tools/rules/values.py::text 只检查非空文本，::record 拒绝未知固定字段；rules/schedule.py::validate 按 flow 中声明的 phase 解析依赖，不解释 describe 中的条件。",
+        "隔离复制 GDN 的 root.yaml 和 segmented.yaml，用 python3 -B schema_template/check_yaml.py --skip-hardware <副本>/root.yaml 检查：原文返回 0；给 normalize 的 launch 增加 when 字段返回 1（field not allowed）；将 prep 的前驱改为 missing_phase.kernel_done 返回 1；仅把 normalize.describe 改成 This phase and its completion event do not exist for any input. 仍返回 0。原产物未改写。",
+        "schema_extract/review_cases/RESULTS.md：2.2.5 的生产 Reviewer 对真实 GDN 重新进行隔离 P6，要求重开 P3，并定位 normalize 提交及 Qc/Kc/Perm handoff 的同类表达问题。reviewer-document-integrity 的机制修复已归档；本项具体产物表达仍待修订。",
+        "2.2.6：schema_extract/issues/TRIAGE.md 按真实 gdn_kernel.cu 和 dsv4_kernel.cu 区分实际提交、物化与探测结果，schema_docs/0.common.md、4.design.work_schedule.md 及 P2/Reviewer 指引明确先按既有 dispatch 划分。该方案尚未重新生成四类历史产物，不记为产物修复完成。",
+        "2.2.8 补充 MoE 来源：kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/nvfp4_moe.cu:4843-4915 按 Rmax>=16*E 决定 scale prepare 在前一 worktile 的 epilogue drain 前后；默认可达的 97/81 均采用该协议。run 53d4bebe-882d-4a66-98b1-287d132dd6f3 的 root 观察及默认 T=400/600 选择证据见 .schema_extract/trials/six-families/post-batch/artifact-repairs-2.2.7/moe-default-53d4bebe.hoist-observation.json、moe-default-53d4bebe.selector-witnesses.json。当前 root 把低 fill 的跨 role 前驱藏在 prepare 契约中，局部有限图确实缺 release→prepare 路径；这不是 checker 对自然语言的自动诊断。",
+        "2.2.8 的 schema_docs/5.design.tile_pipeline.md“动作与契约”“条件等待示例”沿用 0/1 repeat、q 动作身份、serial wait@done 和 waits_for。隔离示例 fc1/fc2 在 R=3200/4800,E=256、每 worker 两个 worktile 的图均无环：低 fill 四个 release 约束 prepare，高 fill 不增该约束，两者均保留 release→首个 MMA；wait 可提前 issue，固定 q=0 的负例真实报告 dangling event。方案、源定位及原验证保存在 .schema_extract/trials/six-families/post-batch/plan-semantics-2.2.8/，不授予真实 root 新批准。",
+        "2.2.7 的 GDN 独立 P1 依据 problem/input.py:243 确认 norm=false 且 cu_seqlens/chunk_indices/chunk_offsets 必有；实际 nullable 仅 core_attn_out、FinalState、CoreWritten，旧 normalize 提交不在本任务域。新六节点 root/cached_ordered/direct_qk/direct_qk_ordered/segmented/segmented_ordered 分别表达缓存或直接 QK、分段及 Perm 存在性；图像与系数读者数量、KS/QS/DU0 登记及 segmented_ordered 的 stage_inputs 排序合并均已完成独立审阅。",
+        "2026-11-04 GDN 修订已由 Supervisor 验收并正式 export：run 45f9bb51-77f3-4285-b7a7-251cf2744fa1，冻结 2.2.7，6/6 与 P6 完成，checkpoint 349f0fdbad54effd79e2557888dffcc88de418c142438fd2989db2b4937d0a2d，最终 reviewer 1283b632-a802-4625-b666-a0eb3dce449d，P6 receipt SHA-256 ed4f3e2dc665dd7bf3ee1dd23e16e6d85170ad40ea52a259d87f2ecdb4280cf0。交付回执 schema_wiki/revisions/2.2.7/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/.extraction/receipt.json；最终单次 P6 审计 .schema_extract/trials/six-families/post-batch/artifact-repairs-2.2.7/gdn-quota-restored-final-audit-20261104T125856480549Z.json 为 verified，errors/unavailable 为空；.schema_extract/trials/six-families/post-batch/artifact-repairs-2.2.7/quota-restored-recovery.jsonl 的 gdn_export_delivery_verified 事件确认新目录 8 文件一致、旧目录 4 文件 SHA 未变。原目标 publication 仍 conflict/published=false，独立 exports 对应项 status=published，不再 resume；源码限制保留且未做 GPU 验证。FMHA/MoE 继续修订，Sparse 受上游源缺陷阻塞，本 issue 整体继续 pending。",
+        "前条保留 GDN 交付时点的记录；后续 2.2.9 已解决源缺陷抽象边界，2026-11-05 依用户确认将 sparse-tc-control-layout-overlap 记录归档，低层槽位偏差不再作为提取阻塞；Sparse 实际 Design/P6 仍须独立完成和审阅，本项产物表达仍待决。",
+        "归档版本依据：2.2.6 的 dispatch 划分及 2.2.8 的条件等待说明已见上述证据；2.5.0 的 schema_docs/0.common.md、schema_extract/DESIGN_REGION_DERIVATION.md 与 schema_extract/issues/archive/extract_workflow/design-region-derivation.json 已落实直接父同名整区 from_parent 及子上下文审阅。真实拓扑不同仍拆独立 dispatch，确实相同的区域可按该契约共享；没有实现单节点 guarded graph。",
+        "2026-11-05，用户决定先归档本项，schema 产物问题随后另行研究。以上原始事实、证据与 proposal 保留各记录时点含义，其中继续 pending/待决不再表示当前台账状态；当前部分采纳范围和未收口产物见 decision。本次仅整理归档与入口，未修改产物、旧 run、源码或批准。"
+      ],
+      "proposal": "按 schema_docs/0.common.md“参数变化与结构变化”和 schema_docs/4.design.work_schedule.md 的既有提交语义，将实际 launch 集合、生产者/消费者或完成依赖不同的路径拆为完整 dispatch 节点，数量变化仍参数化。schema_extract/issues/TRIAGE.md 给出 GDN 与 sparse probe 的具体划分、来源和验收边界；when 可引用已定义的实际运行时事实，但不预测 probe 结果，也不删除实际已提交的探测。每个节点独立写全自身 flow 与 Design，禁止正文删边及把未提交改成 no-op。规则说明已补充，GDN 已在冻结 2.2.7 下完成六节点独立审阅、P6 和正式 export 并获 Supervisor 验收，原两节点保留历史身份；MoE/FMHA/Sparse 的实际产物仍须独立修订和审阅，因此本项整体继续待决。Sparse 低层槽位偏差已有来源支持同一完整抽象 Design，源问题已按 2.2.9 边界归档至 schema_extract/issues/archive/kernel_wiki/sparse-tc-control-layout-overlap.json，不再作为提取前置条件；源 kernel 未修、GPU 未验证，不得将坏地址写入 realization.require/forbid 或因此批准残稿。只有发现上述写法仍不足的最小反例才讨论新字段或流程分支语言。MoE hoist 的等待位置已能用既有条件重复和显式 waits_for 参数化，无需新增 guards 或拆出两个 fill 节点；本 role 内部计算和原语固有保证仍可封装。采用 2.2.8 后须正式接续并独立重审实际产物，不能由规范澄清或隔离示例继承原批准。",
+      "necessity": "四类产物已出现同类越过规范的写法。应先落实遵循规范及 reviewer 拒绝自造语义的要求，再区分产物可修问题与真实规范缺口，避免用修改语言迁就已有输出。验收覆盖实际提交、替代生产者与事件存在性，不能只看检查器通过。",
+      "decision": {
+        "outcome": "partially_adopted",
+        "version": "2.5.0",
+        "reason": "本轮提取侧处理方式已确定：真实提交、生产消费或完成依赖不同的路径按既有 dispatch 分开，确实相同的整区可依 2.5.0 from_parent 契约共享，MoE hoist 等待沿用 2.2.8 的条件重复与显式 waits_for。2026-11-05 依用户决定先归档，schema 产物问题另行研究；部分采纳保留尚未收口的实际产物，不宣称所有旧产物已修复，也不宣称实现单节点条件拓扑。version 记录已采纳能力所属版本，本次归档不新增功能或升级版本。",
+        "adopted": "保留实际拓扑拆分、数量参数化及独立完整 Design 审阅；相同区域的 from_parent 共享须在使用节点上下文中成立，不能借正文或引用删除实际 launch、handoff、生产者或事件。GDN 已在冻结 2.2.7 下完成六节点独立审阅、P6、正式 export 和 Supervisor 验收，原两节点保留历史身份。提取侧方案与上述交付证据已记录，无需为归档新增语言字段或重复待决项。",
+        "remaining": "FMHA：schema_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/split_tcg.yaml:211-219、267-272 的 TwoPass segment/segmax 存在性及 scan 生产者改接，实际产物尚未全部修订并独立验收。\nMoE：schema_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/ws_fused_ws.yaml:194-215 的 Small 准备链及可选 gather，以及上述 2.2.8 root hoist 观察记录对应的跨 role release→prepare 等待，实际产物仍须独立修订和重审；成员范围问题另保留在 symbolic-member-bounds 的 remaining。\nSparse：schema_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/probe_dual.yaml:224-239 与 root.yaml:269-279 的 probe/packed/mma 路径、完成事件及 combine 存在性，实际完整 Design/P6 仍须完成并独立审阅。上述旧产物行号沿用 evidence 的 KernelSchema@6e4ca91bd91d998cac99e8dadd83838e153c679d 基线，后续来源与试验位置见原 evidence 和 schema_extract/issues/TRIAGE.md。Sparse 低层槽位偏差已有独立归档，不再阻塞提取；源 kernel 未修、GPU 未验证的事实保留。\n以上产物问题按用户决定另行研究，本次未启动迁移、重提取或产物修改，不继承或改写旧批准。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/conditional-flow-topology.json",
+      "status": "partially_adopted"
+    },
+    "contract-comparator-evidence": {
+      "id": "contract-comparator-evidence",
+      "category": "extract_workflow",
+      "problem": "已知数值判据的相对误差基准可能在 Contract 撰写和审阅中同时被遗漏。",
+      "evidence": [
+        "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/performance/ACCEPTANCE.json:135–160 明确声明 relative_to=candidate。",
+        "schema_extract/phases/01_contract.md 与 schema_extract/tools/comparators.py 定义比较对象、声明引文和判据校验。",
+        "版本依据：8eb1e94:schema_extract/tools/__init__.py 声明 2.1.3；同提交新增 tools/comparators.py 及 P1 的具名输出 comparisons 绑定与判据校验，落实当前决定。原始声明引文门禁修复见 69e3027:schema_extract/tools/protocol.py::missing_comparator_anchors。"
+      ],
+      "proposal": "在 Contract 阶段定位实际判据。审阅通过前核对并引用声明比较基准的原文。",
+      "necessity": "更换相对误差基准会改变同一个输出能否通过判定。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.1.3",
+        "reason": "P1 用 comparisons 绑定具名输出与 relative_to 声明；Runner 核对引文和可机械检查的判据，reviewer 独立判断数值语义。未声明的比较细节保持未知。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/contract-comparator-evidence.json",
+      "status": "resolved"
+    },
+    "design-region-derivation": {
+      "id": "design-region-derivation",
+      "category": "extract_workflow",
+      "problem": "派生节点当前必须复制并维护三个完整 Design 区域，parent 只记设计来源；相同定义缺少显式共享方式。用户提出允许引用父级完整 math_reshape/work_schedule/tile_pipeline 的候选，但现行语言、检查和产物工具、P5 审阅证据、换父及 provider 修复通道尚未定义这种内容依赖。只增加引用语法会造成子参数/跨区适用性不清、来源身份不完整或有效设计变化未受正确审阅。问题底稿见 schema_extract/issues/DESIGN_REGION_DERIVATION.md（DRD-01 至 DRD-10）；本项待决。",
+      "evidence": [
+        "核对基线 KernelSchema@26a7947c8257401c95582a8a43676c5651c9a2ef；完整事实、待决定项和约束见 schema_extract/issues/DESIGN_REGION_DERIVATION.md。",
+        "schema_docs/0.common.md:104、121；schema_template/tools/rules/__init__.py:31：parent 不提供 Design 继承，Contract 通过 root 统一符号环境解析。schema_docs/3.design.math_reshape.md:164、4.design.work_schedule.md:327、5.design.tile_pipeline.md:443 显示三区域存在参数、资源、里程碑和 worker 身份依赖；6.realization.md:7、57 要求本节点适用的实现选择。",
+        "schema_template/examples/fa4_decode/q1_cluster.yaml 与 q4_cluster.yaml 的完整 math_reshape 由现有 yaml_source 解析器只读比较为相同；两者 parent 分别 q1_global/root，work_schedule 的 QueryTile 分别 1/2。这是完整区域共享的具体候选，不证明可直接沿现有 parent 复用。",
+        "schema_template/tools/rules/structure.py:211、schema.py:38、diagnostics.py:53、pipeline_graph.py:40、80 直接消费完整 Design 及原始文档定位；schema_extract/tools/standalone.py:25 只复制共享 Contract，来源身份和生成防漂移只覆盖 root 与指定节点。",
+        "schema_extract/tools/store.py:458、617：P5 已有全祖先依赖核验和只读上下文，首次无稿复制父文件，旧稿优先保留；stages.py:168、282 沿树失效并保留旧稿、更新计划父关系。换父不会自动更新旧子 YAML 的原始 parent 或未来引用。",
+        "schema_extract/tools/receipts.py:52 的 P5 必要文件证据只有 root、本节点、直接父；prompts.py:127 隐藏历史批准；REVIEW.md、phases/05_branch.md、06_final.md 要求当前完整产物及复制内容适用性审阅。receipts.py:42、runner.py:419 的普通 reopen 无指定 P5 provider 入口，P4/P5 现有写权限不能代替该修复。",
+        "schema_extract/phases/04_dispatch_plan.md 与 tools/artifacts.py:208、352、401 约束七字段 plan、索引/文件/父关系和写入范围；schema_docs/0.common.md:135 要求 when 独立互斥全覆盖。区域引用不改变 conditional-flow-topology 的待决状态。",
+        "schema_extract/tools/compatibility.py:219、revisions.py:198、254、snapshots.py:24 规定兼容执行器、语义修订与冻结规则的边界；新增内容依赖语义不能作为仅兼容运行时变更回填旧 run。",
+        "2.5.0 的最终决定与 DRD-01 至 DRD-10 对应见 schema_extract/DESIGN_REGION_DERIVATION.md；上述原问题、proposal 和行号保留调查时点含义，基线为 26a7947c8257401c95582a8a43676c5651c9a2ef（2.4.1）。",
+        "schema_template/tools/design_resolution.py、schema.py、diagnostics.py 与 pipeline/output.py 统一展开、子上下文校验和 provider/chain/source manifest/effective identity；check_yaml.py --show-effective 明示 validation=not_run，严格 standalone 另完整检查并生成 v2 来源回执。",
+        "schema_extract/tools/artifacts.py、receipts.py、stages.py、runner.py、maintenance.py、revisions.py 与 runtime.py 贯通冻结适配、真实来源证据、显式换父、普通 P5 provider 重开、新 generation 独立批准、受影响后代失效与完整 raw 树保存；P5 临时检查排除依赖已变的旧子稿，P6/发布仍要求整树有效。",
+        "Python 3.13.12 / PyYAML 6.0.3 下，模板完整 discover 171 项、extract 完整 discover 90 项全部通过；含 13 项 schema 派生回归、7 项工作流贯通回归及 10 项 standalone 回归。",
+        "使用真实 26a7947c8257401c95582a8a43676c5651c9a2ef 规则树隔离验证：旧 inline 导出仍走旧 exporter/检查器及 v1 回执，旧规则拒绝引用；同一未完成测试 run 经过正式 semantic revision 采用 2.5.0，受限 worker 改稿、真实 checker 与独立 reviewer 回执批准及 v2 standalone 均通过。原 checkpoint 文件、5 份回执和 5 条旧用量记录保留；没有执行真实模型、硬件或历史 run 迁移。"
+      ],
+      "proposal": "进入独立方案阶段，评估完整区域显式引用父级的候选，明确子节点上下文绑定、来源及传递规则、原始/有效视图、工具来源身份、审阅分工、换父与指定 provider 修复、规则修订边界。DRD-01 至 DRD-10 保留待决定项，不预先定语法或最终实现；优先用少量贯通场景检验设计是否闭合，暂不扩展为局部 patch、兄弟共享、自动去重/换父或通用条件语言。",
+      "necessity": "相同区域的复制会增加维护与重复审阅负担，但真实不同的 dispatch、参数、物化及依赖不能为去重而抹平。需要明确共享的是哪些事实以及子节点仍须独立证明什么，而不是以减少节点数为目标。沿用现有祖先上下文、保稿和保守失效机制可控制改动范围；记录本项不表示规则、工具或历史产物已修复。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.0",
+        "reason": "首版设计与实现已完成：共享完整定义与子节点适用性分开，原始内容、有效来源、审批 generation 和规则 revision 各保留独立身份；语言、检查、派生产物、证据与修复生命周期形成闭环。完整回归及真实旧冻结规则的隔离正式采用验证通过。",
+        "adopted": "显式直接父同名整区 from_parent，可传递；root 全本地，when 与 realization 本地，引用在当前节点环境中完整检查。\n共用 raw/effective API、真实 provider/chain 诊断、完整来源 manifest/effective identity、只读有效视图、图和严格 standalone 的全部来源防漂移。\nP5 首次无稿生成引用，已有稿保留；provider 审本地定义，consumer 审绑定、选择域、跨区组合及输入输出，证据回到实际 raw。\nP4 换父由有权限 worker 显式迁移；普通 P5 可修复实际非 root provider，新 generation 必须新批准，保守后代失效、兄弟继续、旧结果 stale，预算与历史保留。\n完整 raw merged 树与 P5 当前有效检查闭包分开；maintenance 候选父变更先排除旧后代，P6/发布仍要求整树有效。\n2.5.0 冻结语言与执行语义；旧 inline 与旧 exporter 保持原规则，正式 semantic revision 采用能力已实现和验证，compatible runtime 不跨此语义边界。",
+        "remaining": "有意后置的语言扩展：局部 patch、兄弟/跨目录共享、自动换父/去重、区域级审批缓存、通用条件求解、自动晚到稿采纳与审阅 IR。\n现存真实历史 run 的实际升级、已发布产物迁移和批量引用转换未执行；这与已经实现并验证的正式 semantic revision 采用能力分别记录。\nconditional-flow-topology 已按用户决定归档保留，产物研究另行开展，剩余清单见 schema_extract/issues/archive/extract_workflow/conditional-flow-topology.json；不能由整区引用或测试通过代替其真实算子产物修订，不承诺节点数、文本压缩比或实际审阅用量下降。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/design-region-derivation.json",
+      "status": "resolved"
+    },
+    "location-storage-level-registration": {
+      "id": "location-storage-level-registration",
+      "category": "extract_workflow",
+      "problem": "DOC5要求Storage.location沿用硬件区名称，而提取P1仅要求最小登记执行单元及所属资源作用域；register等纯存储层级在硬件占位下如何登记，缺少明确指引。",
+      "evidence": [
+        "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_docs/5.design.tile_pipeline.md:352,361,365,524 明列register等存储位置，同时要求沿用硬件规格名称。",
+        "同版本 schema_extract/prompt/phases/01_contract.md:45-47 只登记源码明确的执行单元、组成及所属资源作用域，其余硬件保持占位；下游无权直接改Contract。",
+        "GEMM P3 worker与独立reviewer确认：sb_regs、row_acc采用register，固定fp8gg_umma.cu:813-815,832-836支持寄存器状态；Contract已列smem/tmem但未列register。reviewer认可其为已有开放取值，不阻塞产物。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：GEMM 全目录只读检查退出 0；schema_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/.extraction/issue-review-20261119.json 保存精确两字段变化、root/wide 寄存器来源和 unchanged wide/dispatch，当前字节及 DOC5 删减复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+      ],
+      "proposal": "明确提取时存储层级的命名与登记口径，区分名称登记和硬件能力调查；不新增字段或要求调查寄存器容量。",
+      "necessity": "减少P1和下游对同一存储名称的反复判断；当前已有register取值不因这一说明问题停止提取。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 对齐 DOC2、DOC5 和 P1：在所属执行单元摘要登记有据存储名称及范围，Storage.location 沿用；纯存储不必另设 Execution 键，也不成为 worker/role。GEMM thread 摘要已补 thread-local register，第三、四轮限域复核通过；不推定容量、编译后分配或无 spill，原 P6 仍只覆盖原字节。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/location-storage-level-registration.json",
+      "status": "resolved"
+    },
+    "maintenance-version-bump-outside-field-cap": {
+      "id": "maintenance-version-bump-outside-field-cap",
+      "category": "extract_workflow",
+      "problem": "限域维护和P6修改范围未清楚区分Version的隐含更新权与显式字段清单，曾出现误称Runner代填版本及P6单列Version被拒收的情况。",
+      "evidence": [
+        "FMHA worker及独立reviewer确认该ID；artifacts.py:_erase_fields默认排除META_DATA.Version，_versions要求获准内容变动时版本递增，Runner只校验。",
+        "当前维护提示已补齐一句现有职责说明，见schema_extract/prompt/operations/maintenance.md及schema_discussion/extract_six_full_20261118/MAINTENANCE_VERSION_GUIDANCE.md。",
+        "Sparse P6 reviewer在revision_scope中显式列META_DATA.Version被冻结validator拒收；原方案仅改目录和tcgen05_packed，不含root写入。公开resume续原reviewer重交，当前P6阶段提示补明版本随授权内容更新、不单列scope；六项边界检查通过，权限/版本函数AST未改。见schema_discussion/extract_six_full_20261118/P6_VERSION_SCOPE.md。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md 和 schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：P6 权限回归及原六项版本边界依据保留；schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md 复核仅合并重复 Version 说明，未削弱隐含写权或校验。"
+      ],
+      "proposal": "在维护与P6既有写权限段落明确worker依公共版本规则更新Version，属于授权内容变更的隐含写权，P6 revision_scope只列实际内容字段；Runner负责检查。",
+      "necessity": "避免为已有隐含写权反复判断或失败检查，不增加字段或更改版本规则。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 的维护和 P6 提示明确：worker 随获准内容更新 Version，Runner 只校验，P6 不将 Version 单列 revision_scope。第三轮仅合并重复说明；root 只读、显式内容范围与版本校验均保留，未新增写入口或放宽权限。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/maintenance-version-bump-outside-field-cap.json",
+      "status": "resolved"
+    },
+    "p1-external-comparator-gate": {
+      "id": "p1-external-comparator-gate",
+      "category": "extract_workflow",
+      "problem": "P1 将外部验收器的完整比较定义作为进入 Design 提取的前置条件，即使数学、IO、reference 和已有阈值已能忠实转录，也会因比较公式或相对误差基准未提供而阻塞。",
+      "evidence": [
+        "2026-11-03，基线 b5c8e87、Schema Extract 2.2.1，fp8_scaled_grouped_gemm、nvfp4_fused_moe、fmha_mxfp8_qkv、mla_expanded_fp8、dual_cache_latent_bf16、gdn_prefill_bf16_state_bf16 六项独立 P1 reviewer 均判定 Contract 主体忠实，但因外部验收定义缺口返回 blocked；全部未进入 P2。共 14 次调用，其中 2 次是空 summary 的格式修复，实质退修为 0。",
+        "b5c8e87:schema_extract/phases/01_contract.md 的第 2 段要求不补造比较公式，并由 reviewer 判断验收缺项是否影响放行。此次六项均将相对基准或额外度量缺失判为关键外部事实。",
+        "b5c8e87:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/metadata.json 提供 atol=0.01、rtol=0.05、max_mismatch_fraction=0.0；performance/CERTIFIED_BEST.json 仅声明 comparator/tolerances unchanged，未给出公式和 relative_to。FMHA、Sparse、GDN 的 reviewer 报告同类缺项。",
+        "nvfp4_fused_moe 的 reviewer 指出 mutated_inputs.output 的 max_rel_l2=0.01 缺少归一化定义；mla_expanded_fp8 的 reviewer 另指出 O/LSE 的相对基准、相对 L2 和返回别名/写回阈值映射缺少定义。两者均未将比较器精度或 NaN/Inf 政策单独作为阻塞理由。",
+        "完整逐运行记录和回执定位保存在 .schema_extract/trials/six-families/findings.json，审计结果在同目录 audit/；该目录仅提供详细证据，上述事实摘要与固定源码定位不依赖临时 /tmp 文件。",
+        "六项 2.2.2 P1 独立批准的 audit --attempt --verify 均为 verified，errors/unavailable 为空；可追溯记录在 .schema_extract/trials/six-families/gap-fix/acceptance.json 及同目录 audit/。"
+      ],
+      "proposal": "明确忠实提取与完整复刻外部验收器的边界：数学、IO、reference 已固定时，考虑允许将未提供的验收公式、相对基准或路由定义显式记为 gap，保留已有阈值并继续 Design 提取；不得套用默认公式或补造保证。任务数学、必要输入输出或 reference 不明仍阻塞。规则确定后由新冻结执行器独立重审，不修改旧批准或运行状态。",
+      "necessity": "六类样本被同一前置门槛挡在 P1，尚无法检验 Design 的表达能力及后续提取流程。需先澄清这一边界，单纯重复调用或增加预算不会补齐外部事实。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.2",
+        "reason": "2.2.2 已明确来源缺口与任务计算事实的边界，保留已知阈值和未知比较器定义，既有身份、源码和比较事实检查仍有效。六项使用新冻结规则的独立 P1 审阅均批准并进入 P2，全部批准回执通过深验；随后六项均进入 Design 提取。当前回归套件也通过既有 source_gap 正反例。未修改 kernel 或绕过 reviewer 决定。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/p1-external-comparator-gate.json",
+      "status": "resolved"
+    },
+    "p6-tree-artifact-evidence": {
+      "id": "p6-tree-artifact-evidence",
+      "category": "extract_workflow",
+      "problem": "P6 的 tree 结论通常陈述已生成目录的节点数、链接、父关系及可达性；通用结论门禁要求它也带非空 source_evidence 索引，没有明确区分产物检查与源码语义依据。",
+      "evidence": [
+        "schema_extract/tools/receipts.py::validate_receipt 仅在结论 text 和 evidence 同时非空时计入 required_conclusions；P6 的 tree 也受此规则约束，conclusions.evidence 只索引 source_evidence。",
+        "MoE 的第一次 P6 reviewer 回执 43d6c173-33aa-4b8f-9cac-3513bacbe9a8 返回 approve；tree 文本陈述 60 节点、链接、父关系、无环、可达及共享 Contract 检查，evidence 为 []。其他四类结论都提供了源码索引。",
+        "该回执含 64 个 artifact_evidence 条目和全目录冻结 checker 成功记录；Runner 仍以 missing supported stage conclusions: tree 拒绝，未形成发布批准。",
+        "原始回执、门禁、终止与预算检查保存在 .schema_extract/trials/six-families/checks/check-7-11.json；当前任务通过原执行器重新独立审阅，未由 Supervisor 填写索引或改写原回执。",
+        "2.2.4 的提取回归共 29 项通过；修复、原例回放及维护记录见 .schema_extract/trials/six-families/post-batch/fixes-2.2.4.json。"
+      ],
+      "proposal": "明确区分 P6 产物树检查与源码语义结论：产物树事实依据完整 artifact_evidence 和实际全树检查，选择、覆盖等源码语义仍要求有效固定源码依据。保持拓扑、文件集合、链接和来源门禁，避免让模型为纯产物事实附上不相干的源码索引。",
+      "necessity": "来源与产物的证据责任需要清楚；在事实已可检查时反复要求不相干的来源引用会增加无效调用，也不提升提取的可追溯性。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.4",
+        "reason": "2.2.4 允许 P6 的纯产物 tree 结论使用完整 artifact_evidence；必须实际文件集合等于计划、全部文件被有效引用，并通过 validate_plan(require_files=True)。其他结论仍须有效源码依据，最终完整 schema 检查和独立审阅保持。旧 MoE 的 60 节点原提案在只读验证回放中通过，原状态与回执字节未变；缺产物引用、错父关系、额外文件和无来源 selection 的回归均继续拒绝。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/p6-tree-artifact-evidence.json",
+      "status": "resolved"
+    },
+    "progress-preserving-continuation": {
+      "id": "progress-preserving-continuation",
+      "category": "extract_workflow",
+      "problem": "长任务遇到工具缺陷、执行器修复或规则变化时，缺少按实际影响从既有阶段、节点和候选稿续接的稳定约定。历史continue曾统一清批准并退回P1；2.4.0修复后，20261117精简又删除执行器换绑与跨身份承接，调查基线只剩固定执行器内恢复/维护。Supervisor因此容易把没有现成恢复入口、新执行身份、旧批准是否有效和是否需要重写产物捆绑，造成无依据的全流程重跑。仅保留旧文件供阅读，仍可能丢失有效进度并重复大量提取与审阅；已有issue的已解决状态也未随能力撤除更新。",
+      "evidence": [
+        "基线 58a4d92 的 continuation._scope/_inherit 统一清批准、撤下有效节点并回到 P1，保留旧用量和单次决定。",
+        "schema_extract/tools/compatibility.py 对完整规则 manifest 与实际字节生成报告，独立 review 逐项绑定差异；runtime.py::upgrade_runtime 封存报告、审阅、原状态和执行锁，保留同一 run 的输入、批准与预算。",
+        "2.3.0 集中合成场景验证 P1–P4 批准及已合入兄弟保留、重复登记幂等、新执行器推进后核验和基线 Store.load 拒绝新状态格式；test_cli_recovery.py 验证完整目标及独立审阅绑定。",
+        "2.4.0 的 revisions/revision_control/maintenance 将同 run 语义上下文、调用边界请求、批准采纳、保稿维护与正常游标接续分开；默认 continue 生成待评估计划，full-restart 须显式理由。",
+        "test_semantic_revision.py 的 5 个隔离组合场景覆盖 P1/P2 未完保稿、P4 reviewer-first 全树保留、P5 父 patch/子 review/兄弟 keep、目标 prompt/checker 与原始/有效批准、runtime 交错 audit、drain/重复/P6 发布屏障和原计数。",
+        "20261117 精简记录 schema_discussion/extract_execution_20261117/PLAN.md 第36–42行明确移除执行器换绑、continue/revise 和跨身份批准 adoption；implementation/R3_B.md 记录对应实现与执行绑定切换测试退出。BRIEF.md 同时要求保留有价值的恢复且不建设旧版本兼容层，不能把后者等同放弃当前格式长任务的工具修复接续。",
+        "20261119调查基线2.5.1的 README.md 将来源/任务/规则/执行器变化统一指向另建run；tools/runtime.py 的 verify_execution 与 frozen_run_invocation 只接受原冻结执行器，tools/cli.py 的 resume/maintain 沿原冻结入口。current_maintenance、原批准与当前适用性核验仍在，但当时没有工具补丁换绑或跨run进度承接入口。",
+        "20261119 Sparse P6 工具误拒事件暴露当前缺口：完整候选和历史批准仍可核验，普通resume却无法采用已修 gate，Supervisor 曾因此选择从P1重建。独立复盘见 schema_discussion/extract_six_full_20261118/recovery_reassessment/SUPERVISOR_DECISION.md；保稿可行性与恢复边界见同目录 TECHNICAL_RECOVERY.md。两份报告的验证发生在副本，不能当作真实续接已完成。",
+        "同目录 RECOMMENDATION.md 记录主Supervisor的决策责任：提前限定仅现成公共接口，将新执行身份与全部阶段重做绑定，没有充分比较保进度修复和重复执行的剩余成本。新开的Sparse调用已按用户要求取消；续接应使用最后P6候选，并处理分支draft仍指早稿的潜在回退，不能只保留文件却回到旧进度。",
+        "20261119用户明确要求原技术调查子代理负责Sparse续接直到交付，同时强调续接机制本身仍需要讨论、须清楚记录为issue。已委派当前格式、同源码/同语义规则、未交付且调用已结清的执行器补丁续接实施与监管；实施授权不等于工具验收通过或本issue已解决。",
+        "20261119用户随后明确决定：本轮仅支持extract流程工具故障的修复续接；沿已有前提先完成，对出问题的阶段及潜在独立审计点随schema留标记，完成后知会用户，由用户决定是否复查/重来；不再把这些额外审计或产品选择前置为中途停等。其他issue修改等后续指挥。原话及执行边界见schema_discussion/extract_six_full_20261118/recovery_reassessment/USER_DECISION.md。",
+        "20261119真实收口：工具补丁续接已应用到Sparse与FMHA，原候选、旧调用及执行身份保留；Sparse仅增加一次正常P6后发布。FMHA新P6出现坐标和轴词问题，用户随后明确授权内部xhigh定点小修交付、不打回循环；其原自动reopen/invalid_receipt未被改成批准。六项逻辑交付证据见schema_discussion/extract_six_full_20261118/DELIVERY_INDEX.json，两项回执均携带pending_user_decision审计标记。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md 及 ROUND2_RUNTIME_TESTS.json 记录 30 个独立定向用例取得通过结果；test_executor_repairs/test_executor_snapshots 覆盖初始/P5/P6 保存稿、裁决待签收、原已哈希 scope、双次绑定、严格同内容封印复用与真实阶段审计点。第三轮 5 项定向检查及最终删减复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md；本轮不冒称完成 FMHA/Sparse 专项。"
+      ],
+      "proposal": "按用户已确定的目标，仅对extract工具自身故障提供保进度续接：记录真实工具修复及新旧执行身份，保留最新候选、原证据/历史批准和调用账，沿正常流程先完成。对故障阶段、继续沿用的前提及潜在独立审计点随交付留可追溯标记，完成后由用户决定额外检查或重来；不把额外语义审计、无现成入口或新执行身份转成默认重跑/中途决策。正常校验和真实最终结果保留，失败结果不冒充批准。规则语义、源码或任务变化不纳入本轮，其他issue不顺手修改。",
+      "necessity": "优先级：高。用户明确认定这是一个很重要的问题。基础设施迭代频繁时，无差别回退会重复消耗源码阅读、模型调用、审阅时间和预算，延迟已有成果的交付，并使维护越频繁、重复工作越多。节省重跑不能依靠无条件继承已经失效的批准；可核验的兼容性与必要复核范围是本问题的核心。20261119 再次要求区分执行身份、已有内容和批准适用性，评估当前格式任务采用工具修复后继续剩余工作的最小能力，不恢复庞大旧版本兼容系统。",
+      "decision": {
+        "outcome": "partially_adopted",
+        "version": "2.5.1",
+        "reason": "2.5.1 已完成用户选定的 extract 工具故障续接范围；保稿真实性、原权限/批准来源与完成度诊断分开，未完成诊断不形成批准。第三轮删减未削弱执行绑定、最新 P6 草稿、提交前控制核验或交付审计标记。保留部分采纳是因为广义源码、任务及语义迁移未实现，不是仍待选择当前续接方案；原 2.4.0 能力及撤除依据保留为历史。",
+        "adopted": "同源码、任务和语义规则下，仅 extract Python 工具修复可 prepare/apply 后普通 resume。原 checkpoint、调用/批准来源与已哈希权限材料保持可核验，合法未完成稿交原阶段继续；普通、恢复和裁决保存共用最新 P6 draft 规则。绑定冻结完整目标并严格复用同内容封印；pause/cancel/hold、维护和在途 fence 保留。仅接受真实 user_instruction 的 continue_with_audit_marker，stage/attempt/null 对应实际停点，交付保留待审计事项；原批准、旧 response 和计数不改。",
+        "remaining": "源码、任务、语义规则变化及已发布产物迁移、通用旧版本兼容不在当前支持范围，未建设通用承接系统。FMHA/Sparse 原 continuation_audit 和自动流程历史保持原含义；用户已安排后续专项复核，本轮框架归档不宣称这些额外语义审计完成，也不再以前置产品决策或等待指挥阻塞既定工具续接范围。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/progress-preserving-continuation.json",
+      "status": "partially_adopted"
+    },
+    "proposal-summary-ownership": {
+      "id": "proposal-summary-ownership",
+      "category": "extract_workflow",
+      "problem": "提示词将“摘要”列为 Runner 生成的字段，但模型同时必须提交非空语义字段 summary；文件哈希与语义总结的责任表述混用，可能诱发空 summary 和重复格式修复。",
+      "evidence": [
+        "schema_extract/tools/prompts.py 的回执提示写着“identity、摘要、文件清单、实际差异由 Runner ... 生成，不手填”；EXTRACT_SCHEMA.md 与 schema_extract/tools/README.md 也使用未区分的“摘要”。",
+        "schema_extract/tools/receipts.py 的 receipt_schema/proposal_schema 保留模型负责的 summary 字符串，validate_receipt 拒绝空白 summary；normalize_response 不会为模型生成语义总结。",
+        "2026-11-03，MoE 已进入 P6 的本次固定 2.2.2 提取中，逐个 repair.json 核得 50 次 receipt requires a summary；抽查对应原始 response.json 均为 summary 空串，涉及 P1/P3/P4/P5 及 worker/reviewer。",
+        "按真实回执统计的原因与样本记录在 .schema_extract/trials/six-families/checks/check-7-10.json。该观察支持澄清责任，但不能证明文案歧义是所有空值的唯一原因。",
+        "2.2.4 的提取回归共 29 项通过；修复、原例回放及维护记录见 .schema_extract/trials/six-families/post-batch/fixes-2.2.4.json。"
+      ],
+      "proposal": "明确 summary 是模型必须填写的简短非空语义结论；工具生成的字段称为文件 SHA-256 或哈希，避免混称“摘要”。保留空值拒绝和原有限修复，不由工具代写模型结论。",
+      "necessity": "频繁的机械格式修复消耗真实调用和阶段时间；澄清两种字段的责任即可消除提示歧义，无需放宽来源、设计或审阅要求。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.4",
+        "reason": "2.2.4 明确 summary 由模型填写简短非空语义结论，Runner 生成的是文件 SHA-256；提示词、回执说明和 schema 字段说明已统一。空值拒绝与有限修复保持，工具不代填结论。职责歧义已修复，实际模型返工是否减少由单独的真实验证记录评估。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/proposal-summary-ownership.json",
+      "status": "resolved"
+    },
+    "published-dispatch-draft-status": {
+      "id": "published-dispatch-draft-status",
+      "category": "extract_workflow",
+      "problem": "P4 索引中的临时阶段说明进入最终交付，P6 核对文件和链接后未清理。读者打开已发布索引仍会看到待 P5 生成或当前缺文件，容易将完整产物误认为尚未完成。",
+      "evidence": [
+        "KernelSchema@6e4ca91bd91d998cac99e8dadd83838e153c679d:schema_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/dispatch.md:80：表内计划文件由后续 P5 生成，当前缺文件不代表已有完整 Design。该目录已有 60 个发布节点。",
+        "同一版本 schema_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/dispatch.md:13：派生文件待 P5 生成。该目录已有 root、tc_grouped、probe_dual 三个发布节点。",
+        "schema_extract/phases/04_dispatch_plan.md 允许索引在派生文件生成前定稿；phases/06_final.md 的第一项放行门槛核对实有文件和链接，但未明确清理索引内的过期阶段措辞。",
+        "2026-11-04：schema_wiki/errata/nvfp4_fused_moe.md 与 schema_wiki/errata/dual_cache_latent_bf16.md 提供独立文案勘误，schema_wiki/README.md 的当前阅读入口已指向两页；schema_extract/OPERATOR_REVIEW.md 与 schema_extract/issues/TRIAGE.md 同步说明。原表格和覆盖事实保留，仅移除过期阶段文字并调整相对链接。",
+        "2026-11-04 候选静态核验：63 个节点全部链接到原 YAML；正文除勘误说明、链接重定位与两处过期文字外等同。原两目录 67 个文件的前后 SHA-256 不变，65 项发布 receipt 绑定文件全部匹配；129 个本地链接、2 个锚点及 git diff --check 通过。主线程 Supervisor 已验收，详情见 .schema_extract/trials/six-families/post-batch/second-class-index-errata.json（本地非权威维护证据）。"
+      ],
+      "proposal": "P4 的最终索引只保留稳定的 workload、设计差异、选择依据和覆盖事实；临时缺文件/待派发说明留在回执。P6 检查并清除索引中的过期阶段措辞。已发布文件先提供明确勘误，后续通过独立修订清理，不直接改写旧发布回执绑定的文件。",
+      "necessity": "这是面向读者的交付状态错误，不是 kernel 计算错误；修正规则与勘误即可先消除误解，无需重做算子正确性审计。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.6",
+        "reason": "经 Supervisor 验收，P4/P6 的索引交付规则和当前阅读入口问题已解决：导航使用两份独立文案勘误页，保留 63 个节点及覆盖事实。历史 dispatch 按原发布快照身份保留，YAML、回执及原审阅身份不变。第一类条件流程与成员表达问题仍按各自 issue 独立待修；本次没有新 P6 或正式 export。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/published-dispatch-draft-status.json",
+      "status": "resolved"
+    },
+    "reviewer-document-integrity": {
+      "id": "reviewer-document-integrity",
+      "category": "extract_workflow",
+      "problem": "阶段 Reviewer 的职责、输入和批准门槛没有共同保证其对当前已完成文档承担完整审阅责任。初始提示包含前序批准、交接与旧稿线索，终审侧重树和已审结论；合法文本中的历史依赖、跨层补定义、正文覆盖结构和过程记录可能随产物放行。",
+      "evidence": [
+        "KernelSchema@6e4ca91bd91d998cac99e8dadd83838e153c679d:schema_extract/tools/prompts.py::build_prompt 将 feedback、handoff、prior_approvals、node_approvals、reviewed_artifacts 等加入 reviewer 初始上下文；stages.py 的 P6 required_conclusions 没有当前文档完整性的专门结论。",
+        "同一版本 schema_extract/phases/06_final.md 的阅读顺序先参考有效节点结论，并称其他节点无需重做；其范围没有明确区分全文表达复核与重复源码审计。",
+        "schema_extract/OPERATOR_REVIEW.md 记录实际产物的正文/结构冲突，以及检查器已执行但不解释文本语义的证据。conditional-flow-topology 和 symbolic-member-bounds 继续跟踪具体表达问题。",
+        "schema_extract/tools/tests/test_review_protocol.py、test_proposals.py 验证历史内容不进入初始 reviewer 提示、各阶段文档结论与文件锚点不可缺省，以及只读上游规范错误的有据重开和去重。",
+        "schema_extract/review_cases/RESULTS.md 记录 4 个合法样例、6 个缺陷样例全部符合预期，以及生产提示下真实 GDN 被要求重开 P3 的独立验证。"
+      ],
+      "proposal": "按用户采纳的方法设立统一 Reviewer 文档验收职责：先读当前规范和累计完成产物，再核对源码；审阅独立理解、分层、全文一致与内容必要性，覆盖复制及未改内容。初始上下文移除历史批准和交接，批准门槛要求四项当前文档结论；保留有据上游修订出口及正反语义回归集。单文件阅读由正式工具展开共享 Contract，不让 worker 自行改写创作格式。",
+      "necessity": "纯文本需要表达空间，结构检查不能承担全部语义判断；应使 Reviewer 对当前文档而非修改记录负责，并用实际反例和合法样例检验其执行。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.5",
+        "reason": "2.2.5 已落实统一 REVIEW.md、各阶段累计审阅范围、初始输入隔离、四项批准结论、schema_conformance 上游重开和单文件阅读视图。42 项提取测试及 148 项模板测试通过，10 个独立语义样例全部符合预期；真实 GDN 在正式回执校验下要求重开 P3。解决的是 Reviewer 机制问题；历史算子的具体表达修订仍由原 issue 和任务记录跟踪，未覆写旧批准或宣称旧产物已修复。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/reviewer-document-integrity.json",
+      "status": "resolved"
+    },
+    "source-defect-abstraction-boundary": {
+      "id": "source-defect-abstraction-boundary",
+      "category": "extract_workflow",
+      "problem": "提取指引中的“源码缺陷保持原样”和不区分层级的“不能补加等待”，容易把源码的低层地址或同步实现偏差当成必须复制的设计，或要求先还原损坏值、修复源 kernel 才能完成 Schema。应保留缺陷事实与证据，并按 schema_docs 的抽象边界判断同一完整设计是否已有来源依据；这不豁免残缺 Design 或需要新算法、数据版本、依赖、容量和复用策略的修复。",
+      "evidence": [
+        "schema_docs/5.design.tile_pipeline.md“资源”只登记存放上游值或局部状态的设计存储，明确 barrier 存储、对齐余量和编译器临时量不登记；schema_docs/6.realization.md“核心思想”将不影响既定语义的地址计算和 barrier 编号留给 Coder，且禁止 realization 重定角色、缓冲或依赖。",
+        "2.2.8 的 schema_extract/tools/prompts.py 共用指令写“源码既有缺陷忠实记录，不能补造等待、fallback或外部保证”，schema_extract/phases/03_root.md 写“事实、代价和源码缺陷保持原样”。前者没有区分既有逻辑依赖的指令落实与新增逻辑依赖，后者容易被读成要在 YAML 固化坏布局。",
+        "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu，SHA-256 c9389387d35bd26954754a5ae13e2d202df06fc9799a77fddfb0654306909eb2：1879–1881 已为 5*STG*8 字节 barrier 区及返回槽、union 留出容量；2111–2115 却让 bar_land 与 tmem_base_s 共址，且 ukey 紧随其后。独立对象、整个 kernel 的 union 寿命、2753–2761 的 gather 使用点及 2514 的已有交接共同支持分开低层槽位，不仅是作者意图猜测。源问题独立登记为 sparse-tc-control-layout-overlap。",
+        "Sparse run 2d252bf9-d9a3-4fa4-96d2-90a98e25eb34 的固定 checkpoint f55a0eb8369967ef18bc01fa51f6926815714e0ff88991d51bb695cf2eda8c7e 中，tc_direct.yaml:130–138 将 TmemBase 与 UnionKey 合入 union_tail，189–199 又把共址写入 realization.require；59–63 只定义空路径，182–188 的非空 pipe 仅到 setup。前者把实现偏差升为约束，后者仍是必须补齐的独立文档缺陷。",
+        "同 run 的 P5 reviewer b0877632-8c5e-4ec0-99f4-a54269aa891a 在 issues/detail 中要求确定重叠后的有效 TMEM 地址、landing 状态及键值，认为搬移存储或补写等待都会改变固定实现；recovery_condition 要求先提供这些损坏值或更新源码/范围。这说明分流过严；拒绝缺少非空计算及输出链的当前稿仍然正确，不能由规则修订直接改判批准。",
+        "2.2.9 验证：28 项相关协议、提示、证据和来源缺口回归通过；P3/P5/P6 的六种审阅 mode 均嵌入同一共用方法并保留原结论与文件要求。三个小型 CUDA 语义样例使用真实 build_prompt、同一冻结规则 cbb9985a24ef3346244f9517e27e108fac2e6cdc5074a390f1c38ce3edeb9d00、原配置模型及现有 proposal/receipt 校验：完整预算内 offset 偏差 approve，缺计算和输出链的残稿 revise，双 stream 共用单槽却要求双槽的修复 blocked。原始提示、固定输入、合法输出、usage 和逐例语义判断保存在 .schema_extract/review-eval/source-defect-2.2.9-20261104T145114Z/report.json 及其 attempts；未做 GPU 测试，也未更改或批准 Sparse 产物。"
+      ],
+      "proposal": "在 schema_extract/REVIEW.md 统一源缺陷分流，并使 build_prompt 的共用及 mode 指令、P3/P5/P6 和入口说明引用同一标准。固定源码足以支持同一完整设计、且不需重定算法、精度、数据版本、逻辑依赖、角色、提交、容量、寿命或复用策略时，记录源问题并继续提取；需要猜测或改变这些决定才阻塞。缺陷详情使用既有 issues/source_evidence/summary，由 Supervisor 登记 kernel issue；YAML 不要求坏地址或错误复用。保留完整 Design、四项文档结论、全部文件与源码锚点及检查门禁，不增加字段、状态机或缺陷白名单。维护版本为 2.2.9；通用规则修复与 Sparse 实际 Design/P6 的验收分开。",
+      "necessity": "Sparse 的现有预算、对象寿命和使用点已给出可复核的抽象边界反例。澄清后可以完成有据设计，同时继续独立追踪源 kernel 正确性；也必须以残缺设计和无依据增加缓冲/依赖的反例验证拒绝边界，避免将任意 kernel 修复或算法重写伪装为实现自由。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.9",
+        "reason": "Supervisor 已验收共用源缺陷分流及其在真实 prompt、P3/P5/P6 和入口说明中的落实；此次解决通用提取规则，不要求 YAML 复现坏布局，也不允许借修复重定设计。28 项相关离线回归通过，三个真实 P3 语义样例分别 approve/revise/blocked，合法回执确认有据完整设计可继续、残稿须补齐、新容量/复用或逻辑依赖不能豁免。四项文档判断、完整文件与源码锚点及现有门禁保留，已测 prompt 与 Reviewer 方法字节不变。Sparse 实际 Design/P6 尚未完成，源 kernel 未修；sparse-tc-control-layout-overlap 和 conditional-flow-topology 继续独立待决，本决定不继承或改写旧批准。以上保留 2.2.9 验收时点；2026-11-05 依用户确认将源布局问题按本边界归档至 schema_extract/issues/archive/kernel_wiki/sparse-tc-control-layout-overlap.json，低层槽位偏差不再作为提取阻塞，实际 Design/P6 仍须独立完成，不改写当时状态或版本。"
+      },
+      "path": "schema_extract/issues/archive/extract_workflow/source-defect-abstraction-boundary.json",
+      "status": "resolved"
+    },
+    "gdn-slot-padding-coverage": {
+      "id": "gdn-slot-padding-coverage",
+      "category": "kernel_wiki",
+      "problem": "GDN 的 FP32 状态槽填充域比当前候选所接受的布局更宽。",
+      "evidence": [
+        "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/problem/shape_range.json:55–59 允许 state_slot_padding=0..65536。",
+        "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_postconv_mtp_bf16_state_fp32/candidate/launch.cu:194–198 要求槽首地址和步长保持 16 字节对齐。",
+        "历史版本依据：5fb0fde 同步校订 kernel_wiki/catalog.json、kernel_wiki/tools/catalog.py 与 kernel_wiki/GUIDE.md 的槽填充域及候选对齐限制，并归档本项已采纳部分；当时 Schema Extract 没有产品版本号，以该实际修复提交的完整 Git SHA 定位。"
+      ],
+      "proposal": "区分题目域和候选可接受的对齐布局。要覆盖全部合法填充量需在上游支持未对齐槽。",
+      "necessity": "调用方对合法的 padding=1 会遇到入口拒绝。",
+      "decision": {
+        "outcome": "partially_adopted",
+        "version": "git:5fb0fde8d287a546430ef49aa7fbc732850ad603",
+        "reason": "保留完整任务域，并将候选的对齐限制作为实现覆盖缺口。",
+        "adopted": "明确 FP32 槽步长必须为 4 个元素的倍数，并保留任务原有的填充域。",
+        "remaining": "其余填充量需要上游候选支持未对齐槽，提取不修改实现。"
+      },
+      "path": "schema_extract/issues/archive/kernel_wiki/gdn-slot-padding-coverage.json",
+      "status": "partially_adopted"
+    },
+    "masked-gemm-tail-write-coverage": {
+      "id": "masked-gemm-tail-write-coverage",
+      "category": "kernel_wiki",
+      "problem": "BF16 masked GEMM 的目录容易让读者把合同中的尾行保护当作候选实现的行为。",
+      "evidence": [
+        "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/problem/metadata.json:17–22 要求非活动行及其余 backing storage 保持原值。",
+        "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/bf16_grouped_gemm_masked/candidate/solution.py:208–215、647–652、1572–1578 按块写回。",
+        "历史版本依据：5fb0fde 同步校订 kernel_wiki/catalog.json、kernel_wiki/tools/catalog.py 与 kernel_wiki/GUIDE.md 的合同保护区及候选尾块写区，并归档本项已采纳部分；当时 Schema Extract 没有产品版本号，以该实际修复提交的完整 Git SHA 定位。"
+      ],
+      "proposal": "注明合同与候选的实际写区。若需实现完全符合合同，应修正尾块写回。",
+      "necessity": "依赖非活动行保留原值的调用方会受到影响。",
+      "decision": {
+        "outcome": "partially_adopted",
+        "version": "git:5fb0fde8d287a546430ef49aa7fbc732850ad603",
+        "reason": "Contract 的保护区域与候选实际写区分别保留，不把数值比较的有效前缀当成写掩码。",
+        "adopted": "区分数值比较的有效前缀、合同保护的其余行和候选可能修改的尾行。",
+        "remaining": "候选尾块写回的修正属于上游算子改动，提取保留该实现差异。"
+      },
+      "path": "schema_extract/issues/archive/kernel_wiki/masked-gemm-tail-write-coverage.json",
+      "status": "partially_adopted"
+    },
+    "mla-catalog-dynamic-domain": {
+      "id": "mla-catalog-dynamic-domain",
+      "category": "kernel_wiki",
+      "problem": "仅凭 MLA 目录摘要建立 Contract，可能误纳入头数或排除合法的非因果输入。",
+      "evidence": [
+        "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/metadata.json 指定 shape_range.json 为动态域依据。",
+        "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/shape_range.json:26–34、57–71 限定 heads=12/24/32/96/128，并允许 causal=false 和可选 sink。",
+        "历史版本依据：38d5a38 同步修正 kernel_wiki/catalog.json、kernel_wiki/tools/catalog.py 与 kernel_wiki/GUIDE.md 的 MLA 头数和因果输入域，并首次归档本项；当时 Schema Extract 没有产品版本号，以该实际修复提交的完整 Git SHA 定位。"
+      ],
+      "proposal": "目录用于导航，Contract 的合法输入以本题 metadata 和 shape_range 为依据。",
+      "necessity": "后续提取按目录摘要建 Contract 会纳入不支持的头数或排除合法的非 causal 调用。明确导航依据可避免每次提取重复裁决同一冲突。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "git:38d5a389173b099a8694cffd3d892dc25f6fa049",
+        "reason": "提取使用本题绑定的动态域和输入构造，目录摘要不覆盖这些定义。"
+      },
+      "path": "schema_extract/issues/archive/kernel_wiki/mla-catalog-dynamic-domain.json",
+      "status": "resolved"
+    },
+    "mla-fp8-source-comment-drift": {
+      "id": "mla-fp8-source-comment-drift",
+      "category": "kernel_wiki",
+      "problem": "展开式 FP8 MLA 的部分源码注释与实际缩放、调度及缓冲复用行为不一致；catalog 虽已有校注入口，旧提取的来源收集未纳入该文件，原归档将材料存在误认为已进入冻结输入。",
+      "evidence": [
+        "kernel_wiki/annotations/mla_expanded_fp8/solution.py 提供可逐行对照的校注，原件位于 kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py。",
+        "kernel_wiki/catalog.json 中 mla_expanded_fp8 的 paths.annotated_entrypoint 指向该校注文件。",
+        "2026-11-04 复核：2.2.5 及此前 resolve_request 只收集算子目录和必要输入，未收集 paths.annotated_entrypoint；原 MLA run e3f7704f-061f-48ff-8131-cc317afe6003 的 inputs.lock.json 没有 kernel_wiki/annotations/mla_expanded_fp8/solution.py。原决定声称该批提取已冻结校注不成立，历史快照保持原样。",
+        "2.2.6：schema_extract/tools/inputs.py::resolve_request 通过现有 _locator 收集 catalog 的可选 annotated_entrypoint；entrypoint、host 和证据角色绑定保持原件，不以校注替换原实现、reference 或验收绑定。",
+        "2.2.6：test_inputs.py 的 4 项新增测试覆盖可选项、缺失/链接/路径边界、实际快照收集与旧快照不变；最终 47 项提取回归和 git diff --check 通过。",
+        "对当前真实 MLA 输入的只读收集得到 31 个文件并包含校注；现有 annotation_program 对当前原件和校注的比对为 True。这是独立只读核验，不是 extract 自动执行等价验证，也不追授旧运行的阅读或审批结论。"
+      ],
+      "proposal": "保留可逐行对照的校注作为阅读辅助，经现有来源收集入口纳入新快照；固定的实现、host、reference 与验收绑定仍指向原件。设计事实以实际执行代码为准，不把校注存在或被收集当成已完成 Reviewer 核对。",
+      "necessity": "依赖旧注释会误写数值公式、同步和缓冲区生命周期。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.6",
+        "reason": "2.2.6 已补齐 catalog 可选校注文件的输入收集，复用现有 _locator、文件摘要和冻结机制，未新建证据角色或替换原入口绑定；4 项输入回归及最终 47 项提取测试通过。真实 MLA 只读收集确认包含校注，当前原件/校注另经 annotation_program 核验一致。纠正原归档关于旧批次已冻结校注的错误判断：旧 MLA 快照实际未含该文件，原快照和批准未改写，本次只保障后续新快照的输入链路。"
+      },
+      "path": "schema_extract/issues/archive/kernel_wiki/mla-fp8-source-comment-drift.json",
+      "status": "resolved"
+    },
+    "scaled-gemm-output-abi": {
+      "id": "scaled-gemm-output-abi",
+      "category": "kernel_wiki",
+      "problem": "fp8_scaled_gemm 的通用元数据提到可选 C，容易推导出实际接口没有的累加输入或输出行掩码。",
+      "evidence": [
+        "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/problem/input.py:63–74 定义实际输入。",
+        "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/fp8_scaled_gemm/problem/reference.py::Model.forward 无 C 输入，写满并返回传入的 out。",
+        "历史版本依据：5fb0fde 同步校订 kernel_wiki/catalog.json、kernel_wiki/tools/catalog.py 与 kernel_wiki/GUIDE.md 的实际输入、完整写区及 out 返回别名，并归档本项；当时 Schema Extract 没有产品版本号，以该实际修复提交的完整 Git SHA 定位。"
+      ],
+      "proposal": "按本题接口说明 out 的返回别名、实际写区和 logical_m 的生成用途。",
+      "necessity": "把 C 或尾行掩码写进 Contract 会改变算子的可观察语义。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "git:5fb0fde8d287a546430ef49aa7fbc732850ad603",
+        "reason": "按输入构造和 reference 表达实际接口、写区与 out 返回别名；不额外加入 C 输入或尾行掩码。"
+      },
+      "path": "schema_extract/issues/archive/kernel_wiki/scaled-gemm-output-abi.json",
+      "status": "resolved"
+    },
+    "sparse-tc-control-layout-overlap": {
+      "id": "sparse-tc-control-layout-overlap",
+      "category": "kernel_wiki",
+      "problem": "Sparse dual_cache_latent_bf16 的 tcgen05 共享内存控制区中，bar_land 与 tmem_base_s 同为 mbar+4*STG，ukey 又紧接 32 位返回槽。STG=2 时第五组 landing barrier 的 16 字节与 TMEM 基址槽及 packed UnionKey 的前三个 int 重叠；这些对象在非空路径同时需要存活。源码未修，静态证据说明布局冲突及正确性风险，不确定具体 GPU 执行的损坏值。",
+      "evidence": [
+        "固定文件：kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu；SHA-256 c9389387d35bd26954754a5ae13e2d202df06fc9799a77fddfb0654306909eb2。以下行号全部指向这些原字节，未修改候选源码。",
+        "1879–1881，tc_smem_bytes 已计算 5*STG*8 的 barrier 字节、16 字节对齐余量、4 字节基址返回槽，以及 GT>1 的 TCUBYTES+16；因此在已预留第五组之后分配返回槽与 union，不要求增加本函数声明的总容量。",
+        "2111–2115：bar_land=mbar+4*STG，tmem_base_s=reinterpret_cast<uint32_t*>(mbar+4*STG)，ukey=reinterpret_cast<int*>(tmem_base_s+1)，umask 紧接 TCUCAP 个 key；2113 明确 packed union 在整个 kernel 中保留。STG=2 时两枚 64 位 landing 状态覆盖 4 字节返回槽和 ukey[0..2]，不能将 union 当成初始化后可覆盖的临时元数据。",
+        "1608–1618 的 mbarrier.init 写入 64 位状态，1683–1688 的 tcgen05.alloc 将 32 位基址写入共享内存目的地址；2497–2515 在同一非空 prologue 中初始化 landing 状态、由 warp 4 分配 TMEM，并在 2514 的 __syncthreads 后读取基址。该交接可用于槽位分开后的使用前顺序，但现有 rendezvous 不会修复共址写入。",
+        "2753–2761 的 packed gather 后续读取 ukey 以选择池和行，同时更新 landing barrier；3068–3070 的 QK 发射等待 bar_land。UnionKey、TMEM 计算资源、数据就绪及资源复用关系均须在 Schema 中保留，只有返回基址槽等低层元数据可按规范省略。",
+        "5941–5946 的 cfg90 实例启用 MBA/QIS2 且 PR=false，受影响路径属于现有任务范围；Sparse P5 reviewer b0877632-8c5e-4ec0-99f4-a54269aa891a 已按上述固定 SHA 记录同一冲突。此 issue 依据源码和布局静态检查，未运行 GPU 复现，也不宣称某个局部 offset 修改能证明整个 kernel 正确。",
+        "版本依据：schema_extract/issues/archive/extract_workflow/source-defect-abstraction-boundary.json 的 2.2.9 决定已落实 schema_extract/REVIEW.md 的源实现缺陷与设计分流；上述容量预算、独立对象、寿命、使用点和已有交接共同支持同一完整抽象 Design，低层槽位分开无需重定设计。2.2.9 当时 Sparse 实际 Design/P6 尚未完成，本次归档不改写该事实。"
+      ],
+      "proposal": "按 schema_extract/REVIEW.md 的源缺陷分流保留固定源码身份、布局冲突及未修事实，完成提取侧记录后归档。已有来源足以支持同一完整抽象 Design，该低层槽位偏差及其上游修复不作为 Schema 提取前置条件；不能把坏地址写成 realization.require/forbid，TMEM、完整 UnionKey 及已有数据和复用关系仍须表达，也不能因此批准残稿。实际 Design/P6 继续独立完成和审阅；控制区槽位、模板实例、容量、对齐及初始化/访问的实现修复由上游独立处理。",
+      "necessity": "用户要求独立追踪源 kernel 问题。单独登记可保留未修状态与明确源码身份，防止提取流程的抽象边界澄清被误当作正确性修复或 GPU 验证；无需改变既有 issue 系统。",
+      "decision": {
+        "outcome": "partially_adopted",
+        "version": "2.2.9",
+        "reason": "沿用 2.2.9 已解决的 source-defect-abstraction-boundary：现有来源支持同一完整抽象 Design，此低层槽位偏差不改变设计决定。2026-11-05 依用户确认整理台账，归档提取侧记录与分流；本次不新增规则或升级当前 2.4.0 版本，不表示源 kernel 已修或实际 Design/P6 已完成，也不继承或改写旧批准。",
+        "adopted": "提取侧的固定源码证据记录与缺陷分流已完成；该源布局问题不再列为 Schema 提取待决项，不要求先修源码或还原损坏值，完整 Design 与独立审阅门槛保留。",
+        "remaining": "仅保留上游控制区布局尚未修复、GPU 正确性未验证的事实；源实现修复由上游独立处理，不是 Schema 待办或提取前置条件，不记为 kernel bug 已修复。"
+      },
+      "path": "schema_extract/issues/archive/kernel_wiki/sparse-tc-control-layout-overlap.json",
+      "status": "partially_adopted"
+    },
+    "capture-invocation-boundary": {
+      "id": "capture-invocation-boundary",
+      "category": "schema_docs",
+      "problem": "2.2.7 已定义一次提交的 phase 身份与 kernel_done，却未直接说明静态 plan 绑定哪一次算子请求的实际执行。纯 record/instantiate 不执行所记录的 kernel，内层录图后又可立即 replay；把录制和执行合计会虚增计算，假定外层必定 replay 会补造保证，将失败前实际提交另算逻辑调用则会抹去同一请求的重复工作和副作用。",
+      "evidence": [
+        "正式候选来自 MoE run 53d4bebe-882d-4a66-98b1-287d132dd6f3 的 P4 worker blocked 回执，attempt 5d888d90-c3af-462c-be61-97db802e707c，candidates 命令可按本稳定 ID 查到。后续 Reviewer 因路径覆盖退修，尚未确认需要扩展语言；本决定依据下面可独立复查的规范和源码事实，不把 worker blocked 当成扩语言结论或算子批准。",
+        "kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/nvfp4_moe.cu:9471-9489：外层 capture 记录 clean 与 full 并返回，不在本次等待设备 verdict；9506-9512 使用录制的参数，1723-1787 的验证仍读取执行时数据。host 选择、按值标量和张量绑定与设备当次读取的内容不能混为同一绑定时点。",
+        "同一 nvfp4_moe.cu:9533-9542、9569-9577：内层 record/instantiate 后可立即 replay；BeginCapture 失败仍调用 private stream 的 run_pipeline，随后可能 eager fallback。实际提交的前缀必须保留，不能据失败补造完成事件或跨 stream 顺序。schema_extract/inputs/nvfp4_fused_moe_default_scope.md:5-11 保持默认实现可达的 capture、graph、fallback 和错误出口范围。",
+        "2.2.8 的 schema_docs/0.common.md“plan 与计算执行实例”、schema_docs/4.design.work_schedule.md“提交身份与字段”“事件与启动”直接说明执行绑定和三个录图例子；schema_extract/phases/02_dispatch_draft.md、04_dispatch_plan.md 与 REVIEW.md 引用同一边界。没有增加字段、capture-only 计算 plan 或执行系统。",
+        "已审方案及来源哈希保存在 .schema_extract/trials/six-families/post-batch/plan-semantics-2.2.8/prepared/PROPOSAL.md、source-evidence.json；六份文档与原隔离补丁逐字一致，文档链接、示例语法及维护记录的落地检查记入同目录上级的 maintenance-validation.json。原始源码哈希为 cf0b42e2e4809cf71b2442f1b64285da4cc0a69214f43eb82efbdac938978f6f。"
+      ],
+      "proposal": "沿用现有 plan/phase/事件结构，将工作和事件实例绑定一次算子请求的实际执行。纯 record/instantiate 不产生所录计算的 kernel_done，也不保证外部 replay；record 后立即 replay 只计真实执行。录制固化的 host 选择、标量和张量绑定按录制或显式更新后的值，设备读取内容按当次读取。失败前的 private-stream 实际提交与 fallback 重复工作保留在同一请求中；P2/P4 与 Reviewer 在完整 host 路径覆盖中依同一边界核对，不靠删路径或收窄 Contract 解决。",
+      "necessity": "MoE 的范围内 capture 路径提供了静态设计与执行身份绑定不明的具体反例。补清现有语义即可避免漏计、重复计数和虚构回放保证；无需新结构。规范绑定说明的验收与 MoE 路径覆盖、实际 Design 修订及独立审阅分别处理。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.8",
+        "reason": "已审规范方案及现有表达示例验收后，2.2.8 补清静态 plan 对一次算子请求实际执行的绑定，并由 P2/P4/Reviewer 共用：纯 record/instantiate 不产生计算完成事件或保证外部 replay，立即回放只计真实执行，同一请求失败前的 private-stream 提交与 fallback 重复工作全部保留，录制绑定与设备当次读取内容分别处理。本项解决的是绑定说明，无需新增字段或执行系统；不表示旧 MoE 的路径覆盖、root 或派生产物已修复，也不继承旧批准。MoE 仍须正式 continue 采用新冻结并独立重审，跨 role 条件等待的实际产物修订沿用 pending 的 conditional-flow-topology。"
+      },
+      "path": "schema_extract/issues/archive/schema_docs/capture-invocation-boundary.json",
+      "status": "resolved"
+    },
+    "inplace-output-input-registration": {
+      "id": "inplace-output-input-registration",
+      "category": "schema_docs",
+      "problem": "Sparse把调用者提供、可取None的写回目的地仅登记为Output，以Compute散文说明接口，reviewer据此提出是否需要双登记的规范建议。",
+      "evidence": [
+        "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_docs/1.contract.algorithm_requirement.md:43-44 已要求Input包含调用者提供的全部对象，原地写回结果也列Output；第107行要求契约内名称唯一。",
+        "固定Sparse problem/metadata.json:13-34、input.py:119-130、reference.py:17,43-45,70,82-83明确调用者目的地、NaN初态、None时分配和相同对象返回。",
+        "独立核对见schema_discussion/extract_six_full_20261118/OUTPUT_BUFFER_TRIAGE.md和OUTPUT_BUFFER_CROSSCHECK.md；MoE output、FMHA o_tensor/lse_tensor也缺对应Input，另三项已登记。",
+        "schema_discussion/extract_six_full_20261118/ISSUES.md 的 2026-11-18 17:24 记录与 PROGRESS.md 的 17:25 记录确认 Sparse、MoE、FMHA 三项限域维护均 complete，原运行继续必要重审；OUTPUT_MAINTENANCE_REGISTRATION.md 的较早 applied 仅指请求已调度，不作为完成证据。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md 和 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md 保留现有双角色规则及原实例维护证据；本轮只复核框架删减，未完成或重写 FMHA/Sparse 的专项语义审计。"
+      ],
+      "proposal": "明确或新增写回目的地的Input/Output双登记规则，并提供异名对象及可缺省示例。",
+      "necessity": "调用者对象与结果角色应完整登记；散文已表达语义仍不能替代已有字段义务。",
+      "decision": {
+        "outcome": "declined",
+        "reason": "继续 declined：现有规则已要求调用者对象与原地结果分别登记 Input/Output，无需再新增相同规范义务。Sparse、MoE、FMHA 已完成的实例限域维护事实保留，工具诊断由 inplace-output-input-name-diagnostic 改进；本轮不重审这些算子语义。原维护批准不替代其他阶段、P6 或人工修订证据，FMHA/Sparse 遗留标记交指定专项核对。"
+      },
+      "path": "schema_extract/issues/archive/schema_docs/inplace-output-input-registration.json",
+      "status": "declined"
+    },
+    "non-tensor-parameter-registration": {
+      "id": "non-tensor-parameter-registration",
+      "category": "schema_docs",
+      "problem": "现有 Input 规则允许有明确定义的非数值类型，但未说明固定长度 Python 序列的 shape/dtype 如何对应容器与元素。非 Tensor 参数的登记可能在不同算子间出现不一致。",
+      "evidence": [
+        "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_docs/1.contract.algorithm_requirement.md 的 dtype 表及 nullable 与 None 一节，仅给出 python_none 单值类型示例。",
+        "同版本 kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/input.py:53-68 构造 scale_granularity_mnk=(1,128,128) 和 out_dtype=torch.bfloat16；candidate/solution.py:253-273 定义这些参数并检查 tuple 值。",
+        "2026-11-18 GEMM P1 worker 与独立 reviewer 均以本 ID 提报；reviewer 确认示例缺口，同时认定当前登记可按既有开放语义批准，不阻塞提取。",
+        "同版本 kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/input.py:106-129 构造四元 None tuple 与整数 tuple。MLA 的 tuple-abi-input-typing 候选中，登记示例建议并入本项；未列入示例的已定义 dtype 一律非法这一主张不成立。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：DOC1 三例通过现有 Algorithm 校验，MLA 全目录只读检查退出 0；schema_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/.extraction/issue-review-20261119.json 记录精确四字段变化和原回执边界，当前字节及删减复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+      ],
+      "proposal": "评估是否补充固定长度非 Tensor 序列和框架 dtype 值的登记示例，说明现有 shape、dtype 和 meaning 的对应关系；保留 dtype 开放取值及 python_none 单值语义，不新增字段或类型登记表。",
+      "necessity": "减少同类接口重复判断及登记差异；属于非阻塞说明建议，当前字段规则保持不变。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 的 DOC1 已用现有字段说明逻辑元素轴、整体对象和 torch.dtype，并区分 None 成员、整个对象 nullable 与省略参数 default；dtype 仍开放，不从默认值、样本或未使用推定固定 range。MLA 的整体 tuple shape 及相邻整数 tuple meaning 已限域修正，第三、四轮复核通过；原 P6 仅覆盖原字节，新字节由独立人工复核记录承接，不冒充新 P6。"
+      },
+      "path": "schema_extract/issues/archive/schema_docs/non-tensor-parameter-registration.json",
+      "status": "resolved"
+    },
+    "optional-tensor-contract": {
+      "id": "optional-tensor-contract",
+      "category": "schema_docs",
+      "problem": "共享 Contract 中的一个外部对象实际可为数值张量或 Python None。2.2.6 只定义数值 dtype、非数值标量和只含 None 的 python_none，未说明对象缺席时 shape/dtype/range 的适用边界；default 仅授权省略参数，不能取消这些约束。旧稿以 dtype: fp32 or python_none 或正文声明属性仅在 present 时成立，缺少规范依据。dispatch 节点共用 root Contract，不能靠拆 Design 解决同一接口的对象类型问题。",
+      "evidence": [
+        "修订前规范可从 KernelSchema@6e4ca91bd91d998cac99e8dadd83838e153c679d:schema_docs/1.contract.algorithm_requirement.md 复查：dtype 允许数值格式或有定义的非数值标量，range/shape/dtype/compute 同时成立；python_none 只含 Python None，要求 shape: []，不表示张量或零值。冻结 2.2.6 沿用这些规则。",
+        "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/reference.py:35-42：cu_seqlens=None 选择单请求，core_attn_out 非 None 才写前缀，返回 final 或 None。problem/input.py:242-246 实际构造 core_buffer 与 output_only 分支；这不是仅由可选签名推测的接口。cu_seqlens、chunk_indices、chunk_offsets、core_attn_out、FinalState、CoreWritten 的最小字段片段收录于 schema_template/tools/tests/fixtures/nullable_io.yaml。",
+        "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/problem/input.py:177-179 按 return_lse 提供 FP32[B,H,Sq] 或 None；problem/reference.py:100-103,120-127 只写存在的 lse_tensor，调用本身返回 None。schema_template/tools/tests/fixtures/nullable_io.yaml 保留张量目标及 python_none 单值返回的区别。",
+        "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/problem/reference.py:20,48-50,73-82 定义 sinks 为 None 或 FP32[H]；存在时加入零 value 的额外 logit，因此数值零张量也不同于 None。candidate/solution.py:173-176,236 把缺席转为内部空张量，不改变外部接口，不能用 shape: [head: 0] 替代。以上源码均可在 KernelSchema@6e4ca91bd91d998cac99e8dadd83838e153c679d 复查。",
+        "提报来源：GDN 的旧 P1 worker 提出了 optional-tensor-contract，但该提案因另有越权删除 dispatch 的改动被拒，未获 Reviewer 批准，不作为已接受回执或算子批准证据。Sparse 独立 P1 Reviewer 已被正式接收的 revise 回执另提 optional-tensor-none-default；两者同根因，合并至当前 ID。上述规范与源码反例可独立复查，不依赖旧 worker 提案被接受。",
+        "2.2.7 当前改动：schema_docs/1.contract.algorithm_requirement.md 的 nullable 与 None 节给出正式语义，schema_extract/phases/01_contract.md 引用它；rules/structure.py 只校验 I/O nullable 的布尔类型，rules/symbols.py 复用 Contract 关联检查拒绝 python_none 加非空 shape。分支条件、默认值表达式和来源有效域仍由 Reviewer 核实。",
+        "schema_template/tools/tests/test_nullable.py 与 schema_extract/tools/tests/test_source_gaps.py 覆盖 tensor/None 字段、required 但 nullable 与 default 的独立性、布尔类型误用、数值零/空张量/YAML null 的区别，以及 GDN/FMHA/Sparse I/O 片段通过当前 Contract/P1 门禁。片段故意省略其他计算，只是结构与门禁回归，不代表三个算子已重新提取、通过 Reviewer 或获得数值保证。",
+        "2.2.7 修改后使用 /opt/venv/python3.13.12/bin/python3 -B 运行 unittest discover：schema_template/tools/tests（-t schema_template）157 项通过，schema_extract/tools/tests 49 项通过。2.2.6 的 152/47 项是修改前基线；未运行 GPU、外部模型评估或算子重提取。",
+        "GDN 证据范围澄清：nullable_io.yaml 中 cu_seqlens/chunk_indices/chunk_offsets 的 metadata-None 片段是 reference API 的表达示例，不代表本次实际任务域。冻结 2.2.7 的独立 P1 reviewer d9dcd45f-eaf0-4033-8dd6-c640f8321459 在 .schema_extract/v2/runs/45f9bb51-77f3-4285-b7a7-251cf2744fa1/attempts/d9dcd45f-eaf0-4033-8dd6-c640f8321459/receipt.json 的 source_evidence[3] 依据 problem/input.py:243 明确元数据必有、norm=false；实际 nullable 仅 core_attn_out、FinalState、CoreWritten。本条仅澄清证据，不改 fixture、原 2.2.7 规范决定或原测试记录；GDN 后续六节点交付另见 schema_extract/TRIAL_REPORT.md。"
+      ],
+      "proposal": "在 Contract input/output 条目增加可选布尔 nullable。省略或 false 不在既有 dtype 的值之外增加 None；true 允许整个对象为 None，shape/dtype/range 完整描述非 None 对象，compute 明确含义、条件、各分支的计算和副作用，输出比较先核对对象是否缺席。default 仍只控制调用者能否省略输入；None 默认使用已定义的表达式字符串，不改用 YAML null。保留 python_none 的单值标量语义，不增加泛型 union、类型解释器或自然语言过滤。旧冻结规则、旧产物与算子审批不随框架修复改写。",
+      "necessity": "GDN 的可达返回与缓冲分支、FMHA 的生成调用和 Sparse 的源代码提供了真正的共享规范反例。一个正交布尔字段即可区分 payload 与对象缺席，避免把 None 伪装成 dtype、全零或空张量，也不以缩小外部接口迁就实现覆盖。框架能力、历史产物修订和各算子独立审阅必须分别验收。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.2.7",
+        "reason": "Supervisor 已依据代码、正式规范与 157 项模板/49 项提取回归证据验收。2.2.7 解决共享 Contract I/O 的张量或 None 表达及字段/结构检查能力，明确 default、nullable、非 None 属性与 python_none 单值类型的边界；Sparse 的 optional-tensor-none-default 同根候选并入本项。此决定不表示旧 GDN、FMHA、Sparse 已重提取或获得新批准；历史产物仍须在正式接续的新冻结规则下独立修订与审阅，符号条件及来源有效域继续由 Reviewer 核实。"
+      },
+      "path": "schema_extract/issues/archive/schema_docs/optional-tensor-contract.json",
+      "status": "resolved"
+    },
+    "tuple-abi-input-typing": {
+      "id": "tuple-abi-input-typing",
+      "category": "schema_docs",
+      "problem": "MLA 提取将四元 None tuple 登记为 python_none，并据此推断复合非 Tensor 参数没有合法类型写法；worker 与 reviewer 同 ID 提报。",
+      "evidence": [
+        "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_docs/1.contract.algorithm_requirement.md:58,71 明确 dtype 为开放取值、已定义类型的含义须说明；第210行规定 python_none 仅取单个 Python None。",
+        "同版本 kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/input.py:106-129 及 candidate/solution.py:2105-2106 明确两个实际 tuple 参数。",
+        "2026-11-18 MLA P1 worker 2768965d-56c6-40e5-834d-07e4488370f4、reviewer 5cb325e9-a33f-41cd-b690-33c5e1ba456b 提报；独立核查见 schema_discussion/extract_six_full_20261118/TUPLE_TRIAGE.md。",
+        "schema_discussion/extract_six_full_20261118/DELIVERY_MLA.md 核对实例维护 complete、P1 任务 done 和独立 verify 批准；sage_attn_sfs 已使用明确定义的 python_tuple，整数 tuple 未据默认值收窄。TUPLE_CROSSCHECK.md 记录同类核对未发现其余五项有相同 tuple/None 矛盾。",
+        "schema_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/.extraction/issue-review-20261119.json 保存当前 root Version 5 的精确四字段修改、固定来源和原 receipt 摘要；说明与实例的必要性复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md，原类型机制提案仍不采纳。"
+      ],
+      "proposal": "明确复合哨兵类型，或让 python_none 容纳 tuple，并使数值与非数值 tuple 使用一致登记形式。",
+      "necessity": "需要忠实记录真实接口对象；实例错误、既有开放类型误读与可选说明示例须分别处理。",
+      "decision": {
+        "outcome": "declined",
+        "reason": "继续 declined：现有 dtype 为开放取值，python_none 仍只表示单个 None，不需要新增类型登记机制或让它容纳 tuple。说明建议已由 non-tensor-parameter-registration 解决；MLA root 进一步将 python_tuple 对应为整体 shape: []，整数 tuple 保留元素轴、python_int 和原 default/range 边界。当前新字节及说明经第三、四轮限域复核，原回执不追认新字节；拒绝新机制没有忽略实例错误。"
+      },
+      "path": "schema_extract/issues/archive/schema_docs/tuple-abi-input-typing.json",
+      "status": "declined"
+    },
+    "inplace-output-input-name-diagnostic": {
+      "id": "inplace-output-input-name-diagnostic",
+      "category": "schema_template",
+      "problem": "Contract撞名报错未展示原有定义位置或保留输入/输出两角色的写法，实际提取曾删掉必要目的地Input来消除冲突。",
+      "evidence": [
+        "MoE worker与独立reviewer同ID确认：Input.output与Output.output冲突后删Input，造成后续接口维护；详见本批OUTPUT_BUFFER_CROSSCHECK.md。",
+        "DOC1要求调用者对象和原地结果各自登记且名称唯一；当前symbols.py:contract诊断现展示两处路径，Input/Output冲突附分别命名和条件性别名说明。",
+        "10种冲突组合、4种shape/dtype组合、异名正例、渲染及4项现有测试通过，见schema_discussion/extract_six_full_20261118/IO_NAME_DIAGNOSTIC.md。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：Template 76 项回归包含撞名双方定位、Input/Output 双角色及开放类型边界；现有实现保留，复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+      ],
+      "proposal": "保持同一命名空间检查，报清冲突名称与双方位置，提示保留Input/Output角色并分别命名，不自动删改或推断inplace。",
+      "necessity": "避免作者通过删除必需对象满足检查，减少无必要返工。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 保留冲突名称及双方路径，Input/Output 冲突提示分别命名并在有来源证据时说明别名；当前 Template 回归通过。同一命名空间和双角色义务不变，不按 shape/dtype 自动推断 alias 或删除必要对象。"
+      },
+      "path": "schema_extract/issues/archive/schema_template/inplace-output-input-name-diagnostic.json",
+      "status": "resolved"
+    },
+    "normalizer-diff-not-visible": {
+      "id": "normalizer-diff-not-visible",
+      "category": "schema_template",
+      "problem": "长字符串规范化警告仅截取修改前后相同的开头，改动位于后文时无法从警告看出实际变更。",
+      "evidence": [
+        "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_template/tools/yaml_format.py 的 shown() 截取前100字符，identifier+reference 和 period 警告分别对整段 before/after 调用它。",
+        "2026-11-18 MoE P1 worker 与独立 reviewer 同 ID 确认；保存的 Compute[2].Math 为968字符，首差异位于第158字符，L→l 不在旧警告展示范围。",
+        "当前 schema_template/tools/yaml_format.py 改为首差异位置及局部上下文；真实案例重新规范化与保存产物逐字节一致，相关68项检查通过。报告为 schema_discussion/extract_six_full_20261118/NORMALIZER_WARNING.md。",
+        "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：Template 76 项回归包含首差异诊断；现有实现保留，第三、四轮未改代码，复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+      ],
+      "proposal": "使用短上下文显示实际修改处，注明首处差异的字符位置，保持原有规范化与warning类别。",
+      "necessity": "自动改正后应能核对实际改动，避免作者因相同前缀反复自检或猜测变化。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.5.1",
+        "reason": "2.5.1 保留首处 Unicode 字符差异位置、局部上下文及省略号提示，覆盖标识符/引用和句号变动。当前 Template 回归通过，未改规范化结果、warning 类别或字符预算，也未扩成完整 diff。"
+      },
+      "path": "schema_extract/issues/archive/schema_template/normalizer-diff-not-visible.json",
+      "status": "resolved"
+    },
+    "pipeline-graph-skip-hardware": {
+      "id": "pipeline-graph-skip-hardware",
+      "category": "schema_template",
+      "problem": "提取产物按规范保留硬件占位，普通检查通过显式 --skip-hardware 验证其余内容；有限流水线图的命令行入口没有对应参数，且调用 validate_file 时未透传 skip_hardware，因而无法直接对这些产物展开依赖图。",
+      "evidence": [
+        "基线 58a4d92 的 schema_template/tools/pipeline_graph.py CLI 未声明或透传 --skip-hardware，底层 validate_file 已有该能力。",
+        "2.3.0 的 pipeline_graph.py::main 显式透传 skip_hardware 并保留 notices/图提示；默认完整检查。",
+        "schema_template/tools/tests/test_pipeline_graph.py::GraphCliTests.test_skip_hardware_is_explicit_and_preserves_other_checks 通过：默认拒绝占位，显式豁免可展开，错误非硬件依赖仍拒绝。"
+      ],
+      "proposal": "图入口显式透传 --skip-hardware，沿用底层 notices 与全部非硬件门禁；旧冻结版本不自动获得新能力。",
+      "necessity": "同一硬件占位规则已适用于所有提取产物，图命令行缺少透传会造成重复的人工或 Python API 操作。这是共用入口的局部缺项，不需要修改 schema 语义，也不能将图工具不可用解释为产物已通过依赖检查。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "2.3.0",
+        "reason": "显式参数、透传和用法已实现，单个集中图入口回归通过；不改变 Schema 语义，也不代表历史 FMHA 依赖图已验收。"
+      },
+      "path": "schema_extract/issues/archive/schema_template/pipeline-graph-skip-hardware.json",
+      "status": "resolved"
+    },
+    "symbolic-member-bounds": {
+      "id": "symbolic-member-bounds",
+      "category": "schema_template",
+      "problem": "role.info.member 的成员区间只接受数字端点，不能直接写已定义的 Nt/32 或 3+EPI。MoE 因此登记最大 warp 范围，再在 thesis 中说明部分成员未实例化、没有动作和事件；结构声明与真实参与集合需要两处共同解释。",
+      "evidence": [
+        "schema_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/ws_fused_ws.yaml:357：明确写最大成员范围，实际 gather 是 warp[0:Nt/32]、Epilogue 是 warp[3:3+EPI]，范围外成员未启动且没有事件。",
+        "同一 ws_fused_ws.yaml:503、592：两个 Epilogue 的结构字段均为 member: warp[3:11]。该可复查产物基线为 KernelSchema@6e4ca91bd91d998cac99e8dadd83838e153c679d。",
+        "schema_docs/5.design.tile_pipeline.md:53、186：member 给出实际执行角色的成员集合，不承担动作的 warp 不登记；成员使用半开区间。",
+        "2.2.5 及此前的 schema_template/tools/rules/structure.py::member、rules/pipeline.py::validate 和 pipeline/graph.py::members 分别通过数字正则和 int 转换读取成员区间。只放宽第一处正则不能完成支持。",
+        "KernelSchema@b5c8e870e5534ae629325e56aa0ba28c3f00486f:kernel_wiki/aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/candidate/nvfp4_moe.cu:4208-4217、8117-8128：WS 模板有 EPI 参数，cfg69/70 的实际实例取 EPI=8。原 P5 worker 已以 symbolic-member-bounds 提报此根因，本次沿用原 ID。",
+        "原初验时（早于 2.2.6 成员支持）隔离复制 MoE 的 root.yaml 与 ws_fused_ws.yaml，运行 python3 -B schema_template/check_yaml.py --skip-hardware <副本>/root.yaml：原成员写法返回 0；只将首个 member: warp[3:11] 改成 member: warp[3:3+EPI] 返回 1（expected unit[index] or unit[start:end] member path）。这是当时成员语法的对照；原文件未改写。",
+        "2.2.6：schema_docs/5.design.tile_pipeline.md 的“成员与名称”明确已定义整数端点、执行前绑定、非负与非空约束；pipeline_syntax.py::parse_members 为字段、关联检查和有限图提供共用解析，图复用 Domains.integer 检查每段端点。",
+        "2.2.6：python3 -B -m unittest discover -s schema_template/tools/tests -t schema_template 的 152 项测试通过；新增 4 项覆盖实际参数化成员、已知越界、内层非整数/空/负区间与缺参数；限定修改文件的 git diff --check 通过。"
+      ],
+      "proposal": "沿用 unit[index]/unit[lower:upper]，允许已经定义且在该 worker 的 phase 执行前确定的整数表达式；共用成员路径解析，普通检查只核对记法和已知数值，有限展开复用现有整数求值。成员数量变化保留参数化设计；role 存在性、执行或事件关系改变时依既有 dispatch 划分。旧 MoE 另做独立产物修订，移除最大范围与正文删成员的绕行写法。",
+      "necessity": "实际 Agent 候选和 MoE 产物反例说明数字端点限制会诱发重复节点或虚构成员。共享表达式解析可补足能力而无需增加 YAML 字段、条件 role 或符号求解器；工具能力与旧产物修订分别验收。",
+      "decision": {
+        "outcome": "partially_adopted",
+        "version": "2.2.6",
+        "reason": "2.2.6 的规范、字段识别、关联检查与有限展开已统一支持参数化成员端点，152 项模板回归通过。历史 MoE 的最大范围及正文覆盖仍存在，不能以工具更新代替产物修复。",
+        "adopted": "已定义整数端点沿用既有成员路径；共享解析代替三处数字正则，保留非负、整数、非空和已知 worker 越界检查，缺参数不猜最大范围。参数全域约束及内层硬件容量继续由独立审阅核对。",
+        "remaining": "旧 MoE YAML 须在独立、经审阅的产物修订中改用真实成员范围并删除正文取消规则。本轮未重新提取、未改变历史发布或原批准。"
+      },
+      "path": "schema_extract/issues/archive/schema_template/symbolic-member-bounds.json",
+      "status": "partially_adopted"
+    },
+    "zero-work-partition": {
+      "id": "zero-work-partition",
+      "category": "schema_template",
+      "problem": "partition.size 允许使用运行时表达式，但原检查器拒绝写明其合法的零工作量。",
+      "evidence": [
+        "schema_docs/4.design.work_schedule.md:91、145 允许 size=0 和 range=[0, null]。",
+        "schema_template/tools/tests/test_structure.py::test_work_dimensions_and_assignment 覆盖零工作量、负下界及零 tile。",
+        "历史版本依据：5fb0fde 同步修改 schema_docs/4.design.work_schedule.md、schema_template/tools/rules/structure.py 及其回归，允许零工作量并保留正 tile 约束，同时归档本项；当时 Schema Extract 没有产品版本号，以该实际修复提交的完整 Git SHA 定位。"
+      ],
+      "proposal": "允许 partition.size 及 range 的有限端点为非负整数，tile 保持正数。",
+      "necessity": "提取结果应能直接用结构化字段表达空工作集合。",
+      "decision": {
+        "outcome": "resolved",
+        "version": "git:5fb0fde8d287a546430ef49aa7fbc732850ad603",
+        "reason": "partition.size 和 range 的有限端点允许非负值，tile 保持正数；规范与检查器采用同一规则。"
+      },
+      "path": "schema_extract/issues/archive/schema_template/zero-work-partition.json",
+      "status": "resolved"
+    }
+  },
+  "pending": 0,
+  "archived": 41
+}

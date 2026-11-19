@@ -15,13 +15,14 @@ STATE_FORMAT = "schema_extract.run.v2"
 EXECUTOR_CAPABILITIES = ("summary.v1", "state_guard.v1", "hold.v1", "scoped_restart.v1",
                          "scoped_recovery.v2", "audit.v1", "proposal.v1",
                          "call_extension.v1", "frozen_execution.v1", "current_maintenance.v1",
-                         "design_region_derivation.v1")
+                         "design_region_derivation.v1", "executor_patch.v1")
 _BOUNDARY = ContextVar("schema_extract_execution_boundary", default=None)
 
 
 def _key(store, state):
     return (store.root, state.get("run_id"), digest({key: state.get(key) for key in
-            ("format", "input_fingerprint", "snapshot", "source_identity", "config", "executor")}))
+            ("format", "input_fingerprint", "snapshot", "source_identity", "config", "executor",
+             "execution_binding", "execution_bindings")}))
 
 
 def execution_boundary(function):
@@ -94,13 +95,13 @@ def _attempt_identity(store, state, attempt):
         raise ExtractError("attempt has no explicit session identity")
     if attempt["session_id"] is not None:
         exact_uuid(attempt["session_id"])
-    if any(key in attempt for key in ("execution_binding", "semantic_revision")):
+    if "semantic_revision" in attempt:
         raise ExtractError("attempt is not part of the current fixed execution protocol")
 
 
 def verify_execution(store, state: dict, *, executor=False, attempt: dict | None = None,
                      attempts=None, evidence=None) -> dict:
-    """Verify one fixed run; never adopt, migrate or infer missing identities.
+    """Verify fixed semantic inputs and an explicitly sealed executor patch chain.
 
     ``executor=True`` also requires these executing Python bytes to match the
     frozen implementation. Control entrypoints use the returned lock to launch
@@ -109,7 +110,7 @@ def verify_execution(store, state: dict, *, executor=False, attempt: dict | None
     from .backends import backend_for
     if (state.get("format") != STATE_FORMAT or
             not {"selected_designs", "writing_plan", "active_attempts", "reopen_requests"} <= state.keys() or
-            any(key in state for key in ("execution_binding", "execution_bindings", "semantic_revision",
+            any(key in state for key in ("semantic_revision",
                                          "semantic_revisions", "continuation", "imported_draft"))):
         raise ExtractError("unsupported run protocol; start a new extraction")
     config = store.execution_config(state)
@@ -124,7 +125,10 @@ def verify_execution(store, state: dict, *, executor=False, attempt: dict | None
         if state.get("source_identity") != {key: lock["source"][key]
                 for key in ("id", "repository_id", "ref", "ref_kind")}:
             raise ExtractError("run source identity differs from its fixed input lock")
-        if state.get("executor") != _executor(lock):
+        from .executor_repairs import verify_bindings
+        records = verify_bindings(store, state, lock, evidence=evidence)
+        current = records[-1]["target"] if records else lock
+        if state.get("executor") != _executor(current):
             raise ExtractError("run executor identity differs from its frozen implementation")
         if evidence:
             checksum = sha256(json_bytes(lock))
@@ -140,11 +144,22 @@ def verify_execution(store, state: dict, *, executor=False, attempt: dict | None
                         evidence(path)
     for registered in ([attempt] if attempt is not None else attempts or []):
         _attempt_identity(store, state, registered)
+        from .executor_repairs import verify_attempt_binding
+        verify_attempt_binding(store, state, lock, registered)
     if executor:
-        verify_executor(lock)
+        verify_executor(executor_lock(store, state, lock=lock))
     return lock
 
 
+def executor_lock(store, state: dict, attempt: dict | None = None, *, lock=None) -> dict:
+    from .executor_repairs import verify_bindings, verify_attempt_binding
+    lock = lock or read_json(store.run_dir(state["run_id"]) / "inputs.lock.json")
+    records = verify_bindings(store, state, lock)
+    binding = verify_attempt_binding(store, state, lock, attempt) if attempt is not None else state.get("execution_binding")
+    return next((item["target"] for item in records if item["record"]["id"] == binding), lock)
+
+
 def frozen_run_invocation(store, state: dict, arguments: list[str]):
-    command, _, environment = frozen_invocation(verify_execution(store, state), arguments)
+    original = verify_execution(store, state)
+    command, _, environment = frozen_invocation(executor_lock(store, state, lock=original), arguments)
     return command, store.run_dir(state["run_id"]), environment

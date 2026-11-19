@@ -1,0 +1,363 @@
+META_DATA:
+  Name: dual_cache_latent_bf16
+  Describe: Sparse latent attention that gathers each query token's listed rows from sliding-window and compressed BF16 KV pools into one joint softmax
+  Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu::attn_kernel
+  Version: 5
+  Dispatch:
+    when: >-
+      Inputs with head_count >= 64 served by exactly one whole-batch kernel submission with no key split: heads form ceil_div(head_count, 64) blocks of 64, last possibly padded, and each (token, head-block) CTA walks that token's full selected key range in ascending 64-key chunks, writing the final BF16 output rows directly; workspace_buffer is neither read nor written and no combine submission follows. A graph-captured replay of the identical launch serves the same calls
+CONTRACT:
+  Algorithm_requirement:
+    Constant:
+      latent_dim: {value: 512, meaning: Latent channels of a query or cache row}
+      swa_window: {value: 128, meaning: Sliding-window capacity and index segment width}
+    Input:
+      query: {meaning: 'Query latents, one row per token and head', shape: [{token: total_query_tokens}, {head: head_count}, {d: latent_dim}], dtype: bf16}
+      swa_kv_cache: {meaning: Paged BF16 pool of sliding-window latent rows, shape: [{page: swa_page_count}, {page_row: swa_page_rows}, {d: latent_dim}], dtype: bf16}
+      workspace_buffer: {meaning: Opaque scratch; contents are not a result, shape: [{byte: workspace_bytes}], dtype: uint8}
+      sparse_indices: {meaning: Per-token row selections into both pools, shape: [{token: total_query_tokens}, {index: index_width}], dtype: int32}
+      compressed_kv_cache: {meaning: Paged BF16 pool of compressed latent rows, shape: [{page: compressed_page_count}, {page_row: compressed_page_rows}, {d: latent_dim}], dtype: bf16}
+      sparse_topk_lens: {meaning: Per-token count of window plus selected rows, shape: [{token: total_query_tokens}], dtype: int32}
+      seq_lens: {meaning: Per-request context length in positions, shape: [{request: request_count}], dtype: int32}
+      out_buffer: {meaning: 'Caller destination buffer, ABI parameter out', shape: [{token: total_query_tokens}, {head: head_count}, {d: latent_dim}], dtype: bf16, nullable: true, range: finite or +inf or -inf or NaN, default: None}
+      cum_seq_lens_q: {meaning: Prefix sums of per-request query lengths, shape: [{boundary: request_count + 1}], dtype: int32}
+      max_q_len: {meaning: Longest per-request query length, shape: [], dtype: python_int}
+      bmm1_scale: {meaning: Python float scaling every query-key product, shape: [], dtype: python_float, default: 1.0}
+      bmm2_scale: {meaning: Python float scaling the normalised output, shape: [], dtype: python_float, default: 1.0}
+      sinks: {meaning: Per-head sink logit with a zero value vector, shape: [{head: head_count}], dtype: fp32, nullable: true, default: None}
+      kv_layout: {meaning: Layout tag; only the string HND is accepted, shape: [], dtype: python_str, default: HND}
+      enable_pdl: {meaning: Launch hint the reference ignores, shape: [], dtype: python_bool, nullable: true, default: None}
+      swa_topk_lens: {meaning: Reserved slot; must be Python None, shape: [], dtype: python_none, default: None}
+      extra_sparse_indices: {meaning: Reserved slot; must be Python None, shape: [], dtype: python_none, default: None}
+      extra_sparse_topk_lens: {meaning: Reserved slot; must be Python None, shape: [], dtype: python_none, default: None}
+    Output: {out: {meaning: Attention result written in place into out_buffer, shape: [{token: total_query_tokens}, {head: head_count}, {d: latent_dim}], dtype: bf16}}
+    Compute:
+      - Name: Interface preconditions
+        Math: |
+          The reference requires what the ABI types optional: cum_seq_lens_q, max_q_len, sparse_topk_lens, seq_lens and compressed_kv_cache must all be given, and compressed_kv_cache stays a contiguous BF16 three-axis tensor even when no compressed row is selected.
+          bmm1_scale and bmm2_scale must be Python floats and tensor scales are rejected, kv_layout must be the string HND, swa_topk_lens, extra_sparse_indices and extra_sparse_topk_lens must be None, and enable_pdl is not read so no value of it changes the result.
+          When out_buffer is not None, out is written in place into it and returned as the identical object; when out_buffer is None or omitted, out is a newly allocated tensor of the query shape.
+      - Name: Pool row spaces
+        Math: |
+          Both pools are contiguous with three axes and are read as flat row spaces of latent_dim channels, so row r of a pool is the element range [r * latent_dim, (r + 1) * latent_dim) of its storage, swa_row_count = swa_page_count * swa_page_rows and compressed_row_count = compressed_page_count * compressed_page_rows.
+          Paging and physical placement only decide which row index a caller lists, and the two pools may share one storage when no compressed row is selected.
+          Every selected row is one shared key and value latent. The pools hold different states, so their rows are never deduplicated or merged by logical position and an index listed twice contributes one term per occurrence.
+      - Name: Request layout and causal visibility
+        Math: |
+          cum_seq_lens_q[0] = 0, cum_seq_lens_q[request_count] = total_query_tokens and the boundaries strictly increase, so query_len[b] = cum_seq_lens_q[b + 1] - cum_seq_lens_q[b] >= 1 for 0 <= b < request_count and total_query_tokens = sum_{b=0}^{request_count-1} query_len[b].
+          max_q_len = max_{0 <= b < request_count} query_len[b].
+          Request b owns the token rows cum_seq_lens_q[b] <= t < cum_seq_lens_q[b + 1] and its context length obeys seq_lens[b] >= query_len[b].
+          A token t of request b sees visible(t) = seq_lens[b] - query_len[b] + (t - cum_seq_lens_q[b]) + 1 positions, so 1 <= visible(t) <= seq_lens[b].
+          Declared domain: 1 <= request_count <= 32; 1 <= query_len[b] <= 4096; total_query_tokens <= 16384; query_len[b] <= seq_lens[b] <= 1048576; sum_{b} seq_lens[b] <= 1048576; head_count in {8, 16, 32, 64, 128}.
+        Symbol: {visible: {meaning: Integer count of positions visible to one token, shape: [], dtype: not_applicable}}
+      - Name: Selected rows of one token
+        Math: |
+          swa_window <= index_width <= 8320 and index_width % 4 == 0.
+          For token t: swa_count(t) = min(visible(t), swa_window) and total(t) = sparse_topk_lens[t] with swa_window <= total(t) <= index_width.
+          swa_sel(t) = [sparse_indices[t, i] : 0 <= i < swa_count(t) and sparse_indices[t, i] >= 0]
+          glob_sel(t) = [sparse_indices[t, i] : swa_window <= i < total(t) and sparse_indices[t, i] >= 0]
+          Both lists keep the column order the caller wrote. A negative entry, which the caller writes as -1, marks an invalid slot and is dropped independently of the two gates. Columns with swa_count(t) <= i < swa_window or total(t) <= i < index_width are not read.
+          Listed rows obey 0 <= r < swa_row_count in swa_sel(t) and 0 <= r < compressed_row_count in glob_sel(t).
+          sel_kv(t) lists the swa_sel(t) rows followed by the glob_sel(t) rows, so selected_count(t) = len(swa_sel(t)) + len(glob_sel(t)) and 0 <= selected_count(t) <= total(t).
+        Symbol:
+          selected_count: {meaning: Integer number of rows one token selects, shape: [], dtype: not_applicable}
+          sel_kv: {meaning: 'Selected rows of one token, in list order', shape: [{key: selected_count}, {d: latent_dim}], dtype: 'ref:swa_kv_cache.dtype'}
+      - Name: Joint softmax over the selected rows
+        Math: |
+          Heads are independent: each formula is evaluated for one token t and head h, 0 <= h < head_count, in FP32 over the exact BF16 values, with the sink term taken as -inf when sinks is None and every sum over j running on 0 <= j < selected_count(t).
+          If selected_count(t) = 0 no maximum or normaliser is formed and out[t, h, c] = 0 for all h and c, also when sinks is given. Otherwise:
+          score[h, j] = bmm1_scale * sum_{c=0}^{latent_dim-1} query[t, h, c] * sel_kv(t)[j, c]
+          row_max[h] = max(max_j score[h, j], sinks[h])
+          prob[h, j] = exp(score[h, j] - row_max[h])
+          denominator[h] = sum_j prob[h, j] + exp(sinks[h] - row_max[h])
+          acc[h, c] = sum_j prob[h, j] * sel_kv(t)[j, c], 0 <= c < latent_dim
+          out[t, h, c] = bf16(acc[h, c] * (bmm2_scale / denominator[h]))
+          The sink is one extra softmax logit with a zero value vector: it enters row_max and denominator only, and is neither an output bias nor a scale on the selected rows. With selected_count(t) >= 1 some prob or sink term equals 1, so denominator[h] >= 1.
+        Symbol:
+          score: {meaning: Scaled query-key products of one token, shape: [{head: head_count}, {key: selected_count}], dtype: fp32}
+          prob: {meaning: Unnormalised softmax weights of one token, shape: [{head: head_count}, {key: selected_count}], dtype: fp32}
+          denominator: {meaning: Per-head softmax normaliser of one token, shape: [{head: head_count}], dtype: fp32}
+          acc: {meaning: Weighted value accumulation of one token, shape: [{head: head_count}, {d: latent_dim}], dtype: fp32}
+      - Name: Output write scope and side effects
+        Math: |
+          Every element of out is written once per call, that is all total_query_tokens * head_count * latent_dim entries including the tokens whose selected set is empty, so no element keeps a value the caller left in out_buffer.
+          The bf16 conversion of the written element is the only narrowing of the computation, and every input other than out_buffer is read-only: query, both pools, sparse_indices, sparse_topk_lens, seq_lens, cum_seq_lens_q, max_q_len, both scales, sinks, kv_layout and enable_pdl.
+          workspace_buffer is opaque scratch that an implementation may write; its contents are not part of the result and are not compared.
+    Golden_reference:
+      Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/problem/reference.py::Model.forward
+      Tolerance:
+        out: Source only; atol=.01, rtol=.05, max_mismatch_fraction=0; formula/relative basis absent; no defaults
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      thread: Lane with thread-local register values; 32 threads form one warp; each thread arrives individually on a barrier
+      warp: 32 lockstep threads of one CTA; the scope of warp shuffle exchange and of one warp-issued mma.sync
+      cta: Thread block owning one dynamic shared-memory smem allocation and CTA-scoped tensor memory tmem; the scope of __syncthreads()
+      cluster: CTAs co-scheduled by a launch-time cluster dimension; peer shared memory is addressable inside it
+      sm: Streaming multiprocessor that hosts resident CTAs and supplies the shared memory one CTA allocates
+      tensor core: Matrix-multiply unit executing warp-issued mma.sync and per-CTA or CTA-pair tcgen05.mma
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: >-
+      One ascending pass over fixed kc-key chunks replaces the compacted key list: base-2 scores, running max/normaliser/accumulator, probabilities forked into FP32 for the normaliser and BF16 for the value GEMM. Costs one extra rounding and masked evaluation of invalid and padded slots
+    Rewrite:
+      - Name: Fixed key slots, validity mask and chunk range
+        Math: |
+          With visible, total, swa_count = min(visible, swa_window) per the Contract (the kernel's
+          defensive clamps are in-domain identities) and nglob = max(total - swa_window, 0), N =
+          swa_count + nglob, the tile evaluates the fixed positions 0 <= j < N: slot(j) =
+          sparse_indices[t, j] for j < swa_count, else sparse_indices[t, swa_window + j - swa_count];
+          v(j) = slot(j) >= 0; pool(j) = swa_kv_cache for j < swa_count, else compressed_kv_cache;
+          kv_row(j) = row max(slot(j), 0) of pool(j), so masked positions still gather a discarded
+          row. sel_kv(t) drops exactly the v(j) = 0 positions in order, so each Contract sum equals
+          the sum over all j of the same term where v(j) = 1 and zero else, one term per repeated
+          index. chunk_count = ceil_div(N, kc); chunk c covers kc*c <= j < min(kc*(c+1), N), j >= N
+          padding with v = 0; in-domain N >= 1; kv_rows(c) is chunk c's gathered rows in order.
+        Symbol:
+          kc: {meaning: Keys per chunk, binding: 'bind:DESIGN.Work_schedule::kc'}
+          chunk_count: {meaning: Number of kc-key chunks of one token's key range}
+          kv_rows: {meaning: 'One chunk''s gathered rows, key and value operand', shape: [{key: kc}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::swa_kv_cache.dtype', retention: 'keep_value (t,c)'}
+        Ledger:
+          Baseline: >-
+            The Contract's compacted sel_kv list: selected_count rows gathered and evaluated per token
+          Gain: null
+          Cost: >-
+            Gathered rows per token selected_count -> chunk_count*kc of 1 KiB each; both GEMMs evaluate invalid and padded positions, masked afterwards
+      - Name: Base-2 online softmax with a BF16 probability fork
+        Math: |
+          log2e = 1.4426950408889634, qs = bmm1_scale * log2e, NEG_BIG = -3.0e38; sink2(h) =
+          sinks[h] * log2e with sinks, else -inf; exp2 of a qs-scaled difference equals the
+          Contract's exp of the natural one up to FP32 rounding. Per head h, chunk c, j in c:
+          s(c,h,j) = qs * dot32(query[t,h,:], kv_row(j)) at v(j) = 1, else -inf; mu(c,h) = max_j s(c,h,j);
+          m(c,h) = max(m(c-1,h), mu(c,h)), then held at NEG_BIG if <= NEG_BIG/2 (no valid key
+          yet), keeping differences finite: exp2(-inf - NEG_BIG) = 0, exp2(NEG_BIG - NEG_BIG) = 1;
+          scale(c,h) = exp2(m(c-1,h) - m(c,h)); pf(c,h,j) = exp2(s(c,h,j) - m(c,h)), 0 masked;
+          pb(c,h,j) = bf16(pf(c,h,j)) RNE; l(c,h) = l(c-1,h)*scale(c,h) + sum32_j pf(c,h,j) on pf;
+          o(c,h,:) = mma32(pb(c,h,:), kv_rows(c), o(c-1,h,:)*scale(c,h)); init m(-1,h) = sink2(h)
+          or NEG_BIG, l(-1,h) = 0, o(-1,h,:) = 0, so m stays the base-2 row_max image with sink.
+        Symbol:
+          s: {meaning: Scaled masked scores of one chunk, shape: [{key: kc}], dtype: fp32, retention: 'keep_value (t,h,c)'}
+          pb: {meaning: Chunk probabilities rounded to BF16 for phase 2, shape: [{key: kc}], dtype: bf16, retention: 'keep_value (t,h,c)'}
+          m: {meaning: Running base-2 row maximum including the sink, shape: [], dtype: fp32, retention: 'carry_forward (t,h); c=-1..chunk_count-1'}
+          l: {meaning: Running base-2 normaliser of processed chunks, shape: [], dtype: fp32, retention: 'carry_forward (t,h); c=-1..chunk_count-1'}
+          o: {meaning: Unnormalised attention accumulator, shape: [{d: latent_dim}], dtype: fp32, retention: 'carry_forward (t,h); c=-1..chunk_count-1'}
+        Arithmetic:
+          Approx: >-
+            exp2 and final divides compile --use_fast_math to ex2.approx.f32 / div.approx.f32; unknown: per-op bound, path gated at zero reference mismatches
+          Accumulate: >-
+            32 ascending 16-term mma steps per score; lane/shuffle/cross-warp row-sum folds; rescaled chunkwise l and o; reassociations of Contract flat FP32 sums
+        Ledger:
+          Baseline: >-
+            The Contract's two-pass evaluation: every score materialised in FP32, exact row max, flat sums
+          Gain: >-
+            Score materialisation head_count*selected_count FP32 -> kc per head per step; one key traversal serves max, normaliser and accumulator
+          Cost: >-
+            pb adds one BF16 rounding of softmax weights; per chunk the rescale adds latent_dim multiplies per head; approximations per Arithmetic
+      - Name: Normaliser completion, sink fold and output
+        Math: |
+          After the last chunk C = chunk_count - 1, per head h:
+          l_final(h) = l(C,h) + exp2(sink2(h) - m(C,h)), the sink's probability, 0 when sinks is
+          None; m carried sink2 from init, so m(C,h) is the base-2 image of row_max and l_final(h)
+          of denominator(h). inv(h) = bmm2_scale / l_final(h) when l_final(h) > 0, else 0.
+          out[t,h,:] = bf16(o(C,h,:) * inv(h)), one RNE narrowing per element, each written once.
+          At selected_count(t) = 0 every pf was 0, so o(C,h,:) = 0 and l_final(h) is 0 without sinks
+          or 1 with them, giving the Contract's zero row through the same inv path with no separate
+          branch; l_final = 0 -> inv = 0 avoids a division by zero.
+  Work_schedule:
+    Thesis: >-
+      One CTA owns one (token, 64-head-block) worktile and walks its full key range as an ascending chunk iteration, so a single submission writes the final output: no partials, no workspace. One tile per CTA, head block varying fastest for cache reuse; duration variance is not rebalanced
+    Step:
+      MAIN:
+        Describe: >-
+          Computes the joint softmax output rows of one token's 64-head block over its full key range and writes the block's final BF16 rows directly into out
+        Decomposition:
+          Strategy: >-
+            kc = 64; the N-position range is one ascending iteration of chunk_count chunks, tail padding masked; in-domain N >= 1, so no worktile is empty
+          Partition:
+            token: {meaning: One query token's output rows, size: total_query_tokens, tile: 1}
+            head_block: {meaning: Block of 64 consecutive heads of one token, size: head_count, tile: 64}
+          Worktile:
+            Invariant:
+              query_block: {meaning: 'Head-block query rows, zero-filled for padding', shape: [{head: 64}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::query.dtype'}
+              index_row: {meaning: 'Token''s sparse_indices row, re-read per chunk', shape: [{index: index_width}], dtype: 'ref:CONTRACT.Algorithm_requirement::sparse_indices.dtype'}
+            Iteration: {kv_rows: {meaning: 'One chunk''s kc gathered rows, key and value', shape: [{key: kc}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::swa_kv_cache.dtype', direction: ascending}}
+          Target:
+            Single_tile: {out_block: {meaning: 'Final BF16 rows of the block, padding unwritten', shape: [{head: 64}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: total_query_tokens * ceil_div(head_count, 64)
+        Schedule:
+          Strategy: >-
+            Host asserts HND, non-null cum_seq_lens_q and the three reserved None slots; C++ asserts contiguity, dtypes, 512 channels; rest caller-guaranteed
+          Worktile_order:
+            - {by: token, direction: ascending}
+            - {by: head_block, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: >-
+      One symmetric role of eight warps; overlap comes from the two-slot cp.async ring - chunk c+1 in flight during chunk c - and register-resident operands: 16 cached phase-1 A-fragment steps and the 64x512 FP32 accumulator. Costs 207,232 B smem
+    Step:
+      MAIN:
+        Index: {c: {meaning: Local chunk iteration within this worktile, definition: [0, chunk_count]}}
+        Storage:
+          kv_ring: {meaning: Gathered KV chunk rows; slot 0 doubles as staging, depth: 2, location: smem, shape: [{key: kc}, {d: latent_dim}],
+            dtype: bf16, total_size: 131072, view: {kv_rows(c): {slot_index: c%2}, out_block: {slot_index: 0}}}
+          query_tile: {meaning: 'Staged query rows of the worktile, padding zeroed', depth: 1, location: smem, shape: [{head: 64}, {d: latent_dim}],
+            dtype: bf16, total_size: 65536, view: {query_block: {}}}
+          p_tile: {meaning: 'One chunk''s BF16 probabilities, phase-2 A operand', depth: 1, location: smem, shape: [{head: 64}, {key: kc}],
+            dtype: bf16, total_size: 8192, view: {pb(c): {}}}
+          softmax_ctrl: {meaning: 'Softmax state, per-chunk slabs and trailing slack', depth: 1, location: smem, shape: [{element: 576}],
+            dtype: fp32, total_size: 2304, view: {m(c): {region: {element: [0, 64]}}, l(c): {region: {element: [64, 128]}}, scale(c): {region: {element: [128, 192]}}, sink2: {region: {element: [192, 256]}}, warp_max(c): {region: {element: [256, 384]}}, warp_sum(c): {region: {element: [384, 512]}}}}
+          validity: {meaning: Per-position validity byte of each gathered chunk, depth: 2, location: smem, shape: [{key: kc}],
+            dtype: uint8, total_size: 128, view: {v(c): {slot_index: c%2}}}
+          q_fragments: {meaning: 'Register-cached phase-1 A fragments, k-steps 0-15', depth: 1, location: register, shape: [{k_step: 16}, {element: 2048}],
+            dtype: bf16, total_size: 65536, view: {a_frag(k): {region: {k_step: [k, k+1]}}}}
+          scores: {meaning: Per-warp FP32 dot-product slices of one chunk, depth: 1, location: register, shape: [{head: 64}, {key: kc}],
+            dtype: fp32, total_size: 16384, view: {s(c): {}}}
+          o_acc: {meaning: 'FP32 output accumulator, resident across chunks', depth: 1, location: register, shape: [{head: 64}, {d: latent_dim}],
+            dtype: fp32, total_size: 131072, view: {o(c): {}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: >-
+                Eight warps run every phase cooperatively: phase 1 as four head-row groups of two key-column warps, phase 2 with 64 output columns per warp
+              Member: warp[0:8]
+              Using_verb:
+                compute:
+                  meta:
+                    execution_mode: serial
+                    describe: >-
+                      Per thread: request via cum_seq_lens_q break, then seq_lens and topk; token, h0 = head_block*64, nrows from blockIdx.x; N, chunk_count per Math
+                  init_state:
+                    execution_mode: serial
+                    describe: >-
+                      Threads 0..63 write softmax_ctrl: sink2 (or -inf without sinks), m = sink2 or NEG_BIG, l = 0, scale = 1; await(query_landed)'s barrier publishes
+                  q_fragments:
+                    execution_mode: serial
+                    describe: >-
+                      Each warp ldmatrix-caches a_frag(0..15) - its row group's query rows at channels [16k,16k+16) - into q_fragments; both column warps cache duplicates
+                  o_init: {execution_mode: serial, describe: 'Zeroes all of o_acc, the recurrence''s o(-1) = 0; reads no input and no old value'}
+                  row_max:
+                    execution_mode: serial
+                    describe: >-
+                      Scale scores by qs, -inf where validity slot c%2 is zero; shuffle plus warp_max slab and barrier reduce; threads 0..63 update m(c) and scale(c)
+                  p:
+                    execution_mode: serial
+                    describe: >-
+                      pf = exp2(s - m(c)), zero where masked; pb = bf16(pf) into p_tile; FP32 pf sums via shuffle, warp_sum slab and barriers; threads 0..63 fold l(c)
+                  out_stage:
+                    execution_mode: serial
+                    describe: >-
+                      l_final = l + exp2(sink2 - m); inv = bmm2_scale/l_final, 0 if padded or l_final <= 0; o_acc*inv to BF16 into staging on slot 0, barrier-published
+                matmul:
+                  qk:
+                    execution_mode: serial
+                    describe: >-
+                      32 k-steps of mma.sync m16n8k16 per warp's 16x32 slice: A = a_frag(k) for k < 16 else ldmatrix query_tile, B = ldmatrix of kv_ring slot c%2
+                  pv:
+                    execution_mode: serial
+                    describe: >-
+                      Rescale the warp's 64x64 o_acc slice by scale(c); four 16-key mma.sync m16n8k16 steps: A = ldmatrix p_tile, B = ldmatrix.trans of kv_ring slot c%2
+                load:
+                  query:
+                    execution_mode: async_unordered
+                    describe: >-
+                      256 threads cp.async nrows query rows as 4096 16B items into query_tile's swizzle, zero-filling padding; one group; done when own copies land
+                  kv:
+                    execution_mode: async_unordered
+                    describe: >-
+                      Chunk n gather: read all slot values first, write validity bytes, cp.async 16B per item of each selected row into kv_ring slot n%2, commit one group
+                store:
+                  out:
+                    execution_mode: serial
+                    describe: >-
+                      Coalesced 16B-chunk copy of the staged nrows x 512 BF16 rows to out[token, h0:h0+nrows, :]; padded rows unwritten; kernel boundary gives visibility
+                await:
+                  query_landed:
+                    execution_mode: serial
+                    describe: >-
+                      cp.async.wait_group 0 retires the query group for every thread; one CTA barrier publishes query_tile and the softmax_ctrl initial state
+                  kv_landed:
+                    execution_mode: serial
+                    describe: >-
+                      wait_group 0 retires chunk c's group; one CTA barrier publishes slot c%2 and validity(c), certifies iteration c-1's slot and p_tile reads done
+                  chunk_release:
+                    execution_mode: serial
+                    describe: >-
+                      CTA barrier closing iteration c: every warp's reads of slot c%2, validity(c) and p_tile are done, releasing them for refill, rewrite and staging
+            Pipe:
+              - compute:meta
+              - load:query
+              - compute:init_state
+              - await:query_landed
+              - compute:q_fragments
+              - compute:o_init
+              - load:kv(0)
+              - for(c=0:chunk_count):
+                  - await:kv_landed(c)
+                  - if(c+1 < chunk_count):
+                      - load:kv(c+1)
+                  - matmul:qk(c)
+                  - compute:row_max(c)
+                  - compute:p(c)
+                  - matmul:pv(c)
+                  - await:chunk_release(c)
+              - compute:out_stage
+              - store:out
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: >-
+        mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 for both GEMMs, ldmatrix.x4 and ldmatrix.x4.trans for the shared-memory operands, and the 16-byte-chunk XOR swizzle (physical chunk = chunk ^ (row & 7)) shared by query_tile, kv_ring, p_tile and the output staging
+      Reason: >-
+        Math_reshape's BF16-input FP32-accumulate path and phase 2's transposed read of the value rows from the same gathered ring rows depend on these primitives, and every fragment load in the pipeline assumes the conflict-free swizzle the storage layout was sized for.
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: >-
+        cp.async.cg.shared.global sixteen-byte copies with per-thread commit_group / wait_group accounting - exactly one committed group per query gather and per chunk gather, retired by cp.async.wait_group 0 at each consumption point - for load(query) and load(kv)
+      Reason: >-
+        The issue/done split of the two load nouns and the release semantics of await(kv_landed) assume per-thread group retirement followed by a CTA barrier; a bulk-copy or barrier-only replacement would move the overlap the two-slot ring provides.
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: >-
+        256 threads per CTA with __launch_bounds__(256, 1); one 207,232-byte dynamic smem request including 256-byte slack, checked against the runtime device opt-in maximum
+      Reason: >-
+        The shared-memory request must cover the Tile_pipeline storage layout; run_cfg checks it against the device opt-in limit before launch; the registered arrays do not establish compiled register allocation or spilling
+    - Item: DESIGN.Math_reshape
+      Choice: >-
+        Compile the kernel with --use_fast_math so exp2f and the FP32 divisions lower to the ex2.approx.f32 / div.approx.f32 approximations declared in Arithmetic.Approx, targeting the sm_103a/sm_100a or plain sm_103/sm_100 gencode chain; no tcgen05 feature is used
+      Reason: >-
+        The declared numerics path is defined by those approximations, and the tile must build on both the architecture-specific and the plain targets of the frozen build chain
+    - Item: CONTRACT.Algorithm_requirement::workspace_buffer
+      Choice: >-
+        Host binds the caller's buffer as scratch only if it is a CUDA tensor of >= 32 MiB, else silently substitutes a private 32 MiB buffer, cached per buffer object identity; this design's submission neither reads nor writes it
+      Reason: >-
+        The same host entry serves the split designs whose split count is capped by the bound scratch; identity caching assumes same object, same storage; the root path leaves workspace_buffer untouched
+    - Item: CONTRACT.Algorithm_requirement::sinks
+      Choice: >-
+        Python None reaches the extension as a zero-element FP32 tensor and the parameter builder maps zero numel to a null device pointer, which is what init_state's and out_stage's sink-less branches key on
+      Reason: >-
+        The frozen ABI accepts a tensor or None, and Math_reshape's sink case split has to be decided inside Params without adding a flag
+    - Item: DESIGN.Work_schedule::MAIN
+      Choice: >-
+        Keep the reduced host validation set of Schedule.Strategy: the device path dereferences cum_seq_lens_q unconditionally and assumes contiguous HND pools, so anything it does not check stays the caller's guarantee
+      Reason: >-
+        A violated unchecked precondition would be silent on device, and the frozen source keeps exactly this reduced set because host work sits inside the measured window

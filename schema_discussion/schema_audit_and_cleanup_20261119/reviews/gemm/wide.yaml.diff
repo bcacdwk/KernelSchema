@@ -1,0 +1,171 @@
+--- before/wide.yaml
++++ after/wide.yaml
+@@ -2,30 +2,30 @@
+   Name: fp8_scaled_grouped_gemm
+   Describe: Grouped GEMM of m_indptr-segmented fp8_e4m3 activation rows, dequantized by stored fp32 scales, with per-group fp8_e4m3 weights into bf16 out
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/candidate/solution.py::Model.forward
+-  Version: 1
++  Version: 2
+   Dispatch:
+     id: wide
+     when: >-
+-      All inputs of the shared Contract domain whose n is a multiple of 256, which every allowed n already is; the item is a 256-column weight panel split into two 128-column scale halves. Beyond the Contract it needs a host-supplied sm count, tensor maps for a, b (256-row box) and out, and 230400 bytes of opt-in dynamic shared memory per worker, leaving one resident worker per sm. Its range overlaps the root design's; the frozen host selector between them is recorded in dispatch.md
++      The shared Contract shape domain with n divisible by 256, a positive host-supplied sm count, valid tensor maps and 230400 bytes of opt-in dynamic shared memory per worker. Cached launches require unchanged tensor storage and metadata while an identity entry is reused. This structural range overlaps root; it is not a full-domain numerical or residency guarantee. The source selector and evidence limits are recorded in dispatch.md
+ DESIGN:
+   Math_reshape:
+     Thesis: >-
+-      Both scales are constant over the Contract's scale_block, so each k-block is contracted first on the exact e4m3 payload of a 128x256 tile, then promoted by one fp32 factor per row and column half. This removes the dequantized operands, at the cost of a rounding association unlike the reference's
++      Both scales are constant over the Contract's scale_block, so each k-block is contracted first on the stored e4m3 payload of a 128x256 tile, then promoted by one fp32 factor per row and column half. This removes the dequantized operands, at the cost of a rounding association unlike the reference's
+     Rewrite:
+-      - Name: Contract each scale-uniform k-block on exact fp8
++      - Name: Contract each scale-uniform k-block on stored fp8
+         Math: |
+           kb_count = k / scale_block, an integer for every (n, k) the Contract allows.
+           For one output tile holding rows [row0, row0 + valid_rows) of group g and columns [nt*256, nt*256 + 256), with 0 <= nt < n/256, row0 = m_indptr[g] + mt*128 and valid_rows = min(128, m_indptr[g+1] - row0), and for each kb with 0 <= kb < kb_count:
+             blk(kb)[r, i] = sum_{d=0}^{127} a[row0 + r, kb*128 + d] * b[g, nt*256 + i, kb*128 + d]
+           for 0 <= r < valid_rows and 0 <= i < 256.
+-          The fp8 payload values enter these products exactly, no operand is dequantized or widened first, and blk(kb) carries no scale.
+-        Symbol: {blk: {meaning: Exact fp8 block product of one output tile, shape: [{row: valid_rows}, {column: 256}], dtype: fp32}}
++          The stored fp8 payloads are the operands; each finite product is FP32-representable, but blk follows Arithmetic.Accumulate. No operand is dequantized first and blk(kb) carries no scale.
++        Symbol: {blk: {meaning: FP32 block contraction of stored fp8 payloads, shape: [{row: valid_rows}, {column: 256}], dtype: fp32}}
+         Arithmetic:
+-          Accumulate: blk is summed in four consecutive 32-element k-groups, the first initializing the accumulator; each e4m3 product is exact in fp32
++          Accumulate: Four k32 tcgen05.mma steps, first initializing FP32 blk; internal rounding and subnormal behavior are unspecified by the source
+         Ledger:
+           Baseline: Contract evaluation, which materializes a_deq and b_deq and forms k fp32 products per output element
+-          Gain: Dequantized operands m*k + group_count*n*k fp32 elements -> 0; fp32 MACs per output element m*n*k -> 0
+-          Cost: Exact e4m3 MACs 0 -> m*n*k, plus n*k for each of the 128 - valid_rows padded rows of a group's last tile
++          Gain: Dequantized operands m*k + group_count*n*k fp32 elements -> 0; dequantized-input MACs per call m*n*k -> 0
++          Cost: E4m3-input MACs per call 0 -> m*n*k; the source's full-row MMA also evaluates n*k MACs per padded row of each nonempty group's last row block
+       - Name: Promote blocks by per-half factors, narrow once
+         Math: |
+           sc(kb, h)[r] = a_scale[kb, row0 + r] * b_scale[g, kb, 2*nt + h], one fp32 product per tile row and column half h = floor(i / 128), shared by all 128 columns of that half.
+@@ -36,11 +36,11 @@
+         Symbol: {acc: {meaning: Promoted running output accumulator of one tile, shape: [{row: valid_rows}, {column: 256}], dtype: fp32, retention: 'carry_forward (g,mt,nt); kb=-1..kb_count-1'}}
+         Ledger:
+           Baseline: One fp32 product per element per k from separately rounded dequantized operands, summed in Contract order
+-          Gain: Per-element fp32 operations 2*k -> kb_count fused multiply-adds; block scales multiplied once per row, k-block and column half
+-          Cost: One extra fp32 rounding per element per block, 2*kb_count scale products per tile row, and a new accumulation order, so no bitwise reference match
++          Gain: Scalar FP32 MACs per output k -> kb_count FFMAs; tensor cores form blk, and each scale product is shared by 128 columns
++          Cost: Post-block scaling changes rounding and can overflow or underflow differently from separate dequantization; no full-domain error bound
+   Work_schedule:
+     Thesis: >-
+-      One persistent step whose workers claim (group row block, 256-column tile) items from a compact device-side enumeration of m_indptr, so no host read or workspace is needed. Items are ordered group-major with the 256-column tile between group and row block, so neighbours reuse one weight panel
++      One persistent step enumerates (group row block, 256-column tile) items from m_indptr on-device without a global workspace. The source host selector separately reads m_indptr on cache misses. Group-major items place the column tile between group and row block so neighbours reuse a weight panel
+     Step:
+       MAIN:
+         Describe: >-
+@@ -86,10 +86,12 @@
+             dtype: fp8_e4m3fn, total_size: 65536, view: {a_block(n): {slot_index: n%4}}}
+           b_ring: {meaning: Ring of weight operand k-block stages, depth: 4, location: smem, shape: [{row: 256}, {col: 128}],
+             dtype: fp8_e4m3fn, total_size: 131072, view: {b_block(n): {slot_index: n%4}}}
+-          sa_regs: {meaning: Row-private activation-scale prefetch registers, depth: 2, location: register, shape: [{row: 128}],
+-            dtype: fp32, total_size: 1024, view: {a_scale_block(j): {slot_index: j%2}}}
+-          sb_regs: {meaning: 'Weight-scale prefetch registers, one per half', depth: 2, location: register, shape: [{n_block: 2}],
+-            dtype: fp32, total_size: 16, view: {b_scale_block(j): {slot_index: j%2}}}
++          sa_regs: {meaning: Row-scale copies for two column groups, depth: 2, location: register, shape: [{row: 128}, {n_block: 2}],
++            dtype: fp32, total_size: 2048, view: {'a_scale_block(t,j)': {slot_index: j%2}}}
++          sb_regs: {meaning: Weight-scale copies for each half's 128 threads, depth: 2, location: register, shape: [{row: 128}, {n_block: 2}],
++            dtype: fp32, total_size: 2048, view: {'b_scale_block(t,j)': {slot_index: j%2}}}
++          drain_regs: {meaning: Rotating 32-column register drain batches, depth: 2, location: register, shape: [{row: 128}, {n_block: 2}, {column: 32}],
++            dtype: fp32, total_size: 65536, view: {'drain(n,c)': {slot_index: c%2}}}
+           staging: {meaning: Swizzled half-tile store staging, depth: 1, location: smem, shape: [{row: 128}, {col: 128}],
+             dtype: bf16, total_size: 32768, view: {'tile_half(t,h)': {}}}
+           sched_table: {meaning: Group offsets and the derived row-block prefix, depth: 1, location: smem, shape: [{entry: 2*(group_count+1)}],
+@@ -121,7 +123,7 @@
+               Member: warp[8:9]
+               Using_verb:
+                 load:
+-                  a_block: {execution_mode: async_unordered, describe: 'Bulk tensor load of this k-block''s A rows into a_ring slot n%4; only the item''s rounded row box is transferred, rows above it keep earlier bytes'}
++                  a_block: {execution_mode: async_unordered, describe: 'Bulk tensor load of this k-block''s A rows into a_ring slot n%4; only the item''s rounded row box is transferred, rows above it remain unwritten'}
+                   b_block: {execution_mode: async_unordered, describe: Bulk tensor load of this k-block's 256 weight rows into b_ring slot n%4; one announced byte count covers this and a_block}
+                 await:
+                   ready: {execution_mode: serial, describe: Wait for the preparation rendezvous; done means sched_table and the barrier states are valid}
+@@ -174,9 +176,10 @@
+               Using_verb:
+                 compute:
+                   item_geom: {execution_mode: serial, describe: 'Recover g, nt, row0, valid_rows and row validity from sched_table by a group scan whose hint carries across items; full_rows means valid_rows is 128'}
+-                  row_acc_init: {execution_mode: serial, describe: Set the thread's 128 register accumulators to zero; reads no input and no old value}
+-                  scale: {execution_mode: serial, describe: 'Multiply a_scale_block(j) and b_scale_block(j) into sc, one value per row and column half, then rotate both prefetch registers so slot j%2 is free'}
+-                  promote: {execution_mode: serial, describe: 'Rotate 32-column x16 drains of blk(n) against FFMAs by sc into acc; group grp drains columns [128*grp, 128*grp+128), warp w lane l owns row 32*(w%4)+l'}
++                  row_acc_init: {execution_mode: serial, describe: Zero the 128 accumulators without reading old values; warp w lane l owns row 32*(w%4)+l and column half floor(w/4)}
++                  scale: {execution_mode: serial, describe: 'Multiply a_scale_block(t,j) and b_scale_block(t,j) into sc, one value per row and column half, then rotate both prefetch registers so slot j%2 is free'}
++                  promote: {execution_mode: serial, describe: 'Retire blk drains via drain_regs; apply FFMAs except columns [96,128) of each half, retained in drain(n,3) for promote_tail'}
++                  promote_tail: {execution_mode: serial, describe: 'Apply the remaining FFMAs from drain(n,3) and sc into row_acc columns [96,128) of each half; reads no tmem and completes acc for this round'}
+                 load:
+                   a_scale: {execution_mode: async_unordered, describe: Predicated per-row read of one k-block's activation scales into sa_regs slot j%2; rows at or beyond m read zero}
+                   b_scale: {execution_mode: async_unordered, describe: 'Predicated read of one k-block''s two weight scales, one per column half, into sb_regs slot j%2 two rounds ahead of use'}
+@@ -198,16 +201,17 @@
+                   - compute:item_geom(t)
+                   - compute:row_acc_init(t)
+                   - for(q=0:2):
+-                      - load:a_scale(q)
+-                      - load:b_scale(q)
++                      - load:a_scale(t,q)
++                      - load:b_scale(t,q)
+                   - for(n[t]):
+                       - compute:scale(n)
+                       - if(j+2 < kb_count):
+-                          - load:a_scale(j+2)
+-                          - load:b_scale(j+2)
++                          - load:a_scale(t,j+2)
++                          - load:b_scale(t,j+2)
+                       - await:acc_ready(n)
+                       - compute:promote(n)
+                       - signal:acc_free(n)
++                      - compute:promote_tail(n)
+                   - if(full_rows(t)):
+                       - for(h=0:2):
+                           - release:staging(t,h)
+@@ -221,12 +225,12 @@
+               Prepared:
+                 - '{done await:ready} ← [{done PREPARE::signal:ready}]'
+                 - '{done await:acc_ready(n)} ← [{done ISSUER::signal:round_done(n)}]'
+-                - '{issue compute:scale(n)} ← [{done load:a_scale(j)}, {done load:b_scale(j)}]'
++                - '{issue compute:scale(n)} ← [{done load:a_scale(t,j)}, {done load:b_scale(t,j)}]'
+ REALIZATION:
+   Require:
+     - Item: DESIGN.Tile_pipeline::MAIN.ISSUER
+       Choice: tcgen05.mma kind f8f6f4 with a 128x256 fp32-accumulator descriptor, four 32-element k-steps per round with the first step's accumulate predicate cleared, and one tcgen05.commit per round
+-      Reason: Supplies blk's exact e4m3 products with fp32 accumulation inside the block across the whole 256-column tile, and the single deferred arrival that signal:round_done needs to free the stage and publish the accumulator at once
++      Reason: Binds blk to the source's e4m3-input instruction path and FP32 accumulators; the deferred arrival covers all round MMAs and frees the stage while publishing the result, without specifying internal arithmetic rounding
+     - Item: DESIGN.Tile_pipeline::MAIN.Storage.acc_pair
+       Choice: One tcgen05.alloc of 512 tensor-memory columns per worker before the preparation rendezvous, tcgen05.relinquish_alloc_permit, and a matching tcgen05.dealloc after the exit rendezvous
+       Reason: The two 128x256 fp32 slots are exactly 512 columns, and the allocation must outlive every tensor-core write and every epilogue read of blk
+@@ -235,19 +239,22 @@
+       Reason: await:stage_full reads one announced byte count for the whole round, so announcing 128 A rows while transferring a tightened box would never complete, and announcing fewer bytes than transferred would free the stage early
+     - Item: DESIGN.Tile_pipeline::MAIN.EPILOGUE
+       Choice: cp.async.bulk.tensor 2D stores from staging committed as one bulk group per half, drained by cp.async.bulk.wait_group.read for release:staging and by cp.async.bulk.wait_group for await:stores_done
+-      Reason: release:staging must return the region once the store has finished reading it, which is strictly earlier than store completion, and the second half of an item may not be packed until the first half's store has stopped reading the same 32768 bytes
++      Reason: release:staging returns the region after the store has read it, potentially before global completion; the next half cannot be packed until the preceding store stops reading these same 32768 bytes
+     - Item: DESIGN.Tile_pipeline::MAIN.EPILOGUE
+       Choice: Predicated scale reads that substitute zero instead of dereferencing when the activation row is at or beyond m or the k-block index is at or beyond kb_count
+-      Reason: A padded row's last-k-block activation scale and the last group's past-the-end weight scale both lie outside the caller's arrays; the substituted zeros are never consumed
++      Reason: Invalid padded rows still execute arithmetic, so their substituted scale zeros can be consumed but never stored; prefetch indices beyond kb_count are never used by a round
+     - Item: DESIGN.Tile_pipeline::MAIN.EPILOGUE
+-      Choice: tcgen05.ld.sync.aligned.32x32b.x16 drains in four 32-column batches per round per column group, with each warp's tmem lane quarter taken from its position in that group rather than the address, and tcgen05.wait::ld retiring every outstanding drain before signal:acc_free
+-      Reason: The lane quarter binds acc's row axis to the tile rows the store addresses use, and a wait covering all outstanding drains is the only guarantee behind signal:acc_free's claim that the slot's reads retired
++      Choice: Rotate two 32-value register drain batches per thread using x16 tcgen05.ld and tcgen05.wait::ld; arrive at acc_free after the last read wait and before the final 32 FFMAs in each half
++      Reason: The warp's quarter fixes the row and the last batch remains in drain_regs during tensor-memory reuse; promote_tail reads only registers and finishes before the next round or tile store
+     - Item: DESIGN.Tile_pipeline::MAIN.PREPARE
+       Choice: mbarrier objects initialized before any wait, one arrival for each operand-full and round-done barrier and 256 for each accumulator-release barrier, published with release ordering, and a first wait using the parity that passes on a fresh barrier
+       Reason: The producer's first four stage waits and the issuer's first two accumulator waits have no predecessor arrival, and the 256-arrival count is what makes signal:acc_free cover every epilogue thread of both column groups
+     - Item: DESIGN.Tile_pipeline::MAIN
+       Choice: 320 threads per worker and 230400 bytes of opt-in dynamic shared memory laid out as the operand rings, the 32768-byte half-tile staging and a 1 KiB tail for the barriers, the tensor-memory base and sched_table
+-      Reason: The non-issuing lanes of the producer and issuer warps hold no registered action but must attend the preparation copy and both rendezvous; the total is within the per-block opt-in maximum, so one worker per sm, and the tail bounds group_count
++      Reason: Idle lanes still join preparation and exit; the tail uses 84+8*(group_count+1) bytes, at most 604. This launch needs resource support; the sampled one-CTA residency is recorded in dispatch.md
++    - Item: DESIGN.Tile_pipeline::MAIN.Storage.drain_regs
++      Choice: Within one CTA, drain(n,c) holds 32 columns of each half of blk(n), c=floor((i%128)/32). Keep scales, row_acc and both drain batches thread-local through their consumers
++      Reason: These capacities include replicated prefetch values but do not prove compiler register allocation, peak liveness or absence of spills; the fixed source provides no such whole-domain guarantee
+     - Item: DESIGN.Tile_pipeline::MAIN.Storage.staging
+       Choice: fence.proxy.async between the staged writes and the bulk store, a 128-byte swizzled layout of two 64-element by 128-row boxes matching the output tensor map, and a named CTA barrier with an explicit 256-thread count for the two rendezvous around each half
+       Reason: The bulk store reads staging through the asynchronous proxy, so the generic-proxy writes must be ordered before it, and a whole-worker barrier would never be met while the producer and issuer lanes are in their loops
+@@ -259,7 +266,7 @@
+   Prefer:
+     - Item: DESIGN.Work_schedule::Flow.Launch
+       Choice: Submit through a cached single-node CUDA graph with the parameters and tensor maps baked in, falling back permanently to a direct launch on any graph API failure
+-      Reason: The submission structure never changes within an argument identity, so caching removes per-call launch overhead while every call still re-executes the whole work set
++      Reason: Reuse removes launch setup while rerunning the device work; it requires unchanged storage and metadata, which weakref object identity alone does not establish
+     - Item: DESIGN.Work_schedule::Flow.Launch
+       Choice: Encode the a, b and out tensor maps once per pointer and dimension identity in small host caches and pass them by value as kernel arguments
+       Reason: Encoding is a driver call whose cost would otherwise be paid on every submission, and the maps depend only on the pointers and dimensions

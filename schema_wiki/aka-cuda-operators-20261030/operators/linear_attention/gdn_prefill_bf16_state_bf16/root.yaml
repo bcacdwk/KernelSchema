@@ -1,0 +1,520 @@
+META_DATA:
+  Name: gdn_prefill_bf16_state_bf16
+  Describe: Gated delta-rule prefill over packed requests from BF16 Q/K/V, FP32 log decay/beta and BF16 state, returning BF16 out and optional FP32 final state.
+  Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/candidate/solution.py::Model.forward
+  Version: 3
+  Dispatch:
+    when: >-
+      Monolithic vt32: optional normalization, prep then MODE0. With sm_count/l2_bytes and slots_ub = ceil_div(total_tokens,64)+request_count: 8*value_head_count*request_count > sm_count, no wide-tile rule; request_count < 8 and 4*value_head_count*request_count <= sm_count (no permutation); slots_ub*key_head_count < sm_count (per-head prep); floor((total_tokens+63*request_count)/(64*request_count)) < 8 (depth-2 ring); flag on or workspace+q footprint <= l2_bytes (mirror staged).
+CONTRACT:
+  Algorithm_requirement:
+    Constant:
+      key_dim: {value: 128, meaning: Width of q/k rows; K axis of the state}
+      value_dim: {value: 128, meaning: Width of v and output rows; V axis of the state}
+    Input:
+      q: {meaning: Packed prefill query operand indexed by key head, shape: [{batch: 1}, {token: total_tokens}, {key_head: key_head_count}, {key: key_dim}], dtype: bf16}
+      k: {meaning: Packed prefill key operand indexed by key head, shape: [{batch: 1}, {token: total_tokens}, {key_head: key_head_count}, {key: key_dim}], dtype: bf16}
+      v: {meaning: Packed prefill value operand per value head, shape: [{batch: 1}, {token: total_tokens}, {value_head: value_head_count}, {value: value_dim}], dtype: bf16}
+      g: {meaning: Natural-log state decay per token and value head, shape: [{batch: 1}, {token: total_tokens}, {value_head: value_head_count}], dtype: fp32}
+      beta: {meaning: Delta-rule write strength per token and head, shape: [{batch: 1}, {token: total_tokens}, {value_head: value_head_count}], dtype: fp32}
+      initial_state: {meaning: Read-only carried state per request and value head, shape: [{request: request_count}, {value_head: value_head_count}, {value: value_dim}, {key: key_dim}], dtype: bf16}
+      output_final_state: {meaning: Flag selecting whether final state is returned, shape: [], dtype: bool}
+      cu_seqlens: {meaning: Prefix sums delimiting each request's tokens, shape: [{bound: request_count + 1}], dtype: int32, nullable: true, default: None}
+      chunk_indices: {meaning: 'Auxiliary (request, chunk) enumeration metadata', shape: [{chunk: total_chunks}, {field: 2}], dtype: int32, nullable: true, default: None}
+      chunk_offsets: {meaning: Per-request start offsets into chunk_indices, shape: [{bound: request_count + 1}], dtype: int32, nullable: true, default: None}
+      use_qk_l2norm_in_kernel: {meaning: Flag selecting in-operation L2 norm of q/k, shape: [], dtype: bool, default: true}
+      core_attn_out: {meaning: Optional in-place destination of flattened out, shape: [{token_capacity: core_token_capacity}, {value_head: value_head_count}, {value: value_dim}], dtype: bf16, nullable: true, default: None}
+    Output:
+      out: {meaning: Attention output per packed token and value head, shape: [{batch: 1}, {token: total_tokens}, {value_head: value_head_count}, {value: value_dim}], dtype: bf16}
+      final_state: {meaning: Final state per request; None if not requested, shape: [{request: request_count}, {value_head: value_head_count}, {value: value_dim}, {key: key_dim}], dtype: fp32, nullable: true}
+      core_attn_out_updated: {meaning: Caller buffer after the in-place prefix write, shape: [{token_capacity: core_token_capacity}, {value_head: value_head_count}, {value: value_dim}], dtype: bf16, nullable: true}
+    Compute:
+      - Name: REQUEST_LAYOUT
+        Math: |
+          None denotes Python None. request_count is the number of packed requests, total_tokens the packed token count, length_r the token count of request r.
+          If cu_seqlens is None, request_count = 1 and the single request covers all tokens.
+          Otherwise request_count = len(cu_seqlens) - 1, cu_seqlens[0] = 0, cu_seqlens strictly increases to cu_seqlens[request_count] = total_tokens, and request r covers tokens t with cu_seqlens[r] <= t < cu_seqlens[r+1], so length_r = cu_seqlens[r+1] - cu_seqlens[r].
+          Domain: 1 <= request_count <= 32, 1 <= length_r <= 16384, total_tokens = sum_r length_r <= 16384.
+          key_head_count is in {2, 4, 8, 16}, the 16 model key/query heads over tensor-parallel degrees 1/2/4/8, and value_head_count = key_head_count * group_ratio, group_ratio in {2, 3, 8}; value head h reads q and k through key head h // group_ratio (integer division).
+          Projection, convolution and output normalization are outside this task; operands arrive ready for the recurrence.
+      - Name: CHUNK_METADATA
+        Math: |
+          chunk_indices and chunk_offsets are auxiliary metadata and the outputs do not depend on their values.
+          None stands for the standard enumeration implied by the request layout; when provided they equal it, with chunks_r = ceil(length_r / 64), total_chunks = sum_r chunks_r, chunk_offsets[0] = 0, chunk_offsets[r+1] = chunk_offsets[r] + chunks_r, and chunk_indices[c] = (r, c - chunk_offsets[r]) for chunk_offsets[r] <= c < chunk_offsets[r+1].
+      - Name: QK_L2_NORMALIZATION
+        Math: |
+          q_hat and k_hat are the fp32 operands entering the recurrence, defined for every packed token t and key head h with 0 <= i < key_dim.
+          If use_qk_l2norm_in_kernel:
+            q_hat[0,t,h,i] = q[0,t,h,i] / sqrt(sum_{j=0}^{key_dim-1} q[0,t,h,j]^2 + 1e-6)
+            k_hat[0,t,h,i] = k[0,t,h,i] / sqrt(sum_{j=0}^{key_dim-1} k[0,t,h,j]^2 + 1e-6)
+          Otherwise q_hat and k_hat are the exact bf16 input values of q and k.
+        Symbol:
+          q_hat: {meaning: Query operand entering the recurrence, shape: 'ref:q.shape', dtype: fp32}
+          k_hat: {meaning: Key operand entering the recurrence, shape: 'ref:k.shape', dtype: fp32}
+      - Name: GATED_DELTA_RECURRENCE
+        Math: |
+          All arithmetic is fp32 unless a conversion is written, and bf16 inputs participate with their exact values. For each request r and value head h independently, let kh = h // group_ratio and let s(t) be the state matrix after t tokens of that request, s(t)[i,j] with 0 <= i < key_dim and 0 <= j < value_dim.
+          s(-1)[i,j] = initial_state[r,h,j,i], the stored [value, key] layout transposed into the recurrence state.
+          For t = 0 .. length_r - 1 with global token index tau (tau = cu_seqlens[r] + t, or tau = t when cu_seqlens is None):
+            a = exp(g[0,tau,h])
+            pred[j] = sum_{i=0}^{key_dim-1} k_hat[0,tau,kh,i] * a * s(t-1)[i,j]
+            delta(t)[j] = beta[0,tau,h] * (v[0,tau,h,j] - pred[j])
+            s(t)[i,j] = a * s(t-1)[i,j] + k_hat[0,tau,kh,i] * delta(t)[j]
+            out[0,tau,h,j] = bf16(key_dim^(-0.5) * sum_{i=0}^{key_dim-1} q_hat[0,tau,kh,i] * s(t)[i,j])
+          The output of token t reads the state s(t) updated by token t itself, whose diagonal term carries decay exp(0) = 1.
+        Symbol:
+          s: {meaning: State after t tokens; s(-1) is initial state, shape: [{key: key_dim}, {value: value_dim}], dtype: fp32}
+          delta: {meaning: Delta-rule update vector of one token, shape: [{value: value_dim}], dtype: fp32}
+      - Name: RESULTS_AND_SIDE_EFFECTS
+        Math: |
+          The call returns the pair (out, final_state).
+          If output_final_state is true, final_state[r,h,j,i] = s(length_r - 1)[i,j] in fp32 for every request r and value head h; otherwise final_state is None.
+          If core_attn_out is None, nothing is written and core_attn_out_updated is None; otherwise core_token_capacity >= total_tokens, the first total_tokens * value_head_count * value_dim elements of core_attn_out in row-major flattened order are overwritten with the row-major flattening of out, the remaining capacity stays untouched, and core_attn_out_updated is that buffer after the write.
+          out and requested final_state are fresh result tensors; their element regions may share a new backing but do not overlap. out does not alias core_attn_out; only core_attn_out is mutated, and input backing allocations are preserved.
+    Golden_reference:
+      Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/problem/reference.py::Model.forward
+      Tolerance:
+        out: Source only, no defaults; atol=.01, rtol=.05, max_mismatch_fraction=0; formula/basis absent
+        final_state: Source only, no defaults; same declared atol/rtol/max_mismatch_fraction; routing absent
+        core_attn_out_updated: Source only, no defaults; same declared record as out; routing to mutated buffer absent
+      Gap: FP32 block solve changes association; constructor fault must be None for task math
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      sm: Streaming multiprocessor hosting resident CTAs and owning the SMEM and register file they share; the fixed source sizes launches in waves of CTAs against the device SM count.
+      cta: Thread block, a grid-launched group of threads scheduled entirely on one SM whose threads share the block's SMEM allocation and synchronize through block barriers.
+      warp: 32 consecutive threads of a CTA executing in lockstep, the granularity of the full-mask warp shuffles and per-warp segment work in the fixed source.
+      thread: Single thread, one scalar lane of a warp executing the SIMT element work of the fixed source kernels.
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: >-
+      A 64-token triangular block solve shortens the serial recurrence. Explicit BF16 narrowing of operands and intermediate inverses approximates the FP32 task; chunks advance authoritative FP32 state with BF16 tensor-core products
+    Rewrite:
+      - Name: L2-normalized q/k operands
+        Math: |
+          Defines the bf16 operand rows q_n and k_n entering every downstream product, for each packed token t and key head h, 0 <= d < key_dim.
+          If use_qk_l2norm_in_kernel:
+            ss = sum_d fp32(q[0,t,h,d])^2;  q_n[0,t,h,d] = bf16(fp32(q[0,t,h,d]) * rsqrt(ss + 1e-6))
+            k_n is defined identically from k.
+          Otherwise q_n = q and k_n = k, the exact bf16 input values with no renormalization.
+          Contract q_hat/k_hat are the fp32 normalized values; q_n/k_n are their single bf16 narrowing when the flag is on and replace them as recurrence operands.
+        Symbol:
+          q_n: {meaning: bf16 query operand entering the chunk products, shape: 'ref:CONTRACT.Algorithm_requirement::q.shape', dtype: bf16, retention: keep_value invocation}
+          k_n: {meaning: bf16 key operand entering the chunk products, shape: 'ref:CONTRACT.Algorithm_requirement::k.shape', dtype: bf16, retention: keep_value invocation}
+        Arithmetic:
+          Approx: 'the row scale uses device rsqrtf; unknown: end-to-end error and intermediate finiteness over all finite Contract inputs'
+          Accumulate: ss is the per-lane sum of 4 sequential fp32 squares folded by a five-step full-warp xor butterfly
+        Ledger:
+          Baseline: Contract q_hat/k_hat stay fp32 into the recurrence
+          Gain: normalized operands are exact bf16 mma inputs sharing one tensor-core path with the flag-off case
+          Cost: one bf16 narrowing per q/k element (~2^-9 class) enters every gram/qk/state product when the flag is on
+      - Name: Chunk layout and decay statistics
+        Math: |
+          chunks(r) = ceil(length_r / 64) as in Contract CHUNK_METADATA; chunk c of request r covers rows i = 0..63 with global token tau(i) = cu_seqlens[r] + c*64 + i, lc = min(64, length_r - c*64) valid rows, and slot = chunk_offsets[r] + c.
+          For i >= lc, g and beta are zero-filled; q/k/v loads retain following-request rows or tensor-boundary zero fill. All 64 rows are evaluated; only i < lc are stored. Zero beta contains padded rhs/u/du only when intermediate products remain finite; it does not suppress NaN from 0*inf.
+          Per (slot, h) with kh = h // group_ratio, fp32 unless a cast is written:
+            b(i) = sum_{j<=i} g[0, tau(j), h]   (inclusive log-decay cumsum)
+            ai(i) = exp(b(i));  dl(i) = exp(b(63) - b(i));  rho(0) = 1;  rho(i) = exp(b(i-1) - b(i))
+            exp(b_i - b_j) for i >= j evaluates as exp(b_i - b_j0) * prod_{l=j0+1..j} rho(l), j0 the anchor of a column group (4-wide in system, 2-wide in qkd).
+        Symbol:
+          b: {meaning: published chunk cumsum of g; unread by the chain, shape: [{token: 64}], dtype: fp32, retention: 'keep_value (slot,h)'}
+          ai: {meaning: 'per-row chunk decay exp(b(i)), published', shape: [{token: 64}], dtype: fp32, retention: 'keep_value (slot,h)'}
+          dl: {meaning: 'decay to chunk end exp(b(63)-b(i)), published', shape: [{token: 64}], dtype: fp32, retention: 'keep_value (slot,h)'}
+        Arithmetic:
+          Approx: 'every exp uses __expf; unknown: full-domain error and finiteness of anchors/rho products; sampled gates do not bound cumulative b'
+          Accumulate: b uses two 32-lane inclusive shuffle scans and one upper-warp correction; zero-filled tail sums can differ by FP32 association
+        Ledger:
+          Baseline: per-token decay a = exp(g) applied at every token step
+          Gain: one exp anchor per small column group plus cheap ratio products replaces per-pair exp evaluation
+      - Name: Per-chunk system and published planes
+        Math: |
+          per (slot, h), on the 64 chunk rows, with the decay factors of the previous step:
+            gram(i,j) = bf16(dot32(k_n[tau(i),kh,:], k_n[tau(j),kh,:]))
+            qk(i,j) = dot32(q_n[tau(i),kh,:], k_n[tau(j),kh,:])
+            system(i,j) = bf16(1) if i == j; bf16(beta[0,tau(i),h] * exp(b_i-b_j) * gram(i,j)) if i > j; 0 otherwise
+            tinv = the rounded hierarchical approximation of system^{-1} defined by the next step
+            qkd(i,j) = bf16(key_dim^(-1/2) * qk(i,j) * exp(b_i-b_j)) for i >= j, else 0
+          Only ten lower 16x16 tiles are evaluated; strict-upper elements inside diagonal tiles are computed then masked. Entire strict-upper tiles are skipped.
+        Symbol:
+          tinv: {meaning: rounded lower-triangular inverse approximation, shape: [{row: 64}, {column: 64}], dtype: bf16, retention: 'keep_value (slot,h)'}
+          qkd: {meaning: 'scaled decay-masked qk plane, lower triangle', shape: [{row: 64}, {column: 64}], dtype: bf16, retention: 'keep_value (slot,h)'}
+        Arithmetic:
+          Accumulate: gram/qk use BF16 operands with FP32 accumulation; gram is narrowed before system construction
+        Ledger:
+          Baseline: full 64x64 gram and qk products per chunk
+          Gain: skip six strict-upper 16x16 tiles; the last two skips remove 17% of the prior twelve-tile work
+      - Name: Hierarchical block inverse
+        Math: |
+          tinv approximates system^{-1}; rows and columns partition into eight 8x8 diagonal blocks.
+          Level 8, per block with base = 8*block and column j = 0..7, fp32 forward substitution over bf16 entries:
+            t(0) = 1;  t(d) = -sum_{q<d} system(base+j+d, base+j+q) * t(q);  tinv(base+j+d, base+j) = bf16(t(d)) for 1 <= d < 8-j
+          Merge levels 16 and 32: a superblock pairs the inverted halves invd1 (upper) and invd2 (lower) with the coupling l21 = system[lower half rows, upper half columns]:
+            z = mm32(invd2, l21);  x = -mm32(bf16(z), invd1);  tinv[lower, upper] = bf16(x)
+          Level 64 materializes y = bf16(mm32(l21, invd1)) as a [32][32] bf16 plane, then x = -mm32(invd2, y), tinv[lower,upper] = bf16(x); levels 16 and 32 fuse both passes, repacking the z C-fragments as a-fragments, zero-padded k halves killing dead terms and garbage rows discarded.
+          The unit diagonal and zero strict-upper skeleton are established once before the levels overwrite the strictly-lower tiles.
+        Arithmetic:
+          Accumulate: level products accumulate bf16 inputs in fp32; zero-padded operand halves eliminate skipped finite terms
+        Ledger:
+          Baseline: full 64-column fp32 SIMT forward substitution per chunk
+          Gain: serial substitution chain 64 -> 8 steps; merges on tensor cores; levels 16/32 single-pass
+          Cost: 'level inputs/outputs and z, y are bf16: ~2^-9 per level, ~7 stages on the tinv path, source-declared ~0.5-1% relative'
+      - Name: Chunk state advance and outputs
+        Math: |
+          per (r,h), k_c/q_c are [64][key_dim] rows of k_n/q_n for kh; sc(c) is the chunk-entry state with sc(0)[d,v] = initial_state[r,h,v,d], the Contract s(-1):
+            sc_hi(c) = bf16(sc(c)), a single plane, no residual plane kept
+            pred = mm32(k_c, sc_hi(c));  qpred = mm32(q_c, sc_hi(c))
+            rhs(i,v) = beta[0,tau(i),h] * (v[0,tau(i),h,v] - ai(i) * pred(i,v));  rhs_h = bf16(rhs)
+            u = mm32(tinv, rhs_h); u(i,.) approximates the Contract delta(c*64+i) for i < lc;  u_h = bf16(u);  du_h = bf16(dl(i) * u(i,v)), both narrowings from the fp32 u, not chained
+            attn2 = mm32(qkd, u_h);  o(i,v) = ai(i) * key_dim^(-1/2) * qpred(i,v) + attn2(i,v);  out[0,tau(i),h,v] = bf16(o(i,v)) for i < lc
+            ds = mm32(k_c^t, du_h);  sc(c+1) = ai(63) * sc(c) + ds, approximating Contract s(min((c+1)*64,length_r)-1)
+          If requested, final_state[r,h,v,d] = sc(chunks(r))(d,v) in fp32, with the accumulated approximation error and no further narrowing.
+        Symbol:
+          sc: {meaning: fp32 chunk-entry state; sc(0) = Contract s(-1), shape: [{key: key_dim}, {value: value_dim}], dtype: fp32, retention: 'carry_forward (r,h); c=0..chunks(r)'}
+          sc_hi: {meaning: single bf16 plane of sc(c) feeding pred/qpred, shape: [{key: key_dim}, {value: value_dim}], dtype: bf16}
+          rhs_h: {meaning: bf16 plane of the residual rhs, shape: [{row: 64}, {value: value_dim}], dtype: bf16}
+          u_h: {meaning: bf16 plane of the solved deltas u, shape: [{row: 64}, {value: value_dim}], dtype: bf16}
+          du_h: {meaning: bf16 plane of the decayed deltas dl*u, shape: [{row: 64}, {value: value_dim}], dtype: bf16}
+        Arithmetic:
+          Accumulate: products use BF16 operands with FP32 accumulation; pred/qpred split the eight key steps into even/odd accumulator pairs merged in fp32 at use
+        Ledger:
+          Baseline: per-token recurrence with length_r sequential rank-1 fp32 state updates and per-token outputs
+          Gain: serial state transitions per (r,h) length_r -> chunks(r), 64x shorter; intra-chunk work is dense bf16 tensor-core products
+          Cost: per chunk the tinv build, two [64][64] bf16 planes, 4 vectors and the rhs/u/du planes; pad rows evaluated; ~2^-9 narrowing on derived operands
+      - Name: Workspace publication of chunk operands
+        Math: |
+          For every existing slot and value head h the slot publishes exactly the defined values: tinv and qkd triangle-packed (only the ten 16x16 fragment tiles (m, ks) with ks <= m exist, bytes equal the working-plane values) and the fp32 vectors b, beta (byte-identical republication of the chunk input rows), ai, dl.
+          For every existing slot and key head kh, the first value head of the group republishes kq_mirror, the byte-identical image of the k_c/q_c chunk tiles concatenated by operand; the other value heads write nothing. With the flag on, the mirrored bytes come from the persistent normalized buffers, else from the inputs.
+          Pad rows publish zero beta and scanned b/ai/dl with the arithmetic limits above; mirror bytes include foreign rows or tensor-boundary zeros.
+        Symbol: {kq_mirror: {meaning: byte image of the k_n/q_n chunk tiles of one kh, shape: [{operand: 2}, {token: 64}, {key: key_dim}], dtype: bf16, retention: 'keep_value (slot,kh)'}}
+        Ledger:
+          Baseline: chain CTAs read the k/q rows per chunk directly from the input tensors
+          Gain: one bulk image copy per chain chunk; one mirror writer per (slot,kh); this per-value-head prep still reloads q/k for each head
+          Cost: mirror storage 32,768B per (slot,kh), slot storage 11,264B per (slot,h); each chain value tile reloads its bundle
+  Work_schedule:
+    Thesis: >-
+      PREP resolves chunk-independent systems in parallel over (slot, value head); CHAIN gives one CTA the whole chunk chain of a (request, head, 32-column value tile) with fp32 register state, value tiling being the only split of the serial recurrence; 1:1 preassigned; chain starts early via PDL.
+    Step:
+      L2NORM:
+        Describe: Row-wise L2 normalization of q and k into persistent bf16 buffers, submitted only when use_qk_l2norm_in_kernel is on
+        Decomposition:
+          Strategy: the virtual row space lists q rows then k rows; the 8 warps take 8 consecutive rows; surplus warps of the tail CTA perform no access
+          Partition: {row: {meaning: one q or k row of the virtual row space, size: 2*total_tokens*key_head_count, tile: 8}}
+          Target:
+            Single_tile: {norm_rows: {meaning: normalized q_n/k_n rows of the 8-row span, shape: [{row: 8}, {key: key_dim}], dtype: bf16}}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil_div(2*total_tokens*key_head_count, 8)
+        Schedule:
+          Strategy: with the flag off the step is not submitted; the PREP start_after and q_n/k_n handoffs then have no event instances
+          Worktile_order: [{by: row, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+      PREP:
+        Describe: 'Per existing (slot, value head): build and invert the chunk system, publish planes and vectors; the group-first head also publishes the mirror'
+        Decomposition:
+          Strategy: 'slot < total_chunks = chunk_offsets[request_count] resolves (n,c) = chunk_indices[slot]; a slot >= total_chunks is empty: trigger and exit'
+          Partition:
+            slot: {meaning: 'chunk slot enumerating (request, chunk) pairs', size: 'ceil_div(total_tokens, 64) + request_count', tile: 1}
+            hv: {meaning: value head, size: value_head_count, tile: 1}
+          Target:
+            Single_tile:
+              tinv_plane: {meaning: triangle-packed bf16 tinv plane of the slot, shape: [{tile: 10}, {row: 16}, {column: 16}], dtype: bf16}
+              qkd_plane: {meaning: triangle-packed bf16 qkd plane of the slot, shape: [{tile: 10}, {row: 16}, {column: 16}], dtype: bf16}
+              slot_vectors: {meaning: 'b, beta, ai, dl fp32 vectors of the slot tail', shape: [{vector: 4}, {token: 64}], dtype: fp32}
+              kq_mirror: {meaning: operand mirror; only the group-first head writes, shape: [{operand: 2}, {token: 64}, {key: key_dim}], dtype: bf16}
+        Mapping:
+          Strategy: grid x = value head (head-fastest), y = slot; the per-CTA work is identical under either order
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: value_head_count * (ceil_div(total_tokens, 64) + request_count)
+        Schedule:
+          Worktile_order:
+            - {by: slot, direction: ascending}
+            - {by: hv, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+      CHAIN:
+        Describe: 'Walk the chunk chain of one (request, head, 32-column value tile): per chunk form pred/qpred, rhs, u, du, attn2, write out rows, advance the state'
+        Decomposition:
+          Strategy: chunk_count = chunks(n), length_n = cu_seqlens[n+1] - cu_seqlens[n]; the chunk order is the recurrence, not permutable; n is the grid z index
+          Partition:
+            n: {meaning: request whose chunk chain this worker walks, size: request_count, tile: 1}
+            hv: {meaning: value head, size: value_head_count, tile: 1}
+            vt: {meaning: tile of 32 value columns of state and output, size: value_dim, tile: 32}
+          Worktile:
+            Invariant: {state0_tile: {meaning: 'transposed entry state slice sc(0) of (n,hv,vt)', shape: [{key: key_dim}, {value: 32}], dtype: 'ref:CONTRACT.Algorithm_requirement::initial_state.dtype'}}
+            Iteration:
+              kq_tile: {meaning: k_n/q_n operand rows of the chunk via the mirror, shape: [{operand: 2}, {token: 64}, {key: key_dim}], dtype: bf16, direction: ascending}
+              v_tile: {meaning: v rows of the chunk for this value tile, shape: [{token: 64}, {value: 32}], dtype: 'ref:CONTRACT.Algorithm_requirement::v.dtype', direction: ascending}
+              tinv_plane: {meaning: 'published tinv plane of the chunk, head hv', shape: [{tile: 10}, {row: 16}, {column: 16}], dtype: bf16, direction: ascending}
+              qkd_plane: {meaning: 'published qkd plane of the chunk, head hv', shape: [{tile: 10}, {row: 16}, {column: 16}], dtype: bf16, direction: ascending}
+              slot_vectors: {meaning: published beta/ai/dl vectors; b rides unread, shape: [{vector: 4}, {token: 64}], dtype: fp32, direction: ascending}
+          Target:
+            Single_tile:
+              out_tile: {meaning: 'out rows of request n, head hv, this value tile', shape: [{token: length_n}, {value: 32}], dtype: bf16}
+              final_tile: {meaning: 'final_state slice of this tile, only if requested', shape: [{value: 32}, {key: key_dim}], dtype: fp32}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: (value_dim / 32) * value_head_count * request_count
+        Schedule:
+          Worktile_order:
+            - {by: n, direction: ascending}
+            - {by: hv, direction: ascending}
+            - {by: vt, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch:
+        - {step: [L2NORM]}
+        - {step: [PREP], start_after: L2NORM.kernel_done}
+        - {step: [CHAIN], start_after: PREP.launch_ready}
+      Handoff:
+        q_n: {producer: L2NORM, consumer: [PREP], storage: global}
+        k_n: {producer: L2NORM, consumer: [PREP], storage: global}
+        kq_mirror: &prep_to_chain {producer: PREP, consumer: [CHAIN], storage: global, wait_at: CHAIN.prep_done}
+        tinv: *prep_to_chain
+        qkd: *prep_to_chain
+        beta: *prep_to_chain
+        ai: *prep_to_chain
+        dl: *prep_to_chain
+  Tile_pipeline:
+    Thesis: >-
+      One all-warp role per CTA; concurrency lives inside actions and async rings. Prep overlaps decay stats on gram-idle warps with in-flight boxes. Chain runs a depth-2 stage ring, per-chunk B1/B3 joins publish the planes, fp32 state stays in registers; the serial per-chunk mma chain bounds pace.
+    Step:
+      L2NORM:
+        Role:
+          MAIN:
+            Info:
+              Describe: Stream-normalize the 8 rows of the CTA worktile, one row per warp
+              Member: warp[0:8]
+              Using_verb:
+                compute: {norm_row: {execution_mode: serial, describe: warp w normalizes virtual row w of the 8-row worktile from the inputs into the q_n/k_n buffers per Math step 1; surplus warps idle}}
+            Pipe:
+              - compute:norm_row
+      PREP:
+        Storage:
+          kq_image: {meaning: swizzle image of the chunk k_n/q_n operand tiles, depth: 1, location: smem, shape: [{operand: 2}, {token: 64}, {key: key_dim}],
+            dtype: bf16, total_size: 32768, view: {k_tile: {region: {operand: [0, 1]}}, q_tile: {region: {operand: [1, 2]}}}}
+          gram_plane: {meaning: 'bf16 working plane of gram, padded columns', depth: 1, location: smem, shape: [{row: 64}, {column: 72}],
+            dtype: bf16, total_size: 9216, view: {gram: {region: {column: [0, 64]}}}}
+          sys_plane: {meaning: bf16 working plane of the quantized system, depth: 1, location: smem, shape: [{row: 64}, {column: 72}],
+            dtype: bf16, total_size: 9216, view: {system: {region: {column: [0, 64]}}}}
+          tinv_plane: {meaning: bf16 inverse working plane = published bytes, depth: 1, location: smem, shape: [{row: 64}, {column: 72}],
+            dtype: bf16, total_size: 9216, view: {tinv: {region: {column: [0, 64]}}}}
+          vec_stage: {meaning: 'staged g->b, beta and derived rho rows', depth: 1, location: smem, shape: [{vector: 3}, {token: 64}],
+            dtype: fp32, total_size: 768, view: {b: {region: {vector: [0, 1]}}, beta: {region: {vector: [1, 2]}}, rho: {region: {vector: [2, 3]}}}}
+          y_scratch: {meaning: level-64 BF16 y plane; 40-element row pitch, depth: 1, location: smem, shape: [{row: 64}, {column: 40}],
+            dtype: bf16, total_size: 5120, view: {y_plane: {region: {row: [0, 32], column: [0, 32]}}}}
+          qk_acc: {meaning: qk fp32 fragments held until the qkd publication, depth: 1, location: register, shape: [{row: 64}, {column: 64}],
+            dtype: fp32, total_size: 16384, view: {qk: {}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: One cooperative CTA per (slot, hv) resolving the chunk system and publishing the chunk operands
+              Member: warp[0:8]
+              Using_verb:
+                load:
+                  geo: {execution_mode: serial, describe: 'a parallel cold round stages chunk_offsets, cu_seqlens and clamped chunk_indices[slot] into smem and inits the mbarrier; the first join publishes'}
+                  kq_image: {execution_mode: async_unordered, describe: 'thread 0 issues four {64,64,1} SWIZZLE_128B TMA boxes of the k_n/q_n chunk tiles into kq_image under one expect_tx on the stage mbarrier'}
+                  g_beta: {execution_mode: async_unordered, describe: 'threads 0-63 stage the g and beta rows of head hv by predicated 4B cp.async, zero-filled past lc, one commit group'}
+                compute:
+                  decay_stats: {execution_mode: async_unordered, describe: 'warps 4-5 turn staged g rows into b in place and derive rho, released by the issuers cp.async wait via a subset barrier; done covers the join'}
+                  gram: {execution_mode: serial, describe: 'six tile-active warps compute gram = k_n@k_n^T from k_tile by fp32 mma, bf16 into gram_plane, skipping unconsumed upper halves; done covers the join'}
+                  qk: {execution_mode: serial, describe: the same warps compute qk = q_n@k_n^T into the qk_acc fragments held until qkd_publish; the same upper skip applies}
+                  system: {execution_mode: serial, describe: init tinv_plane identity/zeros once; build sys_plane with 4-column anchored decay factors}
+                  qkd_publish: {execution_mode: async_unordered, describe: 'six warps write the ten packed qkd tiles to the slot from qk_acc, b and rho; global stores, visibility bound to grid completion'}
+                  inv8: {execution_mode: serial, describe: lane j<8 of warp w runs the fp32 register forward substitution of column j of block 8w over bf16 system into tinv_plane; done covers the join}
+                  inv16: {execution_mode: serial, describe: 'warps 0-3 fuse z = invd2@l21 and x = -bf16(z)@invd1 per 16-block, C fragments repacked as A, zero k-halves killing dead terms; done joins'}
+                  inv32: {execution_mode: serial, describe: warps 0-1 run the same fused merge on full 16x16 tiles per 32-block; done covers the join}
+                  inv64: {execution_mode: serial, describe: 'warps 0-3 materialize y = bf16(l21@invd1) in y_plane, join, then write x = -invd2@y into tinv_plane; done covers the join completing tinv'}
+                  slot_publish: {execution_mode: async_unordered, describe: 'all threads copy the ten packed tinv tiles and threads 0-63 write b/beta/ai/dl to the slot; global stores, visible at grid completion'}
+                store: {kq_mirror: {execution_mode: async_unordered, describe: 'thread 0 bulk-copies the 32,768B kq_image to the mirror of (slot, kh), group-first head only; the exit bulk-group drain completes the write'}}
+                signal:
+                  launch_dependents_exit: {execution_mode: serial, describe: 'empty-slot worker: thread 0 triggers the dependent launch before exiting, keeping the chain launch permission complete'}
+                  launch_dependents: {execution_mode: serial, describe: thread 0 triggers the dependent launch once the join proved the loads of this CTA landed; all CTAs triggering forms PREP.launch_ready}
+            Pipe:
+              - load:geo
+              - if(slot >= total_chunks):
+                  - signal:launch_dependents_exit
+              - if(slot < total_chunks):
+                  - load:kq_image
+                  - load:g_beta
+                  - compute:decay_stats
+                  - signal:launch_dependents
+                  - compute:gram
+                  - compute:qk
+                  - if(hv % group_ratio == 0):
+                      - store:kq_mirror
+                  - compute:system
+                  - compute:qkd_publish
+                  - compute:inv8
+                  - compute:inv16
+                  - compute:inv32
+                  - compute:inv64
+                  - compute:slot_publish
+            Waiting:
+              Prepared:
+                - '{issue compute:decay_stats} ← [{done load:g_beta}]'
+                - '{issue signal:launch_dependents} ← [{done load:kq_image}, {done load:g_beta}, {done compute:decay_stats}]'
+      CHAIN:
+        Index: {c: {meaning: local chunk iteration in recurrence order, definition: [0, chunk_count]}}
+        Event:
+          prep_done: ['{done MAIN[0]::await:prep_grid}']
+        Storage:
+          sreg: {meaning: fp32 authoritative state columns of this tile, depth: 1, location: register, shape: [{key: key_dim}, {value: 32}],
+            dtype: fp32, total_size: 16384, view: {sc(c): {}}}
+          pred_acc: {meaning: even/odd pred accumulators retained until rhs, depth: 1, location: register, shape: [{parity: 2}, {row: 64}, {value: 32}],
+            dtype: fp32, total_size: 16384}
+          qpred_acc: {meaning: even/odd qpred accumulators retained until o_stage, depth: 1, location: register, shape: [{parity: 2}, {row: 64}, {value: 32}],
+            dtype: fp32, total_size: 16384}
+          shi: {meaning: 'bf16 plane of sc(c), rebuilt each chunk', depth: 1, location: smem, shape: [{key: key_dim}, {column: 40}],
+            dtype: bf16, total_size: 10240, view: {sc_hi(c): {region: {column: [0, 32]}}}}
+          uh: {meaning: bf16 plane of u feeding the qkd product, depth: 1, location: smem, shape: [{row: 64}, {column: 40}],
+            dtype: bf16, total_size: 5120, view: {u_h(c): {region: {column: [0, 32]}}}}
+          duh: {meaning: bf16 plane of du feeding the state delta product, depth: 1, location: smem, shape: [{row: 64}, {column: 40}],
+            dtype: bf16, total_size: 5120, view: {du_h(c): {region: {column: [0, 32]}}}}
+          rhh: {meaning: 'shared plane: rhs_h first, then staged out rows', depth: 1, location: smem, shape: [{row: 64}, {column: 40}],
+            dtype: bf16, total_size: 5120, view: {rhs_h(c): {region: {column: [0, 32]}}, out(c): {region: {column: [0, 32]}}}}
+          stage_kq: {meaning: stage ring slot of the operand mirror copy, depth: 2, location: smem, shape: [{operand: 2}, {token: 64}, {key: key_dim}],
+            dtype: bf16, total_size: 65536, view: {kq_mirror(c): {slot_index: c%2}, final_stage: {slot_index: 0}}}
+          stage_v: {meaning: stage ring slot of the v chunk tile (TMA box), depth: 2, location: smem, shape: [{token: 64}, {value: 32}],
+            dtype: bf16, total_size: 8192, view: {v(c): {slot_index: c%2}}}
+          stage_tinv: {meaning: stage ring slot of the published tinv plane, depth: 2, location: smem, shape: [{tile: 10}, {row: 16}, {column: 16}],
+            dtype: bf16, total_size: 10240, view: {tinv(c): {slot_index: c%2}}}
+          stage_qkd: {meaning: stage ring slot of the published qkd plane, depth: 2, location: smem, shape: [{tile: 10}, {row: 16}, {column: 16}],
+            dtype: bf16, total_size: 10240, view: {qkd(c): {slot_index: c%2}}}
+          stage_vec: {meaning: stage ring slot of the vectors; b rides unread, depth: 2, location: smem, shape: [{vector: 4}, {token: 64}],
+            dtype: fp32, total_size: 2048, view: {b(c): {slot_index: c%2, region: {vector: [0, 1]}}, beta(c): {slot_index: c%2, region: {vector: [1, 2]}}, ai(c): {slot_index: c%2, region: {vector: [2, 3]}}, dl(c): {slot_index: c%2, region: {vector: [3, 4]}}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: 'One CTA walks the whole chunk chain: warp (mw = warp%4, nw = warp/4) tiles the [64][32] products; each warp owns state key rows warp*16..+15'
+              Member: warp[0:8]
+              Using_verb:
+                compute:
+                  barrier_init: {execution_mode: serial, describe: thread 0 initializes the two stage mbarriers (count 1) with an init fence; the first join publishes; issued before the PDL wait}
+                  state_plane: {execution_mode: serial, describe: every thread writes sc_hi(0) = bf16(sc(0)) from sreg into shi; done covers the join publishing it to chunk 0}
+                  rhs: {execution_mode: serial, describe: 'per-thread rhs = beta*(v - ai*pred), merging pred_acc even/odd pairs, v from stage_v(c); bf16 into rhh; done covers the B1 join'}
+                  u_planes: {execution_mode: serial, describe: u_h = bf16(u) into uh and du_h = bf16(dl*u) into duh from the fp32 u accumulators; done covers the B3 join also freeing rhh for o staging}
+                  o_stage: {execution_mode: serial, describe: 'rows i < lc: o = ai*key_dim^(-1/2)*qpred + attn2 with qpred_acc pair-merged, staged bf16 into rhh, whose rhs readers retired at B3; bytes equal out'}
+                  state_advance: {execution_mode: serial, describe: 'sc(c+1) = ai(63)*sc(c) + ds in sreg (fp32) and sc_hi(c+1) rebuilt into shi; the next await:stage join publishes it cross-warp'}
+                load:
+                  state0: {execution_mode: serial, describe: 'resolve n, start, chunk_count, slot0 from cu/chunk_offsets and load the transposed initial_state slice into sreg as sc(0); pre-wait input read'}
+                  stage: {execution_mode: async_unordered, describe: 'thread 0 stages chunk x into slot x%2 under one expect_tx: mirror bulk, 11,264B slot-bundle bulk and one v TMA box; done = the mbarrier satisfied'}
+                await:
+                  prep_grid: {execution_mode: serial, describe: 'grid-dependency wait binding to PREP grid completion, the acquire for mirror, planes and vectors; done is the CHAIN.prep_done event'}
+                  stage: {execution_mode: serial, describe: 'parity wait on slot c%2, then CTA join; done publishes c and retires prior-chunk reads before prefetch reuses the prior slot'}
+                matmul:
+                  kq_mirror@sc_hi: {execution_mode: serial, describe: 'eight key steps: k_n/q_n from kq_mirror(c) times warp columns of shi.sc_hi(c), yielding even/odd FP32 pred_acc/qpred_acc'}
+                  tinv@rhs_h: {execution_mode: serial, describe: 'per warp: A from the packed tinv(c) tiles (m,ks), ks <= mw only, preloaded before the B1 join; B from rhs_h(c); fp32 accumulate; yields u fragments'}
+                  qkd@u_h: {execution_mode: serial, describe: 'per warp: A from the packed qkd(c) tiles, ks <= mw only, preloaded before the B3 join; B from u_h(c); fp32 accumulate; yields attn2 fragments'}
+                  kt@du_h: {execution_mode: serial, describe: 'per warp over four steps: A = transposed k_n rows of kq_mirror(c), key rows warp*16..+15, preloaded pre-B3; B from du_h(c); fp32; yields ds'}
+                store:
+                  out: {execution_mode: async_unordered, describe: 'after a warp join each warp sweeps its staged rhh rows by 128-bit IO into out and core (when given), rows i < lc; smem reads complete in-action'}
+                  final_state: {execution_mode: serial, describe: 'stage sreg in stage_kq.final_stage at odd pitch, join, then float4 transpose; B3/prior loop join retired K/Q reads; all stage writes completed'}
+                signal: {launch_dependents: {execution_mode: serial, describe: 'thread 0 triggers the dependent launch at entry; no PDL secondary follows the chain here, a neutral protocol hint'}}
+            Pipe:
+              - compute:barrier_init
+              - signal:launch_dependents
+              - load:state0
+              - await:prep_grid
+              - load:stage(0)
+              - compute:state_plane
+              - for(c):
+                  - await:stage(c)
+                  - if(c + 1 < chunk_count):
+                      - load:stage(c+1)
+                  - matmul:kq_mirror(c)@sc_hi(c)
+                  - compute:rhs(c)
+                  - matmul:tinv(c)@rhs_h(c)
+                  - compute:u_planes(c)
+                  - matmul:qkd(c)@u_h(c)
+                  - compute:o_stage(c)
+                  - matmul:kt(c)@du_h(c)
+                  - compute:state_advance(c)
+                  - store:out(c)
+              - if(output_final_state):
+                  - store:final_state
+            Waiting:
+              Prepared:
+                - '{done await:stage(c)} ← [{done load:stage(c)}]'
+                - '{issue matmul:kq_mirror(c)@sc_hi(c)} ← [{done compute:state_advance(c-1)}]'
+REALIZATION:
+  Require:
+    - Item: CONTRACT.Algorithm_requirement
+      Choice: preserve the declared nullable metadata and caller-buffer writeback; the bound source only synthesizes chunk metadata when cu_seqlens is None and writes core through core_->contiguous()
+      Reason: source coverage gaps remain when cu is present but ci/co are None, or a noncontiguous core requires copyback; these do not narrow the Contract
+    - Item: DESIGN.Work_schedule::Flow
+      Choice: the chain grid launches under programmatic stream serialization against prep; every prep CTA triggers the dependent launch explicitly, active CTAs after their loads landed and empty CTAs before exit; the chain grid-dependency wait binds the handoffs to prep grid completion
+      Reason: provides the declared PREP.launch_ready and CHAIN.prep_done points while the chain prologue overlaps the prep drain; without the explicit trigger dependents fire only at grid completion (+5-6us measured)
+    - Item:
+        - DESIGN.Tile_pipeline::PREP.MAIN
+        - DESIGN.Tile_pipeline::CHAIN.MAIN
+      Choice: operand bundles move by cp.async.bulk 1D copies and TMA boxes accounted on one mbarrier per stage with explicit expect_tx bytes; the mbarrier wait is the acquire publishing async-proxy writes; the mirror store completes by the exit bulk-group drain
+      Reason: the completion protocol behind the load/await/store done guarantees; bulk drains measured ~320ns per 80KB against ~3.5us per 88KB for queue-limited per-element copies
+    - Item:
+        - DESIGN.Math_reshape::kq_mirror
+        - DESIGN.Math_reshape::q_n
+        - DESIGN.Math_reshape::k_n
+      Choice: planes/mirrors share a grow-only workspace; q_n/k_n use two separate grow-only normalized buffers reused across calls under same-stream order, prep rewriting every consumed slot per call; out/final_state occupy disjoint views of one fresh byte backing, carved after the prep launch
+      Reason: stable pointers keep the tensor-map cache valid and avoid per-call allocator round-trips (~2-4us each); same-stream reuse is ordered; the source adds no exclusion for concurrent calls on different streams
+    - Item:
+        - DESIGN.Tile_pipeline::PREP.MAIN
+        - DESIGN.Tile_pipeline::CHAIN.MAIN
+      Choice: the k/q/v loads consume host-encoded TMA tensor maps passed as grid constants, cached under exact (pointer, geometry) keys and holding address/layout metadata only
+      Reason: encoding measured ~57.8us per map, prohibitive per forward; exact keys with metadata-only content preserve semantics because every call re-reads the current tensor bytes
+    - Item:
+        - DESIGN.Tile_pipeline::PREP.Storage.kq_image
+        - DESIGN.Tile_pipeline::CHAIN.Storage.stage_kq
+      Choice: dynamic smem bases stay 1024B-aligned so the prep writer base and the chain stage reader bases are equal mod 1024, fixing the SWIZZLE_128B writer phase to 0 at both ends
+      Reason: TMA swizzle bakes the writer destination phase into the bytes; mismatched bases corrupt the image (unit-bench verified), equal bases make the mirror handoff phase-transparent
+    - Item: DESIGN.Math_reshape
+      Choice: every declared matrix product executes as warp-level bf16 tensor-core mma with fp32 accumulation, mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 class
+      Reason: 'provides the declared numerical path: BF16 operands, FP32 accumulation and single-narrowing planes; other product precision or accumulation width changes the declared rounding'
+    - Item:
+        - DESIGN.Tile_pipeline::PREP.MAIN
+        - DESIGN.Tile_pipeline::CHAIN.MAIN
+      Choice: both kernels launch 256 threads per CTA; prep reserves 96,512B opt-in dynamic smem at 2 CTAs/SM launch bounds, chain reserves 123,024B (the depth-2 vt32 ring) at 1 CTA/SM
+      Reason: 'the assumed residency: 2 x 96,512 = 193,024B fits the 233,472B opt-in cap and the prep register cap binds anyway; the chain register state plus stage ring fits one CTA per SM'
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::CHAIN.MAIN
+      Choice: stage the o rows into the exhausted rhs plane at plane stride and sweep them with warp-local coalesced 128-bit stores after a warp join, not a block barrier
+      Reason: replaces scattered per-thread 32-bit stores over 8-row sectors; bitwise-identical bytes; measured -14.3us on the long fixed case
+    - Item:
+        - DESIGN.Math_reshape::tinv
+        - DESIGN.Math_reshape::qkd
+      Choice: publish as ten triangle-packed 16x16 fragment tiles per plane (ks <= m only), each split into two 8-column halves at 16B pitch, 512B per tile
+      Reason: the chain consumes only ks <= m tiles, so packing saves ~42% plane bytes; the 16B-pitch halves rotate fragment-load banks conflict-free (+4-7% measured for 32B pitch); bitwise
+    - Item: DESIGN.Tile_pipeline::PREP.MAIN
+      Choice: fuse the level-16/32 merges into one pass repacking the z C-fragments as the second-product A-fragments, no y-plane round-trip
+      Reason: removes one smem round-trip and one barrier per level; the materialized form measured no faster than the SIMT it replaced (1757-2184 cycles/CTA)
+    - Item: DESIGN.Tile_pipeline::PREP.MAIN
+      Choice: run the cumsum/rho precompute on the two gram-idle warps, released by the issuing warps cp.async wait through a 128-thread subset barrier
+      Reason: 'overlaps the scan with in-flight operand boxes; the production join completes both before gram: max(cp-wait+rho, box-wait)+gram'
+    - Item: DESIGN.Tile_pipeline::CHAIN.MAIN
+      Choice: odd staging pitch of VTT+1 words for the final-state epilogue transpose
+      Reason: an even pitch makes every read quad 32-way bank-conflicted in the transposed float4 sweep; the odd pitch leaves 4-way
+  Forbid:
+    - Item: DESIGN.Tile_pipeline::CHAIN.MAIN
+      Choice: per-element or per-16B cp.async staging of the chunk operand bundles instead of the bulk/TMA loads
+      Reason: 'explicitly replaced: the ~4350-op cp.async16 stream was queue-limited (~3.5us/88KB vs ~320ns/80KB bulk) and spent LSU wavefronts of the top pipe; value-preserving, so numerics do not exclude it'

@@ -1,0 +1,371 @@
+META_DATA:
+  Name: dual_cache_latent_bf16
+  Describe: Sparse latent attention that gathers each query token's listed rows from sliding-window and compressed BF16 KV pools into one joint softmax
+  Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu::tc_attn_kernel
+  Version: 1
+  Dispatch:
+    id: tcgen05
+    when: >-
+      head_count >= 64 inputs served by exactly one tcgen05 submission, no key split, when total_query_tokens * ceil_div(head_count, 64) CTAs reach the device's SM count: each (token, 64-head-block) CTA walks its token's full selected key range in ascending 64-key chunks, writing final BF16 rows directly; workspace_buffer untouched, no combine follows. Exists only in 'a'-suffix tcgen05 builds; others use mma.sync designs. Graph-captured replay of the identical launch serves the same calls
+DESIGN:
+  Math_reshape:
+    Thesis: >-
+      One ascending pass over fixed kc-key chunks replaces the compacted key list: scores are two half-latent FP32 partials added once, and the running max may lag 1 log2 unit, collapsing most accumulator rescales to identity. Costs one extra add and a reassociated dot per score, probabilities up to 2
+    Rewrite:
+      - Name: Fixed key slots, validity mask and chunk range
+        Math: |
+          With visible, total, swa_count = min(visible, swa_window) per the Contract (the kernel's
+          defensive clamps are in-domain identities) and nglob = max(total - swa_window, 0), N =
+          swa_count + nglob, the tile evaluates the fixed positions 0 <= j < N: slot(j) =
+          sparse_indices[t, j] for j < swa_count, else sparse_indices[t, swa_window + j - swa_count];
+          v(j) = slot(j) >= 0; pool(j) = swa_kv_cache for j < swa_count, else compressed_kv_cache;
+          kv_row(j) = row max(slot(j), 0) of pool(j), so masked positions still gather a discarded
+          row. sel_kv(t) drops exactly the v(j) = 0 positions in order, so each Contract sum equals
+          the sum over all j of the same term where v(j) = 1 and zero else, one term per repeated
+          index. chunk_count = ceil_div(N, kc); chunk c covers kc*c <= j < min(kc*(c+1), N), j >= N
+          padding with v = 0; in-domain N >= 1; kv_rows(c) is chunk c's gathered rows in order.
+        Symbol:
+          kc: {meaning: Keys per chunk, binding: 'bind:DESIGN.Work_schedule::kc'}
+          chunk_count: {meaning: Number of kc-key chunks of one token's key range}
+          kv_rows: {meaning: 'One chunk''s gathered rows, key and value operand', shape: [{key: kc}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::swa_kv_cache.dtype', retention: 'keep_value (t,c)'}
+        Ledger:
+          Baseline: >-
+            The Contract's compacted sel_kv list: selected_count rows gathered and evaluated per token
+          Gain: null
+          Cost: >-
+            Gathered rows per token selected_count -> chunk_count*kc of 1 KiB each; both GEMMs evaluate invalid and padded positions, masked afterwards
+      - Name: Split scores, lazy maximum, BF16 fork
+        Math: |
+          log2e = 1.4426950408889634, qs = bmm1_scale * log2e, NEG_BIG = -3.0e38, RD = 1; sink2(h) =
+          sinks[h] * log2e with sinks, else -inf. Per head h, chunk c, j in c: s_lo(c,h,j) =
+          dot32(query[t,h,:256], kv_row(j)[:256]), s_hi(c,h,j) = dot32(query[t,h,256:], kv_row(j)[256:]),
+          each one issuer's 16-step ascending k-chain; sc(c,h,j) = (s_lo + s_hi) * qs at v(j) = 1, else -inf.
+          mu(c,h) = max_j sc(c,h,j); m*(c,h) = max(m(c-1,h), mu(c,h)); m(c,h) = NEG_BIG if m* <= NEG_BIG/2
+          (no valid key yet), else m(c-1,h) if m* - m(c-1,h) <= RD (lazy hold), else m*.
+          scale(c,h) = exp2(m(c-1,h) - m(c,h)); pf(c,h,j) = exp2(sc(c,h,j) - m(c,h)), 0 masked; pb(c,h,j) =
+          bf16(pf) RNE; l(c,h) = l(c-1,h)*scale + sum32_j pf; o(c,h,:) = mma32(pb(c,h,:), kv_rows(c), o(c-1,h,:)*scale(c,h));
+          init m(-1,h) = sink2(h) or NEG_BIG, l(-1,h) = 0, o(-1,h,:) = 0. exp2(-inf - NEG_BIG) = 0 keeps
+          keyless states finite; m* - m <= RD bounds pf <= 2; o, l share the 2^(row_max - m) factor cancelled.
+        Symbol:
+          s_lo: {meaning: FP32 partial scores over latent dims 0-255, shape: [{key: kc}], dtype: fp32, retention: 'keep_value (t,h,c)'}
+          s_hi: {meaning: FP32 partial scores over latent dims 256-511, shape: [{key: kc}], dtype: fp32, retention: 'keep_value (t,h,c)'}
+          sc: {meaning: 'Summed, scaled, validity-masked chunk scores', shape: [{key: kc}], dtype: fp32, retention: 'keep_value (t,h,c)'}
+          pb: {meaning: Chunk probabilities rounded to BF16 for phase 2, shape: [{key: kc}], dtype: bf16, retention: 'keep_value (t,h,c)'}
+          m: {meaning: Lazy base-2 running maximum including the sink, shape: [], dtype: fp32, retention: 'carry_forward (t,h); c=-1..chunk_count-1'}
+          l: {meaning: Running base-2 normaliser of processed chunks, shape: [], dtype: fp32, retention: 'carry_forward (t,h); c=-1..chunk_count-1'}
+          o: {meaning: Unnormalised attention accumulator, shape: [{d: latent_dim}], dtype: fp32, retention: 'carry_forward (t,h); c=-1..chunk_count-1'}
+        Arithmetic:
+          Approx: >-
+            exp2 and the final divide compile --use_fast_math to ex2.approx.f32 / div.approx.f32; unknown: per-op bound, path gated at zero reference mismatches
+          Accumulate: >-
+            Two 16-step half-latent k-chains + one add per score; four-way row-sum folds across lane halves; o by four 16-key steps; reassociates Contract sums
+        Ledger:
+          Baseline: >-
+            The Contract's two-pass evaluation: every score materialised in FP32, exact row max, flat sums
+          Gain: >-
+            Scores head_count*selected_count FP32 -> two kc-wide half buffers per chunk; one traversal feeds max/l/o; lazy max makes most rescales identity
+          Cost: >-
+            pb BF16 rounding; one extra FP32 add and a reassociated dot per score; pf up to 2; rescale multiplies on moved chunks; approximations per Arithmetic
+      - Name: Normaliser completion, sink fold and output
+        Math: |
+          After the last chunk C = chunk_count - 1, per head h:
+          l_final(h) = l(C,h) + exp2(sink2(h) - m(C,h)), the sink's probability, 0 when sinks is None;
+          m carried sink2 from init and lagged the exact row maximum by at most RD, so l_final and
+          o(C,h,:) are denominator and acc scaled by one shared 2^(row_max - m(C,h)) factor that the
+          quotient cancels. inv(h) = bmm2_scale / l_final(h) when l_final(h) > 0, else 0.
+          out[t,h,:] = bf16(o(C,h,:) * inv(h)), one RNE narrowing per element, each written once.
+          At selected_count(t) = 0 every pf was 0, so o(C,h,:) = 0 and l_final(h) is 0 without sinks
+          or 1 with them (m held at sink2), giving the Contract's zero row through the same inv path
+          with no separate branch; l_final = 0 -> inv = 0 avoids a division by zero.
+  Work_schedule:
+    Thesis: >-
+      One CTA owns one (token, 64-head-block) worktile and walks its full key range as an ascending chunk iteration: one submission writes the final output, no partials, no workspace. The reversed grid walk is longest-job-first against per-token key-count variance; head block varies fastest inside it
+    Step:
+      MAIN:
+        Describe: >-
+          Computes the joint softmax output rows of one token's 64-head block over its full key range and writes the block's final BF16 rows directly into out
+        Decomposition:
+          Strategy: >-
+            kc = 64; one ascending iteration of chunk_count chunks, tail padding masked; in-domain N >= 1 and full head blocks, so no empty or padded worktile
+          Partition:
+            token: {meaning: One query token's output rows, size: total_query_tokens, tile: 1}
+            head_block: {meaning: Block of 64 consecutive heads of one token, size: head_count, tile: 64}
+          Worktile:
+            Invariant:
+              query_block: {meaning: The head block's 64 query rows, shape: [{head: 64}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::query.dtype'}
+              index_row: {meaning: 'Token''s sparse_indices row, re-read per chunk', shape: [{index: index_width}], dtype: 'ref:CONTRACT.Algorithm_requirement::sparse_indices.dtype'}
+            Iteration: {kv_rows: {meaning: 'One chunk''s kc gathered rows, key and value', shape: [{key: kc}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::swa_kv_cache.dtype', direction: ascending}}
+          Target:
+            Single_tile: {out_block: {meaning: Final BF16 rows of the block, shape: [{head: 64}, {d: latent_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: total_query_tokens * ceil_div(head_count, 64)
+        Schedule:
+          Strategy: >-
+            Host asserts HND, non-null cum_seq_lens_q and the three reserved None slots; C++ asserts contiguity, dtypes, 512 channels; rest caller-guaranteed
+          Worktile_order:
+            - {by: token, direction: descending}
+            - {by: head_block, direction: descending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: >-
+      Warp specialisation over an mbarrier parity ring: loaders stream chunks into the two-slot ring via gather4; softmax warps own all MMA issues - phase 1 across two issuers and TMEM score buffers, phase 2 trailing one chunk - overlapping transfers. Accumulator in TMEM; staging reuses the dead ring
+    Step:
+      MAIN:
+        Index: {c: {meaning: Local chunk iteration within this worktile, definition: [0, chunk_count]}}
+        Storage:
+          query_tile: {meaning: Staged query rows in SWIZZLE_128B operand layout, depth: 1, location: smem, shape: [{head: 64}, {d: latent_dim}],
+            dtype: bf16, total_size: 65536, view: {query_block: {}}}
+          kv_ring: {meaning: Gathered KV chunk rows; dead ring stages out_block, depth: 2, location: smem, shape: [{key: kc}, {d: latent_dim}],
+            dtype: bf16, total_size: 131072, view: {kv_rows(c): {slot_index: c%2}, out_block: {slot_index: 0}}}
+          p_tile: {meaning: 'One chunk''s BF16 probabilities, phase-2 A operand', depth: 2, location: smem, shape: [{head: 64}, {key: kc}],
+            dtype: bf16, total_size: 16384, view: {pb(c): {slot_index: c%2}}}
+          softmax_ctrl: {meaning: 'Sink, init max, unread l slab, scale/inv channel', depth: 1, location: smem, shape: [{element: 256}],
+            dtype: fp32, total_size: 1024, view: {sink2: {region: {element: [0, 64]}}, m_init: {region: {element: [64, 128]}}, l_init: {region: {element: [128, 192]}}, row_scale: {region: {element: [192, 256]}}}}
+          validity: {meaning: Per-position validity byte of each gathered chunk, depth: 2, location: smem, shape: [{key: kc}],
+            dtype: uint8, total_size: 128, view: {v(c): {slot_index: c%2}}}
+          tmem_alloc: {meaning: 'Full 512 TMEM columns: accumulator, score halves', depth: 1, location: tmem, shape: [{lane: 128}, {column: 512}],
+            dtype: fp32, total_size: 262144, view: {o(c): {region: {column: [0, 256]}}, s_lo(c): {region: {column: [256 + 64*(c%2), 320 + 64*(c%2)]}}, s_hi(c): {region: {column: [384 + 64*(c%2), 448 + 64*(c%2)]}}}}
+          score_regs: {meaning: 'Summed masked scores of one chunk, per lane half', depth: 1, location: register, shape: [{head: 64}, {key: kc}],
+            dtype: fp32, total_size: 16384, view: {sc(c): {}}}
+          row_state: {meaning: 'Per-row lazy max and normaliser, both lane halves', depth: 1, location: register, shape: [{row: 64}, {element: 2}],
+            dtype: fp32, total_size: 512, view: {m(c): {region: {element: [0, 1]}}, l(c): {region: {element: [1, 2]}}}}
+        Role:
+          SOFTMAX:
+            Info:
+              Describe: >-
+                Warps 0-3: online softmax, both tensor-core issue points (lane 0 of warps 1/2 phase 1, of warp 0 phase 2), prologue init and epilogue staging
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  meta:
+                    execution_mode: serial
+                    describe: >-
+                      Threads derive (token, head block, rows) from the reversed block id; thread 0 resolves request, visible, swa_count, N, chunk_count; barrier publishes
+                  protocol_init:
+                    execution_mode: serial
+                    describe: >-
+                      Thread 0 inits both stages' mbarrier words - kv-valid 1, score-ready 2, probability-ready 4, phase-2-retire 1, landing 128 - and the init fence
+                  state_init:
+                    execution_mode: serial
+                    describe: >-
+                      Threads 0..63 write softmax_ctrl: sink2 (or -inf), m_init = sink2 or NEG_BIG, unread l slab zeroed, row_scale = 1; each row loads m(-1) at loop entry
+                  row_max:
+                    execution_mode: serial
+                    describe: >-
+                      Lanes add their 32-col s_lo(c)/s_hi(c) TMEM slices into sc(c), scale by qs, mask by v(c); split fmaxf + half-warp shuffle give mu; lazy m, scale
+                  p:
+                    execution_mode: serial
+                    describe: >-
+                      pf = exp2(sc - m(c)), 0 masked; split sums + half-warp shuffle; l(c) = l(c-1)*scale + sum and m(c) in row_state; lanes 0..15 publish row_scale
+                  rescale:
+                    execution_mode: serial
+                    describe: >-
+                      After pv_retired(c-1): warp-uniform gate on scale != 1; on fire all 16 rows multiply their o columns in tmem_alloc by their scale via TMEM ld/st
+                  p_tile:
+                    execution_mode: serial
+                    describe: >-
+                      Rounds this lane's 32 probabilities to BF16 into p_tile slot c%2's swizzled layout; async-proxy fence orders them ahead of the MMA read
+                  out_finish:
+                    execution_mode: serial
+                    describe: >-
+                      After pv_final: l_final = l + exp2(sink2 - m); inv = bmm2_scale / l_final, 0 if l_final <= 0; published via row_scale and read back per row
+                  out_stage:
+                    execution_mode: serial
+                    describe: >-
+                      Lanes read their o columns from tmem_alloc in 32-column segments, multiply by inv, round to BF16 into the dead kv_ring staging at 1040-byte pitch
+                matmul:
+                  qk:
+                    execution_mode: async_unordered
+                    describe: >-
+                      Warp 1/2 lane 0 issue 16 m64n64k16 tcgen05.mma steps per latent half into s_lo(c)/s_hi(c); A = query_tile, B = kv_ring c%2; commits fill score-ready
+                  pv:
+                    execution_mode: async_unordered
+                    describe: >-
+                      Warp 0 lane 0 once p_ready(c) fires: 8 m64n256k16 steps over p_tile c%2 and kv_ring c%2 into o; chunk 0's first overwrites; commit fills retire
+                load:
+                  query:
+                    execution_mode: async_unordered
+                    describe: >-
+                      This role's 128 threads cp.async their share of the 64 query rows as 16B items into query_tile's swizzle, one group per thread; done when own land
+                store:
+                  out:
+                    execution_mode: serial
+                    describe: >-
+                      This role's 128 threads take their strided share of the coalesced 16B copy-out of staged rows into out; kernel boundary gives visibility
+                await:
+                  query_landed:
+                    execution_mode: serial
+                    describe: >-
+                      wait_group 0 retires the thread's query group; proxy fence + CTA barrier publish query tile, protocol, state slabs and TMEM base to both roles
+                  kv_valid:
+                    execution_mode: serial
+                    describe: >-
+                      Waits the stage's kv-valid barrier, whose single loader arrival publishes chunk c's validity bytes; not the KV rows' landing
+                  scores_ready:
+                    execution_mode: serial
+                    describe: >-
+                      Waits the stage's score-ready barrier, fired when both phase-1 commit groups retired, i.e. s_lo(c) and s_hi(c) are final
+                  pv_retired:
+                    execution_mode: serial
+                    describe: >-
+                      Waits chunk c's phase-2-retire barrier at stage parity; done certifies chunk c's MMAs finished with the accumulator and ring slot
+                  pv_final:
+                    execution_mode: serial
+                    describe: >-
+                      Waits the last chunk's phase-2-retire barrier; the issuer's commit group covers all prior phase-2 MMAs, retiring ring and accumulator
+                  out_staged:
+                    execution_mode: serial
+                    describe: >-
+                      Final CTA barrier: publishes staged rows to all 256 threads and certifies every TMEM read finished before the release
+                signal:
+                  p_ready:
+                    execution_mode: serial
+                    describe: >-
+                      Each warp's lane 0 arrives on probability-ready (4 arrivals): frees phase 2's issue and releases slot c%2's score buffers to chunk c+2's phase 1
+            Pipe:
+              - compute:meta
+              - load:query
+              - compute:protocol_init
+              - compute:state_init
+              - await:query_landed
+              - for(c=0:chunk_count):
+                  - await:kv_valid(c)
+                  - matmul:qk(c)
+                  - await:scores_ready(c)
+                  - compute:row_max(c)
+                  - compute:p(c)
+                  - if(c > 0):
+                      - await:pv_retired(c-1)
+                      - compute:rescale(c)
+                  - compute:p_tile(c)
+                  - signal:p_ready(c)
+                  - matmul:pv(c)
+              - await:pv_final
+              - compute:out_finish
+              - compute:out_stage
+              - await:out_staged
+              - store:out
+            Waiting:
+              Prepared:
+                - '{done compute:meta} ← [{issue LOADER::compute:meta}]'
+                - '{done await:query_landed} ← [{issue LOADER::await:query_landed}]'
+                - '{done await:kv_valid(c)} ← [{done LOADER::signal:kv_valid(c)}]'
+                - '{done await:scores_ready(c)} ← [{done matmul:qk(c)}]'
+                - '{done await:pv_retired(c)} ← [{done matmul:pv(c)}]'
+                - '{done await:pv_final} ← [{done matmul:pv(chunk_count-1)}]'
+                - '{done await:out_staged} ← [{issue LOADER::await:out_staged}]'
+                - '{issue matmul:qk(c)} ← [{done LOADER::load:kv(c)}]'
+              Released: ['{issue matmul:qk(c)} ← [{done signal:p_ready(c-2)}]']
+          LOADER:
+            Info:
+              Describe: >-
+                Warps 4-7: the 128 loader threads gathering KV chunks into the ring, transaction-counted with an analytic cp.async fallback; warp 4 owns TMEM alloc
+              Member: warp[4:8]
+              Using_verb:
+                compute:
+                  meta:
+                    execution_mode: serial
+                    describe: >-
+                      Threads derive the same coordinates from the reversed block id and join the publication barrier; done covers N, swa_count, chunk_count visibility
+                load:
+                  query:
+                    execution_mode: async_unordered
+                    describe: >-
+                      This role's 128 threads cp.async their share of the 64 query rows as 16B items into query_tile's swizzle, one group per thread; done when own land
+                  kv:
+                    execution_mode: async_unordered
+                    describe: >-
+                      Chunk c gather into kv_ring c%2: threads arm 512B each on landing, gather4-move their 4 selected rows, write validity bytes; done when all 128 land
+                store:
+                  out:
+                    execution_mode: serial
+                    describe: >-
+                      This role's 128 threads take their strided share of the coalesced 16B copy-out of staged rows into out
+                await:
+                  query_landed:
+                    execution_mode: serial
+                    describe: >-
+                      wait_group 0 retires the thread's query group; the prologue CTA barrier publishes tile, protocol, state and TMEM base to both roles
+                  out_staged:
+                    execution_mode: serial
+                    describe: >-
+                      Final CTA barrier, loader side: arrives after the gather loop; done requires the softmax role's staged rows published
+                signal:
+                  kv_valid:
+                    execution_mode: serial
+                    describe: >-
+                      Loaders fence, rendezvous on their 128-thread named barrier, then the leader arrives on kv-valid, publishing chunk c's validity bytes
+                acquire:
+                  tmem:
+                    execution_mode: serial
+                    describe: >-
+                      Warp 4 allocates the CTA's 512 TMEM columns into a shared word and relinquishes permits; the prologue barrier publishes the base to both roles
+                release:
+                  tmem:
+                    execution_mode: serial
+                    describe: >-
+                      Warp 4 returns the 512-column allocation after the copy-out; the final barrier already certified every TMEM read finished
+            Pipe:
+              - compute:meta
+              - load:query
+              - acquire:tmem
+              - await:query_landed
+              - load:kv(0)
+              - for(c=0:chunk_count):
+                  - signal:kv_valid(c)
+                  - if(c+1 < chunk_count):
+                      - load:kv(c+1)
+              - await:out_staged
+              - store:out
+              - release:tmem
+            Waiting:
+              Prepared:
+                - '{done compute:meta} ← [{done SOFTMAX::compute:meta}]'
+                - '{done await:query_landed} ← [{issue SOFTMAX::await:query_landed}]'
+                - '{done await:out_staged} ← [{done SOFTMAX::compute:out_stage}]'
+              Released: ['{issue load:kv(c+1)} ← [{done SOFTMAX::matmul:pv(c-1)}]']
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN.SOFTMAX
+      Choice: >-
+        tcgen05.mma cta_group::1 kind::f16, FP32 accumulators, SWIZZLE_128B UMMA descriptors, per-issuing-thread tcgen05.commit groups, tcgen05.ld/st (32x32b and the 16x32bx2 score read) with their waits
+      Reason: >-
+        The TMEM-resident accumulator, the two disjoint completion barriers behind three issue points and the M=64 lane map giving a lane its row's two 32-column halves all rest on these; mma.sync would void the role split
+    - Item: DESIGN.Tile_pipeline::MAIN.LOADER
+      Choice: >-
+        cp.async.bulk.tensor.2d tile::gather4 against per-launch CUtensorMap encodings (SWIZZLE_128B, 64x1 box) built from the tensor ABI's pool row extents; each thread arms its own 512 B via arrive.expect_tx; straddling chunks use 16 B cp.async with mbarrier-arrive completion
+      Reason: >-
+        load:kv's done guarantee is the landing barrier's transaction count, and gather4's hardware swizzle writes byte-for-byte the layout the MMA descriptors assume; a launch without row extents is rejected, not mis-encoded
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.SOFTMAX
+        - DESIGN.Tile_pipeline::MAIN.LOADER
+      Choice: >-
+        Suspending mbarrier.try_wait.parity waits (no polled substitution), mbarrier.arrive, fence.proxy.async.shared::cta ahead of MMA-visible shared writes, a named bar.sync for the 128-loader rendezvous, stage-use parity reuse of the five barrier words per slot
+      Reason: >-
+        Every await/signal done guarantee of both roles resolves to these primitives, and the parity discipline is what lets the two-slot ring recycle its barriers safely across chunks
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: >-
+        Exactly 512 TMEM columns per CTA - accumulator [0, 256) as two lane-offset M=64 halves, score buffers [256, 384) and [384, 512) - and a 214,372-byte dynamic smem request checked against the device opt-in minus a ~1 KiB static reserve; __launch_bounds__(256, 1), one CTA per SM
+      Reason: >-
+        The stage-reuse edges and the epilogue's staging overlay of the dead ring assume exactly this column map and footprint; an over-budget launch is rejected at the launcher's check rather than silently mis-laid-out
+    - Item: DESIGN.Math_reshape
+      Choice: >-
+        Compile --use_fast_math so exp2f and FP32 divides lower to the ex2.approx.f32 / div.approx.f32 declared in Arithmetic.Approx, and build for 'a'-suffix targets (the capability's sm_10Xa, else sm_100a) with DSV4_TCGEN05; plain sm_103/sm_100 targets reject the feature
+      Reason: >-
+        The declared numerics path is defined by those approximations, and the MMA, TMEM and gather4 instructions exist only on 'a' targets - the when's build precondition is this gencode chain
+    - Item: CONTRACT.Algorithm_requirement::sinks
+      Choice: >-
+        Python None reaches the extension as a zero-element FP32 tensor and the parameter builder maps zero numel to a null device pointer, which is what state_init's and out_finish's sink-less branches key on
+      Reason: >-
+        The frozen ABI accepts a tensor or None, and Math_reshape's sink case split has to be decided inside Params without adding a flag
+    - Item: DESIGN.Work_schedule::MAIN
+      Choice: >-
+        Keep the reduced host validation set of Schedule.Strategy: the device path dereferences cum_seq_lens_q, seq_lens, sparse_topk_lens and sparse_indices unconditionally and assumes contiguous HND pools of 512 channels; unchecked preconditions stay the caller's guarantee
+      Reason: >-
+        A violated unchecked precondition would be silent on device, and the frozen source keeps exactly this reduced set because host work sits inside the measured window

@@ -1,34 +1,23 @@
 # Schema Wiki
 
-本目录是 schema 的输出区。六个典型算子提取尝试中已经形成的原稿、修订版和勘误，已整体收拢到 [六算子结果归档](archive/six-operators/README.md)。当前顶层的 catalog 镜像保留输出占位，历史产物按专题保存。
+当前收录六个算子的 15 份完整设计。先读各算子的 `dispatch.md`，再按选择条件阅读对应 YAML；共享 Contract 位于各目录的 `root.yaml`。
 
-## 既有材料入口
+| 算子 | 设计数 | 阅读入口 | 当前版本与检查 |
+| --- | ---: | --- | --- |
+| FMHA MXFP8 | 3 | [dispatch](aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/dispatch.md) | [文件与验收元数据](aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/.extraction/current.json) |
+| FP8 Grouped GEMM | 2 | [dispatch](aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/dispatch.md) | [文件与验收元数据](aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/.extraction/current.json) |
+| GDN Prefill | 2 | [dispatch](aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/dispatch.md) | [文件与验收元数据](aka-cuda-operators-20261030/operators/linear_attention/gdn_prefill_bf16_state_bf16/.extraction/current.json) |
+| MLA FP8 | 1 | [dispatch](aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/dispatch.md) | [文件与验收元数据](aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/.extraction/current.json) |
+| NVFP4 MoE | 3 | [dispatch](aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/dispatch.md) | [文件与验收元数据](aka-cuda-operators-20261030/operators/moe/nvfp4_fused_moe/.extraction/current.json) |
+| Sparse Attention | 4 | [dispatch](aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/dispatch.md) | [文件与验收元数据](aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/.extraction/current.json) |
 
-| 材料 | 位置 |
-| --- | --- |
-| 六算子的初始结果、各版修订、勘误及位置映射 | [六算子结果归档](archive/six-operators/README.md) |
-| 试用、Reviewer 验证材料、恢复评估与执行记录 | [六算子过程档案](../schema_extract/archive/six-operators/README.md) |
-| 最近一次部分成果与未完成项 | [2026-11-09 暂停清单](../schema_extract/archive/six-operators/20261109-pause/README.md) |
-| 全部结果专题归档 | [archive](archive/README.md) |
-
-```text
-schema_wiki/
-├── archive/six-operators/
-│   ├── initial/       六项初始结果
-│   ├── revisions/     同一尝试后续形成的版本
-│   ├── errata/        阅读勘误
-│   └── LOCATIONS.json 归档前后位置与原文件摘要
-└── aka-cuda-operators-20261030/operators/
-                        catalog 镜像的输出占位
-```
-
-归档中的 YAML、dispatch 和原回执保持原字节。回执中的原发布位置保留其历史含义；当前文件位置见 [LOCATIONS.json](archive/six-operators/LOCATIONS.json)。本次目录归置没有修改运行数据或恢复提取。
+[当前总索引](../schema_discussion/schema_audit_and_cleanup_20261119/CURRENT_SCHEMA_INDEX.json)汇总文件摘要、版本、固定来源与语义审阅证据。各 `.extraction/current.json` 是当前成品清单和检查记录，不是 Runner 的阶段回执。验收覆盖来源语义审阅和只读结构检查；硬件字段仍未完整绑定，GPU 与完整动态域数值正确性没有由这些检查证明。外部比较器缺口、源码限制和调用前提以各 YAML、dispatch 为准。
 
 ## Catalog 输出目录
 
-输出占位按 [kernel_wiki/catalog.json](../kernel_wiki/catalog.json) 的 44 条 `paths.readme` 父路径镜像。六项旧产物归档后，其原叶目录恢复为空 `.gitkeep` 占位，其他未提取目录原样保留。
+输出目录按 [kernel_wiki/catalog.json](../kernel_wiki/catalog.json) 的 44 条 `paths.readme` 父路径镜像；六项已有成品，其余保留输出占位。
 
-| 分类 | 初始输出目录 | 算子数 |
+| 分类 | 输出目录 | 算子数 |
 | --- | --- | ---: |
 | GEMM | [gemm](aka-cuda-operators-20261030/operators/gemm/)（dense / grouped / grouped_masked） | 15 |
 | MoE | [moe](aka-cuda-operators-20261030/operators/moe/) | 5 |
@@ -37,6 +26,4 @@ schema_wiki/
 | 稀疏注意力 | [sparse_attention](aka-cuda-operators-20261030/operators/sparse_attention/) | 4 |
 | 线性注意力 | [linear_attention](aka-cuda-operators-20261030/operators/linear_attention/) | 8 |
 
-后续新任务应明确选择输出目录，操作见 [Supervisor 手册](../schema_extract/README.md#输入与输出)和[流程总览](../EXTRACT_SCHEMA.md)。恢复已有 run 前须先核对其记录的 output/export 位置与归档映射；历史产物归档不等于重新发布，也不替代新一轮 P6。
-
-算子说明、源码与证据从 [Kernel Wiki 总索引](../kernel_wiki/CATALOG.md)进入。
+算子说明、源码与证据从 [Kernel Wiki](../kernel_wiki/CATALOG.md)进入。提取操作见 [Supervisor 手册](../schema_extract/README.md#输入与输出)和[流程总览](../EXTRACT_SCHEMA.md)。旧结果、交付回执与调查材料见[历史档案](../schema_discussion/archive/README.md)。

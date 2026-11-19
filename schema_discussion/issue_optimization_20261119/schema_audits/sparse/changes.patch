@@ -1,0 +1,190 @@
+--- before/root.yaml
++++ after/root.yaml
+@@ -2,7 +2,7 @@
+   Name: dual_cache_latent_bf16
+   Describe: Sparse latent attention that gathers each query token's listed rows from sliding-window and compressed BF16 KV pools into one joint softmax
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu::attn_kernel
+-  Version: 4
++  Version: 5
+   Dispatch:
+     when: >-
+       Inputs with head_count >= 64 served by exactly one whole-batch kernel submission with no key split: heads form ceil_div(head_count, 64) blocks of 64, last possibly padded, and each (token, head-block) CTA walks that token's full selected key range in ascending 64-key chunks, writing the final BF16 output rows directly; workspace_buffer is neither read nor written and no combine submission follows. A graph-captured replay of the identical launch serves the same calls
+@@ -91,9 +91,9 @@
+     Device:
+     Architecture:
+     Execution:
+-      thread: Single instruction-executing lane; 32 threads form one warp and a thread arrives alone on a barrier
++      thread: Lane with thread-local register values; 32 threads form one warp; each thread arrives individually on a barrier
+       warp: 32 lockstep threads of one CTA; the scope of warp shuffle exchange and of one warp-issued mma.sync
+-      cta: Thread block of one launch owning one dynamic shared-memory allocation; the scope of __syncthreads()
++      cta: Thread block owning one dynamic shared-memory smem allocation and CTA-scoped tensor memory tmem; the scope of __syncthreads()
+       cluster: CTAs co-scheduled by a launch-time cluster dimension; peer shared memory is addressable inside it
+       sm: Streaming multiprocessor that hosts resident CTAs and supplies the shared memory one CTA allocates
+       tensor core: Matrix-multiply unit executing warp-issued mma.sync and per-CTA or CTA-pair tcgen05.mma
+@@ -215,7 +215,7 @@
+       Launch: [{step: [MAIN]}]
+   Tile_pipeline:
+     Thesis: >-
+-      One symmetric role of eight warps; overlap comes from the two-slot cp.async ring - chunk c+1 in flight during chunk c - and register-resident operands: 16 cached phase-1 A-fragment steps and the 64x512 FP32 accumulator. Costs ~208 registers/thread, 207,232 B smem, one CTA per SM
++      One symmetric role of eight warps; overlap comes from the two-slot cp.async ring - chunk c+1 in flight during chunk c - and register-resident operands: 16 cached phase-1 A-fragment steps and the 64x512 FP32 accumulator. Costs 207,232 B smem
+     Step:
+       MAIN:
+         Index: {c: {meaning: Local chunk iteration within this worktile, definition: [0, chunk_count]}}
+@@ -338,9 +338,9 @@
+         The issue/done split of the two load nouns and the release semantics of await(kv_landed) assume per-thread group retirement followed by a CTA barrier; a bulk-copy or barrier-only replacement would move the overlap the two-slot ring provides.
+     - Item: DESIGN.Tile_pipeline::MAIN
+       Choice: >-
+-        256 threads per CTA, one-CTA-per-SM launch bound; one 207,232-byte dynamic smem allocation (storage account plus 256-byte slack) against the 232,448-byte device max minus ~1 KiB static; ~208 registers per thread without spilling
+-      Reason: >-
+-        The Tile_pipeline account and the register-resident fragment and accumulator design assume exactly this residency and budget; an over-budget launch is rejected at the check rather than silently mis-laid-out
++        256 threads per CTA with __launch_bounds__(256, 1); one 207,232-byte dynamic smem request including 256-byte slack, checked against the runtime device opt-in maximum
++      Reason: >-
++        The shared-memory request must cover the Tile_pipeline storage layout; run_cfg checks it against the device opt-in limit before launch; the registered arrays do not establish compiled register allocation or spilling
+     - Item: DESIGN.Math_reshape
+       Choice: >-
+         Compile the kernel with --use_fast_math so exp2f and the FP32 divisions lower to the ex2.approx.f32 / div.approx.f32 approximations declared in Arithmetic.Approx, targeting the sm_103a/sm_100a or plain sm_103/sm_100 gencode chain; no tcgen05 feature is used
+--- before/split_kv.yaml
++++ after/split_kv.yaml
+@@ -2,7 +2,7 @@
+   Name: dual_cache_latent_bf16
+   Describe: Sparse latent attention that gathers each query token's listed rows from sliding-window and compressed BF16 KV pools into one joint softmax
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu
+-  Version: 2
++  Version: 3
+   Dispatch:
+     id: split_kv
+     when: >-
+@@ -407,7 +407,7 @@
+       Choice: >-
+         256 threads per CTA at a one-CTA-per-SM launch bound, a 202,688-byte dynamic shared-memory request (storage account plus 256 bytes of slack) checked against the runtime opt-in maximum, and no query tile: the query is staged in kv_ring slot 0 and absorbed into 32 register-cached fragment steps
+       Reason: >-
+-        A separate 32,768-byte query tile would need 235,456 bytes against a 231,424-byte budget, so the tile trades it for 128 registers of cached A fragments per thread on top of 64 accumulator registers; the slot-0 release barrier is what makes the reuse safe
++        A separate 32,768-byte query tile would need 235,456 bytes against a 231,424-byte layout budget; cached A fragments and accumulators instead hold 128 and 64 32-bit slots per thread, without determining compiled register allocation; the slot-0 release barrier makes reuse safe
+     - Item: DESIGN.Math_reshape
+       Choice: >-
+         Compile both kernels with --use_fast_math so exp2f and the FP32 divides lower to the ex2.approx.f32 / div.approx.f32 approximations declared in Arithmetic.Approx, on the sm_103a/sm_100a then plain sm_103/sm_100 gencode chain
+@@ -425,9 +425,9 @@
+         An empty segment writes only its sentinels, so its vector bytes are stale, and workspace_buffer is a scratch input the caller restores between calls, so no host-side memset survives; segment 0 always holds a chunk in-domain, which is what makes its row a finite redirect target
+     - Item: DESIGN.Tile_pipeline::COMBINE
+       Choice: >-
+-        512 threads per CTA under a two-blocks-per-SM launch bound, i.e. 64 registers per thread, a 9,776-byte static shared block and no dynamic shared memory; four segment-groups of 128 threads each own one float4 of the 512 latent columns
+-      Reason: >-
+-        The merge is bound by dependent-load latency rather than bandwidth, so its parallelism has to come from threads; the 64-register cap is what limits the prefetched quad depth to four, and only the first 128 threads own the merged output
++        512 threads per CTA with __launch_bounds__(512, 2), a 9,776-byte static shared block and no dynamic shared memory; four segment-groups of 128 threads each own one float4 of the 512 latent columns
++      Reason: >-
++        The merge hides dependent-load latency with four segment groups and four prefetched quads per thread; only the first 128 threads own the merged output, and the launch bound does not specify the compiled register count
+     - Item: DESIGN.Work_schedule.Flow.Launch
+       Choice: >-
+         Two plain stream-ordered launches on the caller's stream, with programmatic dependent launch (griddepcontrol.launch_dependents in ATTENTION, griddepcontrol.wait in COMBINE) left off
+--- before/tcgen05.yaml
++++ after/tcgen05.yaml
+@@ -2,7 +2,7 @@
+   Name: dual_cache_latent_bf16
+   Describe: Sparse latent attention that gathers each query token's listed rows from sliding-window and compressed BF16 KV pools into one joint softmax
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu::tc_attn_kernel
+-  Version: 1
++  Version: 2
+   Dispatch:
+     id: tcgen05
+     when: >-
+@@ -121,8 +121,8 @@
+         Storage:
+           query_tile: {meaning: Staged query rows in SWIZZLE_128B operand layout, depth: 1, location: smem, shape: [{head: 64}, {d: latent_dim}],
+             dtype: bf16, total_size: 65536, view: {query_block: {}}}
+-          kv_ring: {meaning: Gathered KV chunk rows; dead ring stages out_block, depth: 2, location: smem, shape: [{key: kc}, {d: latent_dim}],
+-            dtype: bf16, total_size: 131072, view: {kv_rows(c): {slot_index: c%2}, out_block: {slot_index: 0}}}
++          kv_ring: {meaning: Two gather stages; dead storage holds output, depth: 1, location: smem, shape: [{stage: 2}, {key: kc}, {d: latent_dim}],
++            dtype: bf16, total_size: 131072, view: {kv_rows(c): {region: {stage: [c%2, c%2+1]}}, out_block: {}}}
+           p_tile: {meaning: 'One chunk''s BF16 probabilities, phase-2 A operand', depth: 2, location: smem, shape: [{head: 64}, {key: kc}],
+             dtype: bf16, total_size: 16384, view: {pb(c): {slot_index: c%2}}}
+           softmax_ctrl: {meaning: 'Sink, init max, unread l slab, scale/inv channel', depth: 1, location: smem, shape: [{element: 256}],
+@@ -133,8 +133,8 @@
+             dtype: fp32, total_size: 262144, view: {o(c): {region: {column: [0, 256]}}, s_lo(c): {region: {column: [256 + 64*(c%2), 320 + 64*(c%2)]}}, s_hi(c): {region: {column: [384 + 64*(c%2), 448 + 64*(c%2)]}}}}
+           score_regs: {meaning: 'Summed masked scores of one chunk, per lane half', depth: 1, location: register, shape: [{head: 64}, {key: kc}],
+             dtype: fp32, total_size: 16384, view: {sc(c): {}}}
+-          row_state: {meaning: 'Per-row lazy max and normaliser, both lane halves', depth: 1, location: register, shape: [{row: 64}, {element: 2}],
+-            dtype: fp32, total_size: 512, view: {m(c): {region: {element: [0, 1]}}, l(c): {region: {element: [1, 2]}}}}
++          row_state: {meaning: 'Per-row lazy max and normaliser, both lane halves', depth: 1, location: register, shape: [{row: 64}, {lane_half: 2}, {element: 2}],
++            dtype: fp32, total_size: 1024, view: {m(c): {region: {element: [0, 1]}}, l(c): {region: {element: [1, 2]}}}}
+         Role:
+           SOFTMAX:
+             Info:
+@@ -178,7 +178,7 @@
+                   out_stage:
+                     execution_mode: serial
+                     describe: >-
+-                      Lanes read their o columns from tmem_alloc in 32-column segments, multiply by inv, round to BF16 into the dead kv_ring staging at 1040-byte pitch
++                      Read o from tmem_alloc, scale by inv and round to BF16 into dead kv_ring at 1040-byte row pitch; 64 rows span both stages, reserved by out_block
+                 matmul:
+                   qk:
+                     execution_mode: async_unordered
+--- before/tcgen05_packed.yaml
++++ after/tcgen05_packed.yaml
+@@ -2,7 +2,7 @@
+   Name: dual_cache_latent_bf16
+   Describe: Sparse latent attention that gathers each query token's listed rows from sliding-window and compressed BF16 KV pools into one joint softmax
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/dsv4_kernel.cu::tc_attn_kernel
+-  Version: 2
++  Version: 3
+   Dispatch:
+     id: tcgen05_packed
+     when: >-
+@@ -150,8 +150,8 @@
+         Storage:
+           query_tile: {meaning: 'Staged (token, head) query rows, operand layout', depth: 1, location: smem, shape: [{row: 64}, {d: latent_dim}],
+             dtype: bf16, total_size: 65536, view: {query_block: {}}}
+-          kv_ring: {meaning: Union chunk rows; dead stages hold build and out, depth: 2, location: smem, shape: [{key: kc}, {d: latent_dim}],
+-            dtype: bf16, total_size: 131072, view: {kv_rows(c): {slot_index: c%2}, hash_slots: {slot_index: 0}, index_rows: {slot_index: 1}, out_block: {slot_index: 0}}}
++          kv_ring: {meaning: Two gather stages; dead allocation holds build/out, depth: 1, location: smem, shape: [{stage: 2}, {key: kc}, {d: latent_dim}],
++            dtype: bf16, total_size: 131072, view: {kv_rows(c): {region: {stage: [c%2, c%2+1]}}, hash_slots: {region: {stage: [0, 1]}}, index_rows: {region: {stage: [1, 2]}}, out_block: {}}}
+           p_tile: {meaning: 'One chunk''s BF16 probabilities, phase-2 A operand', depth: 2, location: smem, shape: [{row: 64}, {key: kc}],
+             dtype: bf16, total_size: 16384, view: {pb(c): {slot_index: c%2}}}
+           softmax_ctrl: {meaning: 'Sink, init max, unread l slab, scale/inv channel', depth: 1, location: smem, shape: [{element: 256}],
+@@ -164,8 +164,8 @@
+             dtype: fp32, total_size: 262144, view: {o(c): {region: {column: [0, 256]}}, s_lo(c): {region: {column: [256 + 64*(c%2), 320 + 64*(c%2)]}}, s_hi(c): {region: {column: [384 + 64*(c%2), 448 + 64*(c%2)]}}}}
+           score_regs: {meaning: 'Summed masked scores of one chunk, per lane half', depth: 1, location: register, shape: [{row: 64}, {key: kc}],
+             dtype: fp32, total_size: 16384, view: {sc(c): {}}}
+-          row_state: {meaning: 'Per-row lazy max and normaliser, both lane halves', depth: 1, location: register, shape: [{row: 64}, {element: 2}],
+-            dtype: fp32, total_size: 512, view: {m(c): {region: {element: [0, 1]}}, l(c): {region: {element: [1, 2]}}}}
++          row_state: {meaning: 'Per-row lazy max and normaliser, both lane halves', depth: 1, location: register, shape: [{row: 64}, {lane_half: 2}, {element: 2}],
++            dtype: fp32, total_size: 1024, view: {m(c): {region: {element: [0, 1]}}, l(c): {region: {element: [1, 2]}}}}
+         Role:
+           SOFTMAX:
+             Info:
+--- before/dispatch.md
++++ after/dispatch.md
+@@ -37,6 +37,8 @@
+ 
+ **已识别机制与实测依据的最终去处**：host 事实（32 MiB workspace 下限与静默顶替、identity 缓存校验、三个 assert 缩减集、sinks 空 tensor 顶替、`--use_fast_math` 与 gencode 链）落在四份 YAML 的 `Schedule.Strategy` 与 `REALIZATION.Require`（root 与 split_kv 另含 `workspace_buffer` 条，两份 tc 设计不读写 workspace 故无此条）；split 段几何、环槽原点 `(c-chunk_lo)%3`、越过 chunk_hi 的空组提交与两条零权重守卫落在 split_kv.yaml 的 `Tile_pipeline::ATTENTION`/`::COMBINE` 与 `REALIZATION.Require`；union 构建、成员掩码、TMEM 列预算、smem 预算与 gather4 落在两份 tc 设计的 `Tile_pipeline` 与 `REALIZATION`；跨设计 host 编排落在下方三条组合记录；已研究未展开的完整机制（fused_combine、PR paired tile）在本节诚实登记；其余几何、发射与归并差额在“变体与组合”逐条直链基线对象。上述去处覆盖已识别的全部机制与实测依据。
+ 
++2026-11-19 人工审修及前后字节证据见 [.extraction/schema-audit-20261119.json](.extraction/schema-audit-20261119.json)。原 P6 receipt 只覆盖审修前字节；本轮由同一 xhigh 承担 worker 与 reviewer，未新增 P6。固定源码的 bar_land 与 tmem_base_s/packed union 控制区重叠仍未修复，沿源实现缺陷分流保留；schema 的完整抽象设计不要求复制坏地址，也不据此声称 GPU 正确性已验证。
++
+ ## 完整设计
+ 
+ 当前完整集合共 4 份（含 root），在 10 份上限内；每份承载 `candidate/dsv4_kernel.cu` 的一个真实模板实例，从共享 Contract 的输入贯通到全部输出。四份的三个 Design 区域全部本地定义，引用图中没有任何 `from` 边，唯一共享内容是 root 保存的 Contract；精确参数、`when` 与修订号以各 YAML 为准。
+@@ -72,20 +74,20 @@
+ 
+ ### Combine 形态与 partial 格式（参数）
+ 
+-- 基线：[split_kv](split_kv.yaml) 的 `DESIGN.Work_schedule::COMBINE`（`Decomposition.Strategy` 的一 CTA 一输出行、`Mapping.Worker_count`、`Schedule.Strategy` 的 512 线程 = 4 个 128 线程段组）、`DESIGN.Tile_pipeline::COMBINE.Role.MAIN.Using_verb` 的 `load:prefetch`/`compute:merge`/`compute:group_sum`/`store:out`、`Storage` 的 `split_stats`/`prefetch_vectors`/`group_scratch`/`group_vectors`/`merge_acc`、`DESIGN.Math_reshape` 的 Rewrite “Per-segment partial row in scratch” 与 “Cross-segment merge, sink fold and output”，以及 `REALIZATION.Require` 中挂在 `DESIGN.Work_schedule.Flow.Handoff` 下的 partial 几何条与“保留两条零权重守卫”条、挂在 `DESIGN.Tile_pipeline::COMBINE` 下的线程与寄存器条，和挂在 `DESIGN.Work_schedule.Flow.Launch` 下的两次 stream-ordered launch 条。
+-- 差异与联动：`combine_kernel` 的模板参数（CT、CM、PB、COPT）、partial 行几何（pstride/ml_off/pfp16，host 侧 `set_partial_geom` 解析）与 launch 方式。CT∈{128,512}：split_kv 取 512（G=CT/128=4 段组），`launch_combine` 按 combine grid（p.T·nb·HB）不足一波取 512、否则取 128，一体服务两形态；CT=128 时 G=1，`group_scratch`/`group_vectors` 退化为单组、`compute:group_sum` 的跨组和成为恒等，其余动作与数学不变，冻结 case 3/4/5 实测 512、case 6 实测 128。CM∈{0,1}：两种形式都对零权重段的向量 load 做地址重定向（`combine_row` 的四深跨步循环与尾循环无条件写 `(w != 0) ? row0 + s*sstep : row0`），CM=1 另加两点——把前 PRE=4 个 split 的 float4 在 m/l 往返之前无条件预取（即 split_kv 的 `load:prefetch` 与 `prefetch_vectors`），并以值判据 `(w != 0 ? w*v : 0)` 丢弃零权重值；split_kv 取 CM=1，其 `REALIZATION.Require` 的“保留两条零权重守卫”条与 `compute:merge` 的 describe（“value dropped where w = 0 … w = 0 reads segment 0”）即该形式的准确表述。COPT bit0 NB（去三个 barrier，位同：`compute:row_max`/`compute:weight`/`compute:normaliser` 的发布改由每线程自行归约，动作集合不变）、bit1 PD（预取深度 4→8，重结合），默认 0；取 PD 时 `prefetch_vectors` 的 quad 深度加倍，受 COMBINE 的 64 寄存器上限约束。PB=fp16 预归一 partial（pstride 减半、权重改 u_s=w_s·l_s，数学为重结合等价）实测无 fixed-suite 收益且数值裕度更小，未 shipped（`g_partial_fp16=0`）；split_kv 的 partial 几何条已按“一个 kernel 实例同时服务 f32 与 fp16 两种格式、shipped f32 几何由 host 固定”记录。PDL programmatic dependent launch（`griddepcontrol.launch_dependents/wait`）实测 +2.1~11.5% 被拒（`g_pdl=0`），即 split_kv 的 `Flow.Launch` 条“两次普通 stream-ordered launch、PDL 关闭”。`combine_skip`/`combine_empty` 为定价臂（wrong numerics）。
++- 基线：[split_kv](split_kv.yaml) 的 `DESIGN.Work_schedule::COMBINE`（`Decomposition.Strategy` 的一 CTA 一输出行、`Mapping.Worker_count`、`Schedule.Strategy` 的 512 线程 = 4 个 128 线程段组）、`DESIGN.Tile_pipeline::COMBINE.Role.MAIN.Using_verb` 的 `load:prefetch`/`compute:merge`/`compute:group_sum`/`store:out`、`Storage` 的 `split_stats`/`prefetch_vectors`/`group_scratch`/`group_vectors`/`merge_acc`、`DESIGN.Math_reshape` 的 Rewrite “Per-segment partial row in scratch” 与 “Cross-segment merge, sink fold and output”，以及 `REALIZATION.Require` 中挂在 `DESIGN.Work_schedule.Flow.Handoff` 下的 partial 几何条与“保留两条零权重守卫”条、挂在 `DESIGN.Tile_pipeline::COMBINE` 下的线程与预取规模条，和挂在 `DESIGN.Work_schedule.Flow.Launch` 下的两次 stream-ordered launch 条。
++- 差异与联动：`combine_kernel` 的模板参数（CT、CM、PB、COPT）、partial 行几何（pstride/ml_off/pfp16，host 侧 `set_partial_geom` 解析）与 launch 方式。CT∈{128,512}：split_kv 取 512（G=CT/128=4 段组），`launch_combine` 按 combine grid（p.T·nb·HB）不足一波取 512、否则取 128，一体服务两形态；CT=128 时 G=1，`group_scratch`/`group_vectors` 退化为单组、`compute:group_sum` 的跨组和成为恒等，其余动作与数学不变，冻结 case 3/4/5 实测 512、case 6 实测 128。CM∈{0,1}：两种形式都对零权重段的向量 load 做地址重定向（`combine_row` 的四深跨步循环与尾循环无条件写 `(w != 0) ? row0 + s*sstep : row0`），CM=1 另加两点——把前 PRE=4 个 split 的 float4 在 m/l 往返之前无条件预取（即 split_kv 的 `load:prefetch` 与 `prefetch_vectors`），并以值判据 `(w != 0 ? w*v : 0)` 丢弃零权重值；split_kv 取 CM=1，其 `REALIZATION.Require` 的“保留两条零权重守卫”条与 `compute:merge` 的 describe（“value dropped where w = 0 … w = 0 reads segment 0”）即该形式的准确表述。COPT bit0 NB（去三个 barrier，位同：`compute:row_max`/`compute:weight`/`compute:normaliser` 的发布改由每线程自行归约，动作集合不变）、bit1 PD（预取深度 4→8，重结合），默认 0；取 PD 时 `prefetch_vectors` 的 quad 深度加倍，增加每线程保留值；源码的 64 寄存器讨论是 launch-bound 预算，非实测分配值，冻结 case 4 的同一 COMBINE 实例记录为 48。PB=fp16 预归一 partial（pstride 减半、权重改 u_s=w_s·l_s，数学为重结合等价）实测无 fixed-suite 收益且数值裕度更小，未 shipped（`g_partial_fp16=0`）；split_kv 的 partial 几何条已按“一个 kernel 实例同时服务 f32 与 fp16 两种格式、shipped f32 几何由 host 固定”记录。PDL programmatic dependent launch（`griddepcontrol.launch_dependents/wait`）实测 +2.1~11.5% 被拒（`g_pdl=0`），即 split_kv 的 `Flow.Launch` 条“两次普通 stream-ordered launch、PDL 关闭”。`combine_skip`/`combine_empty` 为定价臂（wrong numerics）。
+ - 条件与依据：各开关定义处注释与测量 job（CM=1 dv_aef05e1da2c4；fp16 dv_34715e8d6760/dv_92a423331536 判决；PDL dv_6ed17c1388c6）；均为同一归并机制的其他取值，不改变 partial 的生产归属（ATTENTION 写、COMBINE 读）与 `Flow.Handoff` 的 o_part/m_part/l_part 三个对象。来源注记：`dsv4_kernel.cu:407` 的 “CM=0 is the shipped form” 是过期注释，与 `g_combine_mode = 1`（`dsv4_kernel.cu:5163`）、`dsv4_kernel.cu:5146-5147` 的 “1 (value-predicated, the shipped form since dv_aef05e1da2c4)” 及认证 case 4 实际运行的 `combine_kernel<32,512,1,false,0>` 相矛盾；本记录与 split_kv 基线均按实际 shipped 值 CM=1 书写。
+ 
+ ### tc Tile 几何与次序（参数）
+ 
+-- 基线：[tcgen05](tcgen05.yaml) 与 [tcgen05_packed](tcgen05_packed.yaml) 的同名对象——`DESIGN.Work_schedule::MAIN.Decomposition.Strategy`（两者的 kc = 64；packed 侧另含 gt 的三条解析约束）、`DESIGN.Tile_pipeline::MAIN.Storage` 的 `kv_ring.depth` 与 `p_tile.depth`（两份均为 2）、`tmem_alloc` 的 `s_lo(c)`/`s_hi(c)` 列视图、`DESIGN.Math_reshape` 的 Rewrite “Split scores, lazy maximum, BF16 fork”（tcgen05）与 “Split scores, member masking, lazy maximum”（tcgen05_packed）中的 RD = 1、`DESIGN.Work_schedule::MAIN.Schedule.Worktile_order` 的 descending 方向，以及各自 `REALIZATION.Require` 的 TMEM 列与 smem 预算条。两份基线的这些对象取值一一对应，故共同差额只写一次。
+-- 差异与联动：模板参数 CK、STG、RD、QP、SPIN、REV、PREFETCH。shipped 为 CK=64、STG=2、RD=1、QP=true、REV=true、PREFETCH=true。其他取值与联动：RD=2（Rewrite 中 lazy hold 阈值由 1 log2 单位变 2，pf 上界由 2 变 4，`compute:rescale` 触发更少但概率动态范围更大；与 RD=1 同噪声，取扰动更小者）；SPIN（以轮询 wait 替代挂起，即反转 `REALIZATION.Require` 的 “Suspending mbarrier.try_wait.parity waits (no polled substitution)” 条；实测 +2.4~3.0% 拒）；REV=false（`Worktile_order` 的 direction 由 descending 改 ascending，longest-job-first 失效，正序对照）；CK=32 配 STG=3/4（联动 `Decomposition.Strategy` 的 kc、`kv_ring`/`p_tile`/`validity` 的 depth 与每槽字节、`tmem_alloc` 的 `s_lo(c)`/`s_hi(c)` 列宽；pre-QIS 实测 +29%，且 packed 侧 `union_set` 工作集挤占一级 ring）；CK=128 配 STG=1（64 KiB `query_tile` 使宽度深度不可兼得，`kv_ring.depth` 降为 1 则 `load:kv` 与 `matmul:qk` 的重叠消失）；PREFETCH=false（串行 ring 纪律，bisection 辅助；LOADER `Pipe` 的 `load:kv(0)` 预热与 `if(c+1 < chunk_count)` 续填退化为循环内同步 load）。QP 把 query tile 的 cp.async 提到 union 构建之前，即两份 tc 设计的 `Pipe` 中 `load:query` 位于 `compute:union`（packed 侧）或 `acquire:tmem`（tcgen05 侧）之前（实测四点同向 -1.4~-4.1 us 晋升）。总联动为 `tc_smem_bytes` 预算与 TMEM 列预算（score buffer ≤128 列，QIS2 下 256 列，与 O 的 256 列恰满 512），即两份 YAML `REALIZATION.Require` 中 “Exactly 512 TMEM columns …” 条的取值依据；cfg 注释块（TC_CFG_RD1/RD2/QP/SPIN/REV/K32/K128S1）逐条列出测量 job。
++- 基线：[tcgen05](tcgen05.yaml) 与 [tcgen05_packed](tcgen05_packed.yaml) 的同名对象——`DESIGN.Work_schedule::MAIN.Decomposition.Strategy`（两者的 kc = 64；packed 侧另含 gt 的三条解析约束）、`DESIGN.Tile_pipeline::MAIN.Storage` 的 `kv_ring.shape` 的 stage=2 与 `p_tile.depth=2`（两份相同；kv_ring 为 depth=1 的整块分配，kv_rows(c) 选 stage 区域）、`tmem_alloc` 的 `s_lo(c)`/`s_hi(c)` 列视图、`DESIGN.Math_reshape` 的 Rewrite “Split scores, lazy maximum, BF16 fork”（tcgen05）与 “Split scores, member masking, lazy maximum”（tcgen05_packed）中的 RD = 1、`DESIGN.Work_schedule::MAIN.Schedule.Worktile_order` 的 descending 方向，以及各自 `REALIZATION.Require` 的 TMEM 列与 smem 预算条。两份基线的这些对象取值一一对应，故共同差额只写一次。
++- 差异与联动：模板参数 CK、STG、RD、QP、SPIN、REV、PREFETCH。shipped 为 CK=64、STG=2、RD=1、QP=true、REV=true、PREFETCH=true。其他取值与联动：RD=2（Rewrite 中 lazy hold 阈值由 1 log2 单位变 2，pf 上界由 2 变 4，`compute:rescale` 触发更少但概率动态范围更大；与 RD=1 同噪声，取扰动更小者）；SPIN（以轮询 wait 替代挂起，即反转 `REALIZATION.Require` 的 “Suspending mbarrier.try_wait.parity waits (no polled substitution)” 条；实测 +2.4~3.0% 拒）；REV=false（`Worktile_order` 的 direction 由 descending 改 ascending，longest-job-first 失效，正序对照）；CK=32 配 STG=3/4（联动 `Decomposition.Strategy` 的 kc、`kv_ring.shape.stage`、`p_tile`/`validity` 的 depth 与每 stage 字节、`tmem_alloc` 的 `s_lo(c)`/`s_hi(c)` 列宽；pre-QIS 实测 +29%，且 packed 侧 `union_set` 工作集挤占一级 ring）；CK=128 配 STG=1（64 KiB `query_tile` 使宽度深度不可兼得，`kv_ring.shape.stage` 降为 1 则 `load:kv` 与 `matmul:qk` 的重叠消失）；PREFETCH=false（串行 ring 纪律，bisection 辅助；LOADER `Pipe` 的 `load:kv(0)` 预热与 `if(c+1 < chunk_count)` 续填退化为循环内同步 load）。QP 把 query tile 的 cp.async 提到 union 构建之前，即两份 tc 设计的 `Pipe` 中 `load:query` 位于 `compute:union`（packed 侧）或 `acquire:tmem`（tcgen05 侧）之前（实测四点同向 -1.4~-4.1 us 晋升）。总联动为 `tc_smem_bytes` 预算与 TMEM 列预算（score buffer ≤128 列，QIS2 下 256 列，与 O 的 256 列恰满 512），即两份 YAML `REALIZATION.Require` 中 “Exactly 512 TMEM columns …” 条的取值依据；cfg 注释块（TC_CFG_RD1/RD2/QP/SPIN/REV/K32/K128S1）逐条列出测量 job。
+ - 条件与依据：同机制其他取值，联动明确（预算与 launcher 的 smem/TMEM TORCH_CHECK）；packed 侧的额外事实是 gt 与 kc 无关、由 `Decomposition.Strategy` 单独解析，故 CK/STG 取值不改变 `Partition.group` 的 tile=gt。
+ 
+ ### tc loader 与发射机制替代（局部）
+ 
+ - 基线：[tcgen05](tcgen05.yaml) 的 `DESIGN.Tile_pipeline::MAIN.Role.LOADER`（`load:kv` 的 gather4 与 expect_tx、`signal:kv_valid`、`await:query_landed`）、`Role.SOFTMAX` 的 `matmul:qk`（两个发射者写 `s_lo(c)`/`s_hi(c)`）、`matmul:pv`、`compute:row_max` 与 `Storage.score_regs`、`await:kv_valid` 的 “not the KV rows' landing”，以及 `REALIZATION.Require` 的 gather4 条与 mbarrier 条；[tcgen05_packed](tcgen05_packed.yaml) 的对应同名对象（其 `await:kv_valid` 表述为 “not the union rows' landing”）。
+-- 差异与联动：shipped 组合为 TMA gather4 loader（每 loader 线程 expect_tx 512B 于 bar_land，跨 pool 四行组解析式回退 cp.async 16B）+ MBA（cp.async/gather4 完成直接到达 barrier，loader 组不再阻塞于自身拷贝，bar_land 由发射者等待；即 `await:kv_valid` 只发布 validity/membership 字节而非 KV 行落地这一分工）+ QIS（phase-1 从 softmax warp1 lane0 发射，发射 stall 不再拖住 loader 组）+ QIS2（phase-1 k-sweep 16/16 拆给 tid32/tid64、双 score buffer、bar_qk 计数 2，softmax 相加两半——重结合，经 frozen 参考 0-mismatch 门控；对应 `matmul:qk` 的两个发射者、`tmem_alloc` 的 `s_lo(c)`/`s_hi(c)` 两个视图与 `compute:row_max` 把两个 32 列切片加进 `score_regs` 的 `sc(c)`）+ SX2（16x32bx2 读使 32 lane 全部工作，行归约加一次 `shfl_xor(.,16)`）+ IS（union 构建前整组索引行 cp.async 入共享）。替代项与实测：单发射者（QIS2 前形态，QIS2 实测 window -4.7~-7.6%）；PV2（phase-2 双发射，-0.04% 不 binding、位同、未 shipped）；LA（phase-1 前瞻，+3.3~+5.6% 拒）；ET（早传输，+41~49% 拒）；DB（确定性 union 构建，+12~15% 拒，且 gt ≤ 4）；IP（索引 batch32，被 TMA 路径取代）；EG（早 gather，被 MBA/ET 次序史取代）；cp.async 16B loader（TMA 前形态，gather4 实测 1.5x 机制速率且 SWIZZLE_128B 与 tc_sw128 字节级同布局）。IS 项的基线归属须单列：其索引行 cp.async staging 整段位于 `if (GT > 1)` 的 union 构建内（`dsv4_kernel.cu:2206` 起的分支，staging 在 `2250-2277`），在 gt = 1 下完全惰性，tcgen05.yaml 也未登记 `load:index_rows` 动作，故 IS 只锚 [tcgen05_packed](tcgen05_packed.yaml) 的 `Role.SOFTMAX`/`Role.LOADER` 的 `load:index_rows`、两份 `Pipe` 中 `load:index_rows` 位于 `compute:union` 之前、`Storage.kv_ring` 的 `index_rows` 视图（slot 1）与 `Storage.union_set`；同族的一层前探（每个 item 的索引 load 提前一个 item 发射）同样只属于 packed 侧，记在 tcgen05_packed.yaml 的 `REALIZATION.Prefer`。同记录其余项（TMA gather4、MBA、QIS、QIS2、SX2）同时适用两份 tc 设计。
++- 差异与联动：shipped 组合为 TMA gather4 loader（每 loader 线程 expect_tx 512B 于 bar_land，跨 pool 四行组解析式回退 cp.async 16B）+ MBA（cp.async/gather4 完成直接到达 barrier，loader 组不再阻塞于自身拷贝，bar_land 由发射者等待；即 `await:kv_valid` 只发布 validity/membership 字节而非 KV 行落地这一分工）+ QIS（phase-1 从 softmax warp1 lane0 发射，发射 stall 不再拖住 loader 组）+ QIS2（phase-1 k-sweep 16/16 拆给 tid32/tid64、双 score buffer、bar_qk 计数 2，softmax 相加两半——重结合，经 frozen 参考 0-mismatch 门控；对应 `matmul:qk` 的两个发射者、`tmem_alloc` 的 `s_lo(c)`/`s_hi(c)` 两个视图与 `compute:row_max` 把两个 32 列切片加进 `score_regs` 的 `sc(c)`）+ SX2（16x32bx2 读使 32 lane 全部工作，行归约加一次 `shfl_xor(.,16)`）+ IS（union 构建前整组索引行 cp.async 入共享）。替代项与实测：单发射者（QIS2 前形态，QIS2 实测 window -4.7~-7.6%）；PV2（phase-2 双发射，-0.04% 不 binding、位同、未 shipped）；LA（phase-1 前瞻，+3.3~+5.6% 拒）；ET（早传输，+41~49% 拒）；DB（确定性 union 构建，+12~15% 拒，且 gt ≤ 4）；IP（索引 batch32，被 TMA 路径取代）；EG（早 gather，被 MBA/ET 次序史取代）；cp.async 16B loader（TMA 前形态，gather4 实测 1.5x 机制速率且 SWIZZLE_128B 与 tc_sw128 字节级同布局）。IS 项的基线归属须单列：其索引行 cp.async staging 整段位于 `if (GT > 1)` 的 union 构建内（`dsv4_kernel.cu:2206` 起的分支，staging 在 `2250-2277`），在 gt = 1 下完全惰性，tcgen05.yaml 也未登记 `load:index_rows` 动作，故 IS 只锚 [tcgen05_packed](tcgen05_packed.yaml) 的 `Role.SOFTMAX`/`Role.LOADER` 的 `load:index_rows`、两份 `Pipe` 中 `load:index_rows` 位于 `compute:union` 之前、`Storage.kv_ring` 的 `index_rows` 视图（stage 区域 [1,2)）与 `Storage.union_set`；同族的一层前探（每个 item 的索引 load 提前一个 item 发射）同样只属于 packed 侧，记在 tcgen05_packed.yaml 的 `REALIZATION.Prefer`。同记录其余项（TMA gather4、MBA、QIS、QIS2、SX2）同时适用两份 tc 设计。
+ - 条件与依据：各项均有同 job A/B 与 frozen 参考 0-mismatch 记录（issue 数 dv_ad76ee325a26、QIS2 dv_8eb1e52d1836、gather4 dv_73879cb02fba/dv_1ddc6f85e90f、QIS dv_d989aa6c55a6、MBA dv_771e57eea482、SX2 dv_c25b7f27928d、IS dv_bb1188a3acda）；替代围绕 loader 与发射 step，ring 协议、softmax 主体与输出形成仍成立，故记局部而非整体。
+ 
+ ### tc tile 与 split-KV 归并（组合）

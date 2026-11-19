@@ -379,6 +379,43 @@ class YamlTests(TaskCase):
         self.assertTrue(text_policy.check_values(hardware))
         self.assertFalse(text_policy.check_values(hardware, skip_hardware=True))
 
+    def test_long_spelling_warning_shows_first_change_with_context(self):
+        padding = 'Prepared payloads retain their logical row order.\n' * 3
+        for prefix, suffix in (('', padding), (padding, padding), ('界' * 120 + '\n  ', '')):
+            with self.subTest(prefix=prefix, suffix=suffix):
+                before = prefix + 'half_row(L) = 2*L' + suffix
+                expected = before.replace('L', 'l')
+                document = yaml_source.loads(encode_value({'CONTRACT': {'Algorithm_requirement': {
+                    'Compute': [{'Math': before}]}}}), 'root')
+                context = next(context for context in yaml_source.scalar_contexts(document)
+                               if not context.key and context.path.endswith('.Math'))
+                warnings = []
+                candidate = yaml_format.format_document(document, corrections=warnings,
+                    edits=(yaml_format.ScalarEdit(context.node, expected, (context,)),))
+                warning, = [item for item in warnings if item.message.startswith('identifier+reference: ')]
+                self.assertEqual(warning.path, 'root.CONTRACT.Algorithm_requirement.Compute[0].Math')
+                self.assertEqual(warning.severity, 'warning')
+                self.assertIn(f'first change at character {before.index("L") + 1}:', warning.message)
+                self.assertIn('half_row(L) = 2*L', warning.message)
+                self.assertIn('half_row(l) = 2*l', warning.message)
+                self.assertLess(len(warning.message), 300)
+                self.assertEqual(yaml_source.loads(candidate, 'root').value['CONTRACT']
+                                 ['Algorithm_requirement']['Compute'][0]['Math'], expected)
+                self.assertEqual(context.node.value, before)
+
+    def test_long_period_warning_shows_removed_period_and_preserved_whitespace(self):
+        before = 'Keep the prepared payload in logical row order and preserve every scale value across experts ' \
+                 'when copying the scalar result.  \n'
+        document = yaml_source.loads(encode_value({'META_DATA': {'Describe': before}}), 'root')
+        warnings = []
+        candidate = yaml_format.format_document(document, corrections=warnings)
+        warning, = [item for item in warnings if item.message.startswith('period: ')]
+        self.assertIn(f'first change at character {before.index(".") + 1}:', warning.message)
+        self.assertIn("scalar result.  \\n'", warning.message)
+        self.assertIn("scalar result  \\n'", warning.message)
+        self.assertEqual(yaml_source.loads(candidate, 'root').value['META_DATA']['Describe'], before.replace('.', ''))
+        self.assertEqual(document.value['META_DATA']['Describe'], before)
+
     def test_sentence_period_formatting_preserves_all_other_text_and_source_document(self):
         for text in ('Copy a scalar.', '计算输入结果。', 'Copy a scalar.\n',
                      '  Copy a scalar.  \n\n', 'Use 3.14 as the threshold.'):

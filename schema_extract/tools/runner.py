@@ -200,7 +200,7 @@ def _artifact_gate(store: Store, state: dict, lock: dict, attempt: dict, before:
         maintenance_fields=maintenance.task_for(state, attempt).get("fields", []) if attempt.get("purpose") == "maintenance" else None)
     validate_artifact_sources(after, context["source_lock"], decision=decision, parser_root=parser_root,
                               completed_nodes=None if attempt["stage"] == "P6" else [attempt["node"]])
-    validation.update({key: attempt[key] for key in ("maintenance_task_id", "purpose", "maintenance_step") if key in attempt})
+    validation.update({key: attempt[key] for key in ("maintenance_task_id", "purpose", "maintenance_step", "execution_binding") if key in attempt})
     return validation
 
 
@@ -250,6 +250,11 @@ def _draft(store: Store, state: dict, attempt: dict, workspace: Path, *, files, 
         state["attempt_usage"][attempt["attempt_id"]]["result_checkpoint"] = checkpoint_id
     node = state["nodes"][attempt["node"]]
     node["draft_checkpoint"] = checkpoint_id
+    if attempt["stage"] == "P6":
+        from .stages import retain_p6_drafts
+        _, before = store.verify_checkpoint(state, attempt["base_checkpoint"])
+        retain_p6_drafts(state, checkpoint_id,
+                         [name for name in files if files[name] != before["files"].get(name)])
     if attempt["stage"] == "P5":
         node["authored"] = True
     scope_for(state, attempt)["candidates"].append({"checkpoint": checkpoint_id, "plan": deepcopy(plan),
@@ -682,7 +687,7 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
     if decision == "approve":
         validation["approval_projection"] = approval_projection(attempt["stage"], workspace,
             parser_root=parser_root, plan=receipt.get("plan"), selected_designs=state["selected_designs"], node=attempt["node"])
-    validation.update({key: attempt[key] for key in ("maintenance_task_id", "purpose", "maintenance_step") if key in attempt})
+    validation.update({key: attempt[key] for key in ("maintenance_task_id", "purpose", "maintenance_step", "execution_binding") if key in attempt})
     if attempt["attempt_id"] in updated.get("attempt_usage", {}):
         updated["attempt_usage"][attempt["attempt_id"]]["result_checkpoint"] = checkpoint_id
     updated = advance(updated, receipt, checkpoint_id, receipt_hash, validation=validation)
@@ -1180,6 +1185,9 @@ def _consume_scope_retries(store, state, lock, running) -> tuple[dict, float | N
                     owner, scope = owner_for(state, call), scope_for(state, call)
                     owner["status"] = "draft" if stage == "P5" else "running"
                     scope["status"] = "reviewing" if owner.get("role") == "reviewer" else "draft"
+                    reason = owner.get("reason")
+                    if reason and (not owner["feedback"] or owner["feedback"][-1] != reason):
+                        owner["feedback"].append(reason)
                     owner["reason"] = None
                     scope["last_recovery"] = {"request_id": request["id"], "attempt_id": request["attempt_id"], "at": time.time()}
                     if stage == "P5":

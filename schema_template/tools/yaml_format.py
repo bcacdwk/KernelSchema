@@ -636,6 +636,20 @@ def _style_corrections(before, after, key_changes, node_changes):
     return changes
 
 
+def _shown_change(before, after):
+    """Show the first changed Unicode character in the decoded scalar."""
+    if max(len(before), len(after)) <= 100:
+        return f"{before!r} → {after!r}"
+    offset = next((index for index, (left, right) in enumerate(zip(before, after)) if left != right),
+                  min(len(before), len(after)))
+    start, end = max(0, offset - 24), offset + 72
+
+    def excerpt(value):
+        return repr(("…" if start else "") + value[start:end] + ("…" if end < len(value) else ""))
+
+    return f"first change at character {offset + 1}: {excerpt(before)} → {excerpt(after)}"
+
+
 @bounded
 def format_document(document: Document, *, skip_hardware=False, corrections=None, edits=()) -> str:
     """Return a verified canonical candidate; never write or mutate a document.
@@ -670,15 +684,12 @@ def format_document(document: Document, *, skip_hardware=False, corrections=None
         if _render(reread, further_changes) != candidate:
             raise ToolError(f"{document.name}: formatting did not reach an idempotent result")
         if corrections is not None:
-            def shown(value):
-                return repr(value if len(value) <= 100 else value[:97] + "…")
-
             changes = {(_final_path(context, document, key_changes), context.node.value, spelling[identity])
                        for identity, contexts in requested.items() for context in contexts}
-            corrections.extend(Diagnostic(path, "identifier+reference: " + shown(before) + " → " + shown(after),
+            corrections.extend(Diagnostic(path, "identifier+reference: " + _shown_change(before, after),
                                           hint="Review the normalized declaration and reference spellings", severity="warning")
                                for path, before, after in sorted(changes))
-            corrections.extend(Diagnostic(path, "period: " + shown(change.node.value) + " → " + shown(change.value),
+            corrections.extend(Diagnostic(path, "period: " + _shown_change(change.node.value, change.value),
                                           hint="Only the terminal period was removed; other text and whitespace were preserved",
                                           severity="warning") for change in periods for path in change.paths)
             if candidate != document.source:

@@ -1,0 +1,19 @@
+{
+  "id": "maintenance-empty-poll-control-lock",
+  "category": "extract_tools",
+  "problem": "Runner 等待模型时每 0.1 秒消费维护请求；没有请求也进入全局控制事务，六个 Runner 可产生约每秒 60 次无用锁申请，干扰 ack、scan 和恢复等前台控制登记。",
+  "evidence": [
+    "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_extract/tools/runner.py 的事件等待循环重复调用 maintenance.consume_requests；maintenance.py 原实现无条件进入 control_transaction 后才判断请求。",
+    "schema_discussion/extract_six_full_20261118/MONITOR_LOCK.md：2026-11-18 07:06 的 440 次非阻塞锁探测中 106 次忙，候选持有者在六个 Runner 间轮换，间隙可取得锁；稍后读取的 maintenance_requests 与 controls 均为空。未保存两次历史 ack 失败瞬间的持锁 PID，不能给那两次失败指定具体持有者，也不能把采样比例当成精确占用率。",
+    "当前工作树 schema_extract/tools/maintenance.py::consume_requests 增加只读无请求返回，锁内重读、封印身份校验以及派发和发布屏障保留；MONITOR_LOCK.md 记录 3 项轮询及 2 项相邻定向验证通过。",
+    "schema_discussion/extract_six_full_20261118/MOE_RESUME_CONTENTION.md 记录本批旧冻结运行的三次 resume busy/committed=false 后原命令成功；未发现持续独占或新的重入根因。集中源审阅见 schema_discussion/extract_six_full_20261118/SOURCE_FIX_FINAL_REVIEW.md。",
+    "schema_discussion/issue_optimization_20261119/ROUND2_RUNTIME.md：test_maintenance_polling 的空轮询、锁内重读及封印身份回归通过；schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md 核对第三轮未删除这些路径。"
+  ],
+  "proposal": "没有 requested/draining 维护请求时只读返回；存在请求时沿用原控制事务重新核验，保留派发和发布前的最新 ledger 门禁。",
+  "necessity": "空轮询造成实际控制登记失败、人工重试和推进延迟；减少无用写锁申请即可处理根因，无需改变维护授权或终止健康调用。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.5.1",
+    "reason": "2.5.1 保留无请求时的只读返回及锁内重读、封印身份和最终派发/发布屏障。第三轮未删这些检查；当前定向用例覆盖持锁空轮询、预读后请求变化及无效封印。历史短锁争用证据不推定持续死锁；本次源码验收不改写旧冻结运行。"
+  }
+}

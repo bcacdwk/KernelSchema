@@ -204,33 +204,43 @@ def scan(store, run_ids=None) -> dict:
         return record_scan(ledger, rows, now)
 
 
-def record_scan(ledger: dict, rows: list[dict], now: float) -> dict:
+def record_scan(ledger: dict, rows: list[dict], observed_at: float) -> dict:
     """Commit an already collected observation; the caller holds the control lock.
 
     A bound clock scan uses the same transaction for this record and its next
     reminder time. No process observation, waiting or task control happens here.
     """
     observations = ledger["observations"]
-    previous = observations.get("latest", {})
+    latest = observations.setdefault("latest", {})
+    changes, superseded = [], []
     for row in rows:
-        prior = previous.get(row["run_id"], {})
+        run_id = row["run_id"]
+        prior = latest.get(run_id, {})
+        sampled_at = row.get("observation", {}).get("observed_at", observed_at)
+        if prior.get("observed_at") is not None and sampled_at < prior["observed_at"]:
+            superseded.append(run_id)
+            continue
         stable = prior.get("state_revision") is not None and prior.get("state_revision") == row.get("state_revision")
-        row["unchanged_since"] = prior.get("unchanged_since", now) if stable else now
-        if (stable and now - row["unchanged_since"] >= 300 and row.get("status") == "running" and
+        row["unchanged_since"] = prior.get("unchanged_since", sampled_at) if stable else sampled_at
+        if (stable and sampled_at - row["unchanged_since"] >= 300 and row.get("status") == "running" and
                 not row.get("active_attempts") and not row.get("unsettled_attempts") and
                 row.get("runner_observation", {}).get("lock") == "held" and row["runner_observation"]["alive"] is True):
             row["anomalies"].append({"run_id": row["run_id"], "scope": row.get("stage"), "classification": "possible_stall",
                                      "summary": "两次观察间活 Runner 无在途调用、state 修订长期不变；需诊断。",
                                      "evidence": row["state_directory"] + "/state.json",
                                      "recovery_condition": "核对准备/处理边界；此观察不授权终止或重试。"})
-    compact = {row["run_id"]: {key: row.get(key) for key in
-               ("status", "stage", "checkpoint", "published", "state_revision", "unchanged_since", "error", "anomalies")}
-               for row in rows}
-    changes = [{"run_id": run_id, "before": previous.get(run_id), "after": value}
-               for run_id, value in compact.items() if previous.get(run_id) != value]
-    observations.update(latest={**previous, **compact}, observed_at=now,
-                        changes=(observations.get("changes", []) + [{"at": now, **item} for item in changes])[-64:])
-    return {"observed_at": now, "runs": rows, "changes": changes,
+        compact = {key: row.get(key) for key in
+                   ("status", "stage", "checkpoint", "published", "state_revision", "unchanged_since",
+                    "runner_observation", "error", "anomalies")}
+        comparable = {key: value for key, value in prior.items() if key != "observed_at"}
+        if comparable != compact:
+            changes.append({"run_id": run_id, "before": deepcopy(latest.get(run_id)),
+                            "after": {**compact, "observed_at": sampled_at}})
+        latest[run_id] = {**compact, "observed_at": sampled_at}
+    observations.update(observed_at=max(observations.get("observed_at", observed_at), observed_at),
+                        changes=(observations.get("changes", []) +
+                                 [{"at": item["after"]["observed_at"], **item} for item in changes])[-64:])
+    return {"observed_at": observed_at, "runs": rows, "changes": changes, "superseded_run_ids": superseded,
             "anomalies": [item for row in rows for item in row.get("anomalies", [])]}
 
 

@@ -1,0 +1,19 @@
+{
+  "id": "non-tensor-parameter-registration",
+  "category": "schema_docs",
+  "problem": "现有 Input 规则允许有明确定义的非数值类型，但未说明固定长度 Python 序列的 shape/dtype 如何对应容器与元素。非 Tensor 参数的登记可能在不同算子间出现不一致。",
+  "evidence": [
+    "KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:schema_docs/1.contract.algorithm_requirement.md 的 dtype 表及 nullable 与 None 一节，仅给出 python_none 单值类型示例。",
+    "同版本 kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped/fp8_scaled_grouped_gemm/problem/input.py:53-68 构造 scale_granularity_mnk=(1,128,128) 和 out_dtype=torch.bfloat16；candidate/solution.py:253-273 定义这些参数并检查 tuple 值。",
+    "2026-11-18 GEMM P1 worker 与独立 reviewer 均以本 ID 提报；reviewer 确认示例缺口，同时认定当前登记可按既有开放语义批准，不阻塞提取。",
+    "同版本 kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/input.py:106-129 构造四元 None tuple 与整数 tuple。MLA 的 tuple-abi-input-typing 候选中，登记示例建议并入本项；未列入示例的已定义 dtype 一律非法这一主张不成立。",
+    "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：DOC1 三例通过现有 Algorithm 校验，MLA 全目录只读检查退出 0；schema_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/.extraction/issue-review-20261119.json 记录精确四字段变化和原回执边界，当前字节及删减复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+  ],
+  "proposal": "评估是否补充固定长度非 Tensor 序列和框架 dtype 值的登记示例，说明现有 shape、dtype 和 meaning 的对应关系；保留 dtype 开放取值及 python_none 单值语义，不新增字段或类型登记表。",
+  "necessity": "减少同类接口重复判断及登记差异；属于非阻塞说明建议，当前字段规则保持不变。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.5.1",
+    "reason": "2.5.1 的 DOC1 已用现有字段说明逻辑元素轴、整体对象和 torch.dtype，并区分 None 成员、整个对象 nullable 与省略参数 default；dtype 仍开放，不从默认值、样本或未使用推定固定 range。MLA 的整体 tuple shape 及相邻整数 tuple meaning 已限域修正，第三、四轮复核通过；原 P6 仅覆盖原字节，新字节由独立人工复核记录承接，不冒充新 P6。"
+  }
+}

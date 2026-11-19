@@ -80,6 +80,15 @@ def publish(store, state: dict, output: Path, *, export=False) -> dict:
                           "model": approval_attempt["model"], "effort": approval_attempt["effort"],
                           "session_scope": approval_attempt["session_scope"]},
              "check_policy": "skip-hardware", "checked_nodes": checked["checked_nodes"]}
+    if state.get("execution_binding"):
+        from .executor_repairs import delivery_audit_markers, verify_bindings
+        repairs = verify_bindings(store, state, lock)
+        proof["execution_binding"] = state["execution_binding"]
+        proof["executor_history"] = [{"binding": item["record"]["id"], "plan": item["plan"]["id"],
+            "issue_id": item["plan"]["issue_id"], "before": item["before"]["executor"],
+            "after": item["record"]["executor"], "authorization_sha256": item["record"]["authorization_sha256"],
+            "authorization": item["authorization"]["decision"]} for item in repairs]
+        proof["continuation_audit"] = delivery_audit_markers(state, repairs)
     publication_id = digest({"proof": proof, "target": str(output)})
     directory = store.run_dir(state["run_id"]) / "publications"
     directory.mkdir(exist_ok=True)

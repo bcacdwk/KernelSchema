@@ -119,7 +119,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape
 
 **查阅案例与来源：** [Template 示例索引](schema_template/examples/README.md)提供四个案例的九份完整设计，沿各案例 README、dispatch 和 YAML 阅读；源码与证据来自独立的[四题固定快照](kernel_wiki/aka-four-problems-20261019/README.md)，入口见[来源索引](schema_discussion/template_examples_20261117/SOURCES.md)。[Kernel Wiki](kernel_wiki/README.md)另有 44 题主批次，提供[分类总索引](kernel_wiki/CATALOG.md)、[精度／阶段／来源检索](kernel_wiki/FACETS.md)与[验证状态说明](kernel_wiki/EVIDENCE.md)，其提取输出导航在 [schema_wiki](schema_wiki/README.md)。核对实际源码身份和实验范围后再复用。
 
-旧规范仅在追溯时查阅 `schema_docs/archived`；维护规范或检查器时，再读 [tools/README.md](schema_template/tools/README.md)。
+维护规范或检查器时，再读 [tools/README.md](schema_template/tools/README.md)。
 
 ## 5 现状与 TODO
 

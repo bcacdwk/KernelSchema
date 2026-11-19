@@ -1,0 +1,19 @@
+{
+  "id": "monitor-wait-stale-observation",
+  "category": "extract_tools",
+  "problem": "monitor 登记允许等锁后，ack 仍可能写入取锁前的旧时间；scan 若复用等锁前的进程表，会把等待期间新出现的活 claim owner 误判为已退出并抢占 claim。后者涉及巡检所有权正确性，不只是等待耗时。",
+  "evidence": [
+    "schema_discussion/extract_six_full_20261118/SOURCE_FIX_FINAL_REVIEW.md：2026-11-19 集中核对工作树 monitor 锁重试改动，隔离测试先复现 ack 时间偏旧与活 claim 被抢占两项失败，再验证修正。没有线上 claim 被抢占、数据损坏或错误发布的现场证据，不能把模拟场景写成已发生事故。",
+    "当前工作树 schema_extract/tools/wakeup.py::Clock.ack 在取得控制锁后读取 self.now；Clock.scan 对当前 ledger 的已有 claim 调用 _alive 重新观察 owner，实际 run 观察仍在事务外。",
+    "schema_extract/tools/tests/test_wakeup_retry.py 的 WakeupRetryTests 与 schema_extract/tools/tests/test_monitor_evidence.py 的 CancelDeliveryTests.test_busy_does_not_register_or_signal_cancel 合计 12 项隔离验证通过；使用临时 state、虚拟时间及假发送器，未启动真实模型或 daemon。",
+    "monitor-registration-lock-retry 记录短竞争直接失败的可用性根因；本项记录等锁后仍采用旧观察的正确性缺陷，未重复旧 reminder-ack-delay 的补送问题。",
+    "schema_discussion/issue_optimization_20261119/ROUND2_MONITOR_SCHEMA.md：27 项 monitor 回归包含延迟提交、新旧采样、单 run 存活变化、分批观察及 unknown owner；第三轮未改代码和测试，复核见 schema_discussion/issue_optimization_20261119/ROUND4_REVIEW_AND_ARCHIVE.md。"
+  ],
+  "proposal": "以实际取得锁后的时间登记 ack，并在判定当前 claim owner 时重新检查存活身份；保留提醒、线程、代际和 claim 校验，以及仅重试事务进入的边界。",
+  "necessity": "旧时间会失真签收时序；误抢活 claim 会导致并发 scan 重复观察、原 owner 提交失效及巡检归属错误。需要修复已复现的竞态，不能因尚未观察到线上事故而忽略。",
+  "decision": {
+    "outcome": "resolved",
+    "version": "2.5.1",
+    "reason": "2.5.1 在取得锁后登记 ack 时间，按 boot/start 重新核实 claim owner，身份未知不抢占；实际采样与完成时间分开，逐 run 旧观察不覆盖 latest，采样元数据不制造 changes，下一次提醒按完成时刻计算。并发采样和真实锁等待回归通过；第三轮未改该实现或测试，未将隔离复现写成线上事故。"
+  }
+}

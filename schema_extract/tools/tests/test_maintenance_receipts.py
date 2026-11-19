@@ -141,7 +141,7 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
         self.invoke("shape", resume=True)
         self.assert_unapproved(2)
         self.assertEqual(self.task()["reason"]["code"], "receipt_repair")
-        self.assertEqual(f.state["stages"]["P2"]["receipt_repairs"], 1)
+        self.assertEqual(f.state["stages"]["P2"]["receipt_repairs"], 2)
         self.invoke("approve", resume=True, pause=True)
         self.assertEqual((f.state["status"], f.state["stage"], f.state["role"]), ("paused", "P3", "worker"))
         self.assertEqual(f.state["maintenance"]["status"], "complete")
@@ -149,7 +149,7 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
         self.assertEqual(f.state["stages"]["P2"]["approval"]["attempt_id"], self.calls[-1]["attempt_id"])
         self.assertEqual(set(f.state["accepted_receipts"]) - set(self.accepted), {self.calls[-1]["attempt_id"]})
         self.assertEqual((f.state["stages"]["P2"]["calls"], f.state["stages"]["P2"]["invalid_receipts"],
-                          f.state["stages"]["P2"]["receipt_repairs"]), (self.before["calls"] + 3, 2, 1))
+                          f.state["stages"]["P2"]["receipt_repairs"]), (self.before["calls"] + 3, 2, 2))
         self.assertEqual(f.state["call_additions"], [])
         for attempt_id, usage in old_usage.items():
             self.assertEqual(f.state["attempt_usage"][attempt_id], usage)

@@ -1,0 +1,115 @@
+{
+  "artifact_cross_checks": [
+    {
+      "line_end": 79,
+      "line_start": 70,
+      "note": "Contract q/k scales run along head_dim; v scales run along key axis.",
+      "path": "root.yaml"
+    },
+    {
+      "line_end": 31,
+      "line_start": 13,
+      "note": "Parallel rewrite already names scale_block_size channels x.",
+      "path": "mma_sync.yaml"
+    }
+  ],
+  "axis_corrections": [
+    {
+      "after_sha256": "4a68866cff4823419e83f8a862730a134d7793dc339c4e60c5705c0a10d7a6fa",
+      "before_sha256": "87743a62395d04005b8282c6d8d33890bb81931aa8d7d29b348475ea8c57922f",
+      "line_changes": [
+        {
+          "after": "  Version: 7",
+          "before": "  Version: 6",
+          "line": 5
+        },
+        {
+          "after": "          4 blocks c of 32 channels: raw[i,j] = sum_c sum_{x in block c} q_payload[i,x] * k_payload[j,x]",
+          "before": "          4 blocks c of 32 keys: raw[i,j] = sum_c sum_{x in block c} q_payload[i,x] * k_payload[j,x]",
+          "line": 183
+        },
+        {
+          "after": "          Accumulate: One block-scaled FP32 product per 32-channel block; blocks accumulate sequentially in increasing x; intra-block addition order is hardware-defined",
+          "before": "          Accumulate: One block-scaled FP32 product per 32-key block; blocks accumulate sequentially in increasing x; intra-block addition order is hardware-defined",
+          "line": 193
+        }
+      ],
+      "path": "root.yaml",
+      "version_after": 7,
+      "version_before": 6
+    },
+    {
+      "after_sha256": "a5ad5ad8b43fa114b79ecb472fb6299bc363f55a483c76ca4f5687fa0bb59752",
+      "before_sha256": "48f85b9baf0b5f7b3fd47b76e1e0dc74e170aed08ca8b02850e8ae8d1e8551ce",
+      "line_changes": [
+        {
+          "after": "  Version: 3",
+          "before": "  Version: 2",
+          "line": 5
+        },
+        {
+          "after": "            - e8m0_exponent_bias), in FP32 over the 4 blocks c of 32 channels with both E8M0 factors inside",
+          "before": "            - e8m0_exponent_bias), in FP32 over the 4 blocks c of 32 keys with both E8M0 factors inside",
+          "line": 18
+        },
+        {
+          "after": "          Accumulate: One block-scaled FP32 product per 32-channel block; blocks accumulate sequentially in increasing x; intra-block addition order is hardware-defined",
+          "before": "          Accumulate: One block-scaled FP32 product per 32-key block; blocks accumulate sequentially in increasing x; intra-block addition order is hardware-defined",
+          "line": 27
+        }
+      ],
+      "path": "split_kv.yaml",
+      "version_after": 3,
+      "version_before": 2
+    }
+  ],
+  "coordinate_erratum": {
+    "basis": "Actual splitlines() count is 572; the original evidence refers to REALIZATION through EOF. This record corrects the coordinate separately; original response/result/rejection remain byte-identical and decision=reopen.",
+    "corrected_value": 572,
+    "does_not_create_p6_approval": true,
+    "json_pointer": "/artifact_evidence/13/line_end",
+    "kind": "separate_evidence_coordinate_erratum",
+    "line_start": 528,
+    "original_and_delivered_line_count": 572,
+    "original_file_sha256": "48f85b9baf0b5f7b3fd47b76e1e0dc74e170aed08ca8b02850e8ae8d1e8551ce",
+    "original_response_sha256": "ecf3012e923c58280ea39b9812d908cf170d47e922d02854e02f745fee887eb2",
+    "original_value": 573,
+    "parent_attempt": "be584879-c7c2-4210-a68c-0073bf00cda2",
+    "path": "split_kv.yaml"
+  },
+  "fixed_source_evidence": [
+    {
+      "line_end": 2895,
+      "line_start": 2893,
+      "path": ".schema_extract/v2/snapshots/a6e39e6f3a33bb2e40c8cc754837da6fb2a7b4abb62d5aca96a128f4647c839b/source/kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/fmha_tcg.cuh",
+      "sha256": "0eb68d429d53e60416de80ed8f4627b5545505b8ed576b7c346a5a723c392806",
+      "text": "  constexpr int BM = 128, BN = 128, KB = D / 32, DCH = D / 128;\n  constexpr int THR = 128 * KSPLIT;    // threads per CTA\n  constexpr int KHALF = BN / KSPLIT;   // keys this warpgroup owns per group"
+    },
+    {
+      "line_end": 4732,
+      "line_start": 4718,
+      "path": ".schema_extract/v2/snapshots/a6e39e6f3a33bb2e40c8cc754837da6fb2a7b4abb62d5aca96a128f4647c839b/source/kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/fmha_tcg.cuh",
+      "sha256": "0eb68d429d53e60416de80ed8f4627b5545505b8ed576b7c346a5a723c392806",
+      "text": "          for (int kb = 0; kb < KB; ++kb) {\n            const int chunk = kb >> 2, ink = kb & 3;\n            const uint64_t da =\n                umma_desc(sQ_u + (uint32_t)(chunk * (BM * 128)), 16, 1024) + 2 * ink;\n            const uint64_t db =\n                umma_desc(khalfstage + (uint32_t)(chunk * (BN * 128)), 16, 1024) + 2 * ink;\n            tcg_mma_bs(tmem + TT::S, da, db, tcg_idesc(BM, 64, 0, ink), (uint32_t)(kb > 0),\n                       tmem + TT::SFA_Q + 4 * chunk,\n                       // gmq1: same parity-aware base as the 128-column form below\n                       // (identity wherever SF_AHEAD is false — every form compiled\n                       // today — so this is byte-identical for fused-QK64, and\n                       // correct-by-construction for the GM-QK64 form whose SF_ALT\n                       // is true via PIPE_GM).\n                       tcg_sf_seq<SF_AHEAD, TT::SF_ALT>(tmem + TT::SFB_K, grp) + 2 * h +\n                           4 * chunk);"
+    },
+    {
+      "line_end": 4785,
+      "line_start": 4778,
+      "path": ".schema_extract/v2/snapshots/a6e39e6f3a33bb2e40c8cc754837da6fb2a7b4abb62d5aca96a128f4647c839b/source/kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_mxfp8_qkv/candidate/fmha_tcg.cuh",
+      "sha256": "0eb68d429d53e60416de80ed8f4627b5545505b8ed576b7c346a5a723c392806",
+      "text": "        for (int kb = 0; kb < KB; ++kb) {\n          const int chunk = kb >> 2, ink = kb & 3;\n          const uint64_t da = umma_desc(sQ_u + (uint32_t)(chunk * (BM * 128)), 16, 1024) + 2 * ink;\n          const uint64_t db =\n              umma_desc(kstage + (uint32_t)(chunk * (BN * 128)), 16, 1024) + 2 * ink;\n          tcg_mma_bs(tmem + TT::S, da, db, tcg_idesc(BM, BN, 0, ink), (uint32_t)(kb > 0),\n                     tmem + TT::SFA_Q + 4 * chunk,\n                     tcg_sf_seq<SF_AHEAD, TT::SF_ALT>(tmem + TT::SFB_K, grp) + 4 * chunk);"
+    }
+  ],
+  "format": "fmha.user_authorized_minor_fix.corrections.v1",
+  "parent_checkpoint": "d3830a2c67c2298494a5d7961e5fde8373c60978cfaa510212cd622910e70252",
+  "parent_p6_attempt": "be584879-c7c2-4210-a68c-0073bf00cda2",
+  "parent_run": "fb8b3758-92d7-4093-aa18-c2e5028f0a43",
+  "scope_verified": "Exactly six changed lines: four QK axis phrases and two Version values. Every other artifact byte is retained.",
+  "version_rule": {
+    "lines": [
+      37,
+      43
+    ],
+    "path": ".schema_extract/v2/snapshots/a6e39e6f3a33bb2e40c8cc754837da6fb2a7b4abb62d5aca96a128f4647c839b/rules/schema_docs/0.common.md"
+  }
+}

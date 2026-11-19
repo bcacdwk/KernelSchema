@@ -1,0 +1,321 @@
+--- before/root.yaml
++++ after/root.yaml
+@@ -2,10 +2,10 @@
+   Name: mla_expanded_fp8
+   Describe: Ragged expanded-MLA attention on prepared FP8 E4M3 Q/K (D192) and V (D128) with per-tensor scales, giving BF16 output and optional log2-space LSE.
+   Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/candidate/solution.py::Model.forward
+-  Version: 5
++  Version: 6
+   Dispatch:
+     when: >-
+-      The E4M3 weight path, the only one the frozen entry point reaches. At launch item_count*2 > sm_count*3, so the grid is sm_count persistent workers refilling from a device counter that holds 0 at entry. The active key and value bytes min(kv_heads*batch_count, sm_count)*max(kv_len)*320*4 stay within l2_bytes*3, with sm_count and l2_bytes queried at launch, so the ring keeps 4 slots. No request has q_len(b) < 128, so the table keeps longest-processing-time order
++      E4M3 weights; item_count*2 > sm_count*3; min(kv_heads*batch_count, sm_count)*max(kv_len)*320*4 <= l2_bytes*3; all q_len(b) >= 128. The cached device attributes sm_count and l2_bytes are positive. Metadata is ready before the side-stream copies; prior calls using the module's static table and queue have completed, with no concurrent host entry or device switch
+ CONTRACT:
+   Algorithm_requirement:
+     Constant:
+@@ -117,13 +117,14 @@
+           The result is (out, lse) when return_lse is True and out alone otherwise, with
+           preserved tensor identity; the frozen caller provides an lse tensor exactly when
+           return_lse is True, so no lse storage is written when return_lse is False.
+-          Side effects: workspace_buffer may be overwritten as scratch; no other input is
+-          modified and no write occurs outside out, lse (when present) and workspace_buffer.
++          Side effects: workspace_buffer may be overwritten as scratch. Caller-visible writes
++          are confined to out, lse (when present) and workspace_buffer; other input and nonwrite
++          storage is preserved, including the guards around the caller-owned output views.
+     Golden_reference:
+       Source: KernelSchema@24d2b3d3ca9d4907c4e7efd9607cf78cfb1a52b2:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_expanded_fp8/problem/reference.py::Model.forward
+       Tolerance:
+-        attention_output: mutated_inputs.out; atol=.01, rtol=.05, mismatch=.005, rel_l2=.01; formula absent; no defaults
+-        lse_log2: default entry atol=.01, rtol=.05, mismatch=0; lse routing/formula absent; no defaults
++        attention_output: mutated_inputs.out; atol=.01, rtol=.05, mismatch=.005, rel_l2=.01; rules unknown; no defaults
++        lse_log2: Source only; default entry atol=.01, rtol=.05, mismatch=0; lse routing/formula absent; no defaults
+   Hardware_specification:
+     Device:
+     Architecture:
+@@ -149,7 +150,7 @@
+ DESIGN:
+   Math_reshape:
+     Thesis: >-
+-      Contract math kept, evaluated as a key-tiled online softmax whose weights are E4M3, so both products run on the FP8 tensor path and the value operand needs no conversion. A frozen running maximum removes most accumulator rescales and cancels in the outputs; rows of at most 32 keys stay exact
++      Key-tiled online softmax uses E4M3 weights and the FP8 tensor path for both products. A frozen running maximum skips rescales; its shift cancels in real arithmetic, while rounding and weight quantization remain. The source's tiny-row branch uses unquantized FP32 weights and FMA accumulation
+     Rewrite:
+       - Name: Work-unit rows and their visible key range
+         Math: |
+@@ -159,7 +160,7 @@
+           qrow_base = cum_seq_lens_q[b] + qstart; row r of the unit is absolute query
+           token qrow_base + r, 0 <= r < bq. For row r,
+             hi(r) = kv_len(b) - 1 when is_causal is False, else min(kv_len(b)-1, qstart+r+kv_delta)
+-            lo(r) = unbounded below while window_left < 0, else hi(r) - window_left
++            lo(r) = unbounded below while window_left < 0, else qstart+r+kv_delta-window_left
+           and key j of request b is allowed for row r when lo(r) <= j <= hi(r). The
+           frozen domain fixes window_left = -1, so lo(r) is inactive there. hi(r) >= 0
+           for every written row, so each of them has at least one allowed key.
+@@ -205,46 +206,50 @@
+           Gain: Per key tile, evaluated MACs bq*bk*256 -> bq*bk*192 and k32 steps 8 -> 6, with no repack pass over Q or K
+       - Name: Frozen running maximum
+         Math: |
+-          c = bmm1_scale * log2(e) converts a dot value into base-2 exponent units. Per
+-          row r, over key tiles i = 0 .. kv_tile_count-1,
+-            mu(-1)[r] = -inf
++          qk_scale = fp32(bmm1_scale); value_scale = fp32(bmm2_scale); c = fp32(qk_scale * fp32(log2(e))).
++          Per row r, over key tiles i = 0 .. kv_tile_count-1,
++            mu(-1)[r] = -FLT_MAX
+             tile_max(i)[r] = max of masked(i)[r,j] over the bk keys, -FLT_MAX if none is allowed
+             cand(i)[r] = max(mu(i-1)[r], tile_max(i)[r])
+-            bump(i)[r] holds iff mu(i-1)[r] == -inf or (cand(i)[r] - mu(i-1)[r]) * c > freeze_tol
++            bump(i)[r] holds iff mu(i-1)[r] == -FLT_MAX or fp32(fp32(cand(i)[r] - mu(i-1)[r]) * c) > freeze_tol
+             mu(i)[r] = cand(i)[r] when bump(i)[r] holds, else mu(i-1)[r]
+-            safe(i)[r] = 0 when mu(i)[r] == -inf, else mu(i)[r]
+-            alpha(i)[r] = 0 when i == 0, else exp2((mu(i-1)[r] - safe(i)[r]) * c)
++            safe(i)[r] = 0 when mu(i)[r] == -FLT_MAX, else mu(i)[r]
++            alpha(i)[r] = 0 when mu(i-1)[r] == -FLT_MAX, else exp2_f32(fp32(fp32(mu(i-1)[r] - safe(i)[r]) * c))
+           alpha(i)[r] == 1 exactly when i > 0 and bump(i)[r] is false.
+         Symbol:
++          qk_scale: {meaning: FP32 device copy of bmm1_scale, shape: [], dtype: fp32}
++          value_scale: {meaning: FP32 device copy of bmm2_scale, shape: [], dtype: fp32}
+           mu: {meaning: Frozen running maximum of dot for one row, shape: [{row: bq}], dtype: fp32, retention: 'carry_forward (b,q_tile,h); i=-1..kv_tile_count-1'}
+           alpha: {meaning: Rescale factor of o_run when mu moves, shape: [{row: bq}], dtype: fp32, retention: 'keep_value (b,q_tile,h,i)'}
+           freeze_tol: {meaning: Base-2 drift tolerated before a maximum bump, value: 0.75}
++        Arithmetic:
++          Approx: 'unknown: exp2_f32 uses the build-selected fast FP32 exponential; scale conversion and drift arithmetic round in FP32'
+         Ledger:
+           Baseline: Bump the running maximum on every new tile maximum
+-          Gain: A 32-row group whose alpha is uniformly 1.0 skips the read-modify-write of its o_run rows for that tile, 128 FP32 reads and writes -> 0
+-          Cost: mu may lag the true row maximum by up to freeze_tol/c, which keeps weights above 1 and consumes the headroom reserved by p_scale_log2
++          Gain: A 32-row group whose alpha is uniformly 1.0 skips 32*128 FP32 accumulator reads and writes for that tile
++          Cost: In real arithmetic mu can lag the row maximum by freeze_tol/c; the rounded drift test and exponent chain have no certified error bound
+       - Name: E4M3 weights with a 2^8 pre-scale
+         Math: |
+-          off(i)[r] = -safe(i)[r] * c + p_scale_log2, one FP32 value per row and key tile.
+-          Per evaluated key of row r,
+-            x(i)[r,j] = fma32(masked(i)[r,j], c, off(i)[r])   one FP32 rounding
++          off(i)[r] = fma32(-safe(i)[r], c, p_scale_log2), one FP32 rounding per row and tile.
++          Per evaluated key of row r: x(i)[r,j] = fma32(masked(i)[r,j], c, off(i)[r])   one FP32 rounding
+             u(i)[r,j] = exp2_f16(fp16(x(i)[r,j]))             FP16 argument and result
+             p(i)[r,j] = e4m3(u(i)[r,j])                       saturating conversion
+-            d(i)[r] = the FP16 sum of u(i)[r,:] over the bk keys, widened to FP32
+-          so u(i)[r,j] = 2^p_scale_log2 * exp(bmm1_scale * (dot(i)[r,j] - safe(i)[r])) for an
+-          allowed key. A sentinel key gives x = -FLT_MAX*c + off, whose FP16 rounding is -inf
+-          once FLT_MAX*c exceeds the largest finite FP16 value 65504 - a bound the frozen
+-          bmm1_scale meets by many orders - so u = p = 0 there; p is the value-product multiplicand and u is not retained.
++            d(i)[r] = fp32(fp32(A0+A1) + fp32(A2+A3)), with the four FP16 chains defined below
++          The ideal unrounded u is 2^p_scale_log2 * exp(qk_scale*(dot-safe)); the actual u
++          includes both argument rounding and the approximate exponential. A masked key uses
++          fma32(-FLT_MAX,c,off); a FP16 cast to -inf gives u=p=0.
++          The prepared scale is far from this underflow boundary; arbitrary positive scales
++          have no corresponding source guarantee. p feeds PV; u is not retained.
+         Symbol:
+           p: {meaning: 'E4M3 weight tile, the value-product multiplicand', shape: [{row: bq}, {key: bk}], dtype: fp8_e4m3fn, retention: 'keep_value (b,q_tile,h,i)'}
+           p_scale_log2: {meaning: Base-2 pre-scale of every weight, value: 8}
+         Arithmetic:
+-          Approx: exp2_f16 is the FP16 approximate base-2 exponential of the FP16 rounding of x; bound unknown - no bound-bearing material is bound in this task
+-          Accumulate: d(i) sums in FP16 as two packed chains, keys 4g and 4g+1 in the first and 4g+2 and 4g+3 in the second, each widened to FP32 before the two are added
++          Approx: 'unknown: exp2_f16 is ex2.approx.f16x2 after FP16 argument rounding; no bound-bearing material is bound'
++          Accumulate: Aj starts at FP16 zero and adds u at keys 4g+j in FP16 for g=0..31; j=0..3. The four chains are widened before the three FP32 additions forming d
+         Ledger:
+           Baseline: FP32 weights and an FP32 tile sum
+           Gain: Value-product multiplicand bytes per key tile bq*bk*4 -> bq*bk, and the value operand needs no conversion pass
+-          Cost: Per key, FP16 argument rounding, approximate FP16 exp2 and E4M3 rounding, relative <= 2^-4 and never saturating as u <= 2^8 * 2^0.75 = 430.5 < 448
++          Cost: E4M3 relative rounding <= 2^-4 only in the normal range; subnormals may round to zero. The rounded exponent chain has no no-saturation guarantee
+       - Name: Tiled denominator and output recurrence
+         Math: |
+           den(-1)[r] = 0 and o_run(-1)[r,:] = 0 for every row; for key tile i,
+@@ -266,10 +271,10 @@
+       - Name: Outputs, sinks and log2 LSE
+         Math: |
+           With L = kv_tile_count - 1 and per row r, den_final[r] = den(L)[r], mu_final[r] = mu(L)[r],
+-            base_nat[r] = bmm1_scale * mu_final[r] + ln(den_final[r]) - ln(2) * p_scale_log2
+-            norm[r] = bmm2_scale / den_final[r] when den_final[r] > 0, else 0
++            base_nat[r] = fma32(mu_final[r], qk_scale, fp32(log_f32(den_final[r]) - fp32(ln(2))*p_scale_log2))
++            norm[r] = value_scale / den_final[r] when den_final[r] > 0, else 0
+           With attention_sinks present and sk = attention_sinks[h],
+-            total[r] = max(base_nat[r], sk) + ln(1 + exp(-|base_nat[r] - sk|))
++            total[r] = max(base_nat[r], sk) + log1p(exp(-|base_nat[r] - sk|))
+             norm[r] = norm[r] * exp(base_nat[r] - total[r]); lse_value[r] = total[r] * log2(e)
+           otherwise total[r] = base_nat[r] and lse_value[r] = base_nat[r] * log2(e).
+           For the q_valid written rows, out[qrow_base+r, h, :] = bf16(o_run(L)[r,:] * norm[r])
+@@ -279,32 +284,32 @@
+           den_final: {meaning: Row denominator of the last key tile, shape: [{row: bq}], dtype: fp32, retention: 'keep_value (b,q_tile,h)'}
+           mu_final: {meaning: Row frozen maximum of the last key tile, shape: [{row: bq}], dtype: fp32, retention: 'keep_value (b,q_tile,h)'}
+         Arithmetic:
+-          Approx: ln, exp and the sink log-sum-exp use the FP32 approximate variants and the subnormal flushing the build selects; bound unknown, none is documented
++          Approx: 'unknown: log_f32, exp, log1p, division and sink arithmetic use fast FP32 operations and build-selected subnormal flushing; no bound is documented'
+         Ledger:
+           Baseline: Recompute the row maximum and the row sum of exponentials over all keys for the LSE
+           Gain: The LSE and the normalization reuse mu and den of the recurrence - 0 extra key traversals and 0 extra score-tile reads per work unit
+-      - Name: Exact FP32 path for rows of at most 32 keys
++      - Name: Unquantized FP32 path for rows of at most 32 keys
+         Math: |
+           tiny_unit holds when kv_tile_count == 1, q_len(b) <= 32 and hi(r) < 32 for every
+-          r < 32. One vote per 32-row group decides it, so only rows [0,32) can select the
+-          path and all of them do; q_len(b) <= 32 makes q_valid <= 32, so a tiny unit
+-          writes no row outside that group. For each row r < 32 of a tiny unit, in FP32,
+-            w[r,j] = exp2(fma32(dot(0)[r,j], c, -safe(0)[r] * c)) for allowed j, else 0
++          r < 32. A warp-wide vote selects only rows [0,32); q_len(b) <= 32 gives q_valid <= 32, so it
++          writes only that group. Root excludes this branch by q_len >= 128; its variants retain it. In FP32,
++            w[r,j] = exp2_f32(fma32(dot(0)[r,j], c, fp32(-safe(0)[r] * c))) for allowed j, else 0
+             den_exact[r] = sum of w[r,j] over the allowed j ascending
+-            o_exact[r,ch] = sum over the allowed j ascending of fma32(w[r,j], fp32(value[kvrow_base+j, kv_head(h), ch]), o_exact[r,ch])
+-          starting from 0, for 0 <= ch < value_dim. These replace den and o_run for those
+-          rows - den_final[r] = den_exact[r], norm[r] = bmm2_scale / den_exact[r] and
+-          base_nat[r] = bmm1_scale * mu_final[r] + ln(den_exact[r]) with no ln(2) term.
+-        Symbol:
+-          o_exact: {meaning: Exact FP32 output rows of a tiny work unit, shape: [{row: 32}, {channel: value_dim}], dtype: fp32, retention: 'keep_value (b,q_tile,h)'}
+-          den_exact: {meaning: Exact FP32 denominator of a tiny work unit, shape: [{row: 32}], dtype: fp32, retention: 'keep_value (b,q_tile,h)'}
++            Starting at o_exact[r,ch]=0, visit j=0..31 ascending, skipping w=0, and update
++            o_exact[r,ch] = fma32(w[r,j], fp32(value[kvrow_base+j, kv_head(h), ch]), o_exact[r,ch])
++          for 0 <= ch < value_dim. These replace den and o_run for those
++          rows - den_final[r] = den_exact[r], norm[r] = value_scale / den_exact[r] and
++          base_nat[r] = fma32(mu_final[r], qk_scale, log_f32(den_exact[r])) with no ln(2) term.
++        Symbol:
++          o_exact: {meaning: Unquantized-weight FP32 accumulation of tiny rows, shape: [{row: 32}, {channel: value_dim}], dtype: fp32, retention: 'keep_value (b,q_tile,h)'}
++          den_exact: {meaning: FP32 sum of unquantized weights for tiny rows, shape: [{row: 32}], dtype: fp32, retention: 'keep_value (b,q_tile,h)'}
+         Arithmetic:
+-          Approx: exp2 here is the FP32 approximate base-2 exponential of the build, bound unknown as in the outputs step; the E4M3 to FP32 widening of value is exact
++          Approx: 'unknown: exp2_f32 follows the frozen-maximum step; E4M3-to-FP32 widening of value is exact, but this branch is not exact real arithmetic'
+           Accumulate: Both sums run strictly ascending in j on the FMA units, one FP32 fma per key and channel, with unquantized FP32 weights and no reassociation
+         Ledger:
+           Baseline: The quantized tiled path for every row
+-          Gain: Weight quantization error of the affected rows 2^-4 relative -> 0, and no 2^p_scale_log2 headroom needed
+-          Cost: Per tiny unit 32*32*value_dim FP32 FMAs move from the matrix to the FMA units and dot(0) is read twice; o_run(0) is still computed and discarded
++          Gain: Removes E4M3 weight rounding and FP16 weight-sum rounding for the affected rows; no weight pre-scale is used
++          Cost: Up to 32*32*value_dim extra FP32 FMAs per tiny unit and a second read of dot(0); quantized PV is still computed and its tiny rows discarded
+   Work_schedule:
+     Thesis: >-
+       One fused persistent kernel per call. A work unit is one (request, bq-row query tile, head) keeping its whole key range, so no partial result crosses a worker. The host resolves geometry into a dense weight-ordered table, costing one device-to-host sync; workers refill from one atomic counter
+@@ -324,7 +329,7 @@
+               out_tile: {meaning: Attention output rows written into out, shape: [{row: q_valid}, {channel: value_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}
+               lse_tile: {meaning: 'Log2 LSE rows written into lse, when supplied', shape: [{row: q_valid}], dtype: 'ref:CONTRACT.Algorithm_requirement::lse.dtype'}
+         Mapping:
+-          Strategy: sm_count is the device SM count queried at launch and equals the submitted worker count, as one worker fills all 512 tensor-memory columns of its SM
++          Strategy: sm_count is the positive device SM count cached at first launch; it equals the worker count, with one worker owning 512 tensor-memory columns
+           Worker: {unit: cta, unit_count: 1}
+           Worker_count: sm_count
+           Placement: {unit: sm, unit_count: 1}
+@@ -363,7 +368,7 @@
+             dtype: fp32, total_size: 512, view: {den_final(t): {}}}
+           mu_final_slot: {meaning: Row frozen maximum of the last key tile, depth: 1, location: smem, shape: [{row: 128}],
+             dtype: fp32, total_size: 512, view: {mu_final(t): {}}}
+-          tiny_scratch: {meaning: 'Exact FP32 rows of a tiny unit, 130-float stride', depth: 1, location: smem, shape: [{row: 32}, {element: 130}],
++          tiny_scratch: {meaning: 'FP32 tiny-row scratch, allocated even when unused', depth: 1, location: smem, shape: [{row: 32}, {element: 130}],
+             dtype: fp32, total_size: 16640, view: {o_exact(t): {region: {element: [0, 128]}}}}
+           geo_slot: {meaning: Published geometry; roles latch before slot reuse, depth: 2, location: smem, shape: [{element: 10}],
+             dtype: int32, total_size: 80, view: {item_geo(t): {slot_index: t%2}}}
+@@ -371,6 +376,10 @@
+             dtype: fp32, total_size: 1024, view: {mu(i): {region: {element: [0, 1]}}, den(i): {region: {element: [1, 2]}}}}
+           score_regs: {meaning: Register copy of the masked score tile, depth: 1, location: register, shape: [{row: 128}, {key: 128}],
+             dtype: fp32, total_size: 65536, view: {masked(n): {}}}
++          prob_regs: {meaning: SOFTMAX packed weights held until the TMEM store, depth: 1, location: register, shape: [{row: 128}, {word: 32}],
++            dtype: uint32, total_size: 16384, view: {p(n): {}}}
++          correction_regs: {meaning: CORRECTION rows used for rescale and output drain, depth: 1, location: register, shape: [{row: 128}, {column: 128}],
++            dtype: fp32, total_size: 65536, view: {o_rescale(n): {}, o_drain(t): {region: {column: [0, 32]}}}}
+         Role:
+           SOFTMAX:
+             Info:
+@@ -380,12 +389,12 @@
+               Using_verb:
+                 compute:
+                   bootstrap_geo: {execution_mode: serial, describe: 'Thread 0 copies the table entry worker_id into geo_slot slot 0 ahead of the prologue join, before any role has published geometry'}
+-                  row_init: {execution_mode: serial, describe: Set mu = -inf and den = 0 for the new work unit and derive hi(r) and lo(r) from its geometry; reads no tile and no previous value}
++                  row_init: {execution_mode: serial, describe: Set mu = -FLT_MAX and den = 0 in row_state for the new unit and derive hi(r) and lo(r); reads no tile and no previous value}
+                   masked_score: {execution_mode: serial, describe: Read dot(n) from score_prob slot n%3 as two 64-column halves into score_regs and replace disallowed keys by -FLT_MAX; done covers both reads}
+                   row_scale: {execution_mode: serial, describe: 'Form tile_max, mu(n), alpha(n) and off(n) of the frozen-maximum step, write alpha(n) to scale_relay slot n%2 and notify CORRECTION of it'}
+-                  prob: {execution_mode: serial, describe: 'Fused weight step - u and p in registers plus the FP16 tile sum d; the recurrence den(i) = fma32(den(i-1), alpha(i), d(i)) stays in row_state'}
+-                  row_final: {execution_mode: serial, describe: 'Write mu_final and den_final; a tiny unit accumulates o_exact and den_exact from its single dot and v_tile, safe as later units hold one tile too'}
+-                store: {prob: {execution_mode: serial, describe: 'Write p(n) from registers into columns [32,64) of score_prob slot n%3; done covers the write being visible to the value product'}}
++                  prob: {execution_mode: serial, describe: 'Read masked(n) in score_regs, form p(n) in prob_regs and the four-chain tile sum d, and update den(i) in row_state by the defined recurrence'}
++                  row_final: {execution_mode: serial, describe: Write den_final_slot and mu_final_slot; tiny rows read dot and v_tile into tiny_scratch before prob_ready gates the tail PV and every later unit}
++                store: {prob: {execution_mode: serial, describe: 'Write p(n) from prob_regs into columns [32,64) of score_prob slot n%3; done covers visibility to the value product'}}
+                 await:
+                   prologue: {execution_mode: serial, describe: The single CTA-wide prologue join - notification objects initialized and the tensor-memory base recorded; its own bootstrap write precedes it}
+                   item_geo: {execution_mode: serial, describe: Wait for the geometry of work unit t in geo_slot slot t%2 and latch its fields; ordinal 0 arrives through the prologue join instead}
+@@ -437,10 +446,10 @@
+               Register: 160
+               Using_verb:
+                 compute:
+-                  rescale_o: {execution_mode: serial, describe: Multiply o_run in o_slot by alpha(n) from scale_relay slot n%2 in place in FP32; a warp whose 32 rows all hold 1.0 does no read or write}
++                  rescale_o: {execution_mode: serial, describe: 'Read o_slot into correction_regs, multiply by alpha(n) from scale_relay slot n%2 in FP32 and write o_slot back; an all-1 warp skips reads and writes'}
+                   output_scale: {execution_mode: serial, describe: 'Read den_final(t) and mu_final(t) and form norm, base_nat, the sink log-sum-exp and lse_value of the outputs step for its 32 rows'}
+                 store:
+-                  out_tile: {execution_mode: async_unordered, describe: 'Drain o_run from o_slot in four 32-column blocks, scale by norm, pack BF16 and store the q_valid rows of out; in a tiny unit rows [0,32) read o_exact'}
++                  out_tile: {execution_mode: async_unordered, describe: 'Drain o_slot via correction_regs in four 32-column blocks, normalize and pack to out; tiny rows use tiny_scratch. Reads finish at release:o_slot'}
+                   lse_value: {execution_mode: async_unordered, describe: 'Store lse_value for the q_valid rows into lse, which exists exactly when the caller supplied it; lse_present is that condition'}
+                 await:
+                   prologue: {execution_mode: serial, describe: 'The single CTA-wide prologue join - notification objects initialized, tensor-memory base recorded and bootstrap geometry written'}
+@@ -498,6 +507,7 @@
+                   o_rescaled: {execution_mode: serial, describe: Wait until CORRECTION has rescaled o_run by alpha of the given key tile and given its notification}
+                   o_released: {execution_mode: serial, describe: 'Wait until the previous unit epilogue has read o_slot, or the initial credit when t = 0, so the first product may initialize o_run'}
+                   queue_end: {execution_mode: serial, describe: Wait for the publish following the last work unit of this worker and read the sentinel that ends it}
++                  exit_join: {execution_mode: serial, describe: CTA-wide exit join after every role reaches its loop exit; all TMEM readers have returned their use before deallocation}
+                 acquire: {tmem: {execution_mode: serial, describe: 'Allocate all 512 tensor-memory columns once for this step, record the base for every role and give up the allocation permit'}}
+                 release:
+                   kv_slot: {execution_mode: async_ordered, describe: 'Second completion commit covering ring slot n%4, so the key and value reads of both products are finished and the slot may be refilled'}
+@@ -530,6 +540,7 @@
+                   - matmul:p(n[t,kv_tile_count-1])@v_tile(n[t,kv_tile_count-1])
+                   - release:kv_slot(n[t,kv_tile_count-1])
+               - await:queue_end
++              - await:exit_join
+               - release:tmem
+             Waiting:
+               Prepared:
+@@ -543,6 +554,7 @@
+                 - '{done await:o_rescaled(n[t,kv_tile_count-1])} ← [{done CORRECTION::signal:o_rescaled(n[t,kv_tile_count-1])}]'
+                 - '{done await:o_released(t)} ← [{done CORRECTION::signal:o_credit}, {done CORRECTION::release:o_slot(t-1)}]'
+                 - '{done await:queue_end} ← [{done QUEUE::compute:item_geo(t+1)}]'
++                - '{done await:exit_join} ← [{done SOFTMAX::await:queue_end}, {done CORRECTION::await:queue_end}, {done LOADER::await:next_item(t)}, {done QUEUE::compute:item_geo(t+1)}]'
+               Released: ['{done await:score_free(n)} ← [{done SOFTMAX::release:score_slot(n-3)}]']
+           LOADER:
+             Info:
+@@ -551,7 +563,7 @@
+               Register: 32
+               Using_verb:
+                 load:
+-                  q_tile: {execution_mode: async_unordered, describe: 'Initialize the query completion object and fill q_slot with the unit''s query tile by two channel-segment transfers, ordinal 0 reading the table'}
++                  q_tile: {execution_mode: async_unordered, describe: Fill q_slot by two channel-segment transfers on its byte-count completion object; only ordinal 0 initializes that object and reads the table directly}
+                   kv_tile: {execution_mode: async_unordered, describe: 'Fill ring slot n%4 with k_tile(n) by two transfers and v_tile(n) by one, announced together as 40960 bytes; done covers all three'}
+                 await:
+                   prologue: {execution_mode: serial, describe: 'The single CTA-wide prologue join - notification objects, tensor-memory base and bootstrap geometry visible; its own transfer precedes it'}
+@@ -588,8 +600,8 @@
+               Register: 32
+               Using_verb:
+                 compute:
+-                  barrier_init: {execution_mode: serial, describe: 'Thread 0 initializes every notification object of this step except the query transfer''s, with its arrival count, and fences them before any wait'}
+-                  item_geo: {execution_mode: serial, describe: 'Thread 0 claims one entry, resets the counter at item_count - 1, publishes ordinal t+1 or the sentinel into geo_slot (t+1)%2, replacing ordinal t-1'}
++                  barrier_init: {execution_mode: serial, describe: 'Warp 10 lane 0 initializes all notification objects except the query transfer''s, with their arrival counts, and fences before use'}
++                  item_geo: {execution_mode: serial, describe: 'Warp 10 lane 0 claims an entry, resets at item_count-1 and publishes the ordinal in geo_slot modulo 2; the sentinel writes only kv_tile_count=-1'}
+                 await: {pop_request: {execution_mode: serial, describe: Wait for the claim request that SOFTMAX issues during work unit t; request t publishes ordinal t+1}}
+             Pipe:
+               - compute:barrier_init
+@@ -604,8 +616,19 @@
+       Choice: Matrix operations issued by this single warp in one in-order stream, each with a completion notification that also covers every earlier product of that stream
+       Reason: The weight tile shares tensor-memory columns with the score tile of its stage and is rewritten three tiles later; the design relies on issue order to keep the value product of tile n reading p(n) before the score product of tile n+3 reaches that stage
+     - Item: DESIGN.Work_schedule::MAIN.Mapping
+-      Choice: Launch 384 threads per worker in 12 warps, warp 11 carrying no role, redistribute the per-thread register budget per role with a warp-group reallocation, and request 209920 bytes of dynamic shared memory as an opt-in attribute before the first launch
++      Choice: Launch 384 threads in 12 warps, warp 11 idle; redistribute register budgets per role and request 209920 dynamic smem bytes. The host also checks SM10x and an opt-in limit >= 218112, since it configures the unreachable MODE1 kernel too
+       Reason: The role union covers 11 warps and the registered regions total 207184 of the 209920 shared-memory bytes, the rest holding notification objects and padding; one resident worker per SM depends on both figures
++    - Item: DESIGN.Tile_pipeline::MAIN.Storage
++      Choice: One CTA owns all listed bytes; smem offsets are Q 0, K 24576, V 122880, Meta 188416 and tiny scratch 192512. Meta reserves 4096 bytes and tiny scratch reserves 17408
++      Reason: The 207184 registered smem bytes leave 2736 bytes for metadata, barriers and padding; score_prob owns TMEM columns 0..383 and o_slot owns 384..511, with no overlap
++    - Item:
++        - DESIGN.Tile_pipeline::MAIN.Storage.prob_regs
++        - DESIGN.Tile_pipeline::MAIN.Storage.correction_regs
++      Choice: Register capacities count one CTA, with one row per participating thread. SOFTMAX keeps 32 packed E4M3 words per row until store; CORRECTION uses 128 FP32 values for rescale or reuses 32 for each drain block
++      Reason: These arrays are within the 248/160 per-thread budgets, not extra allocations; register assignment and spills are compiler-dependent. Four FP8 keys occupy one word, matching score_prob's 32 FP32-capacity columns
++    - Item: DESIGN.Tile_pipeline::MAIN.LOADER
++      Choice: Q/K slots place the SW128 128-channel segment at offset 0 and the SW64 64-channel tail at 16384; V uses SW128. Tensor-map strides address byte (token*head_count+head)*channel_count+channel
++      Reason: These are segmented swizzled tiles, not row-major 192-byte smem rows; transfers may read across ragged request ends, but masked columns and unwritten query rows cannot affect valid outputs
+     - Item:
+         - DESIGN.Tile_pipeline::MAIN.SOFTMAX
+         - DESIGN.Tile_pipeline::MAIN.CORRECTION
+@@ -619,7 +642,10 @@
+       Reason: The 192-channel operands are not a native transfer box, so the segment split keeps them in their stored layout and still gives each load action one completion guarantee
+     - Item: DESIGN.Work_schedule::MAIN.Schedule
+       Choice: Read seq_lens, cum_seq_lens_q and cum_seq_lens_kv with asynchronous device-to-host copies on a non-blocking side stream and synchronize that stream, with no event joining the caller's current stream to it; upload the table on the side stream and join only the launch to it
+-      Reason: Those three metadata tensors must already be complete when the copies are issued and this design supplies no join, so their readiness rests on caller ordering - the frozen protocol restores every input before each call; only the upload is event-joined to the launch
++      Reason: Metadata readiness is a caller precondition; restore-before-call alone does not prove readiness on this non-blocking stream. Only the table upload is event-joined to the launch
++    - Item: DESIGN.Work_schedule::MAIN.Schedule
++      Choice: Use the static host staging buffers, device table, event, queue and device caches only after prior calls have completed, on the initialized device and without concurrent host entry
++      Reason: The upload stream has no reverse join to prior kernels that still read the shared table; buffers and device attributes are not keyed by device or invocation, so stream-ordered launches alone do not protect reuse
+   Prefer:
+     - Item: DESIGN.Math_reshape::p
+       Choice: One fused register chain per key pair - FP32 to FP16 conversion, FP16 approximate base-2 exponential, saturating E4M3 pack - preserving the per-element operations and rounding of the weight step
