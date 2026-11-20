@@ -14,17 +14,49 @@ import time
 
 from ..artifacts import fsync_directory, read_regular
 from ..contracts import sha256
-from ._local import immutable, locked, process_identity, read_json
+from ._local import (DeadlineClockMismatch, DeadlineExpired, immutable, locked,
+                     process_identity, read_json, remaining_timeout_ms)
+
+
+def not_executed(directory: Path, launch: dict, *, stage: str, reason: str):
+    """Written only on a path that has not called execve/started its child."""
+    immutable(directory, "not-executed.json", {
+        "operation_id": launch["operation_id"], "session_id": launch["session_id"],
+        "stage": stage, "reason": reason, "process": process_identity(),
+    })
 
 
 def child(directory: Path):
     launch = read_json(directory, "launch.json")
-    executable = Path(launch["command"][0])
-    if sha256(executable.read_bytes()) != launch["executable_sha256"]:
-        raise RuntimeError("Claude executable changed before exec")
     immutable(directory, "child.json", process_identity())
-    os.chdir(launch["cwd"])
+    try:
+        remaining_timeout_ms(launch)
+        executable = Path(launch["command"][0])
+        if sha256(executable.read_bytes()) != launch["executable_sha256"]:
+            raise RuntimeError("Claude executable changed before exec")
+        os.chdir(launch["cwd"])
+        immutable(directory, "exec-intent.json", {
+            "operation_id": launch["operation_id"], "session_id": launch["session_id"],
+            "process": process_identity(),
+        })
+        # Hashing, interpreter startup and fsync all consume the original window.
+        remaining_timeout_ms(launch)
+    except (DeadlineExpired, DeadlineClockMismatch) as error:
+        not_executed(directory, launch, stage="child", reason=type(error).__name__)
+        raise SystemExit(124) from None
     os.execve(str(executable), launch["command"], dict(os.environ))
+
+
+def wait_for_child(proc, launch):
+    if "deadline_utc_ms" not in launch and "deadline_monotonic_ns" not in launch:
+        return proc.wait(timeout=launch["timeout_ms"] / 1000)
+    while True:
+        if proc.poll() is not None: return proc.returncode
+        remaining = remaining_timeout_ms(launch)
+        try:
+            return proc.wait(timeout=min(remaining / 1000, 0.1))
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def run(directory: Path):
@@ -44,17 +76,23 @@ def run(directory: Path):
         if sha256(prompt) != launch["input_sha256"]:
             raise RuntimeError("frozen role input changed before exec")
         with open(directory / "input.json", "rb") as stdin:
+            try:
+                remaining_timeout_ms(launch)
+            except (DeadlineExpired, DeadlineClockMismatch) as error:
+                not_executed(directory, launch, stage="supervisor", reason=type(error).__name__)
+                raise
             proc = subprocess.Popen(
                 [sys.executable, "-B", "-m", "kernelschema.runtime._runner", "child", str(directory)],
                 stdin=stdin, stdout=out, stderr=err, start_new_session=True,
             )
             try:
-                code = proc.wait(timeout=launch["timeout_ms"] / 1000)
-            except subprocess.TimeoutExpired:
+                code = wait_for_child(proc, launch)
+            except (subprocess.TimeoutExpired, DeadlineExpired, DeadlineClockMismatch):
                 timed_out = True
                 # SIGKILL and wait establish actual local process termination;
                 # a mere timeout/cancellation request does not do so.
-                os.killpg(proc.pid, signal.SIGKILL)
+                try: os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError: pass
                 code = proc.wait()
     except Exception as error:
         spawn_error = type(error).__name__  # Never serialize auth/environment.
@@ -64,6 +102,7 @@ def run(directory: Path):
     immutable(directory, "exit.json", {
         "returncode": code, "timed_out": timed_out, "spawn_error": spawn_error,
         "active_ms": (time.monotonic_ns() - started) // 1_000_000,
+        "not_executed": (directory / "not-executed.json").exists(),
     })
 
 

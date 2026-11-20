@@ -94,6 +94,36 @@ parent limits and available balance. An owner refusal starts zero processes.
 The runtime additionally fences a new local operation until prior launched
 operations have receipts. It has no alternate account or multi-agent scheduler.
 
+To carry the owner's *remaining* active window across input preparation and
+supervisor queueing, the reservation accepts these optional fields:
+
+| Field | Representation and meaning |
+| --- | --- |
+| `deadline_utc_ms` | Strict signed safe integer, UTC Unix-epoch milliseconds; bool/float/string/null are rejected |
+| `deadline_monotonic_ns` | 1–40 ASCII decimal digits in a string, same-host monotonic nanosecond cutoff |
+| `clock_boot_id` | Nonempty current Linux boot ID; required exactly when the monotonic field is supplied |
+
+At the final launch point the runtime freshly clamps profile/request/reserved
+duration against each supplied absolute remaining interval. An exhausted
+window raises `AdmissionDenied` without creating a launch or starting a CLI.
+Bad field types, incomplete monotonic/boot pairs or a different current boot
+raise `ProtocolError` before a new launch. K4/K5 should supply both UTC and
+monotonic bounds to retain the owner's cutoff even if wall time moves backward
+between admission and launch.
+
+When any cutoff is supplied, `launch.json` persists the tightened `timeout_ms`
+and effective `deadline_utc_ms`, `deadline_monotonic_ns`, `clock_boot_id`. The
+effective monotonic bound is also recorded for UTC-only reservations, so a
+later supervisor delay or wall-clock rollback cannot renew the launch window.
+The supervisor rechecks before spawning its child; the child rechecks before
+and after executable hashing/fsync and immediately before exec; the supervisor
+waits only against the remaining original cutoff and terminates the original
+process group when it expires. A late runner can produce an explicit
+`not-executed.json` terminal without starting Claude. With no cutoff fields the
+existing duration-only behavior is preserved; `active_ms` alone does not
+subtract time spent preparing an already frozen reservation. These are narrow
+per-call launch bounds, not a replacement clock or parent ledger.
+
 `admit` freezes exact input, profile/source bindings, role, purpose, reservation,
 scope/session IDs and the core intent. Re-admitting the same operation with any
 changed input/reservation/purpose is an error. An interrupted preparation may
@@ -119,10 +149,23 @@ fixed assignment as a current-task instruction **only if that role's Materials
 grant includes it**; it cannot grant tools, change Task or relax acceptance.
 `verify_only` refuses coder admission even with a reservation.
 
-Call counts in this layer count actual CLI exec attempts. A persisted launch
-gap with no child identity has `calls=null`, known lower bound zero, and an
-unresolved fence. The owner retains its reservation. Authentication errors,
-nonzero exits, timeouts and output failures after CLI start still count one.
+Call counts in this layer retain original CLI execution evidence. The child
+records `exec-intent.json` immediately before its final deadline check/exec.
+A bound exec intent or native init/terminal preserves the known call count;
+authentication errors, nonzero exits, timeouts and output failures after CLI
+start still count one. Missing `child.json` **never implies zero**. With only a
+launch/exit and no execution evidence, calls remain null with known lower bound
+zero; the owner retains its reservation/fence instead of refunding it. Lost
+child identity also rejects model output even if an original native terminal
+and usage remain available.
+
+After a launch, zero calls/tokens/cost are reported only for the trusted,
+operation/session/process-bound `not-executed.json` plus matching supervisor
+exit, with an empty native stream. That is host proof that no CLI was executed,
+not a fabricated native usage report. A contradictory or unverified
+not-executed claim cannot erase an observed call. Such receipts expose
+`facts.not_executed=true`; their model output is absent and status remains
+failed with `deadline_refused_before_exec`.
 
 ## Typed model output
 
@@ -168,11 +211,15 @@ supervisor owns raw stdout/stderr and exit collection. Its child fsyncs
 PID + Linux start ticks + boot ID before exec of Claude. Killing the caller does
 not kill this supervisor or discard the terminal. The locator stores paths for
 the original supervisor/child identities, session, cwd, logs and exit fact.
+The immutable raw receipt also includes the exec-intent and any explicit
+not-executed fact, together with the effective launch deadlines.
 
 | Observed facts | Recovery behavior |
 | --- | --- |
 | Admitted, never launched | Zero calls; owner may still deny launch |
 | Launch persisted, no discoverable process/exit yet | Unknown; preserve fence, no replacement |
+| Queued runner/child reaches an expired cutoff before exec | Explicit bound not-executed receipt; zero model calls, no accepted output |
+| Exit exists but child identity is missing | Preserve native/exec call evidence or unknown; reject output, never infer a refund |
 | Native result emitted, original process still alive | Still in flight |
 | Supervisor dead, original child alive/unknown | Still fenced |
 | Both known original processes demonstrably gone, exit lost | Terminated with `exit_unobserved`; absorb any original usage, reject output |

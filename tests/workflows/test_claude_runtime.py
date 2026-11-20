@@ -464,3 +464,186 @@ def test_public_profile_loads_from_other_cwd_without_private_capture_or_cli(monk
     assert sum(Decimal(row["cli_reported_usd"]) for row in summary["calls"]) == Decimal(summary["cli_reported_usd_sum"])
     assert summary["evidence_kind"] == "explanatory_summary_not_complete_importable_evidence"
     assert b"/home/" not in raw + jcs(summary)
+
+
+def admit_with_deadline(runtime, context, f, **bounds):
+    return runtime.admit(context, operation_id="deadline-call", role="coder", purpose="synthetic deadline boundary",
+                         source=f["starter"], reservation={"synthetic":True, "calls":1, "active_ms":3000, **bounds})
+
+
+def defer_launch(runtime, context, handle, monkeypatch):
+    saved = {}
+    def enqueue(command, **kwargs):
+        saved.update(command=command, cwd=kwargs["cwd"], env=kwargs["env"])
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "Popen", enqueue)
+        pending = runtime.invoke(context, handle, authorize=lambda _:True, wait=False)
+    assert not pending.terminated
+    return saved
+
+
+def start_deferred(saved):
+    result = subprocess.run(saved["command"], cwd=saved["cwd"], env=saved["env"], stdin=subprocess.DEVNULL,
+                            capture_output=True, timeout=8)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("bounds", [
+    {"deadline_utc_ms": True}, {"deadline_utc_ms": 1.5}, {"deadline_utc_ms": "123"},
+    {"deadline_utc_ms": None}, {"deadline_utc_ms": 2**53},
+    {"deadline_monotonic_ns": "123"}, {"clock_boot_id": "missing-monotonic"},
+    {"deadline_monotonic_ns": 123, "clock_boot_id":"dummy"},
+    {"deadline_monotonic_ns": "1.5", "clock_boot_id":"dummy"},
+    {"deadline_monotonic_ns": "123", "clock_boot_id":"wrong-boot"},
+])
+def test_deadline_fields_are_strict_before_admission(runtime_setup, bounds):
+    runtime, context, f, fake = runtime_setup()
+    with pytest.raises(ProtocolError): admit_with_deadline(runtime, context, f, **bounds)
+    assert context.intents() == [] and count(fake) == 0
+
+
+def test_deadline_expired_after_admit_starts_zero_processes(runtime_setup, monkeypatch):
+    from kernelschema.runtime import _local
+    runtime, context, f, fake = runtime_setup()
+    deadline = time.time_ns() // 1_000_000 + 60000
+    handle = admit_with_deadline(runtime, context, f, deadline_utc_ms=deadline)
+    monkeypatch.setattr(_local.time, "time_ns", lambda:(deadline + 1) * 1_000_000)
+    with pytest.raises(AdmissionDenied, match="expired"):
+        runtime.invoke(context, handle, authorize=lambda _:True)
+    directory = context.root / ".runtime/claude" / handle.operation_id
+    assert not (directory / "launch.json").exists() and count(fake) == 0
+
+
+def test_deadline_shortens_effective_timeout_and_detached_window(runtime_setup, monkeypatch):
+    from kernelschema.runtime import _local
+    runtime, context, f, fake = runtime_setup("sleep", seconds=5)
+    deadline = time.time_ns() // 1_000_000 + 60000
+    handle = admit_with_deadline(runtime, context, f, deadline_utc_ms=deadline)
+    with monkeypatch.context() as patch:
+        patch.setattr(_local.time, "time_ns", lambda:(deadline - 1500) * 1_000_000)
+        receipt = runtime.invoke(context, handle, authorize=lambda _:True)
+    launch = json.loads((context.root / ".runtime/claude/deadline-call/launch.json").read_bytes())
+    assert launch["timeout_ms"] == 1500
+    assert launch["deadline_utc_ms"] <= deadline
+    assert launch["clock_boot_id"] == _local.current_boot_id()
+    assert isinstance(launch["deadline_monotonic_ns"], str)
+    assert receipt.terminated and not receipt.ok
+    assert receipt.facts["active_ms"] < 2300
+    assert count(fake) <= 1
+
+
+def test_deadline_runner_queued_past_expiry_does_not_start_cli(runtime_setup, monkeypatch):
+    runtime, context, f, fake = runtime_setup()
+    handle = admit_with_deadline(runtime, context, f, deadline_utc_ms=time.time_ns() // 1_000_000 + 800)
+    saved = defer_launch(runtime, context, handle, monkeypatch)
+    directory = context.root / ".runtime/claude/deadline-call"
+    launch = json.loads((directory / "launch.json").read_bytes())
+    while time.monotonic_ns() <= int(launch["deadline_monotonic_ns"]): time.sleep(0.01)
+    start_deferred(saved)
+    receipt = runtime.settle(context, handle)
+    assert receipt.terminated and not receipt.ok and receipt.facts["not_executed"]
+    assert receipt.facts["calls"] == 0 and receipt.facts["tokens"] == 0 and count(fake) == 0
+    assert not (directory / "child.json").exists()
+    assert "not-executed.json" in receipt.facts["raw"]
+
+
+def test_deadline_delayed_runner_gets_only_original_remaining_window(runtime_setup, monkeypatch):
+    runtime, context, f, fake = runtime_setup("sleep", seconds=5)
+    handle = admit_with_deadline(runtime, context, f, deadline_utc_ms=time.time_ns() // 1_000_000 + 2600)
+    saved = defer_launch(runtime, context, handle, monkeypatch)
+    directory = context.root / ".runtime/claude/deadline-call"
+    launch = json.loads((directory / "launch.json").read_bytes())
+    time.sleep(1.2)
+    start_deferred(saved)
+    receipt = runtime.settle(context, handle)
+    assert receipt.terminated and not receipt.ok
+    assert receipt.facts["active_ms"] < launch["timeout_ms"] - 700
+    assert "timeout_terminated" in receipt.facts["errors"] or receipt.facts["not_executed"]
+    assert count(fake) <= 1
+
+
+def test_deadline_exec_gate_rechecks_after_supervisor_window(runtime_setup, monkeypatch):
+    runtime, context, f, fake = runtime_setup()
+    handle = admit_with_deadline(runtime, context, f, deadline_utc_ms=time.time_ns() // 1_000_000 + 700)
+    saved = defer_launch(runtime, context, handle, monkeypatch)
+    directory = context.root / ".runtime/claude/deadline-call"
+    launch = json.loads((directory / "launch.json").read_bytes())
+    while time.monotonic_ns() <= int(launch["deadline_monotonic_ns"]): time.sleep(0.01)
+    result = subprocess.run([sys.executable,"-B","-m","kernelschema.runtime._runner","child",str(directory)],
+                            cwd=saved["cwd"],env=saved["env"],stdin=subprocess.DEVNULL,capture_output=True,timeout=5)
+    assert result.returncode == 124 and count(fake) == 0
+    fact = json.loads((directory / "not-executed.json").read_bytes())
+    assert fact["stage"] == "child" and fact["reason"] == "DeadlineExpired"
+
+
+def test_deadline_monotonic_bound_survives_wall_clock_rollback(runtime_setup, monkeypatch):
+    from kernelschema.runtime import _local
+    runtime, context, f, fake = runtime_setup()
+    utc = time.time_ns() // 1_000_000 + 60000
+    mono = time.monotonic_ns() + 60_000_000_000
+    handle = admit_with_deadline(runtime, context, f, deadline_utc_ms=utc,
+                                 deadline_monotonic_ns=str(mono), clock_boot_id=_local.current_boot_id())
+    monkeypatch.setattr(_local.time, "time_ns", lambda:(utc - 120000) * 1_000_000)
+    monkeypatch.setattr(_local.time, "monotonic_ns", lambda:mono + 1_000_000)
+    with pytest.raises(AdmissionDenied, match="expired"):
+        runtime.invoke(context, handle, authorize=lambda _:True)
+    assert count(fake) == 0
+
+
+def test_deadline_boot_change_between_admit_and_launch_is_rejected(runtime_setup, monkeypatch):
+    from kernelschema.runtime import _local
+    runtime, context, f, fake = runtime_setup()
+    handle = admit_with_deadline(runtime, context, f, deadline_monotonic_ns=str(time.monotonic_ns() + 60_000_000_000),
+                                 clock_boot_id=_local.current_boot_id())
+    monkeypatch.setattr(_local, "current_boot_id", lambda:"a-different-boot")
+    with pytest.raises(ProtocolError, match="current boot"):
+        runtime.invoke(context, handle, authorize=lambda _:True)
+    assert count(fake) == 0
+
+
+@pytest.mark.parametrize("also_remove_exec_intent", [False, True])
+def test_missing_child_after_actual_cli_does_not_refund_or_accept_output(runtime_setup, also_remove_exec_intent):
+    runtime, context, f, fake = runtime_setup()
+    handle = admit(runtime, context, f)
+    runtime.invoke(context, handle, authorize=lambda _:True, wait=False)
+    directory = context.root / ".runtime/claude/call-1"
+    wait_file(directory / "exit.json")
+    assert not (directory / "receipt.json").exists() and count(fake) == 1
+    (directory / "child.json").unlink()
+    if also_remove_exec_intent: (directory / "exec-intent.json").unlink()
+    receipt = runtime.settle(context, handle)
+    assert receipt.terminated and not receipt.ok and receipt.output is None
+    assert receipt.facts["calls"] == receipt.facts["calls_lower_bound"] == 1
+    assert receipt.facts["tokens"] == 26 and receipt.facts["total_cost_usd"] == "0.001"
+    assert "missing_child_identity" in receipt.facts["errors"]
+    assert receipt.usage_row()["calls"] == 1
+
+
+def test_missing_child_with_only_launch_and_exit_keeps_unknown_calls(runtime_setup):
+    runtime, context, f, fake = runtime_setup()
+    handle = admit(runtime, context, f)
+    directory = context.root / ".runtime/claude/call-1"
+    durable_write(directory / "launch.json", jcs({"synthetic":True}))
+    durable_write(directory / "exit.json", jcs({"returncode":1,"timed_out":False,"spawn_error":None,"active_ms":1}))
+    receipt = runtime.settle(context, handle)
+    assert receipt.terminated and not receipt.ok
+    assert receipt.facts["calls"] is None and receipt.facts["calls_lower_bound"] == 0
+    assert receipt.facts["tokens"] is None and count(fake) == 0
+
+
+def test_not_executed_claim_cannot_erase_actual_native_call(runtime_setup):
+    runtime, context, f, fake = runtime_setup()
+    handle = admit(runtime, context, f)
+    runtime.invoke(context, handle, authorize=lambda _:True, wait=False)
+    directory = context.root / ".runtime/claude/call-1"
+    wait_file(directory / "exit.json")
+    child = json.loads((directory / "child.json").read_bytes())
+    exit_fact = json.loads((directory / "exit.json").read_bytes()); exit_fact["not_executed"] = True
+    (directory / "exit.json").write_bytes(jcs(exit_fact))
+    durable_write(directory / "not-executed.json", jcs({"operation_id":handle.operation_id,"session_id":handle.session_id,
+        "stage":"child","reason":"DeadlineExpired","process":child}))
+    receipt = runtime.settle(context, handle)
+    assert receipt.terminated and not receipt.ok and receipt.output is None
+    assert receipt.facts["calls"] == 1 and receipt.facts["tokens"] == 26
+    assert not receipt.facts["not_executed"] and "unverified_not_executed_claim" in receipt.facts["errors"]
+    assert count(fake) == 1

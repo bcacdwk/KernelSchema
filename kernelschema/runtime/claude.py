@@ -26,7 +26,8 @@ from ..api import RunContext
 from ..artifacts import Publication, durable_mkdir, durable_write, fsync_directory, read_regular
 from ..contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256, validate
 from ..materials import for_role, validate_request
-from ._local import immutable, locked, process_alive, read_json
+from ._local import (DeadlineExpired, freeze_launch_deadlines, immutable, locked,
+                     process_alive, read_json, validate_deadlines)
 
 PROFILE_VERSION = "ks.claude.no_tools.v1"
 OUTPUT_PROTOCOL = "ks.claude.output.v1"
@@ -413,8 +414,20 @@ def _parse(events: bytes, intent: dict, profile: ClaudeProfile) -> tuple[dict, R
               "reported_models": reported, "permission_init_observed": initialized,
               "terminal_observed": terminal is not None, "terminal_replays": max(0, len(terminals) - 1),
               "accounting_complete": tokens is not None and cost is not None,
+              "native_call_observed": any(e.get("session_id") == intent["session_id"] for e in initial)
+                                      or any(e.get("session_id") == intent["session_id"] for _, e in terminals),
               "native_terminal_sha256": sha256(terminals[0][0]) if terminal else None}
     return parsed, output
+
+
+def _bound_process_fact(value: dict | None, intent: dict) -> bool:
+    if not isinstance(value, dict) or any(value.get(k) != intent[k] for k in ("operation_id", "session_id")):
+        return False
+    process = value.get("process")
+    return (isinstance(process, dict) and set(process) == {"pid", "start_ticks", "boot_id"}
+            and type(process["pid"]) is int and process["pid"] > 0
+            and isinstance(process["start_ticks"], str) and process["start_ticks"].isdigit()
+            and isinstance(process["boot_id"], str) and bool(process["boot_id"]))
 
 
 class ClaudeRuntime:
@@ -475,6 +488,7 @@ class ClaudeRuntime:
         an operation with changed input, role, source or reservation fails.
         """
         if not isinstance(reservation, dict) or not reservation: raise AdmissionDenied("owner reservation denied/missing")
+        validate_deadlines(reservation)
         if not isinstance(purpose, str) or not purpose: raise ProtocolError("purpose is required")
         limits = context.request["budget"]["limits"]
         if role not in ROLES: raise ProtocolError("unsupported role")
@@ -563,8 +577,12 @@ class ClaudeRuntime:
                 remaining = intent["reservation"].get("active_ms", context.request["budget"]["limits"]["active_ms"])
                 if type(remaining) is not int or remaining <= 0: raise AdmissionDenied("owner active-time reservation is unavailable")
                 timeout = min(self.profile.timeout_ms, context.request["budget"]["limits"]["active_ms"], remaining)
+                try:
+                    bounds = freeze_launch_deadlines(intent["reservation"], timeout)
+                except DeadlineExpired as error:
+                    raise AdmissionDenied(str(error)) from error
                 launch = {"command": self.profile.command(handle.session_id), "input_sha256": handle.input_sha256,
-                          "executable_sha256": self.profile.executable_sha256, "timeout_ms": timeout,
+                          "executable_sha256": self.profile.executable_sha256, **bounds,
                           "operation_id": handle.operation_id, "session_id": handle.session_id,
                           "cwd": intent["locator"]["scope_path"]}
                 immutable(directory, "launch.json", launch)
@@ -606,6 +624,9 @@ class ClaudeRuntime:
                 return CallReceipt(record["facts"], output, record["receipt"])
             launched = (directory / "launch.json").exists()
             exit_fact = read_json(directory, "exit.json") if (directory / "exit.json").exists() else None
+            child_fact = read_json(directory, "child.json") if (directory / "child.json").exists() else None
+            exec_fact = read_json(directory, "exec-intent.json") if (directory / "exec-intent.json").exists() else None
+            exec_observed = _bound_process_fact(exec_fact, intent)
             identities = [read_json(directory, name) for name in ("supervisor.json", "child.json") if (directory / name).exists()]
             terminated = exit_fact is not None
             if exit_fact is None and len(identities) == 2 and all(process_alive(p) is False for p in identities):
@@ -616,8 +637,8 @@ class ClaudeRuntime:
                      "scope_id": handle.scope_id, "assignment_sha256": handle.assignment_sha256,
                      "input_sha256": handle.input_sha256, "profile_sha256": handle.profile_sha256,
                      "requested_model": self.profile.requested_model, "terminated": terminated,
-                     "calls": 1 if (directory / "child.json").exists() else (None if launched and not terminated else 0),
-                     "calls_lower_bound": 1 if (directory / "child.json").exists() else 0,
+                     "calls": 1 if exec_observed else (None if launched else 0),
+                     "calls_lower_bound": 1 if exec_observed else 0, "not_executed": False,
                      "tokens": None, "active_ms": None,
                      "status": "in_flight" if launched else "admitted", "errors": [], "raw": {}}
             if not terminated:
@@ -627,14 +648,34 @@ class ClaudeRuntime:
             stderr = read_regular(directory, "stderr.log")[0] if (directory / "stderr.log").exists() else b""
             parsed, output = _parse(events, intent, self.profile)
             facts.update(parsed)
+            no_exec = read_json(directory, "not-executed.json") if (directory / "not-executed.json").exists() else None
+            witness = None
+            if no_exec and no_exec.get("stage") in ("supervisor", "child"):
+                name = no_exec["stage"] + ".json"
+                if (directory / name).exists(): witness = read_json(directory, name)
+            proved_no_exec = (exit_fact is not None and exit_fact.get("not_executed") is True
+                             and _bound_process_fact(no_exec, intent) and no_exec["process"] == witness
+                             and no_exec.get("reason") in ("DeadlineExpired", "DeadlineClockMismatch") and not events)
+            if proved_no_exec:
+                facts.update(calls=0, calls_lower_bound=0, not_executed=True, tokens=0, total_cost_usd="0",
+                             native_rounds=0, physical_retries=0, accounting_complete=True,
+                             errors=["deadline_refused_before_exec"])
+            else:
+                if parsed["native_call_observed"]:
+                    facts.update(calls=1, calls_lower_bound=1)
+                if child_fact is None: facts["errors"].append("missing_child_identity")
+                if not exec_observed: facts["errors"].append("missing_exec_intent")
+                if no_exec is not None: facts["errors"].append("unverified_not_executed_claim")
             if len(events) > self.profile.max_output_bytes:
                 facts["errors"].append("native_output_exceeds_profile_limit")
             if exit_fact is None: facts["errors"].append("exit_unobserved")
             else:
                 facts["active_ms"] = exit_fact["active_ms"]
-                if exit_fact["returncode"] != 0: facts["errors"].append("nonzero_exit")
-                if exit_fact["timed_out"]: facts["errors"].append("timeout_terminated")
-                if exit_fact["spawn_error"]: facts["errors"].append("supervisor_error")
+                if not proved_no_exec:
+                    if exit_fact["returncode"] != 0:
+                        facts["errors"].append("exit_status_unobserved" if exit_fact["returncode"] is None else "nonzero_exit")
+                    if exit_fact["timed_out"]: facts["errors"].append("timeout_terminated")
+                    if exit_fact["spawn_error"]: facts["errors"].append("supervisor_error")
             facts["errors"] = sorted(set(facts["errors"]))
             facts["status"] = "failed" if facts["errors"] else "succeeded"
             if facts["errors"]: output = None
@@ -644,7 +685,7 @@ class ClaudeRuntime:
                          "input": ("role-input.json", read_regular(directory, "input.json")[0]),
                          "profile": ("claude-profile.json", jcs(self.profile.as_dict())),
                          "command": ("claude-command.json", read_regular(directory, "launch.json")[0])}
-            for name in ("supervisor.json", "child.json", "exit.json", "supervisor.log"):
+            for name in ("supervisor.json", "child.json", "exec-intent.json", "not-executed.json", "exit.json", "supervisor.log"):
                 if (directory / name).exists(): originals[name] = (name, read_regular(directory, name)[0])
             raw = {name: publication.put_bytes(filename, data) for name, (filename, data) in originals.items()}
             facts["raw"] = raw
