@@ -1,6 +1,6 @@
-"""CPU-only public workflow entry points. Backends are loaded on explicit use."""
-from .api import design, implement, optimize
+"""CPU-only core; public workflow functions live in ``kernelschema.api``."""
+from . import api
 from .contracts import ProtocolError, UnsupportedError
 
 __version__ = "0.1.0"
-__all__ = ["design", "implement", "optimize", "ProtocolError", "UnsupportedError"]
+__all__ = ["api", "ProtocolError", "UnsupportedError"]

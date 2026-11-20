@@ -20,6 +20,8 @@ kernelschema extract -- --help
 ```
 
 `kernelschema.api.{design,optimize,implement}` use exactly the CLI implementation.
+Import these functions from `kernelschema.api`; the package-level names are
+reserved for backend modules and are not callable aliases.
 Each accepts keyword-only `request` (path to request.json) + `out`, or
 `continue_run`. Mixing these groups fails. Return values are validated result
 dictionaries; CLI exit 0 means the result projection was durably published,
