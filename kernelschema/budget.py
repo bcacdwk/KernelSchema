@@ -409,7 +409,7 @@ class OwnerAccount:
         """Launch boundary check. Marks may-have-launched BEFORE external exec."""
         with self._transaction() as s:
             op = s["operations"].get(reservation.get("operation_id"))
-            if op is None or op["reservation"] != reservation:
+            if op is None or jcs(op["reservation"]) != jcs(reservation):
                 raise ProtocolError("unknown/mismatched original authorization")
             if op["launched"] or op["terminated"] or op["released"]:
                 return False
@@ -534,7 +534,7 @@ class OwnerAccount:
                 raise ProtocolError("unknown original reservation group")
             ids = [o["operation_id"] for o in group["fixed"]["operations"]]
             expected = {key: s["operations"][key]["reservation"] for key in ids}
-            if reservations != expected:
+            if jcs(reservations) != jcs(expected):
                 raise ProtocolError("group claim changes original authorization")
             process = _process_identity()
             if group.get("claimed") and group["process"] == process:

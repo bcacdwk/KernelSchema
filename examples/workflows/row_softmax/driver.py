@@ -5,6 +5,7 @@ kernelschema.api. Persisted state only locates original runs/publications; budge
 and native operation recovery remain with their existing owners.
 """
 from copy import deepcopy
+from contextlib import contextmanager
 import fcntl
 import os
 from pathlib import Path
@@ -173,14 +174,21 @@ class Demo:
             request = {**request, "backend": {"name": "reference", "profile": p.put_json("qualified-profile.json", profile)}}
         return request
 
-    def run(self):
+    @contextmanager
+    def _locked(self):
         lock = os.open(self.root / ".runtime/demo.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(lock, fcntl.LOCK_EX)
             self.state = loads(read_regular(self.root, ".runtime/demo-state.json")[0])
+            if self.state["config"] != self.anchor["config"]:
+                raise ProtocolError("original demo state/config changed")
+            yield
+        finally: os.close(lock)
+
+    def run(self):
+        with self._locked():
             with use_authority(self.owner.path):
                 return self._run()
-        finally: os.close(lock)
 
     def _run(self):
         while self.state["phase"] != "done":
@@ -217,7 +225,7 @@ class Demo:
             self.state["current"] = None
             if current["operation"] in ("design", "optimize") and result["schema"]:
                 self.state["schema"], self.state["scope"] = result["schema"], result["scope"]
-            if result["status"] == "blocked" or (current["operation"] != "implement" and result["status"] != "completed"):
+            if result["status"] != "completed":
                 self.state.update(phase="done", status=result["status"], recovery=result["recovery"], reason=result["stop_reason"])
             elif current["operation"] == "design":
                 self.state.update(phase="implement", status="writing_published", recovery="continue", reason="design published; fixed implementation not admitted")
@@ -253,6 +261,10 @@ class Demo:
         return {"mode": "verify_only" if result["next_action"] == "verify" else "code", "seed": sources[0] if sources else None}
 
     def prepare_agate(self, *, transport=None):
+        with self._locked():
+            return self._prepare_agate(transport=transport)
+
+    def _prepare_agate(self, *, transport=None):
         if self.state["history"] or self.state["current"]:
             raise ProtocolError("prepare Agate before the business chain; never replace an admitted profile")
         remote = self.config["remote"]

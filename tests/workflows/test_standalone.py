@@ -170,6 +170,19 @@ def test_owner_budget_not_reset_at_new_r(tmp_path, synthetic):
     assert len(synthetic[0].calls) + len(synthetic[1].calls) == 6
 
 
+@pytest.mark.parametrize("review", ["fail", "unknown"])
+def test_incomplete_fixed_work_does_not_admit_optimize(tmp_path, synthetic, review):
+    synthetic[1].reviews = [review]
+    demo = Demo.create(tmp_path / "demo", start="fixed")
+    result = demo.run()
+    assert result["status"] == "partial" and result["phase"] == "done"
+    assert result["optimize_count"] == 0 and not synthetic[0].calls
+    assert len(result["history"]) == 1 and result["current_qualified"] is None
+    original_calls = list(synthetic[1].calls)
+    assert Demo(demo.root).run() == result
+    assert synthetic[1].calls == original_calls
+
+
 def test_original_unknown_coder_no_replacement(tmp_path, synthetic):
     synthetic[1].unknown = True
     demo = Demo.create(tmp_path / "demo", start="fixed")

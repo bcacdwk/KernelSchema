@@ -1,11 +1,13 @@
-# K2 interface: contracts, files and run boundaries
+# Workflow interface: contracts, files and run boundaries
 
-This is the implemented CPU handoff for `ks.workflow.v1`. The authoritative
-contract remains `schema_discussion/workflow_architecture_20261120/planning/r5_contract_execution_review.md`.
-K2 does not implement model calls, evaluator execution, fidelity decisions,
-writing or the fixed implement loop. Current business entry points report
-unsupported until the owning backend is installed. CPU synthetic fixtures
-never establish runtime, Task, model, GPU or product qualification.
+This describes the implemented `ks.workflow.v1` interface. Core wire validation
+lives in `contracts.py`; the shipped reference backend, writing backends and
+finite [standalone driver](../docs/workflows/standalone.md) implement the business
+paths described below. CPU synthetic fixtures never establish runtime, Task,
+model, GPU or product qualification. The public
+[protocol entry](../docs/workflows/protocol.md) links the implemented grammar and
+behavior. Release license/notices remain delivery items; private planning/audit
+files are not required source-checkout resources.
 
 ## Installation and entry points
 

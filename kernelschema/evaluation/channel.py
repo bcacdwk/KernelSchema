@@ -5,6 +5,7 @@ configuration. Qualification stores original nonsecret job evidence, not a pass
 flag; admission reinterprets it through K1's same frame/subject validator.
 """
 from pathlib import Path
+import fcntl
 import json
 import os
 import re
@@ -14,7 +15,7 @@ from uuid import uuid4
 from ..artifacts import Publication, read_regular, source_manifest
 from ..budget import OwnerAccount, cost, BudgetDenied
 from ..contracts import ProtocolError, UnsupportedError, digest, jcs, loads, sha256
-from .agate import AgateDevExecutor, AgateHTTP, PROFILE, interpret_terminal
+from .agate import AgateDevExecutor, AgateHTTP, PROFILE, interpret_terminal, validate_prepared_request
 from .environment import match_target, read_target
 from .task import RowSoftmaxTask, stage, verify_stage
 from ..runtime import AdmissionDenied
@@ -72,6 +73,7 @@ def _read_record(record):
         raise ProtocolError("incomplete original qualification record")
     intent = loads(record["intent.json"].encode())
     request = loads(record["request.json"].encode())
+    validate_prepared_request(intent, request)
     native = json.loads(record["terminal.raw"])
     acceptance = json.loads(record["acceptance.raw"])
     if digest(request) != intent["request_sha256"] or native.get("job_id") != acceptance.get("job_id") or not native.get("job_id"):
@@ -81,6 +83,16 @@ def _read_record(record):
     execution, diagnostic = interpret_terminal(intent, native)
     if not execution or execution.get("exit_code") != 0:
         raise UnsupportedError("qualification original evaluator incomplete: " + str(diagnostic))
+    if intent["action"] == "probe":
+        try:
+            observed = loads(execution["stdout"].encode())
+            environment, inputs = observed["environment"], observed["inputs"]
+            if (environment["mode"] != "cuda" or inputs["torch_version"] != environment["torch"]
+                    or len(inputs["cases"]) != 36
+                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", execution.get("bwrap_sha256") or "")):
+                raise ValueError("capture incomplete")
+        except (ProtocolError, KeyError, TypeError, AttributeError, ValueError) as error:
+            raise UnsupportedError("qualification original probe lacks complete CUDA/input/bwrap capture") from error
     return intent, request, execution
 
 
@@ -218,6 +230,15 @@ def qualify(context, *, remote, transport=None):
     original parent authority. Reopen this same context on unknown; never retry
     a missing acknowledgment with a new key. No model invocation occurs here.
     """
+    lock = os.open(context.root / ".runtime/agate-qualification.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _qualify(context, remote=remote, transport=transport)
+    finally:
+        os.close(lock)
+
+
+def _qualify(context, *, remote, transport=None):
     _remote_profile(remote)
     if "bwrap_sha256" in remote:
         raise ProtocolError("qualification begins with an unpinned remote profile; probe records the actual bwrap digest")

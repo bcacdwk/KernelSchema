@@ -41,6 +41,17 @@ def test_cumulative_receipts_replay_conflict_and_increment(tmp_path):
     assert not usage["unsettled"]
 
 
+def test_authorize_rejects_python_equal_but_different_jcs_reservation(tmp_path):
+    account, _, _ = setup_account(tmp_path)
+    original = reserve(account)
+    forged = {**original, "calls": True}
+    assert forged == original and jcs(forged) != jcs(original)
+    with pytest.raises(ProtocolError, match="authorization"):
+        account.authorize(forged)
+    assert not account.operations()["op"]["launched"]
+    assert account.authorize(original)
+
+
 def test_unknown_statistics_distinct_from_termination_and_constrained_fence(tmp_path):
     a, clock, _ = setup_account(tmp_path)
     a.begin("run1")
@@ -187,6 +198,10 @@ def test_unstarted_group_can_be_claimed_once_by_external_launcher(tmp_path):
     specs = [{"operation_id": "v0", "role": "evaluator", "purpose": "V0", "amount": cost(evaluator_jobs=1)},
              {"operation_id": "review", "role": "reviewer", "purpose": "prefetch", "amount": cost(role="reviewer", calls=1)}]
     reservations = a.reserve_group("run1", "g", specs)
+    forged = deepcopy(reservations)
+    forged["review"]["calls"] = True
+    with pytest.raises(ProtocolError, match="original authorization"):
+        a.claim_group("g", forged)
     script = "import json,sys; from kernelschema.budget import OwnerAccount; a=OwnerAccount(sys.argv[1],clock=lambda:1000); r=json.loads(sys.argv[2]); a.claim_group('g',r); print(a.authorize(r['v0']),a.authorize(r['review']))"
     result = subprocess.run([sys.executable, "-B", "-c", script, str(a.path), json.dumps(reservations)], capture_output=True, text=True, check=True)
     assert result.stdout.strip() == "True True"

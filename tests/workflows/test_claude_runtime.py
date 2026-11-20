@@ -139,6 +139,44 @@ def test_material_grants_and_private_evaluator_rejection(runtime_setup):
         prepare_role_input(context, "coder", deliveries=(private,))
 
 
+def test_explicit_task_baseline_source_only_is_allowed(runtime_setup, tmp_path):
+    from examples.workflows.row_softmax.driver import Demo
+    runtime, _, _, _ = runtime_setup()
+    demo = Demo.create(tmp_path / "full-task", runtime=runtime.profile, start="fixed")
+    context = api.prepare_run("implement", request=demo.root / "fixed.request.json", out=tmp_path / "baseline-run",
+                              backend_identity=runtime.identity())
+    baseline = context.objects["task"]["baseline_source"]
+    data = context.bundle.source(baseline)
+    assert sha256(data) in {r["sha256"] for r in context.objects["evaluator"]["files"]}
+    p = Publication(context.root)
+    relocated = p.put_source("relocated-baseline", data)
+    private = next(r for r in context.objects["evaluator"]["files"] if r["path"].endswith("/golden.py"))
+    disguised = p.put_source("disguised-private-evaluator", context.bundle.read(private))
+    raw_baseline = p.put_bytes("renamed-baseline.txt", data)
+    p.commit([relocated, disguised, raw_baseline])
+    assert relocated["path"] != baseline["path"] and relocated["sha256"] == baseline["sha256"]
+    for role in ("coder", "reviewer"):
+        delivered = prepare_role_input(context, role, source=relocated)
+        assert next(x["text"] for x in delivered["materials"] if x["id"] == "current_source") == data.decode()
+    delivered = prepare_role_input(context, "reviewer", deliveries=(RoleDelivery("baseline", relocated, ("reviewer",), kind="source"),))
+    assert next(x["text"] for x in delivered["materials"] if x["id"] == "delivery/baseline") == data.decode()
+    hidden = prepare_role_input(context, "planner", source=relocated)
+    assert not any(x["sha256"] == sha256(data) for x in hidden["materials"])
+    for delivery in (RoleDelivery("raw-baseline", raw_baseline, ("reviewer",)),
+                     RoleDelivery("disguised", disguised, ("reviewer",), kind="source")):
+        with pytest.raises(ProtocolError, match="private evaluator"):
+            prepare_role_input(context, "reviewer", deliveries=(delivery,))
+    with pytest.raises(ProtocolError, match="private evaluator"):
+        prepare_role_input(context, "reviewer", source=disguised)
+    design = api.prepare_run("design", request=demo.root / "design.request.json", out=tmp_path / "design-no-baseline",
+                             backend_identity=runtime.identity())
+    assert not any(x["sha256"] == sha256(data) for x in prepare_role_input(design, "planner")["materials"])
+    handle = runtime.admit(context, operation_id="baseline-review", role="reviewer", purpose="synthetic explicit V0 review",
+        source=relocated, reservation={"synthetic": True, "calls": 1, "active_ms": 3000})
+    receipt = runtime.invoke(context, handle, authorize=lambda _: True)
+    assert receipt.ok and receipt.facts["calls"] == 1 and receipt.output.kind == "review"
+
+
 def test_budget_denial_and_pause_start_zero_processes(runtime_setup):
     runtime, context, f, fake = runtime_setup()
     with pytest.raises(AdmissionDenied):

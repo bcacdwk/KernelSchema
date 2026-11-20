@@ -198,9 +198,16 @@ def prepare_role_input(context: RunContext, role: str, *, source: dict | None = 
     private = {f["sha256"] for f in objects["evaluator"]["files"]}
     items: list[dict] = []
 
-    def add(identifier: str, data: bytes, reference: dict | None, category: str):
+    def add(identifier: str, data: bytes, reference: dict | None, category: str, *, selected_source=False):
         if sha256(data) in private or (reference and reference["sha256"] in private):
-            raise ProtocolError("private evaluator bytes cannot enter a role scope")
+            # The public Task baseline can also be an evaluator component. Only
+            # an explicitly granted, canonical copy of that Source may cross
+            # this boundary; ordinary material/text and other evaluator code
+            # remain private. Ref paths may differ after a legitimate import.
+            baseline = task["baseline_source"]
+            if not (selected_source and reference and reference["sha256"] == baseline["sha256"]
+                    and data == bundle.source(baseline)):
+                raise ProtocolError("private evaluator bytes cannot enter a role scope")
         if any(item["id"] == identifier for item in items): raise ProtocolError("duplicate role input ID")
         items.append({"id": identifier, "category": category, "sha256": sha256(data), "text": _text(data)})
 
@@ -218,13 +225,13 @@ def prepare_role_input(context: RunContext, role: str, *, source: dict | None = 
         add("material/" + identifier, data, ref, "role_material")
     if source is not None:
         data = bundle.source(source)  # verify original complete C even if not delivered to this role
-        if role in source_roles: add("current_source", data, source, "source")
+        if role in source_roles: add("current_source", data, source, "source", selected_source=True)
     for delivery in deliveries:
         if not delivery.id or delivery.kind not in ("text", "source") or any(r not in ROLES for r in delivery.roles):
             raise ProtocolError("invalid role delivery")
         if role not in delivery.roles: continue
         data = bundle.source(delivery.file) if delivery.kind == "source" else bundle.read(delivery.file)
-        add("delivery/" + delivery.id, data, delivery.file, delivery.kind)
+        add("delivery/" + delivery.id, data, delivery.file, delivery.kind, selected_source=delivery.kind == "source")
     operation = context.request["operation"]
     objective = next((item for item in items if item["id"] == "material/workflow_objective"), None)
     authority = {"candidate_source": role == "coder", "schema_proposal": role == "planner" and operation in ("design", "optimize"),

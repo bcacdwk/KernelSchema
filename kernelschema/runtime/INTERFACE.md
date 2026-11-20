@@ -139,6 +139,14 @@ Private evaluator bytes are rejected even when relabeled. Request/object
 mutation is rejected; fixed assignment digest is stable when continuing from
 a new explicitly selected C. Role inputs have independent scope IDs.
 
+One narrow exception permits an explicitly granted Source whose canonical C
+identity and exact payload equal `Task.baseline_source`, even when that baseline
+is also an evaluator component. Its Ref path may differ after import. This
+supports an explicit V0/baseline review or seed; it does not expose a baseline
+through ordinary Materials/text, permit other evaluator code wrapped as Source,
+or deliver a baseline to design by default. The current role must still be in
+`source_roles` or the Source delivery's explicit grants.
+
 `fixed_assignment.role_authority` distinguishes code, Schema proposal and
 review authority. Implement fixes the input R; a coder never gains Schema
 revision authority from reference text. Design/optimize planners may propose

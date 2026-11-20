@@ -1,5 +1,7 @@
 """Synthetic in-memory wire only: no SDK auth, remote service, CUDA or fees."""
 import base64
+from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 import gzip
 import json
 from pathlib import Path
@@ -182,6 +184,71 @@ def test_driver_qualification_entry_preserves_same_parent_and_selected_records(t
     assert replay["status"] == "completed" and len(wire.posts) == 6
     demo.export(tmp_path / "selected")
     assert Bundle(tmp_path / "selected").read(demo.state["qualification_evidence"])
+
+
+def test_qualification_binds_uploaded_worker_source_and_command(tmp_path):
+    demo, ctx, target, remote = context(tmp_path)
+    wire = Wire(target)
+    with use_authority(demo.owner.path):
+        result = qualify(ctx, remote=remote, transport=wire)
+    pinned = {**remote, "bwrap_sha256": sha256(b"synthetic-bwrap")}
+    for key in ("_ks_stage/_worker.py", "_ks_stage/kernel.py", "command", "replay_policy"):
+        changed = deepcopy(result["qualification"])
+        record = changed["execute"]
+        intent = loads(record["intent.json"].encode())
+        request = loads(record["request.json"].encode())
+        if key.startswith("_ks_stage/"):
+            request["files"][key] += "\n# different actual uploaded bytes\n"
+        else:
+            request[key] = "changed"
+        intent["request_sha256"] = digest(request)
+        record["request.json"], record["intent.json"] = jcs(request).decode(), jcs(intent).decode()
+        with pytest.raises(ProtocolError, match="uploaded"):
+            read_qualification(changed, context=ctx, remote=pinned, transport=wire.identity())
+    assert len(wire.posts) == 6
+
+
+def test_stale_driver_cannot_qualify_after_business_admission(tmp_path):
+    target = synthetic_target()
+    remote = {"channel": PROFILE, "gpu": "synthetic-gpu", "python": "/synthetic/python", "bwrap": "/synthetic/bwrap"}
+    demo = Demo.create(tmp_path / "demo", start="fixed", environment=jcs(target), remote=remote)
+    stale = Demo(demo.root)
+    assert demo.run()["status"] == "blocked"  # Original R0 is intentionally unbound.
+    wire = Wire(target)
+    with pytest.raises(ProtocolError, match="before the business chain"):
+        stale.prepare_agate(transport=wire)
+    assert not wire.posts
+
+
+def test_concurrent_qualification_callers_settle_only_the_same_six_jobs(tmp_path):
+    demo, ctx, target, remote = context(tmp_path)
+    wire = Wire(target)
+    def invoke():
+        with use_authority(demo.owner.path):
+            return qualify(ctx, remote=remote, transport=wire)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: invoke(), range(2)))
+    assert all(r["status"] == "completed" and r["usage"]["evaluator_jobs"] == 6 for r in results)
+    assert len(wire.posts) == len(demo.owner.operations()) == 6
+
+
+def test_incomplete_probe_capture_stops_after_original_job(tmp_path):
+    demo, ctx, target, remote = context(tmp_path)
+    wire = Wire(target)
+    original = wire.request
+    def request(method, path, payload=None):
+        response = original(method, path, payload)
+        if method == "POST":
+            wire.native["synthetic_1"]["result"]["stdout"] = frame({"action": "probe", "exit_code": 0,
+                "stdout": "{}", "stderr": "", "bwrap_sha256": None})
+        return response
+    wire.request = request
+    with use_authority(demo.owner.path):
+        result = qualify(ctx, remote=remote, transport=wire)
+        replay = qualify(ctx, remote=remote, transport=wire)
+    assert result["status"] == replay["status"] == "blocked" and result["qualification"] is None
+    assert result["usage"]["evaluator_jobs"] == 1 and not result["usage"]["unsettled"]
+    assert "probe" in result["reason"] and len(wire.posts) == 1
 
 
 def test_remote_queue_deadline_refuses_worker_start(tmp_path, monkeypatch):

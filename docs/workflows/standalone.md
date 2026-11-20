@@ -5,6 +5,8 @@ This source-checkout driver calls `kernelschema.api.design`, `implement` and
 Template checks, publications, owner and workflow APIs with explicitly synthetic
 role/evaluator transports. This release has **no new business-model or GPU pass**.
 The existing K3 CLI qualification is a separate runtime capability record.
+The public [protocol entry](protocol.md) explains fixed inputs, checks, accounting
+and recovery and links the actual executable contract.
 
 Use the installed source checkout with Python >=3.11, PyYAML and jsonschema.
 The tested interpreter is Python 3.13.12; Python 3.11 remains unverified. A complete
@@ -41,8 +43,13 @@ The original R0 remains unbound; a device-bound fixed run must provide a reviewe
 Schema whose Contract matches the explicit target. Design derives its own locked
 Contract from Task without reading R0 Design as an answer.
 
-A design start executes design → fixed implement → one optimize. Fixed/partial
-starts execute implement → one optimize. Verify starts execute only verify_only.
+A design start executes design → fixed implement and may then run one optimize.
+Fixed/partial starts run implement and have the same optimize gate. Only a
+completed, qualified implementation advances to optimize for the supplied
+objective. Ordinary build/numerical/fidelity failures, unknown checks and budget
+exhaustion stop with the original implementation result; they do not establish
+a design obstruction. This finite driver does not yet consume independently
+authenticated design-obstruction evidence. Verify starts execute only verify_only.
 Optimize uses exactly the selected settled current result, feedback and reports;
 it can keep/none and stop, keep with implement/verify, or revise then act. A valid
 non-none action is actually run. New Schema publication and its next request's
@@ -113,13 +120,17 @@ python "$KS/examples/workflows/row_softmax/run_demo.py" continue --demo /origina
 python "$KS/examples/workflows/row_softmax/run_demo.py" export --demo /original/demo --out /new/portable-bundle
 ```
 
-Recovery uses `.runtime/demo-state.json` only to find original runs and selected
+Business execution and qualification hold the same driver lock and reload the
+original state before admission; qualification also serializes callers on its
+original child run. Recovery uses `.runtime/demo-state.json` only to find original runs and selected
 Ref closures. Child run/operation state, native locator, publication IDs and the
 single `.runtime/owner.json` remain authoritative; there is no second ledger.
 
 | Interruption | Recovery |
 | --- | --- |
-| Fixed request written, before first child result | Open original child if its anchor exists; otherwise admit the already fixed request |
+| Fixed request written, child not yet published | Admit the already fixed request on the same owner |
+| Child anchor and original backend/owner state initialized, before first result | Continue the original child and its operations |
+| Child anchor exists but owner binding was never initialized or is missing | Recovery currently refuses; retained anchor alone cannot distinguish missing state from interrupted initialization |
 | Child result published, driver selection not recorded | Replay original child result; do not call models again |
 | Writing published / new R not admitted | Retain old result under old R; freeze/admit next fixed request on same owner |
 | Model/evaluator operation unknown | Settle original operation; no replacement submit, alternate channel or budget |

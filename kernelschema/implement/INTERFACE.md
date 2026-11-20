@@ -119,6 +119,8 @@ Stable methods:
   calls/jobs/tokens/active_ms, absolute `deadline_utc_ms`, and on the real Linux
   clock `deadline_monotonic_ns` (decimal string)/`clock_boot_id`. External native
   deadlines must be tightened at the actual launch boundary, as K3 does.
+  Authorize and group claim compare original JCS bytes, so Python-equal values
+  such as `True` and `1` cannot substitute for the frozen authorization.
 * `check_active(reservation) -> bool` is the polling guard for an already
   launched native `run_bounded` operation. It ticks and persists the same owner
   clock, checks the exact original owner/account/run/reservation, active state,

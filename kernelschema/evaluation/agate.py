@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from ..artifacts import Publication, durable_mkdir, durable_write, read_regular
+from ..artifacts import Publication, durable_mkdir, durable_write, read_regular, source_manifest
 from ..contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256
 from .task import verify_stage
 
@@ -82,8 +82,50 @@ def _unframe(stdout):
         if len(data) != envelope["bytes"] or sha256(data) != envelope["sha256"]:
             raise ValueError("truncated or changed evaluator frame")
         return loads(data)
-    except (KeyError,ValueError,OSError) as error:
+    except (KeyError,ValueError,TypeError,OSError,EOFError) as error:
         raise ProtocolError("incomplete evaluator frame: " + str(error)) from error
+
+
+def validate_prepared_request(intent, request):
+    """Bind the actual uploaded bytes/command to the original K1 stage and owner.
+
+    Live submission and retained qualification use this same check. Matching a
+    report to an intent alone does not prove which worker bytes were uploaded.
+    """
+    try:
+        if digest(request) != intent["request_sha256"]:
+            raise ProtocolError("prepared request changed")
+        manifest, profile = intent["stage"]["manifest"], intent["profile"]
+        files = request["files"]
+        ms = min(intent["reservation"]["active_ms"], 1200000)
+        extras = {"_ks_stage/stage.json": jcs(manifest).decode(),
+            "_ks_stage/remote.json": jcs({**{k: profile.get(k) for k in ("python", "bwrap", "bwrap_sha256")},
+                "timeout_s": ms // 1000, "deadline_utc_ms": intent["reservation"].get("deadline_utc_ms")}).decode()}
+        if intent["action"] == "execute":
+            frozen = files["_ks_stage/frozen_inputs.json"]
+            if sha256(frozen.encode()) != intent["frozen_inputs_sha256"]:
+                raise ProtocolError("uploaded frozen inputs changed")
+            extras.update({"_ks_stage/frozen_inputs.json": frozen,
+                "_ks_stage/execution.json": jcs({"mode": "cuda", "profile": PROFILE, "include_timing": True,
+                    "environment": intent["environment"], "frozen_inputs_sha256": intent["frozen_inputs_sha256"]}).decode()})
+        elif intent["action"] != "probe":
+            raise ProtocolError("unknown original evaluator action")
+        expected_names = {"_ks_stage/" + name for name in manifest["files"]} | set(extras)
+        if set(files) != expected_names or any(files[name] != data for name, data in extras.items()):
+            raise ProtocolError("uploaded stage/settings differ from original intent")
+        if any(sha256(files["_ks_stage/" + name].encode()) != value for name, value in manifest["files"].items()):
+            raise ProtocolError("uploaded evaluator/source bytes differ from original stage")
+        if digest(source_manifest(files["_ks_stage/kernel.py"].encode())) != manifest["source"]["sha256"]:
+            raise ProtocolError("uploaded kernel differs from original Source")
+        expected = {"spec": {"target_hardware": [profile["gpu"]], "num_gpus": 1},
+            "command": shlex.join([profile["python"], "-I", "-B", "_ks_stage/_remote.py", intent["action"]]),
+            "files": files, "env_vars": {}, "timeout_s": ms // 1000, "recycle": True,
+            "replay_policy": "never", "dev_intent": "custom_harness", "idempotency_key": intent["submission_key"]}
+        if jcs(request) != jcs(expected):
+            raise ProtocolError("uploaded command/profile/replay policy differs from original intent")
+    except (KeyError, TypeError, AttributeError) as error:
+        raise ProtocolError("malformed original prepared request") from error
+    return request
 
 
 class AgateDevExecutor:
@@ -163,7 +205,7 @@ class AgateDevExecutor:
             if old.is_dir() and old != job and (old/"submission-started.json").exists() and not (old/"terminal.raw").exists():
                 raise ProtocolError("unknown original Agate job fences new submissions")
         request=loads(read_regular(job,"request.json")[0])
-        if digest(request) != intent["request_sha256"]: raise ProtocolError("prepared request changed")
+        validate_prepared_request(intent, request)
         reservation = intent["reservation"]
         remaining = min(reservation["active_ms"], request["timeout_s"] * 1000)
         if "deadline_utc_ms" in reservation:
@@ -189,10 +231,15 @@ class AgateDevExecutor:
     def query(self, operation_id):
         job=self._job(operation_id); intent=loads(read_regular(job,"intent.json")[0])
         if intent["transport"] != self.transport.identity(): raise ProtocolError("cannot switch original channel")
+        validate_prepared_request(intent, loads(read_regular(job,"request.json")[0]))
         unknown={"state":"unknown","operation_id":operation_id,"submission_key":intent["submission_key"],"recovery":"settle_only"}
         if not (job/"acceptance.raw").exists():
             return {**unknown,"reason":"missing acknowledgment/job_id; no read-only key lookup API"}
-        acceptance=json.loads(read_regular(job,"acceptance.raw")[0]); job_id=acceptance.get("job_id")
+        try:
+            acceptance=json.loads(read_regular(job,"acceptance.raw")[0])
+        except (ValueError, UnicodeError):
+            return {**unknown,"reason":"malformed original acknowledgment; no read-only key lookup API"}
+        job_id=acceptance.get("job_id") if isinstance(acceptance,dict) else None
         if not isinstance(job_id,str) or not re.fullmatch(r"[A-Za-z0-9_-]+",job_id):
             return {**unknown,"reason":"no original job locator"}
         unknown["job_id"]=job_id
@@ -203,7 +250,12 @@ class AgateDevExecutor:
             raw=response["body"]; event=job/("query-"+sha256(raw)[7:]+".raw")
             if not event.exists(): durable_write(event,raw)
             if response["status"] != 200: return {**unknown,"reason":"HTTP "+str(response["status"])}
-        native=json.loads(raw)
+        try:
+            native=json.loads(raw)
+        except (ValueError, UnicodeError):
+            return {**unknown,"reason":"incomplete original job response"}
+        if not isinstance(native,dict):
+            return {**unknown,"reason":"original job response is not an object"}
         if native.get("job_id") != job_id: raise ProtocolError("different original job")
         if native.get("status") not in ("succeeded","failed","cancelled") or not native.get("finished_at") or native.get("cleanup_pending") is not False or native.get("execution_quarantined",False):
             return {**unknown,"reason":"remote terminal/quiescence unconfirmed"}
@@ -221,9 +273,12 @@ class AgateDevExecutor:
 def interpret_terminal(intent, native):
     """Same complete K1 frame/subject checks for live and retained qualification."""
     execution=None; diagnostic=None; result=native.get("result") or {}
+    if not isinstance(result,dict):
+        return None, "native result is not an object"
     if native["status"] == "succeeded" and result.get("exit_code") == 0:
         try:
             execution=_unframe(result.get("stdout"))
+            if not isinstance(execution,dict): raise ProtocolError("evaluator output is not an object")
             if execution.get("action") != intent["action"]: raise ProtocolError("different evaluator action")
             if execution.get("exit_code") == 0 and intent["action"] == "execute":
                 worker=loads(execution["stdout"]); manifest=intent["stage"]["manifest"]
@@ -235,7 +290,7 @@ def interpret_terminal(intent, native):
                     not all(p["write_open_denied"] for p in worker["permissions"]["probes"])):
                     raise ProtocolError("actual evaluator subjects/environment/permission evidence differs")
                 execution["worker"]=worker
-        except (ProtocolError,KeyError,ValueError) as error:
+        except (ProtocolError,KeyError,ValueError,TypeError,AttributeError) as error:
             diagnostic=str(error); execution=None
     return execution, diagnostic
 

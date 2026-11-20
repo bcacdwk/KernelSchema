@@ -89,6 +89,55 @@ def test_truncation_keeps_original_terminal_without_pass(tmp_path):
     assert e.settle("probe",Publication(f["bundle"].root))["report"] is None
 
 
+@pytest.mark.parametrize("body", [b"<html>temporary gateway error", b"{", b"[]", b"null"])
+def test_malformed_original_ack_is_unknown_without_resubmit(tmp_path, body):
+    _, _, transport, executor, _ = prepared(tmp_path)
+    original = transport.request
+    def request(method, path, payload=None):
+        response = original(method, path, payload)
+        return {"status": 502, "body": body} if method == "POST" else response
+    transport.request = request
+    assert executor.submit("probe")["state"] == "unknown"
+    assert executor.submit("probe")["state"] == "unknown"
+    assert len(transport.posts) == 1 and not transport.gets
+    assert (executor.root / "probe/acceptance.raw").read_bytes() == body
+
+
+@pytest.mark.parametrize("body", [b"{", b"[]", b"null"])
+def test_malformed_query_preserves_locator_until_original_terminal(tmp_path, body):
+    _, _, transport, executor, _ = prepared(tmp_path)
+    transport.status, transport.raw = 200, body
+    assert executor.submit("probe")["state"] == "unknown"
+    assert not (executor.root / "probe/terminal.raw").exists()
+    transport.terminal()
+    assert executor.submit("probe")["state"] == "terminal"
+    assert len(transport.posts) == 1
+
+
+def test_original_query_rejects_changed_prepared_upload(tmp_path):
+    _, _, transport, executor, _ = prepared(tmp_path)
+    assert executor.submit("probe")["state"] == "unknown"
+    path = executor.root / "probe/request.json"
+    request = json.loads(path.read_bytes())
+    request["files"]["_ks_stage/kernel.py"] += "\n# changed original prepared bytes\n"
+    path.write_bytes(jcs(request))
+    transport.terminal()
+    with pytest.raises(ProtocolError, match="prepared request changed"):
+        executor.query("probe")
+    assert len(transport.posts) == 1
+
+
+@pytest.mark.parametrize("stdout", [MARKER + "[]", frame([]), frame({"action": "probe", "exit_code": 0})[:-1]])
+def test_malformed_evaluator_frame_settles_original_fee_without_report(tmp_path, stdout):
+    fixture_value, _, transport, executor, _ = prepared(tmp_path)
+    transport.terminal(stdout=stdout)
+    result = executor.submit("probe")
+    assert result["state"] == "terminal" and result["execution"] is None
+    settled = executor.settle("probe", Publication(fixture_value["bundle"].root))
+    assert settled["usage_row"]["evaluator_jobs"] == 1 and settled["report"] is None
+    assert len(transport.posts) == 1
+
+
 def test_execute_requires_actual_capture_and_preserves_wrong_source_as_unknown(tmp_path):
     _,s,t,e,args=prepared(tmp_path)
     profile={**args["profile"],"bwrap_sha256":sha256(b"synthetic-bwrap")}
