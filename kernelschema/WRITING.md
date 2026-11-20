@@ -10,6 +10,12 @@ This is CPU engineering delivery. Tests use the actual K3 subprocess and
 persisted native input/usage, with explicitly synthetic drafts/reviews. They
 establish no real model, CUDA, device, numerical or performance qualification.
 The first finite Task adapter supports the fixed K1 row-softmax public Task.
+FA4 F1 is supported by reference implement/verify only. This writing backend
+does not claim FA4 design/optimize or infer new FA4 `when`/variant semantics.
+Writing uses K3's same permission-first body projection: full Rules/tool closure
+and host checks are retained, known host implementations carry identity only,
+and exact duplicate authorized text uses per-payload aliases. The model receives
+all semantic documents through those bodies/aliases, with no text truncation.
 Other Tasks require an explicit future Task/scope adapter. The initial-design Contract generator accepts the original unbound environment
 or the finite `ks.row-softmax.target.v1` adapter. Explicit hardware/runtime
 requirements and hash-checked original documentation stay inside Task.environment.
@@ -144,6 +150,23 @@ including the review minimum before admission. K3 receives the original owner
 reservation with absolute UTC/monotonic deadlines and calls the same owner's
 `authorize` immediately before invocation. `writing_minimum_active_ms` in the
 fixed profile may set positive planner/reviewer minima; defaults are 1/1000 ms.
+
+The optional fixed `parameters.writing_finish_floor` preserves capacity for an
+outer driver's subsequent fixed request. It is the complete flat `budget.cost()`
+vector: planner/coder/reviewer/extract/model_calls/evaluator_jobs/tokens/active_ms,
+all nonnegative integers, with model_calls equal to the sum of role calls.
+Unknown/missing keys, bools and inconsistent totals reject before model calls.
+The default is `cost()` (all zero), preserving standalone writing behavior.
+
+Planner reservation floor is this vector plus the ordinary minimum reviewer
+call/time; reviewer reservation floor retains this vector. The original owner
+checks request, parent and native limits together, so the writing request's own
+limits must also include the selected capacity. The floor does not consume a
+dummy operation, create an account, grant the next request, or guarantee that
+unrelated future work cannot spend remaining capacity after this request closes.
+The outer driver settles writing, checks the same owner, then explicitly admits
+its next fixed request. For code/evaluate/review, construct the floor by adding
+the corresponding ordinary cost vectors component by component.
 
 The persistent phases are original planner intent/input/terminal; retained draft;
 Template normalization and whole-Task permission/scope checks; immutable precheck

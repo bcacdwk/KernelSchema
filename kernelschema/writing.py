@@ -13,11 +13,22 @@ from uuid import uuid4
 from . import _writing_policy as policy, template_api
 from .artifacts import Publication, read_regular
 from .budget import BudgetDenied, OwnerAccount, cost
-from .contracts import PROTOCOL, ProtocolError, UnsupportedError, jcs, loads, sha256, validate, limits as validate_limits
+from .contracts import PROTOCOL, ROLES, ProtocolError, UnsupportedError, jcs, loads, sha256, validate, limits as validate_limits
 from .resources import freeze_rules as freeze_template_rules
 from .runtime import AdmissionDenied, ClaudeProfile, ClaudeRuntime, RoleDelivery
 
 VERSION = "writing.v1"
+
+
+def _finish_floor(profile):
+    value = profile["parameters"].get("writing_finish_floor", cost())
+    if (not isinstance(value, dict) or set(value) != set(cost())
+            or any(type(n) is not int or n < 0 for n in value.values())
+            or value["model_calls"] != sum(value[role] for role in ROLES)):
+        raise ProtocolError("writing_finish_floor requires the complete nonnegative budget.cost vector with matching model_calls")
+    return dict(value)
+
+
 METHOD = b"""Finite writing method v1
 Planner: follow the frozen DESIGN_SCHEMA/OPTIMIZE_SCHEMA and Template documents.
 The workflow_objective is the sole current instruction inside the fixed Task,
@@ -284,7 +295,9 @@ class WritingBackend:
                 minimum = context.objects["profile"]["parameters"].get("writing_minimum_active_ms", {"planner": 1, "reviewer": 1000})
                 if not isinstance(minimum, dict) or set(minimum) != {"planner", "reviewer"} or any(type(v) is not int or v <= 0 for v in minimum.values()):
                     raise ProtocolError("writing_minimum_active_ms requires positive planner/reviewer intervals")
-                floor = cost(role="reviewer", calls=1, active_ms=minimum["reviewer"]) if role == "planner" else cost()
+                review_floor = cost(role="reviewer", calls=1, active_ms=minimum["reviewer"]) if role == "planner" else cost()
+                finish_floor = _finish_floor(context.objects["profile"])
+                floor = {key: finish_floor[key] + review_floor[key] for key in review_floor}
                 op["reservation"] = account.reserve(context.run_id, op["id"], role=role, purpose=op["purpose"],
                     amount=cost(role=role, calls=1, active_ms=minimum[role]), floor=floor,
                     native_limits=context.objects["profile"]["native_limits"].get("workflow_limits"))
@@ -431,6 +444,7 @@ class WritingBackend:
             os.close(fd)
 
     def _execute(self, context, *, continuing):
+        _finish_floor(context.objects["profile"])
         self._rules(context)
         account = self._account(context, create=not continuing)
         native = context.objects["profile"]["native_limits"].get("workflow_limits")

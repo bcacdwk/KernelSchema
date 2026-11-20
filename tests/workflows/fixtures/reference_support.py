@@ -10,7 +10,7 @@ from kernelschema import fidelity
 from kernelschema.artifacts import Publication, durable_write
 from kernelschema.contracts import PROTOCOL, digest, jcs, loads
 from kernelschema.evaluation import freeze_task
-from kernelschema.evaluation.task import verify_stage
+from kernelschema.evaluation.dispatch import verify_stage
 from kernelschema.extract_bridge import consume_raw
 from kernelschema.resources import resource
 from kernelschema.runtime import CallReceipt, RoleOutput, prepare_role_input
@@ -84,8 +84,10 @@ class FakeRuntime:
             content = self.candidates[min(role_number, len(self.candidates) - 1)]
         else:
             source = state["fixed"]["source"]
-            code = context.bundle.source(source).decode()
-            location = f"kernel.py:L1-L{len(code.splitlines())}"
+            files = context.bundle.source_files(source)
+            name = next(n for n in files if n.endswith(".py"))
+            code = files[name].data.decode()
+            location = f"{name}:L1-L{len(code.splitlines())}"
             evidence = [{"location": location, "quote": "\n".join(code.splitlines())}]
             status = self.reviews[min(role_number, len(self.reviews) - 1)]
             inventory = fidelity.obligations(context)
@@ -103,7 +105,7 @@ class FakeRuntime:
                          "reason": "synthetic routing evidence", "source_locations": [location], "evidence": evidence}
                         for b in scope["bindings"] for cid in b["coverage_ids"]]
             content = {"items": items, "coverage": coverage}
-        output = RoleOutput(role, "sha256:" + "0" * 64, "ok", "candidate_source" if role == "coder" else "review", content, "synthetic only")
+        output = RoleOutput(role, "sha256:" + "0" * 64, "ok", ("candidate_files" if isinstance(content, dict) else "candidate_source") if role == "coder" else "review", content, "synthetic only")
         p = Publication(context.root, state["publication_id"])
         facts = {"runtime": "synthetic-reference-v1", "producer": "synthetic:" + context.run_id, "operation_id": handle,
                  "receipt_id": handle + ":terminal", "role": role, "purpose": state["fixed"]["purpose"],

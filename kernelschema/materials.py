@@ -10,6 +10,30 @@ from .contracts import PROTOCOL, ProtocolError, UnsupportedError, capabilities, 
 from .template_api import resolve_bundle
 
 
+def private_evaluator_hashes(evaluator: dict) -> set[str]:
+    """Execution implementation/input bytes; public timing/environment excluded."""
+    return {r["sha256"] for r in [*evaluator["files"], evaluator["entrypoint"], evaluator["inputs"]]}
+
+
+def public_baseline_payload(bundle, task, evaluator, source, name, data):
+    """The existing fixed row baseline is public only as an explicit Source.
+
+    A caller-controlled baseline Ref is not authority to relabel private inputs
+    or arbitrary evaluator implementations. This exception recognizes the exact
+    shipped row baseline; other ordinary nonprivate Sources need no exception.
+    """
+    from .contracts import sha256
+    from .resources import resource
+    if sha256(data) in {evaluator["inputs"]["sha256"], evaluator["entrypoint"]["sha256"]}:
+        return False
+    if (source is None or source["sha256"] != task["baseline_source"]["sha256"]
+            or task["task_id"] != "row_softmax_fp32_v1" or name != "kernel.py"):
+        return False
+    if bundle.document(source, "source")["format"] != "single_file":
+        return False
+    return data == resource("examples/workflows/row_softmax/evaluator/baseline.py").read_bytes() == bundle.source(task["baseline_source"])
+
+
 def for_role(bundle: Bundle, materials: dict, role: str) -> dict[str, bytes]:
     validate(materials)
     if materials["kind"] != "materials" or role not in ("planner", "coder", "reviewer"):
@@ -30,7 +54,7 @@ def validate_request(bundle: Bundle, request: dict) -> dict[str, dict]:
         raise ProtocolError("backend name differs from fixed profile")
     evaluator = bundle.document(task["evaluator"], "evaluator")
     objects["evaluator"] = evaluator
-    private_hashes = {r["sha256"] for r in evaluator["files"]}
+    private_hashes = private_evaluator_hashes(evaluator)
     for entry in objects["materials"]["entries"]:
         if entry["roles"] and entry["file"]["sha256"] in private_hashes:
             raise ProtocolError("private evaluator files cannot enter model role materials")

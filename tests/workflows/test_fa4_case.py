@@ -176,7 +176,7 @@ def test_source_intents_are_distinct_and_private_helpers_not_role_materials(prep
     with pytest.raises(ProtocolError, match="without"):
         freeze_request(Publication(root), **args, intent="schema_rebuild", source=ready["case"]["source"])
     entries = b.document(ready["case"]["materials"])["entries"]
-    assert {e["id"] for e in entries if e["roles"]} == {"license_gaps", "workflow_objective"}
+    assert {e["id"] for e in entries if e["roles"]} == {"candidate_interface", "license_gaps", "workflow_objective"}
     assert {e["id"] for e in entries if not e["roles"]} == {"k7_preflight", "pinned_inventory"}
 
 

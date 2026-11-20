@@ -5,6 +5,14 @@ backend name `reference` uses the existing `kernelschema implement` CLI and
 `kernelschema.api.implement`. This implements CPU-tested engineering only.
 No model/GPU call or real Task/fidelity qualification was added in B04.
 
+The finite Task dispatch now also supports the pinned FA4 four-node Schema's
+F1 direct scope and complete `python_tree` Source. Its
+[case entry](../../examples/workflows/fa4_decode/README.md) describes explicit
+original verification, seed continuation and Schema reconstruction. Row-softmax
+retains its complete Task/single-file behavior. FA4 never uses its `when` grammar
+or `full_task_only` restriction. New FA4 designs/variants stay unknown; design
+and optimize remain limited to row-softmax.
+
 The fixed profile must contain `parameters.claude`, the complete K3 public
 profile dictionary, with matching `model`. The backend never substitutes its
 own implicit CLI/model configuration. `fidelity.freeze_method(publication)`

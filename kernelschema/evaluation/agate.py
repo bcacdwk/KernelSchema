@@ -92,6 +92,9 @@ def validate_prepared_request(intent, request):
     Live submission and retained qualification use this same check. Matching a
     report to an intent alone does not prove which worker bytes were uploaded.
     """
+    if intent.get("action") in ("fa4_execute", "fa4_probe"):
+        from .fa4_channel import validate_prepared
+        return validate_prepared(intent, request)
     try:
         if digest(request) != intent["request_sha256"]:
             raise ProtocolError("prepared request changed")
@@ -157,6 +160,10 @@ class AgateDevExecutor:
         still costs one logical job. Execute consumes that actual prior capture.
         Caller owns the reservation, active clock and cross-channel fences.
         """
+        if action in ("fa4_execute", "fa4_probe"):
+            from .fa4_channel import prepare
+            return prepare(self, staged, profile=profile, operation_id=operation_id, submission_key=submission_key,
+                           owner=owner, reservation=reservation, environment=environment, action=action)
         verify_stage(staged)
         if profile.get("channel") != PROFILE or action not in ("probe","execute"):
             raise UnsupportedError("only explicit Agate dev+bwrap profile implemented")
@@ -272,6 +279,9 @@ class AgateDevExecutor:
 
 def interpret_terminal(intent, native):
     """Same complete K1 frame/subject checks for live and retained qualification."""
+    if intent.get("action") in ("fa4_execute", "fa4_probe"):
+        from .fa4_channel import interpret
+        return interpret(intent, native)
     execution=None; diagnostic=None; result=native.get("result") or {}
     if not isinstance(result,dict):
         return None, "native result is not an object"
@@ -314,12 +324,16 @@ def _publish(executor, operation_id, publication, facts):
     native=publication.put_bytes(prefix+"/agate-terminal.json",read_regular(job,"terminal.raw")[0])
     acceptance=publication.put_bytes(prefix+"/agate-acceptance.json",read_regular(job,"acceptance.raw")[0])
     row={"producer":"kernelschema.agate:"+str(executor.root),"operation_id":operation_id,"role":"evaluator",
-         "purpose":"row-softmax "+intent["action"],"receipt_id":facts["receipt_id"],"sequence":1,"receipt":native,
+         "purpose":intent["action"],"receipt_id":facts["receipt_id"],"sequence":1,"receipt":native,
          "state":"settled","calls":0,"evaluator_jobs":1,"tokens":0,"gpu_ms":None}
     usage=publication.put_json(prefix+"/usage.json",{"protocol":PROTOCOL,"kind":"usage_index","entries":[row]})
     # Exact original terminal retained even if no valid worker report is available.
     report=None; roots=[usage,acceptance]; execution=facts["execution"]
-    if execution and execution.get("worker"):
+    if execution and intent["action"] == "fa4_execute":
+        from .fa4_channel import publish_report
+        report = publish_report(publication, intent, execution, native=native, acceptance=acceptance, usage=usage)
+        roots.append(report)
+    elif execution and execution.get("worker"):
         worker=execution["worker"]; result=worker["result"]; manifest=intent["stage"]["manifest"]
         raw=publication.put_bytes(prefix+"/worker.json",jcs(worker))
         env=publication.put_bytes(prefix+"/environment.json",jcs(worker["environment"]))

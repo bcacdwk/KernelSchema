@@ -30,6 +30,10 @@ dictionaries; CLI exit 0 means the result projection was durably published,
 not that the domain status is completed. Unsupported/admission/publishing
 errors are `ProtocolError` (`UnsupportedError` is a subtype), CLI exit 2.
 No import of this package loads AKA, torch, CUDA or a runtime backend.
+The reference implement backend supports fixed row-softmax/single_file and
+the pinned [FA4 F1/python_tree](../examples/workflows/fa4_decode/README.md).
+Design/optimize remain row-softmax only. Tree format support is separately
+checked in the selected business profile and installed backend.
 An explicit implement request with backend `aka` lazily loads the separately
 installed `aka.workflow.schema.backend.workflow_backend()`; other operations
 do not discover or import AKA. Missing adapter code is an unsupported backend,
@@ -71,7 +75,9 @@ extensions (arrays), empty_start (bool), token_enforcement
 profile must both support a requested combination. A finite token budget needs
 actual hard enforcement. `extensions.information` is inert descriptive content;
 all other owners require explicit backend capability support. Private evaluator
-files cannot be selected for model roles by Materials. Role delivery still
+files, entrypoint and inputs cannot be selected for model roles by Materials,
+including renamed equal-byte copies. Timing/environment descriptions remain
+eligible for explicit grants. Role delivery still
 requires K3's actual runtime allowlist enforcement.
 
 Optimize results include `action_reason` (null permitted when next_action=none),
@@ -89,7 +95,8 @@ It rejects tree Sources. `source_files(ref)` returns the complete verified
 name-to-`FileBytes(data, mode)` map for either format. The additive `python_tree`
 format supports `solution.py`, UTF-8, at most 32 mode-0644 files / 4 MiB, flat
 Python packages and root text provenance; [FA4's format boundary and commands](../examples/workflows/fa4_decode/README.md)
-define its finite use. This does not expand existing backend capabilities.
+define its finite use. Only reference implement and K3 currently advertise
+tree support; this does not claim AKA support or real execution qualification.
 `install_source(bundle, ref, new_directory)` installs one complete snapshot via
 fsynced no-replace rename. It refuses an existing draft; K4 owns authorized seed
 intent/ready/admitted transitions and later draft replacement.

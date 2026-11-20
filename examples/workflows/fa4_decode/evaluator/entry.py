@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import errno
 import hashlib
 import importlib.metadata
 import importlib.util
@@ -132,10 +133,11 @@ def environment(required, torch):
     import tvm_ffi
     smi = subprocess.run(["nvidia-smi", "--query-gpu=name,uuid,driver_version", "--format=csv,noheader"],
                          capture_output=True, text=True, check=True, timeout=10)
+    compiler = subprocess.run(["/usr/local/cuda/bin/nvcc", "--version"], capture_output=True, text=True, check=True, timeout=10)
     return {**observed, "python": sys.version, "executable": sys.executable,
             "executable_sha256": sha(Path(sys.executable).read_bytes()), "os": platform.platform(),
             "device_name": torch.cuda.get_device_name(), "device_index": torch.cuda.current_device(),
-            "nvidia_smi": smi.stdout, "tvm_ffi_version": str(getattr(tvm_ffi, "__version__", "unknown")),
+            "nvidia_smi": smi.stdout, "compiler": compiler.stdout, "tvm_ffi_version": str(getattr(tvm_ffi, "__version__", "unknown")),
             "tvm_ffi_module_sha256": sha(Path(tvm_ffi.__file__).read_bytes()), "qualification": "not_established"}
 
 
@@ -170,6 +172,7 @@ def execute(root, manifest, *, observation=None):
     observed = environment(target["required"], torch)
     observation["environment"] = observed
     observation["cold"] = {}
+    observation["build"] = "not_run"
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     # No prior candidate import/native state is allowed in this fresh process.
@@ -207,6 +210,7 @@ def execute(root, manifest, *, observation=None):
     before = snapshot(inputs, torch)
     started = time.perf_counter_ns()
     model = candidate.Model()
+    observation["build"] = "pass"
     constructor_ns = time.perf_counter_ns() - started
     observation["cold"]["constructor_ns"] = constructor_ns
     checks, samples = [], []
@@ -257,6 +261,7 @@ def main():
     parser.add_argument("--stage", type=Path, required=True)
     parser.add_argument("--stage-sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--require-readonly", action="store_true")
     args = parser.parse_args()
     root = args.stage.resolve()
     if args.output.resolve().is_relative_to(root):
@@ -265,6 +270,19 @@ def main():
     report = {"stage_sha256": args.stage_sha256, "subject": {key: manifest[key]["sha256"]
               for key in ("task", "schema", "scope", "source", "evaluator", "inputs", "timing")}}
     try:
+        if args.require_readonly:
+            probes = []
+            for name in ["stage.json", *manifest["files"]]:
+                try:
+                    descriptor = os.open(root / name, os.O_WRONLY)
+                except OSError as error:
+                    if error.errno not in (errno.EROFS, errno.EPERM, errno.EACCES):
+                        raise
+                    probes.append({"path": name, "write_open_denied": True})
+                else:
+                    os.close(descriptor)
+                    raise RuntimeError("stage write permission is available: " + name)
+            report["permissions"] = {"boundary": "fa4-agate-f1-bwrap-v1", "probes": probes}
         report.update(execute(root, manifest, observation=report))
     except Exception as error:
         report.update(passed=False, exception={"type": type(error).__name__, "message": str(error)},

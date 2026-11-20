@@ -5,6 +5,11 @@ normal `ks.workflow.v1` objects. CPU preparation and tests do not qualify a
 model, GPU, transport, numerical result, timing result or Schema fidelity.
 The source and Schema commits remain distinct; see [materials.json](materials.json).
 
+Reference `api.implement` now supports this fixed F1 with complete Source trees,
+typed K3 output, whole-source fidelity and an explicit FA4 Agate channel. These
+are CPU-tested engineering paths. Real original-stack/channel/model/fidelity
+qualification is still absent; AKA has not acquired this support.
+
 From an installed source checkout with its existing Python/PyYAML dependencies:
 
 ```sh
@@ -19,6 +24,29 @@ original-Source `verify_only` request with zero calls/jobs and an explicitly
 unqualified AKA profile advertising no execution capability. It is reviewable,
 and cannot silently launch through the row-softmax channel. Execution needs a
 new request with the actual adapter/profile, budgets and authority.
+
+To create that reference request without launching anything, pass an explicit
+`ClaudeProfile.as_dict()` JSON and ordinary finite budget JSON. An evaluation
+selection can be made with `kernelschema.evaluation.fa4_channel.selection`.
+No executable probe, credential search or model invocation occurs in prepare:
+
+```sh
+python -B -m examples.workflows.fa4_decode.prepare --out /tmp/fa4-reference \
+  --claude-profile /selected/claude-profile.json --limits /selected/limits.json \
+  --evaluation /selected/fa4-evaluation.json --intent original_verify
+python -m kernelschema implement --request /tmp/fa4-reference/request.json --out /tmp/fa4-run
+python -m kernelschema implement --continue /tmp/fa4-run
+```
+
+`schema_rebuild` selects no seed/starter and supplies no baseline code to the
+coder. `seed_continuation` requires `--seed-bundle` and `--seed-ref` (a JSON
+Source Ref) and supplies exactly that full Source. New C snapshots omit deleted
+files, preserve their own per-file modes/digests, and are re-evaluated under the
+same fixed Schema. `original_verify` selects the exact original C, performs no
+coder call/edit/promotion, and still needs evaluator/reviewer budget. An explicit
+current candidate can also be verified by an ordinary `mode=verify_only` request
+whose nonempty `seed` is that C. Missing qualification returns blocked before
+coder/evaluator admission; a zero-budget preparation is not the whole workflow.
 
 The independent original-stack entry is callable in a **fresh process** on the
 selected original environment. Use `stage.sha256` from prepared.json literally:
@@ -86,8 +114,10 @@ at most 4 MiB total. Paths support identifier-named root Python modules or one
 package-directory level of Python modules, and root `.json/.md/.txt` or `LICENSE`
 text. BOM/invalid UTF-8, links, binaries, deeper trees, executable modes, missing
 entrypoint and extra unlisted files reject. This is not arbitrary-source-tree
-execution support. The current case runner accepts only the complete pinned
-original twelve-file Source; changed candidates fail before import.
+execution support. `stage_original` continues to admit only the complete pinned
+twelve-file Source. `stage_candidate` freezes separate complete baseline and
+candidate trees and the actual finite launcher; it never overlays old files.
+Candidate execution is available only through the explicitly qualified channel.
 
 | Core API | Boundary |
 | --- | --- |
@@ -101,19 +131,22 @@ original twelve-file Source; changed candidates fail before import.
 Closure/export/import follows every explicit file. `validate_request` records
 actual required source formats; `require_capabilities` checks them against both
 profile and backend. Existing single_file-only backends reject python_tree.
-No backend support declaration was expanded in this batch.
+The reference implement backend and K3 advertise this format now. Existing
+single-file-only profiles and AKA adapters continue to reject it.
 
 ## Callable seams and remaining adapter work
 
-`kernelschema.evaluation.fa4` exposes `freeze_case`, `FA4Task`, `stage_original`,
+`kernelschema.evaluation.fa4` exposes `freeze_case`, `FA4Task`, `stage_original`, `stage_candidate`,
 `freeze_request`, and `freeze_observation`. `freeze_request` uses the ordinary
 K2 codec/validation, with an explicit original_verify, seed_continuation or
 schema_rebuild intent. Original verification selects exactly baseline C and
 verify_only; seed continuation requires an explicit full Source; pure-Schema
 rebuild has no seed/starter. Default role Materials contain objective/license
-gaps only. A future rebuild adapter must also suppress the optimized Task
-baseline delivery exception; the current K3 tree rejection prevents accidental
-baseline disclosure and is not a completed rebuild path.
+gaps and the explicit [candidate observation interface](candidate-interface.md).
+That small interface specifies Model/13 ABI and the native launcher observation
+names needed by this finite evaluator; it includes no optimized implementation.
+K3 rejects optimized baseline delivery in a `schema_rebuild` request.
+Baseline metadata supplies the required Source format, not a role grant.
 
 `freeze_observation(publication, staged, raw=..., operation_id=..., usage_receipts=...)`
 verifies original stage bytes and the raw Task/R/Scope/C/evaluator/input/timing
@@ -124,23 +157,90 @@ correctness and performance checks; fidelity and performance goal stay unknown.
 It is an observation importer, not a qualified executor or automatic five-gate
 promotion path. Native job/owner receipts must be supplied by the actual adapter.
 
-AKA/K3 handoff still needs all of the following before advertising support:
+## Actual channel and qualification seam
 
-1. Route this Task to its finite scope/evaluator seam. Existing RowSoftmaxTask,
-   Agate `_worker.py` and channel assumptions cannot consume this case unchanged.
-2. Carry `python_tree` through actual source installation, native source identity,
-   execution uploads and candidate freeze. Use `source_files` and complete
-   replacement, preserving deletions and C-to-native-file mappings.
-3. Add a typed full-file coder output and whole-source reviewer delivery with
-   file-qualified line evidence; current K3 strings and fidelity.py kernel.py
-   locations are unsupported. Enforce the three source-information boundaries.
-4. Qualify original CuTe/SM103 environment, readonly isolation, complete stdout,
-   original-operation budget/query/settle handling and actual Agate credentials.
-   No new balance, parser or recovery journal is supplied here.
-5. Reuse the full comparator/timing entry for baseline and candidate only after
-   a candidate sandbox and native eligibility mechanism are supported. The
-   standalone path intentionally admits original C only. Rejudge full fidelity
-   against the current Schema; unknown obligations remain unknown.
+`fa4_channel.workflow_channel` is a pinned reference channel factory. It extends
+the existing `AgateDevExecutor` with finite `fa4_probe` and `fa4_execute` actions;
+the original submit/key/query/settle, complete compressed frame, native terminal
+and usage publication remain the same implementation. Lost ACK/404 stays on the
+original operation. `prepare` performs no hidden paid probe.
+
+Explicit `fa4_channel.qualify(context, remote=...)` performs six original jobs
+under the same `OwnerAccount`: original-stack probe, full baseline and four
+fixed bad Sources (missing out, changed query, tolerance and original-storage
+replacement). It returns retained original records for a subsequent fixed
+`selection(remote=<observed remote including bwrap_sha256>, qualification=...)`.
+Continue qualification by reopening that same context and owner. The account
+must reserve all remaining jobs; no result or missing binding creates quota.
+Synthetic transport is always rejected as qualification. These paid commands
+have not been run here. The remote shape is:
+
+```python
+remote = {"channel": "agate-dev-bwrap-v1", "gpu": "L20D",
+          "python": "/selected/original/python", "bwrap": "/selected/bwrap"}
+```
+
+After qualification, reuse the original prepared `case` Refs for the new fixed
+request. A fresh `freeze_case` creates a different Task identity and cannot
+inherit those records. Freeze the qualified profile in that same artifact
+bundle, with the original owner's descriptor as the new request's parent:
+
+```python
+# ready is the original prepared.json; owner is its existing OwnerAccount.
+# qualified_profile contains the actual returned selection and fixed Claude profile.
+from kernelschema import api
+from kernelschema.artifacts import Bundle, Publication, durable_write
+from kernelschema.budget import use_authority
+from kernelschema.evaluation.fa4 import freeze_request
+
+p = Publication(bundle_root)
+profile_ref = p.put_json("qualified-profile.json", qualified_profile)
+parent_ref = p.put_json("parent.json", owner.descriptor)
+p.commit([profile_ref, parent_ref])
+request_ref = freeze_request(Publication(bundle_root), ready["case"],
+    rules=ready["rules"], profile=profile_ref, limits=business_limits,
+    parent=parent_ref, intent="original_verify")
+durable_write(next_request_path, Bundle(bundle_root).read(request_ref))
+with use_authority(owner.path):
+    result = api.implement(request=next_request_path, out=new_run_path)
+```
+
+The initial owner's total limits must cover qualification and intended business
+work. No fresh parent balance is created by this handoff; insufficient remaining
+capacity still blocks admission. The snippet uses the existing artifact, budget
+and API functions, and does not mutate the original request/profile/run.
+
+The source snapshot and every trusted evaluator/launcher byte, mode, path,
+command, original key and profile are checked before submit and original query.
+Each execution job runs baseline and candidate in separate fresh processes with
+separate compile/output scratch. The preinstalled pinned bwrap denies stage and
+root writes, drops capabilities and network namespaces, and exposes CUDA
+devices. Every staged file receives a write-open denial probe before candidate
+import. Cold, native predicates, 46 complete comparisons and 40 full-forward
+samples are retained for each Source. Driver/Python/compiler/TVM-FFI and all
+required original versions are captured and must match the qualified profile.
+This fixed path requires `/usr/local/cuda/bin/nvcc`; it installs nothing.
+
+The explicit trust boundary is generated code that does not attack the
+evaluator's Python address space. bwrap protects files and network; it does not
+isolate hostile native code from same-process tensor comparisons. Qualification
+must exercise that stated boundary, full stdout and settled cleanup. Raw JSON
+consistency alone is not independent proof of service execution. Missing actual
+auth, namespace/CUDA permissions, original stack or qualification records blocks
+admission. There is no H20/Triton substitute or permanent unsupported executor.
+
+Fidelity receives all Python files and current root Contract/direct Design.
+Every accepted source location must name a real file and exact quoted lines.
+An independent reviewer is required; incomplete/unknown CuTe, TMA, TMEM,
+empty-parity and page-tail evidence stays unknown. Schema static scope pass is
+separate from runtime native predicates and fidelity. New FA4 variants and
+design/optimize remain unsupported by this finite implementation.
+
+AKA still needs its own Task dispatch, typed full-file model/session handoff,
+complete native install/freeze with deletions, and original C-to-job/report
+mapping. It must explicitly select this channel or qualify its own equivalent
+boundary on the same owner, then enforce original_verify/seed/rebuild delivery.
+KS support does not declare AKA F1 compatibility.
 
 The [K7 license audit](licenses-and-gaps.md) and anonymous fixed-commit retrieval
 gap remain open. Current engineering tests and raw APIs do not close K8.real.

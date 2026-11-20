@@ -12,9 +12,11 @@ and lifetime obligations. N1 avoids the N>=5 PageIndex reuse and global empty
 split cases. It does not prove empty parity initialization/readback, TMA padded
 page/page-tail behavior, TMEM fences/return/deallocation or output staging life.
 
-CPU source/AST/Template checks provide no fidelity pass. The existing row-softmax
-AST reviewer and kernel.py-only line locator do not support this Source. Until a
-complete multi-file reviewer is connected, fidelity stays unknown. Original
+CPU source/AST/Template checks provide no fidelity pass. The finite reviewer now
+receives all actual Python files and verifies file-qualified line/quote evidence;
+the row-softmax-only AST rejection is not applied across an unknown import graph.
+Independent review must retain unknown where it cannot establish a current
+obligation, including the asynchronous lifetimes above. Original
 verification, explicit full-Source seed continuation and pure-Schema rebuild
 are distinct requests. A rebuild coder must not receive optimized baseline,
 historical campaigns, annotated source or old sessions as role materials.

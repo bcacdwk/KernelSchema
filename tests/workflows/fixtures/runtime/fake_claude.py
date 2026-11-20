@@ -24,6 +24,10 @@ assert "--safe-mode" in sys.argv and "--strict-mcp-config" in sys.argv
 assert arg("--mcp-config") == '{"mcpServers":{}}'
 assert arg("--setting-sources") == "" and "--bare" in sys.argv
 data = json.load(sys.stdin)
+def body(item):
+    if "text" in item:
+        return item["text"]
+    return next(x["text"] for x in data["materials"] if x["id"] == item["text_alias_of"])
 mode = scenario.get("mode", "success")
 session = arg("--session-id")
 model = "wrong-model" if mode == "wrong_model" else arg("--model")
@@ -46,9 +50,16 @@ content = {"synthetic": True, "allowed_ids": [x["id"] for x in data["materials"]
 if role == "coder":
     source = next((x["text"] for x in data["materials"] if x["id"] == "current_source"), "# empty start\n")
     content = source + "# synthetic CLI continuation\n"
+    if data["fixed_assignment"].get("source_format") == "python_tree":
+        selected = {i["path"]: body(i) for i in data["materials"] if i["id"].startswith("current_source/")}
+        selected["solution.py"] = selected.get("solution.py", "# empty tree start\n") + "# synthetic CLI continuation\n"
+        content = {"format": "python_tree", "entrypoint": "solution.py", "files": [
+            {"path": name, "mode": "0644", "content": text} for name, text in sorted(selected.items())]}
 output = {"protocol": "ks.claude.output.v1", "role": role, "assignment_sha256": data["assignment_sha256"],
           "status": "ok", "kind": {"coder":"candidate_source", "planner":"writing_draft", "reviewer":"review"}[role],
           "content": content, "reason": "synthetic CPU fixture"}
+if role == "coder" and data["fixed_assignment"].get("source_format") == "python_tree":
+    output["kind"] = "candidate_files"
 if mode == "forged_output": output["reported_model"] = "trusted-model"
 terminal = {"type":"result", "subtype":"success", "is_error":False, "session_id":session,
             "result":json.dumps(output), "num_turns":1, "total_cost_usd":0.001,

@@ -135,13 +135,35 @@ scope. It does not recursively expand prose paths, evaluator files, baselines,
 parent histories or tool implementation sources. Current C is verified and
 delivered only to `source_roles` (default coder/reviewer). Extra feedback/method
 or source material uses `RoleDelivery(id, file, roles, kind="text"|"source")`.
-Private evaluator bytes are rejected even when relabeled. Request/object
+Private evaluator files, entrypoint and inputs are rejected even when relabeled
+or copied to a new Ref with the same bytes. Timing/environment descriptions stay
+eligible for explicit public delivery. K2 and K3 use the same private-byte set.
+Request/object
 mutation is rejected; fixed assignment digest is stable when continuing from
 a new explicitly selected C. Role inputs have independent scope IDs.
 
-One narrow exception permits an explicitly granted Source whose canonical C
-identity and exact payload equal `Task.baseline_source`, even when that baseline
-is also an evaluator component. Its Ref path may differ after import. This
+The complete Rules and tool dependency closure remains unchanged in the bundle
+and in host validation. Model input omits only declared tool entrypoint bodies
+and the exact shipped Template implementation set when its declared entrypoint,
+version and all selected dependency bytes match the installed known sources.
+These items retain their original ID, Ref, digest, size, category/authority and
+`host_implementation={name,version,source}`. Unknown `.py` rules stay readable;
+an explicitly granted Materials/RoleDelivery code reference stays readable too.
+
+Every item passes its own role/private-evaluator/Source/UTF-8 checks before any
+deduplication. Identical authorized bodies appear once; each duplicate retains
+its original bindings with `text_alias_of` naming a body ID in the same payload.
+`runtime.material_text(payload, id)` validates and resolves that direct alias
+without filesystem access. The original single-file `current_source.text`
+remains a canonical body. No Contract, Schema, semantic method or unknown rule
+is truncated. This projection and the system-prompt alias instruction are new
+CPU engineering increments, not behavior certified by earlier real CLI captures.
+
+One narrow exception permits the exact shipped row-softmax baseline as an
+explicitly granted Source whose canonical C and bytes equal
+`Task.baseline_source`, even when it is also an evaluator component. Its Ref path
+may differ after import. A caller-created baseline label cannot grant inputs,
+entrypoint or any other private implementation. This
 supports an explicit V0/baseline review or seed; it does not expose a baseline
 through ordinary Materials/text, permit other evaluator code wrapped as Source,
 or deliver a baseline to design by default. The current role must still be in
@@ -191,7 +213,24 @@ The native terminal must contain one JSON object (no Markdown wrapper):
 }
 ```
 
-Allowed pairs are coder/candidate_source (string), planner/writing_draft
+For a fixed `python_tree` assignment the coder must instead return
+`kind="candidate_files"` and content exactly
+`{"format":"python_tree","entrypoint":"solution.py","files":[{"path":"solution.py","mode":"0644","content":"..."}, ...]}`.
+Files must be name-sorted, unique and form the complete snapshot. The sole core
+Source codec checks finite paths, UTF-8, modes, count and size. Missing files
+are deleted in the next snapshot; an absolute/model-selected host path is never
+accepted. `RoleOutput.candidate_files` returns the verified `FileBytes` map.
+The frozen assignment and original runtime intent bind the required format;
+a tree cannot silently become a `candidate_source` string.
+
+Tree input delivers every file with exact path, mode, digest, text, entrypoint
+and original Source Ref. Single-file input preserves `current_source` and its
+string output interface. Implement delivery includes Task workload/environment.
+Pure-Schema FA4 requests start with no Source; baseline metadata does not grant
+its contents, and explicit baseline delivery in `schema_rebuild` is rejected.
+
+Allowed pairs are coder/candidate_source (string), coder/candidate_files (the
+fixed tree object), planner/writing_draft
 (JSON object), and reviewer/review (JSON object). `status="blocked"` requires
 null content and a nonempty reason. Unknown outer fields, wrong role/assignment,
 and runtime/model/permission metadata forged into the envelope are rejected.

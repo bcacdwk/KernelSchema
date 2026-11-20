@@ -15,11 +15,10 @@ import tempfile
 from uuid import uuid4
 
 from .. import fidelity
-from ..artifacts import Publication, _rename_new, durable_mkdir, fsync_directory, install_source, read_regular
+from ..artifacts import Publication, _rename_new, durable_mkdir, fsync_directory, install_source, read_regular, verify_source_directory
 from ..budget import BudgetDenied, OwnerAccount, cost
 from ..contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256, limits as validate_limits
-from ..evaluation import RowSoftmaxTask, stage
-from ..evaluation.task import verify_stage
+from ..evaluation.dispatch import task_adapter, stage, verify_stage
 from ..runtime import AdmissionDenied, ClaudeProfile, ClaudeRuntime, RoleDelivery
 
 VERSION = "reference.v1"
@@ -69,7 +68,7 @@ class ReferenceBackend:
 
     def capabilities(self, profile):
         return {"protocols": [PROTOCOL], "operations": ["implement"], "modes": ["code", "verify_only"],
-                "source_formats": ["single_file"], "empty_start": True,
+                "source_formats": ["single_file", "python_tree"], "empty_start": True,
                 "recovery": ["local-original-operation-settlement", "new-session-from-explicit-source"],
                 "token_enforcement": "unsupported", "extensions": []}
 
@@ -79,6 +78,8 @@ class ReferenceBackend:
         return {"backend": "reference", "version": VERSION, "runtime": runtime.identity(), "evaluation": evaluator_hash,
                 "implementation": {name: sha256(path.read_bytes()) for name, path in (
                     ("reference.py", Path(__file__)), ("fidelity.py", Path(fidelity.__file__)),
+                    ("task-dispatch.py", Path(__file__).parents[1] / "evaluation/dispatch.py"),
+                    ("fa4.py", Path(__file__).parents[1] / "evaluation/fa4.py"),
                     ("budget.py", Path(__file__).parents[1] / "budget.py"), ("method", fidelity.METHOD_PATH))}}
 
     def _account(self, context, *, create=False):
@@ -115,7 +116,7 @@ class ReferenceBackend:
             raise ProtocolError("reference state version mismatch")
         for source in (state["latest"], state["qualified"]):
             if source:
-                context.bundle.source(source)
+                context.bundle.source_files(source)
         records = account.operations(context.run_id)
         declared = {op["id"] for op in state["operations"]}
         if not set(records) <= declared:
@@ -138,8 +139,9 @@ class ReferenceBackend:
             raise ProtocolError("cannot recreate lost loop state after an operation")
         seed = context.request["seed"] or context.objects["task"]["starter_source"]
         if seed is not None:
-            data = context.bundle.source(seed)
-            if context.request["mode"] == "verify_only" and not data:
+            data = context.bundle.source_files(seed)
+            entrypoint = context.bundle.document(seed, "source")["entrypoint"]
+            if context.request["mode"] == "verify_only" and not data[entrypoint].data:
                 raise ProtocolError("verify_only seed must be nonempty")
         state = {"version": VERSION, "phase": "seed_intent", "seed": seed, "latest": None, "qualified": None,
                  "assessments": [], "operations": [], "current": None, "feedback": [], "episode": 0,
@@ -154,9 +156,10 @@ class ReferenceBackend:
             path = context.root / ".runtime/reference/seed"
             if path.exists():
                 # Only the original pre-admission installation is idempotent.
-                data, mode = read_regular(path, "kernel.py")
-                if data != context.bundle.source(state["seed"]) or mode != 0o644:
-                    raise ProtocolError("seed ready installation changed; never overwrite a changed draft")
+                try:
+                    verify_source_directory(context.bundle, state["seed"], path)
+                except ProtocolError as error:
+                    raise ProtocolError("seed ready installation changed; never overwrite a changed draft") from error
             else:
                 install_source(context.bundle, state["seed"], path)
             state["latest"] = state["seed"]
@@ -167,7 +170,8 @@ class ReferenceBackend:
     def _assessment(self, state, source, context):
         found = next((a for a in state["assessments"] if a["source_sha256"] == source["sha256"]), None)
         if found is None:
-            found = {"source_sha256": source["sha256"], "task_uncovered": [], "performance_goal": "unknown",
+            uncovered = sorted(set(task_adapter(context.bundle, context.request["task"]).partitions) - set(context.objects["scope"]["coverage_ids"]))
+            found = {"source_sha256": source["sha256"], "task_uncovered": uncovered, "performance_goal": "unknown",
                      **{k: _check() for k in ("coverage", "build", "correctness", "fidelity", "performance")}}
             state["assessments"].append(found)
         return found
@@ -189,12 +193,14 @@ class ReferenceBackend:
             verify_stage(staged)
             if manifest["source"] != op["source"] or manifest["task"] != context.request["task"]:
                 raise ProtocolError("original stage subject changed")
+            if "schema" in manifest and any(manifest[k] != context.request[k] for k in ("schema", "scope")):
+                raise ProtocolError("original FA4 stage Schema/scope changed")
             return staged
         durable_mkdir(root.parent)
         temporary = Path(tempfile.mkdtemp(prefix=".preparing-", dir=root.parent))
         temporary.rmdir()
         try:
-            staged = stage(context.bundle, context.request["task"], op["source"], temporary, scope=context.request["scope"])
+            staged = stage(context, op["source"], temporary)
             _rename_new(temporary, root)
             fsync_directory(root.parent)
         finally:
@@ -283,11 +289,18 @@ class ReferenceBackend:
                 state["episode"] += 1
                 if receipt.ok and receipt.output is not None:
                     try:
-                        source_bytes = receipt.output.candidate_source
-                        if not source_bytes:
-                            raise ProtocolError("empty candidate source")
                         publication = Publication(context.root, op["publication_id"])
-                        candidate = publication.put_source("candidate", source_bytes)
+                        required = context.bundle.document(context.objects["task"]["baseline_source"], "source")["format"]
+                        if required == "python_tree":
+                            files = receipt.output.candidate_files
+                            if files is None:
+                                raise ProtocolError("python_tree requires a complete typed file snapshot")
+                            candidate = publication.put_source_files("candidate", files)
+                        else:
+                            source_bytes = receipt.output.candidate_source
+                            if not source_bytes:
+                                raise ProtocolError("single_file requires complete candidate_source text")
+                            candidate = publication.put_source("candidate", source_bytes)
                         publication.commit([candidate])
                     except (ProtocolError, UnicodeError) as error:
                         state["diagnostics"].append(str(error))
@@ -340,8 +353,11 @@ class ReferenceBackend:
             os.close(fd)
 
     def _execute(self, context, *, continuing=False):
-        task = RowSoftmaxTask(context.bundle, context.request["task"])
+        task = task_adapter(context.bundle, context.request["task"])
         task.require_evaluation_scope(context.request["scope"])  # unsupported subset costs nothing
+        required_format = context.bundle.document(context.objects["task"]["baseline_source"], "source")["format"]
+        if context.objects["seed"] is not None and context.bundle.document(context.objects["seed"], "source")["format"] != required_format:
+            raise UnsupportedError("selected Task and explicit seed Source formats differ")
         scope_validation = task.validate_scope(context.request["schema"], context.request["scope"])
         fidelity.method_ref(context)
         account = self._account(context, create=not continuing)
@@ -353,11 +369,14 @@ class ReferenceBackend:
         state = self._initial(context, account)
         self._validate_state(context, account, state)
         self._seed(context, state)
+        for assessment in state["assessments"]:
+            if assessment["coverage"]["status"] == "not_run":
+                assessment["task_uncovered"] = scope_validation["task_uncovered"]
         if state["phase"] == "done":
             return self._result(context, state, account)
         channel = self._channel(context)
         if scope_validation["status"] != "pass":
-            state.update(status="blocked", recovery="new_request", stop_reason="scope/dispatch admission: " + "; ".join(scope_validation["reasons"]))
+            state.update(status="blocked", recovery="new_request", stop_reason="scope/dispatch admission: " + "; ".join(scope_validation.get("reasons", [scope_validation.get("reason", "unknown")])) )
             return self._result(context, state, account)
         if channel is None:
             state.update(status="blocked", recovery="new_request", stop_reason="no configured qualified full-Task evaluation channel")

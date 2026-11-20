@@ -81,7 +81,7 @@ def freeze_case(publication: Publication, *, checkout: str | Path) -> dict:
     baseline = publication.put_source_files("fa4/baseline", {
         path.removeprefix(SOURCE_ROOT): file for path, file in payload.items() if path.startswith(SOURCE_ROOT)})
     local = {name: put(name, _case(name)) for name in
-             ("f1-parameters.json", "materials.json", "preflight-checks.json", "licenses-and-gaps.md", "task/acceptance.md",
+             ("f1-parameters.json", "materials.json", "preflight-checks.json", "licenses-and-gaps.md", "candidate-interface.md", "task/acceptance.md",
               "task/workload.json", "task/timing.json", "task/environment.json", "evaluator/entry.py")}
     evaluator_files = [local["evaluator/entry.py"], retained[ORIGINAL + "input.py"],
                        retained[ORIGINAL + "reference.py"], retained[HARNESS]]
@@ -89,8 +89,8 @@ def freeze_case(publication: Publication, *, checkout: str | Path) -> dict:
         "protocol": PROTOCOL, "kind": "evaluator", "version": VERSION,
         "entrypoint": local["evaluator/entry.py"], "files": sorted(evaluator_files, key=lambda r: r["path"]),
         "inputs": local["f1-parameters.json"], "timing": local["task/timing.json"],
-        "environment": local["task/environment.json"], "adapters": ["fa4-original-stack-standalone-v1"],
-        "extensions": {"information": {"qualification": "none", "transport": "manual fresh process only; no paid launcher"}}})
+        "environment": local["task/environment.json"], "adapters": ["fa4-original-stack-standalone-v1", "fa4-agate-f1-v1"],
+        "extensions": {"information": {"qualification": "none", "transport": "standalone observation or explicit qualified FA4 Agate channel; no implicit launch"}}})
     task = publication.put_json("fa4/task.json", {
         "protocol": PROTOCOL, "kind": "task", "task_id": TASK_ID,
         "contract": retained[SCHEMA_ROOT + "root.yaml"], "acceptance": local["task/acceptance.md"],
@@ -108,6 +108,8 @@ def freeze_case(publication: Publication, *, checkout: str | Path) -> dict:
     objective = put("objective.md", b"Verify the fixed original FA4 F1 only. Retain shared Contract, exact q4_direct Design and full-forward timing. No qualification is currently established.\n")
     materials = publication.put_json("fa4/workflow-materials.json", {
         "protocol": PROTOCOL, "kind": "materials", "entries": [
+            {"id": "candidate_interface", "file": local["candidate-interface.md"], "roles": ["coder", "reviewer"],
+             "origin": "KS finite F1 evaluator observation interface; no baseline implementation", "license": "No original-source license grant"},
             {"id": "k7_preflight", "file": local["preflight-checks.json"], "roles": [],
              "origin": "K7 CPU-only observations; not current execution evidence", "license": "No original-source license grant"},
             {"id": "license_gaps", "file": local["licenses-and-gaps.md"], "roles": ["coder", "planner", "reviewer"],
@@ -141,7 +143,7 @@ class FA4Task:
 
     def evaluation_capabilities(self):
         return {"scope_mode": "fixed_f1_only", "coverage_ids": [F1], "subset_only": True,
-                "task_uncovered": [REST], "source_formats": ["python_tree"], "original_source_only": True}
+                "task_uncovered": [REST], "source_formats": ["python_tree"], "original_source_only": False}
 
     def require_evaluation_scope(self, scope):
         doc = self.bundle.document(scope, "scope")
@@ -165,7 +167,7 @@ class FA4Task:
         pinned = {e["path"]: e["sha256"] for e in json.loads(_case("materials.json"))["entries"]}
         exact = (set(resolved.raw_task) == {"root", "q4_direct", "q4_cluster", "q1_global"}
                  and all(r["file"]["sha256"] == pinned.get(SCHEMA_ROOT + r["node"] + ".yaml") for r in doc["raw"])
-                 and doc["dispatch"]["sha256"] == pinned[SCHEMA_ROOT + "dispatch.md"])
+                 and doc["dispatch"] is not None and doc["dispatch"]["sha256"] == pinned[SCHEMA_ROOT + "dispatch.md"])
         bindings = selected["bindings"]
         direct = bindings == [{"coverage_ids": [F1], "node": "q4_direct", "variant": None}]
         root_binding = any(b["node"] == "root" for b in bindings)
@@ -199,9 +201,9 @@ def freeze_request(publication: Publication, case: dict, *, rules: dict, profile
                    limits: dict, intent="original_verify", source=None, parent=None):
     """Build a normal K2 request; installed backend/role capabilities still gate it.
 
-    No automatic profile expansion: current reference/K3/AKA integrations may
-    reject python_tree. Pure Schema reconstruction must not receive the baseline
-    as a role delivery; its adapter needs a separate qualified policy.
+    No automatic profile expansion: installed backend and requested profile
+    must support python_tree. Pure Schema reconstruction never grants baseline
+    contents merely because the Task carries its performance-baseline Ref.
     """
     if intent not in ("original_verify", "seed_continuation", "schema_rebuild"):
         raise UnsupportedError("unknown FA4 source provenance intent")
@@ -243,15 +245,18 @@ def stage_original(bundle: Bundle, case: dict, destination: str | Path) -> dict:
     This standalone runner is not an untrusted-candidate sandbox or an Agate
     adapter. Changed/seed-generated Sources require a qualified backend seam.
     """
-    adapter = FA4Task(bundle, case["task"])
-    coverage = adapter.validate_scope(case["schema"], case["scope"])
-    if coverage["status"] != "pass":
-        raise UnsupportedError("F1 fixed material scope not admitted")
-    source = case["source"]
-    if source != adapter.task["baseline_source"]:
-        raise UnsupportedError("standalone entry supports pinned original verification only")
-    evaluator = bundle.document(adapter.task["evaluator"], "evaluator")
-    if evaluator["version"] != VERSION or evaluator["environment"] != adapter.task["environment"]:
+    return _stage(bundle, case, destination, original_only=True)
+
+
+def stage_candidate(bundle: Bundle, case: dict, destination: str | Path) -> dict:
+    """Freeze both complete Sources; execution requires the FA4 channel boundary."""
+    return _stage(bundle, case, destination, original_only=False)
+
+
+def execution_materials(bundle, task):
+    """One trusted evaluator/baseline check, shared by admission and staging."""
+    evaluator = bundle.document(task["evaluator"], "evaluator")
+    if evaluator["version"] != VERSION or evaluator["environment"] != task["environment"]:
         raise UnsupportedError("unsupported FA4 evaluator/environment")
     inventory = {e["path"]: e for e in json.loads(_case("materials.json"))["entries"]}
     expected = {"entry.py": _case("evaluator/entry.py")}
@@ -276,15 +281,38 @@ def stage_original(bundle: Bundle, case: dict, destination: str | Path) -> dict:
         if data != _case(name):
             raise UnsupportedError("FA4 evaluator criteria differ: " + key)
         files[Path(name).name] = FileBytes(data, 0o644)
-    source_files = bundle.source_files(source)
     original_files = {p.removeprefix(SOURCE_ROOT): e for p, e in inventory.items() if p.startswith(SOURCE_ROOT)}
-    if set(source_files) != set(original_files) or any(sha256(f.data) != original_files[p]["sha256"] for p, f in source_files.items()):
+    baseline_files = bundle.source_files(task["baseline_source"])
+    if set(baseline_files) != set(original_files) or any(sha256(f.data) != original_files[p]["sha256"] for p, f in baseline_files.items()):
         raise UnsupportedError("standalone original source differs from pinned twelve-file snapshot")
+    return evaluator, files, baseline_files
+
+
+def _stage(bundle, case, destination, *, original_only):
+    adapter = FA4Task(bundle, case["task"])
+    coverage = adapter.validate_scope(case["schema"], case["scope"])
+    if coverage["status"] != "pass":
+        raise UnsupportedError("F1 fixed material scope not admitted")
+    source = case["source"]
+    if original_only and source["sha256"] != adapter.task["baseline_source"]["sha256"]:
+        raise UnsupportedError("standalone entry supports pinned original verification only")
+    evaluator, files, baseline_files = execution_materials(bundle, adapter.task)
+    if bundle.document(source, "source")["format"] != "python_tree":
+        raise UnsupportedError("FA4 requires the complete python_tree Source")
+    source_files = bundle.source_files(source)
     files.update({"source/" + name: data for name, data in source_files.items()})
+    if not original_only:
+        files.update({"baseline/" + name: data for name, data in baseline_files.items()})
+        files["_fa4_remote.py"] = FileBytes(Path(__file__).with_name("_fa4_remote.py").read_bytes(), 0o644)
+        files["_remote.py"] = FileBytes(Path(__file__).with_name("_remote.py").read_bytes(), 0o644)
     manifest = {"version": VERSION, "task": case["task"], "schema": case["schema"], "scope": case["scope"],
         "source": source, "evaluator": adapter.task["evaluator"], "inputs": evaluator["inputs"], "timing": evaluator["timing"],
         "environment": evaluator["environment"], "coverage": coverage,
         "files": {name: {"sha256": sha256(file.data), "mode": f"{file.mode:04o}", "size": len(file.data)} for name, file in files.items()}}
+    if not original_only:
+        manifest.update(baseline=adapter.task["baseline_source"], source_manifest=bundle.document(source, "source"),
+                        baseline_manifest=bundle.document(adapter.task["baseline_source"], "source"),
+                        execution_boundary="fa4-agate-f1-bwrap-v1")
     destination = Path(destination).absolute()
     durable_mkdir(destination.parent)
     temporary = Path(tempfile.mkdtemp(prefix=".ks-fa4-stage-", dir=destination.parent))
@@ -301,12 +329,35 @@ def stage_original(bundle: Bundle, case: dict, destination: str | Path) -> dict:
     return {"root": str(destination), "sha256": digest(manifest), "manifest": manifest}
 
 
+def verify_stage(staged):
+    root = Path(staged["root"])
+    data = read_regular(root, "stage.json")[0]
+    if sha256(data) != staged["sha256"] or json.loads(data) != staged["manifest"]:
+        raise ProtocolError("FA4 stage identity differs")
+    manifest = staged["manifest"]
+    expected = set(manifest["files"]) | {"stage.json"}
+    actual = set()
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise ProtocolError("FA4 stage symlink")
+        if path.is_file():
+            actual.add(path.relative_to(root).as_posix())
+    if actual != expected:
+        raise ProtocolError("FA4 stage has missing/extra files")
+    for name, facts in manifest["files"].items():
+        data, mode = read_regular(root, name)
+        if sha256(data) != facts["sha256"] or len(data) != facts["size"] or mode != int(facts["mode"], 8):
+            raise ProtocolError("FA4 staged file differs: " + name)
+    return manifest
+
+
 def freeze_observation(publication: Publication, staged: dict, *, raw: bytes, operation_id: str, usage_receipts=()):
     """Bind standalone facts to immutable C/Task/evaluator/inputs/timing.
 
     Manual stdout cannot authenticate an external execution/permission boundary.
     Preserve reported booleans as evidence but never promote them to five gates.
-    A future qualified transport must provide its own validated reporting seam.
+    The FA4 channel has a separate qualified frame/subject/permission reporting
+    seam; standalone observations cannot use it to bypass channel qualification.
     """
     # The existing verifier expects sha256 strings. FA4 stage additionally binds
     # modes and sizes; verify here with the same core regular-file reader.

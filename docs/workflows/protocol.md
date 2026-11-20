@@ -13,8 +13,11 @@ relationships are implemented by
 implemented seams. No private planning document or runtime capture is needed
 to install, read or prepare the supported source checkout.
 
-The current business adapters support the fixed row-softmax Task, its entire
-coverage domain, a complete single `kernel.py`, and a finite driver. CPU tests
+The implement reference adapter supports the fixed row-softmax Task's entire
+coverage domain and complete single `kernel.py`, plus the pinned FA4 F1 scope
+and finite complete `python_tree`. The writing backends and finite driver remain
+row-softmax only. [FA4 usage](../../examples/workflows/fa4_decode/README.md) gives
+the actual API/channel preparation and qualification boundary. CPU tests
 establish engineering behavior. They do not establish real model, CUDA,
 fidelity, performance or release qualification; see
 [standalone usage](standalone.md) for commands and the current missing gates.
@@ -70,7 +73,7 @@ artifacts with their own identities.
 | Schema | Task digest, complete raw nodes including root, optional dispatch, revision, parent/change/change_report. The original Template parser determines actual inheritance and source chains. |
 | Rules | Exact rule files and tools with names, versions and source Refs. Methods/checkers stay linked to real bytes. |
 | Materials | Explicit `{id,file,roles,origin,license}` entries. Writing requires one `workflow_objective` visible to planner/reviewer. A grant does not permit changing Task/acceptance or using tools. |
-| Scope | Task coverage IDs and `{coverage_ids,node,variant}` bindings. The present evaluator supports only the full row-softmax Task; unsupported conditions/variants are not guessed. |
+| Scope | Task coverage IDs and `{coverage_ids,node,variant}` bindings. Row-softmax requires its full Task; FA4 requires the exact F1 point and keeps `task_uncovered`. Unsupported conditions/variants are not guessed. |
 | Source | `single_file` / `kernel.py`, or finite `python_tree` / `solution.py`; UTF-8, complete name-sorted file list with mode `0644`, size and digest. Bodies are beside the manifest under `files/<name>`. The [FA4 format boundary](../../examples/workflows/fa4_decode/README.md#core-source-format-and-compatibility) limits trees to 32 files / 4 MiB, flat Python packages and root text provenance. Format support does not imply business support: profile and installed backend must each advertise the actual required format. |
 | Backend profile | Explicit runtime/model/configuration/environment/native limits/capabilities; an advertised capability must also be supported by the installed backend. |
 | Evaluator | Exact entrypoint/files, input/timing/environment Refs and adapter IDs. Staging verifies the actual installed trusted evaluator and complete source. |
@@ -83,7 +86,9 @@ calls/edits/promotion; necessary evaluation/review still consumes budget.
 
 Role inputs are host-delivered, no-tools text. They include only fixed public
 assignment bytes and explicitly granted materials/Source/feedback. Evaluator
-implementation and private histories are not expanded as references. The
+files, entrypoint and inputs are private by original Ref/byte identity, including
+renamed exact copies; timing/environment descriptions remain explicitly
+deliverable. Private histories are not expanded as references. The
 explicit Task baseline Source exception and its exact byte/role boundary are
 specified in the [runtime interface](../../kernelschema/runtime/INTERFACE.md).
 Design does not receive baseline or handwritten R0 Design by default.

@@ -8,7 +8,7 @@ import yaml
 
 from kernelschema import api, template_api, writing
 from kernelschema.artifacts import Bundle, Publication, durable_write, import_bundle
-from kernelschema.budget import OwnerAccount, use_authority
+from kernelschema.budget import OwnerAccount, use_authority, cost
 from kernelschema.contracts import PROTOCOL, ProtocolError, digest, jcs, loads
 from kernelschema.runtime import ClaudeProfile, ClaudeRuntime
 from kernelschema._writing_policy import template_contract
@@ -92,7 +92,8 @@ def test_design_actual_api_freezes_independent_output_and_replays(setup_writing,
     assert not any(item["id"].startswith("schema/") for item in planner["materials"])
     assert not any(item["id"] == "current_source" for item in planner["materials"])
     assert planner["fixed_assignment"]["workflow_objective"]
-    assert "Give each row to one independent CTA" not in "\n".join(x["text"] for x in planner["materials"])
+    from kernelschema.runtime import material_text
+    assert "Give each row to one independent CTA" not in "\n".join(material_text(planner, x["id"]) for x in planner["materials"] if "host_implementation" not in x)
     for intent in api.open_run("design", out).intents():
         assert {"deadline_utc_ms", "deadline_monotonic_ns", "clock_boot_id"} <= intent["reservation"].keys()
     (out / "result.json").unlink()
@@ -327,6 +328,73 @@ def test_finish_floor_blocks_planner_without_review_budget(setup_writing, monkey
     assert api.design(continue_run=out) == result
 
 
+def set_finish_floor(setup, value):
+    f, _, _, req, _ = setup
+    p = Publication(f["root"])
+    profile = Bundle(f["root"]).document(req["backend"]["profile"])
+    profile["parameters"]["writing_finish_floor"] = value
+    req["backend"]["profile"] = p.put_json("finish-profile.json", profile)
+    ref = p.put_json("finish-request.json", req); p.commit([ref])
+    durable_write(f["root"] / "request.json", jcs(req), replace=True)
+
+
+def next_fixed_floor():
+    coder = cost(role="coder", calls=1, evaluator_jobs=1, active_ms=1000)
+    reviewer = cost(role="reviewer", calls=1, active_ms=1000)
+    return {key: coder[key] + reviewer[key] for key in coder}
+
+
+def test_writing_finish_floor_short_budget_starts_zero_calls(setup_writing, monkeypatch):
+    setup = setup_writing()
+    set_finish_floor(setup, next_fixed_floor())
+    result = run(setup, monkeypatch)
+    assert result["status"] == "partial" and not calls(setup[2])
+    assert not any(result["usage"]["calls"].values())
+    assert api.design(continue_run=setup[4]) == result
+
+
+@pytest.mark.parametrize("value", [{}, {**cost(), "coder": True}, {**cost(), "coder": 1}, {**cost(), "extra": 0}])
+def test_writing_finish_floor_rejects_malformed_vector_before_calls(setup_writing, monkeypatch, value):
+    setup = setup_writing()
+    set_finish_floor(setup, value)
+    with pytest.raises(ProtocolError, match="writing_finish_floor"):
+        run(setup, monkeypatch)
+    assert not calls(setup[2])
+
+
+def test_writing_finish_floor_survives_reviewer_on_same_parent(setup_writing, monkeypatch, tmp_path):
+    setup = setup_writing("optimize", decision="keep")
+    f, _, fake, req, out = setup
+    floor = next_fixed_floor()
+    limits = {"calls": {"planner": 1, "reviewer": 2, "coder": 1, "extract": 0}, "tokens": None,
+              "evaluator_jobs": 1, "active_ms": 180000, "model_calls": 4}
+    owner = OwnerAccount.create(tmp_path / "handoff-owner.json", owner="synthetic-handoff-owner", limits=limits)
+    p = Publication(f["root"]); parent = p.put_json("parent.json", owner.descriptor); p.commit([parent])
+    req["budget"] = {"parent": parent, "limits": limits}
+    set_finish_floor(setup, floor)
+    with use_authority(owner.path):
+        result = run(setup, monkeypatch)
+        assert api.optimize(continue_run=out) == result
+    assert result["status"] == "completed" and len(calls(fake)) == 2
+    records = owner.operations(result["run_id"])
+    reviewer = next(op for op in records.values() if op["role"] == "reviewer")
+    planner = next(op for op in records.values() if op["role"] == "planner")
+    assert reviewer["floor"] == floor
+    minimum_review = cost(role="reviewer", calls=1, active_ms=1000)
+    assert planner["floor"] == {key: floor[key] + minimum_review[key] for key in floor}
+    assert result["usage"]["calls"] == {"planner": 1, "reviewer": 1, "coder": 0, "extract": 0}
+    # The same owner can still admit the next fixed coder while reserving its
+    # evaluator/reviewer. No holding operation was inserted into writing state.
+    owner.register("next_fixed", "sha256:" + "c" * 64,
+        {"calls": {"planner":0,"coder":1,"reviewer":1,"extract":0}, "tokens":None,"evaluator_jobs":1,"active_ms":60000},
+        root=str(tmp_path / "next-fixed"))
+    reservation = owner.reserve("next_fixed", "next_coder", role="coder", purpose="synthetic next fixed work",
+        amount=cost(role="coder", calls=1), floor=cost(role="reviewer", calls=1, evaluator_jobs=1, active_ms=1000))
+    assert reservation["account_id"] == owner.descriptor["id"]
+    owner.release_unstarted("next_coder")
+    assert len(owner.operations(result["run_id"])) == 2
+
+
 def test_same_parent_across_new_q_never_resets_budget(setup_writing, monkeypatch, tmp_path):
     setup = setup_writing("optimize", decision="keep")
     f, backend, fake, req, out = setup
@@ -422,7 +490,8 @@ def test_complete_public_task_environment_and_workload_delivered(setup_writing, 
     f = setup[0]
     task = Bundle(f["root"]).document(f["task"])
     for delivery in calls(setup[2]):
-        items = {x["id"]: x["text"] for x in delivery["materials"]}
+        from kernelschema.runtime import material_text
+        items = {x["id"]: material_text(delivery, x["id"]) for x in delivery["materials"] if "host_implementation" not in x}
         for key in ("environment", "workload"):
             assert items["delivery/task_" + key] == Bundle(f["root"]).read(task[key]).decode()
         assert not any("evaluator/golden.py" in x["id"] for x in delivery["materials"])

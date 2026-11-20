@@ -74,7 +74,7 @@ CPU 通过既有 Template `effective_document("q4_direct")` 验证：读取视�
 
 保留 `root.yaml:68–93` 的 L20D/SM103、CuTe DSL 4.6.1、torch 2.9.0+cu130、cuda-python 13.1.1。原 requirements 仅钉 `nvidia-cutlass-dsl==4.6.1`，torch 为 `>=2.9`、cuda-python 未钉；TVM FFI 版本、Python、实际驱动/编译器、设备身份与精度开关未形成当前合格 profile。硬件 Wiki 多项仍是 `@pending`。旧 production metadata 的 torch 2.11 开发版和 roofline 的 B300/SM100 标签属于别的记录，不能补作该原栈版本。H20/Triton 首题资格不能代签 CuTe/实际 SM103。
 
-`solution.py` 必须与 `qoder_greenfield_decode_attention/` 同目录；六个 Python 文件都在清单。即使 direct 不启动 global combine，paged 模块仍导入 `gqa_decode.py` 中符号，不能只取入口或一个 kernel 文件。K8 的有限 `python_tree` codec、完整冻结/装载/导入、原子安装/替换及删除语义已通过 CPU 测试；[实际格式边界](../../../examples/workflows/fa4_decode/README.md) 保留全量 bytes/mode/size，少包不会退回旧文件补齐。AKA/K3 多文件输出、候选隔离、完整执行来源映射仍需补接，未扩大既有 backend 支持声明。
+`solution.py` 必须与 `qoder_greenfield_decode_attention/` 同目录；六个 Python 文件都在原清单。即使 direct 不启动 global combine，paged 模块仍导入 `gqa_decode.py` 中符号，不能只取入口或一个 kernel 文件。有限 `python_tree` codec、完整冻结/装载/导入、原子安装/替换及删除语义已通过 CPU 测试；[实际格式与 reference 入口](../../../examples/workflows/fa4_decode/README.md) 已连接 K3 typed 全文件输出、reference implement/verify、多文件 fidelity 和 FA4 Agate 原作业通道。AKA 仍需自身兼容接线；原栈/只读/CUDA/完整输出/独立 reviewer 的真实资格仍未取得，不由 CPU 工程代签。
 
 `operator.py:474–583,652–843` 区分首次调用和 cache hit。冷路径先执行正常 fmha，再可能克隆 out、经 FFI 重放、设备同步并探测误差；失败/异常可恢复 out。`delta/denominator`（分母≤`1e-6` 时取 delta）≤`1e-2` 只是 launcher 探测门，绝非 Task 的 `0.06/0.04` 容差。记录冷启动/准备事实后，只有满足 native 条件的完整 `Model.forward` 和完成边界才可量声明的稳态。原性能 README 第 44–49 行明确 kernel-sum 排除 host。
 

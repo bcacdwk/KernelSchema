@@ -6,6 +6,7 @@ overall fidelity. Unknown applicable semantics are never silently passed.
 from __future__ import annotations
 
 import ast
+from decimal import Decimal
 from pathlib import Path
 import re
 
@@ -39,6 +40,16 @@ def _text(value):
     return value if isinstance(value, str) else jcs(value).decode()
 
 
+def _wire(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _wire(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_wire(v) for v in value]
+    return value
+
+
 def obligations(context):
     """Enumerate selected current design sections; retain unrecognized semantics."""
     schema = context.objects["schema"]
@@ -46,6 +57,7 @@ def obligations(context):
     output = []
 
     def add(node, path, value, category):
+        value = _wire(value)
         if value in (None, {}, []):
             return
         location = node + "::" + path
@@ -55,7 +67,12 @@ def obligations(context):
     for node in sorted({b["node"] for b in context.objects["scope"]["bindings"]}):
         doc = resolved.effective_document(node)
         contract = doc.get("CONTRACT", {})
-        add(node, "CONTRACT.Algorithm_requirement", contract.get("Algorithm_requirement"), "math-and-abi")
+        from .evaluation.fa4 import TASK_ID
+        fa4 = context.objects["task"]["task_id"] == TASK_ID
+        if fa4:
+            add(node, "CONTRACT", contract, "math-and-abi")
+        else:
+            add(node, "CONTRACT.Algorithm_requirement", contract.get("Algorithm_requirement"), "math-and-abi")
         design = doc.get("DESIGN", {})
         for key, value in design.items():
             category = {"Math_reshape": "math-and-precision", "Work_schedule": "ownership-and-dispatch",
@@ -73,6 +90,16 @@ def obligations(context):
         dispatch = doc.get("META_DATA", {}).get("Dispatch")
         if dispatch:
             add(node, "META_DATA.Dispatch", dispatch, "dispatch")
+        if fa4:
+            for name, obligation in {
+                "empty_parity": "N1: establish initialization and valid readback of every empty parity slot, including slots not advanced by a second iteration.",
+                "tma_tail": "Establish TMA padded page and page-tail accesses for L64 with bk256; no invalid pointer or stale masked data use.",
+                "tmem": "Establish TMEM allocation, fences, accumulator ownership, completion, return and deallocation lifetimes.",
+                "output_staging": "Establish output staging lifetime and complete writes to original out storage before full-forward completion.",
+                "runtime_when": "Establish native launcher, same six objects/signature/thread/device and noncapture before and after each steady full forward; cold/probe is separate.",
+            }.items():
+                location = "META_DATA.Dispatch.when" if name == "runtime_when" else "DESIGN.Math_reshape.Rewrite[2]" if name == "empty_parity" else "DESIGN.Tile_pipeline"
+                add(node, location, obligation, "memory-and-lifetime")
     if not output:
         raise ProtocolError("current Schema has no interpretable design obligations")
     return output
@@ -80,6 +107,7 @@ def obligations(context):
 
 def review_input(context, source, scope_validation):
     return {"method": method_ref(context), "source_sha256": source["sha256"],
+            "source_files": context.bundle.document(source, "source")["files"],
             "obligations": obligations(context), "coverage": scope_validation["mappings"],
             "task_uncovered": scope_validation["task_uncovered"]}
 
@@ -89,7 +117,7 @@ def _aggregate(statuses):
     return "fail" if "fail" in values else "unknown" if not values or any(v != "pass" for v in values) else "pass"
 
 
-def _located(item, lines):
+def _located(item, files):
     locations = item.get("source_locations", [])
     if not isinstance(locations, list) or not locations:
         return False
@@ -97,10 +125,13 @@ def _located(item, lines):
     if not isinstance(evidence, list):
         return False
     for loc in locations:
-        match = re.fullmatch(r"kernel\.py:L([1-9][0-9]*)(?:-L([1-9][0-9]*))?", loc) if isinstance(loc, str) else None
+        match = re.fullmatch(r"([^:]+\.py):L([1-9][0-9]*)(?:-L([1-9][0-9]*))?", loc) if isinstance(loc, str) else None
         if not match:
             return False
-        first, last = int(match[1]), int(match[2] or match[1])
+        if match[1] not in files:
+            return False
+        lines = files[match[1]]
+        first, last = int(match[2]), int(match[3] or match[2])
         if not 1 <= first <= last <= len(lines):
             return False
         quote = "\n".join(lines[first - 1:last])
@@ -109,7 +140,7 @@ def _located(item, lines):
     return True
 
 
-def _machine(obligation, code):
+def _machine(obligation, code, filename="kernel.py"):
     """Only direct, explicit forbidden constructs, not an approximate prover."""
     try:
         tree = ast.parse(code)
@@ -126,10 +157,10 @@ def _machine(obligation, code):
     for node in calls:
         name = ast.unparse(node.func)
         if obligation["category"] == "forbid" and "torch.softmax" in text and name == "torch.softmax":
-            return {"status": "fail", "source_locations": [f"kernel.py:L{node.lineno}-L{node.end_lineno}"],
+            return {"status": "fail", "source_locations": [f"{filename}:L{node.lineno}-L{node.end_lineno}"],
                     "reason": "Direct call to torch.softmax violates this current Forbid; no numerical failure is inferred."}
         if "without fp16 or bf16" in text and name.endswith(".to") and any(ast.unparse(a) in ("tl.float16", "tl.bfloat16", "torch.float16", "torch.bfloat16") for a in node.args):
-            return {"status": "fail", "source_locations": [f"kernel.py:L{node.lineno}-L{node.end_lineno}"],
+            return {"status": "fail", "source_locations": [f"{filename}:L{node.lineno}-L{node.end_lineno}"],
                     "reason": "Explicit low-precision conversion contradicts this current precision obligation."}
     return None
 
@@ -137,8 +168,8 @@ def _machine(obligation, code):
 def report(context, *, source, operation_id, scope_validation, receipt, publication: Publication):
     """Publish a report even when the reviewer failed; original fees remain."""
     spec = method_ref(context)
-    code = context.bundle.source(source).decode("utf-8")
-    lines = code.splitlines()
+    files = {name: file.data.decode("utf-8") for name, file in context.bundle.source_files(source).items() if name.endswith(".py")}
+    lines = {name: code.splitlines() for name, code in files.items()}
     inventory = obligations(context)
     content = receipt.output.content if receipt.ok and receipt.output is not None else None
     valid = isinstance(content, dict) and set(content) == {"items", "coverage"} and isinstance(content["items"], list) and isinstance(content["coverage"], list)
@@ -159,7 +190,8 @@ def report(context, *, source, operation_id, scope_validation, receipt, publicat
         result = {k: obligation[k] for k in ("id", "obligation", "schema_locations")}
         result.update(status=status if accepted else "unknown", source_locations=answer["source_locations"] if accepted else [],
                       reason=answer["reason"] if accepted else "Independent review missing, unlocated, inconsistent or method cannot interpret the applicable obligation.")
-        machine = _machine(obligation, code)
+        # The narrow row checker cannot determine reachability across a tree.
+        machine = _machine(obligation, files["kernel.py"]) if set(files) == {"kernel.py"} else None
         if machine:
             result.update(machine)
         items.append(result)
@@ -173,6 +205,14 @@ def report(context, *, source, operation_id, scope_validation, receipt, publicat
                          "source_locations": answer["source_locations"] if accepted else []})
     facts = receipt.facts
     models = facts.get("reported_models", [])
+    located_quotes = []
+    for item in items:
+        evidence = []
+        for loc in item["source_locations"]:
+            name, positions = loc.split(":L", 1)
+            first, _, last = positions.partition("-L")
+            evidence.append({"location": loc, "quote": "\n".join(lines[name][int(first)-1:int(last or first)])})
+        located_quotes.append({"id": item["id"], "evidence": evidence})
     value = {"protocol": PROTOCOL, "kind": "fidelity", "operation_id": operation_id,
              "subject": {"request_sha256": context.request_sha256, **{k + "_sha256": context.request[k]["sha256"] for k in ("task", "schema", "rules", "scope")}, "source_sha256": source["sha256"]},
              "method": {"spec": spec, "reviewer": {"runtime": facts.get("runtime", "unknown"),
@@ -184,7 +224,9 @@ def report(context, *, source, operation_id, scope_validation, receipt, publicat
              "fidelity": {"status": _aggregate(i["status"] for i in items), "items": items},
              "limitations": ["Finite current-Schema review, not full-domain equivalence or memory-safety proof.",
                              "Execution, numerical correctness, performance and transport qualification remain separate."],
-             "evidence": [context.request_ref, source, *receipt.evidence_refs()], "usage_receipts": [receipt.receipt] if receipt.receipt else []}
+             "evidence": [context.request_ref, source, *receipt.evidence_refs()], "usage_receipts": [receipt.receipt] if receipt.receipt else [],
+             "extensions": {"information": {"located_quotes": located_quotes,
+                 "scope_limitations": scope_validation.get("limitations", [])}}}
     reference = publication.put_json("fidelity.json", validate(value))
     publication.commit([reference], subjects=[context.request_ref, source])
     return reference, value

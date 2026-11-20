@@ -23,9 +23,9 @@ from typing import Callable, Literal
 from uuid import uuid4
 
 from ..api import RunContext
-from ..artifacts import Publication, durable_mkdir, durable_write, fsync_directory, read_regular
+from ..artifacts import FileBytes, Publication, durable_mkdir, durable_write, fsync_directory, read_regular, source_files_manifest
 from ..contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256, validate
-from ..materials import for_role, validate_request
+from ..materials import for_role, validate_request, private_evaluator_hashes, public_baseline_payload
 from ._local import (DeadlineExpired, freeze_launch_deadlines, immutable, locked,
                      process_alive, read_json, validate_deadlines)
 
@@ -43,7 +43,12 @@ usage, execution results, evidence, or verification. Return one JSON object,
 without Markdown fences, with exactly protocol, role, assignment_sha256, status,
 kind, content, reason. protocol is ks.claude.output.v1. Copy role and
 assignment_sha256 from the input. status is ok or blocked. For coder, kind is
-candidate_source and content is the complete UTF-8 kernel.py string. For planner,
+candidate_source for single_file and content is the complete UTF-8 kernel.py
+string. When fixed_assignment.source_format is python_tree, kind is
+candidate_files and content is exactly {format: "python_tree", entrypoint:
+"solution.py", files: [{path: "solution.py", mode: "0644", content: "..."}, ...]}.
+The name-sorted files are the complete snapshot; omissions delete old files.
+Only the finite Source paths are permitted, never host paths. For planner,
 kind is writing_draft and content is a JSON object containing the proposed
 writing output. For reviewer, kind is review and content is a JSON object
 containing the review, with uncertainty explicit. A blocked output has null
@@ -51,6 +56,10 @@ content and a nonempty reason. Drafts and reviews are untrusted proposals; the
 host validates and publishes them. Never put host file paths in place of file
 contents. No prior conversation, hidden file or prior best source is available;
 use the exact current_source supplied, when present.
+Material entries with text_alias_of share the exact text of that ID in this
+same materials array; resolve the alias and retain each entry's own id/ref and
+authority. host_implementation entries bind tool identity only: their bodies
+remain with the host and are not model instructions. No text is truncated.
 """
 
 
@@ -135,7 +144,7 @@ class ClaudeProfile:
         # These are model primitive capabilities. A business backend must narrow
         # them to the workflow operations it actually implements/qualifies.
         return {"protocols": [PROTOCOL], "operations": ["design", "optimize", "implement"],
-                "modes": ["code", "verify_only"], "source_formats": ["single_file"],
+                "modes": ["code", "verify_only"], "source_formats": ["single_file", "python_tree"],
                 "empty_start": True, "recovery": ["local-original-operation-settlement", "new-session-from-explicit-source"],
                 "token_enforcement": "unsupported", "extensions": []}
 
@@ -178,6 +187,68 @@ def _text(data: bytes) -> str:
     except UnicodeError as error: raise ProtocolError("model materials must be UTF-8 text") from error
 
 
+def _host_rule_sources(bundle, rules):
+    """Only declared tool sources and verified shipped Template dependencies.
+
+    Unknown rule bodies remain semantic input, including arbitrary .py files.
+    This does not affect explicitly granted Materials/RoleDelivery code.
+    """
+    selected = {}
+    for tool in rules["tools"]:
+        selected[tool["source"]["path"]] = {k: tool[k] for k in ("name", "version", "source")}
+        if tool["name"] != "template" or tool["version"] != tool["source"]["sha256"]:
+            continue
+        from ..resources import resource
+        entry = resource("schema_template/tools/schema.py")
+        if bundle.read(tool["source"]) != entry.read_bytes():
+            continue
+        known = {"/rules/schema_template/tools/" + path.relative_to(entry.parent).as_posix(): path.read_bytes()
+                 for path in entry.parent.rglob("*.py") if "tests" not in path.relative_to(entry.parent).parts}
+        for ref in rules["files"]:
+            match = next((raw for suffix, raw in known.items() if ref["path"].endswith(suffix)), None)
+            if match is not None and bundle.read(ref) == match:
+                selected[ref["path"]] = {k: tool[k] for k in ("name", "version", "source")}
+    return selected
+
+
+def material_text(payload, identifier):
+    """Resolve one authorized body/alias; no file IO or cross-payload lookup."""
+    items = payload["materials"] if isinstance(payload, dict) else payload
+    indexed = {item["id"]: item for item in items}
+    if len(indexed) != len(items) or identifier not in indexed:
+        raise ProtocolError("duplicate or missing material ID")
+    item = indexed[identifier]
+    if "text_alias_of" in item:
+        original = indexed.get(item["text_alias_of"])
+        if original is None or "text" not in original or "text_alias_of" in original or original["sha256"] != item["sha256"]:
+            raise ProtocolError("invalid material text alias")
+    else:
+        original = item
+    if "text" not in original or sha256(original["text"].encode("utf-8")) != item["sha256"]:
+        raise ProtocolError("material has no matching delivered body")
+    return original["text"]
+
+
+def _compact_materials(items):
+    """Permissions/bytes were checked for each item before this projection."""
+    canonical = {}
+    # Preserve the original single_file current_source interface even when an
+    # earlier authorized reference has the exact same bytes.
+    for item in sorted(items, key=lambda i: i["id"] != "current_source"):
+        if "text" in item and "host_implementation" not in item:
+            canonical.setdefault((item["sha256"], item["text"]), item["id"])
+    result = []
+    for item in items:
+        out = dict(item)
+        if "host_implementation" in out:
+            out.pop("text")
+        elif canonical[(item["sha256"], item["text"])] != item["id"]:
+            out["text_alias_of"] = canonical[(item["sha256"], item["text"])]
+            out.pop("text")
+        result.append(out)
+    return result
+
+
 def prepare_role_input(context: RunContext, role: str, *, source: dict | None = None,
                        source_roles: tuple[str, ...] = ("coder", "reviewer"),
                        deliveries: tuple[RoleDelivery, ...] = ()) -> dict:
@@ -195,43 +266,61 @@ def prepare_role_input(context: RunContext, role: str, *, source: dict | None = 
     objects = validate_request(bundle, context.request)
     if objects != context.objects: raise ProtocolError("fixed role objects changed")
     task = objects["task"]
-    private = {f["sha256"] for f in objects["evaluator"]["files"]}
+    private = private_evaluator_hashes(objects["evaluator"])
     items: list[dict] = []
 
-    def add(identifier: str, data: bytes, reference: dict | None, category: str, *, selected_source=False):
+    def add(identifier: str, data: bytes, reference: dict | None, category: str, *, selected_source=False, source_path=None):
         if sha256(data) in private or (reference and reference["sha256"] in private):
             # The public Task baseline can also be an evaluator component. Only
             # an explicitly granted, canonical copy of that Source may cross
             # this boundary; ordinary material/text and other evaluator code
             # remain private. Ref paths may differ after a legitimate import.
-            baseline = task["baseline_source"]
-            if not (selected_source and reference and reference["sha256"] == baseline["sha256"]
-                    and data == bundle.source(baseline)):
+            if not (selected_source and public_baseline_payload(bundle, task, objects["evaluator"], reference, source_path, data)):
                 raise ProtocolError("private evaluator bytes cannot enter a role scope")
         if any(item["id"] == identifier for item in items): raise ProtocolError("duplicate role input ID")
-        items.append({"id": identifier, "category": category, "sha256": sha256(data), "text": _text(data)})
+        items.append({"id": identifier, "category": category, "authority": category, "ref": reference,
+                      "sha256": sha256(data), "size": len(data), "text": _text(data)})
 
-    for key in ("contract", "acceptance"):
+    def add_source(identifier, reference):
+        if (context.request.get("extensions", {}).get("information", {}).get("source_intent") == "schema_rebuild"
+                and reference["sha256"] == task["baseline_source"]["sha256"]):
+            raise ProtocolError("schema_rebuild cannot deliver optimized baseline Source")
+        manifest = bundle.document(reference, "source")
+        files = bundle.source_files(reference)
+        for name, file in files.items():
+            item_id = identifier if manifest["format"] == "single_file" else identifier + "/" + name
+            add(item_id, file.data, reference, "source", selected_source=True, source_path=name)
+            if manifest["format"] == "python_tree":
+                items[-1].update(path=name, mode=f"{file.mode:04o}", source=reference,
+                                 format=manifest["format"], entrypoint=manifest["entrypoint"])
+
+    for key in ("contract", "acceptance", "workload", "environment"):
         add("task/" + key, bundle.read(task[key]), task[key], "assignment")
+    host_sources = _host_rule_sources(bundle, objects["rules"])
     for index, reference in enumerate(objects["rules"]["files"]):
         add(f"rules/{index}", bundle.read(reference), reference, "rules")
+        if reference["path"] in host_sources:
+            items[-1]["host_implementation"] = host_sources[reference["path"]]
     if "schema" in objects:
         for raw in objects["schema"]["raw"]:
             add("schema/" + raw["node"], bundle.read(raw["file"]), raw["file"], "assignment")
         dispatch = objects["schema"]["dispatch"]
         if dispatch: add("schema/dispatch", bundle.read(dispatch), dispatch, "assignment")
     for identifier, data in for_role(bundle, objects["materials"], role).items():
-        ref = next(e["file"] for e in objects["materials"]["entries"] if e["id"] == identifier)
-        add("material/" + identifier, data, ref, "role_material")
+        entry = next(e for e in objects["materials"]["entries"] if e["id"] == identifier)
+        add("material/" + identifier, data, entry["file"], "role_material")
+        items[-1]["roles"] = entry["roles"]
     if source is not None:
-        data = bundle.source(source)  # verify original complete C even if not delivered to this role
-        if role in source_roles: add("current_source", data, source, "source", selected_source=True)
+        bundle.source_files(source)  # complete C even if not delivered to this role
+        if role in source_roles: add_source("current_source", source)
     for delivery in deliveries:
         if not delivery.id or delivery.kind not in ("text", "source") or any(r not in ROLES for r in delivery.roles):
             raise ProtocolError("invalid role delivery")
         if role not in delivery.roles: continue
-        data = bundle.source(delivery.file) if delivery.kind == "source" else bundle.read(delivery.file)
-        add("delivery/" + delivery.id, data, delivery.file, delivery.kind, selected_source=delivery.kind == "source")
+        if delivery.kind == "source":
+            add_source("delivery/" + delivery.id, delivery.file)
+        else:
+            add("delivery/" + delivery.id, bundle.read(delivery.file), delivery.file, delivery.kind)
     operation = context.request["operation"]
     objective = next((item for item in items if item["id"] == "material/workflow_objective"), None)
     authority = {"candidate_source": role == "coder", "schema_proposal": role == "planner" and operation in ("design", "optimize"),
@@ -251,10 +340,12 @@ def prepare_role_input(context: RunContext, role: str, *, source: dict | None = 
              "role_authority": authority, "instruction": instruction,
              "workflow_objective": {"text":objective["text"], "sha256":objective["sha256"],
                  "authority":"Current-task instruction within the fixed Task/coverage/hard acceptance. It cannot grant tools, change Task or relax acceptance."} if objective else None}
+    if operation == "implement":
+        fixed["source_format"] = bundle.document(task["baseline_source"], "source")["format"]
     # `protocol` at a publication root is reserved for core ks.workflow.v1.
     return {"format": "ks.claude.input.v1", "role": role, "fixed_assignment": fixed,
             "assignment_sha256": digest(fixed), "source_sha256": source["sha256"] if source else None,
-            "materials": items, "output_protocol": OUTPUT_PROTOCOL}
+            "materials": _compact_materials(items), "output_protocol": OUTPUT_PROTOCOL}
 
 
 @dataclass(frozen=True)
@@ -270,27 +361,59 @@ class RoleOutput:
     def candidate_source(self) -> bytes | None:
         return self.content.encode("utf-8") if self.kind == "candidate_source" and isinstance(self.content, str) else None
 
+    @property
+    def candidate_files(self) -> dict[str, FileBytes] | None:
+        if self.kind != "candidate_files":
+            return None
+        value = self.content
+        if (not isinstance(value, dict) or set(value) != {"format", "entrypoint", "files"}
+                or value["format"] != "python_tree" or value["entrypoint"] != "solution.py"
+                or not isinstance(value["files"], list)):
+            raise ProtocolError("candidate_files needs the complete python_tree snapshot")
+        files = {}
+        names = []
+        for item in value["files"]:
+            if (not isinstance(item, dict) or set(item) != {"path", "mode", "content"}
+                    or not isinstance(item["path"], str) or item["mode"] != "0644"
+                    or not isinstance(item["content"], str)):
+                raise ProtocolError("candidate file needs path/mode/content")
+            names.append(item["path"])
+            try:
+                data = item["content"].encode("utf-8")
+            except UnicodeError as error:
+                raise ProtocolError("candidate files must contain valid UTF-8") from error
+            files[item["path"]] = FileBytes(data, 0o644)
+        if names != sorted(set(names)):
+            raise ProtocolError("candidate files must be name-sorted and unique")
+        source_files_manifest(files)  # sole core path/encoding/count/size validator
+        return files
+
     @classmethod
-    def parse(cls, value, *, role: str, assignment_sha256: str):
+    def parse(cls, value, *, role: str, assignment_sha256: str, source_format="single_file"):
+        if source_format not in ("single_file", "python_tree"):
+            raise UnsupportedError("unsupported role Source format")
         if isinstance(value, str): value = loads(value)
         required = {"protocol", "role", "assignment_sha256", "status", "kind", "content", "reason"}
         if not isinstance(value, dict) or set(value) != required:
             raise ProtocolError("model output fields do not match the role protocol")
-        kind = {"coder": "candidate_source", "planner": "writing_draft", "reviewer": "review"}[role]
+        kind = {"coder": "candidate_files" if source_format == "python_tree" else "candidate_source", "planner": "writing_draft", "reviewer": "review"}[role]
         if (value["protocol"], value["role"], value["assignment_sha256"], value["kind"]) != (OUTPUT_PROTOCOL, role, assignment_sha256, kind):
             raise ProtocolError("model output belongs to another role/assignment")
         if value["status"] not in ("ok", "blocked") or not isinstance(value["reason"], str):
             raise ProtocolError("invalid model status/reason")
         if value["status"] == "blocked":
             if value["content"] is not None or not value["reason"]: raise ProtocolError("blocked output needs null content and a reason")
-        elif role == "coder":
+        elif role == "coder" and source_format == "single_file":
             if not isinstance(value["content"], str) or not value["content"] or "\x00" in value["content"]:
                 raise ProtocolError("coder must return complete source text")
         elif not isinstance(value["content"], dict):
             raise ProtocolError("writing/review content must be a JSON object")
         # No fields in content are treated as host paths, model identity, checks,
         # fees, permissions or receipts by this runtime.
-        return cls(**{k: value[k] for k in required - {"protocol"}})
+        output = cls(**{k: value[k] for k in required - {"protocol"}})
+        if role == "coder" and source_format == "python_tree" and output.status == "ok":
+            output.candidate_files
+        return output
 
 
 @dataclass(frozen=True)
@@ -414,7 +537,8 @@ def _parse(events: bytes, intent: dict, profile: ClaudeProfile) -> tuple[dict, R
         if terminal.get("permission_denials"): errors.append("permission_denied_attempt")
         try:
             output = RoleOutput.parse(terminal.get("structured_output", terminal.get("result")),
-                                     role=intent["role"], assignment_sha256=intent["assignment_sha256"])
+                                     role=intent["role"], assignment_sha256=intent["assignment_sha256"],
+                                     source_format=intent.get("source_format", "single_file"))
         except ProtocolError: errors.append("invalid_role_output")
     parsed = {"errors": sorted(set(errors)), "tokens": tokens, "total_cost_usd": cost,
               "native_rounds": turns, "physical_retries": retries, "assistant_messages": assistant_count,
@@ -442,6 +566,7 @@ class ClaudeRuntime:
 
     def identity(self) -> dict:
         files = {name: sha256(Path(__file__).with_name(name).read_bytes()) for name in ("__init__.py", "claude.py", "_local.py", "_runner.py")}
+        files["materials.py"] = sha256(Path(__file__).parents[1].joinpath("materials.py").read_bytes())
         return {"runtime": PROFILE_VERSION, "profile_sha256": digest(self.profile.as_dict()), "implementation_files": files,
                 "host": {"platform":sys.platform, "python_version":platform.python_version(), "python_executable":str(Path(sys.executable).resolve())}}
 
@@ -468,8 +593,11 @@ class ClaudeRuntime:
                     "owner": context.owner, "handle": asdict(handle), "implementation": self.identity()}
         if any(intent.get(k) != value for k, value in expected.items()):
             raise ProtocolError("original Claude operation identity/profile changed")
-        if sha256(read_regular(directory, "input.json")[0]) != handle.input_sha256:
+        input_bytes = read_regular(directory, "input.json")[0]
+        if sha256(input_bytes) != handle.input_sha256:
             raise ProtocolError("frozen role input changed")
+        if intent.get("source_format", "single_file") != loads(input_bytes)["fixed_assignment"].get("source_format", "single_file"):
+            raise ProtocolError("original role Source format changed")
         if intent["locator"]["operation_root"] != str(directory):
             raise ProtocolError("moving a private Claude runtime is unsupported")
         core = [i for i in context.intents() if i["operation_id"] == handle.operation_id]
@@ -535,6 +663,7 @@ class ClaudeRuntime:
                            "child": str(directory / "child.json"), "events": str(directory / "events.jsonl"),
                            "exit": str(directory / "exit.json"), "native_context_resume": False}
                 intent = {"run_id": context.run_id, "request_sha256": context.request_sha256, "owner": context.owner,
+                          "source_format": payload["fixed_assignment"].get("source_format", "single_file"),
                           "implementation": self.identity(), "handle": asdict(handle), **asdict(handle),
                           "role": role, "purpose": purpose, "reservation": reservation, "source": source,
                           "locator": locator, "publication_id": uuid4().hex}
