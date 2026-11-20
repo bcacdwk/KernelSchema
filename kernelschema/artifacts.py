@@ -358,8 +358,8 @@ def _relationships(documents: dict[str, dict]):
             if parent.get("kind") != "schema": raise ProtocolError("Schema.parent must refer to Schema")
             if v["change"] != "new_task" and parent["task_sha256"] != v["task_sha256"]:
                 raise ProtocolError("same-Task Schema change has a different parent Task")
-            expected = parent["design_revision"] + (v["change"] == "new_revision")
-            if v["change"] != "new_task" and v["design_revision"] != expected:
+            expected_revision = parent["design_revision"] + (v["change"] == "new_revision")
+            if v["change"] != "new_task" and v["design_revision"] != expected_revision:
                 raise ProtocolError("incorrect design_revision relative to actual parent")
         if v.get("kind") == "evaluation":
             evaluator = documents.get(v["subject"]["evaluator_sha256"])
