@@ -131,6 +131,11 @@ starting code work. The owner uses one active clock for serial requests and
 explicit finite native groups; parent waiting and child work do not double count.
 The current Claude profile cannot enforce a hard token limit and rejects finite
 token budgets before launch.
+Its per-call timeout defaults to 120 seconds and may be explicitly increased
+in a new frozen business profile. The original parent/request/reservation and
+absolute deadlines still take precedence; this never renews a failed operation
+or grants a new balance. See the [runtime deadline contract](../../kernelschema/runtime/INTERFACE.md)
+and [writing configuration](../../kernelschema/WRITING.md).
 
 Reservations are durable before launch. `authorize` checks the original JCS
 authorization, limits, pause/fences and deadlines at launch; `check_active`

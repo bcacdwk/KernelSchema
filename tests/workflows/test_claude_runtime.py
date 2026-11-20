@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timezone
 import base64
 import json
 import os
@@ -12,7 +13,8 @@ import pytest
 
 from kernelschema import api
 from kernelschema.artifacts import Bundle, Publication, durable_write, import_bundle
-from kernelschema.contracts import ProtocolError, UnsupportedError, jcs, sha256, validate
+from kernelschema.budget import BudgetDenied, OwnerAccount, cost
+from kernelschema.contracts import MAX_INTEGER, ProtocolError, UnsupportedError, digest, jcs, sha256, validate
 from kernelschema.runtime import (
     AdmissionDenied, ClaudeProfile, ClaudeRuntime, RoleDelivery, RuntimeFence, prepare_role_input,
 )
@@ -20,7 +22,8 @@ from kernelschema.runtime import (
 
 @pytest.fixture
 def runtime_setup(make_bundle, tmp_path):
-    def setup(mode="success", *, operation="implement", timeout_ms=3000, seconds=1, request_mode=None):
+    def setup(mode="success", *, operation="implement", timeout_ms=3000, seconds=1, request_mode=None,
+              request_limits=None, parent=None):
         fake_root = tmp_path / ("fake-" + mode)
         fake_root.mkdir()
         script = Path(__file__).parent / "fixtures/runtime/fake_claude.py"
@@ -33,6 +36,10 @@ def runtime_setup(make_bundle, tmp_path):
         f = make_bundle(operation, directory=tmp_path / ("bundle-" + mode))
         p = Publication(f["root"])
         request = dict(f["request"])
+        if request_limits is not None:
+            request["budget"] = {**request["budget"], "limits": request_limits}
+        if parent is not None:
+            request["budget"] = {**request["budget"], "parent": p.put_json("parent.json", parent.descriptor)}
         if request_mode is not None:
             request["mode"] = request_mode
             if request_mode == "verify_only": request["seed"] = f["starter"]
@@ -52,6 +59,30 @@ def admit(runtime, context, f, *, role="coder", operation_id="call-1"):
 def count(fake):
     path = fake / "invocations.jsonl"
     return len(path.read_text().splitlines()) if path.exists() else 0
+
+
+def test_profile_default_and_explicit_long_timeout_have_distinct_frozen_identities(runtime_setup):
+    runtime, context, f, fake = runtime_setup(timeout_ms=120000)
+    fields = runtime.profile.as_dict()
+    fields.pop("timeout_ms")
+    default = ClaudeProfile(**fields)
+    assert default.timeout_ms == 120000 and default.as_dict() == runtime.profile.as_dict()
+    long = replace(default, timeout_ms=600000)
+    assert digest(long.as_dict()) != digest(default.as_dict())
+    assert ClaudeRuntime(long).identity() != runtime.identity()
+    business = long.backend_profile(f["originals"]["task/environment.md"])
+    assert business["parameters"]["claude"]["timeout_ms"] == business["native_limits"]["timeout_ms"] == 600000
+    assert replace(default, timeout_ms=MAX_INTEGER).timeout_ms == MAX_INTEGER
+    with pytest.raises(ProtocolError, match="freeze parameters.claude"):
+        admit(ClaudeRuntime(long), context, f)
+    assert not context.intents() and count(fake) == 0
+
+
+@pytest.mark.parametrize("timeout", [True, False, 1.0, 120000.0, "600000", None, 0, -1, MAX_INTEGER + 1])
+def test_profile_timeout_rejects_nonpositive_or_unsafe_values(timeout):
+    with pytest.raises(ProtocolError, match="positive safe integer"):
+        ClaudeProfile(executable="/synthetic/claude", cli_version="synthetic", executable_sha256="sha256:" + "0" * 64,
+                      requested_model="synthetic", reported_models=("synthetic",), timeout_ms=timeout)
 
 
 def test_success_raw_usage_and_replay_after_first_result_loss(runtime_setup):
@@ -524,6 +555,88 @@ def start_deferred(saved):
     result = subprocess.run(saved["command"], cwd=saved["cwd"], env=saved["env"], stdin=subprocess.DEVNULL,
                             capture_output=True, timeout=8)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("expired_clock", ["utc", "monotonic"])
+def test_long_profile_reopen_wait_uses_original_cutoff_and_fixed_grace(runtime_setup, monkeypatch, expired_clock):
+    runtime, context, f, fake = runtime_setup(timeout_ms=600000)
+    handle = admit(runtime, context, f)  # A duration-only reservation still fixes the launch window.
+    defer_launch(runtime, context, handle, monkeypatch)
+    directory = context.root / ".runtime/claude/call-1"
+    original = (directory / "launch.json").read_bytes()
+    launch = json.loads(original)
+    assert launch["timeout_ms"] == 3000 < runtime.profile.timeout_ms
+    utc = launch["deadline_utc_ms"] * 1_000_000
+    mono = int(launch["deadline_monotonic_ns"])
+    monkeypatch.setattr(time, "time_ns", lambda: utc + (6_000_000_000 if expired_clock == "utc" else -60_000_000_000))
+    monkeypatch.setattr(time, "monotonic_ns", lambda: mono + (6_000_000_000 if expired_clock == "monotonic" else -60_000_000_000))
+    monkeypatch.setattr(time, "sleep", lambda *_: pytest.fail("expired original wait must not renew a profile window or grace"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("original operation cannot be relaunched"))
+    restored = api.open_run("implement", context.root, backend_identity=runtime.identity())
+    for _ in range(2):
+        pending = runtime.invoke(restored, runtime.reopen(restored, handle.operation_id),
+                                 authorize=lambda _: pytest.fail("original reservation cannot be authorized again"))
+        assert not pending.terminated and pending.facts["calls"] is None
+    assert (directory / "launch.json").read_bytes() == original and count(fake) == 0
+
+
+def test_maximum_profile_timeout_keeps_launch_epoch_in_protocol_range(monkeypatch):
+    from kernelschema.runtime import _local
+    monkeypatch.setattr(time, "time_ns", lambda: 1_800_000_000_000_000_000)
+    launch = _local.freeze_launch_deadlines({}, MAX_INTEGER)
+    assert launch["deadline_utc_ms"] == MAX_INTEGER
+    assert 0 < launch["timeout_ms"] < MAX_INTEGER
+    _local.validate_deadlines(launch)
+    jcs(launch)
+
+
+@pytest.mark.parametrize("tightest", ["parent_active", "request_active", "parent_deadline", "request_deadline"])
+def test_long_profile_obeys_original_owner_request_and_terminal_replay(runtime_setup, tmp_path, monkeypatch, tightest):
+    from kernelschema.runtime import _local
+    limits = {"calls": {"planner": 0, "coder": 1, "reviewer": 1, "extract": 0},
+              "model_calls": 2, "evaluator_jobs": 0, "active_ms": 10000, "tokens": None}
+    parent_limits, request_limits = dict(limits), dict(limits)
+    deadline = datetime.fromtimestamp(time.time() + 2.2, timezone.utc).isoformat().replace("+00:00", "Z")
+    if tightest == "parent_active": parent_limits["active_ms"] = 2200
+    if tightest == "request_active": request_limits["active_ms"] = 2200
+    if tightest == "request_deadline": request_limits["deadline_utc"] = deadline
+    owner = OwnerAccount.create(tmp_path / "synthetic-owner.json", owner="original-synthetic-owner", limits=parent_limits,
+                                deadline_utc=deadline if tightest == "parent_deadline" else None)
+    runtime, context, f, fake = runtime_setup("sleep", timeout_ms=600000, seconds=10,
+                                             request_limits=request_limits, parent=owner)
+    account = OwnerAccount.for_context(context, create=True, authority=owner.path)
+    floor = cost(role="reviewer", calls=1, active_ms=200)
+    reservation = account.reserve(context.run_id, "original-call", role="coder", purpose="synthetic bounded call",
+                                  amount=cost(role="coder", calls=1, active_ms=1), floor=floor)
+    assert 0 < reservation["active_ms"] <= (2000 if tightest.endswith("active") else 2200)
+    assert reservation["account_id"] == owner.descriptor["id"]
+    handle = runtime.admit(context, operation_id="original-call", role="coder", purpose="synthetic bounded call",
+                           source=f["starter"], reservation=reservation)
+    receipt = runtime.invoke(context, handle, authorize=lambda intent: account.authorize(intent["reservation"]))
+    launch_path = context.root / ".runtime/claude/original-call/launch.json"
+    original_launch = launch_path.read_bytes()
+    launch = json.loads(original_launch)
+    assert 0 < launch["timeout_ms"] <= reservation["active_ms"]
+    assert launch["deadline_utc_ms"] <= reservation["deadline_utc_ms"]
+    assert int(launch["deadline_monotonic_ns"]) <= int(reservation["deadline_monotonic_ns"])
+    assert receipt.terminated and not receipt.ok and "timeout_terminated" in receipt.facts["errors"]
+    assert receipt.facts["calls"] == 1 and receipt.facts["tokens"] is None and count(fake) == 1
+    assert account.absorb(context.run_id, receipt.usage_row(), terminated=True)
+    recorded = account.operations(context.run_id)
+    restored = api.open_run("implement", context.root, backend_identity=runtime.identity())
+    with monkeypatch.context() as patch:
+        patch.setattr(_local, "current_boot_id", lambda: "a-later-boot-after-original-termination")
+        replay = runtime.invoke(restored, runtime.reopen(restored, handle.operation_id),
+                                authorize=lambda _: pytest.fail("settled original cannot authorize a new call"))
+    assert replay.receipt == receipt.receipt and replay.facts == receipt.facts
+    assert not account.absorb(context.run_id, replay.usage_row(), terminated=True)
+    assert account.operations(context.run_id) == recorded
+    assert launch_path.read_bytes() == original_launch and count(fake) == 1
+    usage = account.usage(context.run_id, Publication(context.root))
+    assert usage["calls"]["coder"] == 1 and usage["tokens"] is None
+    with pytest.raises(BudgetDenied):
+        account.reserve(context.run_id, "forbidden-retry", role="coder", purpose="no refunded call",
+                        amount=cost(role="coder", calls=1, active_ms=1))
 
 
 @pytest.mark.parametrize("bounds", [

@@ -61,10 +61,21 @@ The public capabilities explicitly say `token_enforcement="unsupported"`.
 Finite token budgets are rejected before launch. Timeout and call counts are
 not token limits. The native USD option is set but is a native expenditure
 threshold, not a host-guaranteed hard dollar ceiling (providers may report
-different pricing or the CLI may check between requests). Timeout is at most
-120 seconds and is further narrowed by request and owner active-time authority.
+different pricing or the CLI may check between requests). `timeout_ms` defaults
+to 120000 (120 seconds). A business profile may explicitly select any positive
+safe integer in milliseconds (1 through 2**53 - 1); bools, floats and strings
+are rejected. This is a per-call ceiling, further narrowed by the fixed request,
+owner reservation and original absolute deadlines. It grants no active budget.
 Native internal rounds and physical retries are not independent host calls;
 reported rounds are recorded and unreported retries remain null.
+
+For example, `dataclasses.replace(profile, timeout_ms=600000)` creates a distinct
+profile identity. Freeze that exact profile in a new, not-yet-admitted request
+and use the same original parent's lawful remaining authority. Never change an
+admitted request, profile, reservation, run or historical capture to extend a
+failed call. Retain the original backend/source installation for old-operation
+settlement; implementation identities are checked on reopen. A longer profile
+does not inherit the historical 120-second profile's real qualification.
 
 ## K4/K5 seam
 
@@ -111,17 +122,23 @@ raise `ProtocolError` before a new launch. K4/K5 should supply both UTC and
 monotonic bounds to retain the owner's cutoff even if wall time moves backward
 between admission and launch.
 
-When any cutoff is supplied, `launch.json` persists the tightened `timeout_ms`
+Every new `launch.json` persists the tightened `timeout_ms`
 and effective `deadline_utc_ms`, `deadline_monotonic_ns`, `clock_boot_id`. The
 effective monotonic bound is also recorded for UTC-only reservations, so a
 later supervisor delay or wall-clock rollback cannot renew the launch window.
 The supervisor rechecks before spawning its child; the child rechecks before
 and after executable hashing/fsync and immediately before exec; the supervisor
 waits only against the remaining original cutoff and terminates the original
-process group when it expires. A late runner can produce an explicit
-`not-executed.json` terminal without starting Claude. With no cutoff fields the
-existing duration-only behavior is preserved; `active_ms` alone does not
-subtract time spent preparing an already frozen reservation. These are narrow
+process group when it expires. The invoking host waits against those same
+persisted cutoffs plus at most five seconds to collect termination/exit facts;
+this fixed collection allowance cannot extend CLI execution or restart on
+reopen. All actual waiting remains in the original owner's active clock. If
+termination is still unknown, preserve the original fence and settle that
+operation. A late runner can produce an explicit `not-executed.json` terminal
+without starting Claude. With no owner cutoff fields, the effective duration
+starts at final launch and still fixes the supervisor/child/host window;
+`active_ms` alone does not subtract earlier input preparation. The effective
+UTC cutoff also stays within the protocol's signed safe-integer range. These are narrow
 per-call launch bounds, not a replacement clock or parent ledger.
 
 `admit` freezes exact input, profile/source bindings, role, purpose, reservation,
@@ -327,7 +344,10 @@ from the unchanged real CLI capabilities.
 --model <explicit-model> ...` is an explicit one-call runtime probe, not a
 workflow entry point or kernel experiment. A capture uses only invented dummy
 canaries, a synthetic transport Task, a fresh role scope, at most one call,
-120-second timeout and the USD 0.50 native threshold. Existing output directories
+120-second request/reservation ceiling and the USD 0.50 native threshold,
+even if `capture(..., profile, ...)` receives a longer business profile. It
+retains that exact profile identity; a bounded probe does not establish that a
+longer call or a complete business workflow succeeds. Existing output directories
 refuse a new call; `--settle --out <capture>` only reads the original operation.
 Cross-capture experiment permission is the caller's responsibility. The capture
 archives CLI help/status, frozen source/profile/input, raw receipts and checks.

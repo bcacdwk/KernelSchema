@@ -62,6 +62,28 @@ Top-level requests may use parent=null and receive their original run owner.
 Finite token budgets at request/parent/native levels are rejected because the
 current K3 runtime does not advertise hard token enforcement.
 
+The per-call timeout defaults to 120000 ms. To explicitly configure a longer
+business call before creating its request:
+
+```python
+from dataclasses import replace
+
+new_claude_profile = replace(fixed_claude_profile, timeout_ms=600000)
+business_profile = writing.backend_profile(new_claude_profile, environment_ref)
+```
+
+Publish that new profile and a new, not-yet-admitted Q using the construction
+above, retaining the same `parent_ref` and `original_private_parent_path`.
+Admission still takes the tightest remaining parent/request/native budget and
+original UTC/monotonic deadlines, including the minimum reviewer/finish reserve.
+Choose any required `writing_minimum_active_ms` in the new business profile
+before freezing it; a longer timeout does not increase the default review
+minimum or grant more budget. Never edit an admitted Q/profile or reuse a closed
+scope to retry a failed call. Old operations require their original retained
+backend/source installation. This new profile has a different digest and does
+not inherit the historical 120-second profile's real qualification; CPU tests
+alone do not establish real writing success with a longer deadline.
+
 Materials must contain exactly one reserved `workflow_objective`, at least
 planner/reviewer-visible. The backend validates the current writing method,
 checker/policy source and original docs/Template frozen by `freeze_rules`.

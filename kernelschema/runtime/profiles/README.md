@@ -47,6 +47,10 @@ Loading this file does not query authentication or invoke a model. The pinned
 executable must be available and unchanged before a new call. A different CLI
 installation/model/configuration requires its own explicit compatible profile;
 loading this historical profile does not qualify arbitrary installations.
+Its original `timeout_ms=120000` bytes remain unchanged. Explicitly selecting
+a longer timeout creates a different profile identity; the old capture does
+not qualify that new profile or prove successful longer business calls. The
+configurable timeout and fixed launch/wait deadlines are separately CPU-tested.
 The K4/K5 owner still owns admission, pause/fences, the only budget and business
 validation/publication, as described in [the runtime interface](../INTERFACE.md).
 

@@ -24,9 +24,9 @@ from uuid import uuid4
 
 from ..api import RunContext
 from ..artifacts import FileBytes, Publication, durable_mkdir, durable_write, fsync_directory, read_regular, source_files_manifest
-from ..contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256, validate
+from ..contracts import MAX_INTEGER, PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256, validate
 from ..materials import for_role, validate_request, private_evaluator_hashes, public_baseline_payload, rebuild_source_hashes
-from ._local import (DeadlineExpired, freeze_launch_deadlines, immutable, locked,
+from ._local import (DeadlineClockMismatch, DeadlineExpired, freeze_launch_deadlines, immutable, locked,
                      process_alive, read_json, validate_deadlines)
 
 PROFILE_VERSION = "ks.claude.no_tools.v1"
@@ -110,8 +110,8 @@ class ClaudeProfile:
             raise ProtocolError("builtin plugin names must be explicit")
         if self.effort not in ("low", "medium", "high", "xhigh", "max"):
             raise ProtocolError("unsupported effort")
-        if type(self.timeout_ms) is not int or not 1 <= self.timeout_ms <= 120000:
-            raise ProtocolError("single call timeout must be between 1 and 120000 ms")
+        if type(self.timeout_ms) is not int or not 1 <= self.timeout_ms <= MAX_INTEGER:
+            raise ProtocolError("single call timeout must be a positive safe integer in milliseconds")
         for limit in (self.max_input_bytes, self.max_output_bytes):
             if type(limit) is not int or limit <= 0: raise ProtocolError("byte limits must be positive")
         try:
@@ -748,11 +748,18 @@ class ClaudeRuntime:
                                      start_new_session=True, env=self._environment(directory))
                 finally: os.close(fd)
         if wait:
-            deadline = time.monotonic() + self.profile.timeout_ms / 1000 + 5
-            while not (directory / "exit.json").exists() and time.monotonic() < deadline:
+            launch = read_json(directory, "launch.json")
+            # Only collect termination for five seconds after the original
+            # cutoff. Reopening cannot renew either execution or this grace.
+            while not (directory / "exit.json").exists():
+                try: validate_deadlines(launch)
+                except DeadlineClockMismatch: break
+                remaining_ns = min(int(launch["deadline_monotonic_ns"]) - time.monotonic_ns(),
+                                   launch["deadline_utc_ms"] * 1_000_000 - time.time_ns()) + 5_000_000_000
+                if remaining_ns <= 0: break
                 if (directory / "supervisor.json").exists() and process_alive(read_json(directory, "supervisor.json")) is False:
                     break
-                time.sleep(0.02)
+                time.sleep(min(0.02, remaining_ns / 1_000_000_000))
         return self.settle(context, handle)
 
     def settle(self, context: RunContext, handle: CallHandle) -> CallReceipt:

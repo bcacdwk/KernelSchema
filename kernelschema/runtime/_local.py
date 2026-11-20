@@ -9,7 +9,7 @@ import re
 import time
 
 from ..artifacts import durable_mkdir, durable_write, read_regular
-from ..contracts import ProtocolError, jcs, loads
+from ..contracts import MAX_INTEGER, ProtocolError, jcs, loads
 
 
 class DeadlineExpired(ProtocolError):
@@ -28,7 +28,7 @@ def validate_deadlines(value: dict):
     """Validate optional owner bounds, without granting or renewing a window."""
     if "deadline_utc_ms" in value:
         deadline = value["deadline_utc_ms"]
-        if type(deadline) is not int or abs(deadline) > 2**53 - 1:
+        if type(deadline) is not int or abs(deadline) > MAX_INTEGER:
             raise ProtocolError("deadline_utc_ms must be a strict safe integer")
     mono = "deadline_monotonic_ns" in value
     boot = "clock_boot_id" in value
@@ -62,9 +62,10 @@ def remaining_timeout_ms(value: dict, *, utc_ns: int | None = None, mono_ns: int
 def freeze_launch_deadlines(reservation: dict, timeout_ms: int) -> dict:
     """Freeze the tighter duration/owner cutoff for supervisor and exec gates."""
     validate_deadlines(reservation)
-    if "deadline_utc_ms" not in reservation and "deadline_monotonic_ns" not in reservation:
-        return {"timeout_ms": timeout_ms}  # Legacy duration-only behavior.
     utc_ns, mono_ns = time.time_ns(), time.monotonic_ns()
+    # Every new launch has one fixed window, including duration-only callers.
+    # Keep the persisted epoch cutoff inside the protocol's safe integer range.
+    timeout_ms = min(timeout_ms, MAX_INTEGER - utc_ns // 1_000_000)
     remaining = remaining_timeout_ms({**reservation, "timeout_ms": timeout_ms}, utc_ns=utc_ns, mono_ns=mono_ns)
     return {"timeout_ms": remaining,
             "deadline_utc_ms": utc_ns // 1_000_000 + remaining,
