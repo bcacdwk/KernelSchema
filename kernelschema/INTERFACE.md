@@ -28,6 +28,10 @@ dictionaries; CLI exit 0 means the result projection was durably published,
 not that the domain status is completed. Unsupported/admission/publishing
 errors are `ProtocolError` (`UnsupportedError` is a subtype), CLI exit 2.
 No import of this package loads AKA, torch, CUDA or a runtime backend.
+An explicit implement request with backend `aka` lazily loads the separately
+installed `aka.workflow.schema.backend.workflow_backend()`; other operations
+do not discover or import AKA. Missing adapter code is an unsupported backend,
+not an instruction to install it or start another top-level workflow.
 
 `resources.resource(relative_path)`, `rule_files()` and `freeze_rules(publication)`
 locate/freeze the actual checkout files independent of cwd. This release does

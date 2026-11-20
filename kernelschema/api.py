@@ -30,6 +30,7 @@ class Backend(Protocol):
 
 def _backend(name: str, operation: str) -> Backend:
     modules = {("reference", "implement"): "kernelschema.implement.reference",
+               ("aka", "implement"): "aka.workflow.schema.backend",
                ("claude", "design"): "kernelschema.design",
                ("claude", "optimize"): "kernelschema.optimize"}
     module_name = modules.get((name, operation))
