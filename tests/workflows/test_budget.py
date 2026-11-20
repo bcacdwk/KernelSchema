@@ -5,9 +5,9 @@ import json
 
 import pytest
 
-from kernelschema.artifacts import Publication
+from kernelschema.artifacts import Publication, durable_write
 from kernelschema.budget import BudgetDenied, OwnerAccount, cost
-from kernelschema.contracts import ProtocolError
+from kernelschema.contracts import ProtocolError, jcs
 
 
 def setup_account(tmp_path, *, tokens=None):
@@ -203,3 +203,162 @@ def test_reservation_automatically_accounts_external_activity_until_quiescence(t
     a.absorb("run1", row(), terminated=True)
     clock[0] += 100
     assert a.usage("run1", Publication(tmp_path / "out"))["active_ms"] == 30
+
+
+def _rewrite_authority(account, change):
+    state = account._read()
+    change(state)
+    durable_write(account.path, jcs(state), mode=0o600, replace=True)
+
+
+def _active_group(account, *, native_limits=None):
+    specs = [{"operation_id": "coder", "role": "coder", "purpose": "native code", "amount": cost(role="coder", calls=1)},
+             {"operation_id": "review", "role": "reviewer", "purpose": "prefetch", "amount": cost(role="reviewer", calls=1)}]
+    reservations = account.reserve_group("run1", "active", specs, native_limits=native_limits)
+    for reservation in reservations.values():
+        assert account.authorize(reservation)
+    return reservations
+
+
+def test_check_active_ticks_only_original_clock_without_readmitting_or_charging(tmp_path):
+    a, clock, _ = setup_account(tmp_path)
+    reservation = reserve(a)
+    assert not a.check_active(reservation)
+    assert a.authorize(reservation)
+    original = a.operations()
+    clock[0] += 20
+    assert a.check_active(reservation)
+    assert a.check_active(deepcopy(reservation))
+    assert a.operations() == original  # no counters, history, reservations or launch facts changed
+    assert a._read()["active_ms"] == a._read()["requests"]["run1"]["active_ms"] == 20
+    assert not a.authorize(reservation)
+    a.pause()
+    clock[0] += 10
+    assert not a.check_active(reservation)
+    assert a._read()["active_ms"] == 30  # refusal/pause does not stop an in-flight clock
+    a.pause(False)
+    assert a.check_active(reservation)
+
+
+@pytest.mark.parametrize("change", [lambda r: r.update(owner="other"), lambda r: r.update(account_id="other"),
+    lambda r: r.update(run_id="other"), lambda r: r.update(operation_id="missing"),
+    lambda r: r.update(authorization="forged"), lambda r: r.update(calls=True), lambda r: r.update(deadline_utc_ms=999999)])
+def test_check_active_rejects_different_or_forged_reservation(tmp_path, change):
+    a, _, _ = setup_account(tmp_path)
+    reservation = reserve(a)
+    a.authorize(reservation)
+    wrong = deepcopy(reservation)
+    change(wrong)
+    assert not a.check_active(wrong)
+    assert a.check_active(reservation)
+
+
+@pytest.mark.parametrize("terminal", ["released", "terminated", "unknown"])
+def test_check_active_rejects_closed_or_unknown_operation(tmp_path, terminal):
+    a, _, _ = setup_account(tmp_path)
+    reservation = reserve(a)
+    if terminal == "released":
+        a.release_unstarted("op")
+    else:
+        a.authorize(reservation)
+        if terminal == "terminated":
+            a.absorb("run1", row(), terminated=True)
+        else:
+            a.mark_unknown("op", "original native identity lost")
+    assert not a.check_active(reservation)
+
+
+def test_check_active_allows_normal_group_but_not_unknown_member(tmp_path):
+    a, clock, _ = setup_account(tmp_path)
+    reservations = _active_group(a)
+    clock[0] += 40
+    assert all(a.check_active(r) for r in reservations.values())
+    assert a._read()["active_ms"] == 40  # no parent/member double counting
+    a.mark_unknown("review", "lost acknowledgment")
+    assert not a.check_active(reservations["coder"])
+    assert not a.check_active(reservations["review"])
+
+
+@pytest.mark.parametrize("scope", ["owner", "request", "native"])
+def test_check_active_honors_tightest_original_counter_limit(tmp_path, scope):
+    _, clock, base = setup_account(tmp_path / "base")
+    parent, request, native = deepcopy(base), deepcopy(base), deepcopy(base)
+    {"owner": parent, "request": request, "native": native}[scope]["model_calls"] = 2
+    a = OwnerAccount.create(tmp_path / "authority.json", owner="owner", limits=parent, clock=lambda: clock[0])
+    a.register("run1", "sha256:" + "1" * 64, request, root="run1")
+    reservations = _active_group(a, native_limits=native)
+    assert a.check_active(reservations["coder"])  # both admitted calls fill cap, no new call is requested
+    a.absorb("run1", row("review", role="reviewer", calls=2), terminated=True)
+    assert not a.check_active(reservations["coder"])
+
+
+@pytest.mark.parametrize("limited", [False, True])
+def test_check_active_distinguishes_unrestricted_unknown_tokens(tmp_path, limited):
+    a, _, lim = setup_account(tmp_path)
+    native = deepcopy(lim)
+    native["tokens"] = 100 if limited else None
+    reservations = _active_group(a, native_limits=native)
+    a.absorb("run1", row("review", role="reviewer", tokens=None), terminated=True)
+    assert a.check_active(reservations["coder"]) is (not limited)
+
+
+def test_check_active_preserves_original_finish_reserve_and_utc_expiry(tmp_path):
+    a, clock, _ = setup_account(tmp_path)
+    reservation = reserve(a, floor=cost(role="reviewer", calls=1, active_ms=100))
+    a.authorize(reservation)
+    clock[0] += 899
+    assert a.check_active(reservation)
+    clock[0] += 1
+    assert not a.check_active(reservation)
+    assert a._read()["active_ms"] == 900  # 100 ms remains reserved for finish, not reissued to this op
+
+
+@pytest.mark.parametrize("change", [lambda s: s["requests"].clear(), lambda s: s["descriptor"].update(owner="other"),
+    lambda s: s["requests"]["run1"].pop("request_sha256"),
+    lambda s: s["operations"].clear(), lambda s: s.update(active_run=None, active_since=None)])
+def test_check_active_missing_original_identity_does_not_reset_state(tmp_path, change):
+    a, _, _ = setup_account(tmp_path)
+    reservation = reserve(a)
+    a.authorize(reservation)
+    _rewrite_authority(a, change)
+    assert not a.check_active(reservation)
+    assert not a._read()["operations"] or len(a._read()["operations"]) == 1
+
+
+def test_check_active_missing_authority_is_false_without_recreation(tmp_path):
+    a, _, _ = setup_account(tmp_path)
+    reservation = reserve(a)
+    a.authorize(reservation)
+    a.path.unlink()
+    assert not a.check_active(reservation)
+    assert not a.path.exists()
+
+
+@pytest.mark.parametrize("change", [lambda s: s["groups"].clear(), lambda s: s["groups"]["active"]["process"].clear(),
+    lambda s: s["groups"]["active"]["fixed"].update(run_id="different"), lambda s: s["operations"].pop("review")])
+def test_check_active_missing_group_identity_is_false(tmp_path, change):
+    a, _, _ = setup_account(tmp_path)
+    reservations = _active_group(a)
+    _rewrite_authority(a, change)
+    assert not a.check_active(reservations["coder"])
+
+
+@pytest.mark.parametrize("failure", ["monotonic_expired", "boot_changed"])
+def test_check_active_uses_original_monotonic_deadline_and_boot(tmp_path, monkeypatch, failure):
+    from kernelschema import budget
+    _, _, lim = setup_account(tmp_path / "base")
+    wall, mono, boot = [1000], [5000000000], ["boot-a"]
+    monkeypatch.setattr(budget.time, "time_ns", lambda: wall[0] * 1000000)
+    monkeypatch.setattr(budget.time, "monotonic_ns", lambda: mono[0])
+    monkeypatch.setattr(budget, "_boot", lambda: boot[0])
+    a = OwnerAccount.create(tmp_path / "authority.json", owner="owner", limits=lim)
+    a.register("run1", "sha256:" + "1" * 64, lim, root="run1")
+    reservation = reserve(a)
+    a.authorize(reservation)
+    assert a.check_active(reservation)
+    if failure == "monotonic_expired":
+        wall[0] -= 100  # reversed wall clock cannot extend the original monotonic window
+        mono[0] = int(reservation["deadline_monotonic_ns"])
+    else:
+        boot[0] = "boot-b"
+    assert not a.check_active(reservation)

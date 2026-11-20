@@ -280,12 +280,14 @@ class OwnerAccount:
         with self._transaction() as s:
             return self._fences(s)
 
-    def _check(self, s, run_id, requested, floor, native_limits, *, group=None):
+    def _check(self, s, run_id, requested, floor, native_limits, *, group=None, active_operations=()):
         if s["paused"]:
             raise BudgetDenied("owner paused")
         fences = self._fences(s)
         if group is not None:
             fences = [key for key in fences if s["operations"][key].get("group") != group or s["operations"][key].get("uncertain")]
+        if active_operations:
+            fences = [key for key in fences if key not in active_operations or s["operations"][key].get("uncertain") or s["operations"][key]["terminated"]]
         if fences:
             raise BudgetDenied("original operations/limited balances remain unresolved")
         if s["active_run"] not in (None, run_id):
@@ -429,6 +431,95 @@ class OwnerAccount:
                 op["released"] = False
             op["launched"] = True
             return True
+
+    def check_active(self, reservation) -> bool:
+        """Check continued execution of an original launched operation.
+
+        This ticks the sole clock without admitting, charging, extending or
+        releasing anything. False means stop bounded work and settle the same
+        native operation; it is never proof of termination or a refund.
+        Normal in-flight members of the same approved group are not unknown.
+        Native identity/acknowledgment loss must be recorded with mark_unknown.
+        """
+        try:
+            with self._transaction() as s:
+                if not isinstance(reservation, dict):
+                    return False
+                operation_id = reservation.get("operation_id")
+                op = s["operations"].get(operation_id)
+                if op is None or jcs(op["reservation"]) != jcs(reservation):
+                    return False
+                run_id = op["run_id"]
+                if (reservation["owner"] != s["descriptor"]["owner"] or
+                    reservation["account_id"] != s["descriptor"]["id"] or
+                    reservation["run_id"] != run_id or run_id not in s["requests"] or
+                    s["active_run"] != run_id or s["active_since"] is None or
+                    op["launched"] is not True or op["released"] is not False or op["terminated"] is not False):
+                    return False
+                request = s["requests"][run_id]
+                if (not isinstance(request["request_sha256"], str) or not request["request_sha256"].startswith("sha256:") or
+                    not isinstance(request["root"], str) or not request["root"]):
+                    return False
+                if s["last_clock"] >= reservation["deadline_utc_ms"]:
+                    return False
+                if "deadline_monotonic_ns" in reservation or "clock_boot_id" in reservation:
+                    if (reservation["clock_boot_id"] != s["clock_boot_id"] or s["monotonic_ns"] is None or
+                        int(s["monotonic_ns"]) >= int(reservation["deadline_monotonic_ns"])):
+                        return False
+                allowed = {operation_id}
+                group_id = op.get("group")
+                if group_id is not None:
+                    group = s["groups"][group_id]
+                    process = group["process"]
+                    if (reservation.get("group_id") != group_id or group["fixed"]["run_id"] != run_id or
+                        type(process["pid"]) is not int or process["pid"] <= 0 or
+                        not isinstance(process["start_ticks"], str) or not process["start_ticks"].isdigit() or
+                        not isinstance(process["boot_id"], str) or not process["boot_id"]):
+                        return False
+                    if s["clock_boot_id"] != "injected" and process["boot_id"] != s["clock_boot_id"]:
+                        return False
+                    members = set()
+                    for spec in group["fixed"]["operations"]:
+                        key = spec["operation_id"]
+                        member = s["operations"][key]
+                        if (key in members or member.get("group") != group_id or member["run_id"] != run_id or
+                            member["role"] != spec["role"] or member["purpose"] != spec["purpose"] or
+                            jcs(member["cost"]) != jcs(spec["amount"]) or
+                            jcs(member["floor"]) != jcs(group["fixed"]["floor"]) or
+                            jcs(member["native_limits"]) != jcs(group["fixed"]["native_limits"]) or
+                            member["reservation"].get("group_id") != group_id or
+                            member["reservation"]["operation_id"] != key or member["reservation"]["run_id"] != run_id or
+                            member["reservation"]["owner"] != reservation["owner"] or
+                            member["reservation"]["account_id"] != reservation["account_id"]):
+                            return False
+                        members.add(key)
+                    if operation_id not in members:
+                        return False
+                    allowed.update(members)
+                elif "group_id" in reservation:
+                    return False
+                # Do not mask an explicitly lost identity, even inside a group.
+                # Older native-constrained unknown usage also remains a fence.
+                for other in s["operations"].values():
+                    if other.get("uncertain"):
+                        return False
+                    native = other["native_limits"]
+                    if native is not None:
+                        limits(native)
+                        used, unknown = self._totals(s, other["run_id"])
+                        if any(key in unknown and cap is not None for key, cap in _flatten(native).items()):
+                            return False
+                # Existing reservations are already in _totals(held=True).
+                # Add no new cost, retain the original minimum finish floor.
+                try:
+                    return self._check(s, run_id, cost(), op["floor"], op["native_limits"],
+                                       active_operations=allowed) > 0
+                except BudgetDenied:
+                    return False  # persist the tick even while pause/limits deny progress
+        except (KeyError, TypeError, ValueError, OSError, OverflowError, AttributeError):
+            # Corrupt/missing original state must stop a bounded caller, never
+            # mint replacement authority. This also covers ProtocolError.
+            return False
 
     def claim_group(self, group_id, reservations):
         """Transfer an entirely unstarted group once to its external launcher.

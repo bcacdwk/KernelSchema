@@ -36,7 +36,10 @@ reports explicitly retain source/request locators for selected historical closur
 There is no default passing executor. Missing selection returns a zero-call
 blocked/new_request result with the seed intact. LocalExecutor's CPU checks
 cannot qualify this CUDA Task; K1 Agate engineering has not acquired real service
-qualification. Loading the K3 public profile does not grant GPU qualification.
+qualification. Loading the K3 public profile does not grant GPU qualification. The repository
+now supplies `kernelschema.evaluation.channel:workflow_channel` and a six-job
+qualification preparer; see [standalone usage](../../docs/workflows/standalone.md).
+These paths have synthetic CPU tests, with actual Agate qualification still unrun.
 
 `profile.parameters.evaluation` optionally has exactly:
 
@@ -116,6 +119,23 @@ Stable methods:
   calls/jobs/tokens/active_ms, absolute `deadline_utc_ms`, and on the real Linux
   clock `deadline_monotonic_ns` (decimal string)/`clock_boot_id`. External native
   deadlines must be tightened at the actual launch boundary, as K3 does.
+* `check_active(reservation) -> bool` is the polling guard for an already
+  launched native `run_bounded` operation. It ticks and persists the same owner
+  clock, checks the exact original owner/account/run/reservation, active state,
+  pause, original UTC/monotonic deadline and boot, and the tightest existing
+  parent/request/native limits plus the original finish reserve. It requests
+  zero additional cost; an admitted call that already fills a count limit can
+  keep running within its original time window. The current operation and
+  validated same-request group members may be normally in flight; explicit
+  unknown identities/fees and unrelated unresolved operations still fence.
+  Missing/corrupt authority or group/request identity, forged reservations,
+  unlaunched/released/terminated operations and exhausted limits return False.
+  It does not authorize again, extend the deadline, absorb fees or release any
+  reservation. False means stop bounded work and settle the **original** native
+  operation, never that it has terminated or may be replaced. This check does
+  not query native process/job identities; the adapter records native identity
+  or acknowledgment loss with `mark_unknown`. A monitor can call it through
+  the same private authority without claiming or relaunching a group.
 * `reserve_group(run_id, group_id, operations, floor=None, native_limits=None)`
   atomically reserves a finite native concurrent group (for example evaluator
   V0 and prefetched reviewer). Each item has `operation_id/role/purpose/amount`;
