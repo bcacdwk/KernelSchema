@@ -66,6 +66,13 @@ class RowSoftmaxTask:
     def require_evaluation_scope(self, scope: dict) -> dict:
         """Reject a partial evaluation request before staging or execution."""
         scope_doc = self.bundle.document(scope, kind="scope")
+        return self.require_evaluation_scope_document(scope_doc)
+
+    def require_evaluation_scope_document(self, scope_doc: dict) -> dict:
+        """Apply the same Task coverage boundary before a Scope is published."""
+        validate(scope_doc)
+        if scope_doc["kind"] != "scope":
+            raise ProtocolError("expected a Scope document")
         selected = set(scope_doc["coverage_ids"])
         if not selected <= set(self.partitions):
             raise ProtocolError("scope uses case IDs or unknown Task coverage partitions")
@@ -84,12 +91,24 @@ class RowSoftmaxTask:
         hardware check detects missing fields/placeholders only; its success
         is not evidence of actual device, documentation or profile qualification.
         """
-        self.require_evaluation_scope(scope)
         schema_doc = self.bundle.document(schema, kind="schema")
         scope_doc = self.bundle.document(scope, kind="scope")
+        return self.validate_scope_documents(schema_doc, scope_doc,
+            require_hardware_binding=require_hardware_binding)
+
+    def validate_scope_documents(self, schema_doc: dict, scope_doc: dict, *,
+                                 resolved=None, require_hardware_binding=False) -> dict:
+        """Check host draft documents with the same finite Task semantics.
+
+        Draft callers supply the actual normalized Template ResolvedTask; this
+        does not publish or certify a complete Schema manifest. Publication and
+        writing checks remain the caller's responsibility.
+        """
+        self.require_evaluation_scope_document(scope_doc)
         if schema_doc["task_sha256"] != self.reference["sha256"]:
             raise ProtocolError("Schema belongs to a different Task")
-        resolved = template_api.resolve_bundle(self.bundle, schema_doc)
+        if resolved is None:
+            resolved = template_api.resolve_bundle(self.bundle, schema_doc)
         mappings, reasons, failures = [], [], []
         for binding in scope_doc["bindings"]:
             node = binding["node"]

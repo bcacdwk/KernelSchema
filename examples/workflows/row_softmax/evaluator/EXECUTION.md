@@ -64,6 +64,13 @@ requested_uncovered, task_uncovered, reasons and limitations. This checks dispat
 not current-Schema fidelity or free-form mathematical equivalence; K4 still owns
 the latter. No second Schema language or automatic prose interpretation exists.
 
+Before publication, writing code may use `validate_scope_documents(schema_doc,
+scope_doc, resolved=normalized_resolved_task, require_hardware_binding=False)`.
+It shares the same Task checks without requiring a premature Schema publication;
+the caller supplies the actual normalized Template object and still owns all
+writing/publication checks. `require_evaluation_scope_document(scope_doc)` applies
+the same full-Task coverage restriction to a not-yet-published Scope.
+
 The current evaluator always runs the full four-shape Task: 36 cases/72 basic
 calls, the two-call reuse trace and all four timing shapes. It has no subset-only
 mode. `RowSoftmaxTask.evaluation_capabilities()` returns `scope_mode="full_task_only"`,
