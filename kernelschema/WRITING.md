@@ -10,10 +10,11 @@ This is CPU engineering delivery. Tests use the actual K3 subprocess and
 persisted native input/usage, with explicitly synthetic drafts/reviews. They
 establish no real model, CUDA, device, numerical or performance qualification.
 The first finite Task adapter supports the fixed K1 row-softmax public Task.
-Other Tasks require an explicit future Task/scope adapter. The initial-design
-Contract generator currently requires the fixed unbound public environment; a
-newly device-bound Task needs its own explicit Contract adapter. It refuses to
-invent a selected device or quietly reuse the unbound skeleton.
+Other Tasks require an explicit future Task/scope adapter. The initial-design Contract generator accepts the original unbound environment
+or the finite `ks.row-softmax.target.v1` adapter. Explicit hardware/runtime
+requirements and hash-checked original documentation stay inside Task.environment.
+See [target materials](../docs/workflows/target-environment.md). A declaration
+never proves an actual device; unknown formats are rejected before charging.
 
 ## Constructing a request
 
@@ -108,9 +109,12 @@ raw snapshots and invalid action IDs are rejected with the raw draft retained.
 
 `selection` must explain real planner-granted material IDs and include the unique
 objective. The action catalog contains `evidence:0`, `feedback:0`, etc. for exactly
-the request's explicit Refs, plus `task/starter_source` when available. A non-none
-action needs reason, explicit inputs and nonempty authorized evidence. Each implement/verify action
-requires exactly one nonempty Source input. Source evidence is delivered as its exact
+the request's explicit Refs, plus `task/starter_source` when available, `task/default_start` (the Task Ref),
+and `material:<id>` for material granted to both planner and reviewer. A non-none
+action needs a reason, explicit inputs and nonempty authorized evidence. An
+objective/document can supply that evidence without invented measurements. Verify
+requires exactly one nonempty Source. Implement selects one Source or explicitly
+selects `task/default_start`, meaning seed=null and Task.starter_source/empty start. Source evidence is delivered as its exact
 kernel.py bytes; ordinary evidence uses the exact selected file bytes.
 
 Reviewer content is exactly:
@@ -172,8 +176,8 @@ action_inputs and action_evidence. For a non-none action, action_inputs start
 with the output Schema and Scope, followed by the explicitly selected inputs.
 The next driver must settle/close the prior transaction, check the same owner's
 balance/fences, and construct a new fixed implement request. Verify means
-verify_only with the exact selected nonempty Source. Implement means fixed-R
-code work using its explicit input/seed. The writing backend does not perform
+verify_only with the exact selected nonempty Source. Implement means fixed-R code work using the explicitly selected Source, or
+seed=null when the Task marker is selected. Old C is never selected implicitly. The writing backend does not perform
 that admission or execution. `extensions.information.admitted_request` is null.
 No old C pass, fidelity report, native best or promotion becomes qualification
 for a new R; K4/A5 must assess the actual new request subjects.

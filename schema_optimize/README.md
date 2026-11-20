@@ -17,3 +17,9 @@ Materials and declared feedback/evidence. A completed `keep` with
 next fixed requests for the owning driver to admit on the same account.
 A published revision does not itself admit a new request or qualify any code.
 See [the shared writing interface](../kernelschema/WRITING.md).
+
+The [standalone driver](../docs/workflows/standalone.md) executes that next request
+on the same account. Verify requires an explicit nonempty Source; implement can
+explicitly select `task/default_start` for seed=null. Authorized target/documents
+can justify an action without fabricated measurement evidence. The fixed Task,
+Scope, output Schema and input authority remain unchanged by that choice.

@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import re
 import shlex
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -120,7 +121,8 @@ class AgateDevExecutor:
         ms=reservation.get("active_ms")
         if not owner or not submission_key or reservation.get("owner") != owner or reservation.get("evaluator_jobs") != 1:
             raise ProtocolError("explicit caller owner/reservation/stable key required")
-        if type(ms) is not int or not 1000 <= ms <= 1200000: raise ProtocolError("reservation must be 1s to 20min")
+        if type(ms) is not int or ms < 1000: raise ProtocolError("reservation must allow at least 1s")
+        ms = min(ms, 1200000)  # one dev job never exceeds the channel's 20min bound
         if any(not isinstance(profile.get(k),str) or not profile[k].startswith("/") for k in ("python","bwrap")):
             raise ProtocolError("absolute remote python/bwrap paths required")
         if (action == "execute" and not re.fullmatch(r"sha256:[0-9a-f]{64}",profile.get("bwrap_sha256","") or "")) or not profile.get("gpu"):
@@ -128,7 +130,8 @@ class AgateDevExecutor:
         root=Path(staged["root"])
         files={"_ks_stage/"+name:read_regular(root,name)[0].decode() for name in staged["manifest"]["files"]}
         files["_ks_stage/stage.json"]=jcs(staged["manifest"]).decode()
-        files["_ks_stage/remote.json"]=jcs({**{k:profile.get(k) for k in ("python","bwrap","bwrap_sha256")},"timeout_s":ms//1000}).decode()
+        files["_ks_stage/remote.json"]=jcs({**{k:profile.get(k) for k in ("python","bwrap","bwrap_sha256")},"timeout_s":ms//1000,
+            "deadline_utc_ms":reservation.get("deadline_utc_ms")}).decode()
         if action == "execute":
             if not environment or environment.get("mode") != "cuda" or frozen_inputs is None:
                 raise UnsupportedError("execute requires prior actual CUDA environment/input capture")
@@ -152,7 +155,7 @@ class AgateDevExecutor:
             durable_write(job / "request.json",jcs(request)); durable_write(job / "intent.json",jcs(intent))
         return intent
 
-    def submit(self, operation_id):
+    def submit(self, operation_id, *, authorize=None):
         job=self._job(operation_id); intent=loads(read_regular(job,"intent.json")[0])
         if intent["transport"] != self.transport.identity(): raise ProtocolError("original Agate channel changed")
         if (job / "submission-started.json").exists(): return self.query(operation_id)
@@ -161,7 +164,20 @@ class AgateDevExecutor:
                 raise ProtocolError("unknown original Agate job fences new submissions")
         request=loads(read_regular(job,"request.json")[0])
         if digest(request) != intent["request_sha256"]: raise ProtocolError("prepared request changed")
-        durable_write(job/"submission-started.json",jcs({"submission_key":intent["submission_key"],"request_sha256":intent["request_sha256"]}))
+        reservation = intent["reservation"]
+        remaining = min(reservation["active_ms"], request["timeout_s"] * 1000)
+        if "deadline_utc_ms" in reservation:
+            remaining = min(remaining, reservation["deadline_utc_ms"] - time.time_ns() // 1000000)
+        if "deadline_monotonic_ns" in reservation:
+            if Path("/proc/sys/kernel/random/boot_id").read_text().strip() != reservation["clock_boot_id"]:
+                raise ProtocolError("original Agate reservation belongs to another boot")
+            remaining = min(remaining, (int(reservation["deadline_monotonic_ns"]) - time.monotonic_ns()) // 1000000)
+        if remaining < 1000 or (authorize is not None and not authorize()):
+            from ..runtime import AdmissionDenied
+            raise AdmissionDenied("original Agate launch deadline exhausted or owner refused")
+        request["timeout_s"] = remaining // 1000
+        durable_write(job/"submission-started.json",jcs({"submission_key":intent["submission_key"],"request_sha256":intent["request_sha256"],
+            "submitted_request_sha256":digest(request), "timeout_s":request["timeout_s"]}))
         try:
             response=self.transport.request("POST","/v1/jobs/dev",request)
             durable_write(job/"acceptance.raw",response["body"])
@@ -192,23 +208,7 @@ class AgateDevExecutor:
         if native.get("status") not in ("succeeded","failed","cancelled") or not native.get("finished_at") or native.get("cleanup_pending") is not False or native.get("execution_quarantined",False):
             return {**unknown,"reason":"remote terminal/quiescence unconfirmed"}
         if not (job/"terminal.raw").exists(): durable_write(job/"terminal.raw",raw)
-        execution=None; diagnostic=None; result=native.get("result") or {}
-        if native["status"] == "succeeded" and result.get("exit_code") == 0:
-            try:
-                execution=_unframe(result.get("stdout"))
-                if execution.get("action") != intent["action"]: raise ProtocolError("different evaluator action")
-                if execution.get("exit_code") == 0 and intent["action"] == "execute":
-                    worker=loads(execution["stdout"]); manifest=intent["stage"]["manifest"]
-                    if (execution.get("bwrap_sha256") != intent["profile"]["bwrap_sha256"] or
-                        worker["loaded"] != manifest["files"] or worker["source"] != manifest["source"] or
-                        worker["evaluator"] != manifest["evaluator"] or worker["environment"] != intent["environment"] or
-                        worker["frozen_inputs_sha256"] != intent["frozen_inputs_sha256"] or worker["profile"] != PROFILE or
-                        len(worker["permissions"]["probes"]) != sum(name.endswith(".py") for name in manifest["files"]) or
-                        not all(p["write_open_denied"] for p in worker["permissions"]["probes"])):
-                        raise ProtocolError("actual evaluator subjects/environment/permission evidence differs")
-                    execution["worker"]=worker
-            except (ProtocolError,KeyError,ValueError) as error:
-                diagnostic=str(error); execution=None
+        execution, diagnostic = interpret_terminal(intent, native)
         return {"state":"terminal","operation_id":operation_id,"job_id":job_id,"receipt_id":sha256(raw),
                 "native":native,"execution":execution,"diagnostic":diagnostic}
 
@@ -217,6 +217,27 @@ class AgateDevExecutor:
         if facts["state"] != "terminal": return facts
         return _publish(self,operation_id,publication,facts)
 
+
+def interpret_terminal(intent, native):
+    """Same complete K1 frame/subject checks for live and retained qualification."""
+    execution=None; diagnostic=None; result=native.get("result") or {}
+    if native["status"] == "succeeded" and result.get("exit_code") == 0:
+        try:
+            execution=_unframe(result.get("stdout"))
+            if execution.get("action") != intent["action"]: raise ProtocolError("different evaluator action")
+            if execution.get("exit_code") == 0 and intent["action"] == "execute":
+                worker=loads(execution["stdout"]); manifest=intent["stage"]["manifest"]
+                if (execution.get("bwrap_sha256") != intent["profile"]["bwrap_sha256"] or
+                    worker["loaded"] != manifest["files"] or worker["source"] != manifest["source"] or
+                    worker["evaluator"] != manifest["evaluator"] or worker["environment"] != intent["environment"] or
+                    worker["frozen_inputs_sha256"] != intent["frozen_inputs_sha256"] or worker["profile"] != PROFILE or
+                    len(worker["permissions"]["probes"]) != sum(name.endswith(".py") for name in manifest["files"]) or
+                    not all(p["write_open_denied"] for p in worker["permissions"]["probes"])):
+                    raise ProtocolError("actual evaluator subjects/environment/permission evidence differs")
+                execution["worker"]=worker
+        except (ProtocolError,KeyError,ValueError) as error:
+            diagnostic=str(error); execution=None
+    return execution, diagnostic
 
 AgateExecutor = AgateDevExecutor
 
@@ -259,7 +280,8 @@ def _publish(executor, operation_id, publication, facts):
             "correctness":check("pass" if correct and correct["passed"] else "fail" if correct else "unknown","complete original-storage Task suite"),
             "performance":check("pass" if result.get("timing") and result["timing"]["complete"] else "unknown","complete forward timing; soft goal separately reported"),
             "case_ids":sorted({c["case_id"] for c in correct["basic_calls"]}) if correct else [],"samples":samples,
-            "raw_receipts":[native,acceptance,raw,frozen],"usage_receipts":[usage],"environment":env}
+            "raw_receipts":[native,acceptance,raw,frozen],"usage_receipts":[usage],"environment":env,
+            "extensions":{"information":{"performance_goal":(result.get("timing") or {}).get("soft_goal","unknown")}}}
         if intent["profile"].get("synthetic") or intent["transport"].get("synthetic"):
             document["extensions"]={"information":{"synthetic":True,"qualification":"none"}}
             for name in ("build","correctness","performance"):

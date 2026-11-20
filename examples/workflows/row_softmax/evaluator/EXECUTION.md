@@ -180,3 +180,17 @@ variables, and actual prod `agate env` returned HTTP 401 missing authentication.
 This is **configuration not located in this session**, not evidence that the
 user's service lacks devices/dev. No GPU job was submitted and no real capability
 or old L20D/H20 result was used to sign K1.real.
+
+## B06 reference wrapper
+
+`kernelschema.evaluation.channel:workflow_channel` now supplies the reference
+backend wrapper. `selection()` fixes wrapper/K1 source hashes; `qualify()` runs a
+six-job probe/baseline/four-negative suite on the caller's original OwnerAccount.
+It reuses K1 AgateDevExecutor and the exact full Task, and verifies original
+readonly/CUDA/terminal evidence before admission. See
+[standalone commands](../../../../docs/workflows/standalone.md#agate).
+
+The final submit now tightens the actual native timeout against the original
+UTC/monotonic reservation and authorizes at that boundary. Reports retain the
+Task timing `soft_goal` as `extensions.information.performance_goal`. These are
+CPU-tested integration changes; actual service/CUDA qualification is still unrun.

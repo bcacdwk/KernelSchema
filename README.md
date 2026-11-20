@@ -23,6 +23,10 @@ Kernel Schema 的核心出发点在于：压缩是智能的基础，对语义、
 
 Schema Extract 通过唯一入口 `schema_extract/extract_yaml.py` 执行六阶段提取、独立审阅、按实际来源返回与 Runner 原子发布（默认 Claude Code `qwen3.8-max[1m]` / `max`，各阶段与角色独立会话；Codex 可显式指定）。Linux 运行环境与命令见 [Supervisor 手册](schema_extract/README.md#开始一次试用)，角色与工具权限见[执行协议](schema_extract/tools/README.md#运行恢复与维护)，正式输出目录见 [Schema Wiki](schema_wiki/README.md)。交付须核对目标状态与凭据：`ready` 仅表示当前 P6 终审通过，登记输出目录以 `published: true` 为准，另目录 `export` 以对应发布记录与目标 `.extraction/receipt.json` 为准；待发布或中断运行的排查与接续见[恢复与交付](schema_extract/README.md#恢复与交付)。
 
+## 独立 workflow 试用
+
+[Row-softmax 独立驱动](docs/workflows/standalone.md)已提供同一 API 下的 design → implement → 至多一次 optimize → 明确后续行动，以及固定 R0、人工 partial seed、verify_only 和原 run 恢复。五类请求从实际材料生成，默认预检无需模型/GPU。当前证据为 CPU 工程与 synthetic 运输测试；真实 Agate 认证/设备资格、业务模型写作和 GPU 链尚未通过，不据此声明真实实现全部完成。
+
 ## 术语
 
 - **Planner**：做设计的 Agent 或人，唯一能修改 Design 区，并填写 `REALIZATION` 的 `Require / Prefer / Forbid`。

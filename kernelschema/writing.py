@@ -31,9 +31,12 @@ dispatch (inline Markdown|null), bindings, next_action (none|implement|verify),
 action_reason, action_inputs [catalog ID], action_evidence [catalog ID].
 Initial design uses revise. Keep has raw=[], dispatch=null, bindings=null.
 A revision includes every raw node, root Contract and current coverage bindings.
-An action requires a reason, explicit inputs and authorized feedback/evidence.
-No action uses null reason and empty input/evidence lists. Each implement/verify
-action selects exactly one nonempty Source. A new Schema never inherits old C qualification. No action
+An action requires a reason, explicit inputs and authorized feedback/evidence or
+role-granted materials (including the target/objective; measurements are not required).
+No action uses null reason and empty input/evidence lists. Verify selects exactly
+one nonempty Source. Implement explicitly selects one Source or task/default_start,
+which means seed=null and uses Task.starter_source or a legal empty start. Never
+implicitly select old C. A new Schema never inherits old C qualification. No action
 is executed inside this writing call. Prefer keep/none when no useful action is
 supported. Do not force a revision or treat ordinary implementation defects as
 design changes. Ordinary feedback stays external; new REALIZATION.Feedback is
@@ -61,9 +64,12 @@ def freeze_rules(publication):
     method = publication.put_bytes("writing/method.md", METHOD)
     checker = publication.put_bytes("writing/checker.py", Path(__file__).read_bytes())
     helper = publication.put_bytes("writing/policy.py", Path(policy.__file__).read_bytes())
+    from .evaluation import environment
+    adapter = publication.put_bytes("writing/environment.py", Path(environment.__file__).read_bytes())
     rules = {**rules, "files": sorted([*rules["files"], method], key=lambda r: r["path"]),
              "tools": [*rules["tools"], {"name": "kernelschema.writing", "version": VERSION, "source": checker},
-                       {"name": "kernelschema.writing.policy", "version": VERSION, "source": helper}]}
+                       {"name": "kernelschema.writing.policy", "version": VERSION, "source": helper},
+                       {"name": "kernelschema.writing.environment", "version": VERSION, "source": adapter}]}
     return publication.put_json("writing/rules.json", rules)
 
 
@@ -136,6 +142,7 @@ class WritingBackend:
                 "implementation": {"writing": sha256(Path(__file__).read_bytes()), "policy": sha256(Path(policy.__file__).read_bytes()),
                                    "budget": sha256(Path(__file__).with_name("budget.py").read_bytes()),
                                    "task_adapter": sha256((Path(__file__).parent / "evaluation/task.py").read_bytes()),
+                                   "environment_adapter": sha256((Path(__file__).parent / "evaluation/environment.py").read_bytes()),
                                    "template_api": sha256(Path(template_api.__file__).read_bytes()), "method": sha256(METHOD)}}
 
     def _account(self, context, *, create=False):
@@ -146,7 +153,8 @@ class WritingBackend:
         matches = [ref for ref in rules["files"] if ref["sha256"] == sha256(METHOD)]
         if len(matches) != 1 or context.bundle.read(matches[0]) != METHOD:
             raise ProtocolError("Rules must freeze exactly one current finite writing method")
-        for name, path in (("kernelschema.writing", Path(__file__)), ("kernelschema.writing.policy", Path(policy.__file__))):
+        for name, path in (("kernelschema.writing", Path(__file__)), ("kernelschema.writing.policy", Path(policy.__file__)),
+                           ("kernelschema.writing.environment", Path(__file__).parent / "evaluation/environment.py")):
             found = [t for t in rules["tools"] if t["name"] == name]
             if len(found) != 1 or found[0]["version"] != VERSION or context.bundle.read(found[0]["source"]) != path.read_bytes():
                 raise ProtocolError("Rules must pin the actual writing checker and policy")

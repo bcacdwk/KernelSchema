@@ -439,7 +439,7 @@ def test_newly_bound_task_never_invents_a_contract(setup_writing, monkeypatch):
     r = p.put_json("new-task-request.json", req)
     p.commit([r])
     durable_write(f["root"] / "request.json", jcs(req), replace=True)
-    with pytest.raises(UnsupportedError, match="explicit Contract adapter"):
+    with pytest.raises(UnsupportedError, match="ks.row-softmax.target.v1"):
         run((f, backend, fake, req, out), monkeypatch)
     assert not calls(fake)
 

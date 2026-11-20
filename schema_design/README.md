@@ -19,3 +19,9 @@ construction, exact draft/review formats, publication and limits.
 This implementation has CPU engineering validation with an actual fake CLI
 subprocess. It does not claim a new real model call, device binding, CUDA Task
 qualification, or measured performance.
+
+The [standalone driver](../docs/workflows/standalone.md) now constructs complete
+requests and consumes successful design output in a real fixed API call. The
+[typed target adapter](../docs/workflows/target-environment.md) derives the locked
+Contract from public Task materials; explicit target declarations remain separate
+from device qualification. Unknown environment formats are rejected.

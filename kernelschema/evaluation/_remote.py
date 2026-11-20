@@ -14,8 +14,26 @@ import resource
 import subprocess
 import sys
 import tempfile
+import time
 
 MARKER = "KS_EVALUATOR_V1 "
+
+
+def remaining_timeout(profile):
+    """Queueing/preparation cannot renew the owner's original UTC cutoff.
+
+    Cross-host UTC clock agreement is an execution-profile prerequisite. The
+    host's monotonic cutoff is additionally checked before the original POST.
+    """
+    remaining = profile["timeout_s"]
+    cutoff = profile.get("deadline_utc_ms")
+    if cutoff is not None:
+        if type(cutoff) is not int:
+            raise ValueError("invalid owner UTC cutoff")
+        remaining = min(remaining, (cutoff - time.time_ns() // 1000000) // 1000)
+    if remaining < 1:
+        raise TimeoutError("original owner deadline expired before remote execution")
+    return remaining
 
 
 def emit(value):
@@ -30,7 +48,7 @@ def main():
     action = sys.argv[1]
     if action == "probe":
         result = subprocess.run([profile["python"], "-I", "-B", str(root / "_worker.py"), str(root), "prepare-cuda"],
-                                capture_output=True, timeout=profile["timeout_s"])
+                                capture_output=True, timeout=remaining_timeout(profile))
         binary = Path(profile["bwrap"])
         emit({"action": "probe", "exit_code": result.returncode, "stdout": result.stdout.decode(), "stderr": result.stderr.decode(),
               "bwrap_sha256": "sha256:" + hashlib.sha256(binary.read_bytes()).hexdigest() if binary.is_file() else None,
@@ -51,7 +69,7 @@ def main():
                 resource.setrlimit(resource.RLIMIT_FSIZE,(32 * 1024 * 1024,32 * 1024 * 1024))
                 resource.setrlimit(resource.RLIMIT_CORE,(0,0))
             result = subprocess.run(argv, stdout=stdout, stderr=stderr, stdin=subprocess.DEVNULL,
-                                    timeout=profile["timeout_s"], preexec_fn=limits)
+                                    timeout=remaining_timeout(profile), preexec_fn=limits)
             stdout.seek(0); stderr.seek(0)
             emit({"action": "execute", "exit_code": result.returncode, "stdout": stdout.read().decode(),
                   "stderr": stderr.read().decode(), "bwrap_sha256": profile["bwrap_sha256"]})

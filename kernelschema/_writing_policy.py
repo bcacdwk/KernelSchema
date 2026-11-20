@@ -39,8 +39,11 @@ def template_contract(bundle, task_ref):
     adapter = RowSoftmaxTask(bundle, task_ref)
     task = adapter.task
     from .resources import resource
-    if bundle.read(task["environment"]) != resource("examples/workflows/row_softmax/task/environment.md").read_bytes():
-        raise UnsupportedError("Task-derived writing Contract currently requires the fixed unbound public environment; a newly bound Task needs an explicit Contract adapter")
+    environment = bundle.read(task["environment"])
+    hardware = None
+    if environment != resource("examples/workflows/row_softmax/task/environment.md").read_bytes():
+        from .evaluation.environment import read_target
+        hardware = read_target(environment)["hardware_specification"]
     public = template_api.tools().yaml_source.loads(bundle.read(task["contract"]).decode(), "task").value
     shape = [{"row": "m"}, {"column": "n"}]
     domain = public["domain"]
@@ -51,7 +54,7 @@ def template_contract(bundle, task_ref):
             + formula + ". Write FP32 approximations to g into the original out region and return the identical out object. "
             "Preserve x bytes, both original storage/view signatures and every backing byte outside out. "
             "Recompute changed legal x; no test-number, invocation-order or precomputed-output dependency. Evaluator files are not writable.")
-    return {"Algorithm_requirement": {
+    contract = {"Algorithm_requirement": {
         "Input": {"x": {"meaning": "Read-only logits on the selected CUDA device", "shape": shape, "dtype": "fp32", "range": public["tensors"]["x"]["range"]},
                   "out": {"meaning": "Supplied original output buffer", "shape": shape, "dtype": "fp32", "range": public["tensors"]["out"]["initial_contents"]}},
         "Output": {"y": {"meaning": "Identical out object with original region written", "shape": shape, "dtype": "fp32"}},
@@ -68,6 +71,9 @@ def template_contract(bundle, task_ref):
                      "Microbench": "<task-microbench@pending:NVIDIA/selected-device/>",
                      "Sota": {"Kernel": "<task-kernel@pending:selected-device/index.md>", "Schema": "<task-schema@pending:selected-device/index.md>"},
                      "Profile": "<task-profile@pending:NVIDIA/selected-tools/>"}}}
+    if hardware is not None:
+        contract["Hardware_specification"] = deepcopy(hardware)
+    return contract
 
 
 def contract_for(context):
@@ -83,6 +89,11 @@ def catalog(context):
             result[f"{category}:{index}"] = ref
     if context.objects["task"]["starter_source"]:
         result["task/starter_source"] = context.objects["task"]["starter_source"]
+    # This explicit Task marker means seed=null, including a legal empty start.
+    result["task/default_start"] = context.request["task"]
+    for entry in context.objects["materials"]["entries"]:
+        if {"planner", "reviewer"} <= set(entry["roles"]):
+            result["material:" + entry["id"]] = entry["file"]
     return result
 
 
@@ -129,11 +140,15 @@ def parse_draft(context, value):
     else:
         if context.request["operation"] != "optimize" or not isinstance(value["action_reason"], str) or not value["action_reason"].strip() or not value["action_inputs"] or not value["action_evidence"]:
             raise ProtocolError("action needs an optimize request, reason, explicit inputs and evidence")
-        if any(not key.startswith(("evidence:", "feedback:")) for key in value["action_evidence"]):
-            raise ProtocolError("action evidence must be explicitly authorized feedback/evidence")
+        if any(not key.startswith(("evidence:", "feedback:", "material:")) for key in value["action_evidence"]):
+            raise ProtocolError("action evidence must be authorized feedback, evidence or role-granted material")
         sources = [refs[key] for key in value["action_inputs"] if _is_source(context, refs[key])]
-        if len(sources) != 1 or not context.bundle.source(sources[0]):
-            raise ProtocolError("implement/verify action needs one explicit nonempty original Source")
+        default_start = "task/default_start" in value["action_inputs"]
+        if value["next_action"] == "verify":
+            if default_start or len(sources) != 1 or not context.bundle.source(sources[0]):
+                raise ProtocolError("verify action needs one explicit nonempty original Source")
+        elif not ((len(sources) == 1 and not default_start) or (not sources and default_start)):
+            raise ProtocolError("implement action must explicitly select one Source or task/default_start (seed=null)")
     return deepcopy(value)
 
 
