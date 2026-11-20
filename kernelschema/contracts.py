@@ -296,14 +296,33 @@ def validate(value: Any) -> dict:
         if len(assigned) != len(set(assigned)):
             raise ProtocolError("coverage ID bound more than once")
     elif kind == "source":
-        if (v["format"], v["encoding"], v["entrypoint"]) != ("single_file", "utf-8", "kernel.py"):
-            raise UnsupportedError("only single_file utf-8 kernel.py is supported")
+        for field in ("format", "encoding", "entrypoint"):
+            _text(v[field])
+        supported = {("single_file", "utf-8", "kernel.py"), ("python_tree", "utf-8", "solution.py")}
+        if (v["format"], v["encoding"], v["entrypoint"]) not in supported:
+            raise UnsupportedError("unsupported Source format/encoding/entrypoint")
         def file(x):
             _obj(x, ("name", "mode", "size", "sha256")); relative_path(x["name"]); _count(x["size"]); _hash(x["sha256"])
-            if x["name"] != "kernel.py" or x["mode"] != "0644":
+            if x["mode"] != "0644":
+                raise UnsupportedError("Source supports regular mode 0644 files only")
+            if v["format"] == "single_file" and x["name"] != "kernel.py":
                 raise UnsupportedError("single_file requires only kernel.py with mode 0644")
+            if v["format"] == "python_tree":
+                # Finite source-only format: root Python modules, one level of
+                # package modules, and root text provenance. No native assets,
+                # nested trees, executable scripts or installation instructions.
+                python = re.fullmatch(r"(?:[A-Za-z_][A-Za-z_0-9]*/)?[A-Za-z_][A-Za-z_0-9]*\.py", x["name"])
+                text = re.fullmatch(r"[A-Za-z_][A-Za-z_0-9-]*\.(?:json|md|txt)", x["name"])
+                if not (python or text or x["name"] == "LICENSE"):
+                    raise UnsupportedError("python_tree supports flat Python packages and root text files only")
         _list(v["files"], file, key=lambda x: x["name"], sorted_set=True)
-        if len(v["files"]) != 1: raise ProtocolError("Source is a complete single-file snapshot")
+        if v["format"] == "single_file" and len(v["files"]) != 1:
+            raise ProtocolError("Source is a complete single-file snapshot")
+        if v["format"] == "python_tree":
+            if not 1 <= len(v["files"]) <= 32 or sum(x["size"] for x in v["files"]) > 4 * 1024 * 1024:
+                raise UnsupportedError("python_tree limit is 32 files / 4 MiB")
+            if v["entrypoint"] not in {x["name"] for x in v["files"]}:
+                raise ProtocolError("Source entrypoint is absent")
     elif kind == "budget_account":
         _text(v["id"]); _text(v["owner"]); limits(v["limits"]); _time(v["deadline_utc"])
     elif kind == "backend_profile":

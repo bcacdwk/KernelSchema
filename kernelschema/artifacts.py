@@ -20,7 +20,7 @@ import stat
 import tempfile
 from uuid import uuid4
 
-from .contracts import PROTOCOL, ProtocolError, Ref, digest, jcs, loads, ref, relative_path, sha256, validate
+from .contracts import PROTOCOL, ProtocolError, UnsupportedError, Ref, digest, jcs, loads, ref, relative_path, sha256, validate
 
 
 def fsync_directory(path: Path):
@@ -161,17 +161,33 @@ class Bundle:
         return value
 
     def source(self, reference: Ref) -> bytes:
+        """Original single-file API. A tree must never silently lose its files."""
         manifest = self.document(reference, "source")
-        entry = manifest["files"][0]
-        name = str(PurePosixPath(reference["path"]).parent / "files" / entry["name"])
-        data, mode = self._file(name)
-        if mode != int(entry["mode"], 8) or len(data) != entry["size"] or sha256(data) != entry["sha256"]:
-            raise ProtocolError(f"source bytes/mode/size mismatch: {name}")
-        source_bytes(data)
-        # single_file is a full snapshot: hidden/extra files are not an overlay.
-        if self._names(str(PurePosixPath(name).parent)) != {"kernel.py"}:
-            raise ProtocolError("single_file payload contains extra files")
-        return data
+        if manifest["format"] != "single_file":
+            raise UnsupportedError("source() is single_file only; use source_files() for python_tree")
+        return self.source_files(reference)["kernel.py"].data
+
+    def source_files(self, reference: Ref) -> dict[str, FileBytes]:
+        """Verify the entire snapshot, including extra paths and original modes."""
+        manifest = self.document(reference, "source")
+        root = str(PurePosixPath(reference["path"]).parent / "files")
+        files = {}
+        directories = {"": set()}
+        for entry in manifest["files"]:
+            parts = entry["name"].split("/")
+            for index, part in enumerate(parts):
+                directory = "/".join(parts[:index])
+                directories.setdefault(directory, set()).add(part)
+            name = root + "/" + entry["name"]
+            data, mode = self._file(name)
+            if mode != int(entry["mode"], 8) or len(data) != entry["size"] or sha256(data) != entry["sha256"]:
+                raise ProtocolError(f"source bytes/mode/size mismatch: {name}")
+            source_bytes(data)
+            files[entry["name"]] = FileBytes(data, mode)
+        for directory, expected in directories.items():
+            if self._names(root + ("/" + directory if directory else "")) != expected:
+                raise ProtocolError("Source payload contains extra paths")
+        return files
 
     def closure(self, roots: list[Ref], *, subjects: list[Ref] | None = None) -> dict[str, FileBytes]:
         """Selected roots plus explicitly supplied subject locators; no hash scan."""
@@ -201,11 +217,11 @@ class Bundle:
                 queue.extend(dependencies(value))
                 required.extend(subject_hashes(value))
                 if value.get("kind") == "source":
-                    source = self.source(reference)
-                    entry = value["files"][0]
-                    path = str(PurePosixPath(reference["path"]).parent / "files/kernel.py")
-                    files[path] = FileBytes(source, 0o644)
-                    locators.setdefault(sha256(source), []).append({"path": path, "sha256": sha256(source)})
+                    for name, payload in self.source_files(reference).items():
+                        path = str(PurePosixPath(reference["path"]).parent / "files" / name)
+                        files[path] = payload
+                        identity = sha256(payload.data)
+                        locators.setdefault(identity, []).append({"path": path, "sha256": identity})
                 elif value.get("kind") == "schema":
                     from .template_api import resolve_bundle
                     resolve_bundle(self, value)  # Actual parser provenance, including root/from chains.
@@ -238,21 +254,96 @@ def source_manifest(data: bytes) -> dict:
     return {"protocol": PROTOCOL, "kind": "source", "format": "single_file", "encoding": "utf-8", "entrypoint": "kernel.py", "files": [{"name": "kernel.py", "mode": "0644", "size": len(data), "sha256": sha256(data)}]}
 
 
+def source_files_manifest(files: dict[str, FileBytes]) -> dict:
+    """Encode the finite python_tree format; original bytes remain separate."""
+    for payload in files.values():
+        source_bytes(payload.data)
+    return validate({"protocol": PROTOCOL, "kind": "source", "format": "python_tree",
+        "encoding": "utf-8", "entrypoint": "solution.py", "files": [
+            {"name": name, "mode": f"{payload.mode:04o}", "size": len(payload.data), "sha256": sha256(payload.data)}
+            for name, payload in sorted(files.items())]})
+
+
 def install_source(bundle: Bundle, reference: Ref, destination: str | Path):
     """Install a whole Source into a new directory; never overlay a live draft."""
-    data = bundle.source(reference)
+    files = bundle.source_files(reference)
     destination = Path(destination).absolute()
     if destination.exists() or destination.is_symlink():
         raise ProtocolError("source installation requires a new directory; owner must authorize draft replacement separately")
     durable_mkdir(destination.parent)
     stage = Path(tempfile.mkdtemp(prefix=".ks-source-", dir=destination.parent))
     try:
-        durable_write(stage / "kernel.py", data)
+        for name, payload in files.items():
+            durable_write(stage / name, payload.data, mode=payload.mode)
         fsync_directory(stage)
         _rename_new(stage, destination)
         fsync_directory(destination.parent)
     finally:
         if stage.exists(): shutil.rmtree(stage)
+
+
+def verify_source_directory(bundle: Bundle, reference: Ref, directory: str | Path):
+    """Exact snapshot check for installed drafts; no hidden/extra files or links."""
+    directory = Path(directory)
+    expected = bundle.source_files(reference)
+    actual = set()
+    expected_dirs = {str(p) for name in expected for p in PurePosixPath(name).parents if str(p) != "."}
+    if directory.is_symlink() or not directory.is_dir():
+        raise ProtocolError("Source directory must be a real directory")
+    for parent, dirs, names in os.walk(directory, followlinks=False):
+        for name in dirs:
+            child = Path(parent) / name
+            if child.is_symlink() or child.relative_to(directory).as_posix() not in expected_dirs:
+                raise ProtocolError("Source directory contains an extra directory or symlink")
+        actual.update((Path(parent) / name).relative_to(directory).as_posix() for name in names)
+    if actual != set(expected):
+        raise ProtocolError("Source directory differs from complete snapshot")
+    for name, payload in expected.items():
+        if read_regular(directory, name) != (payload.data, payload.mode):
+            raise ProtocolError("installed Source bytes/mode differ: " + name)
+
+
+def replace_source(bundle: Bundle, reference: Ref, destination: str | Path, *, previous: Ref):
+    """Caller-authorized atomic replacement, recoverable with the same two Refs.
+
+    Linux exchange leaves either complete old or complete new directory visible.
+    A retry after exchange only removes the verified old snapshot; it never
+    overlays files or recreates a budget/operation. Concurrent readers must have
+    quiesced before their owner calls this mutation.
+    """
+    destination = Path(destination).absolute()
+    key = sha256(jcs({"path": str(destination), "new": reference, "old": previous}))[7:]
+    pending = destination.parent / (".ks-replace-" + key)
+    durable_mkdir(destination.parent)
+    # Separate from Bundle's directory lock: the bundle can also be the draft's
+    # parent, and nested shared reads must not deadlock this exclusive mutation.
+    lock_fd = os.open(destination.parent / ".ks-source-replacement.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock_fd, "a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            verify_source_directory(bundle, reference, destination)
+            is_new = True
+        except ProtocolError:
+            is_new = False
+        if is_new:
+            if pending.exists() or pending.is_symlink():
+                verify_source_directory(bundle, previous, pending)
+                shutil.rmtree(pending)
+                fsync_directory(destination.parent)
+            return
+        verify_source_directory(bundle, previous, destination)
+        if pending.exists() or pending.is_symlink():
+            verify_source_directory(bundle, reference, pending)
+        else:
+            install_source(bundle, reference, pending)
+        fn = ctypes.CDLL(None, use_errno=True).renameat2
+        if fn(-100, os.fsencode(pending), -100, os.fsencode(destination), 2):
+            number = ctypes.get_errno()
+            raise OSError(number, os.strerror(number))
+        fsync_directory(destination.parent)
+        verify_source_directory(bundle, previous, pending)
+        shutil.rmtree(pending)
+        fsync_directory(destination.parent)
 
 
 def dependencies(v: dict) -> list[Ref]:
@@ -540,6 +631,12 @@ class Publication:
     def put_source(self, name: str, data: bytes) -> Ref:
         manifest = source_manifest(data)
         self.put_bytes(name + "/files/kernel.py", data)
+        return self.put_json(name + "/manifest.json", manifest)
+
+    def put_source_files(self, name: str, files: dict[str, FileBytes]) -> Ref:
+        manifest = source_files_manifest(files)
+        for path, payload in sorted(files.items()):
+            self.put_bytes(name + "/files/" + path, payload.data, mode=payload.mode)
         return self.put_json(name + "/manifest.json", manifest)
 
     def commit(self, roots: list[Ref], *, subjects: list[Ref] | None = None):

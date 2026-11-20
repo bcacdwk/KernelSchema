@@ -71,7 +71,7 @@ artifacts with their own identities.
 | Rules | Exact rule files and tools with names, versions and source Refs. Methods/checkers stay linked to real bytes. |
 | Materials | Explicit `{id,file,roles,origin,license}` entries. Writing requires one `workflow_objective` visible to planner/reviewer. A grant does not permit changing Task/acceptance or using tools. |
 | Scope | Task coverage IDs and `{coverage_ids,node,variant}` bindings. The present evaluator supports only the full row-softmax Task; unsupported conditions/variants are not guessed. |
-| Source | `single_file`, `utf-8`, entrypoint `kernel.py`, and exactly one file with mode `0644`, size and digest. Its body is beside the manifest under `files/kernel.py`. |
+| Source | `single_file` / `kernel.py`, or finite `python_tree` / `solution.py`; UTF-8, complete name-sorted file list with mode `0644`, size and digest. Bodies are beside the manifest under `files/<name>`. The [FA4 format boundary](../../examples/workflows/fa4_decode/README.md#core-source-format-and-compatibility) limits trees to 32 files / 4 MiB, flat Python packages and root text provenance. Format support does not imply business support: profile and installed backend must each advertise the actual required format. |
 | Backend profile | Explicit runtime/model/configuration/environment/native limits/capabilities; an advertised capability must also be supported by the installed backend. |
 | Evaluator | Exact entrypoint/files, input/timing/environment Refs and adapter IDs. Staging verifies the actual installed trusted evaluator and complete source. |
 

@@ -85,14 +85,25 @@ proof that a raw report is trustworthy; K1/K4/K5 still own execution/review trus
 `Bundle(root).read(ref)` verifies exact regular-file bytes, no symlink traversal.
 `document(ref, kind=None)` additionally validates normative JCS.
 `source(ref)` returns original kernel.py bytes after hash/size/mode/UTF-8 checks.
+It rejects tree Sources. `source_files(ref)` returns the complete verified
+name-to-`FileBytes(data, mode)` map for either format. The additive `python_tree`
+format supports `solution.py`, UTF-8, at most 32 mode-0644 files / 4 MiB, flat
+Python packages and root text provenance; [FA4's format boundary and commands](../examples/workflows/fa4_decode/README.md)
+define its finite use. This does not expand existing backend capabilities.
 `install_source(bundle, ref, new_directory)` installs one complete snapshot via
 fsynced no-replace rename. It refuses an existing draft; K4 owns authorized seed
 intent/ready/admitted transitions and later draft replacement.
+`verify_source_directory` verifies an installed full snapshot.
+`replace_source(bundle, new_ref, directory, previous=old_ref)` performs an
+owner-authorized atomic Linux directory exchange after readers quiesce. Retrying
+the same Refs recovers an interrupted exchange and removes the verified old
+snapshot, including files deleted in the new Source; it never overlays files.
 
 `Publication(root, publication_id=None)` durably records a random 128-bit ID
 before staging. `put_bytes(name,bytes,mode=0o644)`, `put_json(name,dict)` and
-`put_source(name,bytes)` return stable `artifacts/<id>/...` Refs. `commit(roots,
-subjects=[...])` freezes selected actual dependencies. Reopen with the same ID
+`put_source(name,bytes)` return stable `artifacts/<id>/...` Refs.
+`put_source_files(name, dict[str, FileBytes])` publishes a complete `python_tree`.
+`commit(roots, subjects=[...])` freezes selected actual dependencies. Reopen with the same ID
 for the same operation; different bytes or a different published closure need
 a new publication. No snapshot is hardlinked to the mutable input/workspace.
 

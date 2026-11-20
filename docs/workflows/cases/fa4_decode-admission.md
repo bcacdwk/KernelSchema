@@ -1,6 +1,6 @@
 # FA4 decode：F0/F1 准入材料
 
-本页交付 **K7.materials 材料预审**。F1 固定为 `q4_direct` 的 `B=1, Q=4, seq_lens=[64], P=1, block_tables[0,0]=0, N=1, S=1`。原件和 CPU 结构检查可供 K8 开工；没有执行 kernel、GPU 或模型，不能据此声明 runtime 支持或通过 KS-P2。
+本页保留 **K7.materials 材料预审**依据。F1 固定为 `q4_direct` 的 `B=1, Q=4, seq_lens=[64], P=1, block_tables[0,0]=0, N=1, S=1`。后续 K8 已提供 [CPU 准备、正式 Task/Source、独立原栈 evaluator 及接口说明](../../../examples/workflows/fa4_decode/README.md)。没有执行原 kernel、GPU 或模型，不能据此声明 runtime 支持或通过 KS-P2。
 
 可消费文件位于 [examples/workflows/fa4_decode](../../../examples/workflows/fa4_decode/)：
 
@@ -11,7 +11,7 @@
 | [preflight-checks.json](../../../examples/workflows/fa4_decode/preflight-checks.json) | 本次实际 CPU 检查、工具身份和检查范围；非 GPU 收据 |
 | [licenses-and-gaps.md](../../../examples/workflows/fa4_decode/licenses-and-gaps.md) | available/missing/incompatible、许可及 K8/公开发行缺项 |
 
-这些 JSON 是案例内材料记录，尚非 `ks.workflow.v1` Task/Materials/Source/request。K2/K8 应读取选中的真实字节、核摘要，再冻结协议 Ref；不能把 Git SHA 当文件 SHA，也不能将本页的检查当 qualified。
+这些 K7 JSON 保留为案例内材料记录，不是 `ks.workflow.v1` Task/Materials/Source/request。[prepare.py](../../../examples/workflows/fa4_decode/prepare.py) 读取所选固定 Git 原件，核摘要后冻结真正的协议对象和 Ref；不能把 Git SHA 当文件 SHA，也不能将本页的检查当 qualified。
 
 ## 两个固定来源
 
@@ -54,9 +54,9 @@ git show 484902855fe7be82a74fe7c394503d1d7d222dbb:schema_template/examples/fa4_d
 
 完整比较式来自当前 `root.yaml:63–67`：对返回值与原位 `out_after` **分别**检查相同 shape/dtype、actual/reference 每元素均有限，并在 FP32 中逐元素满足 `abs(actual-reference) <= 0.06 + 0.04*abs(reference)`。`root.yaml:38–43` 只允许修改 out 与 workspace；`metadata.json:11–37` 记录两个输出容差、`mutates_inputs=[out]`、`scratch_inputs=[workspace_buffer]`。因此不能把 workspace 误列只读，也不能只测返回值、仅报 L2 误差或忽略 out。
 
-K8 的完整 evaluator 仍需兑现：保留原 out 的 storage/view 身份并核返回别名；检查每个 out 元素覆写；对 query/kv_cache/block_tables/seq_lens 做前后字节不变检查；独立准备 reference destination，避免参考调用覆盖候选证据。helper 后将同一 out 填 BF16 NaN，准备 launcher 后再次 poison，均在计时外且不换对象/存储。不得用包装器补写 out。`reference.py` 不包含这些独立判据，原 30/30 报告也未证明新 harness 已存在。
+K8 的 [完整 evaluator](../../../examples/workflows/fa4_decode/evaluator/entry.py) 已实现以下工程边界：保留原 out 的 storage/view 身份并核返回别名；检查每个 out 元素覆写；对 query/kv_cache/block_tables/seq_lens 做前后字节不变检查；独立准备 reference destination，避免参考调用覆盖候选证据。helper 后将同一 out 填 BF16 NaN，准备 launcher 后再次 poison，均在计时外且不换对象/存储。每次 cold/warmup/measurement 后均完整复查，不用包装器补写 out。CPU helper 测试未执行 F1 GPU，原 30/30 也不能证明新 evaluator 的真实资格。
 
-已有可复用的真实比较器来源是同一 `3d64ad…` 的 [历史 harness.py](../../../kernel_wiki/aka-four-problems-20261019/validation-20261021/bundles/fa4_decode/harness.py)：`44–51` 行执行 FP32 有限/逐元素比较，`54–62` 行检查只读输入字节和 poison，`69–96` 行分别比较返回值/原位输入、核 alias 和未变输入，`120–121` 行禁用 TF32。这些函数源码已纳入清单，未执行。旧 alias 只比较调用后的 data_ptr，没有冻结调用前 out storage/view；`157–167` 行 post-timing 也仅复查返回数值。它的 main 加载 Production、旧 shape 和旧计时协议，不能直接当新的 F1 Task/evaluator；缺项是准确接入与补齐这些边界，不能说比较器源码完全不存在。
+已有可复用的真实比较器来源是同一 `3d64ad…` 的 [历史 harness.py](../../../kernel_wiki/aka-four-problems-20261019/validation-20261021/bundles/fa4_decode/harness.py)：`44–51` 行执行 FP32 有限/逐元素比较，`54–62` 行检查只读输入字节和 poison，`69–96` 行分别比较返回值/原位输入、核 alias 和未变输入，`120–121` 行禁用 TF32。K7 纳入原件；K8 仅在显式 synthetic CPU helper 测试中执行所选函数，未执行历史 main 或 F1 GPU。旧 alias 只比较调用后的 data_ptr，没有冻结调用前 out storage/view；`157–167` 行 post-timing 也仅复查返回数值。K8 接入实际 helpers 并补上述边界，真实执行资格仍待验证。
 
 `shape_valid.json` 与 `shapes.json` 字节相同，各有 30 项；没有 F1 的 `[64],Q4` 这一项。`shape_train.json` 是 widened public domain，`development_cases=[]`，不是第三组 shape 列表。F1 来自既有 Schema README 第 17 行代表样本，不冒称历史 30 shape 中的一项。
 
@@ -74,7 +74,7 @@ CPU 通过既有 Template `effective_document("q4_direct")` 验证：读取视�
 
 保留 `root.yaml:68–93` 的 L20D/SM103、CuTe DSL 4.6.1、torch 2.9.0+cu130、cuda-python 13.1.1。原 requirements 仅钉 `nvidia-cutlass-dsl==4.6.1`，torch 为 `>=2.9`、cuda-python 未钉；TVM FFI 版本、Python、实际驱动/编译器、设备身份与精度开关未形成当前合格 profile。硬件 Wiki 多项仍是 `@pending`。旧 production metadata 的 torch 2.11 开发版和 roofline 的 B300/SM100 标签属于别的记录，不能补作该原栈版本。H20/Triton 首题资格不能代签 CuTe/实际 SM103。
 
-`solution.py` 必须与 `qoder_greenfield_decode_attention/` 同目录；六个 Python 文件都在清单。即使 direct 不启动 global combine，paged 模块仍导入 `gqa_decode.py` 中符号，不能只取入口或一个 kernel 文件。K8 应在案例内实现所需多文件 codec/adapter：全量文件清单、准确 bytes/mode/size、删除语义、固定文件隔离及原子安装；少包不能退回旧文件补齐，返回 C 必须对应实际执行源。这些能力本批未实现。
+`solution.py` 必须与 `qoder_greenfield_decode_attention/` 同目录；六个 Python 文件都在清单。即使 direct 不启动 global combine，paged 模块仍导入 `gqa_decode.py` 中符号，不能只取入口或一个 kernel 文件。K8 的有限 `python_tree` codec、完整冻结/装载/导入、原子安装/替换及删除语义已通过 CPU 测试；[实际格式边界](../../../examples/workflows/fa4_decode/README.md) 保留全量 bytes/mode/size，少包不会退回旧文件补齐。AKA/K3 多文件输出、候选隔离、完整执行来源映射仍需补接，未扩大既有 backend 支持声明。
 
 `operator.py:474–583,652–843` 区分首次调用和 cache hit。冷路径先执行正常 fmha，再可能克隆 out、经 FFI 重放、设备同步并探测误差；失败/异常可恢复 out。`delta/denominator`（分母≤`1e-6` 时取 delta）≤`1e-2` 只是 launcher 探测门，绝非 Task 的 `0.06/0.04` 容差。记录冷启动/准备事实后，只有满足 native 条件的完整 `Model.forward` 和完成边界才可量声明的稳态。原性能 README 第 44–49 行明确 kernel-sum 排除 host。
 
@@ -97,4 +97,4 @@ python3 -B schema_template/check_yaml.py schema_template/examples/fa4_decode/q4_
 
 本次实际使用 Python 3.13.12 与临时隔离的 PyYAML 6.0.3；默认 Python 首次因缺 PyYAML 返回 2，补齐临时 CPU 依赖后返回 0。此环境记录不构成计划中 Python 3.11/CuTe runtime 的资格。材料清单可用 Python 标准库对 `git show <commit>:<path>` 原字节计算 SHA-256/size，逐项与清单比较；13 参数检查仅解析 AST，原 host 检查只提取四个纯整数函数，未导入原 CUDA 模块。
 
-K7.materials 可按“预审完成且如实披露缺项”签收。K8.engineering 可消费清单、固定 F1 和原件开始实现；K8.real/KS-P2 仍缺完整 evaluator/source adapter、原栈真实资格、有限 fidelity、冷/稳态证据及公开材料闭包。历史 L20D 30/30、1.1126× kernel-sum 和既有异步 stress 叙述只保留为原码材料。
+K7.materials 保持“预审完成且如实披露缺项”。K8.engineering 已交付固定案例的 Task/Source/evaluator/准备与原码观察入口；当前独立入口只准入固定原码，不是候选 sandbox。K8.real/KS-P2 仍缺 AKA/K3 完整 case 接入、原栈真实资格、有限 fidelity、冷/稳态证据及公开材料闭包。历史 L20D 30/30、1.1126× kernel-sum 和既有异步 stress 叙述只保留为原码材料。

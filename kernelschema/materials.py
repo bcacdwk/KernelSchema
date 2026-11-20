@@ -34,8 +34,8 @@ def validate_request(bundle: Bundle, request: dict) -> dict[str, dict]:
     for entry in objects["materials"]["entries"]:
         if entry["roles"] and entry["file"]["sha256"] in private_hashes:
             raise ProtocolError("private evaluator files cannot enter model role materials")
-    bundle.source(task["baseline_source"])
-    if task["starter_source"] is not None: bundle.source(task["starter_source"])
+    bundle.source_files(task["baseline_source"])
+    if task["starter_source"] is not None: bundle.source_files(task["starter_source"])
     if request["budget"]["parent"]:
         objects["budget_account"] = bundle.document(request["budget"]["parent"], "budget_account")
     if request["operation"] in ("design", "optimize"):
@@ -56,7 +56,9 @@ def validate_request(bundle: Bundle, request: dict) -> dict[str, dict]:
             raise ProtocolError("implement needs complete nonempty scope bindings")
         seed = request["seed"] or task["starter_source"]
         objects["seed"] = seed
-        if seed is not None: bundle.source(seed)
+        if seed is not None: bundle.source_files(seed)
+        source_refs = [task["baseline_source"]] + ([seed] if seed else [])
+        objects["source_formats"] = sorted({bundle.document(r, "source")["format"] for r in source_refs})
     # Coverage partition semantics and when/variant admissibility are Task and
     # writing/backend owner checks, not a generic expression evaluator here.
     return objects
@@ -69,7 +71,7 @@ def require_capabilities(request: dict, objects: dict, actual: dict):
         if PROTOCOL not in caps["protocols"] or request["operation"] not in caps["operations"]:
             raise UnsupportedError("backend does not support this protocol/operation")
         if request["operation"] == "implement":
-            if request["mode"] not in caps["modes"] or "single_file" not in caps["source_formats"]:
+            if request["mode"] not in caps["modes"] or not set(objects.get("source_formats", ["single_file"])) <= set(caps["source_formats"]):
                 raise UnsupportedError("backend does not support this mode/source format")
             if objects["seed"] is None and not caps["empty_start"]:
                 raise UnsupportedError("backend does not support empty_start")

@@ -96,7 +96,7 @@ class RunContext:
         _name(operation_id)
         if role not in (*ROLES, "evaluator"): raise ProtocolError("invalid intent role")
         _text(purpose); ref(source, nullable=True); _count(episode, nullable=True)
-        if source: self.bundle.source(source)
+        if source: self.bundle.source_files(source)
         if not isinstance(reservation, dict) or not reservation:
             raise ProtocolError("intent needs explicit owner reservation facts")
         if submission_key is not None: _text(submission_key)
