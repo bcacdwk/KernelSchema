@@ -174,3 +174,5 @@ Python 3.11 compatibility, actual business-model/CUDA gates and final licensing
 remain separate release work. Existing material licenses/origins are retained in
 the [row-softmax source inventory](../../examples/workflows/row_softmax/references/README.md)
 and its manifests; public readability does not itself grant redistribution.
+The [release checklist](release-gaps.md) separates these remaining decisions
+from the supported CPU/source-checkout engineering behavior.

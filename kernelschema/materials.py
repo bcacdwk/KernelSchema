@@ -15,6 +15,18 @@ def private_evaluator_hashes(evaluator: dict) -> set[str]:
     return {r["sha256"] for r in [*evaluator["files"], evaluator["entrypoint"], evaluator["inputs"]]}
 
 
+def rebuild_source_hashes(bundle, request, task) -> set[str]:
+    """Exact optimized Python bodies cannot be relabeled as rebuild input.
+
+    Empty package markers disclose no implementation. This is an exact-byte
+    boundary, not a detector for rewritten or partially quoted source.
+    """
+    if request.get("extensions", {}).get("information", {}).get("source_intent") != "schema_rebuild":
+        return set()
+    manifest = bundle.document(task["baseline_source"], "source")
+    return {f["sha256"] for f in manifest["files"] if f["name"].endswith(".py") and f["size"]}
+
+
 def public_baseline_payload(bundle, task, evaluator, source, name, data):
     """The existing fixed row baseline is public only as an explicit Source.
 
@@ -55,9 +67,12 @@ def validate_request(bundle: Bundle, request: dict) -> dict[str, dict]:
     evaluator = bundle.document(task["evaluator"], "evaluator")
     objects["evaluator"] = evaluator
     private_hashes = private_evaluator_hashes(evaluator)
+    rebuild_hashes = rebuild_source_hashes(bundle, request, task)
     for entry in objects["materials"]["entries"]:
         if entry["roles"] and entry["file"]["sha256"] in private_hashes:
             raise ProtocolError("private evaluator files cannot enter model role materials")
+        if entry["roles"] and entry["file"]["sha256"] in rebuild_hashes:
+            raise ProtocolError("schema_rebuild cannot deliver optimized baseline implementation bytes")
     bundle.source_files(task["baseline_source"])
     if task["starter_source"] is not None: bundle.source_files(task["starter_source"])
     if request["budget"]["parent"]:

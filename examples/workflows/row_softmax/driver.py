@@ -301,6 +301,8 @@ class Demo:
                             "request": entry["request"], "usage": result["usage"], "schema": request.get("schema", result.get("schema"))})
             if result["operation"] == "implement" and request["schema"] == self.state["schema"]:
                 current_qualified = result["code"]["qualified"]
+        if self.state["current"] is not None and self.state["current"]["operation"] == "implement":
+            current_qualified = None  # pending new Q, including a same-R verify
         return {"format": VERSION, **{k: self.state[k] for k in ("status", "recovery", "reason", "phase", "schema", "scope", "optimize_count")},
                 "current_qualified": current_qualified, "current_run": self.state["current"], "history": history,
                 "owner": self.owner.descriptor, "fences": self.owner.fences(),

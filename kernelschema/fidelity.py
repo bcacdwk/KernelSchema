@@ -119,10 +119,14 @@ def _aggregate(statuses):
 
 def _located(item, files):
     locations = item.get("source_locations", [])
-    if not isinstance(locations, list) or not locations:
+    if (not isinstance(locations, list) or not locations or any(not isinstance(loc, str) for loc in locations)
+            or len(set(locations)) != len(locations)):
         return False
     evidence = item.get("evidence", [])
-    if not isinstance(evidence, list):
+    if (not isinstance(evidence, list) or len(evidence) != len(locations)
+            or any(not isinstance(e, dict) or set(e) != {"location", "quote"}
+                   or not isinstance(e["location"], str) or not isinstance(e["quote"], str) for e in evidence)
+            or {e["location"] for e in evidence} != set(locations)):
         return False
     for loc in locations:
         match = re.fullmatch(r"([^:]+\.py):L([1-9][0-9]*)(?:-L([1-9][0-9]*))?", loc) if isinstance(loc, str) else None
@@ -176,7 +180,8 @@ def report(context, *, source, operation_id, scope_validation, receipt, publicat
     answers = {}
     if valid:
         for item in content["items"]:
-            if not isinstance(item, dict) or item.get("id") in answers:
+            if (not isinstance(item, dict) or set(item) != {"id", "status", "reason", "source_locations", "evidence"}
+                    or not isinstance(item["id"], str) or item["id"] in answers):
                 valid = False
                 break
             answers[item.get("id")] = item
@@ -186,7 +191,8 @@ def report(context, *, source, operation_id, scope_validation, receipt, publicat
         answer = answers.get(obligation["id"], {}) if valid else {}
         status = answer.get("status")
         understood = obligation["category"] not in ("unrecognized-design", "unrecognized-realization")
-        accepted = understood and status in ("pass", "fail", "unknown") and bool(answer.get("reason")) and _located(answer, lines)
+        accepted = (understood and status in ("pass", "fail", "unknown")
+                    and isinstance(answer.get("reason"), str) and bool(answer["reason"].strip()) and _located(answer, lines))
         result = {k: obligation[k] for k in ("id", "obligation", "schema_locations")}
         result.update(status=status if accepted else "unknown", source_locations=answer["source_locations"] if accepted else [],
                       reason=answer["reason"] if accepted else "Independent review missing, unlocated, inconsistent or method cannot interpret the applicable obligation.")
@@ -196,10 +202,14 @@ def report(context, *, source, operation_id, scope_validation, receipt, publicat
             result.update(machine)
         items.append(result)
     mappings, coverage_statuses = [], []
+    coverage_valid = (valid and len(content["coverage"]) == len(scope_validation["mappings"])
+        and all(isinstance(a, dict) and set(a) == {"coverage_id", "node", "variant", "source_locations", "evidence", "status", "reason"}
+                for a in content["coverage"]))
     for mapping in scope_validation["mappings"]:
-        candidates = [a for a in content["coverage"] if isinstance(a, dict) and all(a.get(k) == mapping.get(k) for k in ("coverage_id", "node", "variant"))] if valid else []
+        candidates = [a for a in content["coverage"] if all(a.get(k) == mapping.get(k) for k in ("coverage_id", "node", "variant"))] if coverage_valid else []
         answer = candidates[0] if len(candidates) == 1 else {}
-        accepted = answer.get("status") in ("pass", "fail", "unknown") and _located(answer, lines) and bool(answer.get("reason"))
+        accepted = (answer.get("status") in ("pass", "fail", "unknown") and _located(answer, lines)
+                    and isinstance(answer.get("reason"), str) and bool(answer["reason"].strip()))
         coverage_statuses.append(answer["status"] if accepted else "unknown")
         mappings.append({**{k: mapping[k] for k in ("coverage_id", "node", "variant")},
                          "source_locations": answer["source_locations"] if accepted else []})

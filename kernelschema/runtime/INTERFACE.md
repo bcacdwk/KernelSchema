@@ -154,7 +154,8 @@ Every item passes its own role/private-evaluator/Source/UTF-8 checks before any
 deduplication. Identical authorized bodies appear once; each duplicate retains
 its original bindings with `text_alias_of` naming a body ID in the same payload.
 `runtime.material_text(payload, id)` validates and resolves that direct alias
-without filesystem access. The original single-file `current_source.text`
+without filesystem access. It rejects conflicting alias text, mismatched sizes,
+cycles and aliases to metadata-only host implementations. The original single-file `current_source.text`
 remains a canonical body. No Contract, Schema, semantic method or unknown rule
 is truncated. This projection and the system-prompt alias instruction are new
 CPU engineering increments, not behavior certified by earlier real CLI captures.
@@ -227,7 +228,10 @@ Tree input delivers every file with exact path, mode, digest, text, entrypoint
 and original Source Ref. Single-file input preserves `current_source` and its
 string output interface. Implement delivery includes Task workload/environment.
 Pure-Schema FA4 requests start with no Source; baseline metadata does not grant
-its contents, and explicit baseline delivery in `schema_rebuild` is rejected.
+its contents. `schema_rebuild` rejects explicit baseline Source delivery and
+exact nonempty baseline Python-file bodies through Materials, Rules, text or a
+different Source manifest. Empty package markers remain legal. The shared
+material boundary checks byte identity, not transformed/partial-code provenance.
 
 Allowed pairs are coder/candidate_source (string), coder/candidate_files (the
 fixed tree object), planner/writing_draft

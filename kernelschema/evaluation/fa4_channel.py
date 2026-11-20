@@ -11,7 +11,7 @@ from uuid import uuid4
 from ..artifacts import Publication, durable_mkdir, durable_write, read_regular, FileBytes, source_files_manifest
 from ..contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256
 from .agate import AgateDevExecutor, PROFILE, _unframe
-from .channel import _remote_profile, transport_from_config, _record
+from .channel import _remote_profile, transport_from_config, _record, _qualification_account
 from .fa4 import FA4Task, F1, ABI, _case, verify_stage, stage_candidate, execution_materials
 from ..budget import OwnerAccount, cost, BudgetDenied
 from ..runtime import AdmissionDenied
@@ -107,7 +107,7 @@ def selection(*, remote, qualification=None, connection_profile="prod"):
 
 def implementation_hashes():
     return {name: sha256(Path(__file__).with_name(name).read_bytes())
-            for name in ("agate.py", "fa4.py", "_fa4_remote.py", "_remote.py")}
+            for name in ("agate.py", "channel.py", "fa4.py", "_fa4_remote.py", "_remote.py")}
 
 
 def _request(intent, files):
@@ -384,7 +384,9 @@ def _qualify(context, *, remote, transport):
     task = FA4Task(context.bundle, context.request["task"])
     if task.validate_scope(context.request["schema"], context.request["scope"])["status"] != "pass":
         raise UnsupportedError("FA4 qualification requires the fixed F1 scope")
-    account = OwnerAccount.for_context(context, create=True)
+    account = _qualification_account(context,
+        state_path=context.root / ".runtime/state/fa4_qualification.json",
+        native_root=context.root / ".runtime/fa4-qualification")
     transport = transport or transport_from_config()
     executor = AgateDevExecutor(context.root / ".runtime/fa4-qualification/jobs", transport)
     if (context.root / ".runtime/state/fa4_qualification.json").exists():

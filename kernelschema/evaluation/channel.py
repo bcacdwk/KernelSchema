@@ -238,16 +238,53 @@ def qualify(context, *, remote, transport=None):
         os.close(lock)
 
 
+def _qualification_account(context, *, state_path, native_root):
+    """Initialize once; retained qualification facts cannot mint another owner."""
+    intents = context.intents()
+    marker = context.root / ".runtime/state/qualification_owner.json"
+    started = marker.exists() or state_path.exists() or native_root.exists() or bool(intents)
+    expected = {"state_namespace": state_path.stem}
+    if marker.exists():
+        if context.load_state("qualification_owner") != expected:
+            raise ProtocolError("original qualification owner initialization differs")
+    elif not started:
+        # A crash here has the same conservative missing-binding behavior as
+        # ordinary workflow bootstrap. This is an intent, not a budget operation.
+        context.save_state("qualification_owner", expected)
+    account = OwnerAccount.for_context(context, create=not started)
+    records = account.operations(context.run_id)
+    if not state_path.exists() and (records or intents or native_root.exists()):
+        raise ProtocolError("original qualification state missing; cannot restart")
+    for intent in intents:
+        record = records.get(intent["operation_id"])
+        if record is None or jcs(record["reservation"]) != jcs(intent["reservation"]):
+            raise ProtocolError("original qualification owner operation missing or changed")
+    if state_path.exists():
+        # Terminal native facts remain a witness even if both the core intent
+        # directory and ledger operations were lost. Never project those paid
+        # records as an empty/zero-use account.
+        core = {i["operation_id"]: i for i in intents}
+        for retained in context.load_state(state_path.stem)["records"].values():
+            native = loads(retained["intent.json"])
+            operation_id = native["operation_id"]
+            original, record = core.get(operation_id), records.get(operation_id)
+            if (original is None or record is None or not record["history"] or not record["terminated"]
+                    or jcs(native["reservation"]) != jcs(original["reservation"])
+                    or jcs(native["reservation"]) != jcs(record["reservation"])):
+                raise ProtocolError("original qualification owner operation/core intent missing or changed")
+    return account
+
+
 def _qualify(context, *, remote, transport=None):
     _remote_profile(remote)
     if "bwrap_sha256" in remote:
         raise ProtocolError("qualification begins with an unpinned remote profile; probe records the actual bwrap digest")
     read_target(context.bundle.read(context.objects["task"]["environment"]))
-    account = OwnerAccount.for_context(context, create=True)
-    transport = transport or transport_from_config()
     root = context.root / ".runtime/agate-qualification"
-    executor = AgateDevExecutor(root / "jobs", transport)
     path = context.root / ".runtime/state/agate_qualification.json"
+    account = _qualification_account(context, state_path=path, native_root=root)
+    transport = transport or transport_from_config()
+    executor = AgateDevExecutor(root / "jobs", transport)
     if path.exists(): state = context.load_state("agate_qualification")
     else:
         state = {"remote": remote, "transport": transport.identity(), "operations": [], "phase": "probe", "records": {}, "qualification": None}

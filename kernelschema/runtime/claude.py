@@ -25,7 +25,7 @@ from uuid import uuid4
 from ..api import RunContext
 from ..artifacts import FileBytes, Publication, durable_mkdir, durable_write, fsync_directory, read_regular, source_files_manifest
 from ..contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256, validate
-from ..materials import for_role, validate_request, private_evaluator_hashes, public_baseline_payload
+from ..materials import for_role, validate_request, private_evaluator_hashes, public_baseline_payload, rebuild_source_hashes
 from ._local import (DeadlineExpired, freeze_launch_deadlines, immutable, locked,
                      process_alive, read_json, validate_deadlines)
 
@@ -214,17 +214,31 @@ def _host_rule_sources(bundle, rules):
 def material_text(payload, identifier):
     """Resolve one authorized body/alias; no file IO or cross-payload lookup."""
     items = payload["materials"] if isinstance(payload, dict) else payload
+    if (not isinstance(items, (list, tuple)) or not isinstance(identifier, str)
+            or any(not isinstance(item, dict) or not isinstance(item.get("id"), str) for item in items)):
+        raise ProtocolError("invalid material IDs")
     indexed = {item["id"]: item for item in items}
     if len(indexed) != len(items) or identifier not in indexed:
         raise ProtocolError("duplicate or missing material ID")
     item = indexed[identifier]
+    if "host_implementation" in item:
+        raise ProtocolError("host implementation has no delivered body")
     if "text_alias_of" in item:
-        original = indexed.get(item["text_alias_of"])
-        if original is None or "text" not in original or "text_alias_of" in original or original["sha256"] != item["sha256"]:
+        alias = item["text_alias_of"]
+        original = indexed.get(alias) if isinstance(alias, str) else None
+        if ("text" in item or original is None or "text_alias_of" in original or "host_implementation" in original
+                or original.get("sha256") != item.get("sha256")):
             raise ProtocolError("invalid material text alias")
     else:
         original = item
-    if "text" not in original or sha256(original["text"].encode("utf-8")) != item["sha256"]:
+    if not isinstance(original.get("text"), str):
+        raise ProtocolError("material has no matching delivered body")
+    try:
+        data = original["text"].encode("utf-8")
+    except UnicodeError as error:
+        raise ProtocolError("material body must be UTF-8") from error
+    if (sha256(data) != item.get("sha256")
+            or any(type(entry.get("size")) is not int or entry["size"] != len(data) for entry in (item, original))):
         raise ProtocolError("material has no matching delivered body")
     return original["text"]
 
@@ -267,9 +281,12 @@ def prepare_role_input(context: RunContext, role: str, *, source: dict | None = 
     if objects != context.objects: raise ProtocolError("fixed role objects changed")
     task = objects["task"]
     private = private_evaluator_hashes(objects["evaluator"])
+    rebuild_hashes = rebuild_source_hashes(bundle, context.request, task)
     items: list[dict] = []
 
     def add(identifier: str, data: bytes, reference: dict | None, category: str, *, selected_source=False, source_path=None):
+        if sha256(data) in rebuild_hashes:
+            raise ProtocolError("schema_rebuild cannot deliver optimized baseline implementation bytes")
         if sha256(data) in private or (reference and reference["sha256"] in private):
             # The public Task baseline can also be an evaluator component. Only
             # an explicitly granted, canonical copy of that Source may cross

@@ -409,7 +409,16 @@ class ReferenceBackend:
     def _result(self, context, state, account):
         if state["phase"] == "done" and state.get("result") is not None and not account.fences():
             return state["result"]
-        usage = account.usage(context.run_id, Publication(context.root))
+        if not state["operations"] and not account.operations(context.run_id):
+            # Recheck the owner/admission on every blocked replay, while keeping
+            # the unchanged empty receipt index at its original publication.
+            if "empty_usage_publication" not in state:
+                state["empty_usage_publication"] = uuid4().hex
+                self._save(context, state, "empty_usage_intent")
+            publication = Publication(context.root, state["empty_usage_publication"])
+        else:
+            publication = Publication(context.root)
+        usage = account.usage(context.run_id, publication)
         if usage["unsettled"]:
             state.update(status="blocked", recovery="settle_only", stop_reason="original operation or limited balance unresolved")
         result = {"protocol": PROTOCOL, "operation": "implement", "run_id": context.run_id,

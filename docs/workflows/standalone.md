@@ -80,9 +80,16 @@ Supply `--remote remote.json` with exactly the chosen `channel` value
 and `bwrap` paths. Do not install tools on the worker. The official client must
 already be available to the selected interpreter.
 
+For actual model work, also supply `--runtime-profile` containing an explicitly
+inspected local `ClaudeProfile.as_dict()`; see the [runtime interface](../../kernelschema/runtime/INTERFACE.md).
+The shipped profile records an earlier installation's executable path and bytes.
+It supports model-free preparation, but does not install or select a portable
+CLI executable for a different host.
+
 ```sh
 python "$KS/examples/workflows/row_softmax/run_demo.py" prepare \
   --out /tmp/softmax-real --start design --environment /materials/target.json \
+  --runtime-profile /materials/claude-profile.json \
   --remote /materials/remote.json
 KS_AGATE_CONFIG=/explicit/existing/official/config.json \
   python "$KS/examples/workflows/row_softmax/run_demo.py" qualify --demo /tmp/softmax-real
@@ -125,6 +132,9 @@ original state before admission; qualification also serializes callers on its
 original child run. Recovery uses `.runtime/demo-state.json` only to find original runs and selected
 Ref closures. Child run/operation state, native locator, publication IDs and the
 single `.runtime/owner.json` remain authoritative; there is no second ledger.
+Qualification persists an initialization intent before binding its original
+owner. A missing binding or original owner operation refuses recovery; original
+native records cannot be replayed against a newly created account.
 
 | Interruption | Recovery |
 | --- | --- |
@@ -133,6 +143,7 @@ single `.runtime/owner.json` remain authoritative; there is no second ledger.
 | Child anchor exists but owner binding was never initialized or is missing | Recovery currently refuses; retained anchor alone cannot distinguish missing state from interrupted initialization |
 | Child result published, driver selection not recorded | Replay original child result; do not call models again |
 | Writing published / new R not admitted | Retain old result under old R; freeze/admit next fixed request on same owner |
+| Same-R follow-up request pending | Keep old qualification in history; `current_qualified` remains null until the new request returns |
 | Model/evaluator operation unknown | Settle original operation; no replacement submit, alternate channel or budget |
 | Top-level result projection lost | Reconstruct it from original child facts/publication |
 | Required owner/state/native locator lost | Refuse recovery; do not mint a fresh account |
@@ -144,3 +155,6 @@ a redacted explanation is not its replacement. A portable artifact bundle suppor
 reading/importing; moving it does not promise private-run recovery. Keep original
 private run directories for settlement. The small public explanation here is not
 an importable real GPU evidence package, because no real GPU run occurred.
+
+The [release checklist](release-gaps.md) records the remaining source, license,
+installation and real qualification requirements.

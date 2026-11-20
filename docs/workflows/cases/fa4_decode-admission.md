@@ -97,4 +97,4 @@ python3 -B schema_template/check_yaml.py schema_template/examples/fa4_decode/q4_
 
 本次实际使用 Python 3.13.12 与临时隔离的 PyYAML 6.0.3；默认 Python 首次因缺 PyYAML 返回 2，补齐临时 CPU 依赖后返回 0。此环境记录不构成计划中 Python 3.11/CuTe runtime 的资格。材料清单可用 Python 标准库对 `git show <commit>:<path>` 原字节计算 SHA-256/size，逐项与清单比较；13 参数检查仅解析 AST，原 host 检查只提取四个纯整数函数，未导入原 CUDA 模块。
 
-K7.materials 保持“预审完成且如实披露缺项”。K8.engineering 已交付固定案例的 Task/Source/evaluator/准备与原码观察入口；当前独立入口只准入固定原码，不是候选 sandbox。K8.real/KS-P2 仍缺 AKA/K3 完整 case 接入、原栈真实资格、有限 fidelity、冷/稳态证据及公开材料闭包。历史 L20D 30/30、1.1126× kernel-sum 和既有异步 stress 叙述只保留为原码材料。
+K7.materials 保持“预审完成且如实披露缺项”。K8 的 KS 工程现已接通 K3 typed 全树、reference implement/verify、多文件 fidelity 和显式 FA4 Agate channel；独立原码观察导入仍只能产生 unknown，不能代替合格 channel。AKA 的 FA4 接线需要独立完成。K8.real/KS-P2 仍缺原栈真实资格、有限 fidelity、冷/稳态证据及公开取得/许可闭包。历史 L20D 30/30、1.1126× kernel-sum 和既有异步 stress 叙述只保留为原码材料。

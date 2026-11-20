@@ -359,16 +359,7 @@ def freeze_observation(publication: Publication, staged: dict, *, raw: bytes, op
     The FA4 channel has a separate qualified frame/subject/permission reporting
     seam; standalone observations cannot use it to bypass channel qualification.
     """
-    # The existing verifier expects sha256 strings. FA4 stage additionally binds
-    # modes and sizes; verify here with the same core regular-file reader.
-    root = Path(staged["root"])
-    data = read_regular(root, "stage.json")[0]
-    if sha256(data) != staged["sha256"] or json.loads(data) != staged["manifest"]:
-        raise ProtocolError("FA4 stage identity differs")
-    for name, facts in staged["manifest"]["files"].items():
-        data, mode = read_regular(root, name)
-        if sha256(data) != facts["sha256"] or len(data) != facts["size"] or mode != int(facts["mode"], 8):
-            raise ProtocolError("FA4 staged file differs")
+    verify_stage(staged)
     observation = json.loads(raw)
     if observation.get("stage_sha256") != staged["sha256"] or observation.get("subject") != {
         k: staged["manifest"][k]["sha256"] for k in ("task", "schema", "scope", "source", "evaluator", "inputs", "timing")}:

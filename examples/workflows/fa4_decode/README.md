@@ -13,10 +13,13 @@ qualification is still absent; AKA has not acquired this support.
 From an installed source checkout with its existing Python/PyYAML dependencies:
 
 ```sh
-python -B -m examples.workflows.fa4_decode.prepare --out /tmp/fa4-f1-prepared
+KS=/absolute/path/to/KernelSchema
+python -B "$KS/examples/workflows/fa4_decode/prepare.py" --out /tmp/fa4-f1-prepared
 ```
 
-This command reads the 27 fixed Git blobs, checks their blob IDs/SHA-256/size/mode,
+The installed-checkout command works from any cwd. The checkout must contain
+both fixed commits in materials.json; preparation does not fetch missing objects.
+It reads the 27 fixed Git blobs, checks their blob IDs/SHA-256/size/mode,
 freezes real Task/evaluator/Materials/Scope/Schema/Source Refs, then installs a
 complete stage. It imports no torch/CUDA/source module and submits no work.
 `prepared.json` records all Refs plus the stage identity. `request.json` is an
@@ -31,7 +34,7 @@ selection can be made with `kernelschema.evaluation.fa4_channel.selection`.
 No executable probe, credential search or model invocation occurs in prepare:
 
 ```sh
-python -B -m examples.workflows.fa4_decode.prepare --out /tmp/fa4-reference \
+python -B "$KS/examples/workflows/fa4_decode/prepare.py" --out /tmp/fa4-reference \
   --claude-profile /selected/claude-profile.json --limits /selected/limits.json \
   --evaluation /selected/fa4-evaluation.json --intent original_verify
 python -m kernelschema implement --request /tmp/fa4-reference/request.json --out /tmp/fa4-run
@@ -145,7 +148,10 @@ rebuild has no seed/starter. Default role Materials contain objective/license
 gaps and the explicit [candidate observation interface](candidate-interface.md).
 That small interface specifies Model/13 ABI and the native launcher observation
 names needed by this finite evaluator; it includes no optimized implementation.
-K3 rejects optimized baseline delivery in a `schema_rebuild` request.
+K2/K3 reject exact nonempty baseline Python-file bodies in a `schema_rebuild`
+request, including renamed Materials/text and a differently wrapped Source.
+Empty package markers remain legal. This byte-identity check does not detect
+rewritten excerpts; it does not turn baseline metadata into a Source grant.
 Baseline metadata supplies the required Source format, not a role grant.
 
 `freeze_observation(publication, staged, raw=..., operation_id=..., usage_receipts=...)`
@@ -172,6 +178,9 @@ replacement). It returns retained original records for a subsequent fixed
 `selection(remote=<observed remote including bwrap_sha256>, qualification=...)`.
 Continue qualification by reopening that same context and owner. The account
 must reserve all remaining jobs; no result or missing binding creates quota.
+An initialization intent is retained before the first owner binding. Missing
+that original binding or an original owner operation refuses recovery, including
+a crash during initialization; retained native records cannot create a balance.
 Synthetic transport is always rejected as qualification. These paid commands
 have not been run here. The remote shape is:
 
@@ -243,4 +252,5 @@ boundary on the same owner, then enforce original_verify/seed/rebuild delivery.
 KS support does not declare AKA F1 compatibility.
 
 The [K7 license audit](licenses-and-gaps.md) and anonymous fixed-commit retrieval
-gap remain open. Current engineering tests and raw APIs do not close K8.real.
+gap remain open; see the [release checklist](../../../docs/workflows/release-gaps.md).
+Current engineering tests and raw APIs do not close K8.real.
