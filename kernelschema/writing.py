@@ -40,9 +40,23 @@ Use ks.writing.draft.v1, exactly: format, decision (keep|revise), reason,
 selection [{id,reason}] including workflow_objective, raw [{node,text}],
 dispatch (inline Markdown|null), bindings, next_action (none|implement|verify),
 action_reason, action_inputs [catalog ID], action_evidence [catalog ID].
-Initial design uses revise. Keep has raw=[], dispatch=null, bindings=null.
-A revision includes every raw node, root Contract and current coverage bindings.
-An action requires a reason, explicit inputs and authorized feedback/evidence or
+selection[].id must copy an exact bare id from writing_input.selection_catalog,
+with a nonempty reason and no duplicates. Its delivery_id (material/<id>) locates
+the delivered bytes; neither that delivery_id nor material:<id> is a selection ID.
+action_inputs/action_evidence instead use exact action_catalog keys, including
+material:<id> when listed. A null selection_catalog.action_id grants no action ID.
+Initial design uses revise and next_action=none, action_reason=null and empty
+action_inputs/action_evidence. Only optimize can propose implement or verify.
+Keep has raw=[], dispatch=null, bindings=null.
+A revision includes every raw node and root Contract. bindings is a JSON list
+of {coverage_ids:[ID,...],node:node_ID,variant:null|ID}, not a Scope object.
+Bind every fixed_assignment.scope.coverage_ids entry exactly once to a supplied
+node; use variant=null unless an actual supported variant is selected.
+Follow writing_input.text_policy for all decoded raw YAML strings: its numeric
+maxLength/maxLines come from the frozen original Template BUDGETS. Count Unicode
+code points and logical lines as specified there, including whitespace. Self-check
+before returning; the host does not truncate text or strip ID prefixes to accept it.
+An optimize action requires a reason, explicit inputs and nonempty authorized feedback/evidence or
 role-granted materials (including the target/objective; measurements are not required).
 No action uses null reason and empty input/evidence lists. Verify selects exactly
 one nonempty Source. Implement explicitly selects one Source or task/default_start,
@@ -53,6 +67,8 @@ supported. Do not force a revision or treat ordinary implementation defects as
 design changes. Ordinary feedback stays external; new REALIZATION.Feedback is
 currently unknown unless the finite method can authenticate measured provenance.
 Reviewer: independent readonly review of the frozen output/Q in review_subject.
+The supplied review_subject.text_policy is the same original Template budget
+projection used by the planner; review the frozen raw without rewriting it.
 Return ks.writing.review.v1 with exactly format, subject (copy exact hashes),
 items [{id,status,reason,location,quote}]. Cover every supplied obligation ID once,
 quote its exact supplied location/text, and explain pass/fail/unknown concretely.
@@ -261,6 +277,7 @@ class WritingBackend:
         RowSoftmaxTask(context.bundle, context.request["task"]).require_evaluation_scope(context.request["scope"])
         body = {"format": policy.DRAFT_FORMAT, "locked_contract": policy.wire_value(policy.contract_for(context)),
                 "action_catalog": policy.catalog(context), "objective_id": "workflow_objective",
+                "selection_catalog": policy.selection_catalog(context), "text_policy": policy.text_policy(context),
                 "note": "All permitted reference bytes arrive via role Materials or explicit request evidence. No repository search is authorized."}
         p = Publication(context.root, state["ids"]["input"])
         state["planner_input"] = p.put_bytes("writing-input.json", jcs(body))
@@ -401,7 +418,8 @@ class WritingBackend:
             output_dispatch = context.bundle.read(frozen["dispatch"]).decode() if frozen["dispatch"] else None
             body = {"format": policy.REVIEW_FORMAT, "subject": subject, "schema": state["schema"], "scope": state["scope"],
                     "raw": output_raw, "dispatch": output_dispatch, "obligations": state["obligations"], "precheck": state["facts"],
-                    "draft": state["draft"], "action_catalog": policy.catalog(context)}
+                    "draft": state["draft"], "action_catalog": policy.catalog(context),
+                    "text_policy": policy.text_policy(context)}
             state["review_input"] = p.put_bytes("review-input.json", jcs(body))
             p.commit([state["review_input"], state["schema"], state["scope"], state["change_report"]], subjects=[context.request_ref])
             state["subject"] = subject

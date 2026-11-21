@@ -9,7 +9,7 @@ import yaml
 from kernelschema import api, template_api, writing
 from kernelschema.artifacts import Bundle, Publication, durable_write, import_bundle
 from kernelschema.budget import OwnerAccount, use_authority, cost
-from kernelschema.contracts import PROTOCOL, ProtocolError, digest, jcs, loads
+from kernelschema.contracts import PROTOCOL, ProtocolError, digest, jcs, loads, sha256
 from kernelschema.runtime import ClaudeProfile, ClaudeRuntime
 from kernelschema._writing_policy import template_contract
 
@@ -68,6 +68,182 @@ def run(setup, monkeypatch):
 def calls(fake):
     path = fake / "invocations.jsonl"
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def with_material_grants(setup):
+    """Synthetic role boundaries, including a private Ref with no role grant."""
+    f, backend, fake, req, out = setup
+    bundle = Bundle(f["root"])
+    materials = bundle.document(req["materials"])
+    for identifier, roles, ref in (
+        ("planner_only", ["planner"], f["originals"]["task/timing.md"]),
+        ("reviewer_only", ["reviewer"], f["originals"]["task/acceptance.md"]),
+        ("private_only", [], bundle.document(f["evaluator"])["entrypoint"]),
+    ):
+        materials["entries"].append({"id": identifier, "file": ref, "roles": roles,
+                                     "origin": "synthetic role-boundary test", "license": "test fixture"})
+    materials["entries"].sort(key=lambda entry: entry["id"])
+    p = Publication(f["root"])
+    req = {**req, "materials": p.put_json("role-grants.json", materials)}
+    ref = p.put_json("request-with-grants.json", req)
+    p.commit([ref])
+    durable_write(f["root"] / "request.json", jcs(req), replace=True)
+    return f, backend, fake, req, out
+
+
+@pytest.mark.parametrize("operation,decision", [("design", "revise"), ("optimize", "keep"), ("optimize", "revise")])
+def test_writing_input_exposes_exact_grants_and_original_text_budgets(setup_writing, monkeypatch, operation, decision):
+    from kernelschema.runtime import material_text
+    setup = with_material_grants(setup_writing(operation, decision=decision))
+    f, _, fake, req, _ = setup
+    result = run(setup, monkeypatch)
+    assert result["status"] == "completed", result  # independent synthetic draft/review only
+    planner, reviewer = calls(fake)
+    supplied = loads(material_text(planner, "delivery/writing_input").encode())
+    reviewed = loads(material_text(reviewer, "delivery/review_subject").encode())
+    bundle = Bundle(f["root"])
+    granted = [e for e in bundle.document(req["materials"])["entries"] if "planner" in e["roles"]]
+    assert [e["id"] for e in supplied["selection_catalog"]] == [e["id"] for e in granted]
+    delivered = {e["id"]: e for e in planner["materials"]}
+    for selection, original in zip(supplied["selection_catalog"], granted):
+        assert selection["ref"] == original["file"] == delivered[selection["delivery_id"]]["ref"]
+        assert selection["delivery_id"] == "material/" + selection["id"]
+        assert material_text(planner, selection["delivery_id"]).encode() == bundle.read(selection["ref"])
+        if "reviewer" in original["roles"]:
+            assert selection["action_id"] == "material:" + selection["id"]
+            assert supplied["action_catalog"][selection["action_id"]] == selection["ref"]
+        else:
+            assert selection["action_id"] is None
+            assert "material:" + selection["id"] not in supplied["action_catalog"]
+    assert "material/reviewer_only" not in delivered and "material/private_only" not in delivered
+    assert "selection_catalog" not in reviewed  # do not disclose planner-only grants to reviewer
+    private_ref = bundle.document(f["evaluator"])["entrypoint"]
+    assert private_ref["sha256"] not in jcs(supplied).decode()
+    summary = supplied["text_policy"]
+    assert reviewed["text_policy"] == summary
+    original = template_api.tools().text_policy
+    assert summary["source"] in bundle.document(req["rules"])["files"]
+    assert bundle.read(summary["source"]) == Path(original.__file__).read_bytes()
+    assert summary["source"]["sha256"] == sha256(Path(original.__file__).read_bytes())
+    assert summary["symbols"] == ["BUDGETS", "text_size", "check_values"]
+    assert len(summary["budgets"]) == len(original.BUDGETS)
+    for declaration, budget in zip(summary["budgets"], original.BUDGETS):
+        path = tuple(int if part == "[]" else None if part == "*" else part for part in declaration["path"])
+        assert (path, declaration["maxLength"], declaration["maxLines"], declaration["prefix"]) == (
+            budget.path, budget.characters, budget.lines, budget.prefix)
+    assert "Unicode code points" in summary["counting"]["characters"]
+    assert "len(value.splitlines())" in summary["counting"]["lines"]
+    assert original.text_size("界😀\n\nA\n") == (6, 3)
+    for delivery in (planner, reviewer):
+        policy_item = next(e for e in delivery["materials"] if e["ref"] == summary["source"])
+        assert "host_implementation" in policy_item and "text" not in policy_item
+        assert any(material_text(delivery, e["id"]).encode() == writing.METHOD
+                   for e in delivery["materials"] if "host_implementation" not in e)
+    assert b"neither that delivery_id nor material:<id> is a selection ID" in writing.METHOD
+    assert b"not a Scope object" in writing.METHOD
+    assert b"Only optimize can propose implement or verify" in writing.METHOD
+
+
+@pytest.mark.parametrize("identifier", ["material:workflow_objective", "material/workflow_objective", "reviewer_only", "private_only", "not_granted"])
+def test_writing_selection_rejects_other_namespaces_and_ungranted_ids(setup_writing, monkeypatch, identifier):
+    setup = with_material_grants(setup_writing(alter=lambda draft: draft["selection"].append(
+        {"id": identifier, "reason": "SYNTHETIC forbidden selection"})))
+    result = run(setup, monkeypatch)
+    assert result["status"] == "failed" and result["recovery"] == "new_request"
+    assert result["schema"] is None and len(calls(setup[2])) == 1
+    state = api.open_run("design", setup[4]).load_state("writing")
+    retained = loads(Bundle(setup[4]).read(state["draft_ref"]))["content"]
+    assert retained == json.loads((setup[2] / "scenario.json").read_text())["draft"]
+    assert "selection must explain actual planner-granted material IDs" in state["stop_reason"]
+
+
+@pytest.mark.parametrize("identifier", ["workflow_objective", "material/workflow_objective", "material:planner_only", "material:private_only"])
+def test_writing_actions_require_exact_shared_catalog_ids(setup_writing, monkeypatch, identifier):
+    def alter(draft):
+        draft.update(next_action="implement", action_reason="SYNTHETIC action", action_inputs=["task/default_start"], action_evidence=[identifier])
+    setup = with_material_grants(setup_writing("optimize", decision="keep", alter=alter))
+    result = run(setup, monkeypatch)
+    assert result["status"] == "failed" and len(calls(setup[2])) == 1
+    assert "action may select only explicit IDs" in result["stop_reason"]
+
+
+def test_optimize_can_use_shared_material_action_id(setup_writing, monkeypatch):
+    def alter(draft):
+        draft.update(next_action="implement", action_reason="SYNTHETIC granted objective supports implementation",
+                     action_inputs=["task/default_start"], action_evidence=["material:workflow_objective"])
+    setup = setup_writing("optimize", decision="keep", alter=alter)
+    result = run(setup, monkeypatch)
+    assert result["status"] == "completed", result
+    assert result["next_action"] == "implement" and len(calls(setup[2])) == 2
+    assert result["usage"]["calls"]["coder"] == 0 and result["usage"]["evaluator_jobs"] == 0
+
+
+@pytest.mark.parametrize("case", ["scope_object", "design_action", "design_keep", "unknown_field"])
+def test_explicit_draft_branch_contract_stays_strict(setup_writing, monkeypatch, case):
+    def alter(draft):
+        if case == "scope_object":
+            draft["bindings"] = {"protocol": PROTOCOL, "kind": "scope", "coverage_ids": [], "bindings": draft["bindings"]}
+        elif case == "design_action":
+            draft.update(next_action="implement", action_reason="SYNTHETIC unsupported initial design action",
+                         action_inputs=["task/default_start"], action_evidence=["material:workflow_objective"])
+        elif case == "design_keep":
+            draft.update(decision="keep", raw=[], dispatch=None, bindings=None)
+        else:
+            draft["extra"] = "SYNTHETIC unexpected field"
+    setup = setup_writing(alter=alter)
+    result = run(setup, monkeypatch)
+    assert result["status"] == "failed" and result["schema"] is None and len(calls(setup[2])) == 1
+    state = api.open_run("design", setup[4]).load_state("writing")
+    assert loads(Bundle(setup[4]).read(state["draft_ref"]))["content"] == json.loads((setup[2] / "scenario.json").read_text())["draft"]
+
+
+def test_writing_private_material_cannot_be_granted_by_a_catalog(setup_writing, monkeypatch):
+    setup = with_material_grants(setup_writing())
+    f, backend, fake, req, out = setup
+    materials = Bundle(f["root"]).document(req["materials"])
+    next(e for e in materials["entries"] if e["id"] == "private_only")["roles"] = ["planner"]
+    p = Publication(f["root"])
+    req = {**req, "materials": p.put_json("forbidden-grant.json", materials)}
+    ref = p.put_json("forbidden-request.json", req)
+    p.commit([ref])
+    durable_write(f["root"] / "request.json", jcs(req), replace=True)
+    with pytest.raises(ProtocolError, match="private evaluator files"):
+        run((f, backend, fake, req, out), monkeypatch)
+    assert not calls(fake)
+
+
+def test_b24_original_failed_draft_and_all_eight_text_errors_remain(tmp_path):
+    """Historical real failure, read unchanged; no operation, owner or repair."""
+    from types import SimpleNamespace
+    from kernelschema import _writing_policy as policy
+    retained = (Path(__file__).parent / "fixtures/writing/b24-failed-draft.json").read_bytes()
+    assert sha256(retained) == "sha256:66f919efa8c676cd8f241cf82563c34c41c3d8e020f5c0c1b5c9f3e5596e2892"
+    draft = loads(retained)["content"]
+    # Exact audited B24 planner grants, not IDs recovered by stripping its draft.
+    ids = ("workflow_objective task_contract task_acceptance task_workload task_timing task_environment "
+           "triton_softmax_reference triton_license reference_context catalog_relevance "
+           "doc_0 doc_1 doc_2 doc_3 doc_4 doc_5 doc_6 method_design method_optimize template_guide").split()
+    context = SimpleNamespace(request={"operation": "design"}, objects={
+        "materials": {"entries": [{"id": identifier, "roles": ["planner", "reviewer"], "file": {}} for identifier in ids]},
+        "task": {"starter_source": None}})
+    context.request["task"] = {}
+    with pytest.raises(ProtocolError, match="selection must explain actual planner-granted material IDs"):
+        policy.parse_draft(context, draft)
+    assert len(draft["selection"]) == 19 and all(e["id"].startswith("material:") for e in draft["selection"])
+    raw = draft["raw"][0]["text"].encode()
+    assert sha256(raw) == "sha256:8a440621fdf5d799fa52024c711800b731dff7bcb6d09d81b2917b5e3a83a3ac"
+    (tmp_path / "root.yaml").write_bytes(raw)
+    engine = template_api.tools()
+    document = engine.yaml_source.loads(raw.decode(), "root", path=tmp_path / "root.yaml")
+    with pytest.raises(engine.SchemaError) as error:
+        engine.validate_documents({"root": tmp_path / "root.yaml"}, {"root": document})
+    message = str(error.value)
+    assert message.count("text has ") == 8
+    for actual, limit in ((720, 300), (469, 300), (522, 300), (318, 150), (165, 150), (183, 150), (51, 50), (69, 50)):
+        assert f"text has {actual} Unicode characters" in message
+        assert f"limits are {limit} characters" in message
+    assert (tmp_path / "root.yaml").read_bytes() == raw
+    assert loads(retained)["content"] == draft  # strict rejection did not reinterpret fields
 
 
 def test_design_actual_api_freezes_independent_output_and_replays(setup_writing, monkeypatch):

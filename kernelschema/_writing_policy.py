@@ -8,7 +8,7 @@ import re
 import tempfile
 
 from . import template_api
-from .contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, validate
+from .contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, sha256, validate
 from .evaluation import RowSoftmaxTask
 
 DRAFT_FORMAT = "ks.writing.draft.v1"
@@ -95,6 +95,44 @@ def catalog(context):
         if {"planner", "reviewer"} <= set(entry["roles"]):
             result["material:" + entry["id"]] = entry["file"]
     return result
+
+
+def selection_catalog(context):
+    """Exact planner grants, with the two other ID namespaces made explicit."""
+    actions = catalog(context)
+    return [{"id": entry["id"], "ref": entry["file"],
+             "delivery_id": "material/" + entry["id"],
+             "action_id": "material:" + entry["id"] if "material:" + entry["id"] in actions else None}
+            for entry in context.objects["materials"]["entries"] if "planner" in entry["roles"]]
+
+
+def text_policy(context):
+    """Project the pinned original Template budgets, without another validator.
+
+    Writing's Rules check binds this installed implementation to the frozen
+    source. The summary carries that actual Ref; host-only source bodies stay
+    host-only. Both writing roles receive the same small normative projection.
+    """
+    original = template_api.tools().text_policy
+    source_sha256 = sha256(Path(original.__file__).read_bytes())
+    sources = [ref for ref in context.objects["rules"]["files"] if ref["sha256"] == source_sha256]
+    if len(sources) != 1 or context.bundle.read(sources[0]) != Path(original.__file__).read_bytes():
+        raise ProtocolError("writing text policy requires exactly one frozen original Template source")
+    return {
+        "format": "ks.writing.text-policy.v1", "source": sources[0],
+        "symbols": ["BUDGETS", "text_size", "check_values"],
+        "path_syntax": "Path segments are literal field names; * selects each named mapping member; [] selects each list item. These are structural paths, not arbitrary matching field names.",
+        "counting": {
+            "value": "Decoded raw YAML string values only, after YAML folding/escapes; no trimming or Unicode normalization. Each matching list item or mapping value is counted separately.",
+            "characters": "Python len(value): Unicode code points, including spaces and newline characters; not bytes or tokens. maxLength=null means no character limit for this entry.",
+            "lines": "Python len(value.splitlines()): logical lines, including interior blank lines; a final line terminator adds no extra line. The empty string has zero lines.",
+            "prefix": "A non-null prefix restricts this entry to strings starting with that exact prefix; count the entire value, including the prefix.",
+        },
+        "budgets": [{"path": ["[]" if part is int else "*" if part is None else part for part in budget.path],
+                     "maxLength": budget.characters, "maxLines": budget.lines, "prefix": budget.prefix}
+                    for budget in original.BUDGETS],
+        "scope": "Required raw-field text limits, not a complete YAML schema. The original Template still checks structure, references, other field rules and semantics. Self-check every applicable value before returning raw; do not assume host truncation or repair.",
+    }
 
 
 def parse_draft(context, value):

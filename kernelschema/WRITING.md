@@ -139,16 +139,34 @@ The planner's content must have exactly these fields:
 }
 ```
 
-For initial design use `decision=revise`; for a revision supply complete
+For initial design use `decision=revise` and `next_action=none`, with
+`action_reason=null` and empty action lists. Only optimize may propose implement
+or verify. For a revision supply complete
 `raw=[{"node":"root","text":"<complete YAML>"}, ...]`, inline dispatch Markdown
-(or null for a legal single node), and complete `bindings` in the original Scope
-shape. IDs become host-chosen filenames only after strict node-ID validation;
+(or null for a legal single node), and `bindings` as a list of
+`{"coverage_ids":["<coverage ID>","..."],"node":"root","variant":null}` entries.
+This is the Scope's bindings list, not a complete Scope object. Cover every
+fixed coverage ID exactly once using supplied nodes and supported variants.
+IDs become host-chosen filenames only after strict node-ID validation;
 there are no model paths. Keep requires the null/empty form and reuses the
 original Schema/scope exactly. Unknown fields, duplicates, missing root, partial
 raw snapshots and invalid action IDs are rejected with the raw draft retained.
 
-`selection` must explain real planner-granted material IDs and include the unique
-objective. The action catalog contains `evidence:0`, `feedback:0`, etc. for exactly
+The frozen `delivery/writing_input` contains a `selection_catalog` projected from
+the exact planner grants. Each entry has `id`, its immutable `ref`, its runtime
+`delivery_id`, and `action_id` (null when the material lacks an action grant).
+`selection[].id` must copy the exact bare `id` and include a nonempty reason;
+the unique `workflow_objective` is required. These namespaces are distinct:
+
+| Use | Example |
+| --- | --- |
+| Draft selection ID | `workflow_objective` |
+| Delivered material ID | `material/workflow_objective` |
+| Action catalog ID | `material:workflow_objective` |
+
+The parser rejects other prefixes and unauthorized IDs; it never strips a
+prefix to reinterpret a failed output. The action catalog contains
+`evidence:0`, `feedback:0`, etc. for exactly
 the request's explicit Refs, plus `task/starter_source` when available, `task/default_start` (the Task Ref),
 and `material:<id>` for material granted to both planner and reviewer. A non-none
 action needs a reason, explicit inputs and nonempty authorized evidence. An
@@ -156,6 +174,29 @@ objective/document can supply that evidence without invented measurements. Verif
 requires exactly one nonempty Source. Implement selects one Source or explicitly
 selects `task/default_start`, meaning seed=null and Task.starter_source/empty start. Source evidence is delivered as its exact
 kernel.py bytes; ordinary evidence uses the exact selected file bytes.
+
+The planner's writing input and reviewer's `review_subject` both contain
+`text_policy`, a compact projection of the actual frozen original Template's
+`BUDGETS`. Its `source` Ref/hash and `symbols` identify the authority. Numeric
+`maxLength`/`maxLines` entries are generated from that source, including the
+300-character / 2-line Thesis, 150-character / 1-line Strategy and verb describe,
+and 50-character / 1-line meaning limits. Path segments `*` select named mapping
+members and `[]` select list items; non-null prefixes restrict matching strings.
+
+Count decoded YAML strings with the original `len(value)` and
+`len(value.splitlines())`: Unicode code points include whitespace/newlines,
+logical lines include interior blank lines, and nothing is trimmed. YAML folding
+and escapes apply before counting; `maxLength=null` only removes that entry's
+character cap. Non-string values are outside these entries. The model must
+self-check before returning. The original Template still validates all structure,
+references and other field rules; this projection is not a second validator.
+
+These are explicit writing-specific declarations delivered with the finite
+METHOD. The current runtime has no independent response JSON Schema parameter,
+and no claim is made that JSON Schema validates the YAML string's internals.
+K3's outer envelope and the strict writing/Template parsers remain authoritative.
+Known host implementation bodies remain omitted; this summary does not restore
+them to the model input or change the common runtime delivery/profile.
 
 Reviewer content is exactly:
 
