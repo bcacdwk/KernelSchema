@@ -166,3 +166,62 @@ def test_official_auth_connection_raw_http_no_retry():
     raw=client.request("POST","/v1/jobs/dev",{"idempotency_key":"same"})
     assert raw["body"]==b'{ "job_id" : "dv_one" }' and len(calls)==1
     assert calls[0].data==jcs({"idempotency_key":"same"})
+
+
+def test_official_env_pair_without_default_file_and_secret_free_identity(tmp_path, monkeypatch):
+    pytest.importorskip("atrex_gateway_client")
+    from atrex_gateway_client import profiles
+    from kernelschema.evaluation.channel import transport_from_config
+    monkeypatch.setattr(profiles, "CONFIG_PATH", tmp_path / "missing.json")
+    monkeypatch.delenv("KS_AGATE_CONFIG", raising=False)
+    monkeypatch.setenv("AGATE_AK", "test-env-access")
+    monkeypatch.setenv("AGATE_SK", "test-env-secret")
+    client = transport_from_config()
+    assert client.connection.url == profiles.PROFILES["prod"]
+    assert client.auth.headers()["Access-Key"] == "test-env-access"
+    assert client.auth.secret_key == "test-env-secret"
+    identity = json.dumps(client.identity())
+    assert "test-env-access" not in identity and "test-env-secret" not in identity
+    assert client.identity()["post_retries"] == 0
+
+
+def test_official_explicit_file_and_named_route_with_env_precedence(tmp_path, monkeypatch):
+    pytest.importorskip("atrex_gateway_client")
+    from kernelschema.evaluation.channel import transport_from_config
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"ak": "test-file-access", "sk": "test-file-secret", "profiles": {
+        "routed": {"url": "https://example.invalid", "environment_id": "h20-test", "route_label": "route-test"}}}))
+    monkeypatch.setenv("KS_AGATE_CONFIG", str(path))
+    monkeypatch.delenv("AGATE_AK", raising=False)
+    monkeypatch.delenv("AGATE_SK", raising=False)
+    client = transport_from_config("routed")
+    assert client.auth.access_key == "test-file-access" and client.auth.secret_key == "test-file-secret"
+    assert client.connection.headers()["x-agate-environment-id"] == "h20-test"
+    assert client.identity()["route_label"] == "route-test"
+    monkeypatch.setenv("AGATE_AK", "test-env-access")
+    monkeypatch.setenv("AGATE_SK", "test-env-secret")
+    client = transport_from_config("routed")
+    assert client.auth.access_key == "test-env-access" and client.auth.secret_key == "test-env-secret"
+    assert client.connection.environment_id == "h20-test"
+    monkeypatch.setenv("KS_AGATE_CONFIG", str(tmp_path / "missing.json"))
+    with pytest.raises(UnsupportedError, match="explicit Agate configuration"):
+        transport_from_config()
+
+
+@pytest.mark.parametrize("pair", [{}, {"AGATE_AK": "test-access"}, {"AGATE_SK": "test-secret"},
+                                  {"AGATE_AK": "", "AGATE_SK": "test-secret"}])
+def test_official_missing_or_incomplete_auth_refused(tmp_path, monkeypatch, pair):
+    pytest.importorskip("atrex_gateway_client")
+    from atrex_gateway_client import profiles
+    monkeypatch.setattr(profiles, "CONFIG_PATH", tmp_path / "missing.json")
+    for key in ("AGATE_AK", "AGATE_SK"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in pair.items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(UnsupportedError, match="complete AGATE_AK/AGATE_SK"):
+        AgateHTTP.from_config()
+    if pair:
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps({"ak": "test-file-access", "sk": "test-file-secret"}))
+        with pytest.raises(UnsupportedError, match="complete AGATE_AK/AGATE_SK"):
+            AgateHTTP.from_config(path)

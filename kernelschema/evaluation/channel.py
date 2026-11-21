@@ -1,8 +1,9 @@
 """K1 Agate dev channel for the fixed reference backend, with paid qualification.
 
-No API key is frozen. KS_AGATE_CONFIG selects only an existing official SDK
-configuration. Qualification stores original nonsecret job evidence, not a pass
-flag; admission reinterprets it through K1's same frame/subject validator.
+No API key is frozen. AGATE_AK/AGATE_SK or the official SDK configuration supplies
+authentication; KS_AGATE_CONFIG explicitly selects an existing file. Qualification
+stores original nonsecret job evidence, not a pass flag; admission reinterprets it
+through K1's same frame/subject validator.
 """
 from pathlib import Path
 import fcntl
@@ -54,9 +55,7 @@ def selection(*, remote, qualification=None, connection_profile="prod"):
 
 
 def transport_from_config(connection_profile="prod"):
-    path = Path(os.environ.get("KS_AGATE_CONFIG", str(Path.home() / ".atrex/config.json")))
-    if not path.is_file():
-        raise UnsupportedError("Agate config not located: select the existing official config with KS_AGATE_CONFIG; auth/dev ACL/CUDA remain unverified")
+    path = os.environ.get("KS_AGATE_CONFIG")
     try:
         return AgateHTTP.from_config(path, profile=connection_profile)
     except ImportError as error:

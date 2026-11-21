@@ -97,11 +97,19 @@ KS_AGATE_CONFIG=/explicit/existing/official/config.json \
   python "$KS/examples/workflows/row_softmax/run_demo.py" run --demo /tmp/softmax-real
 ```
 
+Authentication accepts a complete `AGATE_AK`/`AGATE_SK` environment pair or the
+official `~/.atrex/config.json` file. An environment pair takes precedence; a
+partial pair is rejected. The default file may be absent when the environment
+pair is complete. An explicit `KS_AGATE_CONFIG` must identify an existing file,
+including when environment credentials are used. Named SDK profile routing is
+preserved.
+
 `KS_AGATE_CONFIG` is private local configuration selection; credential bytes are
-never copied into the bundle or profile. Without it, only the standard existing
-`~/.atrex/config.json` is considered. This session did not locate an authenticated
-configuration; prior official env access returned HTTP 401. This does not assert
-that the user's service lacks GPUs or dev permission.
+never copied into the bundle or profile. Authenticated read-only H20 metadata was
+obtained on 2026-11-21 through both the explicit file and standard environment
+pair. The [B14 target declaration](../../examples/workflows/row_softmax/references/h20-target-b14.md)
+preserves the response and its cache status. Authentication and cached hardware
+metadata do not establish dev permission or worker execution qualification.
 
 Qualification uses **six logical jobs** on the same account: a CUDA environment
 and fixed input probe, a complete baseline execution/timing/readonly check, then

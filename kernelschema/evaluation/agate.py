@@ -8,6 +8,7 @@ import gzip
 import importlib.metadata
 import io
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -44,13 +45,21 @@ class AgateHTTP:
         self.opener=opener or urllib.request.build_opener(_NoRedirect()).open
 
     @classmethod
-    def from_config(cls, config_path, *, profile="prod", timeout=30):
+    def from_config(cls, config_path=None, *, profile="prod", timeout=30):
         from atrex_gateway_client.auth import AkSkAuth
-        from atrex_gateway_client.profiles import load_config, resolve_profile
-        config = load_config(Path(config_path))
-        if not config.get("ak") or not config.get("sk"):
-            raise UnsupportedError("selected configuration does not supply Agate AK/SK")
-        return cls(resolve_profile(profile,config), AkSkAuth(config["ak"],config["sk"]),timeout=timeout)
+        from atrex_gateway_client.profiles import CONFIG_PATH, load_config, resolve_profile
+        if config_path is not None and not Path(config_path).is_file():
+            raise UnsupportedError("explicit Agate configuration is not an existing file")
+        config = load_config(CONFIG_PATH if config_path is None else Path(config_path))
+        # The official CLI prefers AGATE_AK/AGATE_SK to file credentials. Keep
+        # that order, but require one complete pair rather than mixing sources.
+        if "AGATE_AK" in os.environ or "AGATE_SK" in os.environ:
+            ak, sk = os.environ.get("AGATE_AK"), os.environ.get("AGATE_SK")
+        else:
+            ak, sk = config.get("ak"), config.get("sk")
+        if not all(isinstance(value, str) and value.strip() for value in (ak, sk)):
+            raise UnsupportedError("Agate authentication requires a complete AGATE_AK/AGATE_SK or configuration ak/sk pair")
+        return cls(resolve_profile(profile,config), AkSkAuth(ak,sk),timeout=timeout)
 
     def identity(self):
         return {"url":self.connection.url,"environment_id":self.connection.environment_id,
