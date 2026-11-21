@@ -68,6 +68,12 @@ coder/reviewer, qualification, failures and unknowns consume the same owner. New
 Q/R/out does not create another balance. In-flight unknown is settle_only, never
 permission to submit again or change channel. Internal CLI rounds/costs stay in
 original receipts; the native USD threshold is not a guaranteed billing cap.
+`ClaudeProfile.max_budget_usd` defaults to `"0.50"` and accepts an explicit
+positive finite decimal string such as `"2.00"`. The CLI may stop only after
+exceeding this threshold. A changed value requires a new frozen profile and
+request; it cannot alter an admitted call. If a terminal's zero aggregate
+tokens conflict with positive model usage or cost, its token total remains
+unknown and its original fields remain available in the raw receipt.
 
 If diagnostics already used an owner before the Task/remote configuration was
 known, reuse that owner when preparing the Demo. Supply all three explicit inputs:

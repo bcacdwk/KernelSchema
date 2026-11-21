@@ -66,6 +66,17 @@ terminal = {"type":"result", "subtype":"success", "is_error":False, "session_id"
             "usage":{"input_tokens":11,"output_tokens":7,"cache_creation_input_tokens":3,"cache_read_input_tokens":5},
             "modelUsage":{model:{"inputTokens":11,"outputTokens":7}}, "permission_denials":[]}
 if mode == "missing_usage": del terminal["usage"]
+if mode in ("zero_usage", "conflicting_usage", "budget_exhausted"):
+    terminal["usage"] = {key: 0 for key in terminal["usage"]}
+    terminal["modelUsage"] = {model: {"inputTokens": 6, "outputTokens": 2219,
+        "cacheCreationInputTokens": 112400, "cacheReadInputTokens": 0, "costUSD": 0.758005}}
+    terminal["total_cost_usd"] = 0.758005
+    if mode == "zero_usage":
+        terminal["modelUsage"] = {model: {key: 0 for key in terminal["modelUsage"][model]}}
+        terminal["total_cost_usd"] = 0
+    if mode == "budget_exhausted":
+        print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": json.dumps(output)}]}}), flush=True)
+        terminal.update(subtype="error_max_budget_usd", is_error=True, result="", errors=["Reached maximum budget ($0.5)"])
 if mode == "missing_cost": del terminal["total_cost_usd"]
 if mode == "error_terminal": terminal.update(subtype="error_during_execution", is_error=True)
 if mode == "wrong_session": terminal["session_id"] = "other"
@@ -77,4 +88,4 @@ if mode == "conflict":
     print(json.dumps(terminal), flush=True)
 if mode == "post_terminal_sleep": time.sleep(scenario.get("seconds", 1))
 print("synthetic stderr original", file=sys.stderr, flush=True)
-raise SystemExit(7 if mode == "nonzero" else 0)
+raise SystemExit(1 if mode == "budget_exhausted" else 7 if mode == "nonzero" else 0)

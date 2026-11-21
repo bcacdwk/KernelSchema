@@ -83,7 +83,9 @@ class ClaudeProfile:
     existing_cli_auth lets the official CLI consume its existing user auth;
     it does not copy/read credentials in Python. environment_auth uses a fresh
     config and bare/restricted mode, requiring caller-provided environment auth.
-    No profile implements a hard token limit or retries a CLI invocation.
+    max_budget_usd is the CLI's stopping threshold, which may be exceeded
+    before it stops; it is not a hard billing cap. No profile implements a
+    hard token limit or retries a CLI invocation.
     """
     executable: str
     cli_version: str
@@ -115,10 +117,11 @@ class ClaudeProfile:
         for limit in (self.max_input_bytes, self.max_output_bytes):
             if type(limit) is not int or limit <= 0: raise ProtocolError("byte limits must be positive")
         try:
+            if not isinstance(self.max_budget_usd, str): raise TypeError
             cost = Decimal(self.max_budget_usd)
-            if not cost.is_finite() or not 0 < cost <= Decimal("0.50"): raise ValueError
+            if not cost.is_finite() or cost <= 0: raise ValueError
         except (InvalidOperation, ValueError, TypeError):
-            raise ProtocolError("native per-call USD threshold must be >0 and <=0.50") from None
+            raise ProtocolError("native per-call USD threshold must be a positive finite decimal string") from None
 
     @classmethod
     def inspect(cls, *, requested_model: str, executable: str = "claude", **kwargs):
@@ -548,6 +551,21 @@ def _parse(events: bytes, intent: dict, profile: ClaudeProfile) -> tuple[dict, R
         # The supported CLI does not promise this field. Unknown is not zero.
         retries = _count(terminal.get("num_retries"))
         model_usage = terminal.get("modelUsage")
+        # Some terminals report an all-zero aggregate after nonzero work/cost.
+        # Keep the original stream; model components do not establish a complete
+        # replacement total, nor may assistant events repair this contradiction.
+        if tokens == 0:
+            positive = cost is not None and Decimal(cost) > 0
+            model_rows = model_usage.values() if isinstance(model_usage, dict) else ()
+            model_fields = ("inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens", "totalTokens")
+            for row in model_rows:
+                if not isinstance(row, dict): continue
+                model_cost = _cost(row.get("costUSD"))
+                positive |= any((_count(row.get(k)) or 0) > 0 for k in model_fields) or (
+                    model_cost is not None and Decimal(model_cost) > 0)
+            if positive:
+                tokens = None
+                errors.append("conflicting_native_usage")
         if isinstance(model_usage, dict):
             reported = sorted(set(reported) | set(model_usage))
             if any(model not in profile.reported_models for model in model_usage): errors.append("reported_model_mismatch")

@@ -85,6 +85,56 @@ def test_profile_timeout_rejects_nonpositive_or_unsafe_values(timeout):
                       requested_model="synthetic", reported_models=("synthetic",), timeout_ms=timeout)
 
 
+def test_explicit_usd_threshold_is_frozen_and_uses_native_flag(runtime_setup):
+    runtime, context, f, fake = runtime_setup()
+    assert runtime.profile.max_budget_usd == "0.50"
+    profile = replace(runtime.profile, max_budget_usd="2.00")
+    command = profile.command("synthetic")
+    assert command[command.index("--max-budget-usd") + 1] == "2.00"
+    assert digest(profile.as_dict()) != digest(runtime.profile.as_dict())
+    assert ClaudeRuntime(profile).identity() != runtime.identity()
+    assert profile.backend_profile(f["originals"]["task/environment.md"])["native_limits"]["max_budget_usd"] == "2.00"
+    with pytest.raises(ProtocolError, match="freeze parameters.claude"):
+        admit(ClaudeRuntime(profile), context, f)
+    handle = admit(runtime, context, f)
+    with pytest.raises(ProtocolError, match="identity/profile"):
+        ClaudeRuntime(profile).reopen(context, handle.operation_id)
+    assert count(fake) == 0
+
+
+@pytest.mark.parametrize("threshold", [True, False, 2, 2.0, None, "", "0", "-1", "NaN", "sNaN", "Infinity", "-Infinity"])
+def test_profile_rejects_invalid_usd_threshold(threshold):
+    with pytest.raises(ProtocolError, match="positive finite decimal string"):
+        ClaudeProfile(executable="/synthetic/claude", cli_version="synthetic", executable_sha256="sha256:" + "0" * 64,
+                      requested_model="synthetic", reported_models=("synthetic",), max_budget_usd=threshold)
+
+
+@pytest.mark.parametrize("mode", ["conflicting_usage", "budget_exhausted"])
+def test_zero_aggregate_conflict_retains_originals_and_unknown_total(runtime_setup, mode):
+    runtime, context, f, fake = runtime_setup(mode)
+    handle = admit(runtime, context, f)
+    receipt = runtime.invoke(context, handle, authorize=lambda _: True)
+    assert receipt.terminated and not receipt.ok and receipt.output is None
+    assert receipt.facts["tokens"] is None and not receipt.facts["accounting_complete"]
+    assert "conflicting_native_usage" in receipt.facts["errors"]
+    assert receipt.facts["total_cost_usd"] == "0.758005"
+    assert receipt.usage_row()["tokens"] is None and receipt.usage_row()["state"] == "settled"
+    events = [json.loads(line) for line in context.bundle.read(receipt.facts["raw"]["events"]).splitlines()]
+    terminal = next(e for e in events if e["type"] == "result")
+    assert all(n == 0 for n in terminal["usage"].values())
+    assert terminal["modelUsage"]["synthetic-model"]["cacheCreationInputTokens"] == 112400
+    if mode == "budget_exhausted":
+        assert {"nonzero_exit", "native_terminal_failure"} <= set(receipt.facts["errors"])
+        assert any(e["type"] == "assistant" for e in events)
+    assert runtime.settle(context, handle).facts == receipt.facts and count(fake) == 1
+
+
+def test_consistent_zero_usage_remains_known_zero(runtime_setup):
+    runtime, context, f, fake = runtime_setup("zero_usage")
+    receipt = runtime.invoke(context, admit(runtime, context, f), authorize=lambda _: True)
+    assert receipt.ok and receipt.facts["tokens"] == 0 and receipt.facts["total_cost_usd"] == "0"
+
+
 def test_success_raw_usage_and_replay_after_first_result_loss(runtime_setup):
     runtime, context, f, fake = runtime_setup()
     handle = admit(runtime, context, f)

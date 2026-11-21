@@ -41,6 +41,34 @@ def test_cumulative_receipts_replay_conflict_and_increment(tmp_path):
     assert not usage["unsettled"]
 
 
+def test_append_unknown_token_erratum_preserves_original_charge_and_history(tmp_path):
+    a, clock, limits = setup_account(tmp_path)
+    a.begin("run1")
+    a.authorize(reserve(a))
+    clock[0] += 57
+    original = row(tokens=0)
+    a.absorb("run1", original, terminated=True)
+    a.end("run1")
+    before = a.operations()["op"]
+    descriptor = a.descriptor
+    clock[0] += 100
+    correction = {**original, "sequence": 2, "receipt_id": "op:usage-erratum", "tokens": None}
+    assert a.absorb("run1", correction, terminated=True)
+    assert not a.absorb("run1", correction, terminated=True)
+    # Replaying the old observation neither removes the erratum nor recharges.
+    assert not a.absorb("run1", original, terminated=True)
+    after = a.operations()["op"]
+    assert after["history"] == [original, correction] and after["latest"] == correction
+    assert after["reservation"] == before["reservation"] and after["lower"] == before["lower"]
+    assert after["terminated"] and a.descriptor == descriptor and descriptor["limits"] == limits
+    assert len(a.operations()) == 1
+    usage = a.usage("run1", Publication(tmp_path / "erratum"))
+    assert usage["calls"]["coder"] == 1 and usage["evaluator_jobs"] == 0
+    assert usage["active_ms"] == 57 and usage["tokens"] is None and not usage["unsettled"]
+    state = json.loads(a.path.read_bytes())
+    assert state["active_run"] is None and state["active_since"] is None
+
+
 def test_authorize_rejects_python_equal_but_different_jcs_reservation(tmp_path):
     account, _, _ = setup_account(tmp_path)
     original = reserve(account)
