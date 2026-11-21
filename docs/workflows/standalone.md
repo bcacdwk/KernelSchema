@@ -148,6 +148,12 @@ inside the same stage protection as execution. It protects the entire evaluator
 stage, with independent namespaces, fresh proc, zero capabilities and writable
 compile scratch; it does not make the whole root read-only. See the exact
 [execution boundary](../../examples/workflows/row_softmax/evaluator/EXECUTION.md).
+The separate `agate-dev-stage-ro-inherited-proc-v1` uses the same tool fields
+and stage/namespace/capability checks, retaining the worker's restricted proc
+mounts. It requires actual parent proc write-alias denial and own-view EROFS
+canaries. It does not provide a private PID listing or hide external process
+metadata. See [the proc boundary](stage-ro.md). Selection is explicit; a failed
+fresh-proc job never switches profiles or retries under another key.
 Each profile needs its own six-job qualification; old bwrap evidence cannot be
 relabelled. Do not install tools on the worker. The official client must
 already be available to the selected interpreter.

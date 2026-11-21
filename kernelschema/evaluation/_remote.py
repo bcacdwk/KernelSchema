@@ -46,7 +46,7 @@ def main():
     root = Path(__file__).resolve().parent
     profile = json.loads((root / "remote.json").read_bytes())
     action = sys.argv[1]
-    if profile.get("channel") == "agate-dev-stage-ro-v1":
+    if profile.get("channel") in ("agate-dev-stage-ro-v1", "agate-dev-stage-ro-inherited-proc-v1"):
         helper = {"__name__": "ks_stage_ro"}
         path = root / "_stage_ro.py"
         exec(compile(path.read_bytes(), str(path), "exec"), helper)

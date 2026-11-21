@@ -189,6 +189,23 @@ six-job suite must produce its own CUDA, complete Task, permission and cleanup
 evidence. Local namespace tests and B19's capability diagnosis do not substitute
 for that suite. Neither profile falls back to another mechanism on failure.
 
+`agate-dev-stage-ro-inherited-proc-v1` is a separate explicit profile with the
+same four pinned tools, complete stage protection, six independent namespaces,
+private mount propagation, zero capabilities, NNP and scratch/FD discipline.
+It retains the existing restricted `/proc` and every inherited mask/submount;
+it never attempts a fresh proc mount. This is not a private PID listing, and
+external process metadata may remain visible. It does not claim `fresh_proc_pid`.
+Before candidate import, actual old-view directory/file FD canaries held by the
+trusted outer parent must be inaccessible through its proc root/cwd/fd paths.
+The known unshare parent must share the child's user/mount namespaces, retain
+nonzero permitted capabilities, scratch cwd, and only standard IO plus at most
+one verified kernel self-pidfd used by pinned unshare for parent death tracking. After capability removal its proc aliases must also be inaccessible.
+The worker's own proc root/cwd/new directory FD paths must return EROFS for the
+stage. All evidence is checked again when reading qualification or admitting a
+run. The original fresh profile still requires fresh proc and fails if denied;
+its failed records cannot be relabelled as inherited-proc qualification. See the
+[kernel rationale and limits](../../../../docs/workflows/stage-ro.md).
+
 Dev uses `recycle=true`, `replay_policy="never"`, a stable idempotency key and a
 timeout no larger than the caller reservation. Server support for never replay,
 dev ACL, complete stdout retention and remote cleanup remain required actual

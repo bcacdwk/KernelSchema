@@ -16,7 +16,7 @@ from uuid import uuid4
 from ..artifacts import Publication, read_regular, source_manifest
 from ..budget import OwnerAccount, cost, BudgetDenied
 from ..contracts import ProtocolError, UnsupportedError, digest, jcs, loads, sha256
-from .agate import AgateDevExecutor, AgateHTTP, PROFILE, STAGE_RO_PROFILE, stage_ro_profile, interpret_terminal, validate_prepared_request
+from .agate import AgateDevExecutor, AgateHTTP, PROFILE, STAGE_RO_PROFILES, stage_ro_profile, interpret_terminal, validate_prepared_request
 from .environment import match_target, read_target
 from .task import RowSoftmaxTask, stage, verify_stage
 from ..runtime import AdmissionDenied
@@ -56,7 +56,7 @@ def selection(*, remote, qualification=None, connection_profile="prod"):
 
 def _row_remote_profile(remote):
     # FA4 still imports _remote_profile and remains bwrap-only.
-    return stage_ro_profile(remote) if isinstance(remote, dict) and remote.get("channel") == STAGE_RO_PROFILE else _remote_profile(remote)
+    return stage_ro_profile(remote) if isinstance(remote, dict) and remote.get("channel") in STAGE_RO_PROFILES else _remote_profile(remote)
 
 
 def transport_from_config(connection_profile="prod"):

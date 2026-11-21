@@ -62,7 +62,7 @@ def main():
         raise ValueError("prepared and actual execution environments differ")
     frozen = json.loads(frozen_data)
     sandbox = load("ks_sandbox", root / "_sandbox.py", payload["_sandbox.py"])
-    if execution.get("profile") == "agate-dev-stage-ro-v1" and stage_permission is None:
+    if execution.get("profile") in ("agate-dev-stage-ro-v1", "agate-dev-stage-ro-inherited-proc-v1") and stage_permission is None:
         raise RuntimeError("stage-ro worker requires actual namespace permission evidence")
     permission = stage_permission or (sandbox.restrict() if mode == "cpu_logic" else {"profile": "agate-dev-bwrap-v1", "boundary": "external bwrap readonly root, writable compile scratch"})
     if stage_permission is None:

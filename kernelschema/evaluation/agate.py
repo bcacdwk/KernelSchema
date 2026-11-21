@@ -20,7 +20,7 @@ import urllib.request
 from ..artifacts import Publication, durable_mkdir, durable_write, read_regular, source_manifest
 from ..contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256
 from .task import verify_stage
-from ._stage_ro import PROFILE as STAGE_RO_PROFILE, TOOLS, NAMESPACES, CAPS
+from ._stage_ro import PROFILE as STAGE_RO_PROFILE, INHERITED_PROFILE, PROFILES as STAGE_RO_PROFILES, TOOLS, NAMESPACES, CAPS
 
 PROFILE = "agate-dev-bwrap-v1"
 MARKER = "KS_EVALUATOR_V1 "
@@ -28,7 +28,7 @@ MARKER = "KS_EVALUATOR_V1 "
 
 def stage_ro_profile(profile):
     required = {"channel", "gpu", "tool_sha256", *TOOLS}
-    if not isinstance(profile, dict) or set(profile) != required or profile["channel"] != STAGE_RO_PROFILE:
+    if not isinstance(profile, dict) or set(profile) != required or profile["channel"] not in STAGE_RO_PROFILES:
         raise ProtocolError("stage-ro requires exact channel/gpu/python/unshare/mount/setpriv/tool_sha256 fields")
     if not isinstance(profile["gpu"], str) or not profile["gpu"].strip():
         raise ProtocolError("stage-ro requires an explicit GPU alias")
@@ -42,7 +42,7 @@ def stage_ro_profile(profile):
 
 
 def remote_settings(profile, reservation):
-    names = ("channel", *TOOLS, "tool_sha256") if profile["channel"] == STAGE_RO_PROFILE else ("python", "bwrap", "bwrap_sha256")
+    names = ("channel", *TOOLS, "tool_sha256") if profile["channel"] in STAGE_RO_PROFILES else ("python", "bwrap", "bwrap_sha256")
     return {**{k: profile.get(k) for k in names}, "timeout_s": min(reservation["active_ms"], 1200000) // 1000,
             "deadline_utc_ms": reservation.get("deadline_utc_ms")}
 
@@ -62,24 +62,66 @@ def protected_files(intent):
     return files
 
 
+def validate_inherited_proc(permission, before, after):
+    proc = permission["proc"]
+    outer, helper = proc["outer"], proc["helper"]
+    if ("fresh_proc_pid" in permission or proc["mode"] != "inherited-restricted"
+            or proc["private_pid_view"] is not False or proc["mounts_unchanged"] is not True
+            or type(proc["namespace_pid"]) is not int or proc["namespace_pid"] != 1
+            or any(type(pid) is not int or pid <= 0 for pid in (proc["proc_self_pid"], outer["pid"], helper["pid"]))
+            or proc["proc_self_pid"] == 1
+            or len({proc["proc_self_pid"], outer["pid"], helper["pid"]}) != 3
+            or any(type(fd) is not int or fd <= 2 for fd in (outer["directory_fd"], outer["file_fd"]))
+            or outer["directory_fd"] == outer["file_fd"]
+            or not Path(outer["cwd"]).is_absolute()
+            or helper["namespaces"] != {**after, "pid": before["pid"]}
+            or not re.fullmatch(r"[0-9a-f]{16}", helper["permitted_caps"]) or not int(helper["permitted_caps"], 16)
+            or helper["inherited_fds"] != [] or helper["cwd"] != permission["scratch"]):
+        raise ProtocolError("inherited proc/outer/helper evidence differs")
+    pidfds = helper["pidfds"]
+    if (not isinstance(pidfds, list) or len(pidfds) > 1
+            or any(type(p["fd"]) is not int or p["fd"] <= 2 or p["target"] != "anon_inode:[pidfd]"
+                   or type(p["pid"]) is not int or p["pid"] != helper["pid"] for p in pidfds)):
+        raise ProtocolError("unshare helper self-pidfd evidence differs")
+    rows = proc["mounts"]
+    if (not isinstance(rows, list) or not rows or not any(r["path"] == "/proc" and r["type"] == "proc" for r in rows)
+            or any(not Path(r["path"]).is_relative_to("/proc") or r["propagation"] for r in rows)):
+        raise ProtocolError("unchanged inherited proc mount evidence absent")
+    expected = {"outer.root", "outer.cwd", "outer.directory_fd", "outer.file_fd",
+                "helper.root", "helper.cwd", "helper.fd0", "helper.fd1", "helper.fd2",
+                *("helper.fd" + str(p["fd"]) for p in pidfds)}
+    denied = proc["denied"]
+    if (len(denied) != len(expected) or {p["target"] for p in denied} != expected
+            or any(type(p["errno"]) is not int or p["errno"] not in (1, 13) for p in denied)):
+        raise ProtocolError("outside proc write-alias denial evidence absent")
+    probes = proc["self_probes"]
+    if (len(probes) != 3 or {p["via"] for p in probes} != {"root", "cwd", "fd"}
+            or any(type(p["errno"]) is not int or p["errno"] != 30 for p in probes)):
+        raise ProtocolError("own proc stage EROFS evidence absent")
+
+
 def validate_stage_ro_evidence(intent, execution, worker):
     profile = stage_ro_profile(intent["profile"])
     permission = worker["permissions"]
     expected = protected_files(intent)
     before, after = permission["namespaces_before"], permission["namespaces_after"]
-    if (execution["profile"] != STAGE_RO_PROFILE or execution["tool_sha256"] != profile["tool_sha256"]
-            or worker["profile"] != STAGE_RO_PROFILE or permission["profile"] != STAGE_RO_PROFILE
+    if (execution["profile"] != profile["channel"] or execution["tool_sha256"] != profile["tool_sha256"]
+            or worker["profile"] != profile["channel"] or permission["profile"] != profile["channel"]
             or permission["scope"] != "complete_evaluator_stage" or permission["whole_root_readonly"] is not False
             or permission["stage_files"] != expected or permission["tool_sha256"] != profile["tool_sha256"]
             or set(before) != set(NAMESPACES) or set(after) != set(NAMESPACES)
             or any(not re.fullmatch(n + r":\[[0-9]+\]", before[n]) or not re.fullmatch(n + r":\[[0-9]+\]", after[n]) or before[n] == after[n] for n in NAMESPACES)
-            or permission["private_mounts"] is not True or type(permission["fresh_proc_pid"]) is not int or permission["fresh_proc_pid"] != 1
+            or permission["private_mounts"] is not True
             or set(permission["caps"]) != set(CAPS) | {"NoNewPrivs"}
             or any(int(permission["caps"][name], 16) for name in CAPS) or permission["caps"]["NoNewPrivs"] != "1"
             or permission["inherited_fds"] != [] or permission["mount_aliases"] != []
             or not permission["scratch"].startswith("/tmp/ks-compile-") or permission["cwd"] != permission["scratch"]
             or permission["scratch_writable"] is not True):
         raise ProtocolError("actual stage-ro boundary evidence differs")
+    if profile["channel"] == INHERITED_PROFILE:
+        validate_inherited_proc(permission, before, after)
+    elif type(permission["fresh_proc_pid"]) is not int or permission["fresh_proc_pid"] != 1 or "proc" in permission:
+        raise ProtocolError("fresh proc evidence absent or changed")
     probes = permission["probes"]
     if (len(probes) != len(expected) + 1 or {p["path"] for p in probes} != {*expected, ".ks-stage-write-probe"}
             or any(p["write_open_denied"] is not True or type(p["errno"]) is not int or p["errno"] != 30 for p in probes)):
@@ -169,7 +211,7 @@ def validate_prepared_request(intent, request):
         if digest(request) != intent["request_sha256"]:
             raise ProtocolError("prepared request changed")
         manifest, profile = intent["stage"]["manifest"], intent["profile"]
-        if profile["channel"] == STAGE_RO_PROFILE:
+        if profile["channel"] in STAGE_RO_PROFILES:
             stage_ro_profile(profile)
         files = request["files"]
         ms = min(intent["reservation"]["active_ms"], 1200000)
@@ -208,7 +250,7 @@ class AgateDevExecutor:
         self.transport=transport
 
     def capabilities(self):
-        return {"profile":PROFILE,"profiles":[PROFILE, STAGE_RO_PROFILE],"engineering":"dev prepare/submit/query/settle implemented",
+        return {"profile":PROFILE,"profiles":[PROFILE, *STAGE_RO_PROFILES],"engineering":"dev prepare/submit/query/settle implemented",
                 "service_qualified":False,"Task_qualification":False,
                 "requires":["configured auth and dev ACL", "server replay_policy=never", "selected pinned remote tools/namespaces/CUDA",
                             "frozen actual environment and FP32 input bytes", "complete framed stdout", "confirmed remote terminal/cleanup"],
@@ -235,14 +277,14 @@ class AgateDevExecutor:
             return prepare(self, staged, profile=profile, operation_id=operation_id, submission_key=submission_key,
                            owner=owner, reservation=reservation, environment=environment, action=action)
         verify_stage(staged)
-        if profile.get("channel") not in (PROFILE, STAGE_RO_PROFILE) or action not in ("probe","execute"):
+        if profile.get("channel") not in (PROFILE, *STAGE_RO_PROFILES) or action not in ("probe","execute"):
             raise UnsupportedError("only explicit Agate bwrap or stage-ro profile implemented")
         ms=reservation.get("active_ms")
         if not owner or not submission_key or reservation.get("owner") != owner or reservation.get("evaluator_jobs") != 1:
             raise ProtocolError("explicit caller owner/reservation/stable key required")
         if type(ms) is not int or ms < 1000: raise ProtocolError("reservation must allow at least 1s")
         ms = min(ms, 1200000)  # one dev job never exceeds the channel's 20min bound
-        if profile["channel"] == STAGE_RO_PROFILE:
+        if profile["channel"] in STAGE_RO_PROFILES:
             stage_ro_profile(profile)
         else:
             if any(not isinstance(profile.get(k),str) or not profile[k].startswith("/") for k in ("python","bwrap")):
@@ -363,7 +405,7 @@ def interpret_terminal(intent, native):
             execution=_unframe(result.get("stdout"))
             if not isinstance(execution,dict): raise ProtocolError("evaluator output is not an object")
             if execution.get("action") != intent["action"]: raise ProtocolError("different evaluator action")
-            stage_ro = intent["profile"]["channel"] == STAGE_RO_PROFILE
+            stage_ro = intent["profile"]["channel"] in STAGE_RO_PROFILES
             if execution.get("exit_code") == 0 and (intent["action"] == "execute" or stage_ro):
                 worker=loads(execution["stdout"]); manifest=intent["stage"]["manifest"]
                 if (worker["loaded"] != manifest["files"] or worker["source"] != manifest["source"] or
