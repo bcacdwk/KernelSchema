@@ -1,4 +1,4 @@
-"""Agate dev entry, using a pre-existing pinned bwrap executable.
+"""Agate dev entry, using explicitly selected pre-existing pinned tools.
 
 No package install, alternate comparator or automatic replay. A missing tool or
 namespace capability fails before candidate import. All stdout is framed and
@@ -46,6 +46,12 @@ def main():
     root = Path(__file__).resolve().parent
     profile = json.loads((root / "remote.json").read_bytes())
     action = sys.argv[1]
+    if profile.get("channel") == "agate-dev-stage-ro-v1":
+        helper = {"__name__": "ks_stage_ro"}
+        path = root / "_stage_ro.py"
+        exec(compile(path.read_bytes(), str(path), "exec"), helper)
+        emit(helper["run"](root, profile, action, remaining_timeout(profile)))
+        return
     if action == "probe":
         result = subprocess.run([profile["python"], "-I", "-B", str(root / "_worker.py"), str(root), "prepare-cuda"],
                                 capture_output=True, timeout=remaining_timeout(profile))

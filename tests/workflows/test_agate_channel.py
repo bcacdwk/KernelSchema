@@ -68,9 +68,9 @@ class Wire:
         return {"status": 200, "body": jcs(self.native[job])}
 
 
-def context(tmp_path):
+def context(tmp_path, *, remote=None):
     target = synthetic_target()
-    remote = {"channel": PROFILE, "gpu": "synthetic-gpu", "python": "/synthetic/python", "bwrap": "/synthetic/bwrap"}
+    remote = remote or {"channel": PROFILE, "gpu": "synthetic-gpu", "python": "/synthetic/python", "bwrap": "/synthetic/bwrap"}
     demo = Demo.create(tmp_path / "demo", start="fixed", environment=jcs(target), remote=remote)
     q = Bundle(demo.root).document(demo.config["requests"]["fixed"])
     q["budget"]["limits"]["evaluator_jobs"] = 7

@@ -112,9 +112,17 @@ the private authority or its locator.
 The built-in channel is `kernelschema.evaluation.channel:workflow_channel`; the
 `selection()` helper pins its source and K1 Agate source. No custom user wrapper
 is needed. Prepare [explicit target materials](target-environment.md) first.
-Supply `--remote remote.json` with exactly the chosen `channel` value
-`agate-dev-bwrap-v1`, authorized `gpu` alias and absolute existing remote `python`
-and `bwrap` paths. Do not install tools on the worker. The official client must
+Supply `--remote remote.json` with an authorized `gpu` alias and one explicit
+profile. `agate-dev-bwrap-v1` requires absolute existing remote `python` and
+`bwrap` paths; its probe records the bwrap digest. `agate-dev-stage-ro-v1`
+requires absolute `python`, `unshare`, `mount`, `setpriv` paths and `tool_sha256`
+mapping those four names to previously observed binary digests. Its probe runs
+inside the same stage protection as execution. It protects the entire evaluator
+stage, with independent namespaces, fresh proc, zero capabilities and writable
+compile scratch; it does not make the whole root read-only. See the exact
+[execution boundary](../../examples/workflows/row_softmax/evaluator/EXECUTION.md).
+Each profile needs its own six-job qualification; old bwrap evidence cannot be
+relabelled. Do not install tools on the worker. The official client must
 already be available to the selected interpreter.
 
 For actual model work, also supply `--runtime-profile` containing an explicitly
@@ -161,7 +169,7 @@ original costs/locator. Repeating `qualify` recovers that same suite.
 The full Task comparator, FP64 golden, 72 basic calls, two-call reuse trace and
 four-shape timing remain unchanged. The channel uses K1 prepare/submit/query/
 settle and the sole OwnerAccount. Native allclose is never substituted. Auth/dev
-ACL, replay_policy=never, existing bwrap/namespaces/CUDA, readonly probes, complete
+ACL, replay_policy=never, selected existing tools/namespaces/CUDA, readonly probes, complete
 stdout and confirmed remote cleanup must be actually observed. Lost acknowledgment
 without job_id remains fenced because the SDK has no read-only key lookup.
 

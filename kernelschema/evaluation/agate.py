@@ -20,9 +20,70 @@ import urllib.request
 from ..artifacts import Publication, durable_mkdir, durable_write, read_regular, source_manifest
 from ..contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256
 from .task import verify_stage
+from ._stage_ro import PROFILE as STAGE_RO_PROFILE, TOOLS, NAMESPACES, CAPS
 
 PROFILE = "agate-dev-bwrap-v1"
 MARKER = "KS_EVALUATOR_V1 "
+
+
+def stage_ro_profile(profile):
+    required = {"channel", "gpu", "tool_sha256", *TOOLS}
+    if not isinstance(profile, dict) or set(profile) != required or profile["channel"] != STAGE_RO_PROFILE:
+        raise ProtocolError("stage-ro requires exact channel/gpu/python/unshare/mount/setpriv/tool_sha256 fields")
+    if not isinstance(profile["gpu"], str) or not profile["gpu"].strip():
+        raise ProtocolError("stage-ro requires an explicit GPU alias")
+    if any(not isinstance(profile[k], str) or not profile[k].startswith("/") for k in TOOLS):
+        raise ProtocolError("stage-ro requires absolute existing tool paths")
+    hashes = profile["tool_sha256"]
+    if not isinstance(hashes, dict) or set(hashes) != set(TOOLS) or any(
+            not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value) for value in hashes.values()):
+        raise ProtocolError("stage-ro requires all four fixed tool hashes before probe")
+    return profile
+
+
+def remote_settings(profile, reservation):
+    names = ("channel", *TOOLS, "tool_sha256") if profile["channel"] == STAGE_RO_PROFILE else ("python", "bwrap", "bwrap_sha256")
+    return {**{k: profile.get(k) for k in names}, "timeout_s": min(reservation["active_ms"], 1200000) // 1000,
+            "deadline_utc_ms": reservation.get("deadline_utc_ms")}
+
+
+def execution_settings(profile, environment, frozen_sha256):
+    return {"mode": "cuda", "profile": profile["channel"], "include_timing": True,
+            "environment": environment, "frozen_inputs_sha256": frozen_sha256}
+
+
+def protected_files(intent):
+    manifest = intent["stage"]["manifest"]
+    files = {**manifest["files"], "stage.json": digest(manifest),
+             "remote.json": digest(remote_settings(intent["profile"], intent["reservation"]))}
+    if intent["action"] == "execute":
+        files.update({"frozen_inputs.json": intent["frozen_inputs_sha256"],
+            "execution.json": digest(execution_settings(intent["profile"], intent["environment"], intent["frozen_inputs_sha256"]))})
+    return files
+
+
+def validate_stage_ro_evidence(intent, execution, worker):
+    profile = stage_ro_profile(intent["profile"])
+    permission = worker["permissions"]
+    expected = protected_files(intent)
+    before, after = permission["namespaces_before"], permission["namespaces_after"]
+    if (execution["profile"] != STAGE_RO_PROFILE or execution["tool_sha256"] != profile["tool_sha256"]
+            or worker["profile"] != STAGE_RO_PROFILE or permission["profile"] != STAGE_RO_PROFILE
+            or permission["scope"] != "complete_evaluator_stage" or permission["whole_root_readonly"] is not False
+            or permission["stage_files"] != expected or permission["tool_sha256"] != profile["tool_sha256"]
+            or set(before) != set(NAMESPACES) or set(after) != set(NAMESPACES)
+            or any(not re.fullmatch(n + r":\[[0-9]+\]", before[n]) or not re.fullmatch(n + r":\[[0-9]+\]", after[n]) or before[n] == after[n] for n in NAMESPACES)
+            or permission["private_mounts"] is not True or type(permission["fresh_proc_pid"]) is not int or permission["fresh_proc_pid"] != 1
+            or set(permission["caps"]) != set(CAPS) | {"NoNewPrivs"}
+            or any(int(permission["caps"][name], 16) for name in CAPS) or permission["caps"]["NoNewPrivs"] != "1"
+            or permission["inherited_fds"] != [] or permission["mount_aliases"] != []
+            or not permission["scratch"].startswith("/tmp/ks-compile-") or permission["cwd"] != permission["scratch"]
+            or permission["scratch_writable"] is not True):
+        raise ProtocolError("actual stage-ro boundary evidence differs")
+    probes = permission["probes"]
+    if (len(probes) != len(expected) + 1 or {p["path"] for p in probes} != {*expected, ".ks-stage-write-probe"}
+            or any(p["write_open_denied"] is not True or type(p["errno"]) is not int or p["errno"] != 30 for p in probes)):
+        raise ProtocolError("complete stage-ro EROFS probes absent")
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -108,18 +169,18 @@ def validate_prepared_request(intent, request):
         if digest(request) != intent["request_sha256"]:
             raise ProtocolError("prepared request changed")
         manifest, profile = intent["stage"]["manifest"], intent["profile"]
+        if profile["channel"] == STAGE_RO_PROFILE:
+            stage_ro_profile(profile)
         files = request["files"]
         ms = min(intent["reservation"]["active_ms"], 1200000)
         extras = {"_ks_stage/stage.json": jcs(manifest).decode(),
-            "_ks_stage/remote.json": jcs({**{k: profile.get(k) for k in ("python", "bwrap", "bwrap_sha256")},
-                "timeout_s": ms // 1000, "deadline_utc_ms": intent["reservation"].get("deadline_utc_ms")}).decode()}
+            "_ks_stage/remote.json": jcs(remote_settings(profile, intent["reservation"])).decode()}
         if intent["action"] == "execute":
             frozen = files["_ks_stage/frozen_inputs.json"]
             if sha256(frozen.encode()) != intent["frozen_inputs_sha256"]:
                 raise ProtocolError("uploaded frozen inputs changed")
             extras.update({"_ks_stage/frozen_inputs.json": frozen,
-                "_ks_stage/execution.json": jcs({"mode": "cuda", "profile": PROFILE, "include_timing": True,
-                    "environment": intent["environment"], "frozen_inputs_sha256": intent["frozen_inputs_sha256"]}).decode()})
+                "_ks_stage/execution.json": jcs(execution_settings(profile, intent["environment"], intent["frozen_inputs_sha256"])).decode()})
         elif intent["action"] != "probe":
             raise ProtocolError("unknown original evaluator action")
         expected_names = {"_ks_stage/" + name for name in manifest["files"]} | set(extras)
@@ -147,9 +208,9 @@ class AgateDevExecutor:
         self.transport=transport
 
     def capabilities(self):
-        return {"profile":PROFILE,"engineering":"dev prepare/submit/query/settle implemented",
+        return {"profile":PROFILE,"profiles":[PROFILE, STAGE_RO_PROFILE],"engineering":"dev prepare/submit/query/settle implemented",
                 "service_qualified":False,"Task_qualification":False,
-                "requires":["configured auth and dev ACL", "server replay_policy=never", "pinned remote bwrap/namespaces/CUDA",
+                "requires":["configured auth and dev ACL", "server replay_policy=never", "selected pinned remote tools/namespaces/CUDA",
                             "frozen actual environment and FP32 input bytes", "complete framed stdout", "confirmed remote terminal/cleanup"],
                 "missing_sdk_operation":"read-only lookup by idempotency_key; lost acknowledgment without job_id stays unknown"}
 
@@ -157,9 +218,9 @@ class AgateDevExecutor:
         if not re.fullmatch(r"[A-Za-z0-9_-]+",operation_id): raise ProtocolError("unsafe operation_id")
         return self.root / operation_id
 
-    def locator(self, operation_id):
+    def locator(self, operation_id, *, profile=PROFILE):
         """Original private locator available before submission acknowledgment."""
-        return {"root":str(self._job(operation_id)),"profile":PROFILE,"transport":self.transport.identity()}
+        return {"root":str(self._job(operation_id)),"profile":profile,"transport":self.transport.identity()}
 
     def prepare(self, staged, *, profile, operation_id, submission_key, owner, reservation,
                 frozen_inputs=None, environment=None, action="execute"):
@@ -174,22 +235,24 @@ class AgateDevExecutor:
             return prepare(self, staged, profile=profile, operation_id=operation_id, submission_key=submission_key,
                            owner=owner, reservation=reservation, environment=environment, action=action)
         verify_stage(staged)
-        if profile.get("channel") != PROFILE or action not in ("probe","execute"):
-            raise UnsupportedError("only explicit Agate dev+bwrap profile implemented")
+        if profile.get("channel") not in (PROFILE, STAGE_RO_PROFILE) or action not in ("probe","execute"):
+            raise UnsupportedError("only explicit Agate bwrap or stage-ro profile implemented")
         ms=reservation.get("active_ms")
         if not owner or not submission_key or reservation.get("owner") != owner or reservation.get("evaluator_jobs") != 1:
             raise ProtocolError("explicit caller owner/reservation/stable key required")
         if type(ms) is not int or ms < 1000: raise ProtocolError("reservation must allow at least 1s")
         ms = min(ms, 1200000)  # one dev job never exceeds the channel's 20min bound
-        if any(not isinstance(profile.get(k),str) or not profile[k].startswith("/") for k in ("python","bwrap")):
-            raise ProtocolError("absolute remote python/bwrap paths required")
-        if (action == "execute" and not re.fullmatch(r"sha256:[0-9a-f]{64}",profile.get("bwrap_sha256","") or "")) or not profile.get("gpu"):
-            raise ProtocolError("fixed GPU and actual bwrap hash required")
+        if profile["channel"] == STAGE_RO_PROFILE:
+            stage_ro_profile(profile)
+        else:
+            if any(not isinstance(profile.get(k),str) or not profile[k].startswith("/") for k in ("python","bwrap")):
+                raise ProtocolError("absolute remote python/bwrap paths required")
+            if (action == "execute" and not re.fullmatch(r"sha256:[0-9a-f]{64}",profile.get("bwrap_sha256","") or "")) or not profile.get("gpu"):
+                raise ProtocolError("fixed GPU and actual bwrap hash required")
         root=Path(staged["root"])
         files={"_ks_stage/"+name:read_regular(root,name)[0].decode() for name in staged["manifest"]["files"]}
         files["_ks_stage/stage.json"]=jcs(staged["manifest"]).decode()
-        files["_ks_stage/remote.json"]=jcs({**{k:profile.get(k) for k in ("python","bwrap","bwrap_sha256")},"timeout_s":ms//1000,
-            "deadline_utc_ms":reservation.get("deadline_utc_ms")}).decode()
+        files["_ks_stage/remote.json"]=jcs(remote_settings(profile, reservation)).decode()
         if action == "execute":
             if not environment or environment.get("mode") != "cuda" or frozen_inputs is None:
                 raise UnsupportedError("execute requires prior actual CUDA environment/input capture")
@@ -197,8 +260,7 @@ class AgateDevExecutor:
             if inputs.get("torch_version") != environment.get("torch") or len(inputs.get("cases",[])) != 36:
                 raise ProtocolError("frozen inputs/environment mismatch")
             files["_ks_stage/frozen_inputs.json"]=frozen_inputs.decode()
-            files["_ks_stage/execution.json"]=jcs({"mode":"cuda","profile":PROFILE,"include_timing":True,
-                "environment":environment,"frozen_inputs_sha256":sha256(frozen_inputs)}).decode()
+            files["_ks_stage/execution.json"]=jcs(execution_settings(profile, environment, sha256(frozen_inputs))).decode()
         request={"spec":{"target_hardware":[profile["gpu"]],"num_gpus":1},
                  "command":shlex.join([profile["python"],"-I","-B","_ks_stage/_remote.py",action]),"files":files,"env_vars":{},
                  "timeout_s":ms//1000,"recycle":True,"replay_policy":"never","dev_intent":"custom_harness","idempotency_key":submission_key}
@@ -294,21 +356,29 @@ def interpret_terminal(intent, native):
     execution=None; diagnostic=None; result=native.get("result") or {}
     if not isinstance(result,dict):
         return None, "native result is not an object"
+    if native.get("output_truncated") is True or result.get("output_truncated") is True:
+        return None, "native output is truncated"
     if native["status"] == "succeeded" and result.get("exit_code") == 0:
         try:
             execution=_unframe(result.get("stdout"))
             if not isinstance(execution,dict): raise ProtocolError("evaluator output is not an object")
             if execution.get("action") != intent["action"]: raise ProtocolError("different evaluator action")
-            if execution.get("exit_code") == 0 and intent["action"] == "execute":
+            stage_ro = intent["profile"]["channel"] == STAGE_RO_PROFILE
+            if execution.get("exit_code") == 0 and (intent["action"] == "execute" or stage_ro):
                 worker=loads(execution["stdout"]); manifest=intent["stage"]["manifest"]
-                if (execution.get("bwrap_sha256") != intent["profile"]["bwrap_sha256"] or
-                    worker["loaded"] != manifest["files"] or worker["source"] != manifest["source"] or
-                    worker["evaluator"] != manifest["evaluator"] or worker["environment"] != intent["environment"] or
-                    worker["frozen_inputs_sha256"] != intent["frozen_inputs_sha256"] or worker["profile"] != PROFILE or
-                    len(worker["permissions"]["probes"]) != sum(name.endswith(".py") for name in manifest["files"]) or
-                    not all(p["write_open_denied"] for p in worker["permissions"]["probes"])):
+                if (worker["loaded"] != manifest["files"] or worker["source"] != manifest["source"] or
+                        worker["evaluator"] != manifest["evaluator"] or worker["profile"] != intent["profile"]["channel"]):
                     raise ProtocolError("actual evaluator subjects/environment/permission evidence differs")
-                execution["worker"]=worker
+                if stage_ro:
+                    validate_stage_ro_evidence(intent, execution, worker)
+                elif (execution.get("bwrap_sha256") != intent["profile"]["bwrap_sha256"] or
+                        len(worker["permissions"]["probes"]) != sum(name.endswith(".py") for name in manifest["files"]) or
+                        not all(p["write_open_denied"] for p in worker["permissions"]["probes"])):
+                    raise ProtocolError("actual evaluator permission evidence differs")
+                if intent["action"] == "execute":
+                    if worker["environment"] != intent["environment"] or worker["frozen_inputs_sha256"] != intent["frozen_inputs_sha256"]:
+                        raise ProtocolError("actual evaluator environment/frozen inputs differ")
+                    execution["worker"]=worker
         except (ProtocolError,KeyError,ValueError,TypeError,AttributeError) as error:
             diagnostic=str(error); execution=None
     return execution, diagnostic

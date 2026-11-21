@@ -16,7 +16,7 @@ from uuid import uuid4
 from ..artifacts import Publication, read_regular, source_manifest
 from ..budget import OwnerAccount, cost, BudgetDenied
 from ..contracts import ProtocolError, UnsupportedError, digest, jcs, loads, sha256
-from .agate import AgateDevExecutor, AgateHTTP, PROFILE, interpret_terminal, validate_prepared_request
+from .agate import AgateDevExecutor, AgateHTTP, PROFILE, STAGE_RO_PROFILE, stage_ro_profile, interpret_terminal, validate_prepared_request
 from .environment import match_target, read_target
 from .task import RowSoftmaxTask, stage, verify_stage
 from ..runtime import AdmissionDenied
@@ -47,11 +47,16 @@ def _remote_profile(remote):
 
 
 def selection(*, remote, qualification=None, connection_profile="prod"):
-    _remote_profile(remote)
+    _row_remote_profile(remote)
     return {"factory": "kernelschema.evaluation.channel:workflow_channel",
             "implementation_sha256": sha256(Path(__file__).read_bytes()),
             "parameters": {"remote": remote, "qualification": qualification, "connection_profile": connection_profile,
                            "agate_sha256": sha256(Path(__file__).with_name("agate.py").read_bytes())}}
+
+
+def _row_remote_profile(remote):
+    # FA4 still imports _remote_profile and remains bwrap-only.
+    return stage_ro_profile(remote) if isinstance(remote, dict) and remote.get("channel") == STAGE_RO_PROFILE else _remote_profile(remote)
 
 
 def transport_from_config(connection_profile="prod"):
@@ -88,14 +93,15 @@ def _read_record(record):
             environment, inputs = observed["environment"], observed["inputs"]
             if (environment["mode"] != "cuda" or inputs["torch_version"] != environment["torch"]
                     or len(inputs["cases"]) != 36
-                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", execution.get("bwrap_sha256") or "")):
+                    or (intent["profile"]["channel"] == PROFILE and not re.fullmatch(r"sha256:[0-9a-f]{64}", execution.get("bwrap_sha256") or ""))):
                 raise ValueError("capture incomplete")
         except (ProtocolError, KeyError, TypeError, AttributeError, ValueError) as error:
-            raise UnsupportedError("qualification original probe lacks complete CUDA/input/bwrap capture") from error
+            raise UnsupportedError("qualification original probe lacks complete CUDA/input/tool capture") from error
     return intent, request, execution
 
 
 def read_qualification(value, *, context, remote, transport):
+    _row_remote_profile(remote)
     if not isinstance(value, dict) or set(value) != {"format", *PHASES} or value["format"] != FORMAT:
         raise UnsupportedError("missing Agate probe/baseline/four-negative qualification; run the paid prepare command on the same owner")
     probe, _, pe = _read_record(value["probe"])
@@ -108,8 +114,9 @@ def read_qualification(value, *, context, remote, transport):
     environment, frozen = observed["environment"], jcs(observed["inputs"])
     if execute["profile"] != remote or probe["profile"] != {k: v for k, v in remote.items() if k != "bwrap_sha256"}:
         raise ProtocolError("qualification remote profile changed")
-    if pe.get("bwrap_sha256") != remote.get("bwrap_sha256") or execute["environment"] != environment or execute["frozen_inputs_sha256"] != sha256(frozen):
-        raise ProtocolError("qualification capture/bwrap changed")
+    if ((remote["channel"] == PROFILE and pe.get("bwrap_sha256") != remote.get("bwrap_sha256"))
+            or execute["environment"] != environment or execute["frozen_inputs_sha256"] != sha256(frozen)):
+        raise ProtocolError("qualification capture/tool changed")
     manifest = execute["stage"]["manifest"]
     task = context.objects["task"]
     if manifest["task"] != context.request["task"] or manifest["evaluator"] != task["evaluator"] or manifest["source"] != task["baseline_source"]:
@@ -177,7 +184,7 @@ class AgateChannel:
             if admission["status"] != "pass": raise UnsupportedError(admission["reason"])
 
     def locator(self, operation_id):
-        return self.executor.locator(operation_id)
+        return self.executor.locator(operation_id, profile=self.settings["remote"]["channel"])
 
     def prepare(self, context, op):
         self._ready(context)
@@ -199,7 +206,7 @@ class AgateChannel:
     def validate(self, context, op):
         self._ready(context)
         verify_stage(op["stage"])
-        if self.executor.locator(op["id"]) != op["locator"]:
+        if self.locator(op["id"]) != op["locator"]:
             raise ProtocolError("original Agate locator changed")
         self.prepare(context, op)  # K1 checks the identical prepared intent, no network.
 
@@ -275,7 +282,7 @@ def _qualification_account(context, *, state_path, native_root):
 
 
 def _qualify(context, *, remote, transport=None):
-    _remote_profile(remote)
+    _row_remote_profile(remote)
     if "bwrap_sha256" in remote:
         raise ProtocolError("qualification begins with an unpinned remote profile; probe records the actual bwrap digest")
     read_target(context.bundle.read(context.objects["task"]["environment"]))
@@ -325,11 +332,11 @@ def _qualify(context, *, remote, transport=None):
                 _, _, execution = _read_record(state["records"]["probe"])
                 observed = loads(execution["stdout"].encode())
                 match_target(context.bundle.read(context.objects["task"]["environment"]), observed["environment"])
-                selected_remote = {**remote, "bwrap_sha256": execution["bwrap_sha256"]}
+                selected_remote = {**remote, "bwrap_sha256": execution["bwrap_sha256"]} if remote["channel"] == PROFILE else remote
                 arguments = {"environment": observed["environment"], "frozen_inputs": jcs(observed["inputs"])}
             context.record_intent(operation_id=opid, role="evaluator", purpose="Agate qualification " + phase,
                 source=source, reservation=reservation,
-                submission_key=opid, native_locator=executor.locator(opid))
+                submission_key=opid, native_locator=executor.locator(opid, profile=selected_remote["channel"]))
             executor.prepare(staged, profile=selected_remote, operation_id=opid, submission_key=opid,
                 owner=context.owner["id"], reservation=reservation, action="probe" if phase == "probe" else "execute", **arguments)
             owned = account.operations(context.run_id)[opid]

@@ -12,7 +12,7 @@ from .. import template_api
 
 VERSION = "row-softmax.evaluator.v1"
 COMPONENTS = ("baseline.py", "check.py", "entry.py", "golden.py", "input.py", "timing.py")
-EXECUTORS = ("_worker.py", "_sandbox.py", "_controller.py", "_remote.py")
+EXECUTORS = ("_worker.py", "_sandbox.py", "_controller.py", "_remote.py", "_stage_ro.py")
 EXAMPLE = "examples/workflows/row_softmax/"
 
 
@@ -34,7 +34,7 @@ def freeze_task(publication: Publication, *, environment: dict) -> dict:
         "protocol": PROTOCOL, "kind": "evaluator", "version": VERSION,
         "entrypoint": files["entry.py"], "files": sorted(files.values(), key=lambda r: r["path"]),
         "inputs": originals["inputs.json"], "timing": originals["timing.md"], "environment": environment,
-        "adapters": ["agate-dev-bwrap-v1", "local-cpu-logic-seccomp-v1"],
+        "adapters": ["agate-dev-bwrap-v1", "agate-dev-stage-ro-v1", "local-cpu-logic-seccomp-v1"],
         "extensions": {"information": {"CUDA_qualification": "none", "CPU": "logic only"}}})
     baseline = publication.put_source("row-softmax/baseline", resource(EXAMPLE + "evaluator/baseline.py").read_bytes())
     starter = publication.put_source("row-softmax/starter", resource(EXAMPLE + "starter/kernel.py").read_bytes())

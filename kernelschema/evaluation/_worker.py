@@ -24,6 +24,10 @@ def load(name, path, data):
 
 def main():
     root, action = Path(sys.argv[1]).resolve(), sys.argv[2]
+    stage_permission = None
+    if len(sys.argv) == 4:
+        helper = root / "_stage_ro.py"
+        stage_permission = load("ks_stage_ro", helper, helper.read_bytes()).prove(root, json.loads(sys.argv[3]))
     manifest = json.loads((root / "stage.json").read_bytes())
     payload = {}
     for name, expected in manifest["files"].items():
@@ -42,7 +46,11 @@ def main():
     spec = json.loads(payload["inputs.json"])
     if action in ("prepare", "prepare-cuda"):
         print(json.dumps({"environment": modules["entry"].environment("cuda" if action == "prepare-cuda" else "cpu_logic"),
-                          "inputs": modules["input"].freeze_inputs(spec)}, sort_keys=True, separators=(",", ":")))
+                          "inputs": modules["input"].freeze_inputs(spec),
+                          **({"profile": stage_permission["profile"], "permissions": stage_permission,
+                              "loaded": {name: hashed(data) for name, data in payload.items()},
+                              "source": manifest["source"], "evaluator": manifest["evaluator"]} if stage_permission else {})},
+                         sort_keys=True, separators=(",", ":")))
         return
     execution = json.loads((root / "execution.json").read_bytes())
     frozen_data = (root / "frozen_inputs.json").read_bytes()
@@ -54,8 +62,11 @@ def main():
         raise ValueError("prepared and actual execution environments differ")
     frozen = json.loads(frozen_data)
     sandbox = load("ks_sandbox", root / "_sandbox.py", payload["_sandbox.py"])
-    permission = sandbox.restrict() if mode == "cpu_logic" else {"profile": "agate-dev-bwrap-v1", "boundary": "external bwrap readonly root, writable compile scratch"}
-    permission["probes"] = sandbox.prove_readonly([root / name for name in manifest["files"] if name.endswith(".py")])
+    if execution.get("profile") == "agate-dev-stage-ro-v1" and stage_permission is None:
+        raise RuntimeError("stage-ro worker requires actual namespace permission evidence")
+    permission = stage_permission or (sandbox.restrict() if mode == "cpu_logic" else {"profile": "agate-dev-bwrap-v1", "boundary": "external bwrap readonly root, writable compile scratch"})
+    if stage_permission is None:
+        permission["probes"] = sandbox.prove_readonly([root / name for name in manifest["files"] if name.endswith(".py")])
     # Baseline and candidate are both loaded after the same permission boundary.
     with contextlib.redirect_stdout(sys.stderr):
         baseline = load("ks_baseline_" + hashed(payload["baseline.py"])[7:], root / "baseline.py", payload["baseline.py"])
@@ -66,7 +77,9 @@ def main():
         except Exception as exc:
             result = {"build": "fail", "correctness": None, "timing": None,
                       "error": {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}}
-    print(json.dumps({"profile": "local-cpu-logic-seccomp-v1" if mode == "cpu_logic" else "agate-dev-bwrap-v1",
+    if stage_permission and sys.modules["ks_stage_ro"].snapshot(root) != stage_permission["stage_files"]:
+        raise RuntimeError("stage path/bytes changed during candidate execution")
+    print(json.dumps({"profile": permission["profile"],
                       "qualification": "CPU logic only; no CUDA qualification" if mode == "cpu_logic" else "finite CUDA evaluator evidence; no Schema fidelity verdict",
                       "loaded": {name: hashed(data) for name, data in payload.items()},
                       "source": manifest["source"], "evaluator": manifest["evaluator"],

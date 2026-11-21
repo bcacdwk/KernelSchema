@@ -292,7 +292,7 @@ class Demo:
         if self.state["history"] or self.state["current"]:
             raise ProtocolError("prepare Agate before the business chain; never replace an admitted profile")
         remote = self.config["remote"]
-        if remote is None: raise UnsupportedError("create with an explicit remote GPU/python/bwrap configuration")
+        if remote is None: raise UnsupportedError("create with an explicit remote GPU/tool profile")
         identity = {"qualification": sha256(resource("kernelschema/evaluation/channel.py").read_bytes()), "agate": sha256(resource("kernelschema/evaluation/agate.py").read_bytes())}
         out = self.root / "qualification"
         with use_authority(self.owner.path):

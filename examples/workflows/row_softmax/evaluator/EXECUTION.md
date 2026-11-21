@@ -41,7 +41,7 @@ staged = stage(bundle, refs["task"], source_ref, new_stage_directory, scope=scop
 ```
 
 The manifest includes the six Task modules and exact `_worker.py`, `_sandbox.py`,
-`_controller.py`, `_remote.py` byte Refs. Every staged dependency is checked
+`_controller.py`, `_remote.py`, `_stage_ro.py` byte Refs. Every staged dependency is checked
 against the selected Ref and supported installed implementation. Both candidate
 and baseline compile directly from the verified byte buffer in a fresh process;
 they never import mutable workspace `kernel.py` or a cached bare `kernel` module.
@@ -155,6 +155,39 @@ timing run inside this boundary. A missing prerequisite fails; the implementatio
 does not install bwrap, change the remote image, fall back to CPU/native allclose,
 or ask a wrapper to repair out. bwrap availability/permission behavior is **not
 observed on an actual Agate worker in B03**.
+
+The separate `agate-dev-stage-ro-v1` profile accepts `gpu`, absolute existing
+`python`, `unshare`, `mount`, `setpriv` paths and a `tool_sha256` object containing
+all four actual binary digests, fixed before the probe. It does not require or
+install bwrap. Both probe and execute enter independent user/mount/PID/network/
+UTS/IPC namespaces. The launcher verifies namespace identities before making
+mount propagation private, mounts a fresh `/proc` for PID 1 and bind-remounts
+only the complete uploaded evaluator stage read-only. Stage submounts, symlinks,
+hardlinks and other mounts exposing the stage backing are rejected.
+
+Before importing torch, evaluator or candidate, the worker verifies zero
+inheritable/permitted/effective/bounding/ambient capabilities, `NoNewPrivs=1`,
+fresh PID namespace proc, closed inherited descriptors and an external compile
+scratch cwd. HOME/TMPDIR/Triton/XDG/CUDA caches point to that scratch. `/dev`
+remains available through the inherited device mounts; CUDA availability is
+measured inside the actual profile. Each staged file, including the manifest,
+remote/execution settings and frozen inputs, must return EROFS on write-open;
+creating a stage file must also fail. Scratch writing is checked independently.
+Loaded Source/evaluator hashes and all protected file hashes are returned and
+rechecked against the exact original uploaded request. The original stage is
+the sole loading tree; no writable evaluator copy or old stage cwd/FD is passed
+to the worker. All loaded modules compile verified buffers. Post-run stage
+hashes are checked again. The launcher kills the whole process group on timeout;
+unshare also kills namespace PID 1 when its parent dies.
+
+This profile promises **complete evaluator stage protection**, not a read-only
+root. Like the existing profiles it does not isolate hostile native code from
+the evaluator's Python address space. Its evidence has an explicit stage scope
+and `whole_root_readonly=false`; old bwrap qualifications cannot establish it.
+New executor bytes require a newly frozen evaluator/Task and request. The same
+six-job suite must produce its own CUDA, complete Task, permission and cleanup
+evidence. Local namespace tests and B19's capability diagnosis do not substitute
+for that suite. Neither profile falls back to another mechanism on failure.
 
 Dev uses `recycle=true`, `replay_policy="never"`, a stable idempotency key and a
 timeout no larger than the caller reservation. Server support for never replay,
