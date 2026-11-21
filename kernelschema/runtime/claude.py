@@ -317,7 +317,12 @@ def prepare_role_input(context: RunContext, role: str, *, source: dict | None = 
     for key in ("contract", "acceptance", "workload", "environment"):
         add("task/" + key, bundle.read(task[key]), task[key], "assignment")
     host_sources = _host_rule_sources(bundle, objects["rules"])
+    write_only = (context.request["operation"] in ("design", "optimize")
+                  and objects["profile"]["parameters"].get("writing_mode", "write_only") == "write_only")
     for index, reference in enumerate(objects["rules"]["files"]):
+        if write_only and (reference["path"] in host_sources or reference["path"].endswith(
+                ("/IMPLEMENT_SCHEMA.md", "/OPTIMIZE_SCHEMA.md" if context.request["operation"] == "design" else "/DESIGN_SCHEMA.md"))):
+            continue
         add(f"rules/{index}", bundle.read(reference), reference, "rules")
         if reference["path"] in host_sources:
             items[-1]["host_implementation"] = host_sources[reference["path"]]
@@ -360,6 +365,11 @@ def prepare_role_input(context: RunContext, role: str, *, source: dict | None = 
              "role_authority": authority, "instruction": instruction,
              "workflow_objective": {"text":objective["text"], "sha256":objective["sha256"],
                  "authority":"Current-task instruction within the fixed Task/coverage/hard acceptance. It cannot grant tools, change Task or relax acceptance."} if objective else None}
+    if write_only:
+        fixed["writing_mode"] = "write_only"
+        fixed["instruction"] = ("Write Schema files and a brief rationale using the supplied constraints, current Schema and references. "
+            "The writing/method.md instructions define the small output. Documents and templates guide writing; no independent review, "
+            "Template acceptance, evaluator qualification or performance assessment is requested. Preserve uncertainty and actual feedback.")
     if operation == "implement":
         fixed["source_format"] = bundle.document(task["baseline_source"], "source")["format"]
     # `protocol` at a publication root is reserved for core ks.workflow.v1.

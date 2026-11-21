@@ -19,11 +19,13 @@ def main(argv=None):
     target = sub.add_parser("target", help="freeze explicit target declarations and original documentation; no qualification")
     target.add_argument("--spec", required=True, help="JSON hardware_specification/runtime/sources; each source has locator/file/license")
     target.add_argument("--out", required=True)
-    create = sub.add_parser("prepare", help="freeze five concrete requests; no model/GPU invocation")
+    create = sub.add_parser("prepare", help="freeze finite writing inputs; no model/GPU invocation")
     create.add_argument("--out", required=True)
-    create.add_argument("--start", choices=("design", "fixed", "partial", "verify"), default="design")
+    create.add_argument("--start", choices=("design", "optimize", "fixed", "partial", "verify"), default="design")
+    create.add_argument("--writing-mode", choices=("write_only", "strict"), default="write_only")
+    create.add_argument("--aka-config", help="JSON problem/repo_root/platform and native AKA options; enables one optimize iteration")
     create.add_argument("--runtime-profile")
-    create.add_argument("--environment", help="explicit ks.row-softmax.target.v1 JSON")
+    create.add_argument("--environment", help="target constraints/documentation; declaration only")
     create.add_argument("--objective", help="current objective text; Task hard criteria stay fixed")
     create.add_argument("--schema", help="complete existing raw directory; default is handwritten R0")
     create.add_argument("--receipt", help="optional original extract delivery receipt, consumed without running extract")
@@ -56,6 +58,7 @@ def main(argv=None):
             value = {"target": str(Path(args.out).absolute()), "qualification": "none; explicit target declaration only"}
         elif args.command == "prepare":
             demo = Demo.create(args.out, start=args.start, runtime=load_runtime(args.runtime_profile),
+                writing_mode=args.writing_mode, aka_config=loads(Path(args.aka_config).read_bytes()) if args.aka_config else None,
                 environment=Path(args.environment).read_bytes() if args.environment else None,
                 objective=Path(args.objective).read_bytes() if args.objective else None,
                 schema_directory=args.schema, receipt=args.receipt,

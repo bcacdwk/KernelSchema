@@ -25,7 +25,7 @@ Schema Extract 通过唯一入口 `schema_extract/extract_yaml.py` 执行六阶�
 
 ## 独立 workflow 试用
 
-[Row-softmax 独立驱动](docs/workflows/standalone.md)已提供同一 API 下的 design → implement → 至多一次 optimize → 明确后续行动，以及固定 R0、人工 partial seed、verify_only 和原 run 恢复。五类请求从实际材料生成，默认预检无需模型/GPU。当前证据为 CPU 工程与 synthetic 运输测试；真实 Agate 认证/设备资格、业务模型写作和 GPU 链尚未通过，不据此声明真实实现全部完成。
+design/optimize 默认只写 Schema：一次 Planner 调用保存 YAML、简短原因与真实调用记录，不要求独立审阅或效果验收。可直接使用 `kernelschema design --task task.md --out run`；优化再提供 `--schema` 和 `--feedback`。见[写作 API](kernelschema/WRITING.md)。[独立驱动](docs/workflows/standalone.md)在显式提供 AKA 原生 problem/config 后，可串联 design → AKA 标准 implement → 一次 optimize → 必要的后续 implement。实现和评测沿用 AKA 标准流程，写完不等于效果已证实；新的衔接验证目前为 CPU 与 synthetic 测试。
 
 ## 术语
 

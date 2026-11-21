@@ -7,6 +7,7 @@ and native operation recovery remain with their existing owners.
 from copy import deepcopy
 from contextlib import contextmanager
 import fcntl
+import json
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -27,6 +28,8 @@ from kernelschema.runtime import ClaudeProfile
 VERSION = "ks.row-softmax.driver.v1"
 DEFAULT_LIMITS = {"calls": {"planner": 2, "coder": 4, "reviewer": 6, "extract": 0},
                   "model_calls": 10, "evaluator_jobs": 8, "active_ms": 3600000, "tokens": None}
+WRITING_LIMITS = {"calls": {"planner": 2, "coder": 0, "reviewer": 0, "extract": 0},
+                  "model_calls": 2, "evaluator_jobs": 0, "active_ms": 1300000, "tokens": None}
 
 
 def load_runtime(path=None):
@@ -35,16 +38,16 @@ def load_runtime(path=None):
     return ClaudeProfile(**value)
 
 
-def _limits(operation, *, verify=False):
+def _limits(operation, *, verify=False, writing_mode="write_only"):
     return {"calls": {"planner": int(operation != "implement"), "coder": 0 if operation != "implement" or verify else 2,
-                       "reviewer": 2 if operation == "implement" else 1, "extract": 0},
+                       "reviewer": 2 if operation == "implement" else int(writing_mode == "strict"), "extract": 0},
             "evaluator_jobs": 2 if operation == "implement" else 0, "active_ms": 1200000, "tokens": None}
 
 
-def _request_limits(value):
+def _request_limits(value, *, writing_mode="write_only"):
     names = {"design", "implement", "verify", "optimize"}
     if value is None:
-        value = {name: _limits("implement" if name == "verify" else name, verify=name == "verify") for name in sorted(names)}
+        value = {name: _limits("implement" if name == "verify" else name, verify=name == "verify", writing_mode=writing_mode) for name in sorted(names)}
     if not isinstance(value, dict) or set(value) != names:
         raise ProtocolError("request_limits requires design/implement/verify/optimize complete limits")
     for item in value.values(): validate_limits(item)
@@ -96,7 +99,8 @@ class Demo:
     def create(cls, root, *, start="design", runtime=None, environment=None, objective=None,
                schema_directory=None, receipt=None, limits=None, remote=None, checkpoint=None,
                parent=None, parent_bundle=None, authority=None, request_limits=None,
-               writing_minimum_active_ms=None, reference_minimum_active_ms=None, writing_finish_floor=None):
+               writing_minimum_active_ms=None, reference_minimum_active_ms=None, writing_finish_floor=None,
+               writing_mode="write_only", aka_config=None):
         """Freeze requests with a new owner, or explicitly reuse one existing owner.
 
         Reuse requires the original public Ref, its Bundle and the private
@@ -104,10 +108,21 @@ class Demo:
         """
         root = Path(root).absolute()
         if root.exists(): raise ProtocolError("demo exists; reopen the original directory")
-        if start not in ("design", "fixed", "partial", "verify"):
-            raise ProtocolError("start must be design/fixed/partial/verify")
-        request_limits = _request_limits(request_limits)
-        writing_minimum_active_ms = _minimum(writing_minimum_active_ms, ("planner", "reviewer"), "writing_minimum_active_ms")
+        if start not in ("design", "optimize", "fixed", "partial", "verify"):
+            raise ProtocolError("start must be design/optimize/fixed/partial/verify")
+        if writing_mode not in ("write_only", "strict"):
+            raise ProtocolError("writing_mode must be write_only or strict")
+        if aka_config is not None:
+            if not isinstance(aka_config, dict) or not {"problem", "repo_root", "platform"} <= aka_config.keys():
+                raise ProtocolError("aka_config requires problem, repo_root and platform")
+            if set(aka_config) & {"schema", "workspace", "owner_account", "prepare_only"}:
+                raise ProtocolError("driver supplies schema, workspace and original owner to AKA")
+            if start in ("partial", "verify") or writing_mode == "strict":
+                raise ProtocolError("AKA standard driver supports write-only design/optimize/fixed starts")
+            aka_config = loads(jcs(aka_config))
+        request_limits = _request_limits(request_limits, writing_mode=writing_mode)
+        minimum_roles = ("planner",) if writing_mode == "write_only" and writing_minimum_active_ms is not None and set(writing_minimum_active_ms) == {"planner"} else ("planner", "reviewer")
+        writing_minimum_active_ms = _minimum(writing_minimum_active_ms, minimum_roles, "writing_minimum_active_ms")
         reference_minimum_active_ms = _minimum(reference_minimum_active_ms, ("coder", "evaluator", "reviewer"), "reference_minimum_active_ms")
         writing_finish_floor = _writing_floor(writing_finish_floor)
         external = any(value is not None for value in (parent, parent_bundle, authority))
@@ -123,16 +138,17 @@ class Demo:
             if limits is not None and jcs(limits) != jcs(descriptor["limits"]):
                 raise ProtocolError("limits conflict with existing parent; cannot replace original limits")
         runtime = runtime or load_runtime()
-        if environment is not None: read_target(environment)
+        if environment is not None and writing_mode == "strict": read_target(environment)
         if external: import_bundle(parent_bundle, root, [parent])
         p = Publication(root)
         if not external:
-            owner = OwnerAccount.create(root / ".runtime/owner.json", owner=uuid4().hex, limits=limits or DEFAULT_LIMITS)
+            owner = OwnerAccount.create(root / ".runtime/owner.json", owner=uuid4().hex,
+                limits=limits or (DEFAULT_LIMITS if writing_mode == "strict" or start in ("fixed", "partial", "verify") and aka_config is None else WRITING_LIMITS))
             parent = p.put_json("parent.json", owner.descriptor)
         env = p.put_bytes("environment.json" if environment else "environment.md",
                           environment or resource("examples/workflows/row_softmax/task/environment.md").read_bytes())
         task = freeze_task(p, environment=env)["task"]
-        w_rules = writing.freeze_rules(p)
+        w_rules = writing.freeze_rules(p, writing_mode=writing_mode)
         rules = loads(read_regular(p.stage, w_rules["path"])[0])
         method = fidelity.freeze_method(p)
         host_tools = []
@@ -153,14 +169,18 @@ class Demo:
                 objective if item["id"] == "workflow_objective" and objective is not None else data)
             entries.append({"id": item["id"], "file": ref, "roles": item["roles"], "origin": "caller-selected current objective" if objective is not None and item["id"] == "workflow_objective" else item["origin"], "license": item["license"]})
         materials = p.put_json("materials.json", {"protocol": PROTOCOL, "kind": "materials", "entries": entries})
+        writing_entries = entries if writing_mode == "strict" else [e for e in entries
+            if not e["id"].startswith(("doc_", "method_")) and e["id"] != "template_guide"]
+        writing_materials = p.put_json("writing-materials.json", {"protocol": PROTOCOL, "kind": "materials", "entries": writing_entries})
         scope_data = loads(resource("examples/workflows/row_softmax/task/scope.json").read_bytes())
         scope = p.put_json("scope.json", {"protocol": PROTOCOL, "kind": "scope", "coverage_ids": scope_data["coverage_ids"], "bindings": scope_data["fixed_r0_bindings"]})
         draft_scope = p.put_json("draft-scope.json", {"protocol": PROTOCOL, "kind": "scope", "coverage_ids": scope_data["coverage_ids"], "bindings": []})
-        consumed = consume_raw(p, schema_directory or resource("examples/workflows/row_softmax/schema/root.yaml").parent,
-                               task=task, origin="extract" if receipt else "handwritten", receipt=receipt)
+        directory = schema_directory or resource("examples/workflows/row_softmax/schema/root.yaml").parent
+        consumed = (consume_raw(p, directory, task=task, origin="extract" if receipt else "handwritten", receipt=receipt)
+                    if writing_mode == "strict" or receipt else {"schema": writing.freeze_schema(p, directory, task=task), "receipt": None})
         seed = p.put_source("manual-partial-seed", resource("examples/workflows/row_softmax/partial-seed/kernel.py").read_bytes())
         seed_origin = p.put_bytes("manual-partial-origin.md", resource("examples/workflows/row_softmax/partial-seed/ORIGIN.md").read_bytes())
-        writing_profile = writing.backend_profile(runtime, env)
+        writing_profile = writing.backend_profile(runtime, env, writing_mode=writing_mode)
         if writing_minimum_active_ms is not None:
             writing_profile["parameters"]["writing_minimum_active_ms"] = writing_minimum_active_ms
         if writing_finish_floor is not None:
@@ -174,15 +194,17 @@ class Demo:
         if remote: rp["parameters"]["evaluation"] = selection(remote=remote)
         rp_ref = p.put_json("reference-profile.json", rp)
         config = {"start": start, "task": task, "rules": rules, "materials": materials, "scope": scope,
+                  "writing_materials": writing_materials, "writing_rules": rules if writing_mode == "strict" else w_rules,
+                  "writing_mode": writing_mode, "aka_config": aka_config,
                   "draft_scope": draft_scope, "schema": consumed["schema"], "seed": seed, "seed_origin": seed_origin,
                   "receipt": consumed["receipt"], "parent": parent, "writing_profile": wp, "reference_profile": rp_ref,
                   "remote": remote, "request_limits": request_limits}
-        base = {"task": task, "rules": rules, "materials": materials, "budget": {"parent": parent, "limits": request_limits["design"]}}
+        base = {"task": task, "rules": rules if writing_mode == "strict" else w_rules, "materials": writing_materials, "budget": {"parent": parent, "limits": request_limits["design"]}}
         requests = {}
         q = writing.request(operation="design", request_id="row-softmax-design", scope=draft_scope, profile=wp, **base)
         requests["design"] = p.put_json("design.request.json", q)
         values = {"design": q}
-        for name in ("fixed", "partial", "verify"):
+        for name in (("fixed", "partial", "verify") if writing_mode == "strict" or start in ("fixed", "partial", "verify") and aka_config is None else ()):
             q = implement_request(request_id="row-softmax-" + name, task=task, rules=rules, materials=materials, scope=scope,
                 budget={"parent": parent, "limits": request_limits["verify" if name == "verify" else "implement"]},
                 backend={"name": "reference", "profile": rp_ref}, schema=consumed["schema"],
@@ -199,9 +221,10 @@ class Demo:
             validate_request(Bundle(root), value)
         durable_write(root / ".runtime/demo-anchor.json", jcs({"version": VERSION, "implementation": sha256(Path(__file__).read_bytes()),
             "config": config_ref, "authority": str(owner.path)}), mode=0o600)
-        durable_write(root / ".runtime/demo-state.json", jcs({"config": config_ref, "phase": "initial", "current": None,
+        durable_write(root / ".runtime/demo-state.json", jcs({"config": config_ref, "phase": "standard" if start == "fixed" and aka_config else "initial", "current": None,
             "history": [], "schema": consumed["schema"] if start != "design" else None, "scope": scope if start != "design" else draft_scope,
-            "qualification": None, "optimize_count": 0, "status": "prepared", "recovery": "continue", "reason": "five concrete request examples frozen"}))
+            "standard_history": [], "standard_current": None,
+            "qualification": None, "optimize_count": 0, "status": "prepared", "recovery": "continue", "reason": "finite requests frozen; no model or GPU call"}))
         return cls(root, checkpoint=checkpoint)
 
     def _save(self, boundary):
@@ -215,6 +238,11 @@ class Demo:
         limit_name = "optimize" if phase == "optimize" else "verify" if verify else "implement"
         base.update(scope=self.state["scope"], budget={"parent": self.config["parent"], "limits": self.config["request_limits"][limit_name]})
         if phase == "optimize":
+            base.update(rules=self.config["writing_rules"], materials=self.config["writing_materials"])
+            if self.state.get("standard_history"):
+                return writing.request(operation="optimize", request_id="row-softmax-optimize-after-aka",
+                    profile=self.config["writing_profile"], schema=self.state["schema"],
+                    feedback=[self.state["standard_history"][-1]["result"], *self.state["standard_history"][-1]["feedback"]], evidence=[], **base)
             previous = Bundle(self.root).document(self.state["history"][-1]["result"])
             evidence = [previous["code"]["latest"]] if previous["code"]["latest"] else []
             for assessment in previous["assessments"]:
@@ -255,6 +283,10 @@ class Demo:
     def _run(self):
         while self.state["phase"] != "done":
             phase = self.state["phase"]
+            if phase in ("standard", "standard_followup"):
+                if not self._standard_implement(phase):
+                    break
+                continue
             current = self.state["current"]
             if current is None:
                 if self.owner.fences():
@@ -290,11 +322,16 @@ class Demo:
             if result["status"] != "completed":
                 self.state.update(phase="done", status=result["status"], recovery=result["recovery"], reason=result["stop_reason"])
             elif current["operation"] == "design":
-                self.state.update(phase="implement", status="writing_published", recovery="continue", reason="design published; fixed implementation not admitted")
+                next_phase = "standard" if self.config.get("aka_config") else "implement" if self.config["writing_mode"] == "strict" else "done"
+                self.state.update(phase=next_phase, status="completed" if next_phase == "done" else "writing_published", recovery="none" if next_phase == "done" else "continue", reason=result["stop_reason"])
             elif current["operation"] == "optimize":
                 self.state["optimize_count"] += 1
                 if self.state["optimize_count"] != 1: raise ProtocolError("driver allows at most one optimize")
-                if result["next_action"] == "none":
+                if self.config.get("aka_config") and result["decision"] == "revise":
+                    self.state.update(phase="standard_followup", status="writing_published", recovery="continue", reason="revised Schema written; one standard implementation remains")
+                elif self.config["writing_mode"] == "write_only":
+                    self.state.update(phase="done", status="completed", recovery="none", reason=result["stop_reason"])
+                elif result["next_action"] == "none":
                     self.state.update(phase="done", status="stopped", recovery="none", reason="optimize returned no action")
                 else:
                     self.state["action"] = self._action(result)
@@ -305,6 +342,68 @@ class Demo:
                 self.state.update(phase="optimize", status="fixed_settled", recovery="continue", reason="original fixed work settled; one optimize remains")
             self._save("writing_published" if current["operation"] in ("design", "optimize") else "child_selected")
         return self.summary()
+
+    def _standard_implement(self, phase):
+        """One normal AKA campaign; no second evaluator or verdict translation."""
+        current = self.state.get("standard_current")
+        if current is None:
+            index = len(self.state["standard_history"])
+            current = {"index": index, "workspace": str(self.root / "aka" / f"implementation-{index}"),
+                       "result_path": f"aka/result-{index}.json", "schema": self.state["schema"], "started": False}
+            self.state["standard_current"] = current
+            self._save("standard_planned")
+        result_path = self.root / current["result_path"]
+        if not result_path.exists():
+            if current["started"] or self.owner.fences():
+                self.state.update(status="blocked", recovery="settle_only",
+                    reason="Original AKA campaign needs settlement in " + current["workspace"] + "; no automatic replay")
+                self._save("standard_unsettled")
+                return False
+            bundle = Bundle(self.root)
+            manifest = bundle.document(current["schema"], "schema")
+            directory = self.root / "aka" / f"schema-{current['index']}"
+            for entry in manifest["raw"]:
+                durable_write(directory / (entry["node"] + ".yaml"), bundle.read(entry["file"]))
+            if manifest["dispatch"]:
+                durable_write(directory / "dispatch.md", bundle.read(manifest["dispatch"]))
+            current["started"] = True
+            self._save("standard_started")
+            options = dict(self.config["aka_config"])
+            if options.pop("share_owner", False):
+                options["owner_account"] = str(self.owner.path)
+            if self.state["history"]:
+                last = bundle.document(self.state["history"][-1]["result"])
+                rationale = last.get("extensions", {}).get("information", {}).get("rationale")
+                if rationale:
+                    options["docs"] = [*options.get("docs", []), str(self.root / rationale["path"])]
+            result = api.implement(schema=str(directory), workspace=current["workspace"], **options)
+            durable_write(result_path, json.dumps(result, ensure_ascii=False, indent=2).encode())
+            self.checkpoint("standard_returned", self)
+        original = read_regular(result_path.parent, result_path.name)[0]
+        result = json.loads(original)
+        p = Publication(self.root)
+        result_ref = p.put_bytes("aka-result.json", original)
+        feedback = []
+        workspace = Path(current["workspace"]).resolve()
+        for index, filename in enumerate(result.get("feedback_files", [])):
+            path = Path(filename).absolute()
+            if not path.resolve().is_relative_to(workspace):
+                raise ProtocolError("AKA feedback file is outside its original workspace")
+            data, _ = read_regular(path.parent, path.name)
+            data.decode("utf-8")
+            feedback.append(p.put_bytes(f"aka-feedback/{index}-{path.name}", data))
+        p.commit([result_ref, *feedback])
+        self.state["standard_history"].append({"result": result_ref, "feedback": feedback,
+            "workspace": current["workspace"], "schema": current["schema"], "status": result["status"]})
+        self.state["standard_current"] = None
+        if result["status"] == "blocked" or self.owner.fences():
+            self.state.update(phase="done", status="blocked", recovery="settle_only", reason=result["stop_reason"])
+        elif phase == "standard_followup":
+            self.state.update(phase="done", status=result["status"], recovery="none", reason=result["stop_reason"])
+        else:
+            self.state.update(phase="optimize", status="implemented", recovery="continue", reason="Original AKA results retained; one Schema writing iteration remains")
+        self._save("standard_selected")
+        return True
 
     def _action(self, result):
         if result["action_inputs"][:2] != [result["schema"], result["scope"]]:
@@ -327,6 +426,8 @@ class Demo:
             return self._prepare_agate(transport=transport)
 
     def _prepare_agate(self, *, transport=None):
+        if "fixed" not in self.config["requests"]:
+            raise UnsupportedError("legacy qualification requires --writing-mode strict; standard AKA owns its evaluation")
         if self.state["history"] or self.state["current"]:
             raise ProtocolError("prepare Agate before the business chain; never replace an admitted profile")
         remote = self.config["remote"]
@@ -366,10 +467,13 @@ class Demo:
         if self.state["current"] is not None and self.state["current"]["operation"] == "implement":
             current_qualified = None  # pending new Q, including a same-R verify
         return {"format": VERSION, **{k: self.state[k] for k in ("status", "recovery", "reason", "phase", "schema", "scope", "optimize_count")},
+                "standard_history": self.state.get("standard_history", []), "standard_current": self.state.get("standard_current"),
                 "current_qualified": current_qualified, "current_run": self.state["current"], "history": history,
                 "owner": self.owner.descriptor, "fences": self.owner.fences(),
                 "qualification_usage": self.state.get("qualification_usage"),
-                "qualification": "original Agate capture supplied" if self.state["qualification"] else "GPU unqualified"}
+                "qualification": "See original AKA results; no KS qualification gate" if self.config.get("aka_config") else
+                    "not evaluated" if self.config["writing_mode"] == "write_only" else
+                    "original Agate capture supplied" if self.state["qualification"] else "GPU unqualified"}
 
     def export(self, destination):
         roots = list(self.config["requests"].values()) + [self.config["seed_origin"]]
@@ -379,5 +483,7 @@ class Demo:
         if self.state.get("qualification_evidence"): roots.append(self.state["qualification_evidence"])
         for entry in self.state["history"]:
             roots.append(entry["result"]); subjects.append(entry["request"])
+        for entry in self.state.get("standard_history", []):
+            roots.extend([entry["result"], *entry["feedback"]])
         import_bundle(Bundle(self.root), destination, roots, subjects=subjects)
         return str(Path(destination).absolute())

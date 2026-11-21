@@ -1,25 +1,19 @@
 # Optimize workflow
 
-```python
-from kernelschema.api import optimize
-result = optimize(request="/bundle/request.json", out="/new/optimize-run")
-result = optimize(continue_run="/new/optimize-run")
+Write a revision from the current Schema and actual implementation feedback:
+
+```sh
+kernelschema optimize --task /materials/task.md --schema /materials/current-schema \
+  --feedback /materials/actual-feedback.txt --out /runs/optimize \
+  --runtime-profile /materials/claude-profile.json
 ```
 
-The CLI equivalent is `kernelschema optimize --request ... --out ...`, or
-`kernelschema optimize --continue ...`. The factory is
-`kernelschema.optimize.workflow_backend()`, name `claude`; the function lives
-in `kernelschema.api`. Both writing operations use the same implementation.
+Or use `kernelschema.api.optimize(task=..., schema=..., feedback=[...], out=...)`.
+The current files and supplied feedback are delivered unchanged. One planner
+call may retain the original Schema or write new YAML and an explanation.
+No reviewer, GPU, improvement test or next-action envelope is required.
+`completed` means the files were written; the effect has not been evaluated.
 
-Optimize reads only the explicitly selected current Schema, role-granted
-Materials and declared feedback/evidence. A completed `keep` with
-`next_action=none` stops normally. `implement` and `verify` describe explicit
-next fixed requests for the owning driver to admit on the same account.
-A published revision does not itself admit a new request or qualify any code.
-See [the shared writing interface](../kernelschema/WRITING.md).
-
-The [standalone driver](../docs/workflows/standalone.md) executes that next request
-on the same account. Verify requires an explicit nonempty Source; implement can
-explicitly select `task/default_start` for seed=null. Authorized target/documents
-can justify an action without fabricated measurement evidence. The fixed Task,
-Scope, output Schema and input authority remain unchanged by that choice.
+See [the shared writing interface](../kernelschema/WRITING.md) for artifacts,
+diagnostics and optional strict compatibility. The [standalone driver](../docs/workflows/standalone.md)
+passes AKA's original results to optimize when automatic iteration is selected.

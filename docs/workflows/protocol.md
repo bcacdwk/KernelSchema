@@ -69,7 +69,7 @@ artifacts with their own identities.
 
 | Object | Meaning and retained contents |
 | --- | --- |
-| Task | Fixed `task_id`, contract, acceptance, workload, environment, evaluator, baseline Source and optional starter Source. Golden numerical reference and performance baseline are distinct. |
+| Task | Fixed task description/contract, acceptance, workload and environment. Write-only tasks may omit evaluator and baseline (`null`); strict/reference implementation requests require them. Golden numerical reference and performance baseline are distinct. |
 | Schema | Task digest, complete raw nodes including root, optional dispatch, revision, parent/change/change_report. The original Template parser determines actual inheritance and source chains. |
 | Rules | Exact rule files and tools with names, versions and source Refs. Methods/checkers stay linked to real bytes. |
 | Materials | Explicit `{id,file,roles,origin,license}` entries. Writing requires one `workflow_objective` visible to planner/reviewer. A grant does not permit changing Task/acceptance or using tools. |
@@ -104,23 +104,24 @@ published; inspect its domain status and checks.
 | Result | Completion boundary |
 | --- | --- |
 | implement | `code.latest` and `code.qualified` are independent Source Refs. Each C has its own coverage/build/correctness/fidelity/performance assessment. Qualified requires all five passes; completed requires qualified C. `performance_goal=met|unmet|unknown` is separate from complete required measurements. |
-| design/optimize | Output Schema/scope plus structure/permissions/semantics/publication checks. Completed requires legal output and all four passes. A new Schema never inherits a prior C's fidelity. |
+| design/optimize | Default write-only saves readable Schema files/scope and real call records; structure/publication have file receipts, permissions/semantics are `not_run`. Completion does not establish design effect. Explicit strict mode requires all four passes. |
 | optimize action | `decision=keep|revise`, reason, `next_action=none|implement|verify`, action reason, explicit input/evidence Refs. The writer proposes; the outer driver owns subsequent admission. |
 
-The writer freezes change_report before Schema and writing_review after Schema;
-there is no mutual hash dependency. New design revision retains its real parent.
-Keep/none ends normally. An implement action explicitly selects one Source or
-`task/default_start` (the Task marker, meaning seed=null). Verify selects one
-nonempty Source. Action inputs begin with output Schema and Scope; authorized
-objective/document evidence can justify an action without claiming measurement.
-New REALIZATION.Feedback retains its separate measured-provenance requirement.
+The default writer saves exact YAML, rationale, change_report, original response
+and native receipts. Its small content needs only raw files and a reason, or
+keep/reason for optimize. Template lengths and semantic review are guidance,
+not publication gates. A write-only Schema manifest explicitly marks that
+mode; bundle closure checks file identity rather than running Template
+resolution. Unsafe filenames or malformed output preserve the original draft.
+Malformed YAML remains a partial file artifact. The file-oriented task entry
+needs no evaluator, private evaluator code or locked Contract generator.
 
-The finite driver advances to optimize only after a completed qualified
-implementation for its supplied objective. Ordinary compile/numerical errors,
-timeouts, no improvement and unknown fidelity do not prove a design obstruction.
-The driver currently has no independently authenticated design-obstruction input
-adapter. Publication of a new R and admission of its next fixed request are
-separate durable phases under the same owner.
+The optional standard AKA driver passes native result/feedback bytes to one
+optimize iteration and implements a revision once more. It does not assess the
+Schema's effect. AKA owns its original comparator and native budgets; optional
+explicit owner sharing uses the existing account. The old strict action
+catalog and reference qualification sequence remain opt-in compatibility
+interfaces and do not gate the default writing/AKA path.
 
 ## One owner and original-operation recovery
 

@@ -223,8 +223,15 @@ class Bundle:
                         identity = sha256(payload.data)
                         locators.setdefault(identity, []).append({"path": path, "sha256": identity})
                 elif value.get("kind") == "schema":
-                    from .template_api import resolve_bundle
-                    resolve_bundle(self, value)  # Actual parser provenance, including root/from chains.
+                    if value.get("extensions", {}).get("information", {}).get("writing_mode") == "write_only":
+                        for raw in value["raw"]:
+                            path = PurePosixPath(raw["file"]["path"])
+                            if path.stem != raw["node"] or path.suffix not in (".yaml", ".yml"):
+                                raise ProtocolError("Schema file must retain its safe node filename")
+                            self.read(raw["file"]).decode("utf-8")
+                    else:
+                        from .template_api import resolve_bundle
+                        resolve_bundle(self, value)  # Actual parser provenance, including root/from chains.
             elif isinstance(value, dict) and value.get("format") == "schema_extract.delivery.v2":
                 queue.extend(_extract_dependencies(reference, value))
             # Plain text and unrecognized native reports are opaque bytes.
@@ -368,6 +375,11 @@ def dependencies(v: dict) -> list[Ref]:
         else:
             add(v["schema"]); add(v["scope"]); checks(v["writing_checks"])
             out += v.get("action_inputs", []) + v.get("action_evidence", [])
+            info = v.get("extensions", {}).get("information", {})
+            if info.get("writing_mode") == "write_only":
+                for key in ("candidate_draft", "change_report", "rationale"):
+                    add(info.get(key))
+                out += info.get("retained_files", []) + info.get("call_artifacts", [])
     elif kind == "task":
         for k in ("contract", "acceptance", "evaluator", "environment", "workload", "baseline_source", "starter_source"): add(v[k])
     elif kind == "schema":

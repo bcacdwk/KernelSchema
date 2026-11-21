@@ -24,15 +24,19 @@ kernelschema extract -- --help
 `kernelschema.api.{design,optimize,implement}` use exactly the CLI implementation.
 Import these functions from `kernelschema.api`; the package-level names are
 reserved for backend modules and are not callable aliases.
-Each accepts keyword-only `request` (path to request.json) + `out`, or
-`continue_run`. Mixing these groups fails. Return values are validated result
-dictionaries; CLI exit 0 means the result projection was durably published,
-not that the domain status is completed. Unsupported/admission/publishing
-errors are `ProtocolError` (`UnsupportedError` is a subtype), CLI exit 2.
+Design/optimize accept `task` + `out`, optional reference/profile paths, and
+`schema`/`feedback` for optimize. Standard implement accepts `schema`, `problem`,
+`repo_root`, `workspace` and native AKA options. These simple entry points are
+documented in [WRITING.md](WRITING.md). Existing keyword-only `request` + `out`
+and `continue_run` remain the strict wire-compatible entry points. Mixing file
+and request groups fails. Standard AKA returns its original JSON result; the
+Ref-based paths return a validated protocol result. Inspect the actual status
+and diagnostics. Unsupported/admission/publication errors use `ProtocolError`
+(`UnsupportedError` is a subtype), with CLI exit 2.
 No import of this package loads AKA, torch, CUDA or a runtime backend.
 The reference implement backend supports fixed row-softmax/single_file and
 the pinned [FA4 F1/python_tree](../examples/workflows/fa4_decode/README.md).
-Design/optimize remain row-softmax only. Tree format support is separately
+Default write-only design/optimize accept arbitrary task-description files and need no evaluator. The optional strict writer retains its row-softmax adapter. Tree format support is separately
 checked in the selected business profile and installed backend.
 An explicit implement request with backend `aka` lazily loads the separately
 installed `aka.workflow.schema.backend.workflow_backend()`; other operations

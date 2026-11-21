@@ -252,7 +252,7 @@ def validate(value: Any) -> dict:
     if kind == "task":
         _text(v["task_id"])
         for k in ("contract", "acceptance", "evaluator", "environment", "workload", "baseline_source", "starter_source"):
-            ref(v[k], nullable=k == "starter_source")
+            ref(v[k], nullable=k in ("starter_source", "baseline_source", "evaluator"))
     elif kind == "schema":
         _hash(v["task_sha256"])
         def raw(x):
@@ -461,7 +461,9 @@ def _result(v):
             raise ProtocolError("completed implement requires qualified Source")
     else:
         ref(v["schema"], nullable=True); ref(v["scope"], nullable=True); _checks(v["writing_checks"])
-        if v["status"] == "completed" and (v["schema"] is None or v["scope"] is None or any(c["status"] != "pass" for c in v["writing_checks"].values())):
+        write_only = v.get("extensions", {}).get("information", {}).get("writing_mode") == "write_only"
+        required_checks = ("structure", "publication") if write_only else tuple(v["writing_checks"])
+        if v["status"] == "completed" and (v["schema"] is None or v["scope"] is None or any(v["writing_checks"][key]["status"] != "pass" for key in required_checks)):
             raise ProtocolError("completed writing requires Schema/scope and four passing checks")
     if op == "optimize":
         _enum(v["decision"], ("keep", "revise")); _text(v["reason"]); _enum(v["next_action"], ("none", "implement", "verify"))

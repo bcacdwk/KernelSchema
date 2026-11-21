@@ -249,9 +249,16 @@ def validate_result(context: RunContext, result: dict):
             if schema["task_sha256"] != base["task_sha256"]: raise ProtocolError("writing output Task mismatch")
         if result["scope"] is not None:
             scope = bundle.document(result["scope"], "scope")
-            if result["status"] == "completed" and not scope["bindings"]: raise ProtocolError("completed writing must have nonempty scope bindings")
+            write_only = context.objects["profile"]["parameters"].get("writing_mode", "write_only") == "write_only"
+            if result.get("extensions", {}).get("information", {}).get("writing_mode") == "write_only" and not write_only:
+                raise ProtocolError("write-only result differs from the requested writing mode")
+            if result["status"] == "completed" and not scope["bindings"] and not write_only: raise ProtocolError("completed writing must have nonempty scope bindings")
         for name, item in result["writing_checks"].items():
             if item["receipt"] is None: continue
+            if result.get("extensions", {}).get("information", {}).get("writing_mode") == "write_only":
+                # These are file/readability facts, not an independent review.
+                bundle.read(item["receipt"])
+                continue
             report = bundle.document(item["receipt"], "writing_review")
             expected_subject = {**base, "schema_sha256": result["schema"]["sha256"], "scope_sha256": result["scope"]["sha256"]}
             if report["subject"] != expected_subject or report["checks"][name]["status"] != item["status"]:
@@ -281,13 +288,46 @@ def _invoke(operation, *, request=None, out=None, continue_run=None):
     return context.publish_result(result)
 
 
-def design(*, request=None, out=None, continue_run=None):
+def design(*, request=None, out=None, continue_run=None, task=None, **writing_options):
+    if task is not None:
+        if request is not None or continue_run is not None or out is None:
+            raise ProtocolError("task requires out and cannot be combined with request/continue_run")
+        from .writing import write_task
+        return write_task("design", task=task, out=out, **writing_options)
+    if writing_options: raise ProtocolError("file-oriented writing options require task")
     return _invoke("design", request=request, out=out, continue_run=continue_run)
 
 
-def optimize(*, request=None, out=None, continue_run=None):
+def optimize(*, request=None, out=None, continue_run=None, task=None, **writing_options):
+    if task is not None:
+        if request is not None or continue_run is not None or out is None:
+            raise ProtocolError("task requires out and cannot be combined with request/continue_run")
+        from .writing import write_task
+        return write_task("optimize", task=task, out=out, **writing_options)
+    if writing_options: raise ProtocolError("file-oriented writing options require task")
     return _invoke("optimize", request=request, out=out, continue_run=continue_run)
 
 
-def implement(*, request=None, out=None, continue_run=None):
+def implement(*, request=None, out=None, continue_run=None, schema=None, problem=None,
+              repo_root=None, workspace=None, **options):
+    """Use AKA's standard kernel workflow, or explicitly resume a legacy request.
+
+    The standard path consumes a readable Schema file/directory directly. AKA
+    owns its normal agents, native problem harness and evaluation results.
+    """
+    if schema is not None:
+        if request is not None or continue_run is not None:
+            raise ProtocolError("schema and legacy request/continue_run are mutually exclusive")
+        if workspace is not None and out is not None:
+            raise ProtocolError("provide workspace or out, not both")
+        if problem is None or repo_root is None or (workspace is None and out is None):
+            raise ProtocolError("standard implement requires schema, problem, repo_root and workspace/out")
+        try:
+            standard = importlib.import_module("aka.workflow.schema.standard")
+        except ModuleNotFoundError as error:
+            raise UnsupportedError("standard implement requires the installed AKA source checkout") from error
+        return standard.implement(schema=schema, problem=problem, repo_root=repo_root,
+                                  workspace=workspace if workspace is not None else out, **options)
+    if problem is not None or repo_root is not None or workspace is not None or options:
+        raise ProtocolError("standard implement options require schema")
     return _invoke("implement", request=request, out=out, continue_run=continue_run)

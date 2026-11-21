@@ -15,6 +15,84 @@ DRAFT_FORMAT = "ks.writing.draft.v1"
 REVIEW_FORMAT = "ks.writing.review.v1"
 
 
+def write_only_files(context, content):
+    """Read file proposals without turning Template guidance into acceptance.
+
+    No text rewriting, Contract derivation, evaluator adapter or semantic check.
+    Malformed YAML remains an artifact with a diagnostic. Unsafe paths or an
+    absent root cannot form a Schema manifest; the caller retains the response.
+    """
+    import yaml
+
+    if not isinstance(content, dict):
+        raise ProtocolError("writing content must provide raw YAML files and a reason")
+    keep = content.get("decision") == "keep"
+    if keep:
+        if "schema" not in context.objects:
+            raise ProtocolError("initial design has no current Schema to keep")
+        raw = [{"node": entry["node"], "text": context.bundle.read(entry["file"]).decode("utf-8")}
+               for entry in context.objects["schema"]["raw"]]
+        ref = context.objects["schema"]["dispatch"]
+        dispatch = context.bundle.read(ref).decode("utf-8") if ref else None
+    else:
+        raw = content.get("raw")
+        dispatch = content.get("dispatch")
+    if not isinstance(raw, list) or not raw:
+        raise ProtocolError("no Schema files returned; original response retained")
+    nodes = []
+    for entry in raw:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("node"), str)
+                or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*", entry["node"])
+                or not isinstance(entry.get("text"), str)):
+            raise ProtocolError("Schema files need safe node IDs and literal text; original response retained")
+        entry["text"].encode("utf-8")
+        nodes.append(entry["node"])
+    if len(set(nodes)) != len(nodes) or "root" not in nodes:
+        raise ProtocolError("Schema files need unique nodes including root; original response retained")
+    raw = sorted(({"node": e["node"], "text": e["text"]} for e in raw), key=lambda e: e["node"])
+    if dispatch is not None and not isinstance(dispatch, str):
+        raise ProtocolError("dispatch must contain Markdown text or null")
+    diagnostics = []
+    readable = True
+    for entry in raw:
+        try:
+            document = yaml.safe_load(entry["text"])
+            if not isinstance(document, dict) or not document:
+                raise ValueError("expected a nonempty YAML mapping")
+        except (yaml.YAMLError, ValueError) as error:
+            readable = False
+            diagnostics.append(f"{entry['node']}.yaml: {error}")
+    scope = deepcopy(context.objects["scope"])
+    if not keep:
+        supplied = content.get("bindings")
+        if supplied is not None:
+            try:
+                candidate = {**scope, "bindings": supplied}
+                validate(candidate)
+                if any(b["node"] not in nodes for b in candidate["bindings"]):
+                    raise ProtocolError("binding names an absent node")
+                scope = candidate
+            except ProtocolError as error:
+                diagnostics.append("Scope binding hint ignored: " + str(error))
+        scope["bindings"] = [b for b in scope["bindings"] if b["node"] in nodes]
+        if not scope["bindings"] and len(nodes) == 1:
+            scope["bindings"] = [{"coverage_ids": scope["coverage_ids"], "node": "root", "variant": None}]
+        if not scope["bindings"]:
+            diagnostics.append("Multiple files have no coverage mapping; downstream implementation needs an explicit selection.")
+    reason = content.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        reason = "Schema text supplied without a rationale. Effects have not been evaluated."
+        diagnostics.append("Writer supplied no rationale.")
+    previous = context.objects.get("schema")
+    unchanged = keep or (previous is not None and raw == [
+        {"node": e["node"], "text": context.bundle.read(e["file"]).decode("utf-8")} for e in previous["raw"]]
+        and dispatch == (context.bundle.read(previous["dispatch"]).decode("utf-8") if previous["dispatch"] else None)
+        and scope == context.objects["scope"])
+    change = "unchanged" if unchanged else "new_revision" if previous else "new_task"
+    return raw, dispatch, scope, {"readable": readable, "diagnostics": diagnostics, "change": change,
+        "changes": [{"location": "Schema", "reason": reason}], "qualification": "not evaluated"}
+
+
 def wire_value(value):
     """Preserve original YAML decimals in JSON role data without binary floats.
 

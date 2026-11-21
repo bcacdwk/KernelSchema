@@ -30,7 +30,7 @@ def draft_for(f, operation, *, decision="revise"):
 
 @pytest.fixture
 def setup_writing(make_bundle, tmp_path):
-    def setup(operation="design", *, decision="revise", alter=None, review="pass", checkpoint=None, parent=None):
+    def setup(operation="design", *, decision="revise", alter=None, review="pass", checkpoint=None, parent=None, writing_mode="strict"):
         directory = tmp_path / ("bundle-" + str(len(list(tmp_path.iterdir()))))
         f = make_bundle(operation, directory=directory)
         fake = tmp_path / ("fake-" + directory.name)
@@ -46,8 +46,8 @@ def setup_writing(make_bundle, tmp_path):
             alter(draft)
         (fake / "scenario.json").write_text(json.dumps({"draft": draft, "review": review}))
         p = Publication(f["root"])
-        rules = writing.freeze_rules(p)
-        business = writing.backend_profile(profile, f["originals"]["task/environment.md"])
+        rules = writing.freeze_rules(p, writing_mode=writing_mode)
+        business = writing.backend_profile(profile, f["originals"]["task/environment.md"], writing_mode=writing_mode)
         profile_ref = p.put_json("writing-profile.json", business)
         budget = {"parent": parent, "limits": {"calls": {"planner": 1, "reviewer": 1, "coder": 0, "extract": 0}, "tokens": None, "active_ms": 60000, "evaluator_jobs": 0}}
         req = writing.request(operation=operation, request_id="synthetic-writing", task=f["task"], rules=rules, materials=f["request"]["materials"], scope=f["request"]["scope"], budget=budget, profile=profile_ref, schema=f["schema"])
@@ -137,11 +137,11 @@ def test_writing_input_exposes_exact_grants_and_original_text_budgets(setup_writ
     for delivery in (planner, reviewer):
         policy_item = next(e for e in delivery["materials"] if e["ref"] == summary["source"])
         assert "host_implementation" in policy_item and "text" not in policy_item
-        assert any(material_text(delivery, e["id"]).encode() == writing.METHOD
+        assert any(material_text(delivery, e["id"]).encode() == writing.STRICT_METHOD
                    for e in delivery["materials"] if "host_implementation" not in e)
-    assert b"neither that delivery_id nor material:<id> is a selection ID" in writing.METHOD
-    assert b"not a Scope object" in writing.METHOD
-    assert b"Only optimize can propose implement or verify" in writing.METHOD
+    assert b"neither that delivery_id nor material:<id> is a selection ID" in writing.STRICT_METHOD
+    assert b"not a Scope object" in writing.STRICT_METHOD
+    assert b"Only optimize can propose implement or verify" in writing.STRICT_METHOD
 
 
 @pytest.mark.parametrize("identifier", ["material:workflow_objective", "material/workflow_objective", "reviewer_only", "private_only", "not_granted"])

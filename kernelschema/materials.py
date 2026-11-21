@@ -10,9 +10,9 @@ from .contracts import PROTOCOL, ProtocolError, UnsupportedError, capabilities, 
 from .template_api import resolve_bundle
 
 
-def private_evaluator_hashes(evaluator: dict) -> set[str]:
+def private_evaluator_hashes(evaluator: dict | None) -> set[str]:
     """Execution implementation/input bytes; public timing/environment excluded."""
-    return {r["sha256"] for r in [*evaluator["files"], evaluator["entrypoint"], evaluator["inputs"]]}
+    return {r["sha256"] for r in [*evaluator["files"], evaluator["entrypoint"], evaluator["inputs"]]} if evaluator else set()
 
 
 def rebuild_source_hashes(bundle, request, task) -> set[str]:
@@ -64,7 +64,10 @@ def validate_request(bundle: Bundle, request: dict) -> dict[str, dict]:
     objects["profile"] = profile
     if profile["name"] != request["backend"]["name"]:
         raise ProtocolError("backend name differs from fixed profile")
-    evaluator = bundle.document(task["evaluator"], "evaluator")
+    write_only = request["operation"] in ("design", "optimize") and profile["parameters"].get("writing_mode", "write_only") == "write_only"
+    if not write_only and (task["evaluator"] is None or task["baseline_source"] is None):
+        raise ProtocolError("implementation/strict requests require a real evaluator and baseline Source")
+    evaluator = bundle.document(task["evaluator"], "evaluator") if task["evaluator"] else None
     objects["evaluator"] = evaluator
     private_hashes = private_evaluator_hashes(evaluator)
     rebuild_hashes = rebuild_source_hashes(bundle, request, task)
@@ -73,22 +76,24 @@ def validate_request(bundle: Bundle, request: dict) -> dict[str, dict]:
             raise ProtocolError("private evaluator files cannot enter model role materials")
         if entry["roles"] and entry["file"]["sha256"] in rebuild_hashes:
             raise ProtocolError("schema_rebuild cannot deliver optimized baseline implementation bytes")
-    bundle.source_files(task["baseline_source"])
+    if task["baseline_source"] is not None: bundle.source_files(task["baseline_source"])
     if task["starter_source"] is not None: bundle.source_files(task["starter_source"])
     if request["budget"]["parent"]:
         objects["budget_account"] = bundle.document(request["budget"]["parent"], "budget_account")
     if request["operation"] in ("design", "optimize"):
         objectives = [e for e in objects["materials"]["entries"] if e["id"] == "workflow_objective"]
-        if len(objectives) != 1 or not {"planner", "reviewer"} <= set(objectives[0]["roles"]):
+        roles = {"planner", "reviewer"} if profile["parameters"].get("writing_mode", "write_only") == "strict" else {"planner"}
+        if len(objectives) != 1 or not roles <= set(objectives[0]["roles"]):
             raise ProtocolError("writing requires exactly one workflow_objective visible to planner/reviewer")
     if "schema" in request:
         schema = bundle.document(request["schema"], "schema")
         objects["schema"] = schema
         if schema["task_sha256"] != request["task"]["sha256"]:
             raise ProtocolError("Schema belongs to another Task")
-        resolved = resolve_bundle(bundle, schema)
+        write_only = request["operation"] == "optimize" and profile["parameters"].get("writing_mode", "write_only") == "write_only"
+        nodes = {entry["node"] for entry in schema["raw"]} if write_only else resolve_bundle(bundle, schema).raw_task
         for binding in scope["bindings"]:
-            if binding["node"] not in resolved.raw_task:
+            if binding["node"] not in nodes:
                 raise ProtocolError("scope binding names an absent actual Schema node")
     if request["operation"] == "implement":
         if not scope["bindings"] or {c for b in scope["bindings"] for c in b["coverage_ids"]} != set(scope["coverage_ids"]):

@@ -8,7 +8,7 @@ import sys
 import pytest
 import yaml
 
-from examples.workflows.row_softmax.driver import Demo, DEFAULT_LIMITS, load_runtime
+from examples.workflows.row_softmax.driver import Demo as ProductionDemo, DEFAULT_LIMITS, load_runtime
 from kernelschema import api, writing, template_api
 from kernelschema.artifacts import Bundle, Publication, durable_write
 from kernelschema.budget import OwnerAccount, cost
@@ -19,6 +19,14 @@ from kernelschema.runtime import CallReceipt, RoleOutput
 
 spec = importlib.util.spec_from_file_location("standalone_synthetic", Path(__file__).parent / "fixtures/reference_support.py")
 support = importlib.util.module_from_spec(spec); spec.loader.exec_module(support)
+
+
+class Demo(ProductionDemo):
+    """These historical tests explicitly exercise the retained strict driver."""
+    @classmethod
+    def create(cls, *args, **kwargs):
+        kwargs.setdefault("writing_mode", "strict")
+        return super().create(*args, **kwargs)
 
 
 class SyntheticWriting(support.FakeRuntime):

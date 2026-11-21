@@ -1,27 +1,20 @@
 # Design workflow
 
-Use the installed source checkout and the single public API:
+Write a Schema from a task description and selected nearby designs/documents:
 
-```python
-from kernelschema.api import design
-result = design(request="/bundle/request.json", out="/new/design-run")
-# Original operations, inputs and budget remain fixed on recovery:
-result = design(continue_run="/new/design-run")
+```sh
+kernelschema design --task /materials/task.md --out /runs/design \
+  --reference /materials/neighbor.yaml \
+  --runtime-profile /materials/claude-profile.json
 ```
 
-The CLI equivalent is `kernelschema design --request ... --out ...`, or
-`kernelschema design --continue ...`. The backend factory is
-`kernelschema.design.workflow_backend()`, name `claude`. The package-root
-`design` name is a module; import callable functions from `kernelschema.api`.
-See [the shared writing interface](../kernelschema/WRITING.md) for request
-construction, exact draft/review formats, publication and limits.
+Or use `kernelschema.api.design(task=..., out=..., references=[...])`.
+The default makes one planner call and saves the actual YAML, rationale,
+diagnostics and call receipts. No evaluator, GPU or independent reviewer is
+required. A completed write does not establish correctness or performance.
+The CLI prints the Schema directory for downstream AKA implementation.
 
-This implementation has CPU engineering validation with an actual fake CLI
-subprocess. It does not claim a new real model call, device binding, CUDA Task
-qualification, or measured performance.
-
-The [standalone driver](../docs/workflows/standalone.md) now constructs complete
-requests and consumes successful design output in a real fixed API call. The
-[typed target adapter](../docs/workflows/target-environment.md) derives the locked
-Contract from public Task materials; explicit target declarations remain separate
-from device qualification. Unknown environment formats are rejected.
+See [the shared writing interface](../kernelschema/WRITING.md) for profiles,
+results, malformed-output retention, optional strict mode and the existing
+`--request`/`--continue` interface. The [standalone driver](../docs/workflows/standalone.md)
+can explicitly enable finite automatic iteration with AKA's standard workflow.
