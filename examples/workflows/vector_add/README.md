@@ -47,69 +47,69 @@ controller remains a separate legacy path with its original qualifications.
 
 ## Design → implement → optimize → implement
 
-The file APIs work for a caller-supplied task and runtime. Fill in the paths
-and the native AKA settings, runtime and composition patches you intend to use.
-The sequence makes at most one design and one optimize call, and at most two
-native campaigns; each campaign below permits one coding iteration.
+Use the finite `iterate` entry with the explicit task and native problem. Each
+Schema version gets a new native workspace, and the original coder can run
+multiple iterations within that version:
+
+```sh
+kernelschema iterate --task "$KS/examples/workflows/vector_add/task.md" \
+  --problem "$PROBLEM" --repo-root "$AKA" --platform L20D \
+  --runtime-profile /path/to/your-writing-runtime-profile.json \
+  --reference "$PROBLEM/reference.py" --reference "$PROBLEM/input.py" \
+  --reference "$PROBLEM/shapes.json" \
+  --rounds 2 --max-iters 4 --out "$RUNS/new-iteration"
+```
+
+This starts with design. To begin with the supplied proposal, add
+`--schema "$KS/examples/workflows/vector_add/root.yaml"`.
+`--rounds 2` permits at most two Schema versions and one optimize call;
+`--max-iters 4` permits up to four native coder iterations per version. A `keep`
+decision ends the sequence without another implementation.
+
+The same loop can be called directly, with your existing native settings and
+composition patches:
 
 ```python
-import json
 from pathlib import Path
 from kernelschema import api
 
 example = Path("/path/to/KernelSchema/examples/workflows/vector_add")
 problem = Path("/path/to/atrex-bench/data/native-atrex-bench-vector-add")
-runs = Path("/path/to/new-vector-add-runs")
-writing = dict(
-    task=example / "task.md",
+result = api.iterate(
+    task=example / "task.md", schema=example / "root.yaml",
+    out="/path/to/new-vector-add-run", rounds=2,
     references=[problem / name for name in ("reference.py", "input.py", "shapes.json")],
     runtime_profile="/path/to/your-writing-runtime-profile.json",
-)
-native = dict(
     problem=problem, repo_root="/path/to/atrex-kernel-agent",
-    platform="L20D", framework="Triton", agent_cli="claude", max_iters=1,
-    # Add your existing settings=..., runtime=..., patches=(...,) as needed.
+    platform="L20D", framework="Triton", agent_cli="claude", max_iters=4,
+    # Add your existing settings=..., runtime=..., profile=..., patches=... as needed.
 )
-
-def published_schema(out, result):
-    info = result.get("extensions", {}).get("information", {})
-    relative = info.get("schema_directory")
-    if result.get("status") != "completed" or not relative:
-        raise RuntimeError(f"Read retained writing diagnostics: {info.get('diagnostics')}")
-    return out / relative
-
-d_out = runs / "design"
-design = api.design(out=d_out, **writing)
-s1 = published_schema(d_out, design)
-i1 = api.implement(schema=s1, workspace=runs / "implement-1", **native)
-i1_file = runs / "implement-1-result.json"
-i1_file.write_text(json.dumps(i1, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-if i1.get("status") == "blocked":
-    raise RuntimeError(f"Resolve the native run before continuing: {i1.get('workspace')}")
-
-o_out = runs / "optimize"
-optimized = api.optimize(
-    schema=s1, feedback=[i1_file, *i1.get("feedback_files", [])],
-    out=o_out, **writing,
-)
-if optimized.get("status") == "completed" and optimized.get("decision") == "revise":
-    s2 = published_schema(o_out, optimized)
-    i2 = api.implement(schema=s2, workspace=runs / "implement-2", **native)
-    (runs / "implement-2-result.json").write_text(
-        json.dumps(i2, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
-    )
 ```
 
-A `keep` decision ends the sequence. Preserve the full writing directories and
-native results. Failed or partial writing retains diagnostics; inspect a readable
-raw file explicitly before implementing it. An interrupted native campaign needs
-settlement in its original workspace before further work. Native `completed`
-alone, or an incumbent's carried-forward `PASS`, does not establish a new
-candidate's correctness or promotion.
+AKA also exposes this shared loop:
 
-This snippet is a usage example, not a recorded four-step successful run.
-For the existing automatic finite driver, see
-[standalone workflow instructions](../../../docs/workflows/standalone.md#finite-automatic-iteration).
-That driver has a fixed row-softmax task; it is not a vector-add or arbitrary-task
-driver. The direct file APIs above provide the task-specific sequence without
-adding a scheduler, evaluator or recovery framework.
+```sh
+aka optimize --repo-root "$AKA" --problem "$PROBLEM" \
+  --platform L20D --framework Triton --max-iters 4 \
+  --framework-baseline never --convert-after 0 \
+  --schema --schema-iterate --schema-task "$KS/examples/workflows/vector_add/task.md" \
+  --schema-path "$KS/examples/workflows/vector_add/root.yaml" \
+  --schema-runtime-profile /path/to/your-writing-runtime-profile.json \
+  --schema-reference "$PROBLEM/reference.py" --schema-reference "$PROBLEM/input.py" \
+  --schema-reference "$PROBLEM/shapes.json" \
+  --schema-rounds 2 --schema-out "$RUNS/new-aka-iteration"
+```
+
+`iterations.json` lists separate writing and native stages. The complete native
+result and byte-preserved declared feedback go to optimize, including terminal
+implementation failures. A blocked, unsettled or interrupted native stage stops;
+missing feedback or writing without a completed readable Schema also stops.
+Preserve the whole run. Any existing output directory is rejected, so the loop
+cannot replay an interrupted, possibly charged stage. Settle that original
+operation using its own records before starting new work.
+
+Native `completed` alone, or an incumbent's carried-forward `PASS`, does not
+establish a new candidate's correctness or promotion. These commands document
+the CPU-tested entry, not a recorded successful model/GPU closed loop. See the
+[standalone workflow instructions](../../../docs/workflows/standalone.md#finite-automatic-iteration)
+for API options and the separate fixed row-softmax example.

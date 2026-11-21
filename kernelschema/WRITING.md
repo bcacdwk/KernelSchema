@@ -99,8 +99,10 @@ kernelschema implement --schema /runs/design/artifacts/OUTPUT_ID/raw \
 ```
 
 The CLI prints the concrete Schema directory, so users need not construct the
-artifact path. The [standalone driver](../docs/workflows/standalone.md) can also
-perform a bounded design → AKA implement → optimize → implement sequence.
+artifact path. [`api.iterate` / `kernelschema iterate`](../docs/workflows/standalone.md#finite-automatic-iteration)
+can also perform a bounded design → AKA implement → optimize → implement sequence
+for the same explicit task. Schema-version rounds and the native coder's
+`max_iters` are separate limits; optimize receives the original native results.
 
 ## Existing request and strict interfaces
 

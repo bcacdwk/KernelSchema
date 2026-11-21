@@ -331,3 +331,12 @@ def implement(*, request=None, out=None, continue_run=None, schema=None, problem
     if problem is not None or repo_root is not None or workspace is not None or options:
         raise ProtocolError("standard implement options require schema")
     return _invoke("implement", request=request, out=out, continue_run=continue_run)
+
+
+def iterate(**options):
+    """Finite Schema versions: optional design, native implement and optimize.
+
+    See :func:`kernelschema.iterations.iterate` for file inputs and native options.
+    """
+    from .iterations import iterate as run
+    return run(**options)

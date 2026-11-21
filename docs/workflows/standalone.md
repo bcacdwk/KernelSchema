@@ -37,6 +37,59 @@ readonly qualification do not gate this path. Native failures remain failures.
 
 ## Finite automatic iteration
 
+Use `iterate` for an explicit task and native problem. It calls the same file
+writing APIs and standard AKA implementation entry:
+
+```sh
+kernelschema iterate --task /materials/task.md --out /runs/new-iteration \
+  --runtime-profile /materials/claude-profile.json \
+  --problem /bench/problem --repo-root /checkouts/atrex-kernel-agent \
+  --platform L20D --framework Triton --rounds 2 --max-iters 4
+```
+
+Omit `--schema` to start with design, or add `--schema /materials/schema` to
+start by implementing an existing design. `--rounds` limits Schema versions
+(default 2); `--max-iters` retains the original coder iteration limit **within
+each version**. A two-version run makes at most one optimize call. A `keep`
+decision ends the sequence. The loop never rewrites Schema between individual
+coding episodes.
+
+The same loop is available directly:
+
+```python
+from kernelschema import api
+
+result = api.iterate(
+    task="/materials/task.md", out="/runs/new-iteration",
+    schema="/materials/schema", rounds=2,
+    runtime_profile="/materials/claude-profile.json",
+    problem="/bench/problem", repo_root="/checkouts/atrex-kernel-agent",
+    platform="L20D", max_iters=4,
+    # Native settings=..., runtime=..., profile=..., patches=... remain available.
+)
+```
+
+Select writer context with `--reference`, `--objective` and `--environment`.
+Native `--profile`, repeatable `--patch`, `--doc`, and JSON-file `--settings` /
+`--runtime` forward to the existing AKA interfaces. `--owner-account` and
+`--owner-limits` remain optional native adapters; normal runs use AKA's own
+limits and usage records.
+
+Every version gets a new native workspace. `iterations.json` locates each
+writing/native stage and its complete returned result. Declared native feedback
+is copied byte-for-byte and passed with the complete native result to optimize,
+including terminal implementation failures. Missing feedback, an unsettled or
+blocked native result, and writing without a completed readable Schema stop the
+loop. Original stage records and partial writing text remain available.
+
+Use a new output directory: any existing output is rejected, including an
+interrupted run. Inspect and settle its original writing/native operations;
+this entry has no automatic replay or continuation. Completion describes the
+sequence, and retained `PASS` records may describe the incumbent. Consult the
+original native candidate and measurement evidence for implementation outcomes.
+
+## Fixed row-softmax example
+
 The row-softmax example can prepare an isolated writing run without model or GPU
 calls:
 
@@ -49,8 +102,8 @@ python examples/workflows/row_softmax/run_demo.py run --demo /tmp/softmax
 This default stops after design and saves its actual Schema. `--start optimize
 --schema /materials/schema` starts from explicit current files. `--objective`
 and `--environment` accept current task instructions and target documentation.
-The example's public row-softmax Task remains fixed; use the file-oriented CLI
-for a different Task.
+The example's public row-softmax Task remains fixed; use `iterate` above for a
+different explicitly supplied Task.
 
 To enable automatic iteration, supply `--aka-config /materials/aka.json` when
 preparing the demo. The JSON contains native AKA options:
