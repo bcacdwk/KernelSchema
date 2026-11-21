@@ -11,7 +11,7 @@ from uuid import uuid4
 from ..artifacts import Publication, durable_mkdir, durable_write, read_regular, FileBytes, source_files_manifest
 from ..contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256
 from .agate import AgateDevExecutor, PROFILE, _unframe
-from .channel import _remote_profile, transport_from_config, _record, _qualification_account
+from .channel import _remote_profile, transport_from_config, _record, _qualification_account, _reject_qualification_record
 from .fa4 import FA4Task, F1, ABI, _case, verify_stage, stage_candidate, execution_materials
 from ..budget import OwnerAccount, cost, BudgetDenied
 from ..runtime import AdmissionDenied
@@ -59,6 +59,7 @@ def read_qualification(value, *, context, remote, transport):
     environment = None
     for phase in PHASES:
         record = value[phase]
+        _reject_qualification_record(record)
         if set(record) != {"intent.json", "request.json", "acceptance.raw", "terminal.raw"}:
             raise ProtocolError("FA4 original qualification record incomplete")
         intent, request = loads(record["intent.json"]), loads(record["request.json"])
@@ -404,7 +405,8 @@ def _qualify(context, *, remote, transport):
     for phase, record in state["records"].items():
         if _record(executor, state["operations"][phase]["id"]) != record:
             raise ProtocolError("FA4 original qualification record changed or disappeared")
-    account.begin(context.run_id)
+    if state["phase"] != "done":
+        account.begin(context.run_id)
     try:
         while state["phase"] != "done":
             phase = state["phase"]
@@ -454,6 +456,7 @@ def _qualify(context, *, remote, transport):
             context.record_terminal(op["id"], {"report": settled.get("report"), "usage": settled["usage_row"], "terminated": True})
             record = _record(executor, op["id"])
             state["records"][phase] = record
+            _reject_qualification_record(record)
             observed, diagnostic = interpret(loads(record["intent.json"]), json.loads(record["terminal.raw"]))
             if observed is None:
                 raise UnsupportedError("FA4 original qualification output incomplete: " + str(diagnostic))

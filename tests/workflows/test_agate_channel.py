@@ -19,6 +19,7 @@ from kernelschema.evaluation.channel import AgateChannel, qualify, read_qualific
 from kernelschema.evaluation.task import stage
 from kernelschema.runtime import AdmissionDenied
 from test_standalone import synthetic_target
+from test_evaluation_agate import REJECTION_BODY
 
 
 def frame(value):
@@ -169,6 +170,72 @@ def test_lost_qualification_ack_stays_fenced_without_second_post(tmp_path):
     with use_authority(demo.owner.path): second = qualify(ctx, remote=remote, transport=wire)
     assert first["recovery"] == second["recovery"] == "settle_only"
     assert first["usage"]["unsettled"] and len(wire.posts) == 1
+
+
+@pytest.mark.parametrize("reject_at", [1, 2])
+def test_explicit_gateway_rejection_blocks_qualification_and_stops_original_clock(tmp_path, reject_at):
+    demo, ctx, target, remote = context(tmp_path)
+    wire = Wire(target)
+    original = wire.request
+    def request(method, path, payload=None):
+        if method == "POST" and len(wire.posts) + 1 == reject_at:
+            wire.posts.append(payload)
+            return {"status": 400, "body": REJECTION_BODY}
+        return original(method, path, payload)
+    wire.request = request
+    with use_authority(demo.owner.path):
+        result = qualify(ctx, remote=remote, transport=wire)
+    assert result["status"] == "blocked" and result["recovery"] == "none" and result["qualification"] is None
+    assert "rejected before job: HTTP 400 validation/dev_sensitive_target_denied" in result["reason"]
+    assert result["usage"]["evaluator_jobs"] == reject_at - 1 and result["usage"]["unsettled"] == []
+    assert all(v == 0 for v in result["usage"]["calls"].values())
+    state = ctx.load_state("agate_qualification")
+    phase = "probe" if reject_at == 1 else "execute"
+    record = state["records"][phase]
+    assert record["acceptance.raw"].encode() == REJECTION_BODY and "terminal.raw" not in record
+    evidence = loads(ctx.bundle.read(result["evidence"]))
+    assert evidence["records"][phase] == record and evidence["qualification"] is None
+    assert loads(demo.owner.path.read_bytes())["active_run"] is None
+    before = demo.owner.operations(ctx.run_id)
+    wire.request = lambda *a, **k: pytest.fail("closed refusal cannot use the network")
+    with use_authority(demo.owner.path):
+        replay = qualify(ctx, remote=remote, transport=wire)
+    assert replay["usage"]["active_ms"] == result["usage"]["active_ms"]
+    assert replay["usage"]["evaluator_jobs"] == reject_at - 1 and len(wire.posts) == reject_at
+    assert demo.owner.operations(ctx.run_id) == before
+    from kernelschema.evaluation.channel import FORMAT, PHASES
+    with pytest.raises(UnsupportedError, match="rejected before job"):
+        read_qualification({"format": FORMAT, **{p: record for p in PHASES}}, context=ctx,
+                           remote=remote, transport=wire.identity())
+
+
+def test_old_unknown_qualification_reopens_saved_rejection_without_post(tmp_path, monkeypatch):
+    demo, ctx, target, remote = context(tmp_path)
+    wire = Wire(target)
+    def reject(method, path, payload=None):
+        assert method == "POST"
+        wire.posts.append(payload)
+        return {"status": 400, "body": REJECTION_BODY}
+    wire.request = reject
+    with monkeypatch.context() as old:
+        old.setattr(AgateDevExecutor, "_rejection", lambda *a: None)
+        with use_authority(demo.owner.path):
+            unknown = qualify(ctx, remote=remote, transport=wire)
+    assert unknown["recovery"] == "settle_only" and unknown["usage"]["unsettled"]
+    operation_id = ctx.run_id + "_qualify_probe"
+    prior = demo.owner.operations(ctx.run_id)[operation_id]
+    job = ctx.root / ".runtime/agate-qualification/jobs" / operation_id
+    originals = {name: (job / name).read_bytes() for name in ("intent.json", "request.json", "submission-started.json", "acceptance-status.json", "acceptance.raw")}
+    wire.request = lambda *a, **k: pytest.fail("recovery must only read saved original refusal")
+    with use_authority(demo.owner.path):
+        closed = qualify(ctx, remote=remote, transport=wire)
+    assert closed["status"] == "blocked" and closed["recovery"] == "none" and closed["qualification"] is None
+    assert closed["usage"]["evaluator_jobs"] == 0 and not closed["usage"]["unsettled"]
+    current = demo.owner.operations(ctx.run_id)[operation_id]
+    assert current["reservation"] == prior["reservation"] and current["terminated"] and len(current["history"]) == 1
+    assert len(demo.owner.operations(ctx.run_id)) == len(wire.posts) == 1
+    assert all((job / name).read_bytes() == data for name, data in originals.items())
+    assert not (job / "terminal.raw").exists()
 
 
 def test_driver_qualification_entry_preserves_same_parent_and_selected_records(tmp_path):

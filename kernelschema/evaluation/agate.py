@@ -24,6 +24,63 @@ from ._stage_ro import PROFILE as STAGE_RO_PROFILE, INHERITED_PROFILE, PROFILES 
 
 PROFILE = "agate-dev-bwrap-v1"
 MARKER = "KS_EVALUATOR_V1 "
+REJECTION_RECORDS = ("intent.json", "request.json", "submission-started.json", "acceptance-status.json", "acceptance.raw")
+
+
+def interpret_rejection(record):
+    """Recognize only a complete original dev POST validation/auth refusal.
+
+    This is operation termination before job creation, never a worker terminal.
+    Missing/ambiguous envelopes or submission provenance remain unknown. Exact
+    original bytes are embedded so an exported usage receipt is self-contained.
+    """
+    if set(record) != set(REJECTION_RECORDS):
+        return None
+    try:
+        intent, request, started, status, response = (loads(record[name]) for name in REJECTION_RECORDS)
+        validate_prepared_request(intent, request)
+        if (not isinstance(status, dict) or set(status) != {"status"}
+                or type(status["status"]) is not int or status["status"] not in (400, 401, 403, 422)
+                or not isinstance(response, dict)):
+            return None
+        required = {"error_class", "reason", "message", "details", "trace_id"}
+        if (set(response) not in (required, required | {"job_id"}) or response.get("job_id") is not None
+                or response["error_class"] not in ("validation", "auth")
+                or any(not isinstance(response[k], str) or not response[k].strip() for k in ("reason", "message", "trace_id"))
+                or not isinstance(response["details"], dict)):
+            return None
+        # A locator/acceptance or execution fact conflicts with pre-job refusal,
+        # including one nested in details. Unknown error schemas stay fenced.
+        def accepted(value):
+            if isinstance(value, dict):
+                return any((k in ("job_id", "job_ids", "job", "locator", "job_locator", "accepted", "accepted_at",
+                                 "status", "job_status", "execution", "execution_phase", "execution_quarantined",
+                                 "cleanup_pending", "started_at", "finished_at", "result") and v is not None)
+                           or accepted(v) for k, v in value.items())
+            return isinstance(value, list) and any(accepted(v) for v in value)
+        if accepted(response["details"]):
+            return None
+        if (set(started) != {"submission_key", "request_sha256", "submitted_request_sha256", "timeout_s"}
+                or started["submission_key"] != intent["submission_key"]
+                or started["request_sha256"] != intent["request_sha256"]
+                or type(started["timeout_s"]) is not int or not 1 <= started["timeout_s"] <= request["timeout_s"]
+                or digest({**request, "timeout_s": started["timeout_s"]}) != started["submitted_request_sha256"]):
+            return None
+        return {"format": "ks.agate.rejection.v1", "outcome": "rejected_before_job",
+                "operation_id": intent["operation_id"], "submission_key": intent["submission_key"],
+                "http_status": status["status"], "response": response,
+                "method": "POST", "path": "/v1/jobs/dev", "transport": intent["transport"],
+                "submitted_request_sha256": started["submitted_request_sha256"],
+                "original_sha256": {name: sha256(record[name].encode()) for name in REJECTION_RECORDS},
+                "original_records": record}
+    except (ProtocolError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def rejection_diagnostic(rejection):
+    response = rejection["response"]
+    return ("gateway rejected before job: HTTP " + str(rejection["http_status"]) + " "
+            + response["error_class"] + "/" + response["reason"])
 
 
 def stage_ro_profile(profile):
@@ -253,7 +310,7 @@ class AgateDevExecutor:
         return {"profile":PROFILE,"profiles":[PROFILE, *STAGE_RO_PROFILES],"engineering":"dev prepare/submit/query/settle implemented",
                 "service_qualified":False,"Task_qualification":False,
                 "requires":["configured auth and dev ACL", "server replay_policy=never", "selected pinned remote tools/namespaces/CUDA",
-                            "frozen actual environment and FP32 input bytes", "complete framed stdout", "confirmed remote terminal/cleanup"],
+                            "frozen actual environment and FP32 input bytes", "complete framed stdout", "confirmed remote terminal/cleanup or bound explicit pre-job refusal"],
                 "missing_sdk_operation":"read-only lookup by idempotency_key; lost acknowledgment without job_id stays unknown"}
 
     def _job(self, operation_id):
@@ -323,7 +380,8 @@ class AgateDevExecutor:
         if (job / "submission-started.json").exists(): return self.query(operation_id)
         for old in self.root.iterdir():
             if old.is_dir() and old != job and (old/"submission-started.json").exists() and not (old/"terminal.raw").exists():
-                raise ProtocolError("unknown original Agate job fences new submissions")
+                if self._rejection(old) is None:
+                    raise ProtocolError("unknown original Agate job fences new submissions")
         request=loads(read_regular(job,"request.json")[0])
         validate_prepared_request(intent, request)
         reservation = intent["reservation"]
@@ -345,8 +403,28 @@ class AgateDevExecutor:
             durable_write(job/"acceptance.raw",response["body"])
             durable_write(job/"acceptance-status.json",jcs({"status":response["status"]}))
         except Exception as error:
-            durable_write(job/"submission-error.json",jcs({"type":type(error).__name__,"message":str(error)[:2000]}))
+            durable_write(job/"submission-error.json",jcs({"type":type(error).__name__,
+                "message":"transport outcome unknown; original identity retained"}))
         return self.query(operation_id)
+
+    def _rejection(self, job):
+        # Never reinterpret a later query failure or previously observed job as
+        # zero jobs, even if a private acknowledgment was subsequently damaged.
+        if any((job/name).exists() for name in ("accepted-job.json", "terminal.raw")) or any(job.glob("query-*.raw")):
+            return None
+        if (job/"absorption.json").exists():
+            prior = loads(read_regular(job, "absorption.json")[0])
+            if prior.get("outcome") != "rejected_before_job" or prior.get("usage_row", {}).get("evaluator_jobs") != 0:
+                return None
+        if not all((job/name).exists() for name in REJECTION_RECORDS):
+            return None
+        try:
+            rejection = interpret_rejection({name: read_regular(job, name)[0].decode() for name in REJECTION_RECORDS})
+        except UnicodeError:
+            return None
+        if rejection and (rejection["operation_id"] != job.name or rejection["transport"] != self.transport.identity()):
+            raise ProtocolError("original rejected submission identity changed")
+        return rejection
 
     def query(self, operation_id):
         job=self._job(operation_id); intent=loads(read_regular(job,"intent.json")[0])
@@ -360,8 +438,19 @@ class AgateDevExecutor:
         except (ValueError, UnicodeError):
             return {**unknown,"reason":"malformed original acknowledgment; no read-only key lookup API"}
         job_id=acceptance.get("job_id") if isinstance(acceptance,dict) else None
+        if (job/"accepted-job.json").exists():
+            locator=loads(read_regular(job,"accepted-job.json")[0])
+            if locator != {"job_id":job_id,"acceptance_sha256":sha256(read_regular(job,"acceptance.raw")[0])}:
+                raise ProtocolError("original accepted job acknowledgment changed")
         if not isinstance(job_id,str) or not re.fullmatch(r"[A-Za-z0-9_-]+",job_id):
+            rejection=self._rejection(job)
+            if rejection is not None:
+                return {"state":"terminal","outcome":"rejected_before_job","operation_id":operation_id,
+                        "submission_key":intent["submission_key"],"receipt_id":digest(rejection),
+                        "rejection":rejection,"execution":None,"diagnostic":rejection_diagnostic(rejection)}
             return {**unknown,"reason":"no original job locator"}
+        if not (job/"accepted-job.json").exists():
+            durable_write(job/"accepted-job.json",jcs({"job_id":job_id,"acceptance_sha256":sha256(read_regular(job,"acceptance.raw")[0])}))
         unknown["job_id"]=job_id
         if (job/"terminal.raw").exists(): raw=read_regular(job,"terminal.raw")[0]
         else:
@@ -442,11 +531,13 @@ def _publish(executor, operation_id, publication, facts):
         publication=Publication(binding["root"],binding["id"])
     else: durable_write(selected,jcs({"root":str(publication.root),"id":publication.publication_id}))
     prefix="evaluation/"+operation_id
-    native=publication.put_bytes(prefix+"/agate-terminal.json",read_regular(job,"terminal.raw")[0])
+    rejected = facts.get("outcome") == "rejected_before_job"
+    native=(publication.put_bytes(prefix+"/agate-rejection.json",jcs(facts["rejection"])) if rejected else
+            publication.put_bytes(prefix+"/agate-terminal.json",read_regular(job,"terminal.raw")[0]))
     acceptance=publication.put_bytes(prefix+"/agate-acceptance.json",read_regular(job,"acceptance.raw")[0])
     row={"producer":"kernelschema.agate:"+str(executor.root),"operation_id":operation_id,"role":"evaluator",
          "purpose":intent["action"],"receipt_id":facts["receipt_id"],"sequence":1,"receipt":native,
-         "state":"settled","calls":0,"evaluator_jobs":1,"tokens":0,"gpu_ms":None}
+         "state":"settled","calls":0,"evaluator_jobs":0 if rejected else 1,"tokens":0,"gpu_ms":0 if rejected else None}
     usage=publication.put_json(prefix+"/usage.json",{"protocol":PROTOCOL,"kind":"usage_index","entries":[row]})
     # Exact original terminal retained even if no valid worker report is available.
     report=None; roots=[usage,acceptance]; execution=facts["execution"]
@@ -480,5 +571,7 @@ def _publish(executor, operation_id, publication, facts):
     publication.commit(roots,subjects=[intent["stage"]["manifest"]["task"],intent["stage"]["manifest"]["source"]])
     settled={"state":"terminal","receipt_id":facts["receipt_id"],"report":report,"usage_row":row,
              "bundle_root":str(publication.root),"new_receipt":True,"diagnostic":facts["diagnostic"]}
+    if rejected:
+        settled["outcome"] = "rejected_before_job"
     durable_write(job/"absorption.json",jcs(settled))
     return settled

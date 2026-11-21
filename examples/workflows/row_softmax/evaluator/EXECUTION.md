@@ -214,9 +214,38 @@ or absent frames cannot become passes. Original native error/terminal bytes are
 kept even without a valid evaluator report. Unknown GPU milliseconds remain
 null; they are not invented from wall time.
 
-Missing acknowledgment/job ID, 404, transport loss, cancellation with pending
-cleanup or quarantined execution yields `unknown`/`settle_only`. No new POST or
-channel change occurs. This SDK exposes no read-only lookup by idempotency key;
+An original dev POST can also terminate **before job creation**. The adapter
+recognizes only saved HTTP 400/401/403/422 responses with a complete gateway
+error envelope: `error_class` is `validation` or `auth`, nonempty `reason`,
+`message` and `trace_id`, object `details`, and no job locator or acceptance fact.
+Other response schemas stay unknown. The response must be bound to the original
+intent, stable key, prepared request and submission-start record, including the
+actual tightened timeout and submitted request digest. A previously observed
+job, query record or native terminal prevents zero-job reinterpretation.
+
+For this case `query`/`settle` return operation `state="terminal"` with
+`outcome="rejected_before_job"` and no job ID or worker terminal; `settle` returns
+`report=None`.
+The ordinary settled usage row records zero evaluator jobs/calls/tokens/GPU time;
+the caller absorbs it through the original `OwnerAccount.absorb(...,
+terminated=True)` and ends the original active clock. Elapsed active time is
+retained. The receipt embeds the exact original HTTP body/status, request,
+intent and submission-start bytes with their hashes, so exporting its ordinary
+usage index retains the complete refusal proof. There is no new ledger or
+automatic retry. A saved explicit refusal can recover an older unknown
+operation without network access; a missing status/body/binding cannot.
+
+Both qualification callers consume the same refusal as `blocked`, with
+`qualification=None` and `recovery="none"` after settlement. A refusal signs no
+build, correctness, performance or permission result. Reopening that completed
+qualification does not restart its clock, submit another phase or charge again.
+Existing manually settled operations must retain their original receipt history;
+this does not authorize rerunning or rewriting an old qualification.
+
+Missing acknowledgment/job ID without this complete refusal proof, query 404,
+transport loss, 5xx, cancellation with pending cleanup or quarantined execution
+yields `unknown`/`settle_only`. No new POST or channel change occurs. This SDK
+exposes no read-only lookup by idempotency key;
 if the whole acknowledgment was lost, automated recovery cannot discover the
 job ID and remains fenced. A known original job can later supply its terminal;
 the original receipt is absorbed once. Public request/result serialization never

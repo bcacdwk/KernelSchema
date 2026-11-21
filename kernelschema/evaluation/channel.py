@@ -16,7 +16,8 @@ from uuid import uuid4
 from ..artifacts import Publication, read_regular, source_manifest
 from ..budget import OwnerAccount, cost, BudgetDenied
 from ..contracts import ProtocolError, UnsupportedError, digest, jcs, loads, sha256
-from .agate import AgateDevExecutor, AgateHTTP, PROFILE, STAGE_RO_PROFILES, stage_ro_profile, interpret_terminal, validate_prepared_request
+from .agate import (AgateDevExecutor, AgateHTTP, PROFILE, STAGE_RO_PROFILES, stage_ro_profile,
+                    interpret_terminal, validate_prepared_request, REJECTION_RECORDS, interpret_rejection, rejection_diagnostic)
 from .environment import match_target, read_target
 from .task import RowSoftmaxTask, stage, verify_stage
 from ..runtime import AdmissionDenied
@@ -69,10 +70,20 @@ def transport_from_config(connection_profile="prod"):
 
 def _record(executor, op):
     job = executor._job(op)
-    return {name: read_regular(job, name)[0].decode() for name in ("intent.json", "request.json", "acceptance.raw", "terminal.raw")}
+    names = ("intent.json", "request.json", "acceptance.raw", "terminal.raw") if (job / "terminal.raw").exists() else REJECTION_RECORDS
+    return {name: read_regular(job, name)[0].decode() for name in names}
+
+
+def _reject_qualification_record(record):
+    if set(record) == set(REJECTION_RECORDS):
+        rejection = interpret_rejection(record)
+        if rejection is None:
+            raise ProtocolError("invalid original gateway rejection record")
+        raise UnsupportedError(rejection_diagnostic(rejection))
 
 
 def _read_record(record):
+    _reject_qualification_record(record)
     if set(record) != {"intent.json", "request.json", "acceptance.raw", "terminal.raw"}:
         raise ProtocolError("incomplete original qualification record")
     intent = loads(record["intent.json"].encode())
@@ -303,7 +314,8 @@ def _qualify(context, *, remote, transport=None):
     if state["qualification"]:
         actual_remote = loads(state["qualification"]["execute"]["intent.json"].encode())["profile"]
         read_qualification(state["qualification"], context=context, remote=actual_remote, transport=transport.identity())
-    account.begin(context.run_id)
+    if state["phase"] != "done":
+        account.begin(context.run_id)
     try:
         while state["phase"] != "done":
             phase = state["phase"]

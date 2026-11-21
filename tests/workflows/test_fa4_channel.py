@@ -230,3 +230,35 @@ def test_six_job_qualification_uses_original_owner_and_never_qualifies_synthetic
     assert result["usage"]["evaluator_jobs"] == 6 and transport.posts == 6
     assert len(OwnerAccount.for_context(c).operations(c.run_id)) == 6
     assert qualify(c, remote=remote, transport=transport)["usage"]["evaluator_jobs"] == 6 and transport.posts == 6
+
+
+def test_fa4_gateway_rejection_settles_without_worker_or_qualification(ready, tmp_path):
+    from kernelschema import api
+    from kernelschema.artifacts import durable_write
+    from kernelschema.budget import OwnerAccount
+    from test_evaluation_agate import REJECTION_BODY
+    class Rejected(Transport):
+        def request(self, method, path, body=None):
+            assert method == "POST" and self.posts == 0
+            self.posts += 1
+            return {"status": 400, "body": REJECTION_BODY}
+    root, result, _ = ready
+    request = Bundle(root).document(result["request"])
+    request["budget"]["limits"].update(evaluator_jobs=6, active_ms=120000)
+    p = Publication(root); ref = p.put_json("rejected-request.json", request); p.commit([ref])
+    # Request-relative refs must resolve in the source bundle.
+    path = root / ("rejected-request-" + tmp_path.name + ".json"); durable_write(path, Bundle(root).read(ref))
+    context = api.prepare_run("implement", request=path, out=tmp_path / "run", backend_identity={"synthetic": True})
+    remote = {"channel": "agate-dev-bwrap-v1", "gpu": "L20D", "python": "/original/python", "bwrap": "/usr/bin/bwrap"}
+    transport = Rejected()
+    closed = qualify(context, remote=remote, transport=transport)
+    replay = qualify(context, remote=remote, transport=transport)
+    assert closed["status"] == replay["status"] == "blocked" and closed["qualification"] is None
+    assert closed["recovery"] == "none" and "rejected before job" in closed["reason"]
+    assert closed["usage"]["evaluator_jobs"] == 0 and closed["usage"]["unsettled"] == []
+    assert replay["usage"]["active_ms"] == closed["usage"]["active_ms"] and transport.posts == 1
+    account = OwnerAccount.for_context(context)
+    operations = account.operations(context.run_id)
+    assert len(operations) == 1 and all(op["terminated"] for op in operations.values())
+    record = context.load_state("fa4_qualification")["records"]["probe"]
+    assert "terminal.raw" not in record and record["acceptance.raw"].encode() == REJECTION_BODY
