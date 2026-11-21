@@ -29,7 +29,9 @@ kernelschema implement --schema /materials/schema --problem /bench/problem \
 `kernelschema.api.implement(schema=..., problem=..., repo_root=..., workspace=...,
 platform=...)` calls `aka.workflow.schema.standard.implement` directly. AKA owns
 its normal Light/Agent/Executor/Evaluator workflow and native results. Install
-that AKA checkout in the same Python environment. `--prepare-only` prepares the
+that AKA checkout in the same Python environment; follow its
+[matching package installation and native Task baseline steps](https://github.com/alibaba/atrex-kernel-agent/blob/main/docs/schema-standard-workflow.md).
+`--prepare-only` prepares the
 normal inputs without running the model or evaluator. Writing checks and legacy
 readonly qualification do not gate this path. Native failures remain failures.
 

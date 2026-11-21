@@ -13,23 +13,42 @@ relationships are implemented by
 implemented seams. No private planning document or runtime capture is needed
 to install, read or prepare the supported source checkout.
 
-The implement reference adapter supports the fixed row-softmax Task's entire
+The default [file-oriented writer](../../kernelschema/WRITING.md) accepts an
+arbitrary UTF-8 task description and writes Schema files with one planner call.
+The standard [implement entry](../../schema_implement/README.md) passes raw
+Schema files and a native problem to AKA's existing workflow. Neither path
+requires the legacy reference adapter's Task or qualification sequence.
+
+The legacy implement reference adapter supports the fixed row-softmax Task's entire
 coverage domain and complete single `kernel.py`, plus the pinned FA4 F1 scope
-and finite complete `python_tree`. The writing backends and finite driver remain
-row-softmax only. [FA4 usage](../../examples/workflows/fa4_decode/README.md) gives
+and finite complete `python_tree`. The strict writing Task adapter and the
+finite row-softmax example driver remain row-softmax only.
+[FA4 usage](../../examples/workflows/fa4_decode/README.md) gives
 the actual API/channel preparation and qualification boundary. CPU tests
 establish engineering behavior. They do not establish real model, CUDA,
 fidelity, performance or release qualification; see
 [standalone usage](standalone.md) for commands and the current missing gates.
 
-## Entry points and fixed requests
+## Public entry points
 
 `kernelschema.api.design`, `optimize` and `implement` are keyword-only functions.
-Use either `request=<request.json>, out=<new run>` or
-`continue_run=<original run>`. The `kernelschema` CLI calls those same functions.
+For default writing, use `design(task=..., out=...)` or
+`optimize(task=..., schema=..., feedback=[...], out=...)`. For standard AKA, use
+`implement(schema=..., problem=..., repo_root=..., platform=..., workspace=...)`;
+`out` is an alternative to `workspace`. The `kernelschema` CLI calls those same
+functions; see [standalone commands](standalone.md).
 Import functions from `kernelschema.api`; package-level operation names belong
 to backend modules. `kernelschema extract -- ...` forwards the existing extract
 CLI and preserves that workflow's own publication/recovery protocol.
+
+## Legacy fixed requests
+
+Use `request=<request.json>, out=<new run>` or
+`continue_run=<original run>` explicitly for the legacy request interface.
+These arguments cannot be combined with the file-oriented task/Schema entry.
+The following Ref, object and account rules describe that fixed-request
+protocol and the writer's retained internal artifacts; they do not replace
+AKA's native Task or result format.
 
 Each request contains `protocol`, `operation`, `request_id`, `task`, `rules`,
 `materials`, `scope`, `budget` and `backend`. The four object inputs are Refs.
@@ -103,7 +122,8 @@ published; inspect its domain status and checks.
 
 | Result | Completion boundary |
 | --- | --- |
-| implement | `code.latest` and `code.qualified` are independent Source Refs. Each C has its own coverage/build/correctness/fidelity/performance assessment. Qualified requires all five passes; completed requires qualified C. `performance_goal=met|unmet|unknown` is separate from complete required measurements. |
+| legacy implement | `code.latest` and `code.qualified` are independent Source Refs. Each C has its own coverage/build/correctness/fidelity/performance assessment. Qualified requires all five passes; completed requires qualified C. `performance_goal=met|unmet|unknown` is separate from complete required measurements. |
+| standard AKA implement | Original native completion, version records and feedback. Inspect `candidate_commit`, measurement subject/source, actual candidate evaluation and promotion; `completed` or an incumbent's carried-forward PASS alone does not establish a new kernel's success. |
 | design/optimize | Default write-only saves readable Schema files/scope and real call records; structure/publication have file receipts, permissions/semantics are `not_run`. Completion does not establish design effect. Explicit strict mode requires all four passes. |
 | optimize action | `decision=keep|revise`, reason, `next_action=none|implement|verify`, action reason, explicit input/evidence Refs. The writer proposes; the outer driver owns subsequent admission. |
 
