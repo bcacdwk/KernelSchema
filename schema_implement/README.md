@@ -20,7 +20,7 @@ kernelschema implement --schema /materials/schema --problem /bench/problem \
 ```
 
 Install matching AKA packages and KernelSchema source/editable in the same
-Python environment; follow AKA's [installation and native Task preparation](https://github.com/alibaba/atrex-kernel-agent/blob/main/docs/schema-standard-workflow.md).
+Python environment; follow AKA's [installation and native Task preparation](https://github.com/bcacdwk/atrex-kernel-agent/blob/feat/schema-workflows-v1/docs/schema-standard-workflow.md).
 The normal full evaluation needs real per-shape performance metadata for the
 selected hardware. `prepare_only=True` / `--prepare-only` loads inputs without
 calling the model or evaluator. Keep the original result and feedback: native
