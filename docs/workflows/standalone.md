@@ -75,6 +75,33 @@ request; it cannot alter an admitted call. If a terminal's zero aggregate
 tokens conflict with positive model usage or cost, its token total remains
 unknown and its original fields remain available in the raw receipt.
 
+For longer business calls, `Demo.create` accepts explicit request budgets and
+the existing backend admission minima. `request_limits` must contain exactly
+`design`, `implement`, `verify` and `optimize`, each with a complete ordinary
+request-limits object. Fixed/partial and subsequent code actions use `implement`;
+initial and subsequent verify actions use `verify`. The resolved limits are
+frozen in the original config and reused by every later request. Omitting them
+retains the original 1,200,000 ms per-request limits and role/job counts.
+
+`writing_minimum_active_ms` selects positive `planner`/`reviewer` intervals;
+`reference_minimum_active_ms` selects positive `coder`/`evaluator`/`reviewer`
+intervals. `writing_finish_floor` is the complete existing `budget.cost()` vector
+reserved after writing. These values are frozen in the original profiles;
+omitting them retains backend defaults. The CLI accepts the corresponding JSON
+files as `--request-limits`, `--writing-minimum-active-ms`,
+`--reference-minimum-active-ms` and `--writing-finish-floor` on `prepare` only.
+
+A 600,000 ms planner and a 600,000 ms reviewer need both admission minima set
+to 600,000 and a writing request with room for both calls and host work; for
+example, 1,250,000 ms when no additional finish floor is selected. Setting only
+the Claude timeout does not reserve the reviewer window. Any additional finish
+floor must also fit the writing request's role/job/time limits. The original
+parent's remaining limits and deadlines still take precedence; these settings
+grant no new balance or operations. A too-small request or parent stops before
+the relevant model admission. Change settings only in a newly prepared Demo,
+never by editing a frozen config/profile or an admitted request. Keep the
+original driver/source installation to reopen an older Demo.
+
 If diagnostics already used an owner before the Task/remote configuration was
 known, reuse that owner when preparing the Demo. Supply all three explicit inputs:
 the original public parent Ref, its Bundle and the original private authority file.

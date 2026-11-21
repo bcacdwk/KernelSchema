@@ -84,6 +84,18 @@ backend/source installation. This new profile has a different digest and does
 not inherit the historical 120-second profile's real qualification; CPU tests
 alone do not establish real writing success with a longer deadline.
 
+The standalone `Demo.create` exposes `writing_minimum_active_ms` and
+`writing_finish_floor`, freezing them directly in this profile. Its explicit
+`request_limits` has complete `design`/`implement`/`verify`/`optimize` entries,
+frozen in the Demo config and reused for later writing and action requests.
+For two 600000 ms writing windows, select planner/reviewer minima of 600000 and
+allow at least 1250000 ms for the request with no extra finish floor. A nonzero
+finish floor additionally requires its complete call/job/time vector to fit
+the request. These are capacity checks against the same original parent; they
+do not consume dummy operations or extend the account. See
+[standalone usage](../docs/workflows/standalone.md) for the corresponding JSON
+CLI inputs and the separate reference-loop minima.
+
 Materials must contain exactly one reserved `workflow_objective`, at least
 planner/reviewer-visible. The backend validates the current writing method,
 checker/policy source and original docs/Template frozen by `freeze_rules`.

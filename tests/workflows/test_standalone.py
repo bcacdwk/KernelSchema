@@ -406,3 +406,128 @@ def test_existing_parent_cli_prepare_inspect_without_private_export(tmp_path, mo
     assert main(["prepare", "--out", str(tmp_path / "incomplete"), "--parent-ref", str(ref_file)]) == 2
     assert "requires parent, parent_bundle and authority together" in capsys.readouterr().err
     assert not (tmp_path / "incomplete").exists()
+
+
+def explicit_budgets():
+    writing_limits = {"calls": {"planner": 1, "coder": 1, "reviewer": 2, "extract": 0},
+                      "model_calls": 4, "evaluator_jobs": 1, "active_ms": 2500000, "tokens": None}
+    implement_limits = {"calls": {"planner": 0, "coder": 1, "reviewer": 1, "extract": 0},
+                        "model_calls": 2, "evaluator_jobs": 1, "active_ms": 1250000, "tokens": None}
+    return {"request_limits": {"design": writing_limits, "optimize": {**deepcopy(writing_limits), "active_ms": 2600000},
+                "implement": implement_limits, "verify": {**deepcopy(implement_limits),
+                    "calls": {"planner": 0, "coder": 0, "reviewer": 1, "extract": 0}, "model_calls": 1, "active_ms": 650000}},
+            "writing_minimum_active_ms": {"planner": 600000, "reviewer": 600000},
+            "reference_minimum_active_ms": {"coder": 600000, "evaluator": 1000, "reviewer": 600000},
+            "writing_finish_floor": {**cost(role="coder", calls=1, evaluator_jobs=1, active_ms=1201000),
+                                      "reviewer": 1, "model_calls": 2}}
+
+
+@pytest.mark.parametrize("action", ["implement", "verify"])
+def test_explicit_budgets_frozen_across_same_parent_full_driver_and_recovery(tmp_path, synthetic, monkeypatch, action):
+    from test_agate_channel import Wire, PROFILE
+    limits = deepcopy(DEFAULT_LIMITS); limits["evaluator_jobs"] = 10
+    bundle, owner, parent = existing_parent(tmp_path, limits=limits)
+    original_operations, original_bytes = owner.operations(), owner.path.read_bytes()
+    forbid_new_owner(monkeypatch)
+    synthetic[0].action = action
+    if action == "verify": synthetic[0].decision, synthetic[0].seed = "keep", "source"
+    remote = {"channel": PROFILE, "gpu": "synthetic-gpu", "python": "/synthetic/python", "bwrap": "/synthetic/bwrap"}
+    options = explicit_budgets(); expected = deepcopy(options)
+    target = synthetic_target()
+    demo = Demo.create(tmp_path / "demo", parent=parent, parent_bundle=bundle, authority=owner.path,
+                       environment=jcs(target), remote=remote, **options)
+    assert owner.path.read_bytes() == original_bytes
+    options["request_limits"]["design"]["active_ms"] = 1
+    options["writing_minimum_active_ms"]["planner"] = 1
+    options["reference_minimum_active_ms"]["reviewer"] = 1
+    options["writing_finish_floor"]["active_ms"] = 1
+    assert demo.config["request_limits"] == expected["request_limits"]
+    for name, ref in demo.config["requests"].items():
+        q = Bundle(demo.root).document(ref)
+        limit_name = "implement" if name in ("fixed", "partial") else name
+        assert q["budget"]["limits"] == expected["request_limits"][limit_name]
+    assert demo.prepare_agate(transport=Wire(target))["status"] == "completed"
+    stopped = []
+    def stop(label, current):
+        if label == "writing_published" and not stopped:
+            stopped.append(label); raise RuntimeError("synthetic budget recovery")
+    demo.checkpoint = stop
+    with pytest.raises(RuntimeError, match="synthetic budget recovery"): demo.run()
+    reopened = Demo(demo.root)
+    result = reopened.run()
+    assert result["phase"] == "done" and [h["operation"] for h in result["history"]] == ["design", "implement", "optimize", "implement"]
+    assert result["history"][-1]["status"] == "completed"
+    for entry in result["history"]:
+        q = Bundle(demo.root).document(entry["request"])
+        limit_name = "verify" if q.get("mode") == "verify_only" else q["operation"]
+        assert q["budget"] == {"parent": parent, "limits": expected["request_limits"][limit_name]}
+        parameters = Bundle(demo.root).document(q["backend"]["profile"])["parameters"]
+        if q["operation"] == "implement":
+            assert parameters["minimum_active_ms"] == expected["reference_minimum_active_ms"]
+            assert parameters["evaluation"]["parameters"]["qualification"]
+        else:
+            assert parameters["writing_minimum_active_ms"] == expected["writing_minimum_active_ms"]
+            assert parameters["writing_finish_floor"] == expected["writing_finish_floor"]
+    operations = owner.operations()
+    assert all(operations[key] == value for key, value in original_operations.items())
+    assert sum(op["lower"]["calls"] for op in operations.values()) == (9 if action == "implement" else 8)
+    assert not (demo.root / ".runtime/owner.json").exists()
+    assert Demo(demo.root).run() == result
+
+
+@pytest.mark.parametrize("invalid", ["missing_stage", "unknown_stage", "bad_limit", "unknown_minimum", "bool_minimum", "zero_minimum", "huge_minimum", "incomplete_floor", "inconsistent_floor", "negative_floor"])
+def test_explicit_budgets_invalid_before_output_or_owner_change(tmp_path, monkeypatch, invalid):
+    bundle, owner, parent = existing_parent(tmp_path)
+    before = owner.path.read_bytes()
+    forbid_new_owner(monkeypatch)
+    options = explicit_budgets()
+    if invalid == "missing_stage": del options["request_limits"]["verify"]
+    elif invalid == "unknown_stage": options["request_limits"]["followup"] = options["request_limits"]["implement"]
+    elif invalid == "bad_limit": options["request_limits"]["design"]["active_ms"] = True
+    elif invalid == "unknown_minimum": options["writing_minimum_active_ms"]["coder"] = 600000
+    elif invalid == "bool_minimum": options["reference_minimum_active_ms"]["reviewer"] = True
+    elif invalid == "zero_minimum": options["writing_minimum_active_ms"]["planner"] = 0
+    elif invalid == "huge_minimum": options["writing_minimum_active_ms"]["planner"] = 2 ** 64
+    elif invalid == "incomplete_floor": del options["writing_finish_floor"]["tokens"]
+    elif invalid == "inconsistent_floor": options["writing_finish_floor"]["model_calls"] = 1
+    else: options["writing_finish_floor"]["active_ms"] = -1
+    with pytest.raises(ProtocolError):
+        Demo.create(tmp_path / "demo", parent=parent, parent_bundle=bundle, authority=owner.path, **options)
+    assert not (tmp_path / "demo").exists() and owner.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("tight", ["request", "parent"])
+def test_explicit_writing_minima_and_finish_floor_refuse_insufficient_budget_without_calls(tmp_path, synthetic, tight):
+    options = explicit_budgets()
+    parent_limits = deepcopy(DEFAULT_LIMITS)
+    if tight == "request": options["request_limits"]["design"]["active_ms"] = 2400000
+    else: parent_limits["active_ms"] = 2400000
+    bundle, owner, parent = existing_parent(tmp_path, limits=parent_limits)
+    original = owner.operations()
+    result = Demo.create(tmp_path / "demo", parent=parent, parent_bundle=bundle, authority=owner.path, **options).run()
+    assert result["status"] == "partial" and result["phase"] == "done"
+    assert not synthetic[0].calls and not synthetic[1].calls
+    assert owner.operations() == original
+
+
+def test_explicit_budgets_cli_freezes_public_inputs(tmp_path, monkeypatch, capsys):
+    from examples.workflows.row_softmax.run_demo import main
+    bundle, owner, parent = existing_parent(tmp_path)
+    before = loads(owner.path.read_bytes())
+    forbid_new_owner(monkeypatch)
+    ref_file = tmp_path / "parent.json"; durable_write(ref_file, jcs(parent))
+    args = ["prepare", "--out", str(tmp_path / "demo"), "--parent-ref", str(ref_file),
+            "--parent-bundle", str(bundle.root), "--authority", str(owner.path)]
+    options = explicit_budgets()
+    for name, value in options.items():
+        path = tmp_path / (name + ".json"); durable_write(path, jcs(value))
+        args.extend(["--" + name.replace("_", "-"), str(path)])
+    assert main(args) == 0
+    assert str(owner.path) not in capsys.readouterr().out
+    demo = Demo(tmp_path / "demo")
+    assert demo.config["request_limits"] == options["request_limits"]
+    assert Bundle(demo.root).document(demo.config["writing_profile"])["parameters"]["writing_finish_floor"] == options["writing_finish_floor"]
+    assert Bundle(demo.root).document(demo.config["reference_profile"])["parameters"]["minimum_active_ms"] == options["reference_minimum_active_ms"]
+    after = loads(owner.path.read_bytes())
+    for key in ("descriptor", "operations", "requests", "paused", "active_ms", "active_ns"):
+        assert after[key] == before[key]

@@ -31,6 +31,10 @@ def main(argv=None):
     create.add_argument("--parent-ref", help="JSON containing only the original public parent Ref; requires --parent-bundle and --authority")
     create.add_argument("--parent-bundle", help="original public parent Bundle directory")
     create.add_argument("--authority", help="original private owner authority file; used in place, never copied")
+    create.add_argument("--request-limits", help="JSON with complete design/implement/verify/optimize request limits; original owner still applies")
+    create.add_argument("--writing-minimum-active-ms", help="JSON with positive planner/reviewer admission minima")
+    create.add_argument("--reference-minimum-active-ms", help="JSON with positive coder/evaluator/reviewer admission minima")
+    create.add_argument("--writing-finish-floor", help="JSON with the complete budget.cost vector retained after writing")
     for name in ("run", "continue", "inspect", "qualify", "export"):
         command = sub.add_parser(name)
         command.add_argument("--demo", required=True)
@@ -57,7 +61,11 @@ def main(argv=None):
                 schema_directory=args.schema, receipt=args.receipt,
                 remote=loads(Path(args.remote).read_bytes()) if args.remote else None,
                 parent=loads(Path(args.parent_ref).read_bytes()) if args.parent_ref else None,
-                parent_bundle=args.parent_bundle, authority=args.authority)
+                parent_bundle=args.parent_bundle, authority=args.authority,
+                request_limits=loads(Path(args.request_limits).read_bytes()) if args.request_limits else None,
+                writing_minimum_active_ms=loads(Path(args.writing_minimum_active_ms).read_bytes()) if args.writing_minimum_active_ms else None,
+                reference_minimum_active_ms=loads(Path(args.reference_minimum_active_ms).read_bytes()) if args.reference_minimum_active_ms else None,
+                writing_finish_floor=loads(Path(args.writing_finish_floor).read_bytes()) if args.writing_finish_floor else None)
             value = demo.summary()
         else:
             demo = Demo(args.demo)

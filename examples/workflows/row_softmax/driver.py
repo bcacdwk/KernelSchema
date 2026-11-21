@@ -13,8 +13,8 @@ from uuid import uuid4
 
 from kernelschema import api, fidelity, writing
 from kernelschema.artifacts import Bundle, Publication, durable_write, import_bundle, read_regular
-from kernelschema.budget import OwnerAccount, use_authority
-from kernelschema.contracts import PROTOCOL, ProtocolError, UnsupportedError, digest, jcs, loads, sha256
+from kernelschema.budget import OwnerAccount, cost, use_authority
+from kernelschema.contracts import PROTOCOL, ROLES, ProtocolError, UnsupportedError, digest, jcs, loads, sha256, limits as validate_limits
 from kernelschema.evaluation import freeze_task
 from kernelschema.evaluation.channel import selection, qualify
 from kernelschema.evaluation.environment import read_target
@@ -39,6 +39,31 @@ def _limits(operation, *, verify=False):
     return {"calls": {"planner": int(operation != "implement"), "coder": 0 if operation != "implement" or verify else 2,
                        "reviewer": 2 if operation == "implement" else 1, "extract": 0},
             "evaluator_jobs": 2 if operation == "implement" else 0, "active_ms": 1200000, "tokens": None}
+
+
+def _request_limits(value):
+    names = {"design", "implement", "verify", "optimize"}
+    if value is None:
+        value = {name: _limits("implement" if name == "verify" else name, verify=name == "verify") for name in sorted(names)}
+    if not isinstance(value, dict) or set(value) != names:
+        raise ProtocolError("request_limits requires design/implement/verify/optimize complete limits")
+    for item in value.values(): validate_limits(item)
+    return loads(jcs(value))
+
+
+def _minimum(value, roles, name):
+    if value is not None and (not isinstance(value, dict) or set(value) != set(roles)
+            or any(type(n) is not int or n <= 0 for n in value.values())):
+        raise ProtocolError(name + " requires positive per-role intervals")
+    return loads(jcs(value))
+
+
+def _writing_floor(value):
+    if value is not None and (not isinstance(value, dict) or set(value) != set(cost())
+            or any(type(n) is not int or n < 0 for n in value.values())
+            or value["model_calls"] != sum(value[role] for role in ROLES)):
+        raise ProtocolError("writing_finish_floor requires the complete nonnegative budget.cost vector with matching model_calls")
+    return loads(jcs(value))
 
 
 def _put_request(root, publication, name, value):
@@ -70,7 +95,8 @@ class Demo:
     @classmethod
     def create(cls, root, *, start="design", runtime=None, environment=None, objective=None,
                schema_directory=None, receipt=None, limits=None, remote=None, checkpoint=None,
-               parent=None, parent_bundle=None, authority=None):
+               parent=None, parent_bundle=None, authority=None, request_limits=None,
+               writing_minimum_active_ms=None, reference_minimum_active_ms=None, writing_finish_floor=None):
         """Freeze requests with a new owner, or explicitly reuse one existing owner.
 
         Reuse requires the original public Ref, its Bundle and the private
@@ -80,6 +106,10 @@ class Demo:
         if root.exists(): raise ProtocolError("demo exists; reopen the original directory")
         if start not in ("design", "fixed", "partial", "verify"):
             raise ProtocolError("start must be design/fixed/partial/verify")
+        request_limits = _request_limits(request_limits)
+        writing_minimum_active_ms = _minimum(writing_minimum_active_ms, ("planner", "reviewer"), "writing_minimum_active_ms")
+        reference_minimum_active_ms = _minimum(reference_minimum_active_ms, ("coder", "evaluator", "reviewer"), "reference_minimum_active_ms")
+        writing_finish_floor = _writing_floor(writing_finish_floor)
         external = any(value is not None for value in (parent, parent_bundle, authority))
         if external:
             if any(value is None for value in (parent, parent_bundle, authority)):
@@ -130,29 +160,36 @@ class Demo:
                                task=task, origin="extract" if receipt else "handwritten", receipt=receipt)
         seed = p.put_source("manual-partial-seed", resource("examples/workflows/row_softmax/partial-seed/kernel.py").read_bytes())
         seed_origin = p.put_bytes("manual-partial-origin.md", resource("examples/workflows/row_softmax/partial-seed/ORIGIN.md").read_bytes())
-        wp = p.put_json("writing-profile.json", writing.backend_profile(runtime, env))
+        writing_profile = writing.backend_profile(runtime, env)
+        if writing_minimum_active_ms is not None:
+            writing_profile["parameters"]["writing_minimum_active_ms"] = writing_minimum_active_ms
+        if writing_finish_floor is not None:
+            writing_profile["parameters"]["writing_finish_floor"] = writing_finish_floor
+        wp = p.put_json("writing-profile.json", writing_profile)
         rp = runtime.backend_profile(env, name="reference")
         rp["capabilities"] = ReferenceBackend().capabilities(rp)
         rp["parameters"]["claude"] = runtime.as_dict()
+        if reference_minimum_active_ms is not None:
+            rp["parameters"]["minimum_active_ms"] = reference_minimum_active_ms
         if remote: rp["parameters"]["evaluation"] = selection(remote=remote)
         rp_ref = p.put_json("reference-profile.json", rp)
         config = {"start": start, "task": task, "rules": rules, "materials": materials, "scope": scope,
                   "draft_scope": draft_scope, "schema": consumed["schema"], "seed": seed, "seed_origin": seed_origin,
                   "receipt": consumed["receipt"], "parent": parent, "writing_profile": wp, "reference_profile": rp_ref,
-                  "remote": remote}
-        base = {"task": task, "rules": rules, "materials": materials, "budget": {"parent": parent, "limits": _limits("design")}}
+                  "remote": remote, "request_limits": request_limits}
+        base = {"task": task, "rules": rules, "materials": materials, "budget": {"parent": parent, "limits": request_limits["design"]}}
         requests = {}
         q = writing.request(operation="design", request_id="row-softmax-design", scope=draft_scope, profile=wp, **base)
         requests["design"] = p.put_json("design.request.json", q)
         values = {"design": q}
         for name in ("fixed", "partial", "verify"):
             q = implement_request(request_id="row-softmax-" + name, task=task, rules=rules, materials=materials, scope=scope,
-                budget={"parent": parent, "limits": _limits("implement", verify=name == "verify")},
+                budget={"parent": parent, "limits": request_limits["verify" if name == "verify" else "implement"]},
                 backend={"name": "reference", "profile": rp_ref}, schema=consumed["schema"],
                 seed=None if name == "fixed" else seed, mode="verify_only" if name == "verify" else "code")
             requests[name] = p.put_json(name + ".request.json", q); values[name] = q
         q = writing.request(operation="optimize", request_id="row-softmax-optimize", scope=scope, profile=wp,
-                            schema=consumed["schema"], **base)
+                            schema=consumed["schema"], **{**base, "budget": {"parent": parent, "limits": request_limits["optimize"]}})
         requests["optimize"] = p.put_json("optimize.request.json", q); values["optimize"] = q
         config["requests"] = requests
         config_ref = p.put_bytes("demo-config.json", jcs(config))
@@ -175,7 +212,8 @@ class Demo:
         if phase == "initial": return Bundle(self.root).document(self.config["requests"][self.config["start"]])
         verify = phase == "followup" and self.state["action"]["mode"] == "verify_only"
         base = {k: self.config[k] for k in ("task", "rules", "materials")}
-        base.update(scope=self.state["scope"], budget={"parent": self.config["parent"], "limits": _limits("optimize" if phase == "optimize" else "implement", verify=verify)})
+        limit_name = "optimize" if phase == "optimize" else "verify" if verify else "implement"
+        base.update(scope=self.state["scope"], budget={"parent": self.config["parent"], "limits": self.config["request_limits"][limit_name]})
         if phase == "optimize":
             previous = Bundle(self.root).document(self.state["history"][-1]["result"])
             evidence = [previous["code"]["latest"]] if previous["code"]["latest"] else []
