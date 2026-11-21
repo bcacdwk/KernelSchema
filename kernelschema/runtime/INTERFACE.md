@@ -260,6 +260,15 @@ are untrusted proposals for K4/K5's domain validators; no nested path is an
 instruction to write a file, and no claimed pass is a host verification.
 The runtime reports transport success separately from model `status`.
 
+For a planner whose frozen assignment and runtime intent specify
+`writing_mode="write_only"`, the outer `reason` is optional: the runtime can use
+`content.reason`. An unusable outer reason or extra outer metadata is ignored,
+without changing the original response bytes. Protocol, role, assignment, status,
+kind and content checks still apply; native process, model, permissions and usage
+checks are unchanged. This exception does not apply to strict writing, coder or
+reviewer output. Writing retains native reply text even when a failed receipt
+provides no accepted `RoleOutput`; retention is not acceptance or a new call.
+
 ## Durable original-operation recovery
 
 ```python

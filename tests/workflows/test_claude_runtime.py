@@ -16,8 +16,23 @@ from kernelschema.artifacts import Bundle, Publication, durable_write, import_bu
 from kernelschema.budget import BudgetDenied, OwnerAccount, cost
 from kernelschema.contracts import MAX_INTEGER, ProtocolError, UnsupportedError, digest, jcs, sha256, validate
 from kernelschema.runtime import (
-    AdmissionDenied, ClaudeProfile, ClaudeRuntime, RoleDelivery, RuntimeFence, prepare_role_input,
+    AdmissionDenied, ClaudeProfile, ClaudeRuntime, RoleDelivery, RoleOutput, RuntimeFence, prepare_role_input,
 )
+
+
+@pytest.mark.parametrize("role,write_only", [("planner", False), ("coder", False), ("reviewer", False), ("coder", True), ("reviewer", True)])
+@pytest.mark.parametrize("mutation", ["missing_reason", "extra_field"])
+def test_other_role_protocols_still_require_exact_outer_fields(role, write_only, mutation):
+    output = {"protocol": "ks.claude.output.v1", "role": role, "assignment_sha256": "sha256:" + "0" * 64,
+              "status": "ok", "kind": {"planner": "writing_draft", "coder": "candidate_source", "reviewer": "review"}[role],
+              "content": "# synthetic source\n" if role == "coder" else {"reason": "SYNTHETIC nested reason"},
+              "reason": "SYNTHETIC outer reason"}
+    if mutation == "missing_reason":
+        del output["reason"]
+    else:
+        output["extra"] = "SYNTHETIC metadata"
+    with pytest.raises(ProtocolError, match="fields"):
+        RoleOutput.parse(output, role=role, assignment_sha256=output["assignment_sha256"], write_only=write_only)
 
 
 @pytest.fixture

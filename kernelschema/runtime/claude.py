@@ -50,7 +50,9 @@ candidate_files and content is exactly {format: "python_tree", entrypoint:
 The name-sorted files are the complete snapshot; omissions delete old files.
 Only the finite Source paths are permitted, never host paths. For planner,
 kind is writing_draft and content is a JSON object containing the proposed
-writing output. For reviewer, kind is review and content is a JSON object
+writing output. For a planner with fixed_assignment.writing_mode=write_only,
+put the explanation in content.reason; the outer reason field is optional.
+For reviewer, kind is review and content is a JSON object
 containing the review, with uncertainty explicit. A blocked output has null
 content and a nonempty reason. Drafts and reviews are untrusted proposals; the
 host validates and publishes them. Never put host file paths in place of file
@@ -419,11 +421,22 @@ class RoleOutput:
         return files
 
     @classmethod
-    def parse(cls, value, *, role: str, assignment_sha256: str, source_format="single_file"):
+    def parse(cls, value, *, role: str, assignment_sha256: str, source_format="single_file", write_only=False):
         if source_format not in ("single_file", "python_tree"):
             raise UnsupportedError("unsupported role Source format")
         if isinstance(value, str): value = loads(value)
         required = {"protocol", "role", "assignment_sha256", "status", "kind", "content", "reason"}
+        if write_only and role == "planner" and isinstance(value, dict):
+            # A writing explanation belongs to the draft; repeating it in the
+            # transport envelope is not a prerequisite for retaining files.
+            content = value.get("content")
+            reason = value.get("reason")
+            if not isinstance(reason, str):
+                reason = content.get("reason", "") if isinstance(content, dict) else ""
+            # Extra outer metadata remains untrusted and cannot supply runtime
+            # identity, usage or checks. The original response is kept verbatim.
+            value = {k: v for k, v in value.items() if k in required}
+            value["reason"] = reason if isinstance(reason, str) else ""
         if not isinstance(value, dict) or set(value) != required:
             raise ProtocolError("model output fields do not match the role protocol")
         kind = {"coder": "candidate_files" if source_format == "python_tree" else "candidate_source", "planner": "writing_draft", "reviewer": "review"}[role]
@@ -583,7 +596,8 @@ def _parse(events: bytes, intent: dict, profile: ClaudeProfile) -> tuple[dict, R
         try:
             output = RoleOutput.parse(terminal.get("structured_output", terminal.get("result")),
                                      role=intent["role"], assignment_sha256=intent["assignment_sha256"],
-                                     source_format=intent.get("source_format", "single_file"))
+                                     source_format=intent.get("source_format", "single_file"),
+                                     write_only=intent.get("writing_mode") == "write_only")
         except ProtocolError: errors.append("invalid_role_output")
     parsed = {"errors": sorted(set(errors)), "tokens": tokens, "total_cost_usd": cost,
               "native_rounds": turns, "physical_retries": retries, "assistant_messages": assistant_count,
@@ -643,6 +657,8 @@ class ClaudeRuntime:
             raise ProtocolError("frozen role input changed")
         if intent.get("source_format", "single_file") != loads(input_bytes)["fixed_assignment"].get("source_format", "single_file"):
             raise ProtocolError("original role Source format changed")
+        if intent.get("writing_mode") != loads(input_bytes)["fixed_assignment"].get("writing_mode"):
+            raise ProtocolError("original role writing mode changed")
         if intent["locator"]["operation_root"] != str(directory):
             raise ProtocolError("moving a private Claude runtime is unsupported")
         core = [i for i in context.intents() if i["operation_id"] == handle.operation_id]
@@ -709,6 +725,7 @@ class ClaudeRuntime:
                            "exit": str(directory / "exit.json"), "native_context_resume": False}
                 intent = {"run_id": context.run_id, "request_sha256": context.request_sha256, "owner": context.owner,
                           "source_format": payload["fixed_assignment"].get("source_format", "single_file"),
+                          "writing_mode": payload["fixed_assignment"].get("writing_mode"),
                           "implementation": self.identity(), "handle": asdict(handle), **asdict(handle),
                           "role": role, "purpose": purpose, "reservation": reservation, "source": source,
                           "locator": locator, "publication_id": uuid4().hex}

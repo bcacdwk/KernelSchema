@@ -6,6 +6,7 @@ is not admission of a subsequent implementation request or code qualification.
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -103,8 +104,9 @@ original when no useful revision follows. Explain what changed and why, citing
 the supplied feedback where relevant. Do not silently relax the task to fix code.
 Return content as {"raw":[{"node":"root","text":"complete YAML text"}],
 "reason":"brief rationale / changes and remaining uncertainties"}.
-Additional nodes use safe node IDs and complete text; dispatch may contain the
-directory's Markdown dispatch. Optional bindings may map coverage IDs to nodes.
+Every raw entry is YAML saved as <node>.yaml. For Markdown use the separate
+"dispatch":"complete Markdown text" field, saved as dispatch.md, outside raw.
+Additional YAML nodes use safe node IDs. Optional bindings map coverage IDs to nodes.
 To keep the current Schema, return {"decision":"keep","reason":"why"}.
 There is no selection catalog to reproduce, locked Contract wrapper, review
 answer, performance claim or next-action contract to complete. Existing Template
@@ -492,21 +494,62 @@ class WritingBackend:
     def _draft(self, context, state, receipt):
         op = next(o for o in state["operations"] if o["role"] == "planner")
         content = receipt.output.content if receipt.ok and receipt.output else None
+        write_only = mode(context.objects["profile"]) == "write_only"
         state["call_artifacts"] = receipt.evidence_refs()
         p = Publication(context.root, state["ids"]["draft"])
+        responses = []
+        if write_only and (events := receipt.facts.get("raw", {}).get("events")):
+            # Retention is independent of acceptance. In particular, a malformed
+            # wrapper or failed call must not turn a paid-for response into null.
+            assistant_text = []
+            for line in context.bundle.read(events).splitlines():
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue  # The complete original stream is already evidence.
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") == "result":
+                    value = event.get("result", event.get("structured_output"))
+                    if value is not None:
+                        responses.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=True))
+                elif event.get("type") == "assistant":
+                    message = event.get("message")
+                    blocks = message.get("content") if isinstance(message, dict) else None
+                    if isinstance(blocks, list):
+                        assistant_text.extend(b["text"] for b in blocks if isinstance(b, dict) and isinstance(b.get("text"), str))
+            responses = list(dict.fromkeys(responses + assistant_text))
+            nonempty = [text for text in responses if text]
+            if content is None and len(nonempty) == 1:
+                try:
+                    value = loads(nonempty[0])
+                    content = value.get("content", value) if isinstance(value, dict) else value
+                except ProtocolError:
+                    # Escaped invalid Unicode remains available in the original
+                    # stream; keep a serializable textual quotation here too.
+                    content = nonempty[0].encode("utf-8", errors="backslashreplace").decode("utf-8")
         state["draft_ref"] = p.put_bytes("draft.json", jcs({"format": "ks.writing.retained-draft.v1", "content": content,
-                                                           "receipt": receipt.receipt, "ok": receipt.ok}))
+            "receipt": receipt.receipt, "ok": receipt.ok,
+            **({"native_responses": [text.encode("utf-8", errors="backslashreplace").decode("utf-8") for text in responses]} if write_only else {})}))
         state["retained_files"] = []
         if isinstance(content, dict) and isinstance(content.get("raw"), list):
             for index, entry in enumerate(content["raw"]):
                 if isinstance(entry, dict) and isinstance(entry.get("text"), str):
                     state["retained_files"].append(p.put_bytes(f"original/{index}.txt", entry["text"].encode("utf-8", errors="backslashreplace")))
+        if write_only:
+            if isinstance(content, dict) and isinstance(content.get("dispatch"), str):
+                state["retained_files"].append(p.put_bytes("original/dispatch.md", content["dispatch"].encode("utf-8", errors="backslashreplace")))
         p.commit([state["draft_ref"], *state["retained_files"], *receipt.evidence_refs()], subjects=[context.request_ref])
         self._save(context, state, "draft_retained")
         try:
+            if not receipt.ok:
+                errors = ", ".join(receipt.facts.get("errors", [])) or "unsuccessful native call"
+                raise ProtocolError("planner call failed; original response retained: " + errors)
+            if receipt.output is None or receipt.output.status != "ok":
+                raise ProtocolError("planner returned no accepted writing proposal; original response retained")
             if content is None:
                 raise ProtocolError("planner returned no complete valid writing proposal")
-            state["draft"] = content if mode(context.objects["profile"]) == "write_only" else policy.parse_draft(context, content)
+            state["draft"] = content if write_only else policy.parse_draft(context, content)
         except ProtocolError as error:
             self._fail(state, str(error))
         else:

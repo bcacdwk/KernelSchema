@@ -52,6 +52,8 @@ def write_only_files(context, content):
     raw = sorted(({"node": e["node"], "text": e["text"]} for e in raw), key=lambda e: e["node"])
     if dispatch is not None and not isinstance(dispatch, str):
         raise ProtocolError("dispatch must contain Markdown text or null")
+    if dispatch is not None:
+        dispatch.encode("utf-8")
     diagnostics = []
     readable = True
     for entry in raw:

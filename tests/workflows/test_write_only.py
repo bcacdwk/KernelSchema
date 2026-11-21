@@ -88,6 +88,98 @@ def test_bad_format_retains_original_text(setup_writing, monkeypatch, content, e
     assert len(calls(setup[2])) == 1
 
 
+def scenario(setup, **changes):
+    path = setup[2] / "scenario.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), **changes}))
+
+
+@pytest.mark.parametrize("outer", [{}, {"reason": None, "extra_note": "SYNTHETIC optional metadata"}])
+def test_write_only_explanation_need_not_be_repeated_in_outer_wrapper(setup_writing, monkeypatch, outer):
+    content = {**proposal(), "dispatch": "# Dispatch\nRead root.yaml.\n"}
+    setup = simple(setup_writing, content=content)
+    scenario(setup, omit_outer_reason=True, outer=outer)
+    result = run(setup, monkeypatch)
+    assert result["status"] == "completed"
+    bundle = Bundle(setup[4])
+    info = result["extensions"]["information"]
+    manifest = bundle.document(result["schema"])
+    assert bundle.read(manifest["dispatch"]).decode() == content["dispatch"]
+    retained = loads(bundle.read(info["candidate_draft"]))
+    assert retained["content"] == content
+    envelope = json.loads(retained["native_responses"][0])
+    assert envelope["content"] == content and envelope.get("reason") is None
+    assert result["usage"]["calls"]["reviewer"] == 0 and len(calls(setup[2])) == 1
+    assert api.design(continue_run=setup[4]) == result
+
+
+@pytest.mark.parametrize("dispatch,expected", [("# Dispatch\n- use `root.yaml`\n", "partial"), ("DESIGN: {route: root}\n", "completed")])
+def test_raw_dispatch_node_is_never_guessed_to_be_markdown(setup_writing, monkeypatch, dispatch, expected):
+    content = proposal()
+    content["raw"].append({"node": "dispatch", "text": dispatch})
+    setup = simple(setup_writing, content=content)
+    scenario(setup, omit_outer_reason=True)
+    result = run(setup, monkeypatch)
+    assert result["status"] == expected
+    bundle = Bundle(setup[4])
+    manifest = bundle.document(result["schema"])
+    assert manifest["dispatch"] is None
+    files = {item["node"]: bundle.read(item["file"]).decode() for item in manifest["raw"]}
+    assert files == {"root": TEXT, "dispatch": dispatch}
+    if expected == "partial":
+        assert any("dispatch.yaml" in d for d in result["extensions"]["information"]["diagnostics"])
+    assert len(calls(setup[2])) == 1
+
+
+@pytest.mark.parametrize("changes,error", [
+    ({"outer": {"role": "coder"}}, "invalid_role_output"),
+    ({"outer": {"assignment_sha256": "sha256:" + "0" * 64}}, "invalid_role_output"),
+    ({"outer": {"kind": "candidate_source"}}, "invalid_role_output"),
+    ({"init": {"tools": ["Read"]}}, "tool_or_mcp_permission_mismatch"),
+    ({"exit_code": 7}, "nonzero_exit"),
+    ({"terminal": {"subtype": "error_during_execution", "is_error": True}}, "native_terminal_failure"),
+    ({"terminal": {"usage": None}}, "missing_or_invalid_usage"),
+])
+def test_unaccepted_native_reply_is_retained_without_publishing_schema(setup_writing, monkeypatch, changes, error):
+    content = proposal()
+    setup = simple(setup_writing, content=content)
+    scenario(setup, omit_outer_reason=True, **changes)
+    result = run(setup, monkeypatch)
+    assert result["status"] in ("failed", "blocked") and result["schema"] is None
+    bundle = Bundle(setup[4])
+    info = result["extensions"]["information"]
+    retained = loads(bundle.read(info["candidate_draft"]))
+    assert retained["content"] == content and retained["ok"] is False
+    assert bundle.read(info["retained_files"][0]).decode() == TEXT
+    assert json.loads(retained["native_responses"][0])["content"] == content
+    assert any(error in diagnostic for diagnostic in info["diagnostics"])
+    receipt = loads(bundle.read(retained["receipt"]))
+    assert receipt["status"] == "failed" and error in receipt["errors"]
+    if error == "missing_or_invalid_usage":
+        assert receipt["tokens"] is None and not receipt["accounting_complete"]
+    assert len(calls(setup[2])) == 1
+    assert result["usage"]["calls"]["reviewer"] == 0
+
+
+def test_malformed_reply_text_remains_a_portable_artifact(setup_writing, monkeypatch):
+    setup = simple(setup_writing)
+    response = '{"content":{"raw":[{"node":"root","text":"unfinished'
+    scenario(setup, response=response)
+    result = run(setup, monkeypatch)
+    assert result["status"] == "failed" and result["schema"] is None
+    bundle = Bundle(setup[4])
+    info = result["extensions"]["information"]
+    retained = loads(bundle.read(info["candidate_draft"]))
+    assert retained["content"] == response and retained["native_responses"] == [response]
+    publication = Publication(setup[4])
+    selected = publication.put_json("retained-failure.json", result)
+    context = api.open_run("design", setup[4])
+    publication.commit([selected], subjects=[context.request_ref])
+    exported = setup[4].parent / "exported-failure"
+    import_bundle(bundle, exported, [selected], subjects=[context.request_ref])
+    for ref in [info["candidate_draft"], *info["retained_files"], *info["call_artifacts"]]:
+        assert Bundle(exported).read(ref) == bundle.read(ref)
+
+
 @pytest.mark.parametrize("keep", [True, False])
 def test_optimize_preserves_current_schema_and_actual_feedback(setup_writing, monkeypatch, keep):
     content = {"decision": "keep", "reason": "The actual failure is in code; keep this design"} if keep else proposal()

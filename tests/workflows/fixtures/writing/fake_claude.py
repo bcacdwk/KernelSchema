@@ -22,7 +22,9 @@ with (root / "invocations.jsonl").open("a") as f:
 role = request["role"]
 model = arg("--model")
 session = arg("--session-id")
-print(json.dumps({"type": "system", "subtype": "init", "session_id": session, "model": model, "tools": [], "mcp_servers": [], "skills": [], "plugins": [], "permissionMode": "dontAsk", "cwd": str(Path.cwd())}), flush=True)
+initial = {"type": "system", "subtype": "init", "session_id": session, "model": model, "tools": [], "mcp_servers": [], "skills": [], "plugins": [], "permissionMode": "dontAsk", "cwd": str(Path.cwd())}
+initial.update(scenario.get("init", {}))
+print(json.dumps(initial), flush=True)
 if scenario.get("failure") == role:
     raise SystemExit(7)
 if role == "planner":
@@ -36,4 +38,10 @@ else:
     if scenario.get("bad_subject"):
         content["subject"]["schema_sha256"] = "sha256:" + "0" * 64
 output = {"protocol": "ks.claude.output.v1", "role": role, "assignment_sha256": request["assignment_sha256"], "status": "ok", "kind": "writing_draft" if role == "planner" else "review", "content": content, "reason": "SYNTHETIC writing CPU fixture"}
-print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "session_id": session, "result": json.dumps(output), "num_turns": 1, "total_cost_usd": 0.001, "usage": {"input_tokens": 11, "output_tokens": 7, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 5}, "modelUsage": {model: {"inputTokens": 11, "outputTokens": 7}}, "permission_denials": []}), flush=True)
+if scenario.get("omit_outer_reason"):
+    del output["reason"]
+output.update(scenario.get("outer", {}))
+terminal = {"type": "result", "subtype": "success", "is_error": False, "session_id": session, "result": scenario.get("response", json.dumps(output)), "num_turns": 1, "total_cost_usd": 0.001, "usage": {"input_tokens": 11, "output_tokens": 7, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 5}, "modelUsage": {model: {"inputTokens": 11, "outputTokens": 7}}, "permission_denials": []}
+terminal.update(scenario.get("terminal", {}))
+print(json.dumps(terminal), flush=True)
+raise SystemExit(scenario.get("exit_code", 0))

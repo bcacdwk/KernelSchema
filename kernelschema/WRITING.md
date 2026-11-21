@@ -50,11 +50,19 @@ The normal planner content is small:
 {"raw":[{"node":"root","text":"complete YAML text"}],"reason":"What was chosen or changed, and why"}
 ```
 
-Optional `dispatch` contains Markdown; optional `bindings` maps coverage IDs to
-nodes. Optimize may return `{"decision":"keep","reason":"why"}`. There is no
+Every `raw` entry is saved as `<node>.yaml`. Put Markdown in the separate
+`"dispatch":"complete Markdown text"` field, saved as `dispatch.md`; a raw node
+named `dispatch` remains YAML. Optional `bindings` maps coverage IDs to nodes.
+Optimize may return `{"decision":"keep","reason":"why"}`. There is no
 required selection catalog, locked Contract wrapper, 11-field action envelope
 or separate review response. Additional old envelope fields are ignored in
 write-only mode. No proposed next action is executed by a writing command.
+
+The runtime envelope still binds protocol, planner role, assignment, status and
+output kind. In write-only mode the explanation can live solely in
+`content.reason`; an omitted or unusable outer reason and extra outer metadata
+do not reject the draft. Such metadata never supplies runtime facts. Strict
+writing, coder and reviewer protocols retain their exact field requirements.
 
 `result.schema` and `result.scope` remain the existing portable Refs. The Schema
 manifest contains the exact `raw` files, optional dispatch and original parent
@@ -62,7 +70,9 @@ for a revision. `extensions.information` records:
 
 - `schema_directory`: the directory relative to the run root, usable by a coder;
 - `rationale` and `change_report`: the explanation and exact retained changes;
-- `candidate_draft` and `retained_files`: the original response and proposed text;
+- `candidate_draft`: parsed content and native reply strings in
+  `native_responses`, including failed calls;
+- `retained_files`: the available original raw and dispatch text;
 - `diagnostics`, `writing_mode`, and the explicit unevaluated qualification.
 
 Only safe filenames, unique nodes including `root`, UTF-8 and basic nonempty
@@ -73,6 +83,10 @@ saved with a partial result; an unusable envelope or unsafe filename leaves the
 original proposal text and a clear failure diagnosis. The host does not trim,
 rewrite or discard a draft to satisfy Template text limits. Original runtime
 failures retain their receipts and native outputs; they are not recast as success.
+Unreadable reply JSON remains a text artifact. Failed calls, mismatched identities
+and unknown native usage cannot publish a successful Schema; their available
+text is retained for inspection. Existing failed runs and accounts are immutable:
+this change does not reclassify or rerun them.
 
 The writing checks report basic readability/publication and `not_run` for
 semantic review. Downstream implementation consumes the files and evaluates the
