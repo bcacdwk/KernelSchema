@@ -6,8 +6,9 @@ account. The earlier H20 target, requests and rejected diagnostic remain intact.
 This document declares a target; it does not certify a worker, dev permission,
 namespace isolation, a benchmark or an implementation.
 
-The requested runtime is `NVIDIA L20D`, CUDA compute capability `[10,3]`,
+The selected device is `NVIDIA L20D`, CUDA compute capability `[10,3]`,
 PyTorch `2.9.0+cu130`, Triton `3.7.1`, and `torch.version.cuda == "13.0"`.
+The exact runtime name for the post-diagnostic target is recorded below.
 K1 must match its actual complete worker capture against these requirements.
 
 An authenticated, non-forced `GET /v1/env/L20D` returned HTTP 200 on
@@ -27,6 +28,30 @@ timeout ceiling, but no Python/bwrap absolute path or namespace permission.
 The target does not pin cached SM count, memory capacity, driver or nvcc.
 K1 captures actual device, driver, executable hashes and stack identity; later
 qualified jobs must match that capture under the existing channel rules.
+
+The single independent L20D diagnostic subsequently ran as `dv_37ffeb8cd2f2`
+with original key `b16_l20d_diagnostic_2ebb6e8cfac34b1d822cba45cb9f5860`.
+Its retained terminal response has SHA-256
+`2a9ad595c4f1b4d94a54a1825a60aa67c96f6664b3589d13936a049f7656a7a5`:
+`succeeded`, `execution_state=stopped`, `cleanup_pending=false`, and
+`execution_quarantined=false`. The complete diagnostic stdout reports:
+
+```json
+{"name":"NVIDIA L20D        ","architecture":[10,3],"torch":"2.9.0+cu130","triton":"3.7.1","cuda_build":"13.0","mode":"cuda"}
+```
+
+The post-diagnostic target preserves those eight trailing spaces in
+`runtime.name`; no normalization or comparator relaxation is introduced. The
+earlier cache-based target remains retained as a separate preparation artifact.
+The interpreter was `/venv/bin/python`, resolving to `/usr/bin/python3.12`,
+Python 3.12.3, executable SHA-256
+`1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118`.
+The trusted diagnostic returned `bwrap=null` from `shutil.which("bwrap")`.
+No existing bwrap path was established, so its namespace/readonly probe did not
+run. This observation does not prove every filesystem path lacks bwrap. No
+tools were installed and the original six-job K1 qualification did not start.
+The unqualified Demo therefore carries `remote=null`; successful dev execution
+and runtime observation alone do not establish K1 qualification.
 
 Selected immutable references, whose original text accompanies the target:
 
