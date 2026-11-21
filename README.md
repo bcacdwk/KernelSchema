@@ -25,7 +25,7 @@ Schema Extract 通过唯一入口 `schema_extract/extract_yaml.py` 执行六阶�
 
 ## 独立 workflow 试用
 
-design/optimize 默认只写 Schema：一次 Planner 调用保存 YAML、简短原因与真实调用记录，不要求独立审阅或效果验收。可直接使用 `kernelschema design --task task.md --out run`；优化再提供 `--schema` 和 `--feedback`。见[写作 API](kernelschema/WRITING.md)。[独立驱动](docs/workflows/standalone.md)在显式提供 AKA 原生 problem/config 后，可串联 design → AKA 标准 implement → 一次 optimize → 必要的后续 implement。实现和评测沿用 AKA 标准流程，写完不等于效果已证实；新的衔接验证目前为 CPU 与 synthetic 测试。
+design/optimize 默认只写 Schema：一次 Planner 调用保存 YAML、简短原因与真实调用记录，不要求独立审阅或效果验收。可直接使用 `kernelschema design --task task.md --out run`；优化再提供 `--schema` 和 `--feedback`。见[写作 API](kernelschema/WRITING.md)。任意显式 task 可用 [`kernelschema iterate` / `api.iterate`](docs/workflows/standalone.md#finite-automatic-iteration) 串联 design（或已有 Schema）→ AKA 标准 implement → 真实反馈 optimize → 必要的下一版 implement；AKA 的 `--schema --schema-iterate` 使用同一有限循环，`keep` 停止。安装、固定 Schema 实现、版本循环及真实结果边界见 [vector-add 示例](examples/workflows/vector_add/README.md)。实现和评测沿用 AKA 标准流程，写作完成不等于效果已证实。
 
 ## 术语
 

@@ -75,7 +75,13 @@ Native `--profile`, repeatable `--patch`, `--doc`, and JSON-file `--settings` /
 `--owner-limits` remain optional native adapters; normal runs use AKA's own
 limits and usage records.
 
-Every version gets a new native workspace. `iterations.json` locates each
+Every version gets a new native workspace. The loop does not automatically
+install the previous kernel as that workspace's incumbent; the native problem
+and ordinary AKA setup determine its starting point. An explicit `--doc` / API
+`docs` file can supply previous code as a documented coding reference. A Schema
+revision makes no promise of a performance improvement.
+
+`iterations.json` locates each
 writing/native stage and its complete returned result. Declared native feedback
 is copied byte-for-byte and passed with the complete native result to optimize,
 including terminal implementation failures. Missing feedback, an unsettled or
@@ -144,8 +150,10 @@ experiments. They are not prerequisites for file writing or standard AKA
 implementation. See [the protocol](protocol.md), [target metadata](target-environment.md)
 and [legacy readonly boundary](stage-ro.md) when working on that old path.
 
-The new write-only and driver tests use synthetic model/native responses on CPU.
-They verify file preservation, finite calls, original feedback, resume behavior
-and the API handoff. They do not establish real model or GPU performance. A
-runtime profile remains an explicit local CLI choice; no interpreter, CLI or
-remote tools are downloaded by this workflow.
+The write-only and driver CPU tests use synthetic model/native responses to
+check file preservation, finite calls, original feedback, the relevant entry's
+resume/replay behavior and the API handoff. Real run evidence and its candidate
+and host-verification boundaries are recorded separately in the
+[vector-add example](../../examples/workflows/vector_add/README.md#recorded-finite-iteration).
+A runtime profile remains a local CLI choice; no interpreter, CLI or remote
+tools are downloaded by this workflow.

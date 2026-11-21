@@ -13,11 +13,58 @@ The file is 9,106 bytes, SHA-256
 `58a83e9be44e4d1d5f656454fbec1de65ec948f49c79aad06f9daeb6b6d30e1c`.
 It contains no native receipt, CLI stream or local runtime profile.
 
+## Measured solution
+
+[`kernel.py`](kernel.py) is the unchanged 2,089-byte Triton candidate accepted
+by the native host on 2026-11-21. Its SHA-256 is
+`105d89d7432e0662625b9388df68ac1f36ecfcecb1bd4494074b3adc7a5f7e5f`.
+The independent host ABBA measured **1.503522×** geometric-mean speedup over
+the PyTorch reference: 11.226588 µs baseline and 7.466858 µs candidate, for the
+three shapes in [the task](task.md). Candidate full evaluation and the separate
+correctness gate each passed six cases per shape with maximum absolute error 0.
+
+In a CUDA environment with PyTorch and Triton, use it from this directory:
+
+```python
+import torch
+from kernel import Model
+
+x = torch.randn(1024, device="cuda", dtype=torch.bfloat16)
+residual = torch.randn_like(x)
+y = Model(alpha=1.0)(x, residual)
+```
+
+The final validation used KernelSchema `13efd1554d112d56e4d767ba43b66257b2d75669`
+and AKA `55bc39f3239e2d9fa65d2a799182a26df413368c`, through one `api.implement`
+campaign. It supplied the earlier measured candidate as an explicit `docs`
+reference; the coder materialized identical bytes in the new workspace. The
+earlier finite run below generated that candidate from the supplied Schema.
+This final campaign added independent measurements and host promotion without
+a new Schema or writer call.
+
+| Final campaign job | Purpose | Result |
+| --- | --- | --- |
+| `ev_4c605098b3bc` | New PyTorch reference V0 | Three shapes, six cases each passed |
+| `ev_7102dba05dfd` | Candidate full evaluation | Three shapes, six cases each passed |
+| `ev_7840da47d4aa` | Agent same-allocation ABBA | Complete and valid |
+| `ev_9e107207e34c` | CandidateGate correctness-only | Three shapes, six cases each passed |
+| `ev_53c06a9e4f27` | Independent host ABBA | `accepted=true`, verification `PASS`, `reused=false` |
+
+The host timing above is AKA's projection of that single host job: one complete
+A→B→B→A block, two baseline and two candidate samples per shape. Each complete
+ABBA run used one correctness case; the separate full and gate jobs supplied
+the six-case checks. [`results.json`](results.json) records the source hashes,
+candidate/promotion commits, timestamp, receipt hashes and per-shape host timings.
+Environment identity remains unknown; the measurements cover these three shapes
+on this L20D allocation. The timing samples include outliers, and this single
+block does not establish statistical significance or performance on other tasks.
+
 ## Implement the supplied Schema
 
 Use a Python environment with KernelSchema and the matching AKA packages,
 your configured coding CLI and evaluation backend. Follow AKA's
-[installation and native Task setup](https://github.com/bcacdwk/atrex-kernel-agent/blob/feat/schema-workflows-v1/docs/schema-standard-workflow.md).
+[matching source/package installation](https://github.com/bcacdwk/atrex-kernel-agent/blob/feat/schema-workflows-v1/docs/schema-standard-workflow.md#install-and-legacy-compatibility)
+and [native Task setup](https://github.com/bcacdwk/atrex-kernel-agent/blob/feat/schema-workflows-v1/docs/schema-standard-workflow.md#native-task-and-performance-baseline).
 Its [vector-add example](https://github.com/bcacdwk/atrex-kernel-agent/tree/feat/schema-workflows-v1/skills/atrex-aka-light/examples/native-atrex-bench-vector-add)
 provides the actual reference, input generator, three numeric shape IDs and
 measured L20D reference metadata. Copy that directory into the `data/` tree
@@ -66,6 +113,13 @@ This starts with design. To begin with the supplied proposal, add
 `--max-iters 4` permits up to four native coder iterations per version. A `keep`
 decision ends the sequence without another implementation.
 
+A new workspace does not automatically make the previous version's kernel the
+next campaign's incumbent. Each campaign starts from the supplied native
+problem and ordinary AKA setup. To provide an earlier implementation as coding
+reference, pass its explicit file with `--doc` (AKA: `--schema-doc`; API:
+`docs=(path,)`) and keep its provenance. That supplies text to the coder, not an
+automatic promotion or a guarantee that performance improves between versions.
+
 The same loop can be called directly, with your existing native settings and
 composition patches:
 
@@ -108,8 +162,43 @@ Preserve the whole run. Any existing output directory is rejected, so the loop
 cannot replay an interrupted, possibly charged stage. Settle that original
 operation using its own records before starting new work.
 
-Native `completed` alone, or an incumbent's carried-forward `PASS`, does not
-establish a new candidate's correctness or promotion. These commands document
-the CPU-tested entry, not a recorded successful model/GPU closed loop. See the
+Read each native stage's `schema-result.json`, version/episode feedback and
+candidate source together. `candidate_commit` identifies the candidate;
+`measurement_subject` and `measurement_source` distinguish its measurements
+from an incumbent's carried-forward result. Native `completed` alone, or an
+incumbent's carried-forward `PASS`, does not establish candidate correctness or
+host promotion. Check the original correctness results and host verification
+status before interpreting a speedup.
+
+When the service omits environment identity, it stays `null` and cross-record
+comparability stays `unknown`. Complete source-bound results from one native
+evaluation and a complete SDK same-allocation A→B→B→A comparison can be reported;
+unknown identity does not permit cross-record measurement reuse or shape minima.
+See the
 [standalone workflow instructions](../../../docs/workflows/standalone.md#finite-automatic-iteration)
 for API options and the separate fixed row-softmax example.
+
+## Recorded finite iteration
+
+On 2026-11-21, a real `api.iterate` run used this unchanged Schema with
+KernelSchema `13efd1554d112d56e4d767ba43b66257b2d75669` and AKA
+`88d773b3acdd60ed13334dc46404e2d0caefe49f`. The first campaign generated a Triton
+candidate whose full evaluation and six-case correctness check passed for all
+three task shapes (maximum absolute error 0). Its Agent-issued same-allocation
+ABBA passed, reporting a 2.350190× geometric-mean speedup over the PyTorch
+reference within that comparison.
+
+Host promotion failed: after the four accepted jobs (new reference V0, candidate
+full evaluation, Agent ABBA, and six-case correctness), its separate host ABBA
+had no remaining job allocation. No fifth job was submitted. The finite loop
+passed that actual failure to one write-only optimize call, which completed
+with `keep`; it stopped without a second native campaign. This demonstrates
+real implementation feedback and automatic stopping, while preserving the
+failed host verification. If both Agent and host perform ABBA, allow for both
+jobs in the normal native budget; the four-job allocation did not cover this
+observed path.
+
+The final campaign above used five new jobs and obtained its own successful
+host verification. It leaves the earlier failed host result intact. The earlier
+2.350190× Agent ratio and the final 1.503522× host ratio belong to separate
+allocations; they do not establish a performance change between campaigns.
