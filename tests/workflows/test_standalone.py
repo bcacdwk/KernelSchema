@@ -11,6 +11,7 @@ import yaml
 from examples.workflows.row_softmax.driver import Demo, DEFAULT_LIMITS, load_runtime
 from kernelschema import api, writing, template_api
 from kernelschema.artifacts import Bundle, Publication, durable_write
+from kernelschema.budget import OwnerAccount, cost
 from kernelschema.contracts import ProtocolError, UnsupportedError, digest, jcs, loads, sha256
 from kernelschema.evaluation.environment import target_environment, read_target, match_target
 from kernelschema.implement.reference import ReferenceBackend
@@ -217,3 +218,191 @@ def test_typed_target_contract_locks_public_task_and_source_bytes(tmp_path, synt
     with pytest.raises(UnsupportedError, match="differs"): match_target(jcs(target), {"mode": "cuda"})
     target["sources"][0]["text"] += "changed"
     with pytest.raises(ProtocolError, match="bytes/hash"): read_target(jcs(target))
+
+
+def existing_parent(tmp_path, *, limits=None):
+    """Independent synthetic diagnostics; never opens a real validation owner."""
+    owner = OwnerAccount.create(tmp_path / "private/original-owner.json", owner="synthetic-original-owner",
+                                limits=deepcopy(limits if limits is not None else DEFAULT_LIMITS))
+    owner.register("synthetic-diagnostic", sha256(b"synthetic diagnostic"), owner.descriptor["limits"],
+                   root=str(tmp_path / "diagnostic"))
+    for role in ("coder", "evaluator"):
+        operation = "synthetic-prior-" + role
+        reservation = owner.reserve("synthetic-diagnostic", operation, role=role, purpose="synthetic prior diagnostic",
+            amount=cost(role=role, calls=int(role == "coder"), evaluator_jobs=int(role == "evaluator"), active_ms=1))
+        assert owner.authorize(reservation)
+        owner.absorb("synthetic-diagnostic", {"producer": "synthetic:diagnostic", "operation_id": operation,
+            "role": role, "purpose": "synthetic prior diagnostic", "receipt_id": operation + ":terminal", "sequence": 1,
+            "receipt": None, "state": "settled", "calls": int(role == "coder"), "evaluator_jobs": int(role == "evaluator"),
+            "tokens": 0, "gpu_ms": None}, terminated=True)
+    publication = Publication(tmp_path / "public-parent")
+    parent = publication.put_json("original-parent.json", owner.descriptor)
+    publication.commit([parent])
+    return Bundle(publication.root), owner, parent
+
+
+def forbid_new_owner(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("existing-parent Demo must never create an owner")
+    monkeypatch.setattr(OwnerAccount, "create", forbidden)
+
+
+def test_existing_parent_qualification_design_actions_recovery_and_export(tmp_path, synthetic, monkeypatch):
+    from test_agate_channel import Wire, PROFILE
+    limits = deepcopy(DEFAULT_LIMITS); limits["evaluator_jobs"] = 10
+    bundle, owner, parent = existing_parent(tmp_path, limits=limits)
+    original_operations = owner.operations()
+    original_bytes = owner.path.read_bytes()
+    forbid_new_owner(monkeypatch)
+    target = synthetic_target()
+    remote = {"channel": PROFILE, "gpu": "synthetic-gpu", "python": "/synthetic/python", "bwrap": "/synthetic/bwrap"}
+    stopped = []
+    def crash(label, demo):
+        if label == "writing_published" and not stopped:
+            stopped.append(label); raise RuntimeError("synthetic external-owner crash")
+    demo = Demo.create(tmp_path / "demo", parent=parent, parent_bundle=bundle, authority=owner.path,
+        limits=limits, environment=jcs(target), remote=remote, checkpoint=crash)
+    assert owner.path.read_bytes() == original_bytes
+    assert demo.owner.path == owner.path and demo.config["parent"] == parent
+    assert not (demo.root / ".runtime/owner.json").exists()
+    assert (demo.root / ".runtime/demo-anchor.json").stat().st_mode & 0o777 == 0o600
+    assert Bundle(demo.root).read(parent) == bundle.read(parent)
+    assert set(demo.config["requests"]) == {"design", "fixed", "partial", "verify", "optimize"}
+    for ref in demo.config["requests"].values():
+        assert Bundle(demo.root).document(ref)["budget"]["parent"] == parent
+    # Imported public bytes suffice; only the private original authority remains live.
+    bundle.root.rename(tmp_path / "archived-public-parent")
+    wire = Wire(target)
+    assert demo.prepare_agate(transport=wire)["status"] == "completed"
+    with pytest.raises(RuntimeError, match="synthetic external-owner crash"): demo.run()
+    reopened = Demo(demo.root)
+    assert reopened.owner.path == owner.path
+    result = reopened.run()
+    assert [item["operation"] for item in result["history"]] == ["design", "implement", "optimize", "implement"]
+    assert result["phase"] == "done" and result["optimize_count"] == 1
+    assert result["owner"] == owner.descriptor and len(wire.posts) == 6
+    for entry in reopened.state["history"]:
+        context = api.open_run(Bundle(reopened.root).document(entry["result"])["operation"], reopened.root / entry["out"])
+        assert context.request["budget"]["parent"] == parent
+        assert context.load_state("budget")["authority"] == str(owner.path)
+    qualified = api.open_run("implement", reopened.root / "qualification")
+    assert qualified.request["budget"]["parent"] == parent
+    assert qualified.load_state("budget")["authority"] == str(owner.path)
+    requests = [Bundle(reopened.root).document(item["request"]) for item in result["history"]]
+    assert requests[1]["seed"] is None and requests[3]["seed"] is None
+    assert requests[1]["schema"] != requests[3]["schema"]
+    operations = owner.operations()
+    assert all(operations[key] == value for key, value in original_operations.items())
+    assert sum(op["lower"]["calls"] for op in operations.values()) == 9
+    assert sum(op["lower"]["evaluator_jobs"] for op in operations.values()) == 9
+    calls = (len(synthetic[0].calls), len(synthetic[1].calls))
+    assert Demo(demo.root).run() == result and calls == (4, 4)
+    assert (len(synthetic[0].calls), len(synthetic[1].calls)) == calls
+    exported = tmp_path / "exported"
+    reopened.export(exported)
+    assert Bundle(exported).read(parent) == Bundle(reopened.root).read(parent)
+    assert not (exported / ".runtime").exists()
+    for path in exported.rglob("*"):
+        if path.is_file():
+            assert str(owner.path).encode() not in path.read_bytes()
+            assert original_bytes not in path.read_bytes()
+
+
+@pytest.mark.parametrize("blocked_by", ["pause", "fence", "model_calls"])
+def test_existing_parent_preserves_prior_usage_pause_fence_and_tight_budget(tmp_path, synthetic, monkeypatch, blocked_by):
+    limits = deepcopy(DEFAULT_LIMITS)
+    if blocked_by == "model_calls": limits["model_calls"] = 2
+    bundle, owner, parent = existing_parent(tmp_path, limits=limits)
+    if blocked_by == "pause": owner.pause()
+    if blocked_by == "fence":
+        reservation = owner.reserve("synthetic-diagnostic", "synthetic-unknown", role="evaluator", purpose="synthetic unknown",
+                                    amount=cost(evaluator_jobs=1, active_ms=1))
+        assert owner.authorize(reservation)
+        owner.mark_unknown("synthetic-unknown", "SYNTHETIC unresolved original operation")
+    before = owner.path.read_bytes()
+    original = loads(before)
+    forbid_new_owner(monkeypatch)
+    demo = Demo.create(tmp_path / "demo", parent=parent, parent_bundle=bundle.root, authority=owner.path)
+    assert owner.path.read_bytes() == before
+    result = Demo(demo.root).run()
+    assert not synthetic[0].calls and not synthetic[1].calls
+    assert result["status"] in ("blocked", "partial")
+    after = loads(owner.path.read_bytes())
+    assert after["descriptor"] == original["descriptor"] and after["operations"] == original["operations"]
+    assert after["paused"] == original["paused"] and after["active_ms"] >= original["active_ms"]
+    assert not (demo.root / ".runtime/owner.json").exists()
+    if blocked_by == "fence":
+        assert result["recovery"] == "settle_only" and result["fences"] == ["synthetic-unknown"]
+        assert set(after["requests"]) == set(original["requests"])
+        for key in ("request_sha256", "limits", "root"):
+            assert after["requests"]["synthetic-diagnostic"][key] == original["requests"]["synthetic-diagnostic"][key]
+        assert after["requests"]["synthetic-diagnostic"]["active_ms"] >= original["requests"]["synthetic-diagnostic"]["active_ms"]
+
+
+@pytest.mark.parametrize("change", ["parent", "parent_bundle", "authority", "limits", "wrong_owner", "wrong_ref"])
+def test_existing_parent_inputs_rejected_before_output_or_owner_changes(tmp_path, monkeypatch, change):
+    bundle, owner, parent = existing_parent(tmp_path)
+    other = OwnerAccount.create(tmp_path / "other/owner.json", owner="different-owner", limits=deepcopy(DEFAULT_LIMITS))
+    values = {"parent": parent, "parent_bundle": bundle, "authority": owner.path}
+    if change in ("parent", "parent_bundle", "authority"):
+        del values[change]
+        match = "requires parent, parent_bundle and authority together"
+    elif change == "limits":
+        values["limits"] = {**DEFAULT_LIMITS, "model_calls": DEFAULT_LIMITS["model_calls"] + 1}
+        match = "limits conflict"
+    elif change == "wrong_owner":
+        values["authority"] = other.path
+        match = "descriptor differs"
+    else:
+        values["parent"] = {**parent, "sha256": sha256(b"different parent bytes")}
+        match = "Ref digest mismatch"
+    before = owner.path.read_bytes(), other.path.read_bytes()
+    forbid_new_owner(monkeypatch)
+    with pytest.raises(ProtocolError, match=match): Demo.create(tmp_path / "demo", **values)
+    assert not (tmp_path / "demo").exists()
+    assert (owner.path.read_bytes(), other.path.read_bytes()) == before
+
+
+@pytest.mark.parametrize("change", ["missing_locator", "relative_locator", "missing_authority", "wrong_owner"])
+def test_existing_parent_reopen_refuses_missing_or_changed_authority(tmp_path, monkeypatch, change):
+    bundle, owner, parent = existing_parent(tmp_path)
+    other = OwnerAccount.create(tmp_path / "other/owner.json", owner="different-owner", limits=deepcopy(DEFAULT_LIMITS))
+    demo = Demo.create(tmp_path / "demo", parent=parent, parent_bundle=bundle, authority=owner.path)
+    anchor = deepcopy(demo.anchor)
+    if change == "missing_locator": del anchor["authority"]
+    elif change == "relative_locator": anchor["authority"] = ".runtime/owner.json"
+    elif change == "missing_authority": owner.path.unlink()
+    else: anchor["authority"] = str(other.path)
+    durable_write(demo.root / ".runtime/demo-anchor.json", jcs(anchor), mode=0o600, replace=True)
+    forbid_new_owner(monkeypatch)
+    with pytest.raises(ProtocolError): Demo(demo.root)
+    assert not (demo.root / ".runtime/owner.json").exists()
+    if change == "missing_authority": assert not owner.path.exists()
+
+
+def test_existing_parent_cli_prepare_inspect_without_private_export(tmp_path, monkeypatch, capsys):
+    from examples.workflows.row_softmax.run_demo import main
+    bundle, owner, parent = existing_parent(tmp_path)
+    ref_file = tmp_path / "parent-ref.json"
+    durable_write(ref_file, jcs(parent))
+    before = loads(owner.path.read_bytes())
+    forbid_new_owner(monkeypatch)
+    args = ["--parent-ref", str(ref_file), "--parent-bundle", str(bundle.root), "--authority", str(owner.path)]
+    assert main(["prepare", "--out", str(tmp_path / "demo"), *args]) == 0
+    output = capsys.readouterr()
+    assert loads(output.out.encode())["owner"] == owner.descriptor
+    assert str(owner.path) not in output.out + output.err
+    demo = Demo(tmp_path / "demo")
+    assert demo.owner.path == owner.path and demo.config["parent"] == parent
+    assert main(["inspect", "--demo", str(demo.root)]) == 0
+    assert str(owner.path) not in capsys.readouterr().out
+    assert main(["export", "--demo", str(demo.root), "--out", str(tmp_path / "exported")]) == 0
+    assert str(owner.path) not in capsys.readouterr().out
+    assert Bundle(tmp_path / "exported").read(parent) == bundle.read(parent)
+    assert not (tmp_path / "exported/.runtime").exists()
+    after = loads(owner.path.read_bytes())
+    for key in ("descriptor", "operations", "requests", "paused", "active_ms"):
+        assert after[key] == before[key]
+    assert main(["prepare", "--out", str(tmp_path / "incomplete"), "--parent-ref", str(ref_file)]) == 2
+    assert "requires parent, parent_bundle and authority together" in capsys.readouterr().err
+    assert not (tmp_path / "incomplete").exists()

@@ -28,6 +28,9 @@ def main(argv=None):
     create.add_argument("--schema", help="complete existing raw directory; default is handwritten R0")
     create.add_argument("--receipt", help="optional original extract delivery receipt, consumed without running extract")
     create.add_argument("--remote", help="JSON channel/gpu/python/bwrap; existing tools only")
+    create.add_argument("--parent-ref", help="JSON containing only the original public parent Ref; requires --parent-bundle and --authority")
+    create.add_argument("--parent-bundle", help="original public parent Bundle directory")
+    create.add_argument("--authority", help="original private owner authority file; used in place, never copied")
     for name in ("run", "continue", "inspect", "qualify", "export"):
         command = sub.add_parser(name)
         command.add_argument("--demo", required=True)
@@ -52,7 +55,9 @@ def main(argv=None):
                 environment=Path(args.environment).read_bytes() if args.environment else None,
                 objective=Path(args.objective).read_bytes() if args.objective else None,
                 schema_directory=args.schema, receipt=args.receipt,
-                remote=loads(Path(args.remote).read_bytes()) if args.remote else None)
+                remote=loads(Path(args.remote).read_bytes()) if args.remote else None,
+                parent=loads(Path(args.parent_ref).read_bytes()) if args.parent_ref else None,
+                parent_bundle=args.parent_bundle, authority=args.authority)
             value = demo.summary()
         else:
             demo = Demo(args.demo)

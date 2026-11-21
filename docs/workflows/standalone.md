@@ -69,6 +69,37 @@ Q/R/out does not create another balance. In-flight unknown is settle_only, never
 permission to submit again or change channel. Internal CLI rounds/costs stay in
 original receipts; the native USD threshold is not a guaranteed billing cap.
 
+If diagnostics already used an owner before the Task/remote configuration was
+known, reuse that owner when preparing the Demo. Supply all three explicit inputs:
+the original public parent Ref, its Bundle and the original private authority file.
+`parent-ref.json` must contain only the original `{"path": "artifacts/.../parent.json",
+"sha256": "sha256:..."}` Ref, with its actual values.
+
+```sh
+python "$KS/examples/workflows/row_softmax/run_demo.py" prepare \
+  --out /new/softmax-demo --start design \
+  --parent-ref /original/parent-ref.json --parent-bundle /original/parent-bundle \
+  --authority /original/private/owner.json
+```
+
+Add the reviewed `--environment`, `--runtime-profile` and `--remote` inputs when
+available. The Python equivalent is `Demo.create(new_root, parent=original_ref,
+parent_bundle=Bundle(original_bundle), authority=original_authority_path, ...)`.
+The driver verifies the public descriptor against the existing authority and
+imports the exact public Ref and bytes. It creates no account and copies no
+private authority. The original limits, prior operations/usage, pause and fences
+still apply to qualification, design and all subsequent requests. Python callers
+may omit `limits` or repeat the exact original limits; conflicting limits are
+rejected before creating the Demo. Omitting all three inputs retains the default
+new-owner behavior.
+
+The authority's absolute path is saved only in the private driver anchor for
+in-place recovery; `continue` does not accept replacement parent/authority inputs.
+Keep that original authority and Demo directory. A missing locator, missing
+authority or mismatched descriptor refuses recovery. This does not migrate old
+runs across driver or scope-source identities, and exported bundles do not carry
+the private authority or its locator.
+
 <a id="agate"></a>
 ## Actual Agate preparation
 
@@ -139,7 +170,9 @@ Business execution and qualification hold the same driver lock and reload the
 original state before admission; qualification also serializes callers on its
 original child run. Recovery uses `.runtime/demo-state.json` only to find original runs and selected
 Ref closures. Child run/operation state, native locator, publication IDs and the
-single `.runtime/owner.json` remain authoritative; there is no second ledger.
+single original owner authority remain authoritative; there is no second ledger.
+The default authority is `.runtime/owner.json`; an explicitly reused owner stays
+at its original path, recorded only in `.runtime/demo-anchor.json`.
 Qualification persists an initialization intent before binding its original
 owner. A missing binding or original owner operation refuses recovery; original
 native records cannot be replayed against a newly created account.

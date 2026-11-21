@@ -57,8 +57,11 @@ class Demo:
         if self.anchor["version"] != VERSION or self.anchor["implementation"] != sha256(Path(__file__).read_bytes()):
             raise ProtocolError("original driver implementation changed")
         self.config = loads(Bundle(self.root).read(self.anchor["config"]))
-        self.owner = OwnerAccount(self.root / ".runtime/owner.json")
-        if self.owner.descriptor != Bundle(self.root).document(self.config["parent"]):
+        authority = self.anchor.get("authority")
+        if not isinstance(authority, str) or not Path(authority).is_absolute():
+            raise ProtocolError("original demo authority locator missing or invalid")
+        self.owner = OwnerAccount(authority)
+        if self.owner.descriptor != Bundle(self.root).document(self.config["parent"], "budget_account"):
             raise ProtocolError("original demo parent changed")
         self.state = loads(read_regular(self.root, ".runtime/demo-state.json")[0])
         if self.state["config"] != self.anchor["config"]:
@@ -66,16 +69,36 @@ class Demo:
 
     @classmethod
     def create(cls, root, *, start="design", runtime=None, environment=None, objective=None,
-               schema_directory=None, receipt=None, limits=None, remote=None, checkpoint=None):
+               schema_directory=None, receipt=None, limits=None, remote=None, checkpoint=None,
+               parent=None, parent_bundle=None, authority=None):
+        """Freeze requests with a new owner, or explicitly reuse one existing owner.
+
+        Reuse requires the original public Ref, its Bundle and the private
+        authority path together. Only the public Ref closure is imported.
+        """
         root = Path(root).absolute()
         if root.exists(): raise ProtocolError("demo exists; reopen the original directory")
         if start not in ("design", "fixed", "partial", "verify"):
             raise ProtocolError("start must be design/fixed/partial/verify")
+        external = any(value is not None for value in (parent, parent_bundle, authority))
+        if external:
+            if any(value is None for value in (parent, parent_bundle, authority)):
+                raise ProtocolError("existing parent requires parent, parent_bundle and authority together")
+            parent_bundle = parent_bundle if isinstance(parent_bundle, Bundle) else Bundle(parent_bundle)
+            parent = deepcopy(parent)
+            descriptor = parent_bundle.document(parent, "budget_account")
+            owner = OwnerAccount(authority)
+            if owner.descriptor != descriptor:
+                raise ProtocolError("parent descriptor differs from existing owner authority")
+            if limits is not None and jcs(limits) != jcs(descriptor["limits"]):
+                raise ProtocolError("limits conflict with existing parent; cannot replace original limits")
         runtime = runtime or load_runtime()
         if environment is not None: read_target(environment)
+        if external: import_bundle(parent_bundle, root, [parent])
         p = Publication(root)
-        owner = OwnerAccount.create(root / ".runtime/owner.json", owner=uuid4().hex, limits=limits or DEFAULT_LIMITS)
-        parent = p.put_json("parent.json", owner.descriptor)
+        if not external:
+            owner = OwnerAccount.create(root / ".runtime/owner.json", owner=uuid4().hex, limits=limits or DEFAULT_LIMITS)
+            parent = p.put_json("parent.json", owner.descriptor)
         env = p.put_bytes("environment.json" if environment else "environment.md",
                           environment or resource("examples/workflows/row_softmax/task/environment.md").read_bytes())
         task = freeze_task(p, environment=env)["task"]
@@ -137,7 +160,8 @@ class Demo:
         for name, value in values.items():
             durable_write(root / (name + ".request.json"), jcs(value))
             validate_request(Bundle(root), value)
-        durable_write(root / ".runtime/demo-anchor.json", jcs({"version": VERSION, "implementation": sha256(Path(__file__).read_bytes()), "config": config_ref}))
+        durable_write(root / ".runtime/demo-anchor.json", jcs({"version": VERSION, "implementation": sha256(Path(__file__).read_bytes()),
+            "config": config_ref, "authority": str(owner.path)}), mode=0o600)
         durable_write(root / ".runtime/demo-state.json", jcs({"config": config_ref, "phase": "initial", "current": None,
             "history": [], "schema": consumed["schema"] if start != "design" else None, "scope": scope if start != "design" else draft_scope,
             "qualification": None, "optimize_count": 0, "status": "prepared", "recovery": "continue", "reason": "five concrete request examples frozen"}))
