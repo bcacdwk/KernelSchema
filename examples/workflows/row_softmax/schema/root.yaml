@@ -1,0 +1,103 @@
+META_DATA:
+  Name: row_softmax_fp32_v1
+  Describe: Compute independent row softmax values and overwrite the supplied output buffer
+  Source: triton-lang/triton@0add68262ab0a2e33b84524346cb27cbb2787356:python/tutorials/02-fused-softmax.py::softmax_kernel
+  Version: 1
+CONTRACT:
+  Algorithm_requirement:
+    Input:
+      x: {meaning: Read-only logits on the selected CUDA device, shape: [{row: m}, {column: n}], dtype: fp32, range: 'Finite values in [-20,20]'}
+      out: {meaning: Supplied output buffer, shape: [{row: m}, {column: n}], dtype: fp32, range: Arbitrary contents including NaN; old contents ignored}
+    Output: {y: {meaning: Identical out object with original region written, shape: [{row: m}, {column: n}], dtype: fp32}}
+    Compute:
+      - Name: Row softmax
+        Math: |-
+          m in {1,32}; n in {128,1024}; 0<=i<m; 0<=j<n.
+          x and out are same-device CUDA FP32 tensors with stride (n,1), arbitrary legal storage offsets, and requires_grad=False.
+          x and out have distinct storage. Inference-mode eager calls use one call stream; CUDA Graph and concurrent streams are unsupported.
+          Save pre-call x as z=fp64(x_before) on CPU; g[i,j]=exp(z[i,j]-max_k z[i,k])/sum_k exp(z[i,k]-max_l z[i,l]).
+          Write fp32 approximations to g into the original out region and return out itself as y; preserve x bytes and both storage/view signatures.
+          Only the original out region may change; recompute for changed legal x without depending on case IDs, call order or cached outputs.
+    Golden_reference:
+      Source: KernelSchema@2efc92479db497e0ecf681e276ecddc72cad0de6:examples/workflows/row_softmax/evaluator/golden.py::softmax_fp64
+      Tolerance:
+        y: All original out elements finite; abs(fp64(actual)-g)<=2e-6+2e-5*abs(g)
+  Hardware_specification:
+    Device: Unselected NVIDIA CUDA device
+    Architecture: Unselected NVIDIA architecture
+    Execution:
+      cta: Cooperative thread block on one SM; member threads own private registers
+      warp: Group of SIMT threads within a CTA; exact target details require the frozen device profile
+    Feature:
+      register: Thread-private register storage has device-specific capacity; the concrete target is not yet bound
+    Stack:
+      Language: Triton DSL (runtime version unselected)
+      Toolchain: Unselected Triton compiler and CUDA stack; require a fixed profile before execution
+    Wiki:
+      Hardware: <row-softmax-hardware@pending:NVIDIA/selected-device.md>
+      Programming:
+        Language: <row-softmax-language@pending:Triton/selected-version/>
+        Virtual_ISA: <row-softmax-ptx@pending:PTX/selected-version/>
+        Machine_ISA: <row-softmax-sass@pending:NVIDIA/selected-architecture/>
+      Microbench: <row-softmax-microbench@pending:NVIDIA/selected-device/>
+      Sota:
+        Kernel: triton-lang/triton@0add68262ab0a2e33b84524346cb27cbb2787356:python/tutorials/02-fused-softmax.py
+        Schema: <row-softmax-schema-catalog@pending:selected-device/index.md>
+      Profile: <row-softmax-profile@pending:NVIDIA/selected-tools/>
+DESIGN:
+  Math_reshape:
+    Thesis: Keep row statistics and exponentials within one program to avoid explicit global intermediates while retaining stable normalization
+    Rewrite:
+      - Name: Stable FP32 normalization
+        Math: |-
+          For each row i, load v[j]=x[i,j] once for 0<=j<n.
+          a=max_j v[j]; d[j]=fp32(v[j]-a); e[j]=exp32(d[j]); s=sum32_j e[j]; out[i,j]=fp32(e[j]/s).
+          exp32 evaluates the FP32 natural exponential; reductions, subtraction and division remain FP32 without FP16 or BF16 intermediates.
+          Keep v and e inside their owning program through their consumers; no explicit global intermediate tensors or cross-CTA communication.
+        Arithmetic:
+          Approx: 'Triton FP32 approximate exp is permitted only within the Task tolerance; unknown: no full-domain implementation error bound is established'
+          Accumulate: FP32 row-local sum; reduction tree and compiler scheduling are implementation choices
+  Work_schedule:
+    Thesis: Give each row to one independent CTA so max, sum and normalization need no communication between programs
+    Step:
+      MAIN:
+        Describe: Process every row once in one launch with grid=(m,)
+        Decomposition:
+          Partition: {row: {meaning: Independent output row, size: m, tile: 1}}
+          Worktile:
+            Invariant: {x: {meaning: Input row owned by this CTA, shape: [{column: n}], dtype: fp32}}
+          Target:
+            Single_tile: {y: {meaning: Complete output row in original out storage, shape: [{column: n}], dtype: fp32}}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: m
+        Schedule:
+          Worktile_order: [{by: row, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: One cooperative role completes the row dependency chain without asynchronous cross-program lifetimes
+    Step:
+      MAIN:
+        Role:
+          MAIN:
+            Info:
+              Describe: Load, normalize and write the owned row in one program
+              Member: cta[0:1]
+              Using_verb:
+                compute: {y: {execution_mode: serial, describe: 'Read the full x row once, apply Stable FP32 normalization, and store every original out element; done makes the row output visible'}}
+            Pipe:
+              - compute:y
+REALIZATION:
+  Require:
+    - Item: DESIGN.Work_schedule::MAIN
+      Choice: One self-owned Triton kernel per forward with grid=(m,); num_warps is either 4 or 8 and must preserve the complete-row ownership
+      Reason: Bind the single launch and cooperative worker to the required implementation primitive
+  Forbid:
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: Delegating normalization to torch.softmax, the reference, or an external implementation
+      Reason: The selected design requires the candidate's own Triton program to execute the row computation
