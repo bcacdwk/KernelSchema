@@ -2,7 +2,7 @@ META_DATA:
   Name: kda_raw_prefill_state_bf16
   Describe: 'Packed KDA prefill: normalized Q/K, per-channel bounded decay, sigmoid-beta delta-rule recurrence; BF16 output, in-place final state, checkpoints'
   Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/candidate/solution.py::Model.forward
-  Version: 2
+  Version: 3
   Dispatch:
     id: prepare_chain
     when: 'Inputs for which the frozen host engine selector is false. Every declared cadence is a multiple of 32, so this is 2 * request_count * head_count <= sms together with 3 * request_count * head_count <= sms or total_tokens > 4096 or cadence > 0, where cadence = checkpoint_every_n_tokens and sms is the runtime device SM count read by the host. No total_tokens lower bound is added: the native beta descriptor has no minimum token extent and the grids only need capacity >= 1.'
@@ -578,8 +578,8 @@ REALIZATION:
       Reason: request_count is at most 32, so the per-CTA prefix loop is cheaper than a third launch and the global workspace round trip it would need
   Forbid:
     - Item: DESIGN.Work_schedule::CHAIN
-      Choice: Keep the unused ABI arguments (state index pointer, use_state_indices and the two FP32 state pointers) null and zero; the kernel resolves state_slot = request itself
-      Reason: The kernel body never reads them, so enabling indirection on the host side would change validation and slot expectations without changing the device slot resolution
+      Choice: Do not enable indirect state indexing or FP32 state; CHAIN resolves state_slot = request. The unread state-index pointer is an ABI placeholder and need not be null
+      Reason: The kernel ignores these ABI placeholders; enabling indirection or FP32 state on the host would change validation and slot expectations without changing the device addressing
     - Item: DESIGN.Tile_pipeline::CHAIN
       Choice: Do not activate the declared-but-unused left snapshot barrier group at smem offset 192 or its phase tracker
       Reason: It is initialized and its phase toggled but never arrived or waited; using it as a left-half-only ready signal would drop the snapshot and residual of the right half from the eight-arrival conjunction the two MMA roles wait for

@@ -1,0 +1,125 @@
+{
+  "format": "kernelschema.w1_verification.v1",
+  "owner": "A",
+  "status": "W1_VERIFIED",
+  "findings": [
+    "S-06",
+    "X-15"
+  ],
+  "freeze": {
+    "path": "schema_discussion/main_integration_20261122/W1_FROZEN.json",
+    "sha256": "ea40fd9e25baed9a9c45ec5bb8f3838740d19c27588ca6be47b98fe2531b8fdb",
+    "revision": 2
+  },
+  "initial_freeze": {
+    "path": "schema_discussion/main_integration_20261122/W1_FROZEN_01.json",
+    "sha256": "151faff08e9978ade56e584bfe3dbd56d4af1a8fc154aabed1522c9c2b30afa3"
+  },
+  "base_commit": "6c3859e58cbc25e4094590c5e50f39ffcdb773a3",
+  "files": {
+    "schema_template/tools/normalization.py": "76be06d470f74ac9e8dfa3a4e81227569e1082e16c22285665255746ad803f0a",
+    "schema_extract/tools/runner.py": "ecf8684fa62182a082dc80239bf0ffa0f47678fb16c96ae9101d363b6db086ce",
+    "schema_extract/tools/prompts.py": "d138c2af62a8e7936e73f291a89db7f0abf59d07abc61daf752a3771d1e8be22",
+    "schema_template/tools/tests/test_normalization.py": "727ec1feabd32d9713ed57392937cbb6c809949464554fa31ecf57de05cca541",
+    "schema_extract/tools/tests/test_artifact_transactions.py": "0dc85444d32c31b807d79a95a014f7b1178ff617b693365b73cd6d18b20e9ce1",
+    "schema_extract/tools/tests/test_stage_flow.py": "a2e62e42dac2b540716e62445a37395e2b2eef885bc737bee8c24212d18859b1",
+    "schema_extract/tools/tests/test_maintenance_receipts.py": "8742384f6ea9ae448cb64e260f157d8604d3c5b068942df34814774becc9837d"
+  },
+  "interpreter": {
+    "path": "/opt/venv/python3.13.12/bin/python",
+    "version": "3.13.12"
+  },
+  "imports": {
+    "template": "/home/shaohanyong.shy/KernelSchema/schema_template/tools/schema.py",
+    "extract": "/home/shaohanyong.shy/KernelSchema/schema_extract/tools/runner.py"
+  },
+  "environment": {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PATH": "/opt/venv/python3.13.12/bin:/usr/bin:/bin",
+    "real_claude_on_path": null,
+    "real_codex_on_path": null
+  },
+  "verification": [
+    {
+      "command": "/opt/venv/python3.13.12/bin/python -B -m unittest -v tools.tests.test_normalization",
+      "PYTHONPATH": "/home/shaohanyong.shy/KernelSchema:/home/shaohanyong.shy/KernelSchema/schema_template",
+      "exit_code": 0,
+      "tests": 31,
+      "log": {
+        "path": "schema_discussion/main_integration_20261122/round1_a/w1_template_canonical.log",
+        "sha256": "4df731e78887f86e235ec691caa9d1443252fd7e3fd0bf940487a932e92e8f79"
+      },
+      "freeze_revision": 1,
+      "reused_after_revision2": "All product and Template test bytes unchanged."
+    },
+    {
+      "command": "/opt/venv/python3.13.12/bin/python -B -m unittest -v schema_extract.tools.tests.test_artifact_transactions schema_extract.tools.tests.test_stage_flow schema_extract.tools.tests.test_maintenance_receipts",
+      "PYTHONPATH": "/home/shaohanyong.shy/KernelSchema",
+      "exit_code": 1,
+      "tests": 43,
+      "log": {
+        "path": "schema_discussion/main_integration_20261122/round1_a/w1_extract.log",
+        "sha256": "c9794326d32d72f3ca5a5d033c6b207bfa02806efd6bf39aba622a97af742c29"
+      },
+      "freeze_revision": 1,
+      "retained_passes": {
+        "module": "schema_extract.tools.tests.test_stage_flow",
+        "tests": 17,
+        "reason": "Every stage-flow test passed; all product and stage-flow test bytes unchanged at revision2."
+      },
+      "failures": {
+        "old_alias_expectation": 1,
+        "maintenance_fixture_missing_explicit_patch_fields": 1
+      }
+    },
+    {
+      "command": "/opt/venv/python3.13.12/bin/python -B -m unittest -v schema_extract.tools.tests.test_artifact_transactions schema_extract.tools.tests.test_maintenance_receipts",
+      "PYTHONPATH": "/home/shaohanyong.shy/KernelSchema",
+      "exit_code": 0,
+      "tests": 26,
+      "log": {
+        "path": "schema_discussion/main_integration_20261122/round1_a/w1_extract_repaired.log",
+        "sha256": "ecb19227de12a9bba8d795e3d47f20d2b4a53a0fd08df771ac47f456e6221ce0"
+      },
+      "freeze_revision": 2
+    }
+  ],
+  "distinct_tests_passed": 74,
+  "startup_corrections": [
+    {
+      "log": {
+        "path": "schema_discussion/main_integration_20261122/round1_a/w1_template.log",
+        "sha256": "88e933943d6a154e93717bf1dd7a6ade0ae63fa22e66357e240fc051937de330"
+      },
+      "exit_code": 1,
+      "reason": "Existing support imports top-level check_yaml; main/schema_template must be on PYTHONPATH."
+    },
+    {
+      "log": {
+        "path": "schema_discussion/main_integration_20261122/round1_a/w1_template_main_path.log",
+        "sha256": "c00b06ed590d4088454db0cb853f1bba62c506fcbb2334b0d7834dcd637eda51"
+      },
+      "exit_code": 1,
+      "reason": "Using schema_template.tools test identity duplicates tools.schema imported by check_yaml and breaks five mock branches; canonical tools.tests identity passed without product edits."
+    }
+  ],
+  "assertions": {
+    "S-06": [
+      "Real normalize_candidate followed by accept_result preserves V = v+1 and V := v+1 at v=1 => y=3 in four branches, including uppercase input normalized safely in prior P1.",
+      "Final P3 checkpoint remains unapproved, raw and immutable base digests unchanged.",
+      "Reverse registered V/unbound v and declaration X/x capture reject whole group before destination publication; provider/helper/consumer remain unchanged.",
+      "Formal/outer, two local names, comprehension, Pipe/event/waiting/view, shared provider/different consumer, safe exact binding, idempotence and rollback tests passed."
+    ],
+    "X-15": [
+      "Ordinary and maintenance reviewer revise with plan=[] checks state.plan_draft, returns real feedback and transitions to worker with no false check_failures.",
+      "Maintenance revise respects explicit dispatch field authorization.",
+      "Approve altered plan and reviewer raw mutation remain rejected; first P2 material instance is pending_review rather than removed.",
+      "Adjudication and existing six-stage fake backend flows remain covered."
+    ]
+  },
+  "limits": [
+    "Offline CPU tests with new temporary roots and fake backend/CLI only.",
+    "No real model, GPU, user run, monitor, AKA, archive, old receipt, source snapshot or account was modified.",
+    "Does not prove production historical mathematics or actual model repair effectiveness."
+  ]
+}

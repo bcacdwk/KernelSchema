@@ -2,7 +2,7 @@ META_DATA:
   Name: mla_nvfp4
   Describe: Dense NVFP4 MLA decode/MTP attention over a paged shared K=V 512-dim latent KV cache, producing BF16 output and optional natural-log lse
   Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/solution.py::Model.forward
-  Version: 2
+  Version: 3
   Dispatch:
     when: max_b seq_lens[b] < 8192, so the host plan applies the Uniform_split_policy of the shared Contract and every 2-CTA cluster receives exactly one (request, row group, KV split) piece. Also requires compute capability (10, 3) and a workspace_buffer large enough for the planned split partials, split lse, work table, unit offsets, per-token split counts, request offsets and sink copy
 CONTRACT:
@@ -136,8 +136,8 @@ CONTRACT:
     Golden_reference:
       Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/reference.py::Model.forward
       Tolerance:
-        out: Source only; atol=.01, rtol=.05, mismatch_frac=0, relative_to=candidate; no formula; no defaults
-        lse: Source only; atol=.01, rtol=.05, mismatch_frac=0, relative_to=candidate; no formula; no defaults
+        out: Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, max_rel_l2=null, relative_to=candidate, mode=elementwise_and_l2; comparator definition unavailable; no defaults
+        lse: Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, max_rel_l2=null, relative_to=candidate, mode=elementwise_and_l2; comparator definition unavailable; no defaults
       Gap: Reference needs out buffer, returns None lse if return_lse without lse; contract allocates fresh
   Hardware_specification:
     Device:

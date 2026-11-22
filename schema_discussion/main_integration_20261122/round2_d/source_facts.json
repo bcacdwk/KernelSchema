@@ -1,0 +1,367 @@
+{
+  "format": "kernelschema.integration.finite_source_facts.v1",
+  "reviewer": "D",
+  "source_commit": "484902855fe7be82a74fe7c394503d1d7d222dbb",
+  "fixed_sources": {
+    "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu": {
+      "lines": [
+        [
+          1181,
+          1191
+        ],
+        [
+          1936,
+          1950
+        ],
+        [
+          2264,
+          2275
+        ],
+        [
+          2324,
+          2340
+        ]
+      ],
+      "fact": "effective_m clamps to bm before align16; this node bm=128. Aligned columns participate in actual MMA and epilogue.",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "matches_fixed_git_source": true
+    },
+    "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/reference.py": {
+      "lines": [
+        [
+          1,
+          39
+        ]
+      ],
+      "fact": "FP32 operand decoding/scaling and einsum, then BF16 conversion; reference copies only active rows.",
+      "sha256": "8789f550f67455db7b016db1f9a4ffc8b1b57c0761f840a66d7d95016e5d92ea",
+      "matches_fixed_git_source": true
+    },
+    "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu": {
+      "lines": [
+        [
+          421,
+          473
+        ],
+        [
+          582,
+          645
+        ],
+        [
+          1192,
+          1199
+        ]
+      ],
+      "fact": "Each lane retains rm/rl[MT][2]; lane>>2 maps four lane copies per row. Each warp has MetaRegs; BN=16 activates only 16 metadata lanes.",
+      "sha256": "baec88528097a325a4192438769b92c0840855ab435d57b684970ca6f5db9096",
+      "matches_fixed_git_source": true
+    },
+    "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/candidate/runtime.py": {
+      "lines": [
+        [
+          85,
+          102
+        ]
+      ],
+      "fact": "unused_indices is an allocated one-element int32 tensor, not a null pointer.",
+      "sha256": "af0ac45cf6554b30ab56fd3e218d314927344f3f25aad13df8ae8dcbafdbfb21",
+      "matches_fixed_git_source": true
+    },
+    "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/candidate/solution.py": {
+      "lines": [
+        [
+          198,
+          235
+        ]
+      ],
+      "fact": "Passes unused_indices to CHAIN with indirect state indexing disabled; returns output, in-place initial_state and conditional checkpoints.",
+      "sha256": "3870f31199c61da72f4b26a7db3d3069b5b84c2768307cd54c7fd0a15f5ee1fa",
+      "matches_fixed_git_source": true
+    },
+    "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/candidate/chain_launch.cu": {
+      "lines": [
+        [
+          270,
+          285
+        ]
+      ],
+      "fact": "Retains state_indices.data_ptr in ABI; a{} leaves FP32-state pointers zero.",
+      "sha256": "bda20bcd2780eb039be123dbfe9c9090944c1fcccfa8f22c885be0cd4a38b568",
+      "matches_fixed_git_source": true
+    },
+    "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/candidate/chain.cuh": {
+      "lines": [
+        [
+          454,
+          455
+        ],
+        [
+          730,
+          738
+        ],
+        [
+          912,
+          920
+        ]
+      ],
+      "fact": "State slot is the request sequence index; state_indices_addr is declared but not dereferenced in this body.",
+      "sha256": "7580fa7f9df2fc0b9193942e4e0b714c8d3430a1cefea39273904c817c8fcf72",
+      "matches_fixed_git_source": true
+    },
+    "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/candidate/prepare.cuh": {
+      "lines": [
+        [
+          803,
+          855
+        ]
+      ],
+      "fact": "kr_pair uses FP32 ki_pair directly; ki_values and kr_values independently narrow to BF16.",
+      "sha256": "2d7c56d76fef3d257d7928b166fc517f1be64829dd7e71169ffce17d5dd7d3d8",
+      "matches_fixed_git_source": true
+    },
+    "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/candidate/engine.cuh": {
+      "lines": [
+        [
+          2841,
+          2884
+        ],
+        [
+          2933,
+          2952
+        ]
+      ],
+      "fact": "Root engine restore reloads packed BF16 ki, converts it to FP32, multiplies by restore factor and narrows kr; distinct from prepare_chain direct FP32 ki_f32 route.",
+      "sha256": "e9451caa70993579b40884fdb50d6e8389a0e4c29604956810dc2654a2f36897",
+      "matches_fixed_git_source": true
+    },
+    "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/candidate/solution.py": {
+      "lines": [
+        [
+          1365,
+          1382
+        ]
+      ],
+      "fact": "Each conv thread fences, then tid0 increments the arrival counter with no CTA aggregation barrier between those statements; retained source synchronization limitation.",
+      "sha256": "78413b2f0434322c3d5bb5624e5ff6dc201e6fc66324bd66a83cf8837ce4f75a",
+      "matches_fixed_git_source": true
+    }
+  },
+  "reused_historical_index_evidence": {
+    "path": "schema_discussion/extract_schema_review_20261121/round2/schema_contract_evidence/result.json",
+    "sha256": "52ed12bfa3c5b590d00ace5cd66e73d40b34949b188e89455339cf17e2a29db8",
+    "published_original": false,
+    "rerun": false,
+    "facts": {
+      "masked_extent": {
+        "capacity_domain": "128..1024, multiples of 128",
+        "masked_m_domain": "every integer 0..capacity",
+        "cases": 4616,
+        "nonempty_tiles": 15360,
+        "max_extra_rows": 15,
+        "proposed_formula": "eff=min(128,masked_m-128*mb); eff_a=ceil_div(eff,16)*16",
+        "index_invariants_pass": true,
+        "current_counterexample": {
+          "masked_m": 256,
+          "mb": 0,
+          "current_eff": 256,
+          "source_eff": 128
+        },
+        "scope": "index arithmetic only, no GPU execution or floating-point equivalence proof"
+      },
+      "masked_exactness_counterexamples": {
+        "overflow": "2^100 * 2^100 = 2^200 exceeds finite FP32",
+        "underflow": "2^-127 * 2^-23 = 2^-150 is half the FP32 minimum subnormal",
+        "both_decoded_operands_individually_representable": true,
+        "claim_falsified": "all summands are exact in FP32 over the stated Contract domain",
+        "actual_gpu_failure_demonstrated": false
+      },
+      "fp8_fmha_storage_arithmetic": {
+        "root_each_m_l": {
+          "formula": "128 threads * MT=2 * 2 f32 * 4 bytes",
+          "expected_bytes": 2048,
+          "current_bytes": 512
+        },
+        "decode_each_m_l": {
+          "formula": "128 threads * MT=1 * 2 f32 * 4 bytes",
+          "expected_bytes": 1024,
+          "current_bytes": 256
+        },
+        "root_page_regs": {
+          "formula": "4 warp copies * 32 keys * 4 words * 4 bytes",
+          "expected_bytes": 2048,
+          "current_bytes": 512
+        },
+        "decode_page_regs": {
+          "active_payload_bytes": 1024,
+          "full_lane_slot_capacity_if_uniform": 2048,
+          "note": "BN=16 writes only 16 lanes per warp; no automatic factor-of-four correction. Compiler allocation is not established by this payload calculation."
+        }
+      },
+      "short_circuit_evaluator": [
+        {
+          "expression": "false and 1 % 0 == 0",
+          "result": false
+        },
+        {
+          "expression": "true or 1 % 0 == 0",
+          "result": true
+        },
+        {
+          "expression": "0 > 0 and 1 % 0 == 0",
+          "result": false
+        },
+        {
+          "expression": "true and 1 % 0 == 0",
+          "error": "division by zero: 1%0"
+        }
+      ]
+    }
+  },
+  "tolerance_sources": [
+    {
+      "operator_id": "bf16_fused_moe",
+      "root": "schema_wiki/aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/root.yaml",
+      "criteria": [
+        {
+          "source_file": "kernel_wiki/aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/performance/ACCEPTANCE.json",
+          "source_sha256": "18e21f10c0d6dec5189a13d93b09ca10452baefcdb47262c68e8c33e6df139f0",
+          "first_pointer": "/fixed/details/0/0/checks/1/tolerance",
+          "values": {
+            "atol": 0.01,
+            "rtol": 0.05,
+            "max_mismatch_fraction": 0.0,
+            "max_rel_l2": null,
+            "relative_to": "candidate",
+            "mode": "elementwise_and_l2"
+          },
+          "source_outputs": [
+            "input.y"
+          ]
+        }
+      ]
+    },
+    {
+      "operator_id": "mla_absorbed_fp8",
+      "root": "schema_wiki/aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/root.yaml",
+      "criteria": [
+        {
+          "source_file": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/performance/ACCEPTANCE.json",
+          "source_sha256": "e925191444cb8a4fbf4aaeea89330889b91315111309b73ef1eca2306fada608",
+          "first_pointer": "/fixed/details/0/0/checks/0/tolerance",
+          "values": {
+            "atol": 0.01,
+            "rtol": 0.05,
+            "max_mismatch_fraction": 0.001,
+            "max_rel_l2": 0.01,
+            "relative_to": "candidate",
+            "mode": "elementwise_and_l2"
+          },
+          "source_outputs": [
+            "output[0]",
+            "input.out",
+            "out"
+          ]
+        },
+        {
+          "source_file": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/performance/ACCEPTANCE.json",
+          "source_sha256": "e925191444cb8a4fbf4aaeea89330889b91315111309b73ef1eca2306fada608",
+          "first_pointer": "/fixed/details/0/0/checks/1/tolerance",
+          "values": {
+            "atol": 0.01,
+            "rtol": 0.05,
+            "max_mismatch_fraction": 0.0,
+            "max_rel_l2": null,
+            "relative_to": "candidate",
+            "mode": "elementwise_and_l2"
+          },
+          "source_outputs": [
+            "output[1]",
+            "input.lse"
+          ]
+        }
+      ]
+    },
+    {
+      "operator_id": "mla_nvfp4",
+      "root": "schema_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/root.yaml",
+      "criteria": [
+        {
+          "source_file": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/performance/ACCEPTANCE.json",
+          "source_sha256": "b91521fd359e6921d78bd7c8d4d8188f925cd8bd1fd6edba0cbd68eea80edddc",
+          "first_pointer": "/fixed/details/0/0/checks/0/tolerance",
+          "values": {
+            "atol": 0.01,
+            "rtol": 0.05,
+            "max_mismatch_fraction": 0.0,
+            "max_rel_l2": null,
+            "relative_to": "candidate",
+            "mode": "elementwise_and_l2"
+          },
+          "source_outputs": [
+            "output[0]",
+            "output[1]",
+            "input.out",
+            "input.lse",
+            "out"
+          ]
+        }
+      ]
+    },
+    {
+      "operator_id": "paged_indexed_latent_fp8",
+      "root": "schema_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/root.yaml",
+      "criteria": [
+        {
+          "source_file": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/performance/ACCEPTANCE.json",
+          "source_sha256": "d0e84762fa6be794da33eb77d4d03345fe4593ca28c7780dc15072aeb88ede6e",
+          "first_pointer": "/fixed/details/0/0/checks/0/tolerance",
+          "values": {
+            "atol": 0.01,
+            "rtol": 0.05,
+            "max_mismatch_fraction": 0.001,
+            "max_rel_l2": 0.01,
+            "relative_to": "candidate",
+            "mode": "elementwise_and_l2"
+          },
+          "source_outputs": [
+            "out",
+            "input.out"
+          ]
+        }
+      ]
+    },
+    {
+      "operator_id": "kda_raw_prefill_state_bf16",
+      "root": "schema_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/root.yaml",
+      "criteria": [
+        {
+          "source_file": "kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/performance/ACCEPTANCE.json",
+          "source_sha256": "182f64fcce7cd68068b8e84d066337306ba7e23eecf741418fccc1a84ba7ee06",
+          "first_pointer": "/fixed/details/0/0/checks/0/tolerance",
+          "values": {
+            "atol": 0.01,
+            "rtol": 0.05,
+            "max_mismatch_fraction": 0.0,
+            "max_rel_l2": null,
+            "relative_to": "candidate",
+            "mode": "elementwise_and_l2"
+          },
+          "source_outputs": [
+            "output[0]",
+            "output[1]",
+            "input.initial_state",
+            "input.output",
+            "output[2]",
+            "input.state_checkpoints"
+          ]
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Source-only finite review; no executable GPU/kernel import.",
+    "Historical 4616 cases are reused, not counted as this implementation test run.",
+    "Source tolerance labels are not a full comparator specification; null is explicit and is not a waiver.",
+    "No compiler register allocation or residency proof."
+  ]
+}

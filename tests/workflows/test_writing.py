@@ -134,6 +134,9 @@ def test_writing_input_exposes_exact_grants_and_original_text_budgets(setup_writ
     assert "Unicode code points" in summary["counting"]["characters"]
     assert "len(value.splitlines())" in summary["counting"]["lines"]
     assert original.text_size("界😀\n\nA\n") == (6, 3)
+    tolerance = next(item for item in summary["budgets"]
+                     if item["path"] == ["CONTRACT", "Algorithm_requirement", "Golden_reference", "Tolerance", "*"])
+    assert (tolerance["maxLength"], tolerance["maxLines"]) == (300, 2)
     for delivery in (planner, reviewer):
         policy_item = next(e for e in delivery["materials"] if e["ref"] == summary["source"])
         assert "host_implementation" in policy_item and "text" not in policy_item
@@ -142,6 +145,35 @@ def test_writing_input_exposes_exact_grants_and_original_text_budgets(setup_writ
     assert b"neither that delivery_id nor material:<id> is a selection ID" in writing.STRICT_METHOD
     assert b"not a Scope object" in writing.STRICT_METHOD
     assert b"Only optimize can propose implement or verify" in writing.STRICT_METHOD
+
+
+def test_strict_rejects_old_transitive_template_policy_without_rewriting_rules(setup_writing, monkeypatch):
+    """An unchanged schema.py version does not make old Rules current."""
+    setup = setup_writing()
+    f, backend, fake, req, out = setup
+    bundle = Bundle(f["root"])
+    rules = bundle.document(req["rules"])
+    original_rules = bundle.read(req["rules"])
+    source = next(ref for ref in rules["files"] if ref["path"].endswith("schema_template/tools/text_policy.py"))
+    original_policy = bundle.read(source)
+    old_policy = original_policy.replace(
+        b'Budget(A + ("Golden_reference", "Tolerance", None), 300, 2)',
+        b'Budget(A + ("Golden_reference", "Tolerance", None), 100, 1)')
+    assert old_policy != original_policy
+    p = Publication(f["root"])
+    old_source = p.put_bytes("legacy-rules/text_policy.py", old_policy)
+    rules["files"] = sorted((old_source if ref == source else ref for ref in rules["files"]), key=lambda ref: ref["path"])
+    old_rules = p.put_json("legacy-rules/manifest.json", rules)
+    changed = {**req, "rules": old_rules}
+    reference = p.put_json("legacy-rules/request.json", changed)
+    p.commit([reference])
+    durable_write(f["root"] / "request.json", jcs(changed), replace=True)
+    with pytest.raises(ProtocolError, match="all Template implementation bytes"):
+        run((f, backend, fake, changed, out), monkeypatch)
+    assert not calls(fake)
+    assert bundle.read(req["rules"]) == original_rules
+    assert bundle.read(source) == original_policy
+    assert bundle.read(old_source) == old_policy
 
 
 @pytest.mark.parametrize("identifier", ["material:workflow_objective", "material/workflow_objective", "reviewer_only", "private_only", "not_granted"])

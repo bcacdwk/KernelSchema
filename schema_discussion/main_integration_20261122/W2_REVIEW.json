@@ -1,0 +1,138 @@
+{
+  "format": "kernelschema.integration.w2_independent_review.v1",
+  "status": "W2_REVIEW_PASS",
+  "reviewer": "D",
+  "authority": "ARBITRATION_PLAN.md section 5 and approved FINAL_PLAN/COVERAGE/FINAL_REVIEW",
+  "subject": {
+    "path": "schema_discussion/main_integration_20261122/W2_SUBJECT.json",
+    "sha256": "4936e08c5611c703497c6e53a244ff4e3cf746f993ebff62dce57c60752a2242"
+  },
+  "reviewed_inventory": {
+    "yaml": 19,
+    "dispatch": 9,
+    "changed_yaml": 9,
+    "changed_dispatch": 2,
+    "tolerance_outputs": 9,
+    "effective_tolerance_consumers": 10
+  },
+  "checks": [
+    {
+      "id": "masked_clamp_active_domain_precision",
+      "status": "passed",
+      "paths": [
+        "schema_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/root.yaml"
+      ],
+      "finding": "Nonempty tile eff=min(128,masked_m[e]-128*mb), eff_a=16*ceil_div(eff,16); y is referenced only for active local rows. Padding rows are actually computed, narrowed and written without a required y. FP32 decode evaluation and instruction block-scaled accumulation are distinguished; unsupported all-domain exactness and summation-only equivalence claims removed. Input domain, source, tolerance and actual write extent remain unchanged. The 4616 historical index cases were reused without rerun because formula/source match."
+    },
+    {
+      "id": "fmha_independent_replicas",
+      "status": "passed",
+      "paths": [
+        "schema_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/root.yaml",
+        "schema_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/decode_split_kv.yaml"
+      ],
+      "finding": "Source rm/rl[MT][2] is thread private; lane>>2 leaves four simultaneous copies per row. Root m/l each 128*4*4=2048 B; root page_regs 4 warps*32 keys*4 words*4=2048 B. Decode m/l each 4 slices*16 rows*4 lane copies*4=1024 B. Decode page_regs stays 4*16*4*4=1024 B active payload. Shape and total_size agree; mathematical row shape is unchanged. No compiler allocation/residency claim."
+    },
+    {
+      "id": "kda_unused_pointer_and_narrowing",
+      "status": "passed",
+      "paths": [
+        "schema_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/prepare_chain.yaml"
+      ],
+      "finding": "runtime allocates nonempty unused_indices and passes its nonnull address. CHAIN never reads that placeholder, uses request sequence for state slot, and does not enable indirect indexing or FP32 state. prepare_chain retains independent bf16(ki_f32) and bf16(ki_f32*gt); root restore separately reloads already-narrowed BF16 ki before kr. Original scale=0 Gap and the two routes remain unchanged."
+    },
+    {
+      "id": "five_fixed_acceptance_records",
+      "status": "passed",
+      "paths": [
+        "schema_wiki/aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/root.yaml",
+        "schema_wiki/aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/root.yaml",
+        "schema_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/root.yaml",
+        "schema_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/root.yaml",
+        "schema_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/root.yaml"
+      ],
+      "finding": "All nine output strings match the fixed five ACCEPTANCE JSON records, complete six labels, mode=elementwise_and_l2, relative_to=candidate and explicit null. Output aliases are checked against recorded source names and actual Output meaning/host return mapping. Null is distinct from missing and never means waived/passed; source-only/comparator-definition/no-defaults limits remain. Ten effective nodes inherit these five root Contracts."
+    },
+    {
+      "id": "gdn_dispatch_scope",
+      "status": "passed",
+      "paths": [
+        "schema_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/dispatch.md"
+      ],
+      "finding": "Process-only wording replaced by current source support limits. Final paragraph explicitly retains per-thread fence to tid0 arrival missing CTA aggregation; no whole-block visibility guarantee is inferred. out base 4B/stride constraints and vec==0 only relaxing state accesses remain. YAML unchanged; implicit root Contract and fused Math_reshape from root resolve exactly."
+    },
+    {
+      "id": "mixed_sparse_dispatch_scope",
+      "status": "passed",
+      "paths": [
+        "schema_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/dispatch.md"
+      ],
+      "finding": "Missing latest original-problem verification receipt is distinguished from unconfirmed final problem hash. Comparator/per-output/mechanism-A/B gaps remain, with SM103 sampling, NCU 6/10, shape 0/1/3/9 performance exceptions and unknown error bounds. No additional validation/performance conclusion. YAML unchanged."
+    }
+  ],
+  "rules_review": {
+    "status": "passed",
+    "budget": "Only Tolerance changed from 100 characters/1 line to 300 Unicode characters/2 logical lines; remaining BUDGETS bytes unchanged. Complete labels, exact limit, over-limit and output-binding cases passed in C 64-test suite.",
+    "docs": "DOC1 source fields and two alias examples; DOC4/5 separately mapped logical workers and physical sequential takeover, retired storage/in-flight accesses, simultaneous independent copies, left-to-right short circuit only exempts the unevaluated branch. No new enum/evaluator.",
+    "prompts": "P2/P4 future baseline leads go to scope; formal variants link actual complete baselines. P3/P5 unchanged."
+  },
+  "evidence": [
+    {
+      "path": "schema_discussion/main_integration_20261122/round2_d/independent_subject_checks.json",
+      "sha256": "8db74016142169c94ae9b62ebc73bb6dd206ff6a649a4fe2179e82c0f488fbfd"
+    },
+    {
+      "path": "schema_discussion/main_integration_20261122/round2_d/source_facts.json",
+      "sha256": "33ad6b993403134fc8cd8c4ead1e957dd1fa788bba82a84632657a784caf1ef9"
+    },
+    {
+      "path": "schema_discussion/main_integration_20261122/round2_c/structure_checks.json",
+      "sha256": "2d8bf4f1abf5747aa27c6e83b6f2617f18b0ca9abff1d41ea0ac3f3da30b125c"
+    },
+    {
+      "path": "schema_discussion/main_integration_20261122/round2_c/template_tests.json",
+      "sha256": "b77b7d61c7a210674134389d6439e6acba74bf7d2e82125e65d0ab576485dc05"
+    },
+    {
+      "path": "schema_discussion/main_integration_20261122/round2_c/tolerance_and_preservation.json",
+      "sha256": "f7f492b8612b8b3855bfbec352370cdfd647c8e21703df69827a7dbfb699c26e"
+    },
+    {
+      "path": "schema_discussion/main_integration_20261122/round2_c/independent_review_correction.json",
+      "sha256": "0fea726ea7d05b011ef24a3c8b5dc1c9ced688299eae2df37b91e796d4089af7"
+    }
+  ],
+  "byte_binding": {
+    "actual_source_matches_fixed_git_commit": true,
+    "raw_equals_normalization_preview": true,
+    "whole_directory_check_and_dispatch_pass": true,
+    "nineteen_yaml_source_version_dependency_identity_verified": true,
+    "rules_checker_evidence_sha_verified": true
+  },
+  "review_round_corrections": {
+    "same_execution_round": true,
+    "superseded_subject_sha256": "f41ccd270882c88b65f8ece2c8603ab7e95cebb9e55d15ef709a0b872e11c46a",
+    "resolved": [
+      "Explicit GDN missing CTA aggregation source risk",
+      "Unconfirmed final problem hash is not asserted to be absent"
+    ],
+    "affected_directories_rechecked": true,
+    "all_19_yaml_and_rules_unchanged": true,
+    "raw_preview_evidence_strengthened_to_all_19_documents": true
+  },
+  "acceptance": {
+    "independent_finite_source_review": true,
+    "runner_p6_receipt": false,
+    "hardware_validation": false,
+    "gpu_validation": false,
+    "all_domain_numerical_or_performance_proof": false
+  },
+  "unresolved_required_findings": [],
+  "limits": [
+    "Finite review of nine amended YAML/two dispatch and actual dependencies only; not a full 33-design source audit.",
+    "Original source risks, comparison-definition gaps and performance exceptions remain; no kernel repairs.",
+    "Historical 4616 input combinations are reused source/index evidence, not new implementation tests.",
+    "No true model/Extract/monitor/GPU execution or new P6 certification.",
+    "This frozen report binds subject/source/checker evidence only and is not a hash of later current manifests."
+  ]
+}

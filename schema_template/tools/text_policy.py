@@ -55,7 +55,7 @@ BUDGETS = (
       for field in ("range", "default")),
     Budget(A + ("Input", None, "range", int), 150, 1),
     *(Budget(region + ("Thesis",), 300, 2, prose=True) for region in (M, W, P)),
-    Budget(A + ("Golden_reference", "Tolerance", None), 100, 1),
+    Budget(A + ("Golden_reference", "Tolerance", None), 300, 2),
     Budget(A + ("Golden_reference", "Gap"), 100, 1, prose=True),
     *(Budget(H + (field,), 50, 1) for field in ("Device", "Architecture")),
     *(Budget(H + ("Stack", field), 150, 1) for field in ("Language", "Template", "Toolchain")),

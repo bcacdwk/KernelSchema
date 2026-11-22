@@ -27,6 +27,8 @@ Schema Extract 通过唯一入口 `schema_extract/extract_yaml.py` 执行六阶�
 
 design/optimize 默认只写 Schema：一次 Planner 调用保存 YAML、简短原因与真实调用记录，不要求独立审阅或效果验收。可直接使用 `kernelschema design --task task.md --out run`；优化再提供 `--schema` 和 `--feedback`。见[写作 API](kernelschema/WRITING.md)。任意显式 task 可用 [`kernelschema iterate` / `api.iterate`](docs/workflows/standalone.md#finite-automatic-iteration) 串联 design（或已有 Schema）→ AKA 标准 implement → 真实反馈 optimize → 必要的下一版 implement；AKA 的 `--schema --schema-iterate` 使用同一有限循环，`keep` 停止。安装、固定 Schema 实现、版本循环及真实结果边界见 [vector-add 示例](examples/workflows/vector_add/README.md)。实现和评测沿用 AKA 标准流程，写作完成不等于效果已证实。
 
+本轮整合保留 workflow 的 37 个自然提交，并落实 Extract/Template 的采用对象、回执反馈、控制提交与状态观察修订。Schema Wiki 现含 **18 项、48 YAML**；本批九个修订目录的 current 记录有限源复核与实际字节，另外三目录沿用匹配原字节的 receipt。实施范围、CPU 验证和公开历史边界见[整合报告](schema_discussion/main_integration_20261122/FINAL_REPORT.md)；旧 receipt 不批准修订后的字节。
+
 ## 术语
 
 - **Planner**：做设计的 Agent 或人，唯一能修改 Design 区，并填写 `REALIZATION` 的 `Require / Prefer / Forbid`。

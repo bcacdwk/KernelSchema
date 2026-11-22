@@ -106,3 +106,35 @@ def test_rules_freeze_actual_implementation_bytes(tmp_path):
     assert tool["version"] == sha256(resource("schema_template/tools/schema.py").read_bytes())
     assert bundle.read(tool["source"]) == resource("schema_template/tools/schema.py").read_bytes()
     assert any(r["path"].endswith("yaml_source.py") for r in rules["files"])
+
+
+def test_amended_raw_rejects_old_receipt_and_accepts_curated_without_receipt(make_bundle, tmp_path):
+    """A current manifest is provenance; it cannot reapprove changed P6 bytes."""
+    f = make_bundle()
+    native = tmp_path / "amended"
+    native.mkdir()
+    for name in ("root.yaml", "dispatch.md"):
+        (native / name).write_bytes(resource("examples/workflows/row_softmax/schema/" + name).read_bytes())
+    proof = {"format": "schema_extract.delivery.v2", "files": {
+        name: sha256((native / name).read_bytes()).split(":", 1)[1]
+        for name in ("root.yaml", "dispatch.md")}}
+    receipt = native / "receipt.json"
+    receipt.write_text(json.dumps(proof))
+    original_receipt = receipt.read_bytes()
+    with (native / "root.yaml").open("a") as stream:
+        stream.write("\n# Synthetic byte revision after the historical receipt.\n")
+    with pytest.raises(ProtocolError, match="native receipt dependency mismatch: root.yaml"):
+        consume_raw(Publication(tmp_path / "rejected"), native, task=f["task"], origin="extract", receipt=receipt)
+    publication = Publication(f["root"])
+    curated = consume_raw(publication, native, task=f["task"], origin="curated", receipt=None)
+    publication.commit([curated["schema"]], subjects=[f["task"]])
+    manifest = Bundle(f["root"]).document(curated["schema"])
+    assert curated["receipt"] is None
+    assert manifest["extensions"]["information"]["origin"] == "curated"
+    assert Bundle(f["root"]).read(manifest["raw"][0]["file"]) == (native / "root.yaml").read_bytes()
+    current = native / "current.json"
+    current.write_text(json.dumps({"format": "schema_wiki.current_schema_manifest.v1",
+                                   "acceptance": {"runner_p6_receipt": False}}))
+    with pytest.raises(ProtocolError, match="expected original schema_extract.delivery.v2 receipt"):
+        consume_raw(Publication(tmp_path / "not-a-receipt"), native, task=f["task"], origin="curated", receipt=current)
+    assert receipt.read_bytes() == original_receipt

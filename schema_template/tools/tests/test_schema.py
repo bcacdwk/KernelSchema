@@ -79,6 +79,31 @@ class SchemaTests(TaskCase):
         self.assertTrue(any(d.path.endswith('.range') for d in diagnostics))
         self.assertTrue(any('Tolerance' in d.path for d in diagnostics))
 
+    def test_tolerance_preserves_complete_source_record_and_bounded_unicode_text(self):
+        algorithm = deepcopy(at(self.base, ALGO))
+        golden = algorithm['Golden_reference']
+        output = next(iter(algorithm['Output']))
+        record = ('Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, '
+                  'max_rel_l2=null, relative_to=candidate, mode=elementwise_and_l2; '
+                  'comparator definition unavailable; no defaults')
+        for accepted in (record, '界' * 300, '界' * 149 + '\n' + '界' * 150):
+            with self.subTest(accepted_size=text_policy.text_size(accepted)):
+                golden['Tolerance'] = {output: accepted}
+                self.assertFalse(rules.validate_algorithm(algorithm))
+        for rejected in ('界' * 301, 'first\n\nthird'):
+            with self.subTest(rejected_size=text_policy.text_size(rejected)):
+                golden['Tolerance'] = {output: rejected}
+                errors = rules.validate_algorithm(algorithm)
+                self.assertTrue(any(d.path.endswith('.Tolerance.' + output)
+                                    and '300 characters / 2 logical lines' in d.message
+                                    for d in errors))
+        golden['Tolerance'] = {'absent_output': record}
+        self.assertTrue(any('Tolerance' in d.path for d in rules.validate_algorithm(algorithm)))
+        golden['Tolerance'] = {output: record}
+        golden['Gap'] = '界' * 101
+        self.assertTrue(any(d.path.endswith('.Gap') and '100 characters / 1 logical lines' in d.message
+                            for d in rules.validate_algorithm(algorithm)))
+
     def test_nullable_ledger_and_open_expressions_remain_valid(self):
         data = deepcopy(self.base)
         at(data, MATH)['Rewrite'][0]['Ledger'] = {'Baseline': None, 'Gain': None, 'Cost': None}

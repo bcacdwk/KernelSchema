@@ -2,7 +2,7 @@ META_DATA:
   Name: kda_raw_prefill_state_bf16
   Describe: 'Packed KDA prefill: normalized Q/K, per-channel bounded decay, sigmoid-beta delta-rule recurrence; BF16 output, in-place final state, checkpoints'
   Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/candidate/solution.py::Model.forward
-  Version: 3
+  Version: 4
   Dispatch:
     when: 'Inputs for which the frozen host engine selector holds: cadence % 32 == 0 and (2 * request_count * head_count > sms or (3 * request_count * head_count > sms and total_tokens <= 4096 and cadence == 0)), where cadence = checkpoint_every_n_tokens and sms is the runtime device SM count read by the host; further restricted to total_tokens >= 32 because the frozen host rejects this path for smaller totals in its beta TMA box validation'
 CONTRACT:
@@ -90,9 +90,9 @@ CONTRACT:
     Golden_reference:
       Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/problem/reference.py::Model.forward
       Tolerance:
-        attention_output: atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, relative_to=candidate; formula absent; no defaults
-        final_state: atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, relative_to=candidate; formula absent; no defaults
-        checkpoint_states: atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, relative_to=candidate; formula absent; no defaults
+        attention_output: Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, max_rel_l2=null, relative_to=candidate, mode=elementwise_and_l2; comparator definition unavailable; no defaults
+        final_state: Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, max_rel_l2=null, relative_to=candidate, mode=elementwise_and_l2; comparator definition unavailable; no defaults
+        checkpoint_states: Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, max_rel_l2=null, relative_to=candidate, mode=elementwise_and_l2; comparator definition unavailable; no defaults
       Gap: Reference resolves scale by truthiness, so scale == 0 also selects key_dim^(-0.5); Compute governs
   Hardware_specification:
     Device:

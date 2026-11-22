@@ -2,7 +2,7 @@
 
 ## 范围
 
-本次收录固定实现 `candidate/solution.py::Model.forward` 的设备侧设计。host 侧只做校验与几何推导，不做数值归一：14 个张量以借用引用解包（`THPVariable_Unpack`，无 pybind 拷贝），`TORCH_CHECK` 固定 dtype、维度与关键 stride（`mixed_qkv.stride(1)==1`、conv_state 通道连续、`conv_weight.stride(0)==4`、state 的 `size(2)==size(3)==128` 且 `stride(3)==1`、out 与 output_gate 同形），并由形状推出 channels、request_count=n、spec_width=width、value_head_count=hv、qk_head_count=h=(channels-hv*128)/256、ratio=hv/h。out 为 None 时在 Python 侧 `torch.zeros_like(output_gate)` 后传入，返回值即该对象。每次调用的设备工作都在 `gdn_launch` 内的一次或两次 kernel 提交中完成，无库数值调用，也没有阻塞调用者流的 host/device 同步（录图路径只在私有捕获流上 `cudaStreamSynchronize`，融合标志缓冲只在首次分配、容量增长或换设备时另有一次 zero-init）；所有张量按实际 stride 寻址（生产输入的 mixed_qkv 与 output_gate 是同一 guarded backing 上的视图，故 ms0 大于 channels）。不含生产 baseline（`problem/solution.py` 包装的 `QwenGatedDeltaNetAttention._forward_core_decode_spec_fused_norm`，原库 validation.status=numerical_failure，只作背景，不作正确性依据）。
+本目录收录固定实现 `candidate/solution.py::Model.forward` 的设备侧设计。host 侧只做校验与几何推导，不做数值归一：14 个张量以借用引用解包（`THPVariable_Unpack`，无 pybind 拷贝），`TORCH_CHECK` 固定 dtype、维度与关键 stride（`mixed_qkv.stride(1)==1`、conv_state 通道连续、`conv_weight.stride(0)==4`、state 的 `size(2)==size(3)==128` 且 `stride(3)==1`、out 与 output_gate 同形），并由形状推出 channels、request_count=n、spec_width=width、value_head_count=hv、qk_head_count=h=(channels-hv*128)/256、ratio=hv/h。out 为 None 时在 Python 侧 `torch.zeros_like(output_gate)` 后传入，返回值即该对象。每次调用的设备工作都在 `gdn_launch` 内的一次或两次 kernel 提交中完成，无库数值调用，也没有阻塞调用者流的 host/device 同步（录图路径只在私有捕获流上 `cudaStreamSynchronize`，融合标志缓冲只在首次分配、容量增长或换设备时另有一次 zero-init）；所有张量按实际 stride 寻址（生产输入的 mixed_qkv 与 output_gate 是同一 guarded backing 上的视图，故 ms0 大于 channels）。不含生产 baseline（`problem/solution.py` 包装的 `QwenGatedDeltaNetAttention._forward_core_decode_spec_fused_norm`，原库 validation.status=numerical_failure，只作背景，不作正确性依据）。
 
 `gdn_launch` 只在 n>0 时提交。进入哪套设备方案由下列 host 判定决定，它们是配置选择而非算法分支，按 common 的规则不留在 YAML：每份完整设计固定一档，其余取值记入本目录。
 
@@ -14,7 +14,7 @@
 
 有效域内的工作与副作用照常核对，不与 no-op 混淆：`len[i]=0` 的请求其 conv/gdn 块直接返回，不写 out 行也不写状态；非活跃请求（源槽为 0，或 accepted 越界）由 gdn 块把 len*128 个 out 元素写零并返回，不写检查点；活跃请求的 out 行由该 (request, head) 块在尾段全部写满，故 out 的每个元素都有确定生产者。源码另保留 `len>8` 的回退循环与 `len<=8` 活跃门以维持非法域行为，在 Contract 有效域（len<=spec_width<=8）内回退循环为空、活跃门恒真，属防御路径，不构成额外设计。
 
-待核实与来源限制（不影响机制判断与代表选择）：融合门限 160 来自源码记录的常驻块容量（`__launch_bounds__(256,2)`，2 块/SM × 148 SM ≈ 296）约 0.55 倍与 ab3/ab7/ab9 实测取舍，无 GPU、不复现，各设计按来源事实将其记为设计条件而非硬件保证；快速 sigmoid（`tanh.approx.f32` 实现 0.5+0.5*tanh(x/2)）喂 conv 的 silu、gate 两分支与 beta，decay/softplus 保持精确，源码声称绝对误差约 3.1e-4 且在 atol=0.01/rtol=0.05 预算内，未验证，作为来源限制随各设计的数学层保留；外部验收器实现不在快照内（已记 source_gap issue），只影响外部通过边界；`gdn_w11v8_kernel<false>` 与 `gdn_w11_kernel<false>` 两个模板实例在 `gdn_launch` 的四路选择中从不被启动，属死代码，不进设计。
+当前来源支持范围与限制（不影响机制判断与代表选择）：融合门限 160 来自源码记录的常驻块容量（`__launch_bounds__(256,2)`，2 块/SM × 148 SM ≈ 296）约 0.55 倍与 ab3/ab7/ab9 实测取舍，现有材料支持将其记为设计条件，不构成硬件保证；快速 sigmoid（`tanh.approx.f32` 实现 0.5+0.5*tanh(x/2)）喂 conv 的 silu、gate 两分支与 beta，decay/softplus 保持精确，源码声称绝对误差约 3.1e-4 且在 atol=0.01/rtol=0.05 预算内，现有材料未提供独立误差证明，作为来源限制随各设计的数学层保留；外部验收器实现不在快照内，外部通过边界只能按现有来源记录解释；融合路径每线程 fence 到 tid0 arrival 之间缺少 CTA 内聚合，属于来源同步风险，不能据到达计数保证全块写入已对消费者可见；`gdn_w11v8_kernel<false>` 与 `gdn_w11_kernel<false>` 两个模板实例在 `gdn_launch` 的四路选择中从不被启动，属死代码，不进设计。
 
 ## 完整设计
 

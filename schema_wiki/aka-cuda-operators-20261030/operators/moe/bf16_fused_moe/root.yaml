@@ -2,7 +2,7 @@ META_DATA:
   Name: bf16_fused_moe
   Describe: 'Single-rank fused MoE: per-expert FC1, routing-weighted gated activation, FC2, and FP32 route reduction written in place to the BF16 output buffer'
   Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/candidate/solution.py::Model.forward
-  Version: 4
+  Version: 5
   Dispatch:
     when: Contract inputs with hidden_dim = 2048, intermediate_dim = 768, local_expert_count = 128 and num_max_tokens_per_rank = 1920 (hence 1 <= token_count <= 1920), activation_clamp_opt = None, activation_alpha = 1.0, activation_beta = 0.0; invoked on an SM100 device with persistent grid width fixed at 146 CTAs (SM count minus 2, even, 2-CTA clusters), each CTA exclusively occupying one SM; sym_buffer scratch counters are zero before the first invocation and every invocation restores them.
 CONTRACT:
@@ -96,7 +96,7 @@ CONTRACT:
     Golden_reference:
       Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/problem/reference.py::Model.forward
       Tolerance:
-        y_result: Source only; atol=0.01, rtol=0.05, relative_to=candidate; max_mismatch_fraction=0; no defaults
+        y_result: Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, max_rel_l2=null, relative_to=candidate, mode=elementwise_and_l2; comparator definition unavailable; no defaults
   Hardware_specification:
     Device:
     Architecture:

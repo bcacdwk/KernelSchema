@@ -2,7 +2,7 @@ META_DATA:
   Name: fmha_fp8_per_token_head
   Describe: Bottom-right causal multi-head attention over paged FP8-E4M3 KV with inline per-(token, kv-head) FP32 scales; BF16 Q in, BF16 out written in place
   Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py::Model.forward
-  Version: 4
+  Version: 5
   Dispatch:
     when: 'head_dim = 128 and rows = max_seqlen_q * g >= 64, and the merged tcgen05 prefill does not claim the shape: rows = 64, or peer_ctas = (ceil_div(total_q,128) + batch_count) * head_count < 128 with neither short-KV relaxation (max_seqlen_k <= 512 and peer_ctas >= 12, or <= 1024 and >= 96). With n_split > 1 the block merge runs: not (tile_count*kv_head_count*128 >= 8*sms and ceil_div(n_split,256/dc) <= 3). Unchecked prerequisites: power-of-two page_size and g, batch_count <= 32'
 CONTRACT:
@@ -327,18 +327,18 @@ DESIGN:
             dtype: fp16, total_size: 8704}
           v_image: {meaning: One block's V payload as BF16 at a 136 pitch, depth: 1, location: smem, shape: [{key: 32}, {d: 136}],
             dtype: bf16, total_size: 8704}
-          page_regs: {meaning: 'Page index, slot and both scales of one block', depth: 1, location: register, shape: [{key: 32}, {word: 4}],
-            dtype: int32, total_size: 512}
+          page_regs: {meaning: Four warp copies of page metadata and scales, depth: 1, location: register, shape: [{warp_copy: 4}, {key: 32}, {word: 4}],
+            dtype: int32, total_size: 2048}
           kv_raw: {meaning: 'Raw FP8 K and V of one block, prefetched', depth: 1, location: register, shape: [{key: 32}, {d: 128}, {payload: 2}],
             dtype: fp8_e4m3fn, total_size: 8192}
           score: {meaning: Scores of the block being processed, depth: 1, location: register, shape: [{row: 128}, {key: 32}],
             dtype: fp32, total_size: 16384, view: {score(n): {}}}
           o_run: {meaning: Unnormalized output accumulator of the tile, depth: 1, location: register, shape: [{row: 128}, {d: 128}],
             dtype: fp32, total_size: 65536}
-          m_run: {meaning: Running row maximum in the log2 domain, depth: 1, location: register, shape: [{row: 128}],
-            dtype: fp32, total_size: 512}
-          l_run: {meaning: Running row denominator of the tile, depth: 1, location: register, shape: [{row: 128}],
-            dtype: fp32, total_size: 512}
+          m_run: {meaning: Row maxima; four independent lane copies, depth: 1, location: register, shape: [{row: 128}, {lane_copy: 4}],
+            dtype: fp32, total_size: 2048}
+          l_run: {meaning: Row denominators; four independent lane copies, depth: 1, location: register, shape: [{row: 128}, {lane_copy: 4}],
+            dtype: fp32, total_size: 2048}
         Role:
           MAIN:
             Info:

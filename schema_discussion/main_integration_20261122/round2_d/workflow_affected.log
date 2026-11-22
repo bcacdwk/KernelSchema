@@ -1,0 +1,100 @@
+....................................................................F.   [100%]
+=================================== FAILURES ===================================
+_______________ test_explicit_budgets_cli_freezes_public_inputs ________________
+
+root = PosixPath('/tmp/pytest-of-shaohanyong.shy/pytest-408/test_explicit_budgets_cli_free0/demo')
+path = 'artifacts/2d63c9d970484722b28ccc4897aae6b7/reference-profile.json'
+
+    def read_regular(root: Path, path: str) -> tuple[bytes, int]:
+        """Read through directory descriptors; no relative component follows links."""
+        relative_path(path)
+        descriptors = []
+        try:
+            current = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            descriptors.append(current)
+            parts = path.split("/")
+            for part in parts[:-1]:
+                current = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+                descriptors.append(current)
+>           fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           FileNotFoundError: [Errno 2] No such file or directory: 'reference-profile.json'
+
+kernelschema/artifacts.py:93: FileNotFoundError
+
+The above exception was the direct cause of the following exception:
+
+tmp_path = PosixPath('/tmp/pytest-of-shaohanyong.shy/pytest-408/test_explicit_budgets_cli_free0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fcf1d4ec280>
+capsys = <_pytest.capture.CaptureFixture object at 0x7fcf1daa7390>
+
+    def test_explicit_budgets_cli_freezes_public_inputs(tmp_path, monkeypatch, capsys):
+        from examples.workflows.row_softmax.run_demo import main
+        bundle, owner, parent = existing_parent(tmp_path)
+        before = loads(owner.path.read_bytes())
+        forbid_new_owner(monkeypatch)
+        ref_file = tmp_path / "parent.json"; durable_write(ref_file, jcs(parent))
+        args = ["prepare", "--out", str(tmp_path / "demo"), "--parent-ref", str(ref_file),
+                "--parent-bundle", str(bundle.root), "--authority", str(owner.path)]
+        options = explicit_budgets()
+        for name, value in options.items():
+            path = tmp_path / (name + ".json"); durable_write(path, jcs(value))
+            args.extend(["--" + name.replace("_", "-"), str(path)])
+        assert main(args) == 0
+        assert str(owner.path) not in capsys.readouterr().out
+        demo = Demo(tmp_path / "demo")
+        assert demo.config["request_limits"] == options["request_limits"]
+        assert Bundle(demo.root).document(demo.config["writing_profile"])["parameters"]["writing_finish_floor"] == options["writing_finish_floor"]
+>       assert Bundle(demo.root).document(demo.config["reference_profile"])["parameters"]["minimum_active_ms"] == options["reference_minimum_active_ms"]
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/workflows/test_standalone.py:538: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+kernelschema/artifacts.py:155: in document
+    data = self.read(reference)
+           ^^^^^^^^^^^^^^^^^^^^
+kernelschema/artifacts.py:152: in read
+    return self._verified(reference).data
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+kernelschema/artifacts.py:146: in _verified
+    data, mode = self._file(reference["path"])
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+kernelschema/artifacts.py:133: in _file
+    return read_regular(self.root, path)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+root = PosixPath('/tmp/pytest-of-shaohanyong.shy/pytest-408/test_explicit_budgets_cli_free0/demo')
+path = 'artifacts/2d63c9d970484722b28ccc4897aae6b7/reference-profile.json'
+
+    def read_regular(root: Path, path: str) -> tuple[bytes, int]:
+        """Read through directory descriptors; no relative component follows links."""
+        relative_path(path)
+        descriptors = []
+        try:
+            current = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            descriptors.append(current)
+            parts = path.split("/")
+            for part in parts[:-1]:
+                current = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+                descriptors.append(current)
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current)
+            descriptors.append(fd)
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise ProtocolError(f"Ref is not a regular file: {path}")
+            chunks = []
+            while block := os.read(fd, 1024 * 1024):
+                chunks.append(block)
+            after = os.fstat(fd)
+            if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise ProtocolError(f"file changed while reading: {path}")
+            return b"".join(chunks), stat.S_IMODE(after.st_mode)
+        except OSError as error:
+>           raise ProtocolError(f"cannot read regular bundle file {path}: {error}") from error
+E           kernelschema.contracts.ProtocolError: cannot read regular bundle file artifacts/2d63c9d970484722b28ccc4897aae6b7/reference-profile.json: [Errno 2] No such file or directory: 'reference-profile.json'
+
+kernelschema/artifacts.py:106: ProtocolError
+=========================== short test summary info ============================
+FAILED tests/workflows/test_standalone.py::test_explicit_budgets_cli_freezes_public_inputs
+1 failed, 69 passed in 563.28s (0:09:23)

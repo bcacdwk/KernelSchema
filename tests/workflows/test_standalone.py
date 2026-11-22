@@ -524,7 +524,7 @@ def test_explicit_budgets_cli_freezes_public_inputs(tmp_path, monkeypatch, capsy
     before = loads(owner.path.read_bytes())
     forbid_new_owner(monkeypatch)
     ref_file = tmp_path / "parent.json"; durable_write(ref_file, jcs(parent))
-    args = ["prepare", "--out", str(tmp_path / "demo"), "--parent-ref", str(ref_file),
+    args = ["prepare", "--writing-mode", "strict", "--out", str(tmp_path / "demo"), "--parent-ref", str(ref_file),
             "--parent-bundle", str(bundle.root), "--authority", str(owner.path)]
     options = explicit_budgets()
     for name, value in options.items():
