@@ -229,17 +229,19 @@ def _frozen_entry(store, state: dict, command: list[str]) -> None:
     os.execve(sys.executable, arguments, environment)
 
 
-def _print_observations(rows, *, as_json=False):
+def _print_observations(rows, *, as_json=False, current_anomalies=None):
     if as_json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return
     from .wakeup import format_beijing_time
     for row in rows:
+        historical = row.get("observation_role") == "historical"
+        label = "历史采样（已有较新观察） " if historical else ""
         if row.get("error"):
-            print(f"{row['run_id']} unknown: {row['error']}")
+            print(f"{label}{row['run_id']} unknown: {row['error']}")
             continue
         executor = row.get("executor", {})
-        print(f"{row['run_id']} {row.get('operator_id')} {row.get('disposition', row.get('status'))} {row.get('stage')} "
+        print(f"{label}{row['run_id']} {row.get('operator_id')} {row.get('disposition', row.get('status'))} {row.get('stage')} "
               f"nodes={row.get('completed_node_count')}/{row.get('planned_node_count')} "
               f"active={len(row.get('active_attempts', {}))} "
               f"observed={row['observation']['status']} at={format_beijing_time(row['observation']['observed_at'])} "
@@ -247,10 +249,15 @@ def _print_observations(rows, *, as_json=False):
               f"gate={'v1' if row.get('gate_capable') else 'unsupported'} "
               f"last={format_beijing_time(row.get('updated_at'))} "
               f"published={row.get('published')} checkpoint={row.get('checkpoint')}")
-        for item in row.get("anomalies", []):
+        for item in row.get("anomalies", []) if current_anomalies is None or historical else []:
             print(f"  {item.get('classification')} {item.get('scope')}: {item.get('summary')} [{item.get('evidence')}]")
-            if item.get("recovery_condition"):
+            if item.get("recovery_condition") and not historical:
                 print("  next: " + item["recovery_condition"])
+    for item in current_anomalies or []:
+        print(f"  current {item.get('run_id')} {item.get('classification')} {item.get('scope')}: "
+              f"{item.get('summary')} [{item.get('evidence')}]")
+        if item.get("recovery_condition"):
+            print("  next: " + item["recovery_condition"])
 
 
 def _launch_context(store, state: dict, *, mode="resume", add_calls=0) -> dict:
@@ -416,7 +423,7 @@ def main(argv=None) -> int:
             if args.monitor_command != "scan" or args.json:
                 print(json.dumps(shown, ensure_ascii=False, indent=2))
             else:
-                _print_observations(result["runs"])
+                _print_observations(result["runs"], current_anomalies=result["anomalies"])
                 print(f"changes={len(result['changes'])} anomalies={len(result['anomalies'])}")
                 if result.get("superseded_run_ids"):
                     print("以下 run 的本次采样已被更新观察超过：" + ", ".join(result["superseded_run_ids"]))

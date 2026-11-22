@@ -309,25 +309,61 @@ class Store:
             pass
 
     def read_summary(self, run_id: str, *, fallback=True) -> dict:
-        """Read one projection plus one state stat; fallback never validates nodes."""
+        """Read a cache or one state sample, without repairing either file."""
         directory = self.run_dir(run_id)
         observation = {"observed_at": time.time(), "source": "summary", "status": "unknown",
-                       "deep_verified": False}
+                       "deep_verified": False, "cache": {"status": "unknown"}}
+        cache = observation["cache"]
         try:
             value = read_json(directory / "summary.json")
             if (not isinstance(value, dict) or value.get("format") != SUMMARY_FORMAT or
                     value.get("run_id") != run_id or type(value.get("state_revision")) is not int):
                 raise ExtractError("unsupported or mismatched summary projection")
-            if value.get("state_file") == _state_stamp(directory / "state.json"):
-                observation["status"] = "current"
-                return {**value, "observation": observation}
-            observation.update(status="stale", reason="state changed after this projection")
         except (ExtractError, OSError) as exc:
-            observation["reason"] = str(exc)
+            cache.update(status="missing" if isinstance(exc.__cause__ or exc, FileNotFoundError) else "invalid",
+                         reason=str(exc))
+        else:
+            cache.update(state_revision=value["state_revision"], generated_at=value.get("generated_at"),
+                         state_file=value.get("state_file"))
+            try:
+                stamp = _state_stamp(directory / "state.json")
+                if value.get("state_file") == stamp:
+                    cache["status"] = "current"
+                    observation.update(status="current", sampled_at=value.get("generated_at"),
+                                       state_revision=value["state_revision"])
+                    return {**value, "observation": observation}
+                cache.update(status="stale", reason="state metadata changed after this projection")
+            except (ExtractError, OSError) as exc:
+                cache["reason"] = str(exc)
         if not fallback:
             return {"format": SUMMARY_FORMAT, "run_id": run_id, "observation": observation}
         observation["source"] = "state"
-        return {**summary(self, self.load(run_id)), "observation": observation}
+        stamps = []
+        try:
+            before = _state_stamp(directory / "state.json")
+        except (ExtractError, OSError) as exc:
+            before = None
+            stamps.append(str(exc))
+        try:
+            state = self.load(run_id)  # One sample only; never retry a changing file.
+        except (ExtractError, OSError) as exc:
+            observation.update(reason=str(exc), state_file_before=before)
+            return {"format": SUMMARY_FORMAT, "run_id": run_id, "error": str(exc), "observation": observation}
+        sampled_at = time.time()
+        observation.update(observed_at=sampled_at, sampled_at=sampled_at, state_revision=state.get("state_revision"))
+        try:
+            after = _state_stamp(directory / "state.json")
+        except (ExtractError, OSError) as exc:
+            after = None
+            stamps.append(str(exc))
+        observation.update(state_file_before=before, state_file_after=after)
+        if stamps:
+            observation.update(status="unknown", reason="; ".join(stamps))
+        elif before != after:
+            observation.update(status="changed", reason="state changed while reading this sample")
+        else:
+            observation["status"] = "current"
+        return {**summary(self, state), "state_file": before if before == after else None, "observation": observation}
 
     @contextmanager
     def writer(self, run_id: str):

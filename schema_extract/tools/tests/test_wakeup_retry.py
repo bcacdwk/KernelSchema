@@ -138,6 +138,64 @@ class WakeupRetryTests(unittest.TestCase):
         self.assertEqual(fixture.reminder()["id"], wake_id)
         self.assertEqual(fixture.reminder()["attempt_count"], 1)
 
+    def test_disabled_start_runs_initial_scan_and_schedules_from_new_completion(self):
+        fixture = ReminderFixture(self.root, ["queued"])
+        fixture.first_send()
+        fixture.clock.ack(fixture.wake_id, fixture.thread)
+        fixture.clock.scan(fixture.wake_id, fixture.thread)
+        old = fixture.clock.status()
+        fixture.clock.stop()
+        fixture.now += 10000
+        started = fixture.now
+        def initial(store, selected):
+            clock = store.read_supervisor()["clock"]
+            self.assertEqual(clock["last_check_number"], -1)
+            self.assertIsNone(clock["next_due_at"])
+            self.assertNotIn("reminder", clock)
+            fixture.now += 7
+            return []
+        with patch.object(monitor, "inspect_runs", side_effect=initial) as inspection:
+            fixture.restart()
+        inspection.assert_called_once()
+        current = fixture.clock.status()
+        self.assertGreater(current["generation"], old["generation"])
+        self.assertEqual(current["last_check_number"], 0)
+        self.assertEqual(current["last_scan"]["started_at"], started)
+        self.assertEqual(current["next_due_at"], started + 7 + wakeup.EARLY_SECONDS)
+        self.assertNotEqual(current["reminder"]["id"], old["reminder"]["id"])
+        self.assertFalse(fixture.clock.ack(fixture.wake_id, fixture.thread)["accepted"])
+        self.assertEqual(len(fixture.sent), 1)
+
+    def test_enabled_daemon_recovery_keeps_original_ack_claim_and_due(self):
+        fixture = ReminderFixture(self.root, ["queued"])
+        fixture.first_send()
+        fixture.clock.ack(fixture.wake_id, fixture.thread)
+        with fixture.store.supervisor() as ledger:
+            clock = ledger["clock"]
+            clock["reminder"]["scan"] = {"id": str(uuid4()), "owner": {"pid": 123456789}, "started_at": fixture.now}
+            before = json.loads(json.dumps(clock))
+        fixture.now += 10000
+        with patch.object(monitor, "inspect_runs", side_effect=AssertionError("same generation does not restart initial scan")):
+            fixture.restart()
+        current = fixture.store.read_supervisor()["clock"]
+        for key in ("generation", "reminder", "last_scan", "last_check_number", "next_due_at"):
+            self.assertEqual(current[key], before[key])
+        fixture.clock.tick()
+        self.assertEqual(len(fixture.sent), 1)
+        self.assertEqual(fixture.reminder()["id"], fixture.wake_id)
+
+    def test_new_generation_remains_fenced_by_unconfirmed_old_send(self):
+        fixture = ReminderFixture(self.root, ["queued"])
+        fixture.first_send()
+        with fixture.store.supervisor() as ledger:
+            ledger["clock"]["reminder"]["attempts"][-1].update(status="sending", identity=None)
+        fixture.clock.stop()
+        before = fixture.store.read_supervisor()
+        with self.assertRaisesRegex(wakeup.ExtractError, "previous queue delivery"):
+            fixture.restart()
+        self.assertEqual(fixture.store.read_supervisor(), before)
+        self.assertEqual(len(fixture.sent), 1)
+
     def test_latest_attempt_sets_delay_and_all_outcomes_share_persistent_limit(self):
         for second in ("queued", "uncertain"):
             with self.subTest(second=second):
@@ -260,6 +318,8 @@ class WakeupRetryTests(unittest.TestCase):
                     fixture.restart()
                     self.assertFalse(fixture.clock.ack(fixture.wake_id, fixture.thread)["accepted"])
                     self.assertNotEqual(fixture.reminder()["id"], fixture.wake_id)
+                    self.assertEqual(fixture.clock.tick()["status"], "waiting")
+                    fixture.now = fixture.reminder()["due_at"]
                     self.assertEqual(fixture.clock.tick()["status"], "queued")
                     self.assertNotIn(fixture.wake_id, fixture.sent[-1][1])
 
@@ -512,13 +572,17 @@ class WakeupRetryTests(unittest.TestCase):
                     fixture = ReminderFixture(self.root / (phase + str(restart)), ["queued"])
                     fixture.first_send()
                     self.assertTrue(fixture.clock.ack(fixture.wake_id, fixture.thread)["accepted"])
+                    generation = fixture.clock.status()["generation"]
                     after_stop = []
                     with (fixture.store.root / "supervisor.lock").open("a") as held:
                         if phase == "claim":
                             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
                         def inspect(*args):
-                            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            # Inject contention in the old scan only. An explicit
+                            # restart now performs its own fresh initial scan.
+                            if fixture.store.read_supervisor()["clock"]["generation"] == generation:
+                                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
                             return []
 
                         def invalidate(delay):
@@ -537,7 +601,7 @@ class WakeupRetryTests(unittest.TestCase):
                                 result = fixture.clock.scan(fixture.wake_id, fixture.thread)
                                 self.assertEqual(result["clock"], {"committed": False, "status": "scan_invalidated", "id": fixture.wake_id})
                     wait.assert_called_once_with(0.05)
-                    self.assertEqual(inspection.call_count, 0 if phase == "claim" else 1)
+                    self.assertEqual(inspection.call_count, (0 if phase == "claim" else 1) + int(restart))
                     self.assertEqual(fixture.store.read_supervisor(), after_stop[0])
 
     def test_initialization_lock_is_immediate_and_preserves_uninitialized_store(self):

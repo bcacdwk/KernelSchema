@@ -17,6 +17,8 @@ python3 schema_extract/extract_yaml.py status RUN_UUID
 
 单任务默认前台执行；`--background` 登记并启动冻结 Runner，`--queue` 只冻结和排队，两者互斥。`ready` 表示当前 P6 已通过，`published: true` 表示已发布到登记的输出目录。交付包含 `root.yaml`、所选非 root YAML、中文目录及 `.extraction/receipt.json`。
 
+新任务的输出叶目录必须不存在；可以预建父目录。
+
 提取只表达固定实现及其设计边界，不运行 GPU 或修复 kernel。适用检查跳过硬件占位；结构检查和独立语义审阅分别留下证据。
 
 ## 输入与输出
@@ -95,6 +97,10 @@ P2 提交 `{id, instance}` 的有限选择，P4 提交 `{id, wait_for}` 的写�
 
 `status` 展示阶段、角色、checkpoint、节点和停止原因；`--full` 读取权威状态。`inspect` 是轻量只读观察，`monitor scan` 另保存短观察，不自动恢复任务。运行时长和日志沉默不触发终止。
 
+`observation.cache.status` 的 stale/missing/invalid 描述 summary 缓存；fallback 返回一次 state 样本，`observation.status` 单独标记该次样本的 current/changed/unknown。revision、采样时间及含 ctime 的文件标记保留在返回值中；`deep_verified: false` 不表示深度校验通过，读取不会修写缓存或状态。
+
+控制结果的 `committed` 为 true 表示本操作已有持久请求/预约，为 false 表示确认未提交，null 表示无法确认；后续 `delivery`、launch 或运行结果另行核对。保留原 request/launch ID，用 `inspect --run RUN_UUID --json` 的 `requests` 与 `launch`（clock 用 `monitor status`）对账；未知提交或投递不能作为重放操作的依据。
+
 先看 `reason`、节点原因及 `active_attempts / unconfirmed_attempts / unsettled_attempts`。停止状态与调用结清分别核对；终止未确认时保持 fence，不能启动同一范围的新调用。
 
 ## 恢复与交付
@@ -169,7 +175,7 @@ python3 schema_extract/extract_yaml.py monitor status
 python3 schema_extract/extract_yaml.py monitor stop
 ```
 
-提醒通过独立的 `codex queue --resume` 投递；收到后按[提醒正文](prompt/operations/wakeup.md)执行绑定线程的 `monitor ack` 与 `monitor scan`，以 `clock.committed` 或 `reused` 为本轮完成依据。等待锁或中断未返回不等于未提交，可用同一提醒 ID 与 `monitor status` 核对续接。`superseded_run_ids` 标出已被更新观察超越的旧采样，不覆盖较新观察；人读时间采用北京时间（UTC+8）。`stop` 只停用提醒（保留的到期记录不再计时），不取消已启动提取。
+提醒通过独立的 `codex queue --resume` 投递；收到后按[提醒正文](prompt/operations/wakeup.md)执行绑定线程的 `monitor ack` 与 `monitor scan`，以 `clock.committed` 或 `reused` 为本轮完成依据。等待锁或中断未返回不等于未提交，可用同一提醒 ID 与 `monitor status` 核对续接。`superseded_run_ids` 标出已被更新观察超越的旧采样，旧 rows 标记为 historical 并保留，当前 anomalies 使用较新观察；人读时间采用北京时间（UTC+8）。`stop` 只停用提醒（保留的到期记录不再计时），不取消已启动提取。显式 stop/start 创建新代际并先完成初始扫描再排 due；同 enabled 代际的 daemon 恢复保留提醒 ID、ack、claim 与原 due。
 
 monitor 只负责观察和提醒，恢复由 Supervisor 决定（Runner 自身的普通有限重试独立运行）；日志沉默或状态未变不授权终止。`pause/cancel/hold` 保持优先，提醒补送有固定上限；投递未结清时不重发，clock 继续观察，但 `queue` 挂住时不能保证同通道唤醒。
 

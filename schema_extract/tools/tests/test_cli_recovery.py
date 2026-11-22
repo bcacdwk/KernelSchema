@@ -278,6 +278,91 @@ class ControlCommitFactsTests(unittest.TestCase):
                     self.assertNotIn("launch", saved)
                 self.assertEqual(launch.call_count, 4 if batch else 2)
 
+    def test_summary_cache_condition_is_separate_from_one_readonly_state_sample(self):
+        from schema_extract.tools.common import write_json
+        directory = self.store.run_dir(self.run_id)
+        state_path, cache_path = directory / "state.json", directory / "summary.json"
+        with patch.object(self.store, "load", wraps=self.store.load) as load:
+            current = self.store.read_summary(self.run_id)
+        load.assert_not_called()
+        self.assertEqual(current["observation"]["cache"]["status"], "current")
+        self.assertEqual(current["observation"]["source"], "summary")
+        for condition in ("metadata", "revision", "missing", "invalid"):
+            with self.subTest(condition=condition):
+                self.store.save(self.state)
+                cached = read_json(cache_path)
+                if condition == "metadata":
+                    state_path.chmod(0o600 if state_path.stat().st_mode & 0o077 else 0o644)
+                elif condition == "revision":
+                    current = read_json(state_path)
+                    current.update(state_revision=current["state_revision"] + 1, status="ready")
+                    write_json(state_path, current)
+                elif condition == "missing":
+                    cache_path.unlink()
+                else:
+                    cache_path.write_text("{broken")
+                before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_ctime_ns)
+                          for p in (state_path, cache_path) if p.exists()}
+                with patch.object(self.store, "load", wraps=self.store.load) as load, \
+                        patch("schema_extract.tools.store.write_json", side_effect=AssertionError("read cannot write")):
+                    result = self.store.read_summary(self.run_id)
+                load.assert_called_once_with(self.run_id)
+                observed = result["observation"]
+                self.assertEqual(observed["cache"]["status"], "stale" if condition in {"metadata", "revision"} else condition)
+                self.assertEqual((observed["source"], observed["status"], observed["deep_verified"]), ("state", "current", False))
+                self.assertEqual(observed["state_revision"], result["state_revision"])
+                self.assertIsNotNone(observed["sampled_at"])
+                self.assertIn("ctime_ns", observed["state_file_after"])
+                if condition == "metadata":
+                    self.assertEqual(result["state_revision"], cached["state_revision"])
+                    self.assertNotEqual(observed["state_file_after"]["ctime_ns"], observed["cache"]["state_file"]["ctime_ns"])
+                if condition == "revision":
+                    self.assertEqual(result["state_revision"], cached["state_revision"] + 1)
+                    self.assertEqual(result["status"], "ready")
+                after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_ctime_ns)
+                         for p in (state_path, cache_path) if p.exists()}
+                self.assertEqual(after, before)
+
+    def test_summary_changed_during_read_is_not_retried_or_written_back(self):
+        from schema_extract.tools.common import write_json
+        directory = self.store.run_dir(self.run_id)
+        (directory / "summary.json").unlink()
+        load = self.store.load
+        replacement = {}
+        def replace_after_read(run_id):
+            sampled = load(run_id)
+            replacement.update(sampled, state_revision=sampled["state_revision"] + 1, status="ready")
+            write_json(directory / "state.json", replacement)
+            return sampled
+        with patch.object(self.store, "load", side_effect=replace_after_read) as sampled, \
+                patch("schema_extract.tools.store.write_json", side_effect=AssertionError("read cannot write")):
+            result = self.store.read_summary(self.run_id)
+        sampled.assert_called_once_with(self.run_id)
+        self.assertEqual(result["observation"]["status"], "changed")
+        self.assertEqual(result["observation"]["cache"]["status"], "missing")
+        self.assertEqual(result["state_revision"] + 1, replacement["state_revision"])
+        self.assertNotEqual(result["observation"]["state_file_before"], result["observation"]["state_file_after"])
+        self.assertIsNone(result["state_file"])
+        self.assertEqual(read_json(directory / "state.json"), replacement)
+        self.assertFalse((directory / "summary.json").exists())
+
+    def test_summary_missing_metadata_is_unknown_and_fallback_false_does_not_read_state(self):
+        from schema_extract.tools.store import _state_stamp
+        directory = self.store.run_dir(self.run_id)
+        (directory / "summary.json").unlink()
+        with patch.object(self.store, "load", wraps=self.store.load) as load:
+            result = self.store.read_summary(self.run_id, fallback=False)
+        load.assert_not_called()
+        self.assertEqual(result["observation"]["cache"]["status"], "missing")
+        self.assertEqual(result["observation"]["status"], "unknown")
+        with patch("schema_extract.tools.store._state_stamp", side_effect=[_state_stamp(directory / "state.json"), PermissionError("late stat denied")]), \
+                patch.object(self.store, "load", wraps=self.store.load) as load:
+            result = self.store.read_summary(self.run_id)
+        load.assert_called_once_with(self.run_id)
+        self.assertEqual(result["observation"]["status"], "unknown")
+        self.assertEqual(result["state_revision"], self.store.load(self.run_id)["state_revision"])
+        self.assertFalse(result["observation"]["deep_verified"])
+
 
 class CLIRecoveryTests(unittest.TestCase):
     def setUp(self):

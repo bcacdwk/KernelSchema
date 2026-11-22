@@ -232,7 +232,9 @@ class Clock:
                     if not clock.get("enabled"):
                         _archive(clock, clock.pop("reminder", None))
                         clock.update(enabled=True, generation=clock["generation"] + 1, thread_id=thread,
-                                     run_ids=run_ids, started_at=self.now())
+                                     run_ids=run_ids, started_at=self.now(), last_check_number=-1, next_due_at=None)
+                        for key in ("last_scan", "observation_claim", "last_observation", "next_observation_at", "observation_cursor"):
+                            clock.pop(key, None)
                     clock.setdefault("run_ids", run_ids)
                     clock.update(repo=str(self.repo), entrypoint=str(rules_root() / "schema_extract/extract_yaml.py"),
                                  python=sys.executable, queue_backend="codex", codex_binary=codex_binary or clock.get("codex_binary", "codex"))

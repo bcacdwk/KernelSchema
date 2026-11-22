@@ -1,7 +1,9 @@
 """A concurrent branch's diagnostic must not point at its sibling's attempt."""
 
 from copy import deepcopy
+from contextlib import redirect_stdout
 import fcntl
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -76,6 +78,65 @@ class MonitorLaunchTests(unittest.TestCase):
             self.assertFalse(retry.get("reused", False))
             self.assertNotEqual(retry["id"], launch["id"])
             self.assertEqual(state["status"], "queued")
+
+
+class CurrentObservationTests(unittest.TestCase):
+    def test_late_failure_is_history_and_clock_counts_the_current_ready_sample(self):
+        from schema_extract.tools import cli, monitor, wakeup
+        from schema_extract.tools.store import Store
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root))
+            run_id = str(uuid4())
+            failure = {"run_id": run_id, "status": "invalid_receipt", "stage": "P1", "state_revision": 1,
+                       "observation": {"observed_at": 100, "status": "current"}, "active_attempts": {},
+                       "anomalies": [{"run_id": run_id, "scope": "P1", "classification": "framework_or_protocol",
+                                      "summary": "old failure", "evidence": "fixture", "recovery_condition": "old recovery"}]}
+            ready = {**failure, "status": "ready", "state_revision": 2,
+                     "observation": {"observed_at": 200, "status": "current"}, "anomalies": []}
+            with store.supervisor() as ledger:
+                monitor.record_scan(ledger, [ready], 200)
+            current = deepcopy(store.read_supervisor()["observations"]["latest"])
+            with store.supervisor() as ledger:
+                result = monitor.record_scan(ledger, [failure], 300)
+            self.assertEqual(store.read_supervisor()["observations"]["latest"], current)
+            self.assertEqual(result["anomalies"], [])
+            self.assertEqual(result["changes"], [])
+            self.assertEqual(result["superseded_run_ids"], [run_id])
+            historical = result["runs"][0]
+            self.assertEqual(historical["observation_role"], "historical")
+            self.assertEqual(historical["anomalies"], failure["anomalies"])
+            self.assertEqual(historical["superseded_by_observed_at"], 200)
+            self.assertNotIn("observation_role", failure)
+            shown = io.StringIO()
+            with redirect_stdout(shown):
+                cli._print_observations(result["runs"])
+            self.assertTrue(shown.getvalue().startswith("历史采样"))
+            self.assertIn("old failure", shown.getvalue())
+            self.assertNotIn("next:", shown.getvalue())
+            self.assertNotIn("old recovery", shown.getvalue())
+            clock = {"enabled": True, "generation": 1, "thread_id": str(uuid4()), "last_check_number": 0, "next_due_at": 300}
+            check = wakeup.Clock._complete(clock, result, 1, "check", 300, 300)
+            self.assertEqual(check["anomaly_count"], 0)
+
+    def test_old_ready_cannot_hide_a_new_failure_from_current_anomalies(self):
+        from schema_extract.tools import cli, monitor, wakeup
+        ledger = {"observations": {}}
+        anomaly = {"run_id": "fixture", "classification": "execution_failure", "summary": "new failure",
+                   "recovery_condition": "current recovery"}
+        current = {"run_id": "fixture", "state_revision": 2, "status": "cli_error",
+                   "observation": {"observed_at": 200}, "anomalies": [anomaly]}
+        monitor.record_scan(ledger, [current], 200)
+        result = monitor.record_scan(ledger, [{"run_id": "fixture", "state_revision": 1, "status": "ready",
+            "observation": {"observed_at": 100, "status": "current"}, "anomalies": []}], 300)
+        self.assertEqual(result["anomalies"], [anomaly])
+        self.assertEqual(result["runs"][0]["observation_role"], "historical")
+        shown = io.StringIO()
+        with redirect_stdout(shown):
+            cli._print_observations(result["runs"], current_anomalies=result["anomalies"])
+        self.assertIn("current recovery", shown.getvalue())
+        self.assertIn("current fixture execution_failure", shown.getvalue())
+        clock = {"enabled": True, "generation": 1, "thread_id": str(uuid4()), "last_check_number": 0, "next_due_at": 300}
+        self.assertEqual(wakeup.Clock._complete(clock, result, 1, "check", 300, 300)["anomaly_count"], 1)
 
 
 class CancelDeliveryTests(unittest.TestCase):

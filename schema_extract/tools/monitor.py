@@ -227,6 +227,7 @@ def record_scan(ledger: dict, rows: list[dict], observed_at: float) -> dict:
     A bound clock scan uses the same transaction for this record and its next
     reminder time. No process observation, waiting or task control happens here.
     """
+    rows = deepcopy(rows)
     observations = ledger["observations"]
     latest = observations.setdefault("latest", {})
     changes, superseded = [], []
@@ -236,7 +237,10 @@ def record_scan(ledger: dict, rows: list[dict], observed_at: float) -> dict:
         sampled_at = row.get("observation", {}).get("observed_at", observed_at)
         if prior.get("observed_at") is not None and sampled_at < prior["observed_at"]:
             superseded.append(run_id)
+            row.update(observation_role="historical", superseded_by_observed_at=prior["observed_at"])
             continue
+        row["observation_role"] = "current"
+        row.setdefault("anomalies", [])
         stable = prior.get("state_revision") is not None and prior.get("state_revision") == row.get("state_revision")
         row["unchanged_since"] = prior.get("unchanged_since", sampled_at) if stable else sampled_at
         if (stable and sampled_at - row["unchanged_since"] >= 300 and row.get("status") == "running" and
@@ -258,7 +262,8 @@ def record_scan(ledger: dict, rows: list[dict], observed_at: float) -> dict:
                         changes=(observations.get("changes", []) +
                                  [{"at": item["after"]["observed_at"], **item} for item in changes])[-64:])
     return {"observed_at": observed_at, "runs": rows, "changes": changes, "superseded_run_ids": superseded,
-            "anomalies": [item for row in rows for item in row.get("anomalies", [])]}
+            "anomalies": [deepcopy(item) for run_id in dict.fromkeys(row["run_id"] for row in rows)
+                          for item in (latest[run_id].get("anomalies") or [])]}
 
 
 def _cancel_binding(state):
