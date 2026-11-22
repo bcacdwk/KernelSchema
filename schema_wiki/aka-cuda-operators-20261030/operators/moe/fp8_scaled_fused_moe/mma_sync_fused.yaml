@@ -1,0 +1,416 @@
+META_DATA:
+  Name: fp8_scaled_fused_moe
+  Describe: 'FP8 block-scaled fused MoE: top-k expert SwiGLU FFNs on FP8 payloads with FP32 block scales, per-route BF16 materialization, FP32 weighted reduction'
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/moe/fp8_scaled_fused_moe/candidate/solution.py::Model.forward
+  Version: 2
+  Dispatch:
+    id: mma_sync_fused
+    when: 'hidden_size = 7168, intermediate_size = 256, local_num_experts = 256 and token_count = 1, so the route total is 8 and the host row-tile bound token_count*route_count covers total_row_tiles; hidden_states_scale is contiguous with stride token_count. Call conditions: the frozen default launch configuration, that is heuristic dispatch, default tune bits, launch chaining on and the whole chain submitted on the stream of the caller, eagerly or as a recorded replay'
+DESIGN:
+  Math_reshape:
+    Thesis: Keep the Contract block-scaled FP8 math and hoist each quant_block scale product out of the contraction, but pair the up and gate halves of one intermediate block in a single FC1 tile so the first QDQ, the clamped SwiGLU and the second QDQ all finish inside the worktile that produced them
+    Rewrite:
+      - Name: Route grouping into expert row blocks
+        Math: |
+          bm is the row-block height and row_count[e] counts the valid routes with route_id[t,r] = e. Valid routes take rows grouped by ascending expert:
+            row_base[e] = sum_{d<e} row_count[d];  total_rows = sum_e row_count[e]
+            row_of_route(t,r) = -1 if route_id[t,r] < 0, else the unique p in [row_base[e], row_base[e] + row_count[e]) for e = route_id[t,r]
+            row_token[p] = t and row_expert[p] = e of that unique route
+          Within an expert the order is the scatter claim order, not an input function; the output gathers by row_of_route, so no result depends on it.
+            tile_count[e] = ceil_div(row_count[e], bm);  tile_base[e] = sum_{d<e} tile_count[d];  total_row_tiles = tile_base[expert_count]
+            e(mt) = the expert with tile_base[e] <= mt < tile_base[e+1]
+            valid_rows(mt) = max(0, min(bm, row_count[e(mt)] - (mt - tile_base[e(mt)]) * bm))
+          routing_tables publishes row_base, tile_base and both totals; each projection decodes its own tile from it, so row_expert and ticket_counter have no reader here.
+        Symbol:
+          bm: {meaning: Height of a GEMM row block, value: 64}
+          row_count: {meaning: Valid routes per expert}
+          row_base: {meaning: Exclusive row prefix per expert, shape: [{expert: expert_count}], dtype: int32, retention: keep_value invocation}
+          tile_base: {meaning: Exclusive tile prefix per expert, shape: [{expert: expert_count}], dtype: int32, retention: keep_value invocation}
+          total_rows: {meaning: Routed row total}
+          total_row_tiles: {meaning: Row-tile total over all experts}
+          valid_rows: {meaning: Written rows of one row tile}
+          row_token: {meaning: Token index of each routed row, shape: [{row: total_rows}], dtype: int32, retention: keep_value invocation}
+          row_expert: {meaning: Expert index of each routed row; unread here, shape: [{row: total_rows}], dtype: int32, retention: keep_value invocation}
+          row_of_route: {meaning: Row of each route slot; -1 if disabled, shape: [{token: token_count}, {route: route_count}], dtype: int32, retention: keep_value invocation}
+          routing_tables: {meaning: Published row and tile tables with totals, shape: [{word: 2*expert_count+4}], dtype: int32, retention: keep_value invocation}
+          ticket_counter: {meaning: Zeroed claim counters; no reader here, shape: [{word: 2}], dtype: int32, retention: keep_value invocation}
+        Ledger:
+          Baseline: Serve each valid route as its own contraction against the weight rows of its expert
+          Gain: One bm-row block shares an expert weight block, so weight reads fall to one pass per row block and column block
+          Cost: Rows are padded to bm, so total_row_tiles*bm rows are evaluated against total_rows useful rows; one route per expert wastes bm-1 of every bm rows
+      - Name: Scale hoisting out of the FP8 contraction
+        Math: |
+          Both projections contract raw FP8 codes over k blocks of quant_block, the span of one stored scale, and apply that scale product after each block:
+            partial(kb)[row, col] = sum over k in block kb of code_a[row, k] * code_b[col, k], an FP32 accumulator starting at zero
+            acc[row, col] = sum32 over ascending kb of fma32(sa[row, kb] * sb[col_group(col), kb], partial(kb)[row, col], acc)
+          with col_group(col) = floor(col / quant_block), fc1_k_blocks = hidden_size/quant_block and fc2_k_blocks = intermediate_count/quant_block.
+          FC1: code_a = hidden_states gathered by row_token, sa = transposed hidden_states_scale, code_b = gemm1_weights, sb = gemm1_weights_scale, 2*intermediate_count columns, acc = the Contract pre.
+          FC2: code_a and sa = the materialized activation codes and scales, code_b = gemm2_weights, sb = gemm2_weights_scale, hidden_size columns, acc = the Contract fc2_sum.
+          Scales are exact, so acc equals the Contract contraction of the decoded operands up to the reassociation below.
+        Symbol:
+          acc: {meaning: Promoted FP32 contraction of one row and column}
+          fc1_k_blocks: {meaning: k blocks of the FC1 contraction, value: hidden_size/quant_block}
+          fc2_k_blocks: {meaning: k blocks of the FC2 contraction, value: intermediate_count/quant_block}
+        Arithmetic:
+          Accumulate: FP32 warp-level tensor-core accumulate from zero inside each k block; the scaled partials are added in ascending kb order by one fma32 per element
+        Ledger:
+          Baseline: Decode both operands to FP32 and contract once over the whole axis on FP32 multiply-add units
+          Gain: All MACs of both projections move to the FP8 tensor core; decoding costs one scale product per k block per element
+          Cost: fc1_k_blocks-1 or fc2_k_blocks-1 extra FP32 FMA per output element, and a k-block-wise reassociation
+      - Name: FC1 output QDQ inside the producing tile
+        Math: |
+          One FC1 worktile covers bm rows and a pair of quant_block-wide column groups: the up columns [n0, n0+quant_block) and the gate columns
+          [intermediate_count+n0, intermediate_count+n0+quant_block) of the Contract pre, n0 being the tile's intermediate base. Each group is quantize-dequantized on its own:
+            amax(g) = max over g of abs(pre);  s(g) = max(amax(g) / fp8_bound, fp32_min_normal)
+            code[g] = fp8_e4m3fn(pre / s(g)) with saturating round-to-nearest-even, so the conversion realizes the Contract clamp to +-fp8_bound
+            deq[g] = fp32(code[g]) * s(g)
+          The Contract up and gate of a row are the deq of its up group and of its gate group channel by channel.
+          These codes and scales stay inside the worktile that produced them and are consumed there by the activation below: no FC1 output crosses a submission boundary and pre has no materialized form in this design.
+        Ledger:
+          Baseline: Materialize the FC1 output as FP8 codes and scales in global memory and dequantize it again in a separate activation pass
+          Gain: No total_rows*2*intermediate_count code bytes written and read back, and one submission fewer on a band the source records as launch-bound
+          Cost: The two weight groups of a tile come from two windows intermediate_count rows apart in the FC1 weight tensor
+      - Name: Clamped SwiGLU and second QDQ in the tile
+        Math: |
+          Per routed row of the tile, with e = e(mt) its expert, alpha = gemm1_alpha[e], beta = gemm1_beta[e] and L = gemm1_clamp_limit[e] when it is not None:
+            if L is not None then up_c[j] = min(max(up[j], -L), L) and gate_c[j] = min(gate[j], L), else up_c = up and gate_c = gate
+            u[j] = (gate_c[j] * sigmoid(alpha * gate_c[j])) * (up_c[j] + beta),  sigmoid(x) = 1 / (1 + exp(-x))
+          act is the QDQ of u over groups of quant_block consecutive j, with amax and s(g) as above but the code formed as fp8_e4m3fn(u * rs(g)) for an approximate reciprocal rs(g) of s(g); the consumer reads fp32(code) * s(g).
+          The group of one worktile is exactly its quant_block intermediate channels, so its amax covers the Contract group. act_code and act_scale hold these codes and scales and are the only values of this chain that cross a submission boundary as FP8.
+        Symbol:
+          act_code: {meaning: FP8 codes of the FC2 input per row, shape: [{row: total_rows}, {intermediate: intermediate_count}], dtype: fp8_e4m3fn, retention: keep_value invocation}
+          act_scale: {meaning: FP8 block scales of the FC2 input, shape: [{row: total_rows}, {intermediate_group: intermediate_count/quant_block}], dtype: fp32, retention: keep_value invocation}
+        Arithmetic:
+          Approx: sigmoid uses a fast FP32 exponential and an approximate reciprocal, about 2e-7 absolute error per element; rs(g) is approximate at about 2 ULP
+        Ledger:
+          Baseline: Apply the activation in a separate pass over the materialized FC1 output, one warp per two rows
+          Gain: The activation reads no global FC1 output and its QDQ2 amax stays in the registers of the four threads that own the group
+          Cost: The activation runs inside the FC1 worktile on 4 threads per row, so a tile with fewer than bm rows leaves most of the CTA idle in that phase
+      - Name: Per-route BF16 rows and gather reduction
+        Math: |
+          FC2 materializes each routed row before weighting:
+            route_result[p, h] = bf16(acc of FC2 for row p and channel h)
+          so the Contract route_out of route (t,r) is fp32(route_result[row_of_route(t,r), h]) * route_weight[t,r]. The reduction reads the route slots of a token in ascending order:
+            y[t, h] = sum over r = 0 .. route_count-1 of fma32(fp32(route_result[row_of_route(t,r), h]), route_weight[t,r], accumulator), from +0.0
+          A disabled slot has route_weight 0 and contributes a zero payload, so it adds exactly +0.0 and the sum equals the Contract sum over valid routes; a token with no valid route yields +0.0.
+            output[t, h] = bf16(y[t, h]) over the whole caller buffer
+        Symbol: {route_result: {meaning: BF16 FC2 result of each routed row, shape: [{row: total_rows}, {hidden: hidden_size}], dtype: bf16, retention: keep_value invocation}}
+        Arithmetic:
+          Accumulate: Ascending route-slot order with one fma32 per slot; the reference groups the same terms by expert, so the FP32 association differs
+        Ledger:
+          Baseline: Accumulate each route result into the output row directly with atomic FP32 adds
+          Gain: No atomics and no FP32 output staging; each route row is written once and read once by the gather
+          Cost: total_rows*hidden_size BF16 bytes written and then read again by the reduction
+  Work_schedule:
+    Thesis: 'Four submissions on one stream: a single-CTA routing prefix, two non-persistent mma.sync GEMM grids of one 64-row tile per CTA and a chunk-parallel gather. The activation is fused into the first GEMM, so there is no activation node and no FC1 output buffer, and both GEMMs launch plain'
+    Step:
+      ROUTE:
+        Describe: Group the valid routes by expert into contiguous 64-row blocks and publish the row and tile state the two projections and the gather consume
+        Decomposition:
+          Strategy: One CTA walks all route slots once and caches the expert ids of each thread in registers, so the scatter after the prefix never re-reads them
+          Partition: {}
+          Worktile:
+            Iteration: {route_id_block: {meaning: Route ids of one of the eight passes, shape: [{slot: 1024}], dtype: int32, direction: ascending}}
+          Target:
+            Single_tile:
+              row_token: {meaning: Token index of each routed row, shape: [{row: total_rows}], dtype: int32}
+              row_expert: {meaning: Expert index of each routed row, shape: [{row: total_rows}], dtype: int32}
+              row_of_route: {meaning: Row of each route slot; -1 if disabled, shape: [{token: token_count}, {route: route_count}], dtype: int32}
+              routing_tables: {meaning: Published row and tile tables with totals, shape: [{word: 2*expert_count+4}], dtype: int32}
+              ticket_counter: {meaning: Zeroed claim counters of the tile queue, shape: [{word: 2}], dtype: int32}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: 1
+        Schedule:
+          Strategy: Chain head on the stream of the caller; the per-shape workspace buffers it writes are allocated once and reused by every invocation and replay
+          Worker_assignment:
+            Preassigned: {start: 0, count: 1}
+            Refill: none
+            Exit: [assigned_done]
+      GEMM1:
+        Describe: Contract the gathered activation rows with the FC1 weights of one expert, then apply both QDQ steps and the clamped SwiGLU and store the activation
+        Decomposition:
+          Strategy: q = mt * column_tiles + nb with column_tiles = intermediate_count/128; tile nb pairs the up columns of intermediate block nb with its gate columns
+          Partition:
+            mt: {meaning: Expert row block of bm rows, size: total_row_tiles, tile: 1, range: [0, null]}
+            nb: {meaning: Intermediate block pairing its up and gate groups, size: intermediate_count, tile: 128}
+          Worktile:
+            Invariant:
+              row_token_block: {meaning: Token index of the rows of this tile, shape: [{row: bm}], dtype: int32}
+              expert_params: {meaning: 'alpha, beta and clamp limit of the tile expert', shape: [{param: 3}], dtype: fp32}
+            Iteration:
+              a_block: {meaning: Gathered activation codes of one k block, shape: [{row: bm}, {hidden: quant_block}], dtype: fp8_e4m3fn, direction: ascending}
+              b_block: {meaning: Paired up and gate FC1 weight rows of one k block, shape: [{group: 2}, {fc1_out: 128}, {hidden: quant_block}], dtype: fp8_e4m3fn, direction: ascending}
+              scale_block: {meaning: Row and column-group scales of one k block, shape: [{element: bm+2}], dtype: fp32, direction: ascending}
+          Target:
+            Single_tile:
+              act_code_block: {meaning: Activation codes of this tile's rows, shape: [{row: valid_rows}, {intermediate: quant_block}], dtype: fp8_e4m3fn}
+              act_scale_block: {meaning: Second-QDQ scale of each row of this tile, shape: [{row: valid_rows}], dtype: fp32}
+        Mapping:
+          Strategy: One CTA per (column tile, row tile) with no reuse across tiles; the row-tile factor is the host bound token_count*route_count on total_row_tiles
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: (intermediate_count/128)*token_count*route_count
+        Schedule:
+          Strategy: Static one-tile assignment, no runtime claiming; a worker whose mt is not below the published total_row_tiles exits before staging any operand
+          Worktile_order: [{by: [mt, nb], direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: [assigned_done]
+      GEMM2:
+        Describe: Contract the activation of each routed row with the FC2 weights of its expert and store the BF16 result of the row
+        Decomposition:
+          Strategy: q = mt * column_tiles + hb with column_tiles = hidden_size/128; the activation rows of a tile are contiguous, so no gather is needed
+          Partition:
+            mt: {meaning: Expert row block of bm rows, size: total_row_tiles, tile: 1, range: [0, null]}
+            hb: {meaning: Output column block, size: hidden_size, tile: 128}
+          Worktile:
+            Iteration:
+              a_block: {meaning: Activation codes of one k block, shape: [{row: bm}, {intermediate: quant_block}], dtype: fp8_e4m3fn, direction: ascending}
+              b_block: {meaning: FC2 weight rows of one k block, shape: [{hidden: 128}, {intermediate: quant_block}], dtype: fp8_e4m3fn, direction: ascending}
+              scale_block: {meaning: Row and column-group scales of one k block, shape: [{element: bm+1}], dtype: fp32, direction: ascending}
+          Target:
+            Single_tile: {route_result_block: {meaning: BF16 route results of this tile, shape: [{row: valid_rows}, {hidden: 128}], dtype: bf16}}
+        Mapping:
+          Strategy: One CTA per (column tile, row tile) on the same host row-tile bound; two CTAs reside per SM, so the grid can exceed the resident count
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: (hidden_size/128)*token_count*route_count
+        Schedule:
+          Strategy: Static one-tile assignment, no runtime claiming; a worker whose mt is not below the published total_row_tiles exits before staging any operand
+          Worktile_order: [{by: [mt, hb], direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: [assigned_done]
+      FIN:
+        Describe: Gather the route rows of each token, form the FP32 weighted sum and write the BF16 output in place over the whole caller buffer
+        Decomposition:
+          Strategy: Chunk v maps to token floor(v/(hidden_size/16)) and channel base 16*(v mod (hidden_size/16)); each thread owns one chunk
+          Partition: {chunk_tile: {meaning: Block of 256 consecutive output chunks, size: token_count*(hidden_size/16), tile: 256}}
+          Worktile:
+            Invariant:
+              route_row: {meaning: Route row index of each route slot, shape: [{route: route_count}], dtype: int32}
+              route_weight_block: {meaning: Routing weight of each route slot, shape: [{route: route_count}], dtype: fp32}
+            Iteration: {route_result_chunk: {meaning: Route segments of these chunks by route slot, shape: [{chunk: 256}, {hidden: 16}], dtype: bf16, direction: ascending}}
+          Target:
+            Single_tile: {output_block: {meaning: Final output chunks of this worktile, shape: [{chunk: 256}, {hidden: 16}], dtype: bf16}}
+        Mapping:
+          Strategy: One CTA per 256 chunks; this design's domain has one token of hidden_size/16 = 448 chunks, so a worktile stays inside one output row
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil_div(token_count*(hidden_size/16), 256)
+        Schedule:
+          Strategy: Threads whose chunk is past token_count*(hidden_size/16) do no work; the last worktile is the only partial one
+          Worktile_order: [{by: chunk_tile, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: [assigned_done]
+    Flow:
+      Launch:
+        - {step: [ROUTE]}
+        - {step: [GEMM1], start_after: ROUTE.kernel_done}
+        - {step: [GEMM2], start_after: GEMM1.kernel_done}
+        - {step: [FIN], start_after: GEMM2.kernel_done}
+      Handoff:
+        row_token: {producer: ROUTE, consumer: [GEMM1], storage: global}
+        row_of_route: {producer: ROUTE, consumer: [FIN], storage: global}
+        routing_tables: {producer: ROUTE, consumer: [GEMM1, GEMM2], storage: global}
+        act_code: {producer: GEMM1, consumer: [GEMM2], storage: global}
+        act_scale: {producer: GEMM1, consumer: [GEMM2], storage: global}
+        route_result: {producer: GEMM2, consumer: [FIN], storage: global}
+  Tile_pipeline:
+    Thesis: 'Each GEMM CTA runs one tile with all eight warps doing the same work: a four-deep cp.async ring of operand and scale slots, warp-level products into a per-k-block register accumulator and a promotion into a register master the epilogue reads; no tensor memory and no specialized roles'
+    Step:
+      ROUTE:
+        Storage:
+          histogram: {meaning: Per-expert route counts, depth: 1, location: smem, shape: [{expert: 256}],
+            dtype: int32, total_size: 1024}
+          cursor: {meaning: Per-expert scatter cursor, depth: 1, location: smem, shape: [{expert: 256}],
+            dtype: int32, total_size: 1024}
+          scan_state: {meaning: Warp prefix sums and the two totals, depth: 1, location: smem, shape: [{word: 18}],
+            dtype: int32, total_size: 72}
+          slot_cache: {meaning: Expert ids cached by each thread, depth: 1, location: register, shape: [{thread: 1024}, {slot: 8}],
+            dtype: int32, total_size: 32768}
+        Role:
+          MAIN:
+            Info:
+              Describe: Build the expert histogram, its dual prefix and the row scatter for the whole invocation in one CTA
+              Member: warp[0:32]
+              Using_verb:
+                compute:
+                  histogram: {execution_mode: serial, describe: 'Clear the histogram, read every route slot once, cache the eight expert ids of each thread in registers and count the valid ones'}
+                  prefix: {execution_mode: serial, describe: 'Warp-shuffle exclusive prefix of counts and of bm-row tile counts, publish both tables with their totals, zero the claim counters and seed the cursor'}
+                store: {rows: {execution_mode: serial, describe: 'Take a cursor slot per cached route and write its row, expert and reverse index; a disabled slot writes only -1'}}
+                signal: {dependents: {execution_mode: serial, describe: 'Grant launch permission at entry, before any routing work; the next grid launches plain and the attributed gather follows a grid that never grants'}}
+            Pipe:
+              - signal:dependents
+              - compute:histogram
+              - compute:prefix
+              - store:rows
+      GEMM1:
+        Index: {kb: {meaning: k block ordinal of this worktile's contraction, definition: [0, fc1_k_blocks]}}
+        Storage:
+          stage_ring: {meaning: Operand stage ring per k block, depth: 4, location: smem, shape: [{row: bm+256}, {column: quant_block}],
+            dtype: fp8_e4m3fn, total_size: 163840, view: {a_block(kb): {slot_index: kb%4, region: {row: [0, bm]}}, b_block(kb): {slot_index: kb%4, region: {row: [bm, bm+256]}}}}
+          scale_ring: {meaning: Row and column-group scales per k block, depth: 4, location: smem, shape: [{element: bm+4}],
+            dtype: fp32, total_size: 1088, view: {scale_block(kb): {slot_index: kb%4, region: {element: [0, bm+2]}}}}
+          row_index: {meaning: Token index of this tile's rows, depth: 1, location: smem, shape: [{row: bm}],
+            dtype: int32, total_size: 256}
+          amax_partial: {meaning: Per-warp row amax of the tile, depth: 1, location: smem, shape: [{warp: 4}, {row: bm}],
+            dtype: fp32, total_size: 1024}
+          group_scale: {meaning: First-QDQ scale per row and column group, depth: 1, location: smem, shape: [{group: 2}, {row: bm}],
+            dtype: fp32, total_size: 512}
+          codes_stage: {meaning: Staged first-QDQ codes of the tile, depth: 1, location: smem, shape: [{row: bm}, {column: 256}],
+            dtype: fp8_e4m3fn, total_size: 16384}
+          block_acc: {meaning: FP32 tensor-core sum of one k block, depth: 1, location: register, shape: [{row: bm}, {column: 256}],
+            dtype: fp32, total_size: 65536}
+          master: {meaning: FP32 master accumulator of the tile, depth: 1, location: register, shape: [{row: bm}, {column: 256}],
+            dtype: fp32, total_size: 65536}
+        Role:
+          MAIN:
+            Info:
+              Describe: Stage operands, run the warp products, promote each k block into registers and turn the tile into activation codes and scales
+              Member: warp[0:8]
+              Using_verb:
+                compute:
+                  tile_decode: {execution_mode: serial, describe: 'Search the published tile table for the expert of mt, derive its row base, valid_rows and intermediate base and copy the token indices into row_index'}
+                  master_init: {execution_mode: serial, describe: Zero the per-thread FP32 master accumulator; reads no input and no old value}
+                  promote: {execution_mode: serial, describe: Scale this thread's block_acc of k block kb by the row scale times the column-group scale of scale_ring slot kb%4 and add it into master}
+                  qdq1_amax: {execution_mode: serial, describe: 'Reduce abs(master) over this thread''s 16 columns of each of its four rows, combine the four lanes of a row and publish one amax_partial per warp'}
+                  qdq1_scale: {execution_mode: serial, describe: 'Each of the 2*bm threads takes the max of the two warp partials of its row and group and forms max(amax/fp8_bound, fp32_min_normal) in group_scale'}
+                  qdq1_codes: {execution_mode: serial, describe: Divide master by the group_scale of its row and group into codes_stage as fp8 with saturating RNE; done covers CTA rendezvous publishing all warps}
+                  act_quant: {execution_mode: serial, describe: 'Four threads per valid row read the up and gate halves of codes_stage plus two group_scale entries, dequantize, clamp, SwiGLU, row amax, requantize'}
+                matmul: {partial: {execution_mode: serial, describe: 'Zero block_acc, then four k=32 warp product steps of k block kb from the staged operands; done covers the operand reads'}}
+                load:
+                  a_block: {execution_mode: async_unordered, describe: Each thread copies two 16-byte pieces of the gathered token rows of k block kb into stage slot kb%4; rows past valid_rows zero-fill}
+                  b_block: {execution_mode: async_unordered, describe: Each thread copies eight 16-byte pieces of the 128 up and 128 gate weight rows of k block kb into stage slot kb%4}
+                  scale_block: {execution_mode: async_unordered, describe: The bm+2 threads of the ring copy the bm row scales and the two column-group scales of k block kb into scale slot kb%4}
+                store: {act_block: {execution_mode: serial, describe: 'Write the 32 codes and the scale act_quant formed for each valid row, as two 16-byte stores plus one scale store from the first thread of the group'}}
+                await: {stage_ready: {execution_mode: serial, describe: 'Wait until at most two copy groups of this worker are outstanding, so the operand and scale slot of k block kb has landed, then rendezvous the CTA'}}
+                signal: {stage_full: {execution_mode: async_unordered, describe: 'Commit this group''s copies as one asynchronous group that await:stage_ready counts; an unstaged group still commits, keeping the wait depth aligned'}}
+            Pipe:
+              - if(mt < total_row_tiles):
+                  - compute:tile_decode
+                  - compute:master_init
+                  - for(p=0:3):
+                      - if(p < fc1_k_blocks):
+                          - load:a_block(p)
+                          - load:b_block(p)
+                          - load:scale_block(p)
+                      - signal:stage_full(p)
+                  - for(kb):
+                      - await:stage_ready(kb)
+                      - matmul:partial(kb)
+                      - compute:promote(kb)
+                      - if(kb + 3 < fc1_k_blocks):
+                          - load:a_block(kb+3)
+                          - load:b_block(kb+3)
+                          - load:scale_block(kb+3)
+                      - signal:stage_full(kb+3)
+                  - compute:qdq1_amax
+                  - compute:qdq1_scale
+                  - compute:qdq1_codes
+                  - compute:act_quant
+                  - store:act_block
+      GEMM2:
+        Index: {kb: {meaning: k block ordinal of this worktile's contraction, definition: [0, fc2_k_blocks]}}
+        Storage:
+          stage_ring: {meaning: Operand stage ring per k block, depth: 4, location: smem, shape: [{row: bm+128}, {column: quant_block}],
+            dtype: fp8_e4m3fn, total_size: 98304, view: {a_block(kb): {slot_index: kb%4, region: {row: [0, bm]}}, b_block(kb): {slot_index: kb%4, region: {row: [bm, bm+128]}}}}
+          scale_ring: {meaning: Row and column-group scales per k block, depth: 4, location: smem, shape: [{element: bm+3}],
+            dtype: fp32, total_size: 1076, view: {scale_block(kb): {slot_index: kb%4, region: {element: [0, bm+1]}}}}
+          block_acc: {meaning: FP32 tensor-core sum of one k block, depth: 1, location: register, shape: [{row: bm}, {column: 128}],
+            dtype: fp32, total_size: 32768}
+          master: {meaning: FP32 master accumulator of the tile, depth: 1, location: register, shape: [{row: bm}, {column: 128}],
+            dtype: fp32, total_size: 32768}
+        Role:
+          MAIN:
+            Info:
+              Describe: Stage operands, run the warp products, promote each k block into registers and store the BF16 rows of the tile
+              Member: warp[0:8]
+              Using_verb:
+                compute:
+                  tile_decode: {execution_mode: serial, describe: 'Search the published tile table for the expert of mt and derive its row base, valid_rows and output column base; the activation rows are contiguous'}
+                  master_init: {execution_mode: serial, describe: Zero the per-thread FP32 master accumulator; reads no input and no old value}
+                  promote: {execution_mode: serial, describe: Scale this thread's block_acc of k block kb by the row scale times the single column-group scale of scale_ring slot kb%4 and add it into master}
+                matmul: {partial: {execution_mode: serial, describe: 'Zero block_acc, then four k=32 warp product steps of k block kb from the staged operands; done covers the operand reads'}}
+                load:
+                  a_block: {execution_mode: async_unordered, describe: Each thread copies two 16-byte pieces of the contiguous activation rows of k block kb into stage slot kb%4; rows past valid_rows zero-fill}
+                  b_block: {execution_mode: async_unordered, describe: Each thread copies four 16-byte pieces of the 128 FC2 weight rows of k block kb into stage slot kb%4}
+                  scale_block: {execution_mode: async_unordered, describe: The bm+1 threads of the ring copy the bm row scales and the column-group scale of k block kb into scale slot kb%4}
+                store: {c2_block: {execution_mode: serial, describe: 'Narrow this thread''s master values to BF16 pairs and write them as 4-byte stores for valid rows, with no CTA staging'}}
+                await: {stage_ready: {execution_mode: serial, describe: 'Wait until at most two copy groups of this worker are outstanding, so the operand and scale slot of k block kb has landed, then rendezvous the CTA'}}
+                signal: {stage_full: {execution_mode: async_unordered, describe: 'Commit this group''s copies as one asynchronous group that await:stage_ready counts; an unstaged group still commits, keeping the wait depth aligned'}}
+            Pipe:
+              - if(mt < total_row_tiles):
+                  - compute:tile_decode
+                  - compute:master_init
+                  - for(p=0:3):
+                      - if(p < fc2_k_blocks):
+                          - load:a_block(p)
+                          - load:b_block(p)
+                          - load:scale_block(p)
+                      - signal:stage_full(p)
+                  - for(kb):
+                      - await:stage_ready(kb)
+                      - matmul:partial(kb)
+                      - compute:promote(kb)
+                      - if(kb + 3 < fc2_k_blocks):
+                          - load:a_block(kb+3)
+                          - load:b_block(kb+3)
+                          - load:scale_block(kb+3)
+                      - signal:stage_full(kb+3)
+                  - store:c2_block
+      FIN:
+        Role:
+          MAIN:
+            Info:
+              Describe: Reduce the route rows of each token into the weighted sum and write the BF16 output
+              Member: warp[0:8]
+              Using_verb:
+                compute: {weighted_sum: {execution_mode: serial, describe: 'Convert each BF16 route value to FP32, accumulate weight times value in ascending route-slot order over 16 channels and narrow the sum to BF16'}}
+                load:
+                  route_rows: {execution_mode: serial, describe: Read the route row indices and weights of the token of this thread; a disabled slot takes weight 0}
+                  c2_rows: {execution_mode: serial, describe: Issue the eight predicated 32-byte route-row reads back to back so their latency overlaps; a disabled slot contributes a zero payload}
+                store: {output_rows: {execution_mode: serial, describe: Write the 16 BF16 results of this thread as two 16-byte stores into the output buffer of the caller}}
+                await: {grid_dep: {execution_mode: serial, describe: Wait until the GEMM2 grid has completed and the route results are visible}}
+            Pipe:
+              - await:grid_dep
+              - load:route_rows
+              - load:c2_rows
+              - compute:weighted_sum
+              - store:output_rows
+REALIZATION:
+  Require:
+    - Item:
+        - DESIGN.Tile_pipeline::GEMM1.MAIN
+        - DESIGN.Tile_pipeline::GEMM2.MAIN
+      Choice: Warp-level mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 products with the operands staged by ldmatrix out of the swizzled stage slots
+      Reason: The per-k-block FP32 partial and its promotion into a register master assume a warp-synchronous product with no tensor memory and no completion barrier
+    - Item:
+        - DESIGN.Tile_pipeline::GEMM1.MAIN
+        - DESIGN.Tile_pipeline::GEMM2.MAIN
+      Choice: 16-byte cp.async copies with a source size of zero for absent rows, one commit group per ring slot advance including the unstaged ones, and a wait leaving at most two groups outstanding
+      Reason: The readiness of await:stage_ready and the exact-zero operand rows of a partially filled row tile both come from this primitive; a plain load would read out of range
+    - Item: DESIGN.Work_schedule.Flow.Launch
+      Choice: Submit the two GEMM kernels as plain stream-ordered launches with no programmatic-serialization attribute, keeping the routing entry trigger and the gather entry wait
+      Reason: Routing grants launch permission at its entry before any routing work and neither GEMM kernel holds a grid-dependency wait, so a permission-taking GEMM would read unpublished tables
+    - Item:
+        - DESIGN.Work_schedule::GEMM1.Mapping
+        - DESIGN.Work_schedule::GEMM2.Mapping
+      Choice: Opt in to 183104 bytes of dynamic smem per GEMM1 CTA and 109108 per GEMM2 CTA, each launched with 256 threads and a residency of one and two CTAs per SM
+      Reason: Both stage rings exceed the default dynamic-smem limit, and the GEMM2 request carries the epilogue regions of the shared layout that its own tile never writes
+    - Item: DESIGN.Math_reshape::act_code
+      Choice: Form the codes with a saturating round-to-nearest-even FP32 to fp8_e4m3fn conversion; the first QDQ divides by its scale, the second multiplies by an approximate reciprocal
+      Reason: The Contract clamp and the declared Approx bound assume this pair of primitives, and only the second QDQ carries the reciprocal error
+  Prefer:
+    - Item:
+        - DESIGN.Tile_pipeline::GEMM1.MAIN
+        - DESIGN.Tile_pipeline::GEMM2.MAIN
+      Choice: Address a staged operand row as (row*8 + (chunk xor (row mod 8)))*16 bytes, a 128-byte XOR swizzle of the quant_block-wide rows
+      Reason: A plain 128-byte row stride puts the eight rows one ldmatrix reads into the same four banks, an eight-way conflict on every fragment load
+    - Item:
+        - DESIGN.Tile_pipeline::GEMM1.MAIN
+        - DESIGN.Tile_pipeline::GEMM2.MAIN
+      Choice: Load the fragments of two consecutive k=32 steps before issuing their products, giving runs of four products per fragment pair
+      Reason: The source measures 1459T of fp8 mma.sync throughput at a 16-ldmatrix to 32-mma burst ratio against 437T at a 2 to 8 interleave

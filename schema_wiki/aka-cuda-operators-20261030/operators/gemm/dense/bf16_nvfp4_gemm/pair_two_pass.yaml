@@ -1,0 +1,310 @@
+META_DATA:
+  Name: bf16_nvfp4_gemm
+  Describe: Dense GEMM of BF16 activations against NVFP4 weights with per-group E4M3 scales, optionally alpha-scaled, FP32-accumulated, with BF16 output
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu::ws50b::w4a16_ws50b_kernel
+  Version: 2
+  Dispatch:
+    id: pair_two_pass
+    when: 'Compute capability 10.3, m > 32, n a multiple of 512 and k a multiple of 64, so only m has a partial block, whose rows past m are zero-filled by the load and dropped by the guarded write. Covers the large shapes auto dispatch gives two submissions: ceil_div(m, 256) * (n / 512) pair tiles running many waves of resident clusters. Needs tensor maps, tensor memory, cluster notifications and 2*n*k bytes of global workspace; if that allocation fails the source relaunches the single-CTA design'
+DESIGN:
+  Math_reshape:
+    Thesis: Keep the Contract numerical path; move the weight decode out of the GEMM. One pass decodes the whole packed payload into a global BF16 operand, so each element is decoded once per invocation, not once per m block. Costs 4x the packed bytes plus a full extra write and read of n*k elements
+    Rewrite:
+      - Name: Decode the whole weight operand into global BF16
+        Math: |
+          No table is built and nothing is decoded inside the GEMM step. For 0 <= j < n and
+          0 <= l < k, let c = b[j, l // codes_per_byte] be the byte holding code(j, l) of
+          Weight_dequantization in Contract, and let e2m1 be the decode Contract defines:
+            e(j, l) = c mod 16 if l is even
+            e(j, l) = c div 16 if l is odd
+            q(j, l) = f16(b_descale[j, l // scale_block])
+            wq[j, l] = bf16(f16(e2m1(e(j, l))) * q(j, l))
+          wq[j, l] equals w[j, l] of Contract, so wq replaces w in every product below. The whole
+          n x k operand is formed before any product reads it, and each of its elements is read
+          once by every m block of the second step.
+        Symbol: {wq: {meaning: BF16 weight operand of B with the same value as w, shape: [{n: n}, {k: k}], dtype: bf16, retention: keep_value invocation}}
+        Arithmetic:
+          Accumulate: 'The conversions and the FP16 multiply inside the BF16 narrowing are exact, not the default FP32: E2M1 times E4M3 needs at most 6 significand bits'
+        Ledger:
+          Baseline: Weight_dequantization of Contract evaluated per element in FP32 at each use, with no BF16 weight operand formed
+          Gain: Decode evaluations per invocation m*n*k -> n*k; per element one FP32 multiply becomes two packed conversions plus half a packed FP16 multiply
+          Cost: wq materialized globally, 0 -> 2*n*k bytes written; weight bytes read by step 2 go n*k*ceil_div(m, 256)/codes_per_byte -> 2*n*k*ceil_div(m, 256)
+      - Name: One FP32 accumulator per output over the whole k
+        Math: |
+          group_count = k / 16 is the number of consecutive 16-element groups of k; group g
+          covers [16*g, 16*g + 16). In the range this design covers k is a multiple of 64, so
+          group_count is an integer. s = alpha[0] if alpha is not None else 1, as Contract
+          defines it, and acc(-1) is the m x n FP32 zero value. For g = 0 to group_count-1 in
+          ascending g:
+            acc(g) = mma32(a[:, 16*g:16*g + 16], wq[:, 16*g:16*g + 16]ᵀ, acc(g-1))
+          out[i, j] = bf16(s * acc(group_count-1)[i, j]) for 0 <= i < m and 0 <= j < n, written
+          into out_buffer as Contract requires.
+        Symbol: {acc: {meaning: FP32 whole-k accumulator per output element, shape: [{m: m}, {n: n}], dtype: fp32, retention: 'carry_forward (i,j); g=-1..group_count-1'}}
+        Arithmetic:
+          Accumulate: One FP32 accumulator per output spans the whole k in ascending 16-element groups; only the group-internal summation order is set by the matrix unit
+        Ledger:
+          Baseline: Scaled_product_and_writeback of Contract evaluated as one FP32 sum over the whole k per output element
+          Gain: FP32 MACs on the vector path m*n*k -> 0, with the same m*n*k MACs moved onto the matrix unit in 16-element groups
+          Cost: The k reduction is reassociated into ascending 16-element groups, so acc is not bit-identical to the left-to-right sum of Contract
+  Work_schedule:
+    Thesis: Two submissions. One thread per two scale groups decodes the whole weight operand into global memory. A cluster of two CTAs owns one 256 x 512 pair tile and its whole k reduction, sharing every product but keeping separate stages and tensor memory, so no partial result leaves a worker
+    Step:
+      DEQUANT:
+        Describe: Decode the whole packed weight payload of Contract into the BF16 operand wq in a global workspace, two adjacent 16-element scale groups per worktile
+        Decomposition:
+          Strategy: 'A worktile owns the 32 k positions of two adjacent scale groups of one weight row: 16 packed bytes of b and 2 group scales in, 32 elements of wq out'
+          Partition:
+            n: {meaning: Weight row this worktile decodes, size: n, tile: 1}
+            group_pair: {meaning: Two adjacent 16-element scale groups of one row, size: k/(2*scale_block), tile: 1}
+          Target:
+            Single_tile: {wq_tile: {meaning: The elements of wq this worktile writes, shape: [{k: 2*scale_block}], dtype: bf16}}
+        Mapping:
+          Strategy: 'One thread is one worker: it decodes and writes its 32 elements with no shared memory, no barrier and no cooperation, a flat fill of wq'
+          Worker: {unit: thread, unit_count: 1}
+          Worker_count: worktile_count
+        Schedule:
+          Strategy: Workers launch 256 to a CTA and the count rounds up to whole CTAs; surplus threads of the last CTA own no worktile and exit before any action
+          Worktile_order:
+            - {by: n, direction: ascending}
+            - {by: group_pair, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+      MAIN:
+        Describe: Compute one 256 x 512 tile of out over the whole k from the staged activation rows and the decoded weight operand, and write out
+        Decomposition:
+          Strategy: bk = 64; k_tile_count = k / bk. n is a multiple of 512 and k of 64, so both partitions are exact; only m has a tail, whose rows past m stage as zeros
+          Partition:
+            m: {meaning: Block of activation rows of the output pair tile, size: m, tile: 256}
+            n: {meaning: Block of weight rows forming the output columns, size: n, tile: 512}
+          Worktile:
+            Iteration:
+              a_block: {meaning: Activation rows of one k block of this pair tile, shape: [{m: 256}, {k: 64}], dtype: 'ref:CONTRACT.Algorithm_requirement::a.dtype', direction: ascending}
+              wq_block: {meaning: Rows of the decoded weight operand of one k block, shape: [{n: 512}, {k: 64}], dtype: bf16, direction: ascending}
+          Target:
+            Single_tile: {out_tile: {meaning: Tile of out that this worktile writes, shape: [{m: 256}, {n: 512}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}}
+        Mapping:
+          Strategy: Member r stages rows [128*r, 128*r+128) of m and, per product half h, weight rows [256*h+128*r, +128). pair_capacity is the resident cluster count
+          Worker: {unit: cta, unit_count: 2}
+          Worker_count: min(worktile_count, pair_capacity)
+          Placement: {unit: cluster, unit_count: 1}
+          Member: [{m: [0, 128]}, {m: [128, 256]}]
+        Schedule:
+          Strategy: In the final partial m group, m is the flat number modulo that group m count, rotating the ascending m order; coverage stays a bijection
+          Worktile_order:
+            - {by: m, group: 8, direction: ascending}
+            - {by: n, direction: ascending}
+            - {by: m, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, stride: worker_count}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch:
+        - {step: [DEQUANT]}
+        - {step: [MAIN]}
+      Handoff: {wq: {producer: DEQUANT, consumer: [MAIN], storage: global, wait_at: MAIN.wq_wait}}
+  Tile_pipeline:
+    Thesis: The GEMM step splits one cluster into five roles over two members; a four-deep ring keyed by a stage ordinal that runs across pair tiles lets staging outrun the products, and one tensor-memory accumulator per pair tile makes the previous tile's epilogue the bound, released per 256-column half
+    Step:
+      DEQUANT:
+        Role:
+          MAIN:
+            Info:
+              Describe: Decode one pair of adjacent weight scale groups of one row and write its elements of the global operand; no shared memory, no barrier, no pipeline
+              Member: thread[0:1]
+              Using_verb:
+                compute: {wq_tile: {execution_mode: serial, describe: 'Decode b_bytes and s_bytes into the 32 BF16 elements of wq this worktile owns by step 1 of Math_reshape, in registers'}}
+                load:
+                  b_bytes: {execution_mode: async_unordered, describe: 'Read the 16 packed bytes of b holding the k positions of this worktile, one vector read'}
+                  s_bytes: {execution_mode: async_unordered, describe: 'Read the two adjacent group scales of b_descale of this weight row, one 2-byte read'}
+                store: {wq_tile: {execution_mode: async_unordered, describe: 'Write them to their positions of wq as two 32-byte vector stores, not waited on; done means they are in global memory, visible once this grid ends'}}
+            Pipe:
+              - load:b_bytes
+              - load:s_bytes
+              - compute:wq_tile
+              - store:wq_tile
+            Waiting:
+              Prepared: ['{issue compute:wq_tile} ← [{done load:b_bytes}, {done load:s_bytes}]']
+      MAIN:
+        Index:
+          t: {meaning: Local ordinal in this worker's pair-tile sequence, definition: worktile}
+          i: {meaning: k block within one pair tile, definition: [0, k_tile_count]}
+          g: {meaning: Operand stage ordinal across the pair tiles, definition: {flatten: [t, i]}}
+          h: {meaning: One of the two 256-column halves of acc, definition: [0, 2]}
+          c: {meaning: 32-column chunk of one half of a pair tile, definition: [0, 8]}
+        Event:
+          wq_wait: ['{done PRODUCER[*]::await:deq_grid}']
+        Storage:
+          a_ring: {meaning: Staged activation rows of one k block, depth: 4, location: smem, shape: [{m: 128}, {k: 64}],
+            dtype: bf16, total_size: 2*4*128*64*2, view: {a_block(g): {slot_index: g%4}}}
+          b_ring: {meaning: Staged rows of the decoded weight operand, depth: 4, location: smem, shape: [{row: 256}, {k: 64}],
+            dtype: bf16, total_size: 2*4*256*64*2, view: {'wq_block(g,h)': {slot_index: g%4, region: {row: [128*h, 128*(h+1)]}}}}
+          acc: {meaning: FP32 accumulators of the pair tile, depth: 1, location: tmem, shape: [{m: 128}, {n: 512}],
+            dtype: fp32, total_size: 2*128*512*4, view: {'acc(t,h)': {region: {n: [256*h, 256*(h+1)]}}}}
+        Role:
+          PRODUCER:
+            Info:
+              Describe: Stage the operands of every k block of every pair tile of this worker into the operand ring of this member
+              Member: warp[8:9]
+              Using_verb:
+                load:
+                  a_block: {execution_mode: async_unordered, describe: 'Copy the 128 activation rows this member owns for stage g from a into slot g%4 of a_ring as one 64 x 128 box, zero-filling rows at or beyond m'}
+                  wq_block: {execution_mode: async_unordered, describe: 'Copy this member''s 128 rows of wq for product half h of stage g into slot g%4 of b_ring as one 64 x 128 box, under the count that covers a_block(g)'}
+                await:
+                  deq_grid: {execution_mode: serial, describe: 'Wait until every DEQUANT worktile has written its elements of wq; it releases when that grid ends, so the prologue of this step overlaps the tail'}
+                  slot_free: {execution_mode: serial, describe: Wait until stage slot g%4 of a_ring and b_ring of this member is free; issued only from the fifth stage on}
+            Pipe:
+              - await:deq_grid
+              - for(t):
+                  - for(g[t]):
+                      - if(g >= 4):
+                          - await:slot_free(g)
+                      - load:a_block(g)
+                      - for(h):
+                          - load:wq_block(g,h)
+            Waiting:
+              Prepared: ['{issue load:a_block(0)} ← [{done EPILOGUE_HALF0::compute:barrier_init}]']
+              Released: ['{done await:slot_free(g)} ← [{done ISSUER[0]::release:stage_slot(g-4)}]']
+          SIGNALER:
+            Info:
+              Describe: Tell member 0 that this member has staged a stage, so the pair-wide products may read both members
+              Member: cta[1].warp[9:10]
+              Using_verb:
+                await: {stage_full: {execution_mode: serial, describe: Wait until stage slot g%4 of this member has landed under the one count set for a_block(g) and both wq_block halves; done means all are readable here}}
+                signal: {pair_ready: {execution_mode: async_unordered, describe: One thread of this member arrives on the pair notification of slot g%4 held by member 0}}
+            Pipe:
+              - for(t):
+                  - for(g[t]):
+                      - await:stage_full(g)
+                      - signal:pair_ready(g)
+            Waiting:
+              Prepared:
+                - '{issue await:stage_full(0)} ← [{done EPILOGUE_HALF0::compute:barrier_init}]'
+                - '{done await:stage_full(g)} ← [{done PRODUCER::load:a_block(g)}, {done PRODUCER::load:wq_block(g,h)}]'
+          ISSUER:
+            Info:
+              Describe: Issue every pair-wide product of this worker from one thread of member 0, and hand the operand slots and the finished accumulator back
+              Member: cta[0].warp[9:10]
+              Using_verb:
+                matmul: {a_block@wq_block: {execution_mode: async_unordered, describe: 'Issue the four 2-CTA 16-element products of stage g into acc(t, h) by step 2, reading a_block(g) and wq_block(g,h); a tile''s first zeroes that half'}}
+                await:
+                  stage_full: {execution_mode: serial, describe: Wait until stage slot g%4 of this member has landed under the one count set for a_block(g) and both wq_block halves}
+                  pair_ready: {execution_mode: serial, describe: Wait for the arrival of member 1 on the pair notification of slot g%4; done means its a_block(g) and both wq_block halves landed too}
+                  acc_free: {execution_mode: serial, describe: 'Wait until the epilogue warps of both members have finished reading the acc(t-1, h) half, so the products of tile t may reinitialize it'}
+                release:
+                  stage_slot: {execution_mode: async_unordered, describe: 'Hand slot g%4 of a_ring and b_ring back in both members by one matrix-completion arrival per member, firing when the eight products have read it'}
+                  tile_done: {execution_mode: async_unordered, describe: 'Announce to both members, by a second matrix-completion arrival, that every product of pair tile t has finished, so acc(t, 0) and acc(t, 1) are final'}
+            Pipe:
+              - for(t):
+                  - for(g[t]):
+                      - await:stage_full(g)
+                      - await:pair_ready(g)
+                      - for(h):
+                          - if(t > 0 and i == 0):
+                              - await:acc_free(t,h)
+                          - matmul:a_block(g)@wq_block(g,h)
+                      - release:stage_slot(g)
+                  - release:tile_done(t)
+            Waiting:
+              Prepared:
+                - '{issue await:stage_full(0)} ← [{done EPILOGUE_HALF0::compute:barrier_init}]'
+                - '{done await:stage_full(g)} ← [{done PRODUCER::load:a_block(g)}, {done PRODUCER::load:wq_block(g,h)}]'
+                - '{done await:pair_ready(g)} ← [{done SIGNALER[1]::signal:pair_ready(g)}]'
+                - '{done await:acc_free(t,0)} ← [{done EPILOGUE_HALF0[*]::release:acc(t-1)}]'
+                - '{done await:acc_free(t,1)} ← [{done EPILOGUE_HALF1[*]::release:acc(t-1)}]'
+              Allowed: ['{issue matmul:a_block(0)@wq_block(0,0)} ← [{done EPILOGUE_HALF0::acquire:tmem}]']
+          EPILOGUE_HALF0:
+            Info:
+              Describe: Initialize the notifications and acquire the tensor memory, read the low 256 columns of each finished pair tile, write out, then return the memory
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  barrier_init: {execution_mode: serial, describe: 'Read no input and no old value. One thread of this member sets its notification counts, then both members rendezvous; done means all counts are live'}
+                  out_chunk: {execution_mode: serial, describe: 'The four warps each read one 32-column chunk of acc(t, 0), 32 rows by 32 columns, multiply by s and narrow to BF16; done covers those reads'}
+                load: {s: {execution_mode: async_unordered, describe: 'Read the multiplier s of step 2 once per worker, alpha[0] when alpha is not None and no read at all when it is None; only the narrowing uses it'}}
+                store: {out_chunk: {execution_mode: async_unordered, describe: 'Write the 32 BF16 values per lane to its row of out at the 32 columns of chunk c, as two 32-byte vector stores; rows at or beyond m write nothing'}}
+                await: {tile_done: {execution_mode: serial, describe: 'Wait for the arrival announcing that every product of pair tile t has finished; done means acc(t, 0) and acc(t, 1) are final and readable'}}
+                acquire: {tmem: {execution_mode: serial, describe: One warp of each member takes 512 tensor-memory columns for acc cluster-wide and gives up further claims; done means acc is addressable in both}}
+                release:
+                  acc: {execution_mode: async_unordered, describe: 'After the four warps of this role in this member have read acc(t, 0), one thread arrives on the half-0 notification of member 0; global writes may lag'}
+                  tmem: {execution_mode: serial, describe: Return the 512 columns of acc after a CTA-wide and then a cluster-wide rendezvous that every role of both members enters at the end of its own pipe}
+            Pipe:
+              - compute:barrier_init
+              - acquire:tmem
+              - load:s
+              - for(t):
+                  - await:tile_done(t)
+                  - for(c):
+                      - compute:out_chunk(t,c)
+                      - store:out_chunk(t,c)
+                  - release:acc(t)
+              - release:tmem
+            Waiting:
+              Prepared:
+                - '{done await:tile_done(t)} ← [{done ISSUER[0]::release:tile_done(t)}]'
+                - '{issue compute:out_chunk(t,c)} ← [{done load:s}]'
+          EPILOGUE_HALF1:
+            Info:
+              Describe: Read the high 256 columns of each finished pair tile and write its rows of out
+              Member: warp[4:8]
+              Using_verb:
+                compute: {out_chunk: {execution_mode: serial, describe: 'The four warps each read one 32-column chunk of acc(t, 1), 32 rows by 32 columns, multiply by s and narrow to BF16; done covers those reads'}}
+                load: {s: {execution_mode: async_unordered, describe: 'Read the multiplier s of step 2 once per worker, alpha[0] when alpha is not None and no read at all when it is None; only the narrowing uses it'}}
+                store: {out_chunk: {execution_mode: async_unordered, describe: 'Write the 32 BF16 values per lane to its row of out at the 32 columns of chunk c, as two 32-byte vector stores; rows at or beyond m write nothing'}}
+                await: {tile_done: {execution_mode: serial, describe: 'Wait for the arrival announcing that every product of pair tile t has finished; done means acc(t, 0) and acc(t, 1) are final and readable'}}
+                release: {acc: {execution_mode: async_unordered, describe: 'After the four warps of this role in this member have read acc(t, 1), one thread arrives on the half-1 notification of member 0; global writes may lag'}}
+            Pipe:
+              - load:s
+              - for(t):
+                  - await:tile_done(t)
+                  - for(c):
+                      - compute:out_chunk(t,c)
+                      - store:out_chunk(t,c)
+                  - release:acc(t)
+            Waiting:
+              Prepared:
+                - '{issue await:tile_done(0)} ← [{done EPILOGUE_HALF0::compute:barrier_init}, {done EPILOGUE_HALF0::acquire:tmem}]'
+                - '{done await:tile_done(t)} ← [{done ISSUER[0]::release:tile_done(t)}]'
+                - '{issue compute:out_chunk(t,c)} ← [{done load:s}]'
+REALIZATION:
+  Require:
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: 'Two plain launches on the caller''s stream, no event: ws50b::deq_pass2_kernel as ceil_div(n*k/32, 256) CTAs of 256 threads and zero dynamic shared memory, then ws50b::w4a16_ws50b_kernel as 2*min(worktile_count, pair_capacity) CTAs of 320 threads, 196784 bytes with the limit raised once, cluster 2'
+      Reason: Flow declares two submissions with no start_after, so stream order is the only completion relation between them and for the caller's later use of out; 196784 bytes admits one cluster per SM pair, so pair_capacity is half the unspecified SM count, and only a cluster co-schedules the two CTAs
+    - Item: DESIGN.Work_schedule::Flow.Handoff
+      Choice: The second submission carries the programmatic stream serialization launch attribute and the first performs no explicit dependent-launch trigger, so it releases when its last CTA exits; the producer runs griddepcontrol.wait as its await:deq_grid action
+      Reason: Handoff puts the readiness wait on that one action instead of on the submission, which only this attribute allows; without it the wait is a no-op and stream order already gives readiness, and the next call's DEQUANT is stream-ordered after this MAIN, so reusing the workspace stays safe
+    - Item: DESIGN.Work_schedule::Flow.Handoff
+      Choice: A process-wide grow-only allocation of 2*n*k bytes for wq, reused across calls and reallocated only for a larger n*k, destroying every captured graph replay first
+      Reason: Handoff declares storage global and the consumer reads the whole operand, so the buffer must outlive both submissions; a reallocation changes the address recorded launches refer to, and reuse across calls rests on the stream order above
+    - Item: DESIGN.Tile_pipeline::MAIN.ISSUER
+      Choice: tcgen05.mma with cta_group::2 and kind::f16 on BF16 operands with FP32 accumulation, M256 N256 K16 per instruction, issued by one thread of member 0 for both members, plus tcgen05.commit with cluster multicast as the stage-slot and tile-completion arrivals
+      Reason: The products read operands held in both members and write tensor memory of both, which only the pair-wide instruction form does, and the release actions promise a slot free or an accumulator final only after those asynchronous products have read or written it
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.PRODUCER
+        - DESIGN.Tile_pipeline::MAIN.ISSUER
+      Choice: Two 2D tensor-map descriptors per call, a as bf16 over (k, m) and wq as bf16 over (k, n), both with row stride 2*k bytes, a 64 x 128 box under 128-byte swizzle and zero fill outside the declared dimensions
+      Reason: The load actions promise member-wide readable operands whose activation rows beyond m are already zero, which only the out-of-range fill of the descriptor provides, and the product descriptors assume the 128-byte swizzle inside each 128-row chunk of a slot
+    - Item: DESIGN.Tile_pipeline::MAIN.ISSUER
+      Choice: tcgen05.fence::after_thread_sync between the waits of this role and its products
+      Reason: This role observes the operand arrivals through ordinary shared-memory waits while the matrix unit reads those operands through the asynchronous proxy, so the counts alone do not order the two; no decode writes shared memory here, so the write-side proxy fence has nothing to order
+    - Item: DESIGN.Tile_pipeline::MAIN.EPILOGUE_HALF0
+      Choice: 'One thread of each member initializes its notification counts once per worker: 1 for each stage-full, stage-free, pair and tile-completion array, 4 for each of its two half-read arrays, and 2 for each of the two accumulator-half arrays of member 0'
+      Reason: Every wait of the five roles keys on those counts and on the phase of the slot and tile ordinals, so the counts do not follow from the launch configuration, and a wrong one either deadlocks the worker or releases a slot that is still being read
+    - Item: DESIGN.Tile_pipeline::MAIN.EPILOGUE_HALF0
+      Choice: One warp of each member acquires 512 tensor-memory columns cluster-wide and returns them at the end, separated from the pair-tile loop by a cluster-wide rendezvous and from the return by a CTA-wide and then a cluster-wide rendezvous
+      Reason: acc occupies a device-scope region charged once per worker, and release:tmem promises that no role of either member touches acc again, which only a rendezvous spanning both members and all ten warps of each can give
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: 320 threads per CTA under a launch bound for 320, the eight epilogue warps of the two halves plus one warp for staging and one warp in which only member 0 issues products and only member 1 makes the pair arrival
+      Reason: The staging, signaling and issuing roles register one warp each with a single acting lane, so neither the launched size nor the idle lanes follow from the role account, while that size is what shares a pair of SMs with the shared memory above
+    - Item: DESIGN.Tile_pipeline::DEQUANT
+      Choice: 256 threads per CTA with a launch bound for 256, one 16-byte vector read of packed weights, one 2-byte read of group scales and two 32-byte vector stores per worker, and no dynamic shared memory
+      Reason: The step is a flat fill with no cooperation, so its rate is set by how many bytes each worker keeps in flight; the grouping of 256 workers per CTA and the surplus threads that own no worktile are launch facts the Design does not carry
+  Prefer:
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.EPILOGUE_HALF0
+        - DESIGN.Tile_pipeline::MAIN.EPILOGUE_HALF1
+      Choice: Two 32-byte vector stores per 32-column chunk of out_chunk instead of four 16-byte stores, keeping the values, the row guard and the column coverage
+      Reason: Halves the store instruction count while giving each lane full 32-byte sectors of its row

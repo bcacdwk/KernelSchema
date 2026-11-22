@@ -1,0 +1,206 @@
+META_DATA:
+  Name: fmha_bf16
+  Describe: Varlen batched BF16 flash multi-head attention over paged KV with GQA/MQA sharing, causal and window masking, optional sinks and base-2 LSE output
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_bf16/candidate/solution.py::Model.forward
+  Version: 1
+  Dispatch:
+    id: tc_prefill_cpasync
+    when: 'head_dim 64 (dq = dv) and total_q * group > 64 * batch_count, so the host plans m_tile 128; n_tile stays 128 because window_left >= 0 or max_kv_len - (max_q_len // 2 when causal, else 0) < 2048; tiles_ub * kv_head_count exceeds twice the multiprocessor count, where tiles_ub = total_q * group // 128 + batch_count: the wave target is met so splits_ub conservatively stays 1, and the NH4 gate fails so the k and v tensormaps stay unencoded and this cp.async kernel is launched'
+DESIGN:
+  Math_reshape:
+    Thesis: Contract's softmax is kept but evaluated online in base 2 over n_tile-key stages starting at the tile's first visible key, with a fixed-size per-row state instead of a materialized score row and the value scale folded into one writeback multiplier; each ledger records the rounding its step moves
+    Rewrite:
+      - Name: GQA row packing of the query tile
+        Math: |
+          A worktile is one (tile, kv_head) pair and holds m_tile packed rows of a single request, so no tile spans two requests.
+          tile_count(b) = ceil_div(qlen_b * group, m_tile) and tile_offset(b) = sum_{a<b} tile_count(a); tile t of request b starts at m0 = (t - tile_offset(b)) * m_tile and holds mrows = min(m_tile, qlen_b * group - m0) rows.
+          Row i of the tile is packed row u = m0 + i, which is Contract's query row r = cum_seq_lens_q[b] + min(u div group, qlen_b - 1) at head h = kv_head * group + (u mod group), so the group heads sharing kv_head occupy consecutive packed rows.
+          Rows with i >= mrows repeat the request's last token and write no output; a tile with mrows == 0 holds no rows at all.
+        Symbol:
+          m_tile: {meaning: Packed query rows in one worktile, binding: 'bind:DESIGN.Work_schedule::m_tile'}
+          total_m: {meaning: Packed query rows over all requests, value: total_q * group}
+        Ledger:
+          Baseline: Contract's rows evaluated one (token, head) at a time
+          Gain: The group heads sharing a KV head become m_tile rows of one product, so each key block is fetched and scored once per group instead of once per head
+          Cost: Row counts round up to m_tile, so up to m_tile-1 padding rows per request are staged, scored and exponentiated, then discarded
+      - Name: Per-tile key window and stage grid
+        Math: |
+          vis(u) = kv_len_b - qlen_b + (u div group) is the bottom-right key coordinate of row u, and Contract's causal_window_mask decides visibility from it.
+          lo = window_left >= 0 ? max(0, vis(m0) - window_left) : 0 and hi = causal ? min(vis(m0 + mrows - 1) + 1, kv_len_b) : kv_len_b bound the keys at least one row of the tile can see, so hi <= lo leaves the tile empty.
+          kv0 = lo and stage_count = ceil_div(hi - kv0, n_tile); stage c holds the keys kv0 + c * n_tile + j for 0 <= j < n_tile, and every stage of a nonempty tile is walked even where some of its rows see none of it.
+          rlo(u) = max(window_left >= 0 ? max(0, vis(u) - window_left) : 0, lo) and rhi(u) = min(causal ? vis(u) : kv_len_b - 1, hi - 1) are row u's inclusive visible bounds inside the stage grid.
+        Symbol:
+          n_tile: {meaning: Keys covered by one stage, binding: 'bind:DESIGN.Work_schedule::n_tile'}
+          stage_count: {meaning: Stages one worktile walks}
+          rlo: {meaning: Inclusive lower visible key of row u}
+          rhi: {meaning: Inclusive upper visible key of row u}
+        Ledger:
+          Baseline: Every key of the request examined for every row
+          Gain: Only [lo, hi) is fetched and scored per tile, which under causal masking is roughly the tile's own prefix rather than all kv_len_b keys
+          Cost: The last stage repeats up to n_tile-1 keys past hi-1 clamped to hi-1, fetched and masked without contributing
+      - Name: Base-2 online softmax with deferred rescale
+        Math: |
+          Per tile row i (packed row u = m0 + i), in base 2, over stages c = 0 .. stage_count-1; the row max precedes scaling by qk_scale2, valid only for qk_scale2 > 0.
+          s(c)[j] = dot32(q_tile[i], k_block(c)[j]), unscaled, at key kv0 + c*n_tile + j.
+          x(c)[j] = s(c)[j] if rlo(u) <= kv0 + c*n_tile + j <= rhi(u) else -inf
+          m = mbase(c-1); rmax(c) = max_j x(c)[j]; mn(c) = max(m, rmax(c)*qk_scale2); msafe(c) = mn(c) == -inf ? 0 : mn(c)
+          deferred(c) = msafe(c) - m < lazy_thresh; alpha(c) = deferred(c) ? 1 : exp2(m - msafe(c)); mbase(c) = deferred(c) ? m : msafe(c)
+          p(c)[j] = exp2(x(c)[j]*qk_scale2 - mbase(c)); p2(c) = bf16(p(c)); l(c) = alpha(c)*l(c-1) + sum32_j p(c)[j]
+          o(0) = mm32(p2(0), v_block(0)); o(c) = mma32(p2(c), v_block(c), alpha(c)*o(c-1)) for c >= 1; mbase(-1) = -inf, l(-1) = 0.
+          A fully masked stage gives rmax = -inf: it is deferred and inert when m is finite, but at c = 0 msafe clamps to 0, alpha = 0 and mbase(0) = l(0) = 0.
+        Symbol:
+          qk_scale2: {meaning: Logit scale converted to base-2 exponents, value: bmm1_scale * log2(e)}
+          lazy_thresh: {meaning: Base-2 max growth below which rescale is skipped, value: 16}
+          x: {meaning: Masked unscaled logits of one stage, shape: [{key: n_tile}], dtype: fp32}
+          p: {meaning: Unrounded base-2 weights of one stage, shape: [{key: n_tile}], dtype: fp32}
+          p2: {meaning: BF16 weights read by the value product, shape: [{key: n_tile}], dtype: bf16}
+          mbase: {meaning: Running base-2 maximum of one row, shape: [], dtype: fp32, retention: 'carry_forward (tile,kv_head,i); c=0..stage_count-1'}
+          l: {meaning: Running unnormalized base-2 row sum, shape: [], dtype: fp32, retention: 'carry_forward (tile,kv_head,i); c=0..stage_count-1'}
+          o: {meaning: Unnormalized output row before scaling, shape: [{d: head_dim}], dtype: fp32, retention: 'carry_forward (tile,kv_head,i); c=0..stage_count-1'}
+        Arithmetic:
+          Approx: exp2 is ex2.approx.ftz, 2^-22 relative error on normal results, subnormals flush to zero, exp2(-inf) = 0; arguments never exceed lazy_thresh
+          Accumulate: The sum of p pairs keys by residue mod 4 into two packed FP32x2 accumulators; the row max is a 4-way tree over all n_tile values
+        Ledger:
+          Baseline: Contract's row_max, row_sum and y over the whole visible range with natural exp
+          Gain: One pass over the keys with a fixed per-row state (mbase, l, o), so no kv_len_b-long score row is materialized and no second key pass is needed
+          Cost: p2 narrows to bf16 while l sums unrounded fp32 p; deferred rescale lets weights reach 2^lazy_thresh; masked keys are still exponentiated
+      - Name: Value scale, sinks and output writeback
+        Math: |
+          With C = stage_count - 1: lse2 = mbase(C) + log2(l(C)) and inv = bmm2_scale / l(C).
+          When sinks is not None: sink2 = sinks[h] * log2(e); total2 = max(lse2, sink2) + log2(1 + exp2(-|sink2 - lse2|)); os = exp2(lse2 - total2); inv = inv * os; lse2 = total2.
+          out_result[r, h, d] = bf16(o(C)[d] * inv) for 0 <= d < head_dim, and lse_result[r, h] = lse2 when lse is not None.
+          Rows with i >= mrows evaluate the same expressions and write neither output. Contract gives every writing row a visible key, so l(C) > 0 unless that key's weight exp2(x*qk_scale2 - mbase(C)) underflows the approximated exp2's flush threshold, which no recorded workload reaches; inv = bmm2_scale / l(C) carries no guard.
+        Arithmetic:
+          Approx: The log2 and exp2 of this step are the accurate library functions, not the approximated exponential of the softmax step
+        Ledger:
+          Baseline: Contract scales each value vector by bmm2_scale and divides y by row_sum
+          Gain: bmm2_scale, 1/l and the sink factor collapse into one per-row multiplier applied once at writeback, so no per-key scaling pass exists
+          Cost: One FP32 rounding moves from each key's value to the row's final product, and the sink merge uses a max-shifted log-add-exp
+  Work_schedule:
+    Thesis: One CTA owns a whole (kv_head, m_tile packed rows) tile and its entire visible key range, so the row state never leaves the CTA and no partial result, merge or second submission exists; the batch-rounded tile bound leaves slack tiles that exit empty
+    Step:
+      MAIN:
+        Describe: Compute the whole visible key range of one (kv_head, m_tile packed rows) tile and write its final out rows and base-2 lse
+        Decomposition:
+          Strategy: m_tile = 128 rows, n_tile = 128 keys; tiles_ub = total_m // m_tile + batch_count, an upper bound whose batch_count slack tiles issue no action
+          Partition:
+            tile_y: {meaning: Grid coordinate selecting one m_tile row block, size: tiles_ub, tile: 1}
+            kv_head: {meaning: KV head whose pages this tile reads and produces, size: kv_head_count, tile: 1}
+          Worktile:
+            Invariant: {q_tile: {meaning: Packed query rows of this tile for one KV head, shape: [{row: m_tile}, {d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::query.dtype'}}
+            Iteration:
+              k_block: {meaning: Keys of one stage of the tile range, shape: [{key: n_tile}, {d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::k.dtype', direction: ascending}
+              v_block: {meaning: Values of the same stage as k_block, shape: [{key: n_tile}, {d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::v.dtype', direction: ascending}
+          Target:
+            Single_tile:
+              out_rows: {meaning: Final attention output rows of this tile, shape: [{row: m_tile}, {d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}
+              lse_rows: {meaning: 'Base-2 lse rows, written only when lse is given', shape: [{row: m_tile}], dtype: 'ref:CONTRACT.Algorithm_requirement::lse.dtype'}
+        Mapping:
+          Strategy: Each CTA derives its request, row block and key range from cum_seq_lens_q and seq_lens at entry; the host supplies only the plan
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: kv_head_count * tiles_ub
+        Schedule:
+          Strategy: kv_head fastest; tile = tiles_ub-1-tile_y when causal and tile_y otherwise, so the longest visible key ranges start first across the grid
+          Worktile_order:
+            - {by: tile_y, direction: ascending}
+            - {by: kv_head, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: 'Four warps act as one role: each thread owns a packed row, all 128 threads stage every cp.async KV block, and thread 0 issues both matrix products, so stage boundaries are CTA rendezvous. The three-slot ring runs two stages ahead and the next score product issues during the softmax-and-pack phase'
+    Step:
+      MAIN:
+        Index: {c: {meaning: KV stage index within this worktile, definition: [0, stage_count]}}
+        Storage:
+          q_smem: {meaning: Staged packed query rows of this tile, depth: 1, location: smem, shape: [{row: 128}, {d: 64}],
+            dtype: bf16, total_size: 16384, view: {q_tile: {}}}
+          k_ring: {meaning: Key blocks of the three-slot KV ring, depth: 3, location: smem, shape: [{key: 128}, {d: 64}],
+            dtype: bf16, total_size: 49152, view: {k_block(c): {slot_index: c%3}}}
+          v_ring: {meaning: Value blocks of the three-slot KV ring, depth: 3, location: smem, shape: [{key: 128}, {d: 64}],
+            dtype: bf16, total_size: 49152, view: {v_block(c): {slot_index: c%3}}}
+          s_tmem: {meaning: Score block written by the score product, depth: 1, location: tmem, shape: [{row: 128}, {column: 128}],
+            dtype: fp32, total_size: 65536, view: {s(c): {}}}
+          p_tmem: {meaning: 'BF16 weights of one stage, two packed per word', depth: 1, location: tmem, shape: [{row: 128}, {column: 64}],
+            dtype: fp32, total_size: 32768, view: {p2(c): {}}}
+          o_tmem: {meaning: Output accumulator rows of this tile, depth: 1, location: tmem, shape: [{row: 128}, {column: 64}],
+            dtype: fp32, total_size: 32768, view: {o(c): {}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: Each thread owns one packed row through softmax and writeback; all threads stage the KV blocks; thread 0 alone issues both matrix products
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  row_state: {execution_mode: serial, describe: 'Mask s(c) by rlo(u) and rhi(u), reduce rmax(c), derive deferred(c), alpha(c) and msafe(c), then advance mbase(c) and l(c)'}
+                  probability: {execution_mode: serial, describe: Turn the masked scores into the unrounded weights p(c) in registers and add the stage sum to l(c)}
+                  rescale: {execution_mode: serial, describe: Multiply this thread's row of o_tmem by alpha(c) in 32-column tensor-memory read-modify-write chunks}
+                  probability_block: {execution_mode: serial, describe: 'Narrow p(c) to bf16 pairs into the single p_tmem region; its previous reader, the output product of stage c-1, is proven complete first'}
+                  epilogue: {execution_mode: serial, describe: 'Read this thread''s row of o_tmem, form lse2 and inv, apply the sink factor when sinks is given, and write bf16 out rows and fp32 lse'}
+                matmul:
+                  query@key: {execution_mode: async_ordered, describe: 'Score product of q_tile and key(c) into s_tmem by head_dim/16 tensor-core steps with a zero accumulator, then commit to the score mbarrier'}
+                  probability@value: {execution_mode: async_ordered, describe: 'Output product of p2(c) in p_tmem and value(c) into o_tmem by n_tile/16 steps, initializing at c = 0 and accumulating after, then commit'}
+                load:
+                  q: {execution_mode: async_unordered, describe: 'Stage the 128 packed query rows into q_smem with 16-byte async copies, eight units per thread; rows past mrows clamp to the last token'}
+                  key: {execution_mode: async_unordered, describe: 'All threads cooperatively copy paged key(c) rows into k_ring slot c%3 as 16-byte async units, one page-table lookup per unit; rows past hi-1 clamp'}
+                  value: {execution_mode: async_unordered, describe: All threads cooperatively copy paged value(c) rows into v_ring slot c%3 like key(c); rows past hi-1 clamp}
+                  score: {execution_mode: serial, describe: 'Wait the score mbarrier parity phase for stage c, then read this thread''s row of s_tmem into registers with four 32-column tensor-memory loads'}
+                acquire: {tmem: {execution_mode: serial, describe: 'Thread 0 initializes the score and output product mbarriers and warp 0 allocates the 256 TMEM columns, then a CTA rendezvous publishes both'}}
+                release: {tmem: {execution_mode: serial, describe: Return the 256 TMEM columns of the CTA from warp 0 after the closing CTA-wide rendezvous proves every tensor-memory access complete}}
+            Pipe:
+              - if(mrows > 0 and hi > lo):
+                  - acquire:tmem
+                  - load:q
+                  - load:key(0)
+                  - load:value(0)
+                  - load:key(1)
+                  - load:value(1)
+                  - matmul:query@key(0)
+                  - for(c):
+                      - load:score(c)
+                      - compute:row_state(c)
+                      - if(c + 2 < stage_count):
+                          - load:key(c+2)
+                      - if(c + 1 < stage_count):
+                          - matmul:query@key(c+1)
+                      - compute:probability(c)
+                      - if(c > 0 and warp_any(alpha(c) < 1)):
+                          - compute:rescale(c)
+                      - compute:probability_block(c)
+                      - if(c + 2 < stage_count):
+                          - load:value(c+2)
+                      - matmul:probability@value(c)
+                  - compute:epilogue
+                  - release:tmem
+            Waiting:
+              Prepared:
+                - '{issue matmul:query@key(0)} ← [{done load:q}, {done load:key(0)}]'
+                - '{issue load:score(c)} ← [{done matmul:query@key(c)}]'
+                - '{issue matmul:query@key(c+1)} ← [{done load:key(c+1)}]'
+                - '{issue matmul:probability@value(c)} ← [{done load:value(c)}]'
+                - '{issue compute:rescale(c)} ← [{done matmul:probability@value(c-1)}]'
+                - '{issue compute:epilogue} ← [{done matmul:probability@value(last(c))}]'
+              Released:
+                - '{issue matmul:query@key(c+1)} ← [{done load:score(c)}]'
+                - '{issue compute:probability_block(c)} ← [{done matmul:probability@value(c-1)}]'
+                - '{issue load:key(c)} ← [{done matmul:query@key(c-3)}]'
+                - '{issue load:value(c)} ← [{done matmul:probability@value(c-3)}]'
+                - '{done release:tmem} ← [{done matmul:query@key(last(c))}, {done matmul:probability@value(last(c))}]'
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: tcgen05.mma cta_group::1 kind::f16 issued solely by thread 0, with tcgen05.commit after each product to one of the two mbarriers and the tcgen05 thread-sync fences around every phase rendezvous
+      Reason: The commit is cumulative over the earlier matrix ops of the issuing thread, so one alternating issue stream plus two parity-tracked barriers lets all 128 threads observe the completion of score(c) and of the output product of stage c-1 with a single wait each
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: 16-byte cp.async.cg units into the swizzled atom-major smem layout; a commit group closes after the key and after the value issue point of every stage even when empty; cp.async.wait_group 2 at the prologue and both in-loop wait points; fence.proxy.async before matrix issues
+      Reason: The depth-2 wait resolves against commit-group counts, so the empty groups of the tail stages keep the readiness arithmetic of the three-slot ring uniform, and the proxy fence publishes the async copies to the tensor-core reads
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: tcgen05.alloc of 256 TMEM columns by warp 0 at entry and tcgen05.dealloc after the closing rendezvous; 128 threads per CTA and 115328 B dynamic smem
+      Reason: The 256 columns are exactly the score, weight and accumulator regions (128 + 64 + 64), and the smem budget keeps two CTAs resident per SM for this four-warp kernel
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: A real branch around the per-element mask-and-max loop for stages fully inside [rlo, rhi] instead of predicated selects inside one loop; preserve the algebra
+      Reason: The SASS census recorded in the source measured 39% of executed instructions as dead mask predicates on a fixed workload when the interior stages issued them per element

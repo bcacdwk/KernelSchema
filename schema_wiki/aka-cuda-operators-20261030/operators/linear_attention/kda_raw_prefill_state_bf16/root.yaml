@@ -1,0 +1,543 @@
+META_DATA:
+  Name: kda_raw_prefill_state_bf16
+  Describe: 'Packed KDA prefill: normalized Q/K, per-channel bounded decay, sigmoid-beta delta-rule recurrence; BF16 output, in-place final state, checkpoints'
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/candidate/solution.py::Model.forward
+  Version: 3
+  Dispatch:
+    when: 'Inputs for which the frozen host engine selector holds: cadence % 32 == 0 and (2 * request_count * head_count > sms or (3 * request_count * head_count > sms and total_tokens <= 4096 and cadence == 0)), where cadence = checkpoint_every_n_tokens and sms is the runtime device SM count read by the host; further restricted to total_tokens >= 32 because the frozen host rejects this path for smaller totals in its beta TMA box validation'
+CONTRACT:
+  Algorithm_requirement:
+    Constant:
+      key_dim: {value: 128, meaning: Per-head key/query channel count; decay axis}
+      value_dim: {value: 128, meaning: Per-head value channel count; state row axis}
+    Input:
+      q: {meaning: Packed query vectors; contiguous, shape: [{batch: 1}, {token: total_tokens}, {head: head_count}, {key: key_dim}], dtype: bf16}
+      k: {meaning: Packed key vectors; contiguous, shape: [{batch: 1}, {token: total_tokens}, {head: head_count}, {key: key_dim}], dtype: bf16}
+      v: {meaning: Packed value vectors; contiguous, shape: [{batch: 1}, {token: total_tokens}, {head: head_count}, {value: value_dim}], dtype: bf16}
+      g: {meaning: Raw per-channel gate values; contiguous, shape: [{batch: 1}, {token: total_tokens}, {head: head_count}, {key: key_dim}], dtype: bf16}
+      beta: {meaning: Raw per-head beta logit; contiguous or row-strided, shape: [{batch: 1}, {token: total_tokens}, {head: head_count}], dtype: bf16}
+      a_log: {meaning: Per-head log decay amplitude scaling the gate, shape: [{head: head_count}], dtype: fp32}
+      dt_bias: {meaning: 'Per-head per-channel decay bias, flat row-major', shape: [{element: head_count * key_dim}], dtype: fp32}
+      scale: {meaning: Output scale factor; None selects key_dim^(-0.5), shape: [], dtype: python_float, nullable: true, default: None}
+      initial_state: {meaning: Per-request initial state; contiguous, shape: [{request: request_count}, {head: head_count}, {value: value_dim}, {key: key_dim}], dtype: bf16}
+      output_final_state: {meaning: Flag requesting the final-state result, shape: [], dtype: python_bool, range: == True}
+      use_qk_l2norm_in_kernel: {meaning: Flag fixing in-kernel Q/K L2 normalization, shape: [], dtype: python_bool, range: == True, default: true}
+      use_gate_in_kernel: {meaning: Flag fixing in-kernel raw-gate decay, shape: [], dtype: python_bool, range: == True}
+      lower_bound: {meaning: Floor of the per-channel log decay; must be -5.0, shape: [], dtype: python_float, range: == -5.0}
+      cu_seqlens: {meaning: Request boundaries on the token axis; contiguous, shape: [{boundary: request_count + 1}], dtype: int64, range: 'cu_seqlens[0] == 0 and cu_seqlens[r] < cu_seqlens[r+1] for 0 <= r < request_count'}
+      beta_is_logit: {meaning: Flag fixing beta as a pre-sigmoid logit, shape: [], dtype: python_bool, range: == True}
+      output: {meaning: 'Caller-owned attention_output buffer, or None', shape: [{batch: 1}, {token: total_tokens}, {head: head_count}, {value: value_dim}], dtype: bf16, nullable: true, default: None}
+      state_checkpoints: {meaning: 'Caller-owned checkpoint_states buffer, or None', shape: [{slot: checkpoint_slot_count}, {head: head_count}, {value: value_dim}, {key: key_dim}], dtype: bf16, nullable: true, default: None}
+      checkpoint_cu_starts: {meaning: 'First checkpoint slot per request, or None', shape: [{boundary: request_count + 1}], dtype: int64, nullable: true, default: None}
+      checkpoint_every_n_tokens: {meaning: Checkpoint cadence in tokens; 0 disables, shape: [], dtype: python_int, range: 'in {0, 32, 64, 128}', default: 0}
+    Output:
+      attention_output: {meaning: Per-token KDA readout; returned tuple element 0, shape: [{batch: 1}, {token: total_tokens}, {head: head_count}, {value: value_dim}], dtype: bf16}
+      final_state: {meaning: Per-request final state; in-place in initial_state, shape: [{request: request_count}, {head: head_count}, {value: value_dim}, {key: key_dim}], dtype: bf16}
+      checkpoint_states: {meaning: Periodic state snapshots; in state_checkpoints, shape: [{slot: checkpoint_slot_count}, {head: head_count}, {value: value_dim}, {key: key_dim}], dtype: bf16, nullable: true}
+    Compute:
+      - Name: Packed segmentation and derived sizes
+        Math: |
+          The batch axis is fixed to 1; requests are packed along the token axis and computed independently per (request, head) pair.
+          Let cadence denote checkpoint_every_n_tokens; request_count satisfies 1 <= request_count <= 32 and head_count is one of {8, 12, 16, 24, 32, 48, 64, 96}.
+          Request r with 0 <= r < request_count owns tokens cu_seqlens[r] <= t < cu_seqlens[r+1]; length_r = cu_seqlens[r+1] - cu_seqlens[r] with 1 <= length_r <= 16384; total_tokens = cu_seqlens[request_count] with 2 <= total_tokens <= 16384.
+          scale_value = scale if scale is not None else key_dim^(-0.5); the declared domain always passes scale = key_dim^(-0.5).
+          beta is contiguous or a row-strided view with unit head stride, such as the last-axis slice of a [1, total_tokens, 2 * head_count] buffer; both layouts carry the same values.
+        Symbol:
+          length: {meaning: Token count length_r of request r; integer, shape: [], dtype: not_applicable}
+          scale_value: {meaning: Effective output scale factor, shape: [], dtype: fp32}
+      - Name: Per-token normalization, decay and beta weight
+        Math: |
+          sigmoid(x) = 1 / (1 + exp(-x)); ||x||_2 is the Euclidean norm over the key axis. BF16 inputs enter the math as exact values; the bf16(...) conversions of the write steps are the only rounding points.
+          For every token t and head h, with 0 <= c < key_dim:
+            qn[t,h,c] = q[0,t,h,c] / max(||q[0,t,h,:]||_2, 1e-12)
+            kn[t,h,c] = k[0,t,h,c] / max(||k[0,t,h,:]||_2, 1e-12)
+            log_decay[t,h,c] = lower_bound * sigmoid(exp(a_log[h]) * (g[0,t,h,c] + dt_bias[h*key_dim + c]))
+            decay[t,h,c] = exp(log_decay[t,h,c])
+            beta_w[t,h] = sigmoid(beta[0,t,h])
+          dt_bias is read row-major as [head_count, key_dim]; the 1e-12 floor maps an all-zero q or k row to zero; with lower_bound = -5.0, -5 < log_decay < 0 and exp(-5) < decay < 1 whenever the sigmoid argument exp(a_log[h]) * (g[0,t,h,c] + dt_bias[h*key_dim + c]) is finite.
+        Symbol:
+          qn: {meaning: 'L2-normalized query of token t, head h', shape: [{token: total_tokens}, {head: head_count}, {key: key_dim}], dtype: fp32}
+          kn: {meaning: 'L2-normalized key of token t, head h', shape: [{token: total_tokens}, {head: head_count}, {key: key_dim}], dtype: fp32}
+          decay: {meaning: 'Per-channel state decay factor at token t, head h', shape: [{token: total_tokens}, {head: head_count}, {key: key_dim}], dtype: fp32}
+          beta_w: {meaning: 'Sigmoid delta-rule weight of token t, head h', shape: [{token: total_tokens}, {head: head_count}], dtype: fp32}
+      - Name: Gated delta-rule state recurrence
+        Math: |
+          For each request r and head h, the state s[r,h](t) is a value_dim x key_dim FP32 matrix defined for cu_seqlens[r] - 1 <= t < cu_seqlens[r+1]; (t) is the recurrence instance.
+          Initialization: s[r,h](cu_seqlens[r] - 1)[i,c] = initial_state[r,h,i,c], the exact value of the stored BF16 element.
+          For t ascending from cu_seqlens[r] to cu_seqlens[r+1] - 1, with 0 <= i < value_dim and 0 <= c < key_dim:
+            sd[i,c] = decay[t,h,c] * s[r,h](t-1)[i,c]
+            u[t,h,i] = beta_w[t,h] * (v[0,t,h,i] - sum_{c=0}^{key_dim-1} kn[t,h,c] * sd[i,c])
+            s[r,h](t)[i,c] = sd[i,c] + u[t,h,i] * kn[t,h,c]
+            o[t,h,i] = scale_value * sum_{c=0}^{key_dim-1} qn[t,h,c] * s[r,h](t)[i,c]
+          sd is the decayed state before the rank-one update of token t; the readout o uses the updated state s[r,h](t), so token t includes its own update. Order expresses dependence only; (request, head) pairs are unordered.
+        Symbol:
+          s: {meaning: 'State of request r, head h after token t', shape: [{request: request_count}, {head: head_count}, {value: value_dim}, {key: key_dim}], dtype: fp32}
+          u: {meaning: 'Delta-rule update vector at token t, head h', shape: [{token: total_tokens}, {head: head_count}, {value: value_dim}], dtype: fp32}
+          o: {meaning: 'Unrounded readout of token t, head h', shape: [{token: total_tokens}, {head: head_count}, {value: value_dim}], dtype: fp32}
+      - Name: Output, final state and checkpoint writes
+        Math: |
+          attention_output[0,t,h,i] = bf16(o[t,h,i]) for 0 <= t < total_tokens, 0 <= h < head_count and 0 <= i < value_dim.
+          final_state[r,h,i,c] = bf16(s[r,h](cu_seqlens[r+1] - 1)[i,c]) for 0 <= r < request_count, 0 <= h < head_count, 0 <= i < value_dim and 0 <= c < key_dim.
+          checkpoint_states[j,h,i,c] = bf16(s[r,h](cu_seqlens[r] + m * cadence - 1)[i,c]) for cadence > 0, 0 <= r < request_count, each integer m with 0 <= m * cadence < length_r, j = checkpoint_cu_starts[r] + m, 0 <= h < head_count, 0 <= i < value_dim and 0 <= c < key_dim.
+          The attention_output values go into the caller-provided output buffer when output is not None, else into an implementation-allocated tensor; final_state is written in place into the preserved initial_state storage.
+          Slot m of request r holds the state after the first m * cadence tokens of that request, so the m == 0 snapshot equals the stored initial state; when cadence == 0 no checkpoint is written and checkpoint_states is None.
+      - Name: Return tuple and side effects
+        Math: |
+          The call returns (attention_output, final_state) when cadence == 0 and (attention_output, final_state, checkpoint_states) when cadence > 0; the returned final_state and checkpoint_states share the logical storage views of initial_state and state_checkpoints without requiring Python object identity.
+          When cadence > 0 the caller provides contiguous state_checkpoints and checkpoint_cu_starts; when cadence == 0 both are None.
+          Only output (when provided), initial_state and state_checkpoints (when cadence > 0) are written, and every element of these result regions is produced on each call, so prior buffer contents cannot affect results; all other inputs are read-only.
+          In the declared domain, checkpoint_cu_starts[r] is the sum of ceil(length_r2 / cadence) over requests r2 before r and checkpoint_slot_count is the sum over all r2, also checkpoint_cu_starts[request_count]; every slot is written once.
+    Golden_reference:
+      Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/kda_raw_prefill_state_bf16/problem/reference.py::Model.forward
+      Tolerance:
+        attention_output: atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, relative_to=candidate; formula absent; no defaults
+        final_state: atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, relative_to=candidate; formula absent; no defaults
+        checkpoint_states: atol=0.01, rtol=0.05, max_mismatch_fraction=0.0, relative_to=candidate; formula absent; no defaults
+      Gap: Reference resolves scale by truthiness, so scale == 0 also selects key_dim^(-0.5); Compute governs
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      thread: Single execution lane within a warp of a CTA; private on-chip storage is register
+      warp: 32 lockstep threads of one CTA; scope of __syncwarp and warp-collective tcgen05.ld/st on tmem
+      cta: Thread block of warps in a launch grid; owns smem and tmem (tensor memory); syncs via smem mbarriers
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: >-
+      Fold the token-serial delta rule into 32-token chunk updates: intra-chunk coupling becomes a 32x32 unit-triangular solve; the FP32 state persists across chunks. Decay is a log2 prefix split by a fixed offset keeping factors in range; costs are the listed approximations and BF16 narrowings
+    Rewrite:
+      - Name: Chunk partition of the recurrence
+        Math: |
+          Per (request r, head h): chunk_count = ceil_div(length, chunk_tokens) chunks fold the Contract token recurrence.
+          Chunk c covers local tokens 0 <= tau < chunk_tokens at global t = cu_seqlens[r] + c*chunk_tokens + tau, and holds min(chunk_tokens, length - c*chunk_tokens) valid tokens.
+          Padded positions (tau beyond the valid count) load as zeros, receive log2_decay = 0 and beta_w = 0 below, contribute nothing to state or outputs, and are never stored.
+        Symbol:
+          chunk_tokens: {meaning: Tokens per chunk block, value: 32}
+          chunk_count: {meaning: Chunks in the request of one worktile, value: 'ceil_div(length, chunk_tokens)'}
+      - Name: Log2-domain decay prefix and scaled factors
+        Math: |
+          Channel x satisfies 0 <= x < key_dim. decay_offset = 16*lower_bound*log2(e); B = decay_offset/32; restore_scale = exp2_approx(decay_offset).
+          rate_h = exp_approx(a_log[h]); bias_h[x] = dt_bias[h*key_dim+x]*rate_h, both established once per call.
+          log2_decay = fma32(tanh_approx(fma32(g[0,t,h,x], rate_h, bias_h[x]) / 2), B, B), and 0 on padded rows.
+          log2_decay = log2(decay[t,h,x]) of Contract because lower_bound*log2(e)*sigmoid(y) = B*(tanh(y/2)+1).
+          prefix[tau,x] = sum over tau' <= tau of log2_decay, FP32 sequential ascending; total[x] = prefix[chunk_tokens-1,x].
+          decay_scaled = exp2_approx(prefix - decay_offset); gt[x] = exp2_approx(total[x]); restore_factor[x] = exp2_approx(total[x] - decay_offset).
+          With D(tau,x) the product of Contract decay from the chunk start through tau and D_end(x) = D(chunk_tokens-1,x): decay_scaled = D*2^-decay_offset, gt = D_end, restore_factor = D_end*2^-decay_offset, restore_scale = 2^decay_offset; decay_scaled and its reciprocal stay within [e^-80, e^80].
+        Symbol:
+          decay_offset: {meaning: Fixed log2-domain decay range split, value: 16 * lower_bound * log2(e)}
+          prefix: {meaning: Cumulative in-chunk log2 decay per channel, shape: [{token: chunk_tokens}, {key: key_dim}], dtype: fp32, retention: 'keep_value (r,h,c)'}
+          gt: {meaning: Total chunk decay per channel (D_end), shape: [{key: key_dim}], dtype: fp32, retention: 'keep_value (r,h,c)'}
+          restore_factor: {meaning: D_end scaled by 2^-decay_offset; forms kr, shape: [{key: key_dim}], dtype: fp32, retention: 'keep_value (r,h,c)'}
+        Arithmetic:
+          Approx: ex2.approx.ftz at every exp2; sigmoid as 0.5*tanh.approx(x/2)+0.5; fast expf for rate_h; primitive bounds unknown:; sampling passes acceptance
+          Accumulate: prefix is a per-channel FP32 sequential sum over the chunk rows; no reduction tree
+        Ledger:
+          Baseline: Contract per-token decay exp(lower_bound*sigmoid(arg)) multiplied into the state at every token
+          Gain: 32 sequential decay multiplies per channel collapse into one prefix sum plus a single exp2 per use; the split keeps BF16 factors within [e^-80, e^80]
+          Cost: gt from one flush-to-zero exp2 reads 0 for channel totals below 2^-126, where per-token FP32 products keep subnormal track; such terms are < 1e-38
+      - Name: Normalized and scaled operand factors
+        Math: |
+          sumsq_q[t] = sum over x of q[0,t,h,x]^2 and sumsq_k[t] likewise over k (FP32, grouping under Accumulate).
+          qn_s[t,x] = q[0,t,h,x] * (rsqrt_approx(sumsq_q[t] + 1e-6) * scale_value); kn_h[t,x] = k[0,t,h,x] * rsqrt_approx(sumsq_k[t] + 1e-6).
+          qn_s and kn_h are the Contract qn (times scale_value) and kn under the Arithmetic approximation; qn and kn below denote these evaluated values.
+          qd0 = bf16(qn_s * decay_scaled); kd = bf16(kn_h * decay_scaled); ki = bf16(kn_h / decay_scaled), an FP32 divide before narrowing.
+          qd = bf16(fp32(qd0) * restore_scale), an in-place restore; kr = bf16(fp32(ki) * restore_factor) ~ kn*D_end/D(tau).
+          beta_w[t] = 0.5*tanh_approx(beta_logit/2) + 0.5 in FP32, the Contract beta_w value; padded positions get 0.
+          The 2^-decay_offset inflation of qd0/kd cancels the 2^decay_offset deflation of ki in every product below, so no BF16 operand leaves the representable range.
+        Symbol:
+          qd: {meaning: Decayed scaled query; B operand of out_inter, shape: [{token: chunk_tokens}, {key: key_dim}], dtype: bf16, retention: 'keep_value (r,h,c)'}
+          kd: {meaning: 'Decayed key, inflated by 2^-decay_offset', shape: [{token: chunk_tokens}, {key: key_dim}], dtype: bf16, retention: 'keep_value (r,h,c)'}
+          ki: {meaning: Key deflated by 2^decay_offset/D; seed and mqk, shape: [{token: chunk_tokens}, {key: key_dim}], dtype: bf16, retention: 'keep_value (r,h,c)'}
+          kr: {meaning: Key times residual decay D_end/D to chunk end, shape: [{token: chunk_tokens}, {key: key_dim}], dtype: bf16, retention: 'keep_value (r,h,c)'}
+        Arithmetic:
+          Approx: 'rsqrtf replaces the Contract max(||x||_2, 1e-12) division: relative deviation <= 1e-6/(2*sumsq) for sumsq >> 1e-6; zero rows map to 0; bound unknown:'
+          Accumulate: Row sums of squares use 4 packed FP32x2 FMA pairs per 8-channel segment, then a 4-step XOR-shuffle tree over the 16 lanes of a row
+        Ledger:
+          Baseline: FP32 normalized q/k consumed directly by FP32 per-token products
+          Gain: One BF16 narrowing per operand enables tensor-core block products for the prior, triangular system, attention and state update
+          Cost: qd0/qd/kd/ki/kr carry BF16 rounding (qd twice), entering every product at about 2^-9 relative granularity per factor
+      - Name: Intra-chunk triangular system
+        Math: |
+          gram[t,t'] = sum over x of fp32(kd[t,x]) * fp32(ki[t',x]) = sum_x kn*kn'*D(tau,x)/D(tau',x), BF16 inputs with FP32 accumulate.
+          seed[t,t'] = bf16(tau > tau' ? beta_w[t] * gram[t,t'] : 0), the strictly-lower system matrix.
+          inv = (identity + seed)^(-1), the 32x32 unit-lower-triangular inverse, at three levels:
+            level 1: the four 8x8 diagonal blocks by per-row FP32 forward substitution with unit diagonal, stored BF16;
+            level 2: two 16x8 off-diagonal blocks off16 = bf16(-bf16(D8*C8)*A8), D8 and A8 the inverted diagonal blocks and C8 the seed block, BF16-input FP32-accumulate products;
+            level 3: the 32x16 block off32 = bf16(-bf16(D16*C16)*A16) in the same form.
+          The upper-right 16x16 quadrant is structurally zero and published as zeros; on the token axis inv solves (identity + seed)*u = u_raw of the state-advance step.
+        Symbol:
+          seed: {meaning: Strictly-lower beta-weighted decayed key product, shape: [{token: chunk_tokens}, {token_in: chunk_tokens}], dtype: bf16, retention: 'keep_value (r,h,c)'}
+          inv: {meaning: Unit-lower-triangular (identity+seed) inverse, shape: [{token: chunk_tokens}, {token_in: chunk_tokens}], dtype: bf16, retention: 'keep_value (r,h,c)'}
+        Ledger:
+          Baseline: Reference solves the same unit-triangular system per 8-token block in FP32 with no intermediate narrowing
+          Gain: The 32-token system is inverted by two block-combine levels over 8x8 row substitution, shrinking the serial solve
+          Cost: seed and both combine levels round to BF16 between stages, adding narrowing absent from the FP32 reference solve
+      - Name: Masked intra-chunk attention matrix
+        Math: |
+          mqk[t,t'] = bf16(tau >= tau' ? sum over x of fp32(qd0[t,x]) * fp32(ki[t',x]) : 0) ~ scale_value * sum_x qn*D(tau,x)/D(tau',x)*kn', the lower triangle including the diagonal.
+          The product uses the pre-restore qd0, so the inflated and deflated factors cancel and the result carries scale_value and the decay ratio within operand rounding.
+          The zero quadrant (tau < 16 <= tau') is stored explicitly because the fused product reads the full 32x32 block; mqk is stored transposed as the B quadrant of the fused product.
+        Symbol: {mqk: {meaning: 'Masked intra-chunk attention, scale folded in', shape: [{token: chunk_tokens}, {token_in: chunk_tokens}], dtype: bf16, retention: 'keep_value (r,h,c)'}}
+      - Name: Chunk state advance and solved update
+        Math: |
+          s is the Contract state at chunk boundaries: s(c) = s[r,h](last valid token of chunk c); s(-1) = initial_state[r,h] widened exactly to FP32.
+          state_inp = bf16(s(c-1)); s_decayed[i,x] = fp32(s(c-1))[i,x] * gt[x], FP32 in place without narrowing.
+          u_acc[i,tau] = sum over x of fp32(state_inp[i,x]) * fp32(kd[tau,x]) = 2^-decay_offset * sum_x s(c-1)[i,x]*D(tau,x)*kn[tau,x].
+          prior[i,tau] = fp32(u_acc[i,tau]) * restore_scale, the Contract prediction of the decayed state against kn[tau].
+          u_raw[i,tau] = bf16(beta_w[t] * (fp32(v[0,t,h,i]) - prior[i,tau])).
+          u[i,tau] = sum over tau' of fp32(u_raw[i,tau']) * fp32(inv_B[tau',tau]), inv_B being inv transposed as the B operand; this solves (identity + seed)*u = u_raw, FP32 result.
+          u_bf16 = bf16(u); s(c)[i,x] = s_decayed[i,x] + sum over tau of fp32(u_bf16[i,tau]) * fp32(kr[tau,x]).
+          Padded rows carry beta_w = 0, so u_raw and u vanish there and s(c) is correct at eos; u is the Contract u on the chunk's valid tokens.
+        Symbol:
+          s: {meaning: Contract state sampled at chunk boundaries, shape: [{value: value_dim}, {key: key_dim}], dtype: fp32, retention: 'carry_forward (r,h); c=-1..chunk_count-1'}
+          state_inp: {meaning: BF16 snapshot of s(c-1) as MMA A operand, shape: [{value: value_dim}, {key: key_dim}], dtype: bf16, retention: 'keep_value (r,h,c)'}
+          u_acc: {meaning: 'Pre-solve prior prediction against kd, inflated', shape: [{value: value_dim}, {token: chunk_tokens}], dtype: fp32, retention: 'keep_value (r,h,c)'}
+          u_raw: {meaning: Beta-weighted pre-solve residual operand, shape: [{value: value_dim}, {token: chunk_tokens}], dtype: bf16, retention: 'keep_value (r,h,c)'}
+          u: {meaning: Solved update; the Contract u on chunk tokens, shape: [{value: value_dim}, {token: chunk_tokens}], dtype: fp32, retention: 'keep_value (r,h,c)'}
+          u_bf16: {meaning: BF16 solved operand of the fused product, shape: [{value: value_dim}, {token: chunk_tokens}], dtype: bf16, retention: 'keep_value (r,h,c)'}
+        Ledger:
+          Baseline: 'Contract token-serial recurrence: decay, rank-one update and readout of the FP32 state per token'
+          Gain: Serial state transitions per pair length -> chunk_count; 32 token steps fold into four tensor-core block products and one 32x32 solve
+          Cost: Per chunk, seed/inv/mqk 32x32 products; BF16 narrowing of state_inp, factors, u_raw and u_bf16, absent from the FP32 reference
+      - Name: Checkpoint and final-state writes
+        Math: |
+          request_slot_count = if(cadence == 0, 0, ceil_div(length, cadence)).
+          For cadence > 0, slot m = 0 holds bf16(s(-1)) and is written before the chunk loop; slot m >= 1 holds bf16(s(c)) for c = m*cadence/chunk_tokens - 1, written after that chunk only when m*cadence < length, at j = checkpoint_cu_starts[r] + m.
+          This is exactly the Contract snapshot set: slot m holds the state after the first m*cadence tokens of the request.
+          final_state[r,h] = bf16(s(chunk_count-1)), written in place into the preserved initial_state storage after the last chunk.
+        Symbol: {request_slot_count: {meaning: Checkpoint slots written by one request, value: 'if(cadence == 0, 0, ceil_div(length, cadence))'}}
+      - Name: Output assembly and store
+        Math: |
+          out_acc[i,tau] = sum over x of fp32(state_inp[i,x]) * fp32(qd[tau,x]), the inter-chunk term in an initialized FP32 accumulator.
+          out_acc[i,tau] += sum over tau' of fp32(u_bf16[i,tau']) * fp32(mqk_B[tau',tau]), the intra-chunk term with mqk_B the transposed mqk.
+          Both terms share one fused product of N = value_dim + chunk_tokens = 160 columns whose B operand is [kr | mqk_B]: the leading value_dim columns accumulate onto s_decayed and the trailing chunk_tokens columns onto out_acc, whose accumulator is adjacent to the state.
+          out_acc equals Contract o[t,h,i] within operand rounding, since qd carries scale_value and mqk the masked decay-ratio attention.
+          attention_output[0,t,h,i] = bf16(out_acc[i,tau]) for valid tokens: a full chunk stores its 32x128 block in one piece, the tail stores valid tokens element-wise, padded positions are never stored.
+        Symbol: {out_acc: {meaning: FP32 output accumulator before the BF16 store, shape: [{value: value_dim}, {token: chunk_tokens}], dtype: fp32, retention: 'keep_value (r,h,c)'}}
+  Work_schedule:
+    Thesis: >-
+      One CTA per (request, head) pair, 1:1 preassigned: the recurrence stays on chip; only Contract writes and the order array touch global memory. A preceding single-CTA ORDER step ranks requests by descending length so the longest start first; few pairs can underfill the device
+    Step:
+      ORDER:
+        Describe: Single-CTA metadata submission deriving the length-ranked request order consumed by MAIN and a chunk-count prefix nothing consumes
+        Decomposition:
+          Partition: {}
+          Target:
+            Single_tile:
+              order: {meaning: Request index at each sorted position, shape: [{request: request_count}], dtype: int32}
+              chunk_prefix: {meaning: Prefix sums of 16-token chunk counts; unconsumed, shape: [{request: request_count + 1}], dtype: int32}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: 1
+        Schedule:
+          Worker_assignment:
+            Preassigned: {start: 0, count: 1}
+            Refill: none
+            Exit: assigned_done
+      MAIN:
+        Describe: One CTA computes all outputs of one (request, head) pair; 32-token chunks stream through a five-stage on-chip pipeline of four roles
+        Decomposition:
+          Strategy: Task w maps to (request, head) = (order[w / head_count], w % head_count); chunks advance as local iterations, the tail chunk truncated
+          Partition: {task: {meaning: 'One (request, head) pair at its sorted position', size: request_count * head_count, tile: 1}}
+          Worktile:
+            Invariant:
+              s_init: {meaning: 'Initial state seeding s(-1), exact BF16 values', shape: [{value: value_dim}, {key: key_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::initial_state.dtype'}
+              a_log_h: {meaning: Head log decay amplitude, shape: [], dtype: 'ref:CONTRACT.Algorithm_requirement::a_log.dtype'}
+              dt_bias_h: {meaning: Head per-channel decay bias row, shape: [{key: key_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::dt_bias.dtype'}
+            Iteration:
+              q_c: {meaning: Query block of chunk c; padded rows load as zeros, shape: [{token: chunk_tokens}, {key: key_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::q.dtype', direction: ascending}
+              k_c: {meaning: Key block of chunk c; padded rows load as zeros, shape: [{token: chunk_tokens}, {key: key_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::k.dtype', direction: ascending}
+              g_c: {meaning: Gate block of chunk c; padded rows load as zeros, shape: [{token: chunk_tokens}, {key: key_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::g.dtype', direction: ascending}
+              v_c: {meaning: Value block of chunk c; padded rows load as zeros, shape: [{token: chunk_tokens}, {value: value_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::v.dtype', direction: ascending}
+              beta_c: {meaning: Beta logit block of chunk c; padded rows unused, shape: [{token: chunk_tokens}], dtype: 'ref:CONTRACT.Algorithm_requirement::beta.dtype', direction: ascending}
+          Target:
+            Single_tile:
+              output_block: {meaning: attention_output rows of this request and head, shape: [{token: length}, {value: value_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::attention_output.dtype'}
+              final_state_block: {meaning: 'Final state, in place in the initial_state slot', shape: [{value: value_dim}, {key: key_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::final_state.dtype'}
+              checkpoint_block: {meaning: Request checkpoint slots; empty when cadence is 0, shape: [{slot: request_slot_count}, {value: value_dim}, {key: key_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::checkpoint_states.dtype'}
+        Mapping:
+          Strategy: State slot base is seq*state_slot_stride + (head*128+row)*128 with the host-pinned compact stride head_count*128*128, no indirection
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: request_count * head_count
+        Schedule:
+          Strategy: Reads order after ORDER.kernel_done; beta TMA descriptor binds to contiguous aligned beta itself, needing head_count % 8 == 0; variants catalogued
+          Worktile_order: [{by: task, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch:
+        - {step: [ORDER]}
+        - {step: [MAIN], start_after: ORDER.kernel_done}
+      Handoff: {order: {producer: ORDER, consumer: [MAIN], storage: global}}
+  Tile_pipeline:
+    Thesis: >-
+      PREP's five 4-warp instances each own a stage: instance c%5 prepares chunk c, overlapping five chunks. COMPUTE keeps the FP32 state in tmem. MMA issues all four products from one warp; the fused N=160 spans state and out columns; the lone out buffer gates the next out_inter on the epilogue read
+    Step:
+      ORDER:
+        Role:
+          MAIN:
+            Info:
+              Describe: Single CTA; thread 0 derives the whole permutation serially while the other threads only run the inactive capacity-0 fill
+              Member: warp[0:4]
+              Using_verb:
+                compute: {metadata: {execution_mode: serial, describe: 'Thread 0 writes chunk_prefix[s+1] = chunk_prefix[s] + ceil_div(length_s, 16) and order[rank] = s by length-descending rank, ties ascending'}}
+            Pipe:
+              - compute:metadata
+      MAIN:
+        Index: {c: {meaning: Chunk ordinal within this worker's worktile, definition: [0, chunk_count]}}
+        Storage:
+          state_tmem: {meaning: 'FP32 recurrent state, resident for the worktile', depth: 1, location: tmem, shape: [{row: value_dim}, {column: key_dim}],
+            dtype: fp32, total_size: 65536, view: {s: {}}}
+          inp_tmem: {meaning: Snapshot region; low 32 columns reused for u, depth: 1, location: tmem, shape: [{row: value_dim}, {column: 64}],
+            dtype: fp32, total_size: 32768, view: {state_inp(c): {region: {column: [0, 64]}}, u(c): {region: {column: [0, 32]}}}}
+          out_tmem: {meaning: FP32 output accumulator of one chunk, depth: 1, location: tmem, shape: [{row: value_dim}, {column: chunk_tokens}],
+            dtype: fp32, total_size: 16384, view: {out_acc(c): {}}}
+          u_tmem: {meaning: Prior product columns; low 16 hold BF16 operand, depth: 1, location: tmem, shape: [{row: value_dim}, {column: chunk_tokens}],
+            dtype: fp32, total_size: 16384, view: {u_acc(c): {region: {column: [0, 32]}}, u_inp(c): {region: {column: [0, 16]}}}}
+          stage_arena: {meaning: Five-stage chunk arena with time-shared views, depth: 5, location: smem, shape: [{element: 20992}],
+            dtype: bf16, total_size: 209920, view: {g_c(c): {slot_index: c%5, region: {element: [0, 4096]}}, qd(c): {slot_index: c%5, region: {element: [0, 4096]}}, k_c(c): {slot_index: c%5, region: {element: [4096, 8192]}}, kd(c): {slot_index: c%5, region: {element: [4096, 8192]}}, q_c(c): {slot_index: c%5, region: {element: [8192, 12288]}}, ki(c): {slot_index: c%5, region: {element: [8192, 12288]}}, kr(c): {slot_index: c%5, region: {element: [8192, 12288]}}, prefix(c): {slot_index: c%5, region: {element: [12288, 20480]}}, mqk(c): {slot_index: c%5, region: {element: [12288, 13312]}}, inv(c): {slot_index: c%5, region: {element: [14336, 15360]}}, gt(c): {slot_index: c%5, region: {element: [15360, 15616]}}, seed(c): {slot_index: c%5, region: {element: [15680, 17728]}}, v_c(c): {slot_index: c%5, region: {element: [15680, 19776]}}, restore_factor(c): {slot_index: c%5, region: {element: [20480, 20738]}}, beta_c(c): {slot_index: c%5, region: {element: [20480, 20736]}}, beta_w(c): {slot_index: c%5, region: {element: [20738, 20802]}}, rate_bias_consts(i): {slot_index: i, region: {element: [20802, 20804]}}}}
+          out_smem: {meaning: Double-buffered TMA staging of the output block, depth: 2, location: smem, shape: [{element: 4096}],
+            dtype: bf16, total_size: 16384, view: {out_staged(c): {slot_index: c%2}}}
+          gate_bias_smem: {meaning: 'Head bias row scaled by rate_h, all stages share', depth: 1, location: smem, shape: [{element: key_dim}],
+            dtype: fp32, total_size: 512}
+          out_regs: {meaning: Output block held in EPILOGUE registers, depth: 1, location: register, shape: [{element: 4096}],
+            dtype: fp32, total_size: 16384}
+        Role:
+          PREP:
+            Info:
+              Describe: Builds all chunk operands in five 4-warp instances (instance i = warps 12+4i..16+4i-1); instance i owns stage i and the chunks c with c%5 == i
+              Member: warp[12:32]
+              Register: 48
+              Using_verb:
+                compute:
+                  head_consts: {execution_mode: async_unordered, describe: Once per call each instance stores rate_h = exp_approx(a_log_h) in view rate_bias_consts(i); instance 0 scales dt_bias_h into gate_bias_smem}
+                  beta: {execution_mode: async_unordered, describe: 'Full chunk: warp 2 reads the 8-head TMA group in view beta_c(c) and picks this head by head_idx%8 pair and parity; tail: global rows; writes beta_w(c)'}
+                  gate_prefix: {execution_mode: async_unordered, describe: 'One thread per channel: FP32 log2 prefix of the g_c(c) rows into view prefix(c), padded rows 0; then restore_factor(c) over consumed beta bytes'}
+                  norm_factors: {execution_mode: async_unordered, describe: 'Per (row, 8-channel segment): L2-normalize q/k, fold scale into q, apply decay_scaled from prefix(c); write bf16 qd0/kd/ki in place over raw bytes'}
+                  restore: {execution_mode: async_unordered, describe: Publish gt(c) = exp2(total) over consumed prefix rows; rescale qd(c) by restore_scale in place; kr = ki*restore_factor(c) into view kr(c)}
+                  inv: {execution_mode: async_unordered, describe: 'Invert (identity+seed) in view seed(c) in place: 8x8 row substitution, 16x8 and 32x16 BF16 block combines; publish inv(c), upper right zeroed'}
+                matmul:
+                  seed: {execution_mode: async_unordered, describe: 'Warps with row-half >= column-half form seed quadrants as BF16 mma.sync kd(c) x ki(c)^T, strict-lower mask, rows scaled by beta_w(c), into seed(c)'}
+                  mqk: {execution_mode: async_unordered, describe: 'Warp 2 forms mqk rows 0-15 and warp 1 rows 16-31 plus the zero quadrant, masked BF16 mma.sync qd0(c) x ki(c)^T; stmatrix.trans into view mqk(c)'}
+                load:
+                  gate_raw: {execution_mode: async_unordered, describe: 'Full: elected-thread TMA of the g block into g_c(c) plus the 8-head beta group into beta_c(c) under one tx barrier; tail: zero-filled cp.async batch'}
+                  k_raw: {execution_mode: async_unordered, describe: 'Full: elected-thread TMA of the k block into k_c(c) sharing the qk tx count; tail: part of the zero-filled cp.async batch'}
+                  q_raw: {execution_mode: async_unordered, describe: 'Full: elected-thread TMA of the q block into q_c(c) completing the qk tx count, issued after the reuse waits; tail: zero-filled cp.async batch'}
+                  v: {execution_mode: async_unordered, describe: 'Full: elected-thread TMA of v into v_c(c), 8192-byte tx count; tail: zero-filled cp.async then manual arrive; done makes v_c(c) readable'}
+                signal: {qk_full: {execution_mode: async_unordered, describe: 'After an async-proxy fence and instance barrier the elected warp-0 lane arrives the stage barrier, publishing all stage-c operands to COMPUTE and MMA'}}
+            Pipe:
+              - compute:head_consts
+              - for(c):
+                  - load:gate_raw(c)
+                  - load:k_raw(c)
+                  - load:q_raw(c)
+                  - compute:beta(c)
+                  - compute:gate_prefix(c)
+                  - compute:norm_factors(c)
+                  - matmul:seed(c)
+                  - matmul:mqk(c)
+                  - compute:restore(c)
+                  - compute:inv(c)
+                  - signal:qk_full(c)
+                  - load:v(c)
+            Waiting:
+              Prepared:
+                - '{issue compute:beta(c)} ← [{done load:gate_raw(c)}]'
+                - '{issue compute:gate_prefix(c)} ← [{done compute:head_consts}, {done load:gate_raw(c)}, {done compute:beta(c)}]'
+                - '{issue compute:norm_factors(c)} ← [{done load:q_raw(c)}, {done load:k_raw(c)}, {done compute:gate_prefix(c)}]'
+                - '{issue matmul:seed(c)} ← [{done compute:norm_factors(c)}, {done compute:beta(c)}]'
+                - '{issue matmul:mqk(c)} ← [{done compute:norm_factors(c)}]'
+                - '{issue compute:restore(c)} ← [{done matmul:seed(c)}, {done matmul:mqk(c)}]'
+                - '{issue compute:inv(c)} ← [{done matmul:seed(c)}]'
+                - '{issue signal:qk_full(c)} ← [{done compute:restore(c)}, {done compute:inv(c)}]'
+              Released:
+                - '{issue load:gate_raw(c)} ← [{done MMA::signal:prod_done(c-5)}]'
+                - '{issue load:k_raw(c)} ← [{done MMA::signal:prod_done(c-5)}]'
+                - '{issue load:q_raw(c)} ← [{done MMA::signal:fused_done(c-5)}]'
+                - '{issue compute:beta(c)} ← [{done COMPUTE::signal:v_free(c-5)}]'
+                - '{issue compute:gate_prefix(c)} ← [{done MMA::signal:fused_done(c-5)}, {done COMPUTE::signal:v_free(c-5)}]'
+                - '{issue matmul:seed(c)} ← [{done COMPUTE::signal:v_free(c-5)}]'
+                - '{issue matmul:mqk(c)} ← [{done MMA::signal:fused_done(c-5)}]'
+                - '{issue compute:inv(c)} ← [{done MMA::signal:fused_done(c-5)}]'
+                - '{issue load:v(c)} ← [{done compute:inv(c)}]'
+          COMPUTE:
+            Info:
+              Describe: Owns the FP32 tmem state for the worktile, thread per value row; snapshots, decays, forms update operands, writes checkpoints and the final state
+              Member: warp[0:4]
+              Register: 168
+              Using_verb:
+                compute:
+                  state_init: {execution_mode: serial, describe: 'Read the initial_state slot at the pinned compact stride in four column blocks; exact BF16-to-FP32 widening into state_tmem view s, no arithmetic'}
+                  state_inp: {execution_mode: serial, describe: 'Read s in four column blocks, round to BF16 into inp_tmem view state_inp(c), two channels per column; done means readable after the store wait'}
+                  decay_state: {execution_mode: serial, describe: Scale s in place by per-channel gt(c) from view gt(c) in FP32 without narrowing; completes s_decayed before the fused product accumulates on it}
+                  u_raw: {execution_mode: serial, describe: 'Read u_acc(c), multiply by restore_scale, subtract from v_c(c) rows, multiply by beta_w(c); write the BF16 result into u_tmem view u_inp(c)'}
+                  u_bf16: {execution_mode: serial, describe: Read solved u(c) from inp_tmem view u(c) and write its BF16 rounding into u_inp(c) over u_raw(c) whose readers are done; operand then readable}
+                store:
+                  checkpoint_entry: {execution_mode: serial, describe: 'When cadence > 0 write bf16 of s(-1) from tmem into slot checkpoint_cu_starts[r] before the loop; vectorized global stores'}
+                  checkpoint: {execution_mode: serial, describe: 'When cadence > 0 and (c+1)*chunk_tokens < length and divisible by cadence, write bf16 of s(c) into slot checkpoint_cu_starts[r] + m'}
+                  final_state: {execution_mode: serial, describe: 'After the last chunk write bf16 of s(chunk_count-1) in four column blocks into the pair''s slot, in place over the initial_state storage'}
+                await:
+                  factors_ready: {execution_mode: serial, describe: Wait the stage qk_full notification of chunk c}
+                  v_ready: {execution_mode: serial, describe: Wait the stage v notification of chunk c}
+                  prod_ready: {execution_mode: serial, describe: Wait the MMA commit covering out_inter(c) and u_acc(c)}
+                  u_ready: {execution_mode: serial, describe: Wait the MMA commit covering the solved u(c)}
+                  fused_ready: {execution_mode: serial, describe: Wait the MMA commit covering the fused update of chunk c}
+                signal:
+                  state_inp_ready: {execution_mode: serial, describe: Arrive the stage barrier telling MMA that state_inp(c) is readable}
+                  v_free: {execution_mode: serial, describe: 'Arrive returning the stage bytes read by this role (gt in decay_state, v_c and beta_w in u_raw) so PREP may reuse them for chunk c+5'}
+                  u_inp_ready: {execution_mode: serial, describe: Arrive telling MMA that u_inp(c) holds u_raw(c)}
+                  u_final_ready: {execution_mode: serial, describe: Arrive telling MMA that u_inp(c) holds u_bf16(c) and the fused product may issue}
+                  dealloc_ready: {execution_mode: serial, describe: After the final-state store and role barrier warp 0 tells MMA this role's tmem accesses are complete}
+                acquire: {tmem: {execution_mode: serial, describe: Warp 0 reserves all 256 tmem columns at launch and publishes the handle in smem; done means the allocation is valid CTA-wide}}
+            Pipe:
+              - acquire:tmem
+              - compute:state_init
+              - if(cadence > 0):
+                  - store:checkpoint_entry
+              - for(c):
+                  - await:factors_ready(c)
+                  - compute:state_inp(c)
+                  - signal:state_inp_ready(c)
+                  - compute:decay_state(c)
+                  - await:v_ready(c)
+                  - await:prod_ready(c)
+                  - compute:u_raw(c)
+                  - signal:v_free(c)
+                  - signal:u_inp_ready(c)
+                  - await:u_ready(c)
+                  - compute:u_bf16(c)
+                  - signal:u_final_ready(c)
+                  - await:fused_ready(c)
+                  - if(cadence > 0 and (c + 1) * chunk_tokens < length and ((c + 1) * chunk_tokens) % cadence == 0):
+                      - store:checkpoint(c)
+              - store:final_state
+              - signal:dealloc_ready
+            Waiting:
+              Prepared:
+                - '{done await:factors_ready(c)} ← [{done PREP::signal:qk_full(c)}]'
+                - '{done await:v_ready(c)} ← [{done PREP::load:v(c)}]'
+                - '{done await:prod_ready(c)} ← [{done MMA::signal:prod_done(c)}]'
+                - '{done await:u_ready(c)} ← [{done MMA::signal:u_done(c)}]'
+                - '{done await:fused_ready(c)} ← [{done MMA::signal:fused_done(c)}]'
+          MMA:
+            Info:
+              Describe: Single warp issuing all four tcgen05 products per chunk in order, notifying completion by commit arrivals, releasing tmem at kernel end
+              Member: warp[9:10]
+              Register: 48
+              Using_verb:
+                matmul:
+                  out_inter: {execution_mode: async_ordered, describe: 'out_acc(c) = state_inp(c) x qd(c): rows value_dim, columns chunk_tokens, reduction key_dim, BF16 inputs, FP32 accumulator initialized'}
+                  u_acc: {execution_mode: async_ordered, describe: 'u_acc(c) = state_inp(c) x kd(c), same shape, into view u_acc(c); carries the 2^(-decay_offset) inflation COMPUTE removes'}
+                  u: {execution_mode: async_ordered, describe: 'u(c) = u_inp(c)[u_raw] x inv(c) over the token axis into view u(c), initialized; safe over the state_inp columns by commit order and in-order tcgen05'}
+                  fused: {execution_mode: async_ordered, describe: 'N=160 product accumulating u_inp(c)[u_bf16] x [kr | mqk transposed] onto adjacent columns: the state part onto s_decayed, the out part onto out_acc(c)'}
+                await:
+                  factors_ready: {execution_mode: serial, describe: 'Wait the stage qk_full notification covering qd, kd, inv and the fused B operand'}
+                  out_free: {execution_mode: serial, describe: Wait the single out-empty notification; the first chunk passes without arrival by the initial barrier phase}
+                  snapshot_ready: {execution_mode: serial, describe: Wait the COMPUTE notification that state_inp(c) is readable}
+                  u_raw_ready: {execution_mode: serial, describe: Wait the COMPUTE notification that u_inp(c) holds u_raw(c)}
+                  u_final_ready: {execution_mode: serial, describe: Wait the COMPUTE notification that u_inp(c) holds u_bf16(c)}
+                  dealloc_ready: {execution_mode: serial, describe: Wait the two dealloc notifications from COMPUTE and EPILOGUE}
+                signal:
+                  prod_done: {execution_mode: async_unordered, describe: One commit covering out_inter(c) and u_acc(c); done notifies COMPUTE u_acc readable and PREP qd/kd bytes released}
+                  u_done: {execution_mode: async_unordered, describe: 'Commit covering u(c), cumulatively the earlier products; done notifies COMPUTE u(c) readable'}
+                  fused_done: {execution_mode: async_unordered, describe: 'Commit covering fused(c); done notifies COMPUTE (checkpoint may read s), EPILOGUE (out_acc readable), PREP (kr/mqk/inv released)'}
+                release: {tmem: {execution_mode: serial, describe: Deallocate the 256-column tmem reservation after the dealloc notification}}
+            Pipe:
+              - for(c):
+                  - await:factors_ready(c)
+                  - await:out_free(c)
+                  - await:snapshot_ready(c)
+                  - matmul:out_inter(c)
+                  - matmul:u_acc(c)
+                  - signal:prod_done(c)
+                  - await:u_raw_ready(c)
+                  - matmul:u(c)
+                  - signal:u_done(c)
+                  - await:u_final_ready(c)
+                  - matmul:fused(c)
+                  - signal:fused_done(c)
+              - await:dealloc_ready
+              - release:tmem
+            Waiting:
+              Prepared:
+                - '{done await:factors_ready(c)} ← [{done PREP::signal:qk_full(c)}]'
+                - '{done await:snapshot_ready(c)} ← [{done COMPUTE::signal:state_inp_ready(c)}]'
+                - '{done await:u_raw_ready(c)} ← [{done COMPUTE::signal:u_inp_ready(c)}]'
+                - '{done await:u_final_ready(c)} ← [{done COMPUTE::signal:u_final_ready(c)}]'
+                - '{done await:dealloc_ready} ← [{done COMPUTE::signal:dealloc_ready}, {done EPILOGUE::signal:dealloc_ready}]'
+              Released: ['{done await:out_free(c)} ← [{done EPILOGUE::signal:out_free(c-1)}]']
+          EPILOGUE:
+            Info:
+              Describe: Lands output blocks; reads out_acc into registers, stages full chunks in smem for TMA, scatters the tail, drains bulk stores before tmem release
+              Member: warp[4:8]
+              Register: 48
+              Using_verb:
+                compute: {out_read: {execution_mode: serial, describe: 'Four warps read out_acc(c) from out_tmem into registers (out_regs), each warp 32 value rows; role barrier; the tmem columns are no longer read at done'}}
+                store:
+                  out_tma: {execution_mode: async_unordered, describe: 'BF16-convert and stmatrix.trans the register block into out_staged(c), async-proxy fence, elected 4D TMA store of the 32x128 block, commit group'}
+                  out_tail: {execution_mode: serial, describe: Each thread converts its FP32 token row and writes attention_output elements only for global tokens below eos (BF16 scatter)}
+                await: {out_ready: {execution_mode: serial, describe: Wait the MMA commit notification that out_acc(c) is complete}}
+                signal:
+                  out_free: {execution_mode: serial, describe: Elected warp-0 lane arrives the single out-empty barrier so MMA may reinitialize out_tmem with the next out_inter}
+                  dealloc_ready: {execution_mode: serial, describe: 'Warp 0 waits every committed bulk store group complete, then a role barrier, then arrives the dealloc notification for MMA'}
+                release: {out_slot: {execution_mode: serial, describe: 'Bulk-group read-wait leaving at most one group outstanding; the slot written two chunks earlier is read, its global write may be in flight'}}
+            Pipe:
+              - for(c):
+                  - await:out_ready(c)
+                  - compute:out_read(c)
+                  - signal:out_free(c)
+                  - if(length >= (c + 1) * chunk_tokens):
+                      - if(c >= 2):
+                          - release:out_slot(c-2)
+                      - store:out_tma(c)
+                  - if(length < (c + 1) * chunk_tokens):
+                      - store:out_tail(c)
+              - signal:dealloc_ready
+            Waiting:
+              Prepared: ['{done await:out_ready(c)} ← [{done MMA::signal:fused_done(c)}]']
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: Launch 1024 threads per CTA with 227968 bytes opt-in dynamic smem and 256 tmem columns; warp 10 inits the mbarriers and warp 0 acquires tmem before the launch-wide barrier; setmaxnreg gives COMPUTE 168 registers, others 48
+      Reason: Warps 8, 10, 11 hold no steady-state action, but launch scale, init order and register redistribution are the capacity and readiness preconditions of the Storage account and the first waits
+    - Item: DESIGN.Tile_pipeline::MAIN.MMA
+      Choice: tcgen05.mma on one CTA group with BF16 operands and FP32 accumulate; each product group closed by a tcgen05.commit whose mbarrier arrival is the signaled done; rely on in-order execution of same-CTA products
+      Reason: The fused N=160 accumulate over adjacent state and out columns and the column reuse (u over state_inp, u_raw overwritten by u_bf16) are safe only under the cited commit and in-order semantics
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.PREP
+        - DESIGN.Tile_pipeline::MAIN.EPILOGUE
+      Choice: TMA bulk-tensor copies with mbarrier expect_tx for the g/beta/k/q/v fetches and the full-chunk output store; 16-byte cp.async gathers with source-size zero fill for tails; stmatrix/ldmatrix plus async-proxy fences
+      Reason: The qk_full/v_full completion protocol, neutrality of padded tail positions in every masked formula, and smem-to-async-proxy visibility derive from these primitives
+    - Item: DESIGN.Math_reshape
+      Choice: Evaluate the declared approximation sites with ex2.approx.ftz.f32, tanh.approx.f32, rsqrtf and the fast FP32 expf; compile for SM103a with fast math
+      Reason: The Arithmetic entries fix these primitives as the declared numeric path; substituting exact or other approximations changes declared numeric behavior
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: CTA-scope mbarriers with parity-phase tracking for all cross-role notifications; reuse-guarding barriers (stage raw/factor/v releases, out release) initialize at a phase whose first wait succeeds
+      Reason: The first five chunks and the first output have no predecessor, matching the c-5 and c-1 predecessors skipped at the declaration window; a wrong initial phase deadlocks
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::MAIN.COMPUTE
+      Choice: Write checkpoints and the final state directly from COMPUTE registers with vectorized global stores, without smem staging or a checkpoint pipeline
+      Reason: State rows are register-resident after the tmem loads; the direct path keeps the smem budget free of buffers the frozen source declares but never uses
+  Forbid:
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: 'Do not activate declared-but-unused residue: checkpoint-pipe barriers, the smem checkpoint region at offset 228352, the short-chunk v region, work-item and short-beta barriers and words'
+      Reason: They belong to disabled split-work and short-chunk paths; the checkpoint region lies beyond the 227968-byte allocation, so using it corrupts memory
+    - Item: DESIGN.Work_schedule::MAIN
+      Choice: Keep the disabled ABI tail (cu_chunk_offsets, num_sequences, tape pointers, zero workspace) null and zero and its surviving source-text loads dead
+      Reason: Only compiled-out consumers exist in this export; the loads survive solely because results have no live use, and activating them dereferences null

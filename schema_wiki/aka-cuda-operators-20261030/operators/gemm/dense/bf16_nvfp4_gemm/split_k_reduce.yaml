@@ -1,0 +1,275 @@
+META_DATA:
+  Name: bf16_nvfp4_gemm
+  Describe: Dense GEMM of BF16 activations against NVFP4 weights with per-group E4M3 scales, optionally alpha-scaled, FP32-accumulated, with BF16 output
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu::ws10sk
+  Version: 1
+  Dispatch:
+    id: split_k_reduce
+    when: Compute capability 10.3, m > 32, n a multiple of 128, k a multiple of 256 and m*n a multiple of 4, so the two k segments are exact, only m has a partial block and every merge thread owns four whole output elements; rows past m are zero-filled by the load and dropped by the guarded partial write. Needs a global FP32 workspace of 8*m*n bytes and two submissions on the caller stream; if that allocation fails the source relaunches the single-kernel form of umma_single_cta instead
+DESIGN:
+  Math_reshape:
+    Thesis: Keep the Contract numerical path and the packed-conversion decode of the single-CTA UMMA design; only the k reduction changes. Two segments halve each worker's accumulator chain and double the worker count, at the cost of an FP32 partial plane per segment and a second submission that merges them
+    Rewrite:
+      - Name: Decode weights through packed FP16 conversions
+        Math: |
+          No table is built; each decoded pair comes from two conversions and one multiply, and the
+          decode repeats for every k block this worker consumes. For 0 <= j < n and 0 <= l < k, let
+          c = b[j, l // codes_per_byte] be the byte holding code(j, l) of Weight_dequantization in
+          Contract, and let e2m1 be the decode Contract defines:
+            e(j, l) = c mod 16 if l is even
+            e(j, l) = c div 16 if l is odd
+            q(j, l) = f16(b_descale[j, l // scale_block])
+            wq[j, l] = bf16(f16(e2m1(e(j, l))) * q(j, l))
+          wq[j, l] equals w[j, l] of Contract, so wq replaces w in every product below. Only the k
+          block being consumed is formed, and each block is decoded by the one worker that owns it.
+        Symbol: {wq: {meaning: BF16 weight operand of B with the same value as w, shape: [{n: n}, {k: k}], dtype: bf16}}
+        Arithmetic:
+          Accumulate: 'The conversions and the FP16 multiply inside the BF16 narrowing are exact, not the default FP32: E2M1 times E4M3 needs at most 6 significand bits'
+        Ledger:
+          Baseline: Weight_dequantization of Contract evaluated per element in FP32 at each use, with no BF16 weight operand formed
+          Gain: Per weight element one FP32 multiply becomes two packed conversions plus half a packed FP16 multiply, and m*n*k products move onto the matrix path
+          Cost: Decoded operands take 2 bytes per element against 0.5 byte packed, so each k block stages 4x the packed volume and two blocks are held at once
+      - Name: One FP32 accumulator per output per k segment
+        Math: |
+          group_count = k / 16 is the number of consecutive 16-element groups of k; group g covers
+          [16*g, 16*g + 16). The sk segments split those groups into equal runs of
+          seg_groups = group_count / sk, an integer because k is a multiple of 256 here; segment q
+          covers the groups [q*seg_groups, (q+1)*seg_groups) for q = 0..sk-1. acc(q, -1) is the
+          m x n FP32 zero value and, for g = 0 to seg_groups-1 in ascending g:
+            acc(q, g) = mma32(a[:, 16*(q*seg_groups+g) : 16*(q*seg_groups+g) + 16],
+                              wq[:, 16*(q*seg_groups+g) : 16*(q*seg_groups+g) + 16]ᵀ, acc(q, g-1))
+            part(q)[i, j] = acc(q, seg_groups-1)[i, j]
+          Each partial stays FP32 until the merge below: no scaling and no narrowing happen at the
+          segment boundary, and Contract's s is applied only there.
+        Symbol:
+          sk: {meaning: Number of k segments the reduction is split into, value: 2}
+          acc: {meaning: FP32 accumulator of one segment per output element, shape: [{m: m}, {n: n}], dtype: fp32, retention: 'carry_forward (q,i,j); g=-1..seg_groups-1'}
+          part: {meaning: FP32 partial of one k segment per output element, shape: [{seg: sk}, {m: m}, {n: n}], dtype: fp32, retention: keep_value invocation}
+        Arithmetic:
+          Accumulate: One FP32 accumulator per output spans its own segment in ascending 16-element groups; only the group-internal order is set by the matrix unit
+        Ledger:
+          Baseline: Contract's Scaled_product_and_writeback as one FP32 sum over the whole k, carried by one worker as a single ascending chain of group_count products
+          Gain: Per output the accumulator chain group_count -> seg_groups transitions, and the sk segment chains run in sk times as many workers
+          Cost: Partials materialized 0 -> sk*m*n*4 FP32 bytes; k reassociated into sk segment sums, source class rel_l2 5.6e-5..6.8e-5, mismatch 0, unverified
+      - Name: Merge the two segment partials and write out
+        Math: |
+          s = alpha[0] if alpha is not None else 1, as Contract defines it. For 0 <= i < m and
+          0 <= j < n, the merge adds the two partial results of that element in ascending segment
+          order in FP32, then applies the scalar once before the single BF16 narrowing:
+            total[i, j] = part(0)[i, j] + part(1)[i, j]
+            out[i, j] = bf16(s * total[i, j])
+          written into out_buffer as Contract requires. Every element of out is produced exactly
+          once, by the merge that owns it, and no element of part is read twice.
+        Ledger:
+          Baseline: The worker that accumulated the whole k scales and narrows its own accumulator and writes out, with no partial written or read back
+          Cost: sk*m*n*4 bytes read back plus (sk-1)*m*n FP32 additions and one scalar multiply per element on the vector path, in a second submission
+  Work_schedule:
+    Thesis: Two submissions. The first gives one CTA one 128 x 128 tile over one of two k segments, doubling the worker count so a thin m or a short k no longer idles SMs. The second sweeps out flatly and merges the two planes, so out is not formed by the worker that accumulated it
+    Step:
+      MAIN:
+        Describe: Compute one 128 x 128 tile's FP32 partial result over one k segment, decoding its packed weight columns and writing that segment's plane of part
+        Decomposition:
+          Strategy: bk = 128; k_tile_count = k / bk; segment_blocks = k_tile_count / sk, exact since k is a multiple of 256; only m has a tail, staged as zeros
+          Partition:
+            m: {meaning: Block of activation rows of the output tile, size: m, tile: 128}
+            n: {meaning: Block of weight rows forming the output columns, size: n, tile: 128}
+            seg: {meaning: One of the two k segments of this tile's reduction, size: sk, tile: 1}
+          Worktile:
+            Iteration:
+              a_block: {meaning: Activation rows of one k block of this segment, shape: [{m: 128}, {k: 128}], dtype: 'ref:CONTRACT.Algorithm_requirement::a.dtype', direction: ascending}
+              b_block: {meaning: Packed weight bytes of one k block of this segment, shape: [{n: 128}, {k_byte: 64}], dtype: 'ref:CONTRACT.Algorithm_requirement::b.dtype', direction: ascending}
+              scale_block: {meaning: Weight group scales of one k block of this segment, shape: [{n: 128}, {k_group: 8}], dtype: 'ref:CONTRACT.Algorithm_requirement::b_descale.dtype', direction: ascending}
+          Target:
+            Single_tile: {part_tile: {meaning: This segment's FP32 partial of one output tile, shape: [{m: 128}, {n: 128}], dtype: fp32}}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: worktile_count
+        Schedule:
+          Strategy: worker_id gives seg = worker_id mod sk and tile ordinal worker_id div sk; that ordinal is 8-row grouped and its last partial m group rotates m
+          Worktile_order:
+            - {by: m, group: 8, direction: ascending}
+            - {by: n, direction: ascending}
+            - {by: m, direction: ascending}
+            - {by: seg, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+      REDUCE:
+        Describe: Merge the two FP32 segment partials of four consecutive output elements, scale by s and write those elements of out
+        Decomposition:
+          Strategy: One worktile is 256 threads times four consecutive elements of out in row-major order; the two segment planes are m*n elements apart
+          Partition: {out_element: {meaning: Consecutive elements of out in row-major order, size: m*n, tile: 1024}}
+          Target:
+            Single_tile: {out_block: {meaning: Block of out that this worktile writes, shape: [{element: 1024}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}}
+            Tile_reduction: {dimension: seg, input: 'ref:DESIGN.Math_reshape::part', output: 'ref:CONTRACT.Algorithm_requirement::out', method: 'ref:DESIGN.Math_reshape::Merge the two segment partials and write out'}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: worktile_count
+        Schedule:
+          Strategy: Each thread owns four consecutive elements; a thread whose group starts at or beyond m*n reads no partial and writes nothing
+          Worktile_order: [{by: out_element, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch:
+        - {step: [MAIN]}
+        - {step: [REDUCE], start_after: MAIN.launch_ready}
+      Handoff: {part: {producer: MAIN, consumer: [REDUCE], storage: global, wait_at: REDUCE.part_wait}}
+  Tile_pipeline:
+    Thesis: MAIN keeps the single-CTA UMMA role split, but each worker walks only its own segment, so ring, decoded slots and accumulator chain begin and end inside it and the accumulator leaves as FP32. REDUCE is a flat sweep whose only wait is for the whole MAIN grid
+    Step:
+      MAIN:
+        Index: {t: {meaning: k block walked inside this worktile's own segment, definition: [0, segment_blocks]}}
+        Storage:
+          a_ring: {meaning: Staged activation rows of one k block, depth: 4, location: smem, shape: [{m: 128}, {k: 128}],
+            dtype: bf16, total_size: 4*128*128*2, view: {a_block(t): {slot_index: t%4}}}
+          bp_ring: {meaning: Staged packed weight bytes of one k block, depth: 4, location: smem, shape: [{n: 128}, {k_byte: 64}],
+            dtype: uint8, total_size: 4*128*64, view: {b_block(t): {slot_index: t%4}}}
+          sc_reg: {meaning: 'Weight group scales of one k block, prefetched', depth: 2, location: register, shape: [{n: 128}, {k_group: 8}],
+            dtype: fp8_e4m3fn, total_size: 2*128*8, view: {scale_block(t): {slot_index: t%2}}}
+          bdq_ring: {meaning: Decoded BF16 weight operand of the k block in use, depth: 2, location: smem, shape: [{n: 128}, {k: 128}],
+            dtype: bf16, total_size: 2*128*128*2, view: {wq_block(t): {slot_index: t%2}}}
+          acc: {meaning: FP32 accumulators of this worktile's partial, depth: 1, location: tmem, shape: [{m: 128}, {n: 128}],
+            dtype: fp32, total_size: 128*128*4}
+        Role:
+          PRODUCER:
+            Info:
+              Describe: Stage the operands of every k block of this worktile's segment from global memory into the operand ring
+              Member: warp[8:9]
+              Using_verb:
+                load:
+                  a_block: {execution_mode: async_unordered, describe: 'Copy a_block(t) from a into slot t%4 of a_ring as two 64-column boxes at global k block seg*segment_blocks + t, zero-filling rows past m'}
+                  b_block: {execution_mode: async_unordered, describe: 'Copy b_block(t) from b into slot t%4 of bp_ring as two 32-byte boxes at the same global block, under the 40960-byte count a_block(t) announces'}
+                await: {slot_free: {execution_mode: serial, describe: Wait until stage slot t%4 of a_ring and bp_ring is free; 256 decode-thread arrivals plus one issuer completion arrival on one notification provide it}}
+            Pipe:
+              - for(t):
+                  - if(t >= 4):
+                      - await:slot_free(t)
+                  - load:a_block(t)
+                  - load:b_block(t)
+            Waiting:
+              Prepared: ['{issue load:a_block(0)} ← [{done DECODE::compute:barrier_init}]']
+              Released: ['{done await:slot_free(t)} ← [{done DECODE::release:bp_slot(t-4)}, {done ISSUER::release:a_slot(t-4)}]']
+          ISSUER:
+            Info:
+              Describe: Issue every matrix product of this worktile's segment from one elected thread and hand the operand slots back once those products read them
+              Member: warp[9:10]
+              Using_verb:
+                matmul: {a_block@wq_block: {execution_mode: async_unordered, describe: Issue eight 16-element products of a_ring slot t%4 and bdq_ring slot t%2 into acc by step 2 of Math_reshape; this segment's first initializes acc}}
+                await:
+                  stage_full: {execution_mode: serial, describe: Wait until stage slot t%4 has landed under the one announced count of a_block(t) and b_block(t); done means a_block(t) is readable in a_ring}
+                  wq_ready: {execution_mode: serial, describe: Wait for the 256 decode-thread arrivals on the notification of stage slot t%4; done means wq_block(t) is readable through the asynchronous proxy}
+                release:
+                  a_slot: {execution_mode: async_unordered, describe: Hand slot t%4 of a_ring back by a matrix-completion arrival that fires when the eight products of this block have finished reading a_block(t)}
+                  bdq_slot: {execution_mode: async_unordered, describe: 'Hand slot t%2 of bdq_ring back by a second completion arrival on the same eight products, so wq_block(t) is overwritten only after they read it'}
+            Pipe:
+              - for(t):
+                  - await:stage_full(t)
+                  - await:wq_ready(t)
+                  - matmul:a_block(t)@wq_block(t)
+                  - release:a_slot(t)
+                  - release:bdq_slot(t)
+            Waiting:
+              Prepared:
+                - '{issue await:stage_full(0)} ← [{done DECODE::compute:barrier_init}]'
+                - '{done await:stage_full(t)} ← [{done PRODUCER::load:a_block(t)}, {done PRODUCER::load:b_block(t)}]'
+                - '{done await:wq_ready(t)} ← [{done DECODE::signal:wq_ready(t)}]'
+              Allowed: ['{issue matmul:a_block(0)@wq_block(0)} ← [{done DECODE::acquire:tmem}]']
+          DECODE:
+            Info:
+              Describe: Decode the weight operand of every k block of this segment, then read the finished accumulator and write this worktile's FP32 partial to part
+              Member: warp[0:8]
+              Using_verb:
+                compute:
+                  barrier_init: {execution_mode: serial, describe: Read no input and no old value; one thread sets the arrival counts of the four notification arrays once per worker and publishes them CTA-wide}
+                  wq_block: {execution_mode: async_unordered, describe: Decode b_block(t) and scale_block(t) into wq_block(t) in slot t%2 of bdq_ring by step 1 of Math_reshape; two threads split each weight row}
+                load: {scale_block: {execution_mode: async_unordered, describe: 'Read the eight group scales of the 128 weight rows for k block t from b_descale into slot t%2 of sc_reg, one block ahead of the decode using them'}}
+                store: {part_tile: {execution_mode: serial, describe: 'Read acc from tmem and write its FP32 values into segment seg of part, one row per lane, with no scaling or narrowing; rows past m are dropped'}}
+                await:
+                  stage_full: {execution_mode: serial, describe: 'Wait until stage slot t%4 has landed; done means b_block(t) is readable in bp_ring. The shared count also covers a_block(t), unread here'}
+                  bdq_free: {execution_mode: serial, describe: Wait until the issuer completion arrival of block t-2 has freed slot t%2 of bdq_ring; issued only from t = 2 on}
+                  acc_ready: {execution_mode: serial, describe: 'Wait for the issuer completion arrival on the decoded slot of this segment''s last k block, which covers every product; done means acc is final'}
+                signal: {wq_ready: {execution_mode: async_unordered, describe: Each of the 256 decode threads arrives once on the notification of stage slot t%4 after making its writes visible to the asynchronous proxy}}
+                acquire: {tmem: {execution_mode: serial, describe: 'Take 128 tensor-memory columns for acc, publish the base address CTA-wide and give up further allocation claims; done means acc is addressable there'}}
+                release:
+                  bp_slot: {execution_mode: async_unordered, describe: Each of 256 decode threads arrives on the empty notification of stage slot t%4 after reading b_block(t); with the issuer arrival this frees the slot}
+                  tmem: {execution_mode: serial, describe: Return the 128 columns of acc after a CTA-wide rendezvous following the accumulator read of every decode warp}
+            Pipe:
+              - compute:barrier_init
+              - acquire:tmem
+              - load:scale_block(0)
+              - for(t):
+                  - await:stage_full(t)
+                  - if(t >= 2):
+                      - await:bdq_free(t)
+                  - if(t + 1 < segment_blocks):
+                      - load:scale_block(t+1)
+                  - compute:wq_block(t)
+                  - signal:wq_ready(t)
+                  - release:bp_slot(t)
+              - await:acc_ready
+              - store:part_tile
+              - release:tmem
+            Waiting:
+              Prepared:
+                - '{done await:stage_full(t)} ← [{done PRODUCER::load:a_block(t)}, {done PRODUCER::load:b_block(t)}]'
+                - '{issue compute:wq_block(t)} ← [{done load:scale_block(t)}]'
+                - '{done await:acc_ready} ← [{done ISSUER::release:bdq_slot(segment_blocks-1)}]'
+              Released: ['{done await:bdq_free(t)} ← [{done ISSUER::release:bdq_slot(t-2)}]']
+      REDUCE:
+        Event:
+          part_wait: ['{done MAIN[0]::await:grid_ready}']
+        Role:
+          MAIN:
+            Info:
+              Describe: Merge both segment partials of this worktile's output elements, scale them and write them into out
+              Member: warp[0:8]
+              Using_verb:
+                compute: {out_block: {execution_mode: serial, describe: 'Read part''s two FP32 values for each of this thread''s four output elements, merge them by step 3 of Math_reshape and write the result into out'}}
+                await: {grid_ready: {execution_mode: serial, describe: Wait until every MAIN worktile has finished before any partial is read; the launch permission this submission holds alone does not make part readable}}
+            Pipe:
+              - await:grid_ready
+              - compute:out_block
+REALIZATION:
+  Require:
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: Two launches on the caller stream with no events or clusters, MAIN as ceil_div(m, 128) * (n / 128) * sk CTAs of 320 threads and 229504 bytes of dynamic shared memory, REDUCE as ceil_div(m*n, 1024) CTAs of 256 threads launched with programmatic stream serialization
+      Reason: Flow declares two submissions whose only launch relation is MAIN's permission, so that attribute lets merge blocks be scheduled while MAIN drains; 229504 bytes exceeds the 48 KB default limit and needs one raise per function
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: The source also records this same two-kernel chain as one captured CUDA graph from the second identical call and replays it, falling back to plain launches when capture or instantiation fails
+      Reason: A capture records without executing, so this call still has to compute out plainly when capture fails, and the chain is the replay unit because REDUCE consumes what MAIN wrote in the same call
+    - Item: DESIGN.Work_schedule::Flow.Handoff.part
+      Choice: A process-wide grow-only device allocation of sk*m*n*4 bytes, 16-byte aligned, never initialized, reused by later calls with stream order as the only guarantee, and every captured graph destroyed when it grows
+      Reason: Handoff declares global storage whose consumed region is exactly what MAIN writes before REDUCE reads it, so no initial value is needed, but the buffer outlives the call and a captured chain holds the pointer it was recorded with
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: 320 threads per CTA under a launch bound for 320, that is the eight decode warps plus one warp each for staging and for product issue, in each of those two only the first lane acting
+      Reason: The two elected-thread roles register one warp each, so neither the launched size nor the idle lanes follow from the role account, while that size is what shares an SM with the shared memory above
+    - Item: DESIGN.Tile_pipeline::MAIN.PRODUCER
+      Choice: Two 2D tensor-map descriptors per call, a as bf16 over (k, m) with row stride 2*k bytes and a 64 x 128 box under 128-byte swizzle, b as uint8 over (k/2, n) with row stride k/2 bytes and a 32 x 128 box unswizzled. Both zero-fill outside the declared dimensions
+      Reason: The load actions promise CTA-wide readable operands whose rows beyond m are already zero, which only the out-of-range fill of the descriptor provides, and the decode offsets and product descriptors assume the 128-byte swizzle inside each half of a slot
+    - Item: DESIGN.Tile_pipeline::MAIN.ISSUER
+      Choice: tcgen05.mma with cta_group::1 and kind::f16 on BF16 operands with FP32 accumulation for the products of this role, plus tcgen05.commit to the operand-slot notifications as the completion arrival, one per stage per notification
+      Reason: The release actions promise a slot is free only after the asynchronous products have finished reading it, which a thread arrival at issue time cannot provide, and acc lives in tensor memory that only this instruction family writes
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.ISSUER
+        - DESIGN.Tile_pipeline::MAIN.DECODE
+      Choice: fence.proxy.async.shared::cta between the shared-memory writes of the decode role and its notification, and tcgen05.fence::after_thread_sync between the waits of the issuer and its products
+      Reason: The decode role writes the operand with ordinary shared-memory stores while the matrix unit reads it through the asynchronous proxy, so the arrival counts alone do not make wq_block visible to the products
+    - Item: DESIGN.Tile_pipeline::MAIN.DECODE
+      Choice: One thread initializes the four notification arrays once per worker with the arrival counts the actions promise, 1, 257, 256 and 1, one warp allocates and later returns the 128 tensor-memory columns, and a CTA-wide barrier separates this from the stage loops
+      Reason: Every wait in the three roles keys on those counts and on the parity of the slot index, and acc occupies a device-scope region charged once per worker, so neither the counts nor the allocation and return follow from the launch configuration
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.DECODE
+        - DESIGN.Tile_pipeline::REDUCE.MAIN
+      Choice: part is sk row-major m x n FP32 planes, written by 16-byte vector stores of one row's 32 columns per lane and read back by one 16-byte load per plane per merge thread
+      Reason: The merge sweep is flat over out and takes the same element position from every plane, so producer offsets and consumer stride are one interface, and 16-byte accesses keep it a whole-vector sweep
+    - Item: DESIGN.Tile_pipeline::REDUCE.MAIN
+      Choice: griddepcontrol.wait at the head of the merge kernel, with no matching launch-dependents trigger in MAIN
+      Reason: The launch permission this submission holds does not imply part is ready, so this wait is the only ordering between the grids, and with no explicit trigger it resolves at MAIN grid completion
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::MAIN.DECODE
+      Choice: Paired FP16 multiply of two decoded values by one broadcast group scale, then one paired conversion to BF16, keeping the values and the single BF16 rounding
+      Reason: Halves the decode multiply and conversion count for products that step 1 of DESIGN.Math_reshape already fixes as exact

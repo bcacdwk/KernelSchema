@@ -1,0 +1,148 @@
+META_DATA:
+  Name: bf16_nvfp4_gemm
+  Describe: Dense GEMM of BF16 activations against NVFP4 weights with per-group E4M3 scales, optionally alpha-scaled, FP32-accumulated, with BF16 output
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu::gv::gv_kernel
+  Version: 2
+  Dispatch:
+    id: simt_warp_row
+    when: Single-token requests, m == 1, with k / 512 in {5, 8, 24}, the three preload depths this design instantiates. Needs only per-lane register storage, an exact narrow-format decode of the E2M1 codes and the E4M3 group scales, and a warp-collective reduction; no tensor core, shared memory, barrier, tensor map, tensor memory, cluster, global workspace or second submission, and no dynamic shared memory at launch.
+DESIGN:
+  Math_reshape:
+    Thesis: With m == 1 each packed weight byte is read once and used once, so nothing is reused. Decode exactly into FP32 registers and fold each group scale once, leaving only reassociation against Contract, which the source records as rel_l2 ~1e-5 and mismatch 0, not independently verified here
+    Rewrite:
+      - Name: Exact FP32 decode of weight codes and group scales
+        Math: |
+          group_count = k / scale_block is the number of 16-element groups of k and class_count = 32
+          is the number of interleaved classes the k reduction is split into, group g belonging to
+          class c = g mod class_count; Contract's domain makes group_count an integer. For
+          0 <= j < n, 0 <= l < k, 0 <= g < group_count, code(j, l) and e2m1 per Contract's
+          Weight_dequantization:
+            wq[j, l] = fp32(f16(e2m1(code(j, l))))
+            sf[j, g] = fp32(f16(b_descale[j, g]))
+          Every e2m1 value is 0, 0.5, 1, 1.5, 2, 3, 4 or 6 with either sign and every e4m3 scale
+          has a 4-bit exponent and a 3-bit mantissa, so both are exact in F16 and F16 is exact in
+          FP32, and neither conversion rounds. The scale is not folded into wq here; only the chunk being consumed is decoded, and it is dead after its products.
+        Symbol:
+          wq: {meaning: FP32 weight operand holding Contract's e2m1 values, shape: [{n: n}, {k: k}], dtype: fp32}
+          sf: {meaning: FP32 value of one per-group weight scale, shape: [{n: n}, {k_group: group_count}], dtype: fp32}
+          class_count: {meaning: Interleaved classes the k reduction is split into, value: 32}
+        Ledger:
+          Baseline: Weight_dequantization of Contract evaluated as e2m1(code) * b_descale in FP32 at each use, one scale multiply per weight element
+          Gain: Per output element, FP32 group-scale multiplies k -> group_count = k / 16; both narrowings are exact, so the decode adds no error
+          Cost: The operand is FP32, not a narrow one, so no matrix path taking BF16 or F16 operands can consume it and products stay on the FP32 multiply-add path
+      - Name: Parity chains, class chains and a cross-class tree
+        Math: |
+          s = alpha[0] if alpha is not None else 1, as Contract defines it, and chunk_count is bound
+          by DESIGN.Work_schedule; chunk i holds groups [class_count*i, class_count*(i+1)), one per
+          class. For row j and group g, byte q holds positions 16*g + 2*q and 16*g + 2*q + 1, and
+          a[0, l] widens to FP32 exactly. With q = p + 2*t, blk(g, p, -1) = 0 and for t = 0 to 3:
+            blk(g, p, t) = fma32(a[0, 16*g+2*q+1], wq[j, 16*g+2*q+1], fma32(a[0, 16*g+2*q],
+                           wq[j, 16*g+2*q], blk(g, p, t-1))),  bsum(g) = blk(g,0,3) + blk(g,1,3)
+            part(c, -1) = 0, part(c, i) = part(c, i-1) + sf[j, class_count*i+c] * bsum(class_count*i+c)
+            tree(0, c) = part(c, chunk_count-1), tree(d+1, c) = tree(d, c) + tree(d, c xor 2^(4-d))
+          with part and tree taken in ascending i and d = 0 to 4. total(j) = tree(5, c) is the same
+          for every c, and out[0, j] = bf16(s * total(j)) for 0 <= j < n, written into out_buffer.
+        Symbol:
+          chunk_count: {meaning: Number of k chunks one worktile walks, binding: 'bind:DESIGN.Work_schedule::chunk_count'}
+          part: {meaning: FP32 class-chain accumulation over the chunks, shape: [{class: class_count}], dtype: fp32, retention: carry_forward (j); i=-1..chunk_count-1}
+          total: {meaning: Whole-k FP32 sum of one row after the tree, shape: [], dtype: fp32}
+        Arithmetic:
+          Accumulate: Products are exact in FP32, the 8 significand bits of a times the 2 of wq fitting in 24, and fma32 rounds once, so grouping is the only departure
+        Ledger:
+          Baseline: Scaled_product_and_writeback of Contract as one left-to-right FP32 sum over k per output element, the scale already in every weight value
+          Gain: Serial FP32 multiply-add dependency chain per 16-element group 16 -> 8, by splitting the group into two independent parity chains added once
+          Cost: The scale folds once per group, and the sum reassociates into 2 parity chains, class_count class chains and a depth-5 tree against Contract
+  Work_schedule:
+    Thesis: One warp is one worker owning one weight row and its single output element over the whole k, so no partial result, merge, workspace or second submission exists. The n axis gives worktile_count worktiles, eight per CTA. At m == 1 nothing is reused, so every worker re-reads the whole activation row
+    Step:
+      MAIN:
+        Describe: Compute the single output element of one weight row over the whole k from its preloaded packed weights and the streamed activation chunks
+        Decomposition:
+          Strategy: chunk_count = k / 512; a chunk of 512 k positions is the class_count groups that give one group to each class chain, and Contract's k gives 5, 8 or 24
+          Partition: {n: {meaning: One weight row and its single output element, size: n, tile: 1}}
+          Worktile:
+            Invariant:
+              b_row: {meaning: Packed weight bytes of this row over the whole k, shape: [{k_byte: k/codes_per_byte}], dtype: 'ref:CONTRACT.Algorithm_requirement::b.dtype'}
+              s_row: {meaning: Weight group scales of this row over the whole k, shape: [{k_group: k/scale_block}], dtype: 'ref:CONTRACT.Algorithm_requirement::b_descale.dtype'}
+            Iteration: {a_block: {meaning: Activation of the single token for one k chunk, shape: [{k: 512}], dtype: 'ref:CONTRACT.Algorithm_requirement::a.dtype', direction: ascending}}
+          Target:
+            Single_tile: {out_element: {meaning: The single element of out this worktile writes, shape: [], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}}
+        Mapping:
+          Strategy: Lane c carries class c of the k reduction and the classes combine inside the worker; eight consecutive workers share a CTA but no storage or barrier
+          Worker: {unit: warp, unit_count: 1}
+          Worker_count: worktile_count
+        Schedule:
+          Strategy: Contract's n % 64 == 0 makes ceil_div(n, 8) = n / 8, so the eight warps of every CTA own eight existing rows and no worker is out of range or empty
+          Worktile_order: [{by: n, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: One symmetric role, no shared storage and no barrier, so the on-chip account is registers alone. All chunk_count weight and scale chunks load before the first product, keeping every load of a row in flight and the walk fill-bound; only the activation chunk is fetched at its point of use
+    Step:
+      MAIN:
+        Index: {i: {meaning: k chunk walked by this worktile, definition: [0, chunk_count]}}
+        Storage:
+          w_row: {meaning: 'Packed weight bytes of the whole row, all chunks', depth: 1, location: register, shape: [{k_byte: k/codes_per_byte}],
+            dtype: uint8, total_size: k/codes_per_byte, view: {b_chunk(i): {region: {k_byte: [256*i, 256*(i+1)]}}}}
+          s_row: {meaning: 'Weight group scales of the whole row, all chunks', depth: 1, location: register, shape: [{k_group: k/scale_block}],
+            dtype: fp8_e4m3fn, total_size: k/scale_block, view: {s_chunk(i): {region: {k_group: [32*i, 32*(i+1)]}}}}
+          a_chunk: {meaning: 'Activation chunk of the single token, one slot', depth: 1, location: register, shape: [{k: 512}],
+            dtype: bf16, total_size: 1024, view: {a_block(i): {}}}
+          wdq: {meaning: Decoded FP32 weight operands of the chunk in use, depth: 1, location: register, shape: [{k: 512}],
+            dtype: fp32, total_size: 2048, view: {wq_chunk(i): {}}}
+          part: {meaning: 'FP32 class accumulators, one per lane, then total', depth: 1, location: register, shape: [{class: 32}],
+            dtype: fp32, total_size: 128}
+        Role:
+          MAIN:
+            Info:
+              Describe: Preload the packed weights and scales of the row, decode and accumulate each k chunk against the streamed activation chunk, reduce and write out
+              Member: warp[0:1]
+              Using_verb:
+                compute:
+                  wq_chunk: {execution_mode: serial, describe: 'Decode b_chunk(i) of w_row into wq_chunk(i) of wdq and s_chunk(i) of s_row into sf by step 1; done covers both. Register-only, nothing is published'}
+                  group_acc: {execution_mode: serial, describe: 'Multiply-accumulate a_block(i) of a_chunk against wq_chunk(i) of wdq and fold in sf, giving part(c, i) from part(c, i-1) in part by step 2'}
+                  row_total: {execution_mode: serial, describe: 'Combine the 32 values of part into total by the depth-5 cross-class tree of step 2; warp-collective, every lane takes part and ends holding total'}
+                load:
+                  b_chunk: {execution_mode: async_unordered, describe: 'Read the 256 packed weight bytes of chunk i from b into b_chunk(i) of w_row, lane c taking scale group class_count*i + c; all chunks load up front'}
+                  s_chunk: {execution_mode: async_unordered, describe: 'Read the class_count group scale bytes of chunk i from b_descale into s_chunk(i) of s_row, one per lane, interleaved with b_chunk(i)'}
+                  a_block: {execution_mode: async_unordered, describe: 'Read the 512 activation elements of chunk i from a into a_block(i) of a_chunk at the point of use, lane c taking the 16 of its scale group'}
+                  s: {execution_mode: async_unordered, describe: 'Read the multiplier s of step 2, alpha[0] when alpha is not None and no read at all when it is None, before the walk; only the store uses it'}
+                store: {out_element: {execution_mode: serial, describe: 'One lane reads total and s, narrows s * total to BF16 with RNE and writes the element of out for this row in out_buffer; other lanes write nothing'}}
+            Pipe:
+              - for(i):
+                  - load:b_chunk(i)
+                  - load:s_chunk(i)
+              - load:s
+              - for(i):
+                  - compute:wq_chunk(i)
+                  - load:a_block(i)
+                  - compute:group_acc(i)
+              - compute:row_total
+              - store:out_element
+            Waiting:
+              Prepared:
+                - '{issue compute:wq_chunk(i)} ← [{done load:b_chunk(i)}, {done load:s_chunk(i)}]'
+                - '{issue compute:group_acc(i)} ← [{done load:a_block(i)}]'
+                - '{issue store:out_element} ← [{done load:s}]'
+REALIZATION:
+  Require:
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: One plain launch of ceil_div(n, 8) CTAs of 256 threads with zero dynamic shared memory on the current stream of the caller, eight consecutive workers per CTA so that worker w runs as warp w mod 8, and no launch attribute, event, cluster or shared-memory limit change
+      Reason: Flow declares one submission with no start_after, so stream order is the only completion relation, but the submitted unit is a CTA while the worker is a warp; the eight-worker grouping, the 256-thread block and the zero shared memory are launch facts the Design does not carry
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: Replay binding by shape. For (n, k) = (8192, 2560), the only pair in this range with n >= 8192 and n * k <= 32000000, the second and later calls under an unchanged pointer and size key submit one CUDA-graph replay of the same kernel; other shapes keep a plain launch
+      Reason: Recording executes nothing, a failed instantiation re-runs the chain plainly once and any API failure falls back to plain launches permanently, so each call still submits exactly one execution and Flow.Launch holds under both bindings
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: For the row_total action, a warp-scope shuffle reduction over the full 32-lane mask that all 32 lanes of the worker enter together; no shared-memory, atomic or cross-warp path may replace it
+      Reason: This design has no on-chip storage other than registers and no synchronization, and the row a worker owns is uniform across its lanes, so every lane reaches the reduction together and the full mask is valid
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: A per-lane register budget that holds the whole preloaded row payload, two 32-bit words of packed weights plus one scale byte per chunk, with the decoded operands, activation values, two parity chains and class accumulator of one chunk, without spilling; 256 threads per CTA
+      Reason: The fill rate this design exists for depends on all chunk_count weight and scale loads of a row being in flight at once, and a spill to local memory would serialize them; the footprint grows linearly with chunk_count, so the usable depth is bounded by the register file
+  Prefer:
+    - Item: DESIGN.Math_reshape::wq
+      Choice: One packed narrow-format conversion per weight byte giving both FP32 values it holds, and one per scale byte, widened by exact F16-to-FP32; keep the values step 1 fixes. These need the arch-accelerated target; an exact table decode giving the same values is as acceptable
+      Reason: Halves the decode instruction count per weight byte against decoding the two nibbles of a byte separately, for values that step 1 already fixes as exact

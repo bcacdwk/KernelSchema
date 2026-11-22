@@ -1,0 +1,561 @@
+META_DATA:
+  Name: bf16_fused_moe
+  Describe: 'Single-rank fused MoE: per-expert FC1, routing-weighted gated activation, FC2, and FP32 route reduction written in place to the BF16 output buffer'
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/candidate/solution.py::Model.forward
+  Version: 4
+  Dispatch:
+    when: Contract inputs with hidden_dim = 2048, intermediate_dim = 768, local_expert_count = 128 and num_max_tokens_per_rank = 1920 (hence 1 <= token_count <= 1920), activation_clamp_opt = None, activation_alpha = 1.0, activation_beta = 0.0; invoked on an SM100 device with persistent grid width fixed at 146 CTAs (SM count minus 2, even, 2-CTA clusters), each CTA exclusively occupying one SM; sym_buffer scratch counters are zero before the first invocation and every invocation restores them.
+CONTRACT:
+  Algorithm_requirement:
+    Constant: {heap_token_alignment: {value: 1920, meaning: Row alignment of fixed heap ABI allocations}}
+    Input:
+      y: {meaning: 'Output buffer, overwritten in place by y_result', shape: [{token: token_count}, {hidden: hidden_dim}], dtype: bf16}
+      l1_weights: {meaning: 'Per-expert FC1 gate/up weights, 8-row interleaved', shape: [{expert: local_expert_count}, {out: 2*intermediate_dim}, {hidden: hidden_dim}], dtype: bf16}
+      l2_weights: {meaning: 'Per-expert FC2 weights, consumed as stored', shape: [{expert: local_expert_count}, {hidden: hidden_dim}, {intermediate: intermediate_dim}], dtype: bf16}
+      shared_l1_weights: {meaning: Shared-expert FC1 weights; absent in this task, shape: [], dtype: python_none}
+      shared_l2_weights: {meaning: Shared-expert FC2 weights; absent in this task, shape: [], dtype: python_none}
+      cumulative_local_expert_recv_stats: {meaning: 'Per-expert recv counter; absent, never updated', shape: [], dtype: python_none}
+      sym_buffer: {meaning: 'Symmetric heap: header, operand views and scratch', shape: [{byte: heap_bytes}], dtype: int8}
+      sym_buffer_ptrs: {meaning: Heap device addresses; length 1 fixes single rank, shape: [{rank: 1}], dtype: python_int}
+      rank_idx: {meaning: Index of this rank in sym_buffer_ptrs, shape: [], dtype: python_int, range: == 0}
+      num_max_tokens_per_rank: {meaning: Operand-view row capacity; padding beyond tokens, shape: [], dtype: python_int, range: '== heap_token_alignment * ceil_div(token_count, heap_token_alignment)'}
+      num_experts: {meaning: Experts served by this single-rank callable, shape: [], dtype: python_int, range: 'in {128, 256}'}
+      num_topk: {meaning: Routed expert slots per token, shape: [], dtype: python_int, range: == 8}
+      activation: {meaning: Selector of the gated activation, shape: [], dtype: python_string, range: == 'swiglu'}
+      activation_clamp_opt: {meaning: Clamp limit L for gate/up; None disables clamping, shape: [], dtype: python_float, nullable: true, range: [1, 16]}
+      fast_math: {meaning: Reduced-precision switch; off in this task, shape: [], dtype: python_bool, range: == False}
+      activation_alpha: {meaning: Gate factor alpha inside the sigmoid, shape: [], dtype: python_float, range: [0.5, 2]}
+      activation_beta: {meaning: Offset beta added to the up branch, shape: [], dtype: python_float, range: [0, 1]}
+    Output: {y_result: {meaning: Fused MoE result written in place into input y, shape: [{token: token_count}, {hidden: hidden_dim}], dtype: bf16}}
+    Compute:
+      - Name: Scales_and_domain
+        Math: |
+          Abbreviations: T = token_count, H = hidden_dim, I = intermediate_dim, E = local_expert_count, c = num_max_tokens_per_rank, K = num_topk = 8.
+          Domain: 1 <= T <= 8192; (H, I, E) is one of (2048, 768, 128), (4096, 768, 128), (4096, 1536, 128), (7168, 256, 256), keeping their declared expert-TP partitions 1, 2, 1, 8; hence E >= 128 and I is a multiple of 8.
+          c = heap_token_alignment * ceil_div(T, heap_token_alignment), so T <= c; heap operand rows [T, c) are padding.
+          Single rank: len(sym_buffer_ptrs) = 1 and rank_idx = 0, so all E experts are local to this callable.
+          When the expert-TP partition exceeds 1, I is the local intermediate size of this shard and the caller sums the partial outputs across shards outside this task.
+          Between the declared BF16 storage boundaries all arithmetic is independent FP32, rounded RNE, with TF32 disabled; no approximate arithmetic is prescribed.
+      - Name: Heap_operand_offsets
+        Math: |
+          sym_buffer is a contiguous 1-D byte tensor carrying the fixed production heap ABI for one rank. With align(n, a) = a * ceil_div(n, a) and 2^n denoting a power of two, byte offsets from the heap base are:
+            signals_bytes = align(align(align(align(44, 128) + 72*8, 128) + 72*8, 128) + 2*2048*8 + 512*8 + 20*2^20 + 4*2^15, 128) = 21140864
+            pool_rows = align(c * min(K, E) + E * 239, heap_token_alignment) = align(8*c + 239*E, 1920), since E >= 128 > K = 8
+            operand_base = align(signals_bytes + E*c*4 + pool_rows*12, 16)
+          The operand views read by the standard answer are:
+            x[r, h]: BF16, view [c, H] at operand_base, spanning c*H*2 bytes
+            route_ids[r, j]: int64, view [c, K] at operand_base + c*H*2, spanning c*K*8 bytes
+            route_weights[r, j]: FP32, view [c, K] at operand_base + c*H*2 + c*K*8, spanning c*K*4 bytes
+        Symbol:
+          x: {meaning: Token activation operand view of the heap, shape: [{row: num_max_tokens_per_rank}, {hidden: hidden_dim}], dtype: bf16}
+          route_ids: {meaning: Expert per row and slot; -1 is unselected, shape: [{row: num_max_tokens_per_rank}, {slot: num_topk}], dtype: int64}
+          route_weights: {meaning: Routing weight per row and slot, shape: [{row: num_max_tokens_per_rank}, {slot: num_topk}], dtype: fp32}
+      - Name: Heap_contents_and_scratch
+        Math: |
+          Content domain of the operand views: rows [0, T) of x hold the stored token activations, arbitrary finite BF16 values, all zero under the zero distribution; rows [T, c) are unread padding.
+          route_ids[r, j] = -1 marks an unselected route (masked slot, empty-routing profile, or padding row); otherwise 0 <= route_ids[r, j] < E.
+          For a selected route, route_weights[r, j] is the softmax-renormalized router weight in [0, 1] derived from the same logits as route_ids; it is 0 where route_ids = -1, and weights at unselected routes never influence the standard answer.
+          Bytes before operand_base (signals and workspace header, per-expert source tables, pool source metadata) and bytes after the operand views up to heap_bytes (ring and combine staging) are implementation scratch sized by the production allocator; the standard answer reads nothing from scratch.
+      - Name: Expert_weight_deinterleave
+        Math: |
+          The logical fc1 weight w1 of expert e has 2I rows: rows [0, I) are gate rows and rows [I, 2I) are up rows. For 0 <= q < 2I and 0 <= h < H:
+            If q < I: w1[q, h] = l1_weights[e][16 * floor(q/8) + (q mod 8), h]
+            Otherwise: w1[q, h] = l1_weights[e][16 * floor((q - I)/8) + 8 + ((q - I) mod 8), h]
+          The FC2 weight is used as stored: l2_weights[e][h, i] for 0 <= h < H and 0 <= i < I.
+          Both weight tensors are row-major contiguous with the reduction axis H or I last (K-major).
+          Stored BF16 weight values participate in the FP32 products as exact values.
+        Symbol: {w1: {meaning: Deinterleaved FC1 weight of the current expert, shape: [{out: 2*intermediate_dim}, {hidden: hidden_dim}], dtype: bf16}}
+      - Name: FC1_and_activation
+        Math: |
+          For each token t (0 <= t < T) and slot j (0 <= j < K), let e = route_ids[t, j]; routes with e outside [0, E), in particular -1, contribute nothing. Otherwise, with w1 the deinterleaved fc1 weight of expert e:
+            fc1[m] = sum_{h=0}^{H-1} fp32(x[t, h]) * fp32(w1[m, h]) for 0 <= m < 2I, computed in FP32
+            gate_b[m] = bf16(fc1[m]) and up_b[m] = bf16(fc1[I + m]) for 0 <= m < I, the BF16 gate/up storage boundary (RNE)
+          With gate and up taken back to FP32 over the stored BF16 values:
+            If activation_clamp_opt is None: gate[m] = fp32(gate_b[m]) and up[m] = fp32(up_b[m])
+            Otherwise, with L = activation_clamp_opt: gate[m] = min(fp32(gate_b[m]), L) and up[m] = clamp(fp32(up_b[m]), -L, L)
+          act[m] = gate[m] * sigmoid(activation_alpha * gate[m]) * (up[m] + activation_beta), with sigmoid(s) = 1 / (1 + exp(-s)), in FP32
+          act_b[m] = bf16(act[m] * route_weights[t, j]): the routing weight is applied in FP32 before the BF16 FC2-input storage boundary (RNE)
+        Symbol: {act_b: {meaning: BF16 activation row scaled by the routing weight, shape: [{intermediate: intermediate_dim}], dtype: bf16}}
+      - Name: FC2_route_output
+        Math: |
+          FC2 and the per-route output storage boundary. For each valid route (t, j) with e = route_ids[t, j], and 0 <= h < H:
+            routed_out(t, j)[h] = bf16( sum_{i=0}^{I-1} fp32(act_b[i]) * fp32(l2_weights[e][h, i]) )
+          where act_b is the activation row of the same route. The FP32 contraction is followed by the per-route BF16 output storage boundary (RNE).
+        Symbol: {routed_out: {meaning: BF16 FC2 output row of one valid route, shape: [{hidden: hidden_dim}], dtype: bf16}}
+      - Name: Route_reduction_and_writeback
+        Math: |
+          Let valid_slots(t) = { j : 0 <= j < K and 0 <= route_ids[t, j] < E }. For 0 <= t < T and 0 <= h < H:
+            y_result[t, h] = bf16( sum_{j in valid_slots(t)} fp32(routed_out(t, j)[h]) )
+          If valid_slots(t) is empty (empty or fully masked routing), the sum is 0. The FP32 sum covers at most K per-route BF16 outputs; the final cast uses RNE.
+          y_result replaces every row of the row-major contiguous input buffer y in place; the call returns None and yields no other caller-visible result.
+      - Name: Preserved_state_and_scratch
+        Math: |
+          Besides the in-place rewrite of y, the callable may modify only the scratch regions of sym_buffer (workspace signals and counters, ring and combine staging); scratch modifications carry no caller-visible result.
+          The operand views x, route_ids and route_weights, both weight tensors, and every other input are preserved, and input storages are not reallocated.
+          cumulative_local_expert_recv_stats is None, so no counter update is observable; shared_l1_weights and shared_l2_weights are None, so no shared-expert contribution exists.
+    Golden_reference:
+      Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/moe/bf16_fused_moe/problem/reference.py::Model.forward
+      Tolerance:
+        y_result: Source only; atol=0.01, rtol=0.05, relative_to=candidate; max_mismatch_fraction=0; no defaults
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      thread: Single CUDA thread running within a CTA on one SM; private on-chip storage is its register set
+      warp: 32 threads of one CTA executing in lockstep; the granularity of lane elect and ballot operations and of the warp-specialized roles of the fixed source
+      warpgroup: Four consecutive warps (128 threads) of one CTA cooperating as one unit; the granularity of register reallocation and of grouped epilogue execution
+      cta: Thread block scheduled on a single SM; CTA-scope on-chip storage is smem (pipeline stages, output staging, mbarriers) and tmem (tensor memory columns holding MMA accumulators), with named barriers synchronizing its threads
+      cluster: CTAs co-scheduled on SMs of one GPU processing cluster, size fixed at launch; provides cluster-wide synchronization, leader-CTA identification, barrier arrives into peer-CTA smem, and 2-SM cooperative tmem allocation
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: Contract numerics are preserved exactly; the gather regroups scattered routes into expert-blocked dense GEMM tasks, the routing weight folds in at the act_b boundary, and (slot, token) staging makes the final reduction a deterministic slot-ascending sum writing each y row once
+    Rewrite:
+      - Name: Route_pool_gather
+        Math: |
+          valid_routes = {(t, j) : 0 <= t < token_count, 0 <= j < num_topk, route_ids[t, j] in [0, local_expert_count)}; routes_of(e) = {(t, j) in valid_routes : route_ids[t, j] = e}; rcv(e) = count(routes_of(e))
+          blocks(e) = ceil_div(rcv(e), block_m); pool_offset(e) = block_m * sum_{e2 < e} blocks(e2); pool_blocks = sum_e blocks(e); pool_rows = block_m * pool_blocks; routes = sum_e rcv(e)
+          The bijection sigma carries each routes_of(e) onto rows [pool_offset(e), pool_offset(e) + rcv(e)); the rest of its last block is tail padding
+          row-independent per-route evaluation and the fixed sum order of Slot_ordered_route_reduction make every sigma identical; the source realizes one sigma via per-expert atomic slot cursors
+          For p = sigma(t, j): xg[p, h] = x[t, h]; wg[p] = route_weights[t, j]; src(p) = (t, j); padding rows never contribute
+          For block b, expert_of(b) owns row b*block_m; m(b) = b - pool_offset(expert_of(b))/block_m; valid_m(b) = min(rcv(expert_of(b)) - m(b)*block_m, block_m)
+        Symbol:
+          block_m: {meaning: Pool rows of one expert-aligned block, value: 128}
+          rcv: {meaning: 'Valid routes per expert, as tagged 64-bit sums', shape: [{expert: local_expert_count}], dtype: uint64, retention: keep_value invocation}
+          routes: {meaning: Total gathered pool rows; sum of rcv}
+          pool_blocks: {meaning: Number of expert-aligned pool blocks}
+          pool_rows: {meaning: Pool capacity including tail padding}
+          xg: {meaning: Gathered activation rows in pool order, shape: [{row: pool_rows}, {hidden: hidden_dim}], dtype: bf16, retention: keep_value invocation}
+          wg: {meaning: Routing weight per gathered pool row, shape: [{row: pool_rows}], dtype: fp32, retention: keep_value invocation}
+          src: {meaning: 'Source (token, slot) of each pool row', shape: [{row: pool_rows}, {field: 3}], dtype: uint32, retention: keep_value invocation}
+        Ledger:
+          Baseline: Direct Contract evaluation with each route computing its expert GEMMs over scattered (token, slot) rows
+          Gain: Scattered per-route matrix-vector products -> pool_blocks*14 dense tensor-core block tasks of block_m rows by 256 columns
+          Cost: Gather materialization of routes*(hidden_dim*2 + 16) bytes; up to local_expert_count*(block_m - 1) padding rows, 16-aligned prefix computed, no output
+      - Name: Pool_FC1_gated_activation
+        Math: |
+          Per pool block b with expert e = expert_of(b), the rows p in [b*block_m, b*block_m + align(valid_m(b), 16)) are evaluated; w1 is the fc1 weight of e per Contract Expert_weight_deinterleave; 0 <= i < intermediate_dim:
+            fc1g[p, q] = mm32(xg[p, .], w1[q, .]) over hidden_dim, for 0 <= q < 2*intermediate_dim, zero-initiated FP32 accumulation
+            gate(p, i) = fp32(bf16(fc1g[p, i])); up(p, i) = fp32(bf16(fc1g[p, intermediate_dim + i]))
+            actb[p, i] = bf16( (gate(p, i) / (1 + exp(-gate(p, i)))) * up(p, i) * wg[p] )
+          exp is the exact FP32 exponential; this is Contract FC1_and_activation at clamp None, alpha = 1, beta = 0, with gate*sigmoid(gate) as one division and the products left-associated, one RNE rounding each
+          Rows in [valid_m(b), align(valid_m(b), 16)) compute stale bytes and are discarded; actb at rows >= valid_m(b) is undefined and never consumed
+          For every valid row, actb[p, .] equals the Contract act_b of route src(p)
+        Symbol: {actb: {meaning: Weighted gated activation at the act_b boundary, shape: [{row: pool_rows}, {intermediate: intermediate_dim}], dtype: bf16, retention: keep_value invocation}}
+        Arithmetic:
+          Accumulate: FP32 accumulation over ascending K blocks of 64 inside SM100 tensor-core MMA on BF16 operands; the per-instruction reduction tree is hardware-defined
+      - Name: Pool_FC2_route_scatter
+        Math: |
+          Per pool block b with expert e = expert_of(b), the rows p in [b*block_m, b*block_m + align(valid_m(b), 16)) are evaluated; 0 <= hh < hidden_dim:
+            fc2g[p, hh] = mm32(actb[p, .], l2_weights[e][hh, .]) over intermediate_dim, zero-initiated FP32 accumulation
+            routed_b[p, hh] = bf16(fc2g[p, hh]), the Contract FC2_route_output per-route boundary; rows >= valid_m(b) are discarded
+          Each valid row materializes at the staging position of src(p) = (t, j):
+            routed_stg[j, t, hh] = routed_b[p, hh]
+          which equals Contract routed_out(t, j)[hh]; staging positions of invalid routes are never written or read
+        Symbol: {routed_stg: {meaning: 'Per-route BF16 FC2 rows staged by (slot, token)', shape: [{slot: num_topk}, {token: token_count}, {hidden: hidden_dim}], dtype: bf16, retention: keep_value invocation}}
+        Arithmetic:
+          Accumulate: As in Pool_FC1_gated_activation, over ascending K blocks of 64 of intermediate_dim
+        Ledger:
+          Baseline: Per-route output rows kept contiguously in pool order for the reduction
+          Gain: Combine reads rows directly by (slot, token); ring slots free once their FC2 tasks drain, independent of staging lifetime
+          Cost: 16-byte scattered fragment writes instead of contiguous rows; num_topk * token_count * hidden_dim * 2 staging bytes, re-read once
+      - Name: Slot_ordered_route_reduction
+        Math: |
+          Per token t, valid_slots(t) = { j : (t, j) in valid_routes } listed ascending, valid_count(t) = count(valid_slots(t)), and j(u) its u-th element; a(-1) is the zero FP32 vector of hidden_dim entries:
+            a(u) = a(u-1) + fp32(routed_stg[j(u), t, .]) elementwise, one RNE rounding per addition over the exact BF16 widening
+            y_result[t, .] = bf16(a(valid_count(t) - 1))
+          valid_count(t) = 0 leaves the zero vector: an all-zero row. Every y row is written exactly once, in place, evaluating Contract Route_reduction_and_writeback in ascending slot order, independent of the task claim order
+        Arithmetic:
+          Accumulate: Sequential FP32 adds in ascending slot order, at most num_topk terms; each add widens BF16 exactly and rounds the sum once (RNE)
+  Work_schedule:
+    Thesis: One persistent submission of 146 CTAs runs three concurrent step populations by warp specialization; dynamic counter claims absorb routing imbalance; epilogue warps pass GEMM -> COMBINE after sentinel and grid sync, dispatch warps pull -> cleanup after a rendezvous, never doubly active
+    Step:
+      DISPATCH:
+        Describe: Counts routes per expert, publishes grid-wide counts, pulls pool rows into the ring, and restores workspace counters as its tail phase
+        Decomposition:
+          Strategy: 'For pool row p: e = expert_of(floor(p/block_m)), position r = p - pool_offset(e); ring slot = floor(p/block_m) mod 165, lap = floor(p/21120)'
+          Partition: {pool_row: {meaning: One gathered pool row of a valid route, size: routes, tile: 1, range: [0, num_topk*num_max_tokens_per_rank]}}
+          Target:
+            Single_tile:
+              xg_row: {meaning: Gathered activation row of one route, shape: [{hidden: hidden_dim}], dtype: bf16}
+              wg_value: {meaning: Routing weight of one pool row, shape: [], dtype: fp32}
+              src_entry: {meaning: 'Source record (rank 0, token, slot) of a pool row', shape: [{field: 3}], dtype: uint32}
+        Mapping:
+          Strategy: Each CTA is one worker (cta_id = worker_id) run by its 4 dispatch warps; count, publish and cleanup cooperate over 128 threads, pulls claim per warp
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: 146
+        Schedule:
+          Strategy: Two route_ids passes build the source tables; CTA 0 publishes tagged recv sums after a grid sync; the cleanup tail follows the combine rendezvous
+          Worktile_order: [{by: pool_row, direction: ascending}]
+          Worker_assignment:
+            Refill: {warp_stride_claim: Warp w of CTA c claims route ordinals q = (4c + w) + 584j while q < routes; q maps via the cached rcv prefix to its pool row p}
+            Exit: assigned_done
+      GEMM:
+        Describe: Consumes claimed FC1/FC2 tasks, each one pool block against 256 expert output columns; kb_count(tk) = shape_k/64 is 32 for FC1, 12 for FC2
+        Decomposition:
+          Strategy: 'ncl < 6: FC1, n_cluster = ncl, K = hidden_dim; else FC2, n_cluster = ncl - 6, K = intermediate_dim; block b uses ring slot b mod 165, lap floor(b/165)'
+          Partition:
+            pool_block: {meaning: One expert-aligned block of block_m pool rows, size: pool_blocks, tile: 1, range: [0, 248]}
+            ncl: {meaning: 'N-cluster task; FC1 if ncl < 6, FC2 otherwise', size: 14, tile: 1}
+          Worktile:
+            Iteration:
+              act_block: {meaning: Activation rows of one K block of this task, shape: [{token: block_m}, {k: 64}], dtype: bf16, direction: ascending}
+              w_block: {meaning: 'Expert weight rows of one K block, 256 outputs', shape: [{out: 256}, {k: 64}], dtype: bf16, direction: ascending}
+          Target:
+            Single_tile:
+              actb_tile: {meaning: actb columns of one FC1 task for block_m rows, shape: [{token: block_m}, {intermediate: 128}], dtype: bf16}
+              routed_tile: {meaning: Per-route output fragment of one FC2 task, shape: [{token: block_m}, {hidden: 256}], dtype: bf16}
+        Mapping:
+          Strategy: A worker is a 2-CTA cluster running one 2-SM UMMA; each member supplies 128 weight rows and stages a token half; member 0 issues MMA and schedules
+          Worker: {unit: cta, unit_count: 2}
+          Worker_count: 73
+          Placement: {unit: cluster, unit_count: 1}
+          Member: [{out: [0, 128], token: [0, 64]}, {out: [128, 256], token: [64, 128]}]
+        Schedule:
+          Strategy: 'Leader schedulers claim both counters: min(2, FC1 waves) warmup FC1 claims, then FC2:FC1 alternate 1:1; a None sentinel ends all consumers'
+          Worktile_order:
+            - {by: pool_block, direction: ascending}
+            - {by: ncl, direction: ascending}
+          Worker_assignment:
+            Refill:
+              fc1_task_counter: Scheduler atomic add; old value idx1 gives (b, ncl) = (idx1/6, idx1%6); claims at idx1 >= pool_blocks*6 exhaust FC1
+              fc2_task_counter: Old value idx2 gives (b, ncl) = (idx2/8, 6 + idx2%8); publish waits until the FC1 counter >= (b+1)*6; idx2 >= pool_blocks*8 exhausts FC2
+            Exit: assigned_done
+      COMBINE:
+        Describe: Reduces each token's staged route rows in ascending slot order and writes the BF16 row once into y; zero when no valid route
+        Decomposition:
+          Strategy: hidden_dim*2 = 4096 bytes fits one TMA chunk; 24 slots fit the 230464 reusable smem bytes; the full-row FP32 accumulator fits 160 registers
+          Partition: {token: {meaning: One output token row, size: token_count, tile: 1}}
+          Worktile:
+            Iteration: {staged_row: {meaning: 'Staged row of one valid slot, ascending slot', shape: [{hidden: hidden_dim}], dtype: bf16, direction: ascending}}
+          Target:
+            Single_tile: {y_row: {meaning: Final BF16 row written in place into y, shape: [{hidden: hidden_dim}], dtype: bf16}}
+            Tile_reduction: {dimension: pool_block, input: routed_stg, output: y_result, method: 'ref:DESIGN.Math_reshape::Slot_ordered_route_reduction'}
+        Mapping:
+          Strategy: The 8 epilogue warps of each CTA (same physical warps as the GEMM epilogue) are workers, worker_id = epilogue_warp_idx*146 + cta_id
+          Worker: {unit: warp, unit_count: 1}
+          Worker_count: 1168
+        Schedule:
+          Worktile_order: [{by: token, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, stride: 1168}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [DISPATCH, GEMM, COMBINE], order: concurrent}]
+      Handoff:
+        rcv: {producer: DISPATCH, consumer: [GEMM], storage: global}
+        xg: {producer: DISPATCH, consumer: [GEMM], storage: global}
+        wg: {producer: DISPATCH, consumer: [GEMM], storage: global}
+        src: {producer: DISPATCH, consumer: [GEMM], storage: global}
+        routed_stg: {producer: GEMM, consumer: [COMBINE], storage: global}
+  Tile_pipeline:
+    Thesis: 'Roles overlap across tasks: an 8-slot operand ring lets TMA run ahead of the MMA, 2 TMEM accumulator slots let the MMA run ahead of the epilogue, a 2-slot handshake runs the scheduler ahead; FC1 -> FC2 hands off per 64-column mask bit and ring reuse is gated by release counters'
+    Step:
+      DISPATCH:
+        Index: {p: {meaning: Global pool row claimed by this worktile ordinal, definition: worktile}}
+        Storage:
+          expert_cnt: {meaning: Per-expert route counts of this CTA in smem, depth: 1, location: smem, shape: [{expert: 128}],
+            dtype: uint32, total_size: 512}
+          pull_stage: {meaning: Per-warp 4096-byte staging slot for one pool row, depth: 4, location: smem, shape: [{element: 4096}],
+            dtype: uint8, total_size: 16384, view: {pull_buf(w): {slot_index: w}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: Counts routes, builds the source table, publishes counts, pulls pool rows into the ring, and restores workspace counters as the tail phase
+              Member: warp[0:4]
+              Register: 96
+              Using_verb:
+                compute:
+                  count_routes: {execution_mode: serial, describe: 'Pass 1: warps scan strided groups of 4 tokens; valid route ids atomically increment expert_cnt; a 128-thread named barrier follows'}
+                  claim_send_slots: {execution_mode: serial, describe: 'Per expert one thread adds (1<<32 | count) to the 64-bit send counter; low 32 bits become the CTA slot cursor, high bits tag arrival'}
+                  reset_global_counters: {execution_mode: serial, describe: 'CTA 0 only: zeroes the 128 send counters, the FC1/FC2 and shared task counters and the shared-L2 full counters'}
+                  reset_expert_counters: {execution_mode: serial, describe: 'CTA 1..local_expert_count: reads the recv sum of expert cta_id-1 (stats output absent), then zeroes its recv and ring-block counters'}
+                load: {x_row: {execution_mode: async_unordered, describe: 'Elected lane TMA-loads x[t, .] of the route of pool row p into pull_buf(w) and arms the warp mbarrier; the weight read overlaps'}}
+                store:
+                  src_table: {execution_mode: serial, describe: Pass 2 re-scans in the same order; each valid route takes the next cursor slot and writes token*num_topk + slot to the source table}
+                  publish_counts: {execution_mode: serial, describe: 'CTA 0 only: stores the launch grid tag, each expert recv count, and the tagged recv sums materializing rcv; tags reach 146 when complete'}
+                  pool_meta: {execution_mode: serial, describe: 'Elected lane stores wg[p] into the ring weight slot and src[p] into the full-pool metadata array at index p'}
+                  pool_row: {execution_mode: serial, describe: 'Waits the warp staging mbarrier, bulk-stores the 4096-byte chunk into ring row p mod 21120 and waits store completion (single chunk)'}
+                await:
+                  grid_sync: {execution_mode: serial, describe: 128-thread rendezvous; thread 0 of each CTA adds into the tagged counter (CTA 0 adds tag minus 145) and spins on the tag-bit flip}
+                  pull_barrier: {execution_mode: serial, describe: 'Tag-1 NVLink barrier, no prologue sync; CTA 0 self-signal/wait (single rank); epilogue grid_sync orders SM0 plain-store publishes before pull loads'}
+                  epi_sync_pre_pull: {execution_mode: serial, describe: 384-thread rendezvous pairing with the GEMM EPI entry arrival; separates the pull barrier from task consumption}
+                  l1_slot_free: {execution_mode: serial, describe: 'Spins acquire until l1_empty_count of slot floor(p/block_m) mod 165 reached lap*12: all 12 FC1 tasks of the previous generation released it'}
+                  epi_sync_pre_clean: {execution_mode: serial, describe: 'Second 384-thread rendezvous, pairing with the COMBINE post-grid-sync arrival; counter resets start after all GEMM consumers exited'}
+                  exit_barrier: {execution_mode: serial, describe: 'Tag-2 NVLink barrier: grid_sync (all resets done), CTA 0 self-signal, no epilogue sync; kernel may exit after it'}
+                signal: {row_ready: {execution_mode: serial, describe: 'Release add to l1_full_count: +1 per row; the last row of an expert adds block_m - (r mod block_m) so the block ends at block_m*(lap+1)'}}
+            Pipe:
+              - compute:count_routes
+              - compute:claim_send_slots
+              - store:src_table
+              - await:grid_sync
+              - if(cta_id == 0):
+                  - store:publish_counts
+              - await:pull_barrier
+              - await:epi_sync_pre_pull
+              - for(p):
+                  - await:l1_slot_free(p)
+                  - load:x_row(p)
+                  - store:pool_meta(p)
+                  - store:pool_row(p)
+                  - signal:row_ready(p)
+              - await:epi_sync_pre_clean
+              - if(cta_id == 0):
+                  - compute:reset_global_counters
+              - if(cta_id >= 1 and cta_id - 1 < local_expert_count):
+                  - compute:reset_expert_counters
+              - await:exit_barrier
+            Waiting:
+              Prepared: ['{issue store:pool_row(p)} ← [{done load:x_row(p)}]']
+      GEMM:
+        Index:
+          tk: {meaning: Task-slot ordinal; the last slot is the sentinel, definition: worktile}
+          kb: {meaning: 'K-block within one task (32 FC1, 12 FC2)', definition: [0, kb_count(tk)]}
+          g: {meaning: 'K-block ordinal across tasks, shared stage ring', definition: {flatten: [tk, kb]}}
+        Storage:
+          act_stage: {meaning: 'Activation operand stages, half rows per member', depth: 8, location: smem, shape: [{token: 64}, {k: 64}],
+            dtype: bf16, total_size: 131072, view: {act_block(g): {slot_index: g%8}}}
+          w_stage: {meaning: 'Weight operand stage ring, 128 rows per member', depth: 8, location: smem, shape: [{out: 128}, {k: 64}],
+            dtype: bf16, total_size: 262144, view: {w_block(g): {slot_index: g%8}}}
+          accum: {meaning: FP32 MMA accumulator; 128 out rows x 128 tokens, depth: 2, location: tmem, shape: [{out: 128}, {token: 128}],
+            dtype: fp32, total_size: 262144, view: {acc(tk): {slot_index: tk%2}}}
+          epi_stage: {meaning: 'Epilogue staging, unioned between FC1 and FC2', depth: 2, location: smem, shape: [{row: 32}, {column: 128}],
+            dtype: bf16, total_size: 32768, view: {'fc1_block(wg,s)': {slot_index: wg, region: {column: [s*64, (s+1)*64]}}, fc2_block(wg): {slot_index: wg}}}
+          task_slot: {meaning: Cluster handshake payload carrying the TaskInfo, depth: 2, location: smem, shape: [{element: 32}],
+            dtype: uint8, total_size: 128, view: {task(tk): {slot_index: tk%2}}}
+        Role:
+          SCHED:
+            Info:
+              Describe: 'Cluster task generator: caches expert counts, claims FC1/FC2 tasks per policy, publishes them to both members, ends with the sentinel'
+              Member: cta[0].warp[7:8]
+              Register: 88
+              Using_verb:
+                compute: {claim_task: {execution_mode: serial, describe: 'Claims per policy from the FC1 or FC2 counter, resolves idx to (b, ncl) and by warp prefix sums over rcv to (expert, m, valid_m), or None'}}
+                await:
+                  recv_counts: {execution_mode: serial, describe: 'Spins until each tagged recv sum has high bits 146, caches rcv per lane, computes pool_blocks and the warmup waves (2 here)'}
+                  task_slot_free: {execution_mode: serial, describe: 'Waits the empty barrier of task_slot tk%2, arrived by 512 epilogue threads of both members after reading task tk-2; fresh slots pass'}
+                signal: {publish_task: {execution_mode: serial, describe: 'Lanes 0 and 1 async-store the 32-byte TaskInfo into task_slot(tk%2) of member 0 and 1, arming each task-full barrier with the tx bytes'}}
+            Pipe:
+              - await:recv_counts
+              - for(tk):
+                  - await:task_slot_free(tk)
+                  - compute:claim_task(tk)
+                  - signal:publish_task(tk)
+            Waiting:
+              Released: ['{done await:task_slot_free(tk)} ← [{done EPI[*]::release:task_slot(tk-2)}]']
+          TMA_ACT:
+            Info:
+              Describe: Stages the activation operand half of every task of this member into the smem stage ring
+              Member: warp[4:5]
+              Register: 88
+              Using_verb:
+                load: {act_block: {execution_mode: async_unordered, describe: 'Elected lane issues the 2-SM TMA load of the token half of this member (member 1 offsets align(valid_m,16)/2), K block kb*64; tx to member 0'}}
+                await:
+                  task_ready: {execution_mode: serial, describe: Waits the task-full barrier of slot tk%2 of this member and reads the TaskInfo; valid(tk) is false only for the sentinel}
+                  l1_block_full: {execution_mode: serial, describe: 'FC1: spins acquire until l1_full_count of the ring block equals block_m*(lap+1), the DISPATCH readiness of Handoff xg, wg and src'}
+                  l2_kb_ready: {execution_mode: serial, describe: 'FC2, per K block: spins until l2_full_mask bit kb matches the lap parity; bits are XOR-flipped by the FC1 task producing columns kb*64'}
+                  stage_free: {execution_mode: serial, describe: 'Waits the stage-empty barrier of slot g%8 of this member, armed by the MMA commit multicast; the first 8 K blocks pass fresh'}
+            Pipe:
+              - for(tk):
+                  - await:task_ready(tk)
+                  - if(valid(tk)):
+                      - if(fc1(tk)):
+                          - await:l1_block_full(tk)
+                      - for(g[tk]):
+                          - if(fc2(tk)):
+                              - await:l2_kb_ready(tk,kb)
+                          - await:stage_free(g)
+                          - load:act_block(g)
+            Waiting:
+              Prepared: ['{done await:task_ready(tk)} ← [{done SCHED[0]::signal:publish_task(tk)}]']
+              Released: ['{done await:stage_free(g)} ← [{done MMA[0]::release:stage(g-8)}]']
+          TMA_W:
+            Info:
+              Describe: Stages the weight operand half of every task of this member into the smem stage ring
+              Member: warp[5:6]
+              Register: 88
+              Using_verb:
+                load: {w_block: {execution_mode: async_unordered, describe: 'Elected lane issues the 2-SM TMA load of the 128 weight rows of this member at expert*shape_n + (2*ncl_local + rank)*128, K block kb*64'}}
+                await:
+                  task_ready: {execution_mode: serial, describe: Waits the task-full barrier of slot tk%2 of this member and reads the TaskInfo; the sentinel ends the loop}
+                  stage_free: {execution_mode: serial, describe: 'Waits the stage-empty barrier of slot g%8 of this member, armed by the MMA commit multicast; the first 8 K blocks pass fresh'}
+            Pipe:
+              - for(tk):
+                  - await:task_ready(tk)
+                  - if(valid(tk)):
+                      - for(g[tk]):
+                          - await:stage_free(g)
+                          - load:w_block(g)
+            Waiting:
+              Prepared: ['{done await:task_ready(tk)} ← [{done SCHED[0]::signal:publish_task(tk)}]']
+              Released: ['{done await:stage_free(g)} ← [{done MMA[0]::release:stage(g-8)}]']
+          MMA:
+            Info:
+              Describe: Issues the 2-SM UMMA of every task on the leader, accumulating into TMEM; drains the last accumulator phase before exit
+              Member: cta[0].warp[6:7]
+              Register: 88
+              Using_verb:
+                matmul: {w_block@act_block: {execution_mode: async_ordered, describe: 'Elected lane issues four tcgen05.mma cta_group::2 kind::f16 per K block, weights as A (256 rows), activations as B, FP32 acc(tk); kb=0 zeroes'}}
+                await:
+                  task_ready: {execution_mode: serial, describe: 'Waits the task-full barrier of member 0, reads the TaskInfo and sets the instruction N to align(valid_m(tk),16); the sentinel ends the loop'}
+                  accum_free: {execution_mode: serial, describe: 'Waits the accumulator-empty barrier of acc(tk%2) on member 0, arrived by 512 epilogue threads of both members after task tk-2'}
+                  stage_full: {execution_mode: serial, describe: 'Waits the stage-full barrier of slot g%8 on member 0: four arrivals plus both members act and weight tx bytes (2*8192 + 2*16384)'}
+                release: {stage: {execution_mode: async_unordered, describe: Commit multicast arriving at the stage-empty barriers of both members when the reads of slot g%8 complete; the task last also arrives accum-full}}
+            Pipe:
+              - for(tk):
+                  - await:task_ready(tk)
+                  - if(valid(tk)):
+                      - await:accum_free(tk)
+                      - for(g[tk]):
+                          - await:stage_full(g)
+                          - matmul:w_block(g)@act_block(g)
+                          - release:stage(g)
+            Waiting:
+              Prepared:
+                - '{done await:task_ready(tk)} ← [{done SCHED[0]::signal:publish_task(tk)}]'
+                - '{done await:stage_full(g)} ← [{done TMA_ACT[*]::load:act_block(g)}, {done TMA_W[*]::load:w_block(g)}]'
+              Released: ['{done await:accum_free(tk)} ← [{done EPI[*]::release:accum(tk-2)}]']
+          EPI:
+            Info:
+              Describe: 'Consumes finished accumulators: FC1 applies the gated activation and stores actb blocks; FC2 scatters per-route rows; then frees TMEM'
+              Member: warp[8:16]
+              Register: 160
+              Using_verb:
+                compute: {out_tile: {execution_mode: serial, describe: 'Per 32-row block s; out-of-range blocks are empty no-ops. FC1: TMEM gate/up pairs, g/(1+exp(-g))*u*wg, BF16 cast, stmatrix; FC2: BF16 cast, stmatrix'}}
+                store: {out_block: {execution_mode: async_unordered, describe: 'FC1: TMA-stores the 32x64 actb block into ring rows slot(b)*128+wg*64+s*32, cols n_block*64; FC2: per-lane 16-byte scatter to routed_stg[src(p)]'}}
+                await:
+                  dispatch_rendezvous: {execution_mode: serial, describe: Entry 384-thread rendezvous with the DISPATCH pre-pull arrival; separates the pull barrier from task consumption}
+                  task_ready: {execution_mode: serial, describe: 'Waits the task-full barrier of slot tk%2, reads the TaskInfo and broadcasts valid_m from lane 0; the sentinel ends the loop'}
+                  accum_ready: {execution_mode: serial, describe: 'Waits the accumulator-full barrier of acc(tk%2) of this member, arrived by the commit of the last K block of the task'}
+                  l2_slot_drained: {execution_mode: serial, describe: 'FC1: spins acquire until l2_empty_count of the ring block equals 16*lap: every previous-generation FC2 task finished reading actb rows'}
+                signal: {l2_kb_ready: {execution_mode: serial, describe: 'FC1 after the staging drain: elected thread XOR-flips l2_full_mask bit n_block release-ordered, readying columns n_block*64 for FC2'}}
+                release:
+                  task_slot: {execution_mode: serial, describe: 'Per-thread arrive into the task-slot empty barrier of member 0 after a CTA fence; accum_ready implies TMA/MMA reads done, so this is last'}
+                  accum: {execution_mode: serial, describe: Per-thread arrive into the accumulator-empty barrier of acc(tk%2) on member 0 after the last TMEM read; skipped blocks still arrive once}
+                  staging: {execution_mode: serial, describe: 'Returns the warpgroup epi_stage region before restaging: FC1 waits bulk groups leaving one store in flight; FC2 rendezvous after reads'}
+                  staging_task: {execution_mode: serial, describe: 'Task-end return: FC1 drains all bulk store groups then a 256-thread rendezvous; FC2 a 256-thread rendezvous; frees epi_stage for the next task'}
+                  l1_slot: {execution_mode: serial, describe: 'FC1: release +1 into l1_empty_count after the 64 actb columns of the task stored; 12 releases per generation free the xg slot for DISPATCH'}
+                  l2_slot: {execution_mode: serial, describe: 'FC2: release +1 into l2_empty_count at entry - accum_ready implies the actb reads completed; 16 releases let FC1 restage the slot'}
+                  tmem: {execution_mode: serial, describe: 'After the sentinel, warp 0 of both members frees the 256 TMEM columns cooperatively; no accumulator access is in flight'}
+            Pipe:
+              - await:dispatch_rendezvous
+              - for(tk):
+                  - await:task_ready(tk)
+                  - if(valid(tk)):
+                      - await:accum_ready(tk)
+                      - release:task_slot(tk)
+                      - if(fc1(tk)):
+                          - await:l2_slot_drained(tk)
+                      - if(fc2(tk)):
+                          - release:l2_slot(tk)
+                      - for(s=0:2):
+                          - release:staging(tk,s)
+                          - compute:out_tile(tk,s)
+                          - store:out_block(tk,s)
+                      - release:accum(tk)
+                      - release:staging_task(tk)
+                      - if(fc1(tk)):
+                          - signal:l2_kb_ready(tk)
+                          - release:l1_slot(tk)
+              - release:tmem
+            Waiting:
+              Prepared:
+                - '{done await:task_ready(tk)} ← [{done SCHED[0]::signal:publish_task(tk)}]'
+                - '{done await:accum_ready(tk)} ← [{done MMA[0]::matmul:w_block(g[tk,kb_count(tk)-1])@act_block(g[tk,kb_count(tk)-1])}]'
+              Released:
+                - '{done release:staging(tk,0)} ← [{done release:staging_task(tk-1)}]'
+                - '{done release:staging(tk,1)} ← [{done release:staging_task(tk-1)}]'
+      COMBINE:
+        Index: {tt: {meaning: Local ordinal of the token in the preassignment, definition: worktile}}
+        Storage:
+          combine_stage: {meaning: Two load slots and one store slot of 4096 bytes, depth: 3, location: smem, shape: [{element: 4096}],
+            dtype: uint8, total_size: 12288, view: {load_buf(j): {slot_index: j%2}, store_buf: {slot_index: 2}}}
+          reduce_acc: {meaning: Per-warp FP32 accumulator of the full hidden row, depth: 1, location: register, shape: [{hidden: hidden_dim}],
+            dtype: fp32, total_size: 8192}
+        Role:
+          MAIN:
+            Info:
+              Describe: 'Same warps as the GEMM epilogue after the sentinel: reduces staged route rows per token and writes y in place'
+              Member: warp[0:1]
+              Register: 160
+              Using_verb:
+                compute:
+                  slot_mask: {execution_mode: serial, describe: 'Lanes 0..7 read route_ids[token(tt), lane] and ballot the valid-slot mask; the mask is empty exactly for fully masked or empty routing'}
+                  reduce: {execution_mode: serial, describe: 'Waits the load mbarrier phase of load_buf(j), then per lane accumulates its 32 BF16 pairs (64 elements) into zeroed reduce_acc by the fused FP32 add'}
+                load: {staged_row: {execution_mode: async_unordered, describe: Elected lane TMA-loads the 4096 bytes of the row of the j-th valid slot into load_buf(j) and arms the mbarrier; prefetched during reduce}}
+                store: {y_row: {execution_mode: async_unordered, describe: 'Casts reduce_acc once to BF16 into store_buf, then elected lane fences and TMA-stores 4096 bytes into y row token(tt); kernel exit flushes'}}
+                await:
+                  grid_sync: {execution_mode: serial, describe: '256-thread rendezvous, then thread 0 adds into the second tagged grid counter and spins on the tag flip; all FC2 scatter writes are visible'}
+                  dispatch_release: {execution_mode: serial, describe: 384-thread rendezvous pairing with the DISPATCH second arrival; releases the counter cleanup to overlap this loop}
+                  slots_ready: {execution_mode: serial, describe: 'Spins acquire-sys until the ready tag of the owning rank of every selected slot equals the launch grid tag (single rank: local); 300 s timeout'}
+                signal: {ready_tag: {execution_mode: serial, describe: 'Inside the cta_id == 0 guard, the first warp elected thread publishes the launch-unique grid tag with system release into the combine-ready slot'}}
+                release: {y_stage: {execution_mode: serial, describe: Waits the bulk-store read completion of the previous token before store_buf is restaged (single store slot); first iteration passes}}
+            Pipe:
+              - await:grid_sync
+              - if(cta_id == 0):
+                  - signal:ready_tag
+              - await:dispatch_release
+              - for(tt):
+                  - compute:slot_mask(tt)
+                  - await:slots_ready(tt)
+                  - if(valid_count(tt) > 0):
+                      - load:staged_row(tt,0)
+                  - for(j=0:valid_count(tt)):
+                      - if(j + 1 < valid_count(tt)):
+                          - load:staged_row(tt,j+1)
+                      - compute:reduce(tt,j)
+                  - release:y_stage(tt)
+                  - store:y_row(tt)
+            Waiting:
+              Prepared: ['{done compute:reduce(tt,j)} ← [{done load:staged_row(tt,j)}]']
+REALIZATION:
+  Require:
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: 'One non-cooperative launch: grid 146 CTAs, block 512 (128 dispatch + 128 non-epilogue + 256 epilogue), cluster 2, dynamic smem 230820 B raised to the maximum, PDL off; launch bounds (512,1) give each CTA an exclusive SM; 256 TMEM columns via 2-SM cooperative allocation at base 0'
+      Reason: Tag counters, cross-member mbarrier accounting and the smem/TMEM budget assume this geometry and full co-residence of all 146 CTAs; the in-kernel grid-dependency wait is an inert hook and no cross-launch overlap is designed
+    - Item: DESIGN.Tile_pipeline::GEMM.MMA
+      Choice: tcgen05.mma.cta_group::2.kind::f16, weights as A (UMMA_M 256 across the pair), activations as B with UMMA_N = align(valid_m,16); FP32 TMEM accumulation; tcgen05.commit.cta_group::2 multicast arrives for stage and accumulator barriers
+      Reason: The member split, TMEM residency and the release/ready guarantees the TMA and epilogue roles wait on are exactly what this instruction and its commit multicast provide
+    - Item:
+        - DESIGN.Tile_pipeline::GEMM.TMA_ACT
+        - DESIGN.Tile_pipeline::GEMM.TMA_W
+      Choice: cp.async.bulk.tensor.2d with cta_group::2 and the peer bit masked from the mbarrier address, so the transaction bytes of both members accumulate on the stage-full barrier of member 0
+      Reason: Stage-full accounting - four arrivals plus twice the per-operand tx bytes - is designed around leader-only completion counting
+    - Item: DESIGN.Work_schedule::DISPATCH
+      Choice: Workspace counters live in sym_buffer scratch, zero at heap construction; grid-sync and NVLink barrier states use tag-flip and phase/sign protocols needing no reset; the ready tag is the launch-unique grid id; the cleanup tail restores every expert, ring and task counter to zero
+      Reason: Next-invocation spins compare zero-based targets (block_m*(lap+1), 16*lap, 12*lap, the 146 tag); leftovers would deadlock or falsely ready them
+    - Item:
+        - DESIGN.Tile_pipeline::DISPATCH.MAIN
+        - DESIGN.Tile_pipeline::GEMM.EPI
+      Choice: Release/acquire pairs at gpu scope for l1_full, l1_empty, l2_empty and the XOR mask; system scope for the combine ready tag; fence.proxy.async before TMA stores of staged data; tcgen05 fences around accumulator and task barrier sync points
+      Reason: Consumers on other workers decide visibility solely from these counters and tags; feeding stores must be ordered before the release-side arrive
+    - Item: DESIGN.Tile_pipeline::GEMM.EPI
+      Choice: Accumulator reads via paired tcgen05.ld 16x256b (second at +16 lanes) so threads hold the gate/up pairs (v0,v2),(v1,v3),(v4,v6),(v5,v7) of the 8-row interleaved layout; staging writes via transposing stmatrix
+      Reason: SwiGLU pairing and the token-major staging expected by the TMA store and the scatter are co-designed with this fragment shape
+    - Item: META_DATA.Source
+      Choice: The kernel comes from the embedded specialization table keyed by 22 config values (config_5 for this node), else a resolver compiles the same template with float NTTPs as exact IEEE bits
+      Reason: Guarantees the launched binary is exactly the selected instance; bit encoding avoids invalid nvcc host stubs for the infinity clamp
+  Prefer:
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: Build the five distinct TMA descriptors host-side per invocation under a thread-local cache keyed by address and geometry; shared-expert descriptors alias the routed ones
+      Reason: Device TMA actions bind to these descriptors; caching avoids per-call driver encoding when allocations are unchanged
+    - Item: DESIGN.Tile_pipeline::GEMM.EPI
+      Choice: Per-lane register cache of routing weights refreshed every 32 pool rows and lane-shuffled to the two tokens each thread pairs
+      Reason: Avoids re-reading wg from global memory for every store block of the same 32-row group
+    - Item: DESIGN.Math_reshape::Slot_ordered_route_reduction
+      Choice: Fused exact-widening single-rounding FP32 addition of BF16 pairs (add.rn.f32.bf16) for the per-element route accumulation
+      Reason: Halves accumulate instruction count with the identical per-addition rounding declared in Math_reshape

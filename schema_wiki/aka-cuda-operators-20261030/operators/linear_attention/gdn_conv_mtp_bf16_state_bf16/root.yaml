@@ -1,0 +1,406 @@
+META_DATA:
+  Name: gdn_conv_mtp_bf16_state_bf16
+  Describe: 'GDN MTP decode: causal 4-tap conv with SiLU on packed BF16 QKV, gated delta-rule recurrence, in-place BF16 state checkpoints and gated RMSNorm output'
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/candidate/solution.py::Model.forward
+  Version: 3
+  Dispatch:
+    when: channels = (2*qk_head_count+value_head_count)*head_dim; state.stride(0..2) 16-divisible with a 32-byte aligned state base; channels, conv_state.stride(0) and conv_state.stride(2) even, with 4-byte aligned conv_state/mixed_qkv and 16-byte aligned conv_weight bases; mixed_qkv.stride(0) and output_gate.stride(0..1) 4-divisible with 8-byte aligned bases; out.stride(0..1) even with a 4-byte aligned out base; ceil_div(channels,512)*request_count > 160
+CONTRACT:
+  Algorithm_requirement:
+    Constant:
+      head_dim: {value: 128, meaning: Feature width per head; state matrix side length}
+      conv_taps: {value: 4, meaning: Causal convolution window length in tokens}
+      qk_norm_eps: {value: 1e-06, meaning: Epsilon in the rsqrt of Q and K L2 normalization}
+    Input:
+      mixed_qkv: {meaning: 'Packed per-token Q, K, V projections before conv', shape: [{token: total_tokens}, {channel: (2*qk_head_count + value_head_count)*head_dim}], dtype: bf16}
+      conv_state: {meaning: Per-slot rolling raw-token convolution histories, shape: [{pool: pool_size}, {channel: (2*qk_head_count + value_head_count)*head_dim}, {history: spec_width + 2}], dtype: bf16}
+      conv_weight: {meaning: 'Per-channel conv taps, oldest history to current', shape: [{channel: (2*qk_head_count + value_head_count)*head_dim}, {tap: conv_taps}], dtype: bf16}
+      a: {meaning: Per-token decay gate logit feeding softplus, shape: [{token: total_tokens}, {head: value_head_count}], dtype: bf16}
+      b: {meaning: Per-token logit of update strength beta, shape: [{token: total_tokens}, {head: value_head_count}], dtype: bf16}
+      a_log: {meaning: Per-value-head log decay rate, shape: [{head: value_head_count}], dtype: fp32}
+      dt_bias: {meaning: Per-value-head bias added to a before softplus, shape: [{head: value_head_count}], dtype: bf16}
+      state_indices: {meaning: 'Per-request table of state-pool slot ids, 0 null', shape: [{request: request_count}, {position: spec_width}], dtype: int32, range: 0 <= value < pool_size; positive values pairwise distinct within one call}
+      cu_seqlens: {meaning: Exclusive prefix sums of per-request token counts, shape: [{bound: request_count + 1}], dtype: int32}
+      num_accepted_tokens: {meaning: Accepted token prefix length per request, shape: [{request: request_count}], dtype: int32, range: 1 <= value <= spec_width}
+      state: {meaning: Pool of per-slot GDN recurrent state matrices, shape: [{pool: pool_size}, {head: value_head_count}, {row: head_dim}, {col: head_dim}], dtype: bf16}
+      output_gate: {meaning: Per-token output gate logit before activation, shape: [{token: total_tokens}, {head: value_head_count}, {d: head_dim}], dtype: bf16}
+      norm_weight: {meaning: Per-channel weight of the output RMSNorm, shape: [{d: head_dim}], dtype: bf16}
+      out: {meaning: 'Caller result buffer, zeroed and filled in place', shape: [{token: total_tokens}, {head: value_head_count}, {d: head_dim}], dtype: bf16, nullable: true, default: None}
+      scale: {meaning: Scalar multiplier of the L2-normalized queries, shape: [], dtype: python_float, default: 128 ** (-0.5)}
+      norm_eps: {meaning: Epsilon in the output RMSNorm rsqrt, shape: [], dtype: python_float, default: 1e-05}
+      output_gate_activation: {meaning: Name selecting the output gate activation, shape: [], dtype: python_str, default: silu}
+    Output:
+      result: {meaning: 'Returned tensor, the provided out object or new', shape: [{token: total_tokens}, {head: value_head_count}, {d: head_dim}], dtype: bf16}
+      mixed_qkv_updated: {meaning: mixed_qkv after in-place conv+SiLU write-back, shape: [{token: total_tokens}, {channel: (2*qk_head_count + value_head_count)*head_dim}], dtype: bf16}
+      conv_state_updated: {meaning: conv_state after the rolling history update, shape: [{pool: pool_size}, {channel: (2*qk_head_count + value_head_count)*head_dim}, {history: spec_width + 2}], dtype: bf16}
+      state_updated: {meaning: state after the BF16 checkpoint writes, shape: [{pool: pool_size}, {head: value_head_count}, {row: head_dim}, {col: head_dim}], dtype: bf16}
+    Compute:
+      - Name: Request segmentation and activity
+        Math: |
+          cu_seqlens[0] = 0, is non-decreasing, and cu_seqlens[request_count] = total_tokens; request i covers tokens cu_seqlens[i] <= t < cu_seqlens[i+1]; requests and value heads are independent throughout
+          len[i] = cu_seqlens[i+1] - cu_seqlens[i]; 0 <= len[i] <= spec_width; 1 <= spec_width <= 8; 1 <= request_count <= 256; total_tokens = sum_{i} len[i] >= 1
+          qk_head_count * tp = 16 for tp in {1,2,4,8}; value_head_count = qk_head_count * head_ratio for head_ratio in {2,3,8}
+          state_indices values are slot ids in [0, pool_size); slot 0 is null and never read or written; positive source and checkpoint slots are pairwise distinct within one call; pool_size > request_count * spec_width
+          conv_active[i] = (state_indices[i,0] > 0) and (len[i] >= 1)
+          gdn_active[i] = (len[i] >= 1) and (state_indices[i, num_accepted_tokens[i]-1] > 0)
+          tokens of gdn-inactive requests get zero out rows and no state checkpoint write
+        Symbol:
+          len: {meaning: 'Token count of request i, a math integer', shape: [{request: request_count}], dtype: not_applicable}
+          conv_active: {meaning: True when the convolution step updates request i, shape: [{request: request_count}], dtype: not_applicable}
+          gdn_active: {meaning: True when the recurrence processes request i, shape: [{request: request_count}], dtype: not_applicable}
+      - Name: Convolution, SiLU and history update
+        Math: |
+          For each request i with conv_active[i], slot s = state_indices[i,0], off = num_accepted_tokens[i] - 1, every channel c and 0 <= j < len[i], in FP32 over exact stored BF16 values:
+            stream[u] = fp32(conv_state[s,c,off+u]) for u in {0,1,2}; stream[3+j] = fp32(mixed_qkv[cu_seqlens[i]+j,c]) as stored before this call
+            acc[j] = sum_{p=0}^{conv_taps-1} fp32(conv_weight[c,p]) * stream[j+p]
+            mixed_qkv[cu_seqlens[i]+j,c] := bf16(silu(acc[j])), where silu(x) = x * sigmoid(x) and sigmoid(x) = 1/(1+exp(-x))
+            conv_state[s,c,0] := stored conv_state[s,c,off+1]; conv_state[s,c,1] := stored conv_state[s,c,off+2]; conv_state[s,c,2+j] := the pre-call mixed_qkv value, all exact BF16 copies
+          Untouched: columns len[i]+2..spec_width+1 of updated slots, slots without conv_active, other mixed_qkv rows, and storage outside the declared views (backing, guards, padding)
+          m[t,c] = fp32(mixed_qkv[t,c]) after these writes, 0 <= t < total_tokens
+        Symbol: {m: {meaning: FP32 mixed_qkv value after the convolution write, shape: 'ref:mixed_qkv.shape', dtype: fp32}}
+      - Name: Per-token Q/K norms and activations
+        Math: |
+          ratio = value_head_count / qk_head_count, a positive integer; mixed_qkv columns are partitioned into q, k, then v blocks, whose offsets the formulas below fix
+          For 0 <= t < total_tokens and 0 <= e < head_dim, in FP32 from exact stored values:
+            q[t,g,e] = m[t,g*head_dim+e]; k[t,g,e] = m[t,(qk_head_count+g)*head_dim+e]; v[t,j,e] = m[t,(2*qk_head_count+j)*head_dim+e]
+            q_hat[t,g,e] = scale * q[t,g,e] * rsqrt(sum_{e'=0}^{head_dim-1} q[t,g,e']^2 + qk_norm_eps)
+            k_hat[t,g,e] = k[t,g,e] * rsqrt(sum_{e'=0}^{head_dim-1} k[t,g,e']^2 + qk_norm_eps)
+            decay[t,j] = exp(-exp(fp32(a_log[j])) * softplus(fp32(a[t,j]) + fp32(dt_bias[j]))); softplus(x) = ln(1+exp(x)) for x <= 20, else x
+            beta[t,j] = sigmoid(fp32(b[t,j]))
+            gate[t,j,e] = sigmoid(z) if output_gate_activation == 'sigmoid' else z * sigmoid(z), where z = fp32(output_gate[t,j,e])
+          Ranges: 0 <= g < qk_head_count for q, k, q_hat, k_hat and 0 <= j < value_head_count for v, decay, beta, gate
+        Symbol:
+          ratio: {meaning: GQA group size value_head_count / qk_head_count, shape: [], dtype: not_applicable}
+          q_hat: {meaning: 'Normalized, scale-multiplied query row per t, g', shape: [{token: total_tokens}, {head: qk_head_count}, {d: head_dim}], dtype: fp32}
+          k_hat: {meaning: 'L2-normalized key row of token t, QK head g', shape: [{token: total_tokens}, {head: qk_head_count}, {d: head_dim}], dtype: fp32}
+          v: {meaning: 'Value row of token t, value head j, post-conv', shape: [{token: total_tokens}, {head: value_head_count}, {d: head_dim}], dtype: fp32}
+          decay: {meaning: Multiplicative state decay per token and head, shape: [{token: total_tokens}, {head: value_head_count}], dtype: fp32}
+          beta: {meaning: Delta-rule update strength per token and head, shape: [{token: total_tokens}, {head: value_head_count}], dtype: fp32}
+          gate: {meaning: 'Activated output gate per token, head, channel', shape: [{token: total_tokens}, {head: value_head_count}, {d: head_dim}], dtype: fp32}
+      - Name: Delta-rule recurrence, checkpoints, output
+        Math: |
+          If out is None, allocate it shaped like output_gate in bf16; all out elements are zeroed first
+          For each request i with gdn_active[i], src = state_indices[i,num_accepted_tokens[i]-1] > 0, each head j independently, g = floor(j/ratio), in FP32; sum_c and sum_r span [0, head_dim):
+            gdn_state(0)[r,c] = fp32(state[src,j,r,c]) as of call start
+            For s = 0..len[i]-1 with t = cu_seqlens[i]+s:
+              pred[r] = sum_c gdn_state(s)[r,c] * decay[t,j] * k_hat[t,g,c]; delta[r] = (v[t,j,r] - pred[r]) * beta[t,j]
+              gdn_state(s+1)[r,c] = gdn_state(s)[r,c] * decay[t,j] + delta[r] * k_hat[t,g,c]
+              if state_indices[i,s] > 0: state[state_indices[i,s],j,r,c] := bf16(gdn_state(s+1)[r,c])
+              raw[r] = sum_c gdn_state(s+1)[r,c] * q_hat[t,g,c], the readout after the update
+              out[t,j,r] := bf16(raw[r] * rsqrt(sum_r raw[r]^2 / head_dim + norm_eps) * fp32(norm_weight[r]) * gate[t,j,r])
+          Requests without gdn_active write no state, keep zero out rows; other slots unchanged; the call returns out as result
+        Symbol: {gdn_state: {meaning: Recurrent state matrix of one request and head, shape: [{row: head_dim}, {col: head_dim}], dtype: fp32}}
+    Golden_reference:
+      Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/linear_attention/gdn_conv_mtp_bf16_state_bf16/problem/reference.py::Model.forward
+      Tolerance:
+        result: Source only; torch.allclose(atol=0.01, rtol=0.05), max_mismatch_fraction=0.0; no defaults
+        mixed_qkv_updated: Source only; torch.allclose(atol=0.01, rtol=0.05), max_mismatch_fraction=0.0; no defaults
+        conv_state_updated: Source only; torch.allclose(atol=0.01, rtol=0.05), max_mismatch_fraction=0.0; no defaults
+        state_updated: Source only; torch.allclose(atol=0.01, rtol=0.05), max_mismatch_fraction=0.0; no defaults
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      thread: Single CUDA thread, one lane of a warp in a CTA; owns private register storage (register)
+      warp: 32 lockstep threads of one CTA; lane-to-lane register shuffle provides warp reductions
+      cta: Thread block on one SM of whole warps, 256 threads in the fixed source; owns shared memory (smem)
+      grid: All CTAs of one kernel launch; device-wide global memory (global) is visible to every CTA
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: 'Keep the four Contract compute steps, but factor the query normalization into per-token scalars so the readout folds into the pre-update state: one pass over the carried FP32 state then yields the prediction and the readout, and each step RMSNorm is deferred to the end of the request'
+    Rewrite:
+      - Name: Fast sigmoid on the activation path
+        Math: |
+          sig_fast(x) = fma32(0.5, tanh_approx(0.5*x), 0.5); silu_fast(x) = x * sig_fast(x)
+          Every sigmoid of the Contract conv SiLU, output gate and beta is evaluated as sig_fast, so with z = fp32(output_gate[t,j,e]):
+            gate[t,j,e] = sig_fast(z) if output_gate_activation == 'sigmoid' else silu_fast(z)
+            beta[t,j] = sig_fast(fp32(b[t,j]))
+            the convolution write-back is bf16(silu_fast(acc[j]))
+          The decay path keeps accurate exp and log1p evaluations, and both rsqrt normalizations stay unapproximated
+        Symbol:
+          sig_fast: {meaning: Fast sigmoid replacing the Contract sigmoid}
+          silu_fast: {meaning: x*sig_fast(x) in place of the Contract silu}
+        Arithmetic:
+          Approx: tanh_approx is the device approximate hyperbolic tangent; source claims |sig_fast - sigmoid| <= 3.1e-4, unverified here
+        Ledger:
+          Baseline: 'Accurate sigmoid per activation: exponential plus reciprocal division with range reduction'
+          Gain: Activation cost per element -> one approximate hyperbolic tangent plus two FP32 multiply-adds
+          Cost: New error up to 3.1e-4 absolute on every convolved value, gate element and beta, inside the atol 0.01 / rtol 0.05 budget
+      - Name: Convolution accumulation and copied history
+        Math: |
+          For each request i with conv_active[i], slot s = state_indices[i,0], off = num_accepted_tokens[i]-1, channel c and 0 <= j < len[i], over the Contract stream[u]:
+            w_p = fp32(conv_weight[c,p]) for p in {0,1,2,3}
+            acc[j] = ((w_0*stream[j] + w_1*stream[j+1]) + w_2*stream[j+2]) + w_3*stream[j+3], FP32 left to right
+            mixed_qkv[cu_seqlens[i]+j, c] := bf16(silu_fast(acc[j]))
+            conv_state[s,c,0] := conv_state[s,c,off+1], conv_state[s,c,1] := conv_state[s,c,off+2], conv_state[s,c,2+j] := the pre-call mixed_qkv word, all exact BF16 copies
+          stream[j+1..j+3] of one token is stream[j..j+2] of the next, so every token and history column is read once; m stays the Contract post-conv FP32 view
+        Ledger:
+          Baseline: Reading the four window elements of every token separately
+          Gain: Window element reads per channel 4*len[i] -> len[i]+3, the three history columns once
+      - Name: Factored Q/K norms and per-token key scaling
+        Math: |
+          For 0 <= t < total_tokens and QK head g, over the Contract views q[t,g,e] and k[t,g,e] of m, with sum32_e spanning head_dim = 128 terms:
+            invq[t,g] = rsqrt(sum32_e q[t,g,e]^2 + qk_norm_eps) * scale
+            invk[t,g] = rsqrt(sum32_e k[t,g,e]^2 + qk_norm_eps)
+            k_hat[t,g,e] = k[t,g,e] * invk[t,g]
+            qdot[t,g] = sum32_e q[t,g,e]*k[t,g,e] * invq[t,g] * invk[t,g], the three factors left to right
+          The Contract q_hat[t,g,e] = invq[t,g]*q[t,g,e] is never formed per element: only the scalar invq[t,g] is kept and the recurrence consumes the raw query row q
+          invk[t,g] is published with the other scalars but has no consumer here, because k_hat already carries the key normalization
+        Symbol:
+          invq: {meaning: Scaled reciprocal L2 norm of one query row, shape: [], dtype: fp32, retention: 'keep_value (t,g)'}
+          invk: {meaning: Reciprocal L2 norm of one key row; unconsumed, shape: [], dtype: fp32, retention: 'keep_value (t,g)'}
+          k_hat: {meaning: Contract key row of one token; materialized, shape: [{d: head_dim}], dtype: fp32, retention: 'keep_value (t,g)'}
+          qdot: {meaning: Normalized q dot k of one token and QK head, shape: [], dtype: fp32, retention: 'keep_value (t,g)'}
+        Arithmetic:
+          Accumulate: Each sum32_e is 32 groups of 4 columns summed left to right, then a 5-level balanced tree over the groups
+        Ledger:
+          Baseline: Materializing q_hat and k_hat per element and normalizing inside the recurrence
+          Gain: Per-element query scaling head_dim multiplies per token -> the single scalar invq
+          Cost: One extra head_dim-term dot product per token and QK head for qdot
+      - Name: Folded readout of the delta-rule recurrence
+        Math: |
+          For each request i with gdn_active[i], src = state_indices[i,num_accepted_tokens[i]-1], head j, g = floor(j/ratio), step s at token t = cu_seqlens[i]+s, r and c over [0, head_dim):
+            gdn_state(0)[r,c] = fp32(state[src,j,r,c]) as of call start
+            pred[r] = decay[t,j] * sum32_c gdn_state(s)[r,c]*k_hat[t,g,c]
+            delta[r] = (v[t,j,r] - pred[r]) * beta[t,j]
+            qsum[r] = sum32_c gdn_state(s)[r,c]*q[t,g,c]
+            raw[r] = decay[t,j]*invq[t,g]*qsum[r] + delta[r]*qdot[t,g]
+            gdn_state(s+1)[r,c] = fma32(delta[r], k_hat[t,g,c], gdn_state(s)[r,c]*decay[t,j])
+            if state_indices[i,s] > 0: state[state_indices[i,s],j,r,c] := bf16(gdn_state(s+1)[r,c])
+          raw[r] is the Contract readout sum_c gdn_state(s+1)[r,c]*q_hat[t,g,c]: substituting the update with q_hat = invq*q and k_hat = invk*k leaves decay*invq*qsum[r] + delta[r]*qdot[t,g], formed from gdn_state(s) before the update
+        Symbol:
+          gdn_state: {meaning: Contract recurrent state of one request and head, shape: [{row: head_dim}, {col: head_dim}], dtype: fp32, retention: 'carry_forward (i,j); s=0..len[i]'}
+          raw: {meaning: Step readout row; kept for the deferred norm, shape: [{row: head_dim}], dtype: fp32, retention: 'keep_value (i,j,s)'}
+        Arithmetic:
+          Accumulate: 'pred and qsum share one pass: 8 column blocks of 16 accumulated left to right per row, then a 3-level tree; pred reassociates the Contract decay'
+        Ledger:
+          Baseline: 'Contract grouping: decay the state, form pred, update, then read out from the updated state with an elementwise q_hat'
+          Gain: Passes over the carried head_dim^2 state per step 4 -> 2; per-element query scaling -> one invq scalar per token and head
+          Cost: One extra head_dim-term dot product per token (qdot); pred and raw are regrouped, so they differ from the Contract in the last FP32 digits
+      - Name: Deferred RMSNorm over the steps of a request
+        Math: |
+          For each request i with gdn_active[i] and head j, the readout rows raw of all len[i] steps and their partial sums are held until the recurrence of that request and head has finished; then for each step s at token t = cu_seqlens[i]+s and row group gp over [0, head_dim/16):
+            sq_part[s,gp] = sum of 8*raw[r]^2 over the 16 rows r of group gp, every row entering once per its 8 column-block copies
+            rv[s] = rsqrt(sum32_gp sq_part[s,gp] / 1024 + norm_eps), where sum32_gp sq_part[s,gp] / 1024 = sum_r raw[r]^2 / head_dim
+            out[t,j,r] := bf16(((raw[r]*rv[s]) * fp32(norm_weight[r])) * gate[t,j,r])
+          Requests without gdn_active[i] get bf16(0) out rows and no checkpoint; len[i] = 0 leaves no row and no write
+        Symbol: {sq_part: {meaning: Squared-readout partial of one step and group, shape: [{group: head_dim/16}], dtype: fp32, retention: 'keep_value (i,j,s)'}}
+        Arithmetic:
+          Accumulate: sq_part is a 5-level tree over the 32 contributions of a row group; the head_dim/16 group partials are summed left to right
+        Ledger:
+          Baseline: Normalizing each step readout inside the recurrence, so every warp stores only its own 16 rows of that step
+          Gain: Out stores per step go from 8 fragments of head_dim/8 channels to one CTA-wide contiguous head_dim row of pairs
+          Cost: Retained per work len[i]*head_dim FP32 readouts plus len[i]*head_dim/16 partials, one extra CTA barrier, and each squared readout evaluated 8 times
+  Work_schedule:
+    Thesis: 'Two submissions: conv by (request, 512-channel block); recurrence by (request, value head), one CTA carrying all len_i steps in registers, so the sequential state axis stays inside one work. The recurrence prologue overlaps conv through a launch handoff'
+    Step:
+      CONV:
+        Describe: Causal 4-tap conv with SiLU over one request's mixed_qkv rows for a 512-channel block, in place, plus the rolling conv_state history update
+        Decomposition:
+          Strategy: Coordinates request i and channel block cb of 512 channels; len_i = len[i], off_i = num_accepted_tokens[i]-1; 256 threads take 256 channel pairs
+          Partition:
+            request: {meaning: One request's convolution, size: request_count, tile: 1}
+            channel: {meaning: Block of packed QKV channels of one request, size: (2*qk_head_count + value_head_count)*head_dim, tile: 512}
+          Worktile:
+            Invariant:
+              tap_weights: {meaning: The four taps of this channel block, shape: [{channel: 512}, {tap: conv_taps}], dtype: 'ref:CONTRACT.Algorithm_requirement::conv_weight.dtype'}
+              history_columns: {meaning: Stored history columns off_i..off_i+2 of the slot, shape: [{channel: 512}, {history: 3}], dtype: 'ref:CONTRACT.Algorithm_requirement::conv_state.dtype'}
+            Iteration: {token_row: {meaning: mixed_qkv row of one token of this request, shape: [{token: 1}, {channel: 512}], dtype: 'ref:CONTRACT.Algorithm_requirement::mixed_qkv.dtype', direction: ascending}}
+          Target:
+            Single_tile:
+              mixed_qkv_updated: {meaning: Convolved rows written back in place, shape: [{token: len_i}, {channel: 512}], dtype: 'ref:CONTRACT.Algorithm_requirement::mixed_qkv_updated.dtype'}
+              conv_state_updated: {meaning: Shifted columns 0 and 1 plus appended 2..len_i+1, shape: [{channel: 512}, {history: len_i + 2}], dtype: 'ref:CONTRACT.Algorithm_requirement::conv_state_updated.dtype'}
+        Mapping:
+          Strategy: One CTA per worktile; the launch is a (ceil_div(channels/2, 256), request_count) grid of 256-thread CTAs
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil_div((2*qk_head_count + value_head_count)*head_dim, 512) * request_count
+        Schedule:
+          Strategy: Every (i, cb) pair is submitted, also when len_i = 0 or the slot is 0; such a worktile only grants the launch permission and writes nothing
+          Worktile_order:
+            - {by: request, direction: ascending}
+            - {by: channel, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+      GDN:
+        Describe: 'The whole delta-rule recurrence of one request and value head: all len_i steps in FP32 registers, positive-slot checkpoints and the gated out rows'
+        Decomposition:
+          Strategy: Coordinates request i and value head j, g = floor(j/ratio), len_i = len[i]; the steps are a sequential local iteration, not a work axis
+          Partition:
+            request: {meaning: One request's recurrence, size: request_count, tile: 1}
+            head: {meaning: One value head, size: value_head_count, tile: 1}
+          Worktile:
+            Invariant:
+              gdn_state_init: {meaning: Source slot state matrix at call start, shape: [{row: head_dim}, {col: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::state.dtype'}
+              norm_weight: {meaning: RMSNorm channel weights, shape: [{d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::norm_weight.dtype'}
+              q_steps: {meaning: Raw query rows of all steps for QK head g, shape: [{step: len_i}, {d: head_dim}], dtype: fp32}
+              k_hat_steps: {meaning: Normalized key rows of all steps, shape: [{step: len_i}, {d: head_dim}], dtype: fp32}
+              v_steps: {meaning: Value rows of all steps, shape: [{step: len_i}, {d: head_dim}], dtype: fp32}
+              gate_steps: {meaning: Activated output gate rows of all steps, shape: [{step: len_i}, {d: head_dim}], dtype: fp32}
+              decay_steps: {meaning: Decay factor of each step, shape: [{step: len_i}], dtype: fp32}
+              beta_steps: {meaning: Update strength of each step, shape: [{step: len_i}], dtype: fp32}
+              dst_steps: {meaning: Checkpoint slot id of each step; 0 writes none, shape: [{step: len_i}], dtype: 'ref:CONTRACT.Algorithm_requirement::state_indices.dtype'}
+          Target:
+            Single_tile:
+              result: {meaning: Out rows of this request and head or their zeros, shape: [{token: len_i}, {d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::result.dtype'}
+              state_updated: {meaning: BF16 state checkpoints of the positive-slot steps, shape: [{step: len_i}, {row: head_dim}, {col: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::state_updated.dtype'}
+        Mapping:
+          Strategy: One 256-thread CTA per worktile; the launch is a (value_head_count, request_count) grid, head fastest, and no work axis is split across CTAs
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: value_head_count * request_count
+        Schedule:
+          Strategy: 'All request_count*value_head_count works are submitted: len_i = 0 writes nothing, a request without gdn_active[i] writes len_i*head_dim zeros'
+          Worktile_order:
+            - {by: request, direction: ascending}
+            - {by: head, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch:
+        - {step: [CONV]}
+        - {step: [GDN], start_after: CONV.launch_ready}
+      Handoff: {m: {producer: CONV, consumer: [GDN], storage: global, wait_at: GDN.mixed_ready}}
+  Tile_pipeline:
+    Thesis: One synchronous role per submission. CONV grants the launch permission at entry, overlapping a row-load burst with the history reads. GDN runs its conv-independent prologue before the dependency wait, stages all step operands behind one barrier, then loops on registers and smem
+    Step:
+      CONV:
+        Index: {j: {meaning: Token position within this request, definition: [0, len_i]}}
+        Storage:
+          token_rows: {meaning: Pre-call mixed_qkv words of this request, depth: 8, location: register, shape: [{channel: 512}],
+            dtype: bf16, total_size: 8192, view: {token_row(j): {slot_index: j}}}
+          conv_operands: {meaning: Sliding 3-value window and 4 taps per channel, depth: 1, location: register, shape: [{channel: 512}, {element: 7}],
+            dtype: fp32, total_size: 14336}
+        Role:
+          MAIN:
+            Info:
+              Describe: All eight warps convolve the rows of this request for a 512-channel block, one adjacent channel pair per thread, and update the conv_state slot
+              Member: warp[0:8]
+              Using_verb:
+                compute: {convolve: {execution_mode: serial, describe: 'Form acc[j] from the sliding window and token_row(j), apply silu_fast, write the BF16 result back over mixed_qkv, then shift the window'}}
+                load:
+                  token_rows: {execution_mode: async_unordered, describe: 'Issue the len_i 4-byte pre-call mixed_qkv loads of this channel pair into token_rows; done covers every row, so write-back cannot clobber a read'}
+                  conv_operands: {execution_mode: async_unordered, describe: 'Read the three stored history columns off_i..off_i+2 of the slot and the four taps, widening the exact BF16 values to FP32 in conv_operands'}
+                store:
+                  history_shift: {execution_mode: serial, describe: Copy the register copies of history columns off_i+1 and off_i+2 into conv_state columns 0 and 1; no arithmetic and no re-read of the slot}
+                  history_append: {execution_mode: async_unordered, describe: 'Write the pre-call word held in token_row(j), not the convolved value, into conv_state column 2+j as an exact BF16 copy'}
+                signal: {launch_permission: {execution_mode: serial, describe: 'Grant the dependent GDN submission launch permission at kernel entry, before the channel and activity tests, so idle blocks also grant it'}}
+            Pipe:
+              - signal:launch_permission
+              - if(conv_active[i]):
+                  - load:token_rows
+                  - load:conv_operands
+                  - store:history_shift
+                  - for(j):
+                      - compute:convolve(j)
+                      - store:history_append(j)
+            Waiting:
+              Prepared:
+                - '{issue store:history_shift} ← [{done load:conv_operands}]'
+                - '{issue compute:convolve(j)} ← [{done load:conv_operands}, {done load:token_rows}]'
+                - '{issue store:history_append(j)} ← [{done load:conv_operands}, {done load:token_rows}]'
+      GDN:
+        Index: {s: {meaning: Recurrence step within this request, definition: [0, len_i]}}
+        Event:
+          mixed_ready: ['{done MAIN[0]::await:conv}']
+        Storage:
+          state_preload: {meaning: Raw BF16 state words of the source slot, depth: 1, location: register, shape: [{row: head_dim}, {col: head_dim}],
+            dtype: bf16, total_size: 32768, view: {gdn_state_init: {}}}
+          carried_state: {meaning: FP32 recurrent state carried across the steps, depth: 1, location: register, shape: [{row: head_dim}, {col: head_dim}],
+            dtype: fp32, total_size: 65536, view: {gdn_state(s): {}}}
+          q_stage: {meaning: Raw query rows in a padded 160-slot permutation, depth: 8, location: smem, shape: [{element: 160}],
+            dtype: fp32, total_size: 5120, view: {q(s): {slot_index: s}}}
+          k_stage: {meaning: Normalized key rows in the same padded permutation, depth: 8, location: smem, shape: [{element: 160}],
+            dtype: fp32, total_size: 5120, view: {k_hat(s): {slot_index: s}}}
+          v_stage: {meaning: Value rows of the staged steps, depth: 8, location: smem, shape: [{d: head_dim}],
+            dtype: fp32, total_size: 4096, view: {v(s): {slot_index: s}}}
+          gate_stage: {meaning: Activated output gate rows of the steps, depth: 8, location: smem, shape: [{d: head_dim}],
+            dtype: fp32, total_size: 4096, view: {gate(s): {slot_index: s}}}
+          weight_stage: {meaning: FP32 copy of the RMSNorm channel weights, depth: 1, location: smem, shape: [{d: head_dim}],
+            dtype: fp32, total_size: 512, view: {norm_weight: {}}}
+          step_scalars: {meaning: 'Per-step decay, beta, invq, invk and qdot', depth: 8, location: smem, shape: [{scalar: 5}],
+            dtype: fp32, total_size: 160, view: {decay(s): {slot_index: s, region: {scalar: [0, 1]}}, beta(s): {slot_index: s, region: {scalar: [1, 2]}}, invq(s): {slot_index: s, region: {scalar: [2, 3]}}, invk(s): {slot_index: s, region: {scalar: [3, 4]}}, qdot(s): {slot_index: s, region: {scalar: [4, 5]}}}}
+          dst_stage: {meaning: Checkpoint slot id of each staged step, depth: 8, location: smem, shape: [{element: 1}],
+            dtype: int32, total_size: 32, view: {dst(s): {slot_index: s}}}
+          raw_stage: {meaning: Readout rows kept for the deferred norm, depth: 8, location: smem, shape: [{row: head_dim}],
+            dtype: fp32, total_size: 4096, view: {raw(s): {slot_index: s}}}
+          sq_stage: {meaning: Squared-readout partials of the steps, depth: 8, location: smem, shape: [{group: head_dim/16}],
+            dtype: fp32, total_size: 256, view: {sq_part(s): {slot_index: s}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: 'Eight warps carry one request and head: warp w owns rows [16w,16w+16), lane l columns [16*(l mod 8),+16), a thread holding 4 rows by 16 columns'
+              Member: warp[0:8]
+              Using_verb:
+                compute:
+                  geometry: {execution_mode: serial, describe: 'Read cu_seqlens, num_accepted_tokens and state_indices to fix len_i, the source slot and gdn_active[i]; len_i = 0 stops here'}
+                  norm_factors: {execution_mode: serial, describe: 'Each warp s < len_i alone reduces the query and key rows of step s into invq(s), invk(s), qdot(s) and stages q(s), k_hat(s)'}
+                  stage_operands: {execution_mode: serial, describe: 'All threads stage v(s), gate(s) with the Contract activation branch applied, norm_weight, decay(s), beta(s) and dst(s) for s < len_i'}
+                  state_init: {execution_mode: serial, describe: Widen the BF16 words of state_preload into the 4 rows by 16 columns of carried_state this thread owns; reads no memory}
+                  predict: {execution_mode: serial, describe: 'For step s, accumulate over the 16 columns and 4 rows of this thread the pred partials against k_hat(s) and the qsum partials against q(s)'}
+                  delta_readout: {execution_mode: serial, describe: 'Combine the 8 column-block partials of each row by a 3-level lane tree, form delta and raw of step s, publish raw(s) and sq_part(s)'}
+                  advance: {execution_mode: serial, describe: 'Update the 4 rows by 16 columns of carried_state to gdn_state(s+1) by the fma32 form, reading k_hat(s) and the delta kept in registers'}
+                  out_rows: {execution_mode: serial, describe: 'Each thread takes two adjacent channels of one step, sums that step sq_part into rv, multiplies raw*rv*norm_weight*gate(s), stores the pair'}
+                load: {state_preload: {execution_mode: async_unordered, describe: 'Issue the 256-bit loads of the source slot state for the rows and columns of this thread into state_preload, ahead of await:conv'}}
+                store:
+                  checkpoint: {execution_mode: async_unordered, describe: 'Pack gdn_state(s+1) to BF16 and issue 256-bit stores when dst(s) > 0; the pack reads registers at issue, so advance(s+1) may reuse them'}
+                  zero_rows: {execution_mode: serial, describe: Write bf16(0) to the len_i*head_dim out elements of this request and head; this path reads no state and writes no checkpoint}
+                await:
+                  conv: {execution_mode: serial, describe: 'Wait until every CONV worktile finished and its mixed_qkv writes are visible here; the Handoff wait_at target, absent when inactive'}
+                  staged: {execution_mode: serial, describe: 'CTA barrier publishing every staged operand to all warps: step_scalars, q_stage, k_stage, v_stage, gate_stage, weight_stage, dst_stage'}
+                  steps: {execution_mode: serial, describe: CTA barrier closing the step loop; done when the raw(s) rows and sq_part(s) of every step and row group are visible to the output tail}
+            Pipe:
+              - compute:geometry
+              - if(gdn_active[i]):
+                  - load:state_preload
+                  - await:conv
+                  - compute:norm_factors
+                  - compute:stage_operands
+                  - await:staged
+                  - compute:state_init
+                  - for(s):
+                      - compute:predict(s)
+                      - compute:delta_readout(s)
+                      - compute:advance(s)
+                      - if(dst(s) > 0):
+                          - store:checkpoint(s)
+                  - await:steps
+                  - compute:out_rows
+              - if(len_i >= 1 and not gdn_active[i]):
+                  - store:zero_rows
+            Waiting:
+              Prepared: ['{issue compute:state_init} ← [{done load:state_preload}]']
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::CONV.MAIN
+      Choice: cudaTriggerProgrammaticLaunchCompletion at kernel entry of every block, with cudaLaunchAttributeProgrammaticStreamSerialization on the dependent launch
+      Reason: Provides CONV.launch_ready as a launch permission only, ahead of any conv write, and lets the GDN grid become resident while conv still runs
+    - Item: DESIGN.Tile_pipeline::GDN.MAIN
+      Choice: cudaGridDependencySynchronize for await:conv, ahead of the first read of conv-written mixed_qkv
+      Reason: It is the only guarantee here that every CONV worktile finished and its writes are visible; the launch attribute alone would race with conv
+    - Item: DESIGN.Math_reshape::sig_fast
+      Choice: The device approximate hyperbolic tangent (PTX tanh.approx.f32) for the tanh inside sig_fast
+      Reason: The declared error bound of this path is that instruction accuracy halved by the 0.5 factor; another tanh evaluation changes the declared path
+    - Item: DESIGN.Tile_pipeline::GDN.MAIN
+      Choice: Compile this role for 256 threads per CTA with two resident CTAs per SM (source __launch_bounds__(256,2), so at most 128 registers per thread)
+      Reason: carried_state holds 64 FP32 values per thread and state_preload 32 more words; the recurrence stays register-resident only inside that budget
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::GDN.MAIN
+      Choice: One 256-bit ld.global.v8.b32 / st.global.v8.b32 per row tile in load:state_preload and store:checkpoint instead of two 16-byte accesses
+      Reason: Halves the state access instruction count for the same bytes; the range of this design already guarantees the 32-byte alignment they need

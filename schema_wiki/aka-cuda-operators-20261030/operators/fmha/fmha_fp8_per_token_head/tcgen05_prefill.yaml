@@ -1,0 +1,294 @@
+META_DATA:
+  Name: fmha_fp8_per_token_head
+  Describe: Bottom-right causal multi-head attention over paged FP8-E4M3 KV with inline per-(token, kv-head) FP32 scales; BF16 Q in, BF16 out written in place
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py::Model.forward
+  Version: 1
+  Dispatch:
+    id: tcgen05_prefill
+    when: 'head_dim = 128 and rows = max_seqlen_q * g > 64, and the merged tcgen05 prefill claims the shape: peer_ctas = (ceil_div(total_q,128) + batch_count) * head_count >= 128, or max_seqlen_k <= 512 with peer_ctas >= 12, or <= 1024 with >= 96; and max_seqlen_k < 6144 keeps the f16-QK form; and the persist driver runs: not (2*max_seqlen_q >= max_seqlen_k and 2*sms <= peer_ctas <= 4*sms), and 4*peer_ctas >= 10*sms, sms being the multiprocessor count. Unchecked: power-of-two page_size'
+DESIGN:
+  Math_reshape:
+    Thesis: 'The Contract computation is kept in the log2 domain on narrowed tensor-core operands, one online pass per item: per-row state in one thread, output in TMEM, value scale folded into the BF16 value image - no chunk split, partials or merge; the price is a second operand rounding'
+    Rewrite:
+      - Name: Item rows and causal bounds
+        Math: |
+          An item covers 128 consecutive query rows of one request b and one query head h, with no
+          GQA packing: row r is Contract query index tok(r) = i0 + r at head h, its query vector is
+          q_row(r) = q[q_start(b) + tok(r), h], and the g heads of one kv head form separate items
+          re-gathering the same KV at kvh = floor(h / g). Valid rows are r < nrows; rows r >= nrows
+          stage the zero query and are never written. A valid row keeps the Contract bound
+          visible(tok(r)), so the exclusive key bound of the item is
+          hi = min(kv_len(b), kv_len(b) - q_len(b) + i0 + 128) = visible(tok(nrows-1)) + 1 >= 1,
+          walked as ntot = ceil_div(hi, 64) tiles of 64 keys; the last tile holds
+          min(64, hi - 64*(ntot-1)) keys, and positions at or beyond hi are not gathered, their
+          zero images masked for every valid row. Keys use the Contract paged mapping at kvh.
+        Symbol:
+          i0: {meaning: First query index of the item tile, value: tile * 128}
+          nrows: {meaning: Valid query rows of this item, value: 'min(128, q_len(b) - i0)'}
+          hi: {meaning: Exclusive key bound of this item, value: 'min(kv_len(b), kv_len(b) - q_len(b) + i0 + 128)'}
+          ntot: {meaning: 64-key tiles walked by this item, value: 'ceil_div(hi, 64)'}
+          kvh: {meaning: Kv head serving the query head of this item, value: floor(h / g)}
+      - Name: Operand narrowing and score scaling
+        Math: |
+          qk_scale = softmax_scale * log2(e) is folded once on the host in FP32; each gathered key
+          scale becomes kst(j) = kscale(j)[kvh] * qk_scale in FP32 when its tile is converted. The
+          QK product narrows both operands to FP16: k_f16(j) = f16(kvec(j)[kvh]) is exact for
+          every finite E4M3 value, and q_f16(r) = f16(q_row(r)) widens once per item, zero for
+          r >= nrows. The scores of one tile are
+            score(r, j) = mm32(q_f16(r), k_f16(j)) * kst(j),  0 <= j < 64,
+          an FP32 accumulator over the head_dim-deep k steps, materialized in TMEM. The widening
+          is exact only inside the FP16 normal range: below 2^-14 it rounds into subnormals, above
+          65504 it overflows to +-inf. Frozen |q| is of order one, so the overflow side is unreached
+          but the subnormal side is; the Contract leaves q unbounded: a source limitation, not proven.
+        Symbol:
+          qk_scale: {meaning: Host-folded log2-domain score scale, value: softmax_scale * 1.44269504088896340736}
+          kst: {meaning: Folded FP32 key scale published with the tile, shape: [{key: 64}], dtype: fp32}
+          q_f16: {meaning: FP16-widened query rows of the item, shape: [{row: 128}, {d: head_dim}], dtype: fp16}
+          k_f16: {meaning: Exact FP16 key image of one tile, shape: [{key: 64}, {d: head_dim}], dtype: fp16}
+          score: {meaning: Log2-domain scores of one tile before masking, shape: [{row: 128}, {key: 64}], dtype: fp32}
+        Arithmetic:
+          Accumulate: FP32 accumulation over head_dim/16 ascending depth-16 matrix steps; each product of the narrowed FP16 operands is exact in FP32 (11 x 11 bits)
+        Ledger:
+          Baseline: BF16 QK operands against the exact E4M3 key payload, with softmax_scale and the key scale as two separate FP32 products
+          Gain: The key conversion drops from a five-step per-pair chain to one exact instruction; the query widening is paid once per item instead of per tile
+          Cost: Widening Q to FP16 rounds below 2^-14 into subnormals and overflows above 65504 to +-inf; kst adds one FP32 rounding per key
+      - Name: Causal masking with a finite sentinel
+        Math: |
+          allowed(r, j) = (j <= visible(tok(r))); smk(r, j) = score(r, j) if allowed, otherwise
+          the finite sentinel NEG = -1e30 in place of the Contract -inf. For a row whose running
+          maximum exceeds NEG, every masked weight 2^(NEG - mn) flushes to exactly zero and
+          taking max(m_run, NEG) returns m_run, so NEG acts as -inf in both places it enters.
+          visible(tok(r)) >= 0 for every valid row because q_len <= kv_len, so tile 0 keeps the
+          finite score of key 0 and the row maximum exceeds NEG from then on; only rows r >= nrows,
+          never written, could hold a maximum at NEG where a masked weight degenerates to 2^0.
+          A true score reaching -1e30 would also be indistinguishable from a mask: orders of
+          magnitude outside the frozen input domain, but a source limitation since the Contract
+          leaves scores unbounded.
+        Symbol: {smk: {meaning: Masked log2-domain scores of one tile, shape: 'ref:score.shape', dtype: fp32}}
+      - Name: Value scale folded into the value image
+        Math: |
+          The value payload converts with its scale folded in FP32 before a single BF16 rounding,
+          v_img(j) = bf16(f32(vvec(j)[kvh]) * vscale(j)[kvh]), so each PV term is
+          bf16(p) * bf16(v * vscale) accumulated in FP32, where the Contract computes
+          bf16(p * vscale) against the exact E4M3 payload. Each bf16 x bf16 product stays exact
+          in the FP32 accumulate (8 x 8 significand bits). Folding in FP32 keeps one rounding on
+          the value side and cannot underflow on the tiny distribution: BF16 shares the FP32
+          exponent width and v_img reproduces the payload magnitude, since vscale is
+          max|v_bf16|/448 with a 1e-6 floor. An FP16 value image measured failing the frozen
+          tolerance on tiny inputs (rel_l2 about 2e-2 against 1e-2) and is excluded.
+        Symbol: {v_img: {meaning: BF16 value image with the value scale folded in, shape: [{key: 64}, {d: head_dim}], dtype: bf16}}
+        Ledger:
+          Baseline: One BF16 rounding of p * vscale per weight against the exact E4M3 value payload, as the Contract defines
+          Gain: The per-weight value-scale multiply and its broadcast loads leave the softmax score-to-weight chain for the conversion phase
+          Cost: Two BF16 operand roundings per term instead of one; measured worst rel_l2 3.751e-3 of the 1e-2 bound, mismatch 8.0e-5 of the 1e-3 budget
+      - Name: Online softmax in the log2 domain
+        Math: |
+          One item walks its ntot tiles n ascending. Per row, m_run(-1) = NEG, l_run(-1) = 0, o_run(-1) = 0, mx = max_j smk(r, j) over tile n:
+            mn = max(m_run, mx); alpha = 2^(m_run - mn); p(r, j) = 2^(smk(r, j) - mn)
+            p_bf16 = bf16(p); l_run(n) = l_run(n-1) * alpha + sum32_j p(r, j)
+            o_run(n) = mma32(p_bf16, v_img, o_run(n-1) * alpha); m_run(n) = mn
+          At n = 0 every valid row has mn > NEG, so alpha = 0 exactly and the recurrence
+          self-initializes: l_run(0) is the weight sum of tile 0 and the first PV product
+          overwrites o_run. A tile entirely beyond the row bound gives mx = NEG, mn = m_run,
+          alpha = 1, p = 0: the state passes through unchanged, and the rescale is skipped when
+          alpha == 1 for every row of a warp. The maximum entry contributes 2^0 = 1 to the
+          unrounded denominator, so l_run >= 1 for every valid row.
+        Symbol:
+          p_bf16: {meaning: 'BF16-rounded weights, the A operand of PV', shape: [{row: 128}, {key: 64}], dtype: bf16}
+          m_run: {meaning: Running row maximum in the log2 domain, shape: [{row: 128}], dtype: fp32, retention: 'carry_forward (b, tile, h); n=-1..ntot-1'}
+          l_run: {meaning: Running row denominator from unrounded weights, shape: [{row: 128}], dtype: fp32, retention: 'carry_forward (b, tile, h); n=-1..ntot-1'}
+          o_run: {meaning: Unnormalized running output rows, shape: [{row: 128}, {d: head_dim}], dtype: fp32, retention: 'carry_forward (b, tile, h); n=-1..ntot-1'}
+        Arithmetic:
+          Approx: Every 2^x is one MUFU ex2.approx.ftz.f32, about 2^-22 relative error; arguments below about -126, including NEG - mn, flush to exactly 0
+          Accumulate: l_run sums unrounded weights in four ascending FP32 chains by key residue mod 4, joined ((c0+c1)+(c2+c3)); o_run adds four depth-16 mma steps per tile
+        Ledger:
+          Baseline: One pass over the keys of a row against the global maximum with a single final normalization, as the Contract defines
+          Cost: Each tile whose maximum moves multiplies o_run and l_run by alpha, head_dim FP32 multiplies per row; the denominator is regrouped into four chains
+      - Name: Normalization and in-place output
+        Math: |
+          At the end of the item, per row r < nrows and dim e:
+            inv = rcp_approx(l_run(r))
+            attention_out(tok(r), h, e) = bf16(o_run(r, e) * inv), the product formed in FP32,
+          written in place into the caller out tensor at row q_start(b) + i0 + r, head h. The
+          items partition every (token, head) pair exactly once, so every element of out is
+          written exactly once and rows r >= nrows are never written. forward returns Python
+          None; all other inputs are read-only and the softmax_segm_* scratch buffers are
+          untouched.
+        Arithmetic:
+          Approx: The final reciprocal is one MUFU rcp.approx.ftz.f32, about 2^-23 relative error, instead of an exact division; l_run >= 1 keeps it finite
+  Work_schedule:
+    Thesis: 'One merged launch, n_split = 1: T_all = head_count * sum_b nt(b), nt(b) = ceil_div(q_len(b),128), p(b) = sum_{a<b} nt(a); persistent CTAs capped at 2*sms pull from one ticket counter, heaviest first and heads innermost for L2 KV reuse; in-place output, no partials, combine or workspace'
+    Step:
+      MAIN:
+        Describe: One CTA scores the 128 query rows of one request tile and one query head against its whole visible key range and writes the output rows in place
+        Decomposition:
+          Strategy: Ticket w binds work = T_all-1-w; h = work%head_count, rem = work/head_count; p(b)<=rem<p(b+1) fixes b and tile = rem-p(b)
+          Partition: {item: {meaning: 'One (request, q tile, head) item in pull order', size: T_all, tile: 1}}
+          Worktile:
+            Invariant: {q_tile: {meaning: BF16 query rows of the tile and head of this item, shape: [{row: 128}, {d: head_dim}], dtype: bf16}}
+            Iteration:
+              k_tile: {meaning: Gathered FP8 key payload of one 64-key tile, shape: [{key: 64}, {d: head_dim}], dtype: fp8_e4m3fn, direction: ascending}
+              v_tile: {meaning: Gathered FP8 value payload of the same tile, shape: [{key: 64}, {d: head_dim}], dtype: fp8_e4m3fn, direction: ascending}
+              ks_tile: {meaning: FP32 key descale of the keys of the tile, shape: [{key: 64}], dtype: fp32, direction: ascending}
+              vs_tile: {meaning: FP32 value descale of the keys of the tile, shape: [{key: 64}], dtype: fp32, direction: ascending}
+          Target:
+            Single_tile: {attention_out: {meaning: Normalized rows written in place; nrows are valid, shape: [{row: 128}, {d: head_dim}], dtype: bf16}}
+        Mapping:
+          Strategy: sms = device multiprocessor count; slots = 2*sms = the 2-CTA-per-SM residency; each thread owns one query row; one elected thread issues every UMMA
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: min((ceil_div(total_q, 128) + batch_count) * head_count, 2 * sms)
+        Schedule:
+          Strategy: 'Host zeroes the counter on the launch stream before each submission, so graph replay re-arms it; the grid bound is >= T_all: surplus CTAs exit idle'
+          Worktile_order: [{by: item, direction: ascending}]
+          Worker_assignment:
+            Refill: {atomic_ticket: 'Global counter, zeroed at the launch entry; thread 0 adds 1 per pull and claims the old value as ticket; ticket >= T_all fails (ticket_exhausted)'}
+            Exit: [ticket_exhausted]
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: 'Stage parity and mbarrier phase follow a global tile ordinal continuing across items, so a persistent worker never re-synchronizes: raw FP8 lands one tile ahead in registers, K/V images and TMEM score stages double-buffer, and UMMA issue by one elected thread overlaps softmax(i) with PV(i-1)'
+    Step:
+      MAIN:
+        Index:
+          t: {meaning: Local ordinal of the items this worker pulls, definition: worktile}
+          i: {meaning: 64-key tile ordinal within the current item, definition: [0, ntot]}
+          g: {meaning: KV tile ordinal continued across items, definition: {flatten: [t, i]}}
+        Storage:
+          q_image: {meaning: FP16-widened query rows in the K-major UMMA layout, depth: 1, location: smem, shape: [{row: 128}, {d: 128}],
+            dtype: fp16, total_size: 32768, view: {q_f16(t): {}}}
+          k_image: {meaning: Exact FP16 key image of one tile per stage, depth: 2, location: smem, shape: [{key: 64}, {d: 128}],
+            dtype: fp16, total_size: 32768, view: {k_f16(g): {slot_index: g%2}}}
+          v_image: {meaning: 'BF16 value image of one tile, scale folded in', depth: 2, location: smem, shape: [{key: 64}, {d: 128}],
+            dtype: bf16, total_size: 32768, view: {v_img(g): {slot_index: g%2}}}
+          scale_image: {meaning: Folded FP32 key scales; the vs half is unread, depth: 2, location: smem, shape: [{key: 64}, {scale: 2}],
+            dtype: fp32, total_size: 1024, view: {kst(g): {slot_index: g%2, region: {scale: [0, 1]}}}}
+          rescale_flags: {meaning: 'Per-warp alpha-moved votes, parity-indexed', depth: 2, location: smem, shape: [{warp: 4}],
+            dtype: int32, total_size: 32, view: {needf(g): {slot_index: g%2}}}
+          score_p: {meaning: 'TMEM scores, then packed BF16 weights in place', depth: 2, location: tmem, shape: [{row: 128}, {column: 64}],
+            dtype: fp32, total_size: 65536, view: {score(g): {slot_index: g%2}, p_bf16(g): {slot_index: g%2, region: {column: [0, 32]}}}}
+          o_run: {meaning: Unnormalized FP32 output accumulator in TMEM, depth: 1, location: tmem, shape: [{row: 128}, {column: 128}],
+            dtype: fp32, total_size: 65536}
+          raw_kv: {meaning: Raw FP8 K and V chunks of one prefetched tile, depth: 1, location: register, shape: [{key: 64}, {d: 128}, {payload: 2}],
+            dtype: fp8_e4m3fn, total_size: 16384}
+          raw_scales: {meaning: FP32 key and value scales of the prefetched tile, depth: 1, location: register, shape: [{key: 64}, {scale: 2}],
+            dtype: fp32, total_size: 512}
+          bt_regs: {meaning: Block-table entry of the next tile to load, depth: 1, location: register, shape: [{key: 64}, {copy: 2}],
+            dtype: int32, total_size: 512}
+          score_row: {meaning: 'Own-row scores, overwritten with the weights', depth: 1, location: register, shape: [{row: 128}, {key: 64}],
+            dtype: fp32, total_size: 32768, view: {score(g): {}}}
+          p_packed: {meaning: Own-row packed BF16 weights awaiting the store, depth: 1, location: register, shape: [{row: 128}, {key: 64}],
+            dtype: bf16, total_size: 16384, view: {p_bf16(g): {}}}
+          m_run: {meaning: Running row maximum in the log2 domain, depth: 1, location: register, shape: [{row: 128}],
+            dtype: fp32, total_size: 512}
+          l_run: {meaning: Running row denominator of the item, depth: 1, location: register, shape: [{row: 128}],
+            dtype: fp32, total_size: 512}
+          o_window: {meaning: Register window for the o_run TMEM round trips, depth: 1, location: register, shape: [{row: 128}, {d: 64}],
+            dtype: fp32, total_size: 32768}
+        Role:
+          MAIN:
+            Info:
+              Describe: All four warps stage every KV tile and run the softmax and epilogue of their own 32 rows; one elected thread issues every UMMA and its commit
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  item_count: {execution_mode: serial, describe: 'Every thread sums ceil_div(q_len(b), 128) over cu_seqlens and multiplies by head_count, giving the item total T_all that bounds the ticket space'}
+                  item_coord: {execution_mode: serial, describe: 'Map ticket to work = T_all-1-ticket, h = work mod head_count, rem = work div head_count; walk cu_seqlens for b, i0, nrows, kv_len; then kvh, hi, ntot'}
+                  softmax: {execution_mode: serial, describe: 'Own-row TMEM scores, scaled by kst and masked unless a warp-uniform lane-0 vote passes; advance m_run/l_run, pack p_packed, publish the alpha vote'}
+                  o_rescale: {execution_mode: serial, describe: 'Warps voting alpha != 1 rescale their o_run rows via o_window; a fenced barrier on any rescale, always on the last tile, publishes o_run and weights'}
+                matmul:
+                  q_image@k_image: {execution_mode: async_unordered, describe: 'Elected thread: 8 chained depth-16 UMMAs, A = q_image, B = the k_image slot, FP32 into the score stage, first step overwriting; commits the QK bar'}
+                  p_bf16@v_image: {execution_mode: async_unordered, describe: 'Elected thread: 4 chained depth-16 UMMAs, A = TMEM weights, B = v_image slot, FP32 into o_run, first of the item overwriting; commits the PV bar'}
+                load:
+                  q_tile: {execution_mode: serial, describe: 'Each thread stages its share of the 128 query rows: read the BF16 row at token q_start(b)+i0+r, head h, widen to FP16 into q_image; rows >= nrows zero'}
+                  page_meta: {execution_mode: async_unordered, describe: 'Block-table entry of one key row into bt_regs, clamped into [0, kv_len); the source fetch one past the item end is dropped as unconsumed'}
+                  kv_raw: {execution_mode: async_unordered, describe: 'Interleaved 8-byte K and 4-byte V chunk loads of the valid rows into raw_kv, addressed from bt_regs; the row leader loads the scales into raw_scales'}
+                store:
+                  kv_image: {execution_mode: serial, describe: 'Convert raw_kv into stage g%2: K exact FP16, V BF16 with the scale folded in FP32; zero keys >= nvalid; publish kst; done covers the fenced barrier'}
+                  p_bf16: {execution_mode: serial, describe: 'Store the own-row packed weights from p_packed into TMEM stage g%2 columns [0, 32), overwriting its scores; the site barrier publishes them CTA-wide'}
+                  attention_out: {execution_mode: serial, describe: 'After the last PV wait and fence, form inv = rcp(l_run), read the own o_run row through o_window and write packed bf16(o_run * inv) for rows < nrows'}
+                await:
+                  qk_done: {execution_mode: serial, describe: 'Wait the QK mbarrier of stage g%2 at phase floor(g/2) mod 2, counted across items; done means scores complete and q/k image reads finished'}
+                  pv_done: {execution_mode: serial, describe: 'Wait the PV mbarrier of stage g%2 at phase floor(g/2) mod 2; done releases the k/v image slot, the TMEM weight region and o_run for overwrite'}
+                acquire:
+                  ticket: {execution_mode: serial, describe: 'Thread 0 takes the next ticket atomically into a shared word, published by a barrier; ticket >= T_all fails (ticket_exhausted), no TMEM allocated'}
+                  tmem: {execution_mode: serial, describe: Elected thread initializes the four single-arrival mbarriers with a release fence; warp 0 allocates 256 TMEM columns; a barrier publishes the base}
+                release: {tmem: {execution_mode: serial, describe: 'After a CTA barrier ensuring every TMEM load landed and every committed mma was awaited, warp 0 returns the 256 TMEM columns'}}
+            Pipe:
+              - compute:item_count
+              - acquire:ticket(0)
+              - if (ticket(0) < T_all):
+                  - acquire:tmem
+                  - for(t):
+                      - if (t > 0):
+                          - acquire:ticket(t)
+                      - compute:item_coord(t)
+                      - load:q_tile(t)
+                      - load:page_meta(0)
+                      - load:kv_raw(0)
+                      - if (ntot > 1):
+                          - load:page_meta(1)
+                      - store:kv_image(0)
+                      - matmul:q_image@k_image(0)
+                      - for(i):
+                          - if (i + 1 < ntot):
+                              - load:kv_raw(i+1)
+                          - if (i + 2 < ntot):
+                              - load:page_meta(i+2)
+                          - await:qk_done(i)
+                          - compute:softmax(i)
+                          - store:p_bf16(i)
+                          - if (i > 0):
+                              - await:pv_done(i-1)
+                          - if (i + 1 < ntot):
+                              - store:kv_image(i+1)
+                              - matmul:q_image@k_image(i+1)
+                          - compute:o_rescale(i)
+                          - matmul:p_bf16@v_image(i)
+                      - await:pv_done(ntot-1)
+                      - store:attention_out(t)
+                  - release:tmem
+            Waiting:
+              Prepared:
+                - '{issue load:kv_raw(0)} ← [{done load:page_meta(0)}]'
+                - '{issue load:kv_raw(i+1)} ← [{done load:page_meta(i+1)}]'
+                - '{issue store:kv_image(0)} ← [{done load:kv_raw(0)}]'
+                - '{issue store:kv_image(i+1)} ← [{done load:kv_raw(i+1)}]'
+                - '{issue matmul:q_image@k_image(0)} ← [{done load:q_tile(t)}, {done store:kv_image(0)}]'
+                - '{issue matmul:q_image@k_image(i+1)} ← [{done store:kv_image(i+1)}]'
+                - '{issue matmul:p_bf16@v_image(i)} ← [{done store:kv_image(i+1)}, {done compute:o_rescale(i)}]'
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: 'tcgen05.mma (UMMA, cta_group 1, kind f16) issued by one elected thread: shared-memory descriptors for both QK operands, the A-from-TMEM form for PV, each chain committed to a per-stage mbarrier initialized to a single arrival and published with a release fence'
+      Reason: The Design keeps scores, weights and the accumulator in TMEM and hangs every completion on the mbarrier phase floor(g/2) of its stage; a warp-collective multiply or another completion protocol would change the roles, the storage account and every await edge
+    - Item: DESIGN.Tile_pipeline::MAIN.Storage.score_p
+      Choice: tcgen05.ld / tcgen05.st in the 32x32b warp shape with their waits, so each thread reads and rewrites exactly its own TMEM lane row and the packed weight store lands in the A-operand fragment
+      Reason: The per-thread row ownership that removes every cross-lane reduction from the softmax, and the in-place score-to-weight overwrite of one stage, depend on this mapping
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: fence.proxy.async.shared::cta plus tcgen05.fence before and after thread sync around each conversion-site and correction-site CTA barrier
+      Reason: The elected issuer reads through the async proxy the shared and TMEM images that all four warps wrote through the generic proxy; a plain barrier orders threads but not the two proxies
+    - Item: DESIGN.Work_schedule::MAIN.Mapping
+      Choice: Launch 128 threads per CTA with 100008 bytes of dynamic shared memory, raised by a one-time function attribute against the 232448-byte budget; the TMEM allocation is 256 columns and the source records 183 registers per thread
+      Reason: slots = 2*sms and the persist grid follow from the two-CTA-per-SM residency that the shared budget (200016 of 232448 bytes), the TMEM budget (512 of 512 columns) and the register file independently allow
+    - Item: DESIGN.Work_schedule::MAIN.Schedule
+      Choice: The ticket counter is a one-time cudaMalloc-ed 32-bit device word, zeroed by a cudaMemsetAsync on the launch stream immediately before every submission; the in-CTA ticket rides a word of the dynamic shared region
+      Reason: The int-only ABI carries no scratch tensor; the allocation runs on the first direct launch, never during capture, and capture records the memset as a graph node so every replay re-arms the ticket
+    - Item: DESIGN.Work_schedule.Flow.Launch
+      Choice: Record the submission, the ticket memset then the single kernel launch, once per input binding into a CUDA graph on a private non-blocking stream after the direct launch, and replay on the current stream; launch directly if that stream is itself capturing
+      Reason: A replay re-runs the same kernel over the current buffer contents with the recorded counter pointer, which the binding cache keeps alive; nothing numerical is cached
+    - Item:
+        - DESIGN.Math_reshape::Online softmax in the log2 domain
+        - DESIGN.Math_reshape::Normalization and in-place output
+      Choice: ex2.approx.ftz.f32 for every power of two and rcp.approx.ftz.f32 for the final reciprocal, as explicit PTX because the build carries no fast-math flag; no FTZ or fast-math change to the surrounding FP32 arithmetic
+      Reason: The declared error bounds, the exact zero for very negative arguments and the bit-exact alpha == 1 test are what the masked recurrence, the first-tile self-initialization and the rescale skip rely on
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: Branch the per-item prologue on the global tile parity into two literal-stage bodies so the stage index, the barrier and the TMEM column constant-fold
+      Reason: A dynamic stage index shifted the instruction schedule even for even-parity items and measured 0.7 to 1.3 percent slower on the sibling kernels; the branch is CTA-uniform and taken once per item
+  Forbid:
+    - Item: DESIGN.Tile_pipeline::MAIN.Storage
+      Choice: Any static __shared__ variable in this kernel, including a static ticket word
+      Reason: A static shared variable shifts the extern dynamic shared base off 16-byte alignment and the 14-bit addr>>4 field of the UMMA shared descriptor silently truncates, which measured as corrupted output on every tc prefill shape with identical static-path code
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: Weakening the conversion-site or correction-site CTA barrier into split named arrive/sync barriers
+      Reason: Whether the correction barrier runs is decided by OR-ing the rescale votes of every warp, CTA-uniform only because the conversion-site barrier published the votes; the split form deadlocked on a real geometry and deletion probes priced the barriers at -0.01 to -0.44 percent

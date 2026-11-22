@@ -1,0 +1,177 @@
+META_DATA:
+  Name: bf16_nvfp4_gemm
+  Describe: Dense GEMM of BF16 activations against NVFP4 weights with per-group E4M3 scales, optionally alpha-scaled, FP32-accumulated, with BF16 output
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu::smv9::w4a16_smv9_kernel
+  Version: 3
+  Dispatch:
+    id: weight_band_mma
+    when: Up to 16 activation rows, m <= 16, with mpad = min(m, 16) token rows staged per k block and every token at or above m dropped at writeback. Needs the source compute capability 10.3 gate, bulk tensor-map copies, warp-scope BF16 matrix multiply and 82304 bytes of dynamic shared memory per CTA for two co-resident CTAs; no cluster, tensor memory, global workspace or second submission. Contract n and k already make the 32-row band partition and the 256-element k blocks exact
+DESIGN:
+  Math_reshape:
+    Thesis: Keep Contract's operand values exactly, the decoded BF16 weight equalling w element by element with no table, so the only numerical change is how the k reduction is associated. Swapping the operands lets one worker own a 32-row weight band against a fixed 16-token block
+    Rewrite:
+      - Name: Decode weight bytes into exact BF16 operands
+        Math: |
+          No table is built: Contract's code(j, l) and e2m1 are evaluated by the hardware E2M1
+          and E4M3 converters and the group scale enters as an F16 value. For 0 <= j < n and
+          0 <= l < k, with g = l // scale_block:
+            sc(j, g) = f16(b_descale[j, g])
+            e(j, l) = f16(e2m1(code(j, l)))
+            wq[j, l] = bf16(e(j, l) * sc(j, g))
+          The two elements sharing one packed byte are decoded and scaled together. wq[j, l]
+          equals Contract's w[j, l], so wq replaces w below. Only the 16-element group being
+          consumed is formed, and no part of it is needed after that group's product.
+        Symbol: {wq: {meaning: BF16 weight operand of B with the same value as w, shape: [{n: n}, {k: k}], dtype: bf16}}
+        Arithmetic:
+          Accumulate: The scale multiply runs in F16 with one RNE rounding, not FP32; e2m1 times e4m3 needs <= 6 bits, so it and the BF16 narrowing are exact
+        Ledger:
+          Baseline: Weight_dequantization of Contract evaluated per element in FP32 at each use, with no BF16 weight operand formed
+          Gain: Per weight element one FP32 multiply becomes half a packed F16 multiply, and products move to the BF16 matrix path with no table or smem buffer
+          Cost: Decoded operands take 2 bytes per element against 0.5 packed and live in registers, 32 BF16 per thread per k block, all live before any product
+      - Name: Swap operands and merge four FP32 quarter chains
+        Math: |
+          group_count = k / scale_block; group g covers [16*g, 16*g + 16). Contract makes k a
+          multiple of 256, so group_count = 16 * block_count, block_count being bound below to the
+          k block count of the work schedule. quarter_count = 4 is this design's fixed split:
+          quarter q owns the groups g = 16*t + 4*q + u over every k block t = 0..block_count-1 and
+          u = 0..3, walked in ascending r = 4*t + u over [0, 4*block_count), which fixes t, u and g.
+          The product is oriented with weight rows as rows and tokens as columns, so the accumulator
+          is indexed [j][i] and the operand block covers mp token positions, m <= mp. With s = alpha[0] if alpha is not None else 1 and acc(q, -1) the n x m FP32 zero value, for q = 0..quarter_count-1:
+            acc(q, r) = mma32(wq[:, 16*g:16*g + 16], a[:, 16*g:16*g + 16]ᵀ, acc(q, r-1))
+            part[q] = acc(q, 4*block_count - 1);  total = part[0] + ((part[1] + part[2]) + part[3])
+            out[i, j] = bf16(s * total[j, i])   for 0 <= i < m and 0 <= j < n
+        Symbol:
+          mp: {meaning: Token positions in one matrix operand block, binding: 'bind:DESIGN.Work_schedule::mp'}
+          block_count: {meaning: k blocks walked over the whole reduction, binding: 'bind:DESIGN.Work_schedule::k_tile_count'}
+          acc: {meaning: 'FP32 accumulator of one k quarter, rows by tokens', shape: [{n: n}, {m: m}], dtype: fp32, retention: 'carry_forward (q,j,i); r=-1..4*block_count-1'}
+          part: {meaning: FP32 partial product of one k quarter per element, shape: [{quarter: quarter_count}, {n: n}, {m: m}], dtype: fp32, retention: keep_value invocation}
+        Arithmetic:
+          Accumulate: Each quarter spans all k in ascending (t,u) and merges in the fixed order above, so k is reassociated; the source calls it tolerance-safe, unverified
+        Ledger:
+          Baseline: Scaled_product_and_writeback of Contract evaluated as one FP32 sum over the whole k per output element, oriented as out[i, j]
+          Gain: FP32 vector MACs m*n*k -> 0, the same MACs on the matrix unit in 16-element groups; the accumulator chain shortens to group_count/4 plus 3 adds
+          Cost: 3 extra FP32 partials per element staged for the merge; for m < mp the products of the mp - m padded token positions are computed and dropped
+  Work_schedule:
+    Thesis: One CTA owns a 32-row weight band across all k and tokens, so no partial result leaves the worker and no workspace or second submission is needed. The grid is the band count, one band per CTA. The narrow band doubles the CTA count and fills thin-m shapes, but each band restreams the same activations
+    Step:
+      MAIN:
+        Describe: Compute the 32 output columns of one weight band for every token over the whole k, decoding its packed weights and writing out transposed
+        Decomposition:
+          Strategy: bk = 256; k_tile_count = k / bk; mp = 16; mpad = min(m, mp). m <= mp so m is no partition axis, and Contract n and k leave no n or k tail
+          Partition: {n: {meaning: Block of weight rows forming the output columns, size: n, tile: 32}}
+          Worktile:
+            Iteration:
+              w_block: {meaning: Packed weight bytes of one k block of this band, shape: [{n: 32}, {k_byte: 128}], dtype: 'ref:CONTRACT.Algorithm_requirement::b.dtype', direction: ascending}
+              scale_block: {meaning: Weight group scales of one k block of this band, shape: [{n: 32}, {k_group: 16}], dtype: 'ref:CONTRACT.Algorithm_requirement::b_descale.dtype', direction: ascending}
+              a_block: {meaning: 'Activation rows of one k block, whole token range', shape: [{m: mp}, {k: bk}], dtype: 'ref:CONTRACT.Algorithm_requirement::a.dtype', direction: ascending}
+          Target:
+            Single_tile: {out_band: {meaning: Column block of out that this worktile writes, shape: [{m: m}, {n: 32}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: worktile_count
+        Schedule:
+          Worktile_order: [{by: n, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: One producer lane issues every bulk copy while eight warps decode, multiply and release, keeping eight weight slots and four activation slots ahead. Swapped operands keep decoded values in registers, but the four-way k split needs a staged merge behind one CTA barrier and two warps write out
+    Step:
+      MAIN:
+        Index: {t: {meaning: k block walked by this worktile, definition: [0, k_tile_count]}}
+        Storage:
+          w_ring: {meaning: Staged packed weight bytes of one k block, depth: 8, location: smem, shape: [{n: 32}, {byte_pitch: 128}],
+            dtype: uint8, total_size: 8*32*128, view: {w_block(t): {slot_index: t%8}}}
+          sf_ring: {meaning: Staged weight group scales of one k block, depth: 8, location: smem, shape: [{n: 32}, {k_group: 16}],
+            dtype: fp8_e4m3fn, total_size: 8*32*16, view: {scale_block(t): {slot_index: t%8}}}
+          a_ring: {meaning: Staged activation rows of one k block, depth: 4, location: smem, shape: [{m: mp}, {k: bk}],
+            dtype: bf16, total_size: 4*16*256*2, view: {a_block(t): {slot_index: t%4}}}
+          wq_frag: {meaning: Decoded BF16 weight operand of one k block, depth: 1, location: register, shape: [{thread: 256}, {value: 32}],
+            dtype: bf16, total_size: 256*32*2}
+          acc: {meaning: FP32 quarter partial accumulators of this band, depth: 1, location: register, shape: [{thread: 256}, {value: 16}],
+            dtype: fp32, total_size: 256*16*4, view: {part(q): {region: {thread: [64*q, 64*q + 64]}}}}
+          stg: {meaning: Staged partials of the three non-merging quarters, depth: 1, location: smem, shape: [{quarter: 3}, {thread: 64}, {value: 16}],
+            dtype: fp32, total_size: 3*64*16*4, view: {part(q): {region: {quarter: [q-1, q]}}}}
+        Role:
+          LOAD:
+            Info:
+              Describe: Issue every bulk copy that fills the weight, scale and activation rings of this worktile
+              Member: warp[8:9]
+              Using_verb:
+                load:
+                  w_block: {execution_mode: async_unordered, describe: Bulk tensor-map copy of the 32 packed weight rows of this band for k block t from b into slot t%8 of w_ring; done means all warps can read the slot}
+                  scale_block: {execution_mode: async_unordered, describe: Bulk tensor-map copy of the 16 group scales of those rows for k block t from b_descale into slot t%8 of sf_ring; armed together with w_block(t)}
+                  a_block: {execution_mode: async_unordered, describe: Four tensor-map copies of 64 activations each over the 256 k of block t fill the mpad token rows of slot t%4 of a_ring; higher rows keep old content}
+            Pipe:
+              - for(t):
+                  - load:w_block(t)
+                  - load:scale_block(t)
+                  - load:a_block(t)
+            Waiting:
+              Released:
+                - '{issue load:w_block(t)} ← [{done MMA[*]::release:w_slot(t - 8)}]'
+                - '{issue load:scale_block(t)} ← [{done MMA[*]::release:w_slot(t - 8)}]'
+                - '{issue load:a_block(t)} ← [{done MMA[*]::release:a_slot(t - 4)}]'
+          MMA:
+            Info:
+              Describe: Decode the weight operand, accumulate every k block and hand the quarter partials to the merge; warp w takes sub-band w mod 2 and k quarter w div 2
+              Member: warp[0:8]
+              Using_verb:
+                compute: {wq_frag: {execution_mode: serial, describe: 'Decode w_block(t) and scale_block(t) into wq_frag by step 1 of DESIGN.Math_reshape, all four groups of this k block at once before any product'}}
+                matmul: {wq_frag@a_block: {execution_mode: serial, describe: 'Accumulate wq_frag against the token operand a_block(t) of a_ring into this warp part[q] region of acc, this block four groups ascending per step 2'}}
+                store: {part: {execution_mode: serial, describe: 'Leave this warp part[q] in the stg region indexed q-1; the two quarter-0 warps write nothing, and done covers CTA-wide visibility of the writes made'}}
+                release:
+                  w_slot: {execution_mode: serial, describe: Return slot t%8 of w_ring and sf_ring once this warp has read every weight byte and scale of that slot it uses}
+                  a_slot: {execution_mode: serial, describe: Return slot t%4 of a_ring once the products of this warp have read every activation row of that slot they use}
+            Pipe:
+              - for(t):
+                  - compute:wq_frag(t)
+                  - matmul:wq_frag(t)@a_block(t)
+                  - release:w_slot(t)
+                  - release:a_slot(t)
+              - store:part
+            Waiting:
+              Prepared:
+                - '{issue compute:wq_frag(t)} ← [{done LOAD::load:w_block(t)}, {done LOAD::load:scale_block(t)}]'
+                - '{issue matmul:wq_frag(t)@a_block(t)} ← [{done LOAD::load:a_block(t)}]'
+          EPI:
+            Info:
+              Describe: Merge the four quarter partials of this band and write its output columns
+              Member: warp[0:2]
+              Using_verb:
+                compute: {total: {execution_mode: serial, describe: 'Add the part[1] to part[3] copies in stg to the own part[0] in acc in the merge order of step 2, giving total for the 16 rows and 16 tokens held'}}
+                store: {out_band: {execution_mode: serial, describe: 'Read the scalar s from alpha and write bf16(s * total) into out transposed, one element per token and weight row; only tokens below m are written'}}
+                await: {staged: {execution_mode: serial, describe: 'Wait until the part store of every warp is complete and readable CTA-wide; the source barrier also admits the producer warp, which publishes nothing'}}
+            Pipe:
+              - await:staged
+              - compute:total
+              - store:out_band
+            Waiting:
+              Prepared: ['{done await:staged} ← [{done MMA[*]::store:part}]']
+REALIZATION:
+  Require:
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: One plain launch of n / 32 CTAs of 288 threads with 82304 bytes of dynamic shared memory on the caller current stream, raising the per-function limit once and declaring a two-CTA-per-SM bound; no attributes, events, clusters or global workspace
+      Reason: Flow declares one submission with no start_after, so stream order is the only completion relation; 82304 bytes exceeds the 48 KB default dynamic shared memory limit and the two-CTA bound keeps the eight-deep weight ring resident
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: Accept the source replay layer, so from the second call with the same pointers, sizes and resolved configuration the one kernel is submitted as an instantiated CUDA graph replay; capture executes nothing and a failed capture falls back to one plain launch
+      Reason: Recording adds no work, so every call still submits exactly one kernel and completion stays stream order; a binding that skipped or duplicated the launch would break the single submission Flow declares
+    - Item: DESIGN.Tile_pipeline::MAIN.LOAD
+      Choice: Bulk tensor-map copies into shared memory with a transaction-byte count armed per slot before its boxes, one count covering the weight and scale boxes together and one the four activation boxes, the activation box being mpad rows tall
+      Reason: The loads promise CTA-wide readability while one producer lane issues them, which only a byte-counted completion gives; sizing the activation box to mpad keeps every copy in bounds without relying on an out-of-bounds fill
+    - Item: DESIGN.Tile_pipeline::MAIN.MMA
+      Choice: A warp-scope synchronous BF16 m16n8k16 matrix multiply with FP32 accumulate, and a slot release of one arrival per warp at a count-eight barrier placed after the last read of that slot by the warp
+      Reason: release:w_slot and release:a_slot sit in pipe order right after the products with serial mode, so their done must already cover the operand reads; an asynchronous matrix unit would need a separate completion mechanism before refilling the rings
+    - Item: DESIGN.Tile_pipeline::MAIN.EPI
+      Choice: One CTA-wide barrier between the part stores and the merge
+      Reason: store:part promises CTA-wide visibility while six of the eight warps write stg and only the two quarter-0 warps read it, so the staged partials are readable across warps only at a barrier
+  Prefer:
+    - Item: DESIGN.Math_reshape::wq
+      Choice: Packed hardware conversions for the decode, one E2M1 pair and one duplicated E4M3 scale to F16x2, multiplied in F16x2 and narrowed to BF16x2, giving two weight operands per instruction; keep the values and the single F16 rounding
+      Reason: Halves the decode instruction count for products step 1 of DESIGN.Math_reshape already fixes as exact, and needs no decode table in shared memory
+    - Item: DESIGN.Tile_pipeline::MAIN.MMA
+      Choice: Decode all four 16-element groups of a k block into registers before issuing any of the products of that block
+      Reason: Turns four dependent shared-memory read and convert chains into one batch ahead of the multiply stream, at 16 extra live registers per thread that the two-CTA-per-SM budget still allows

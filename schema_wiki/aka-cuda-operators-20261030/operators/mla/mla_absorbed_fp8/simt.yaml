@@ -1,0 +1,173 @@
+META_DATA:
+  Name: mla_absorbed_fp8
+  Describe: Absorbed MLA attention over FP8 E4M3 paged Q/KV with bottom-right causal masking, writing BF16 output and optional FP32 natural-log lse in place
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/candidate/kernel_simt.cuh::mla_v0_launch
+  Version: 2
+  Dispatch:
+    id: simt
+    when: >-
+      Calls whose implementation resolves to the SIMT path: MLA_FORCE_IMPL is v0, or it is not v1 and the device reports a compute capability other than 10.0, 10.1 and 10.3. Every such call takes this design over the whole Contract domain: it reads no workspace_buffer, applies no split policy, needs no tensor core, dynamic shared memory or SM10x feature, and its kernel has no build-time variant knob
+DESIGN:
+  Math_reshape:
+    Thesis: >-
+      FP32 SIMT evaluation with no tensor core, shared staging or probability quantisation: the Contract dot product splits into 32 chains of 18 terms merged by an all-reduce, and a per-key online softmax keeps FP32 weights against widened FP8 values, so only the bf16 output narrowing loses precision
+    Rewrite:
+      - Name: Chain-split score with a balanced all-reduce
+        Math: |
+          One work item is one (token, head) pair: packed row t, head h, request b, index i, and the Contract's visible_key_set(b, i) of visible_count keys. q_wide[d] and k_wide(j)[d] are the exact FP32 forms of query[t, h, d] and of the Contract's k_row(b, j)[d]. The head_dim terms of s[j] split into 32 chains g in [0, 32), chain g owning
+            chain_dims(g) = {16g, ..., 16g+15} ∪ {512+2g, 512+2g+1}
+          which partitions [0, head_dim) into 32*18 = 576 dims, 16 from the value prefix and 2 from the rope suffix:
+            partial(g)[j] = sum_{d in chain_dims(g)} q_wide[d]*k_wide(j)[d], the 2 rope terms first then the 16 ascending prefix terms
+            merge(0,g) = partial(g)[j];  merge(l+1,g) = merge(l,g) + merge(l, g xor 2^(4-l)) for l = 0..4
+            s[j] = bmm1_scale * merge(5,g), the same value for every g
+          bmm1_scale multiplies the reduced sum once and never enters a chain product, and E4M3 widening to FP32 is exact, so this is the Contract's Attention_scores with a different summation grouping.
+        Symbol: {q_wide: {meaning: FP32 form of this work item query row, shape: [{dim: head_dim}], dtype: fp32, retention: 'keep_value (token,head)'}}
+        Arithmetic:
+          Accumulate: The head_dim products of one key form 32 serial 18-term FP32 chains, merged by a 5-round balanced xor tree; the grouping is not a serial sum
+        Ledger:
+          Baseline: Contract s[j] = bmm1_scale * sum_d query*k_row as one serial FP32 chain of head_dim multiply-adds per (row, key)
+          Gain: Serial chain length per key head_dim -> 18 products plus 5 merge rounds, and the score lands in all 32 chains with no broadcast
+          Cost: 5 cross-chain merge rounds per key, 5*visible_count per work item, and a redundant copy of the same score in all 32 chains
+      - Name: Per-key online softmax in the natural domain
+        Math: |
+          Carried per work item over its keys j = 0 .. visible_count-1, from m_run(-1) = -inf and d_run(-1) = 0:
+            m_run(j) = max(m_run(j-1), s[j])
+            safe(j) = 0 when m_run(j) = -inf, else m_run(j)
+            r(j) = exp(m_run(j-1) - safe(j));  w(j) = exp(s[j] - safe(j))
+            d_run(j) = d_run(j-1)*r(j) + w(j)
+          visible_count >= 1 and every s[j] is finite, so m_run(j) is finite for every j >= 0: safe(j) = m_run(j) always and its 0 branch is never taken, defensive like the d_run > 0 test of the normalisation step, while m_run(-1) = -inf gives r(0) = 0 and w(0) = 1, turning the untouched initial state into the first key's own contribution. After the last key m_run is the Contract's m and d_run its z, so w(j) is the Contract's unnormalised exp(s[j] - m) measured against a running maximum instead of the final one, and r(j) rescales the carried state to that new maximum. exp is the natural exponential: no base change, prescale or quantised weight appears here.
+        Symbol:
+          m_run: {meaning: Running maximum of the row scores, shape: [], dtype: fp32, retention: 'carry_forward (token,head); j=-1..visible_count-1'}
+          d_run: {meaning: Running unnormalised denominator, shape: [], dtype: fp32, retention: 'carry_forward (token,head); j=-1..visible_count-1'}
+        Arithmetic:
+          Approx: 'exp is the device FP32 expf and the build adds no fast-math or ftz flag; unknown: no bound in the source and no measured error for this path'
+        Ledger:
+          Baseline: 'Contract Softmax_output: the row maximum, then the denominator, then the weighted value sum, each over all visible keys'
+          Gain: One pass over the keys, so each key row is gathered once instead of once per reduction and no visible_count-long score array exists
+          Cost: 2 exponentials per key instead of 1, and d_run with every accumulator element is re-rounded at each of the visible_count keys
+      - Name: Chain-private value accumulation
+        Math: |
+          Chain g owns the output dims block(g) = {16g, ..., 16g+15}; the 32 blocks partition [0, value_dim) and the rope dims of a key row are not output dims. Carried over the keys of the work item and zero before the first:
+            o_un(-1)[c] = 0
+            o_un(j)[c] = o_un(j-1)[c]*r(j) + w(j)*k_wide(j)[c] for c in block(g)
+          so after the last key, for every c in [0, value_dim),
+            o_un[c] = sum_{j in visible_key_set(b,i)} exp(s[j] - m_run) * v_row(b,j)[c] = d_run * o_acc[c]
+          with o_acc the Contract's weighted accumulation: the value bytes are the Contract's v_row alias of the gathered key row, already widened for the score, so no second gather exists. Each output dim has exactly one accumulating chain, so no cross-chain merge and no tail regrouping is needed.
+        Symbol: {o_un: {meaning: Unnormalised accumulation of the row outputs, shape: [{dim: value_dim}], dtype: fp32, retention: 'carry_forward (token,head); j=-1..visible_count-1'}}
+        Ledger:
+          Baseline: The value rows gathered apart from the keys, and all value_dim accumulators of a row held by one worker
+          Gain: Value bytes reuse the key gather, so a key row is read once; a chain holds 16 FP32 accumulators with no shared staging
+          Cost: The rescale adds one FP32 multiply per output dim per key, value_dim*visible_count per work item, and the accumulators die with it
+      - Name: Normalisation, sink merge and output narrowing
+        Math: |
+          With o_un, m_run and d_run at their last-key values: inv_d = 1/d_run when d_run > 0, else 0, defensive since the largest weight is 1 and d_run >= 1
+            base_lse = m_run + ln(d_run), the natural logarithm
+            sinks None: renorm = 1 and attention_lse[t, h] = base_lse
+            else with sink = sinks[h] and g = max(base_lse, sink):
+              attention_lse[t, h] = g + ln(exp(base_lse - g) + exp(sink - g))
+              renorm = exp(base_lse - attention_lse[t, h])
+            combined = inv_d*bmm2_scale*renorm
+            attention_output[t, h, c] = bf16(o_un[c]*combined) for 0 <= c < value_dim
+          d_run is the Contract's z, so base_lse is its m + ln(z), renorm its renorm and o_un*inv_d its o_acc; combined folds the Contract's three output factors into one FP32 multiplier. All 32 chains derive identical inv_d, base_lse, renorm and combined from their identical m_run and d_run, narrow their own 16 dims with RNE, and one chain writes attention_lse
+        Symbol: {combined: {meaning: Single factor turning o_un into output, shape: [], dtype: fp32}}
+        Arithmetic:
+          Approx: 'ln and the sink merge use the device FP32 logf and expf; unknown: no bound in the source and no measured error for this path'
+        Ledger:
+          Baseline: 'Contract Output_values: p[j] = exp(s[j]-m)/z per key, then attention_output = bf16(bmm2_scale*renorm*o_acc)'
+          Gain: One division per work item instead of one per key, and each output dim takes one multiply by combined instead of separate factors
+          Cost: The fold changes rounding, one multiply by ((1/d_run)*bmm2_scale)*renorm per dim instead of the three separate factors
+  Work_schedule:
+    Thesis: >-
+      One warp owns one (query row, head) pair and scans its whole visible range, so the softmax state and all value_dim accumulators stay in registers, every output has one writer and no cross-worker merge exists; work items are single rows with unequal causal key ranges and nothing rebalances them
+    Step:
+      MAIN:
+        Describe: >-
+          Compute attention_output and attention_lse when provided for one packed (query row, head) pair over every key that row can see
+        Decomposition:
+          Strategy: >-
+            worktile <-> (row, head) flattened as row*head_count + head; each warp resolves b and i from uniform_query_length or by scanning cum_seq_lens_q
+          Partition:
+            row: {meaning: One packed query token row, size: total_query_count, tile: 1}
+            head: {meaning: One query head on the single kv head, size: head_count, tile: 1}
+          Worktile:
+            Invariant:
+              query_row: {meaning: FP8 query row of this work item, shape: [{dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::query.dtype'}
+              page_table_row: {meaning: Page ids of the row request, shape: [{entry: table_stride}], dtype: 'ref:CONTRACT.Algorithm_requirement::block_tables.dtype'}
+            Iteration: {kv_row: {meaning: Key j and its aliased value row, shape: [{dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::kv_cache.dtype', direction: ascending}}
+          Target:
+            Single_tile:
+              output_row: {meaning: 'attention_output of this (row, head)', shape: [{dim: value_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::attention_output.dtype'}
+              lse_value: {meaning: 'attention_lse of this pair, when provided', shape: [], dtype: 'ref:CONTRACT.Algorithm_requirement::attention_lse.dtype'}
+        Mapping:
+          Strategy: >-
+            One warp per work item: its 32 chains split head_dim and value_dim as the math fixes, so no shared storage and no CTA-wide resource is needed
+          Worker: {unit: warp, unit_count: 1}
+          Worker_count: total_query_count*head_count
+        Schedule:
+          Strategy: >-
+            Each worktile is preassigned to its own warp with no refill; visible_count grows with i, so later rows run longer and nothing rebalances them
+          Worktile_order: [{by: [row, head], direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: [assigned_done]
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: >-
+      A single synchronous role: no asynchronous copy, barrier, double buffer or prefetch exists, so each key gather, score reduction, softmax step and accumulation completes before the next key is issued. Latency is hidden only by other resident warps, not by overlap inside a work item
+    Step:
+      MAIN:
+        Index: {j: {meaning: Key position in this work item visible range, definition: [0, visible_count]}}
+        Storage:
+          reg_q: {meaning: Query row widened to FP32 once per work item, depth: 1, location: register, shape: [{dim: head_dim}],
+            dtype: fp32, total_size: 2304, view: {q_wide: {}}}
+          reg_kv: {meaning: 'FP8 bytes of one key row, single slot', depth: 1, location: register, shape: [{dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 576, view: {k_row(j): {}}}
+          reg_acc: {meaning: Unnormalised output accumulation of the row, depth: 1, location: register, shape: [{dim: value_dim}],
+            dtype: fp32, total_size: 2048, view: {o_un: {}}}
+          reg_state: {meaning: 'Row softmax state, identical in all 32 chains', depth: 1, location: register, shape: [{stat: 2}],
+            dtype: fp32, total_size: 8, view: {m_run: {region: {stat: [0, 1]}}, d_run: {region: {stat: [1, 2]}}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: >-
+                The work item warp: gathers each key, forms the score, advances the online softmax and the accumulators, then writes the row output and lse
+              Member: warp[0:1]
+              Using_verb:
+                compute:
+                  score: {execution_mode: serial, describe: 'Form the 18-term chain partials of q_wide and k_row(j) and merge them by the 5-round xor all-reduce, leaving s[j] identical in every chain'}
+                  softmax: {execution_mode: serial, describe: 'Advance m_run and d_run in reg_state from s[j] by the online softmax recurrence, giving this key rescale r(j) and weight w(j)'}
+                  accumulate: {execution_mode: serial, describe: Each chain rescales and accumulates its own 16 output dims of o_un in reg_acc with w(j) against the value bytes of k_row(j)}
+                  row_scale: {execution_mode: serial, describe: 'From the final d_run, m_run, bmm2_scale and sinks compute inv_d, base_lse, the log-domain sink merge, renorm and combined'}
+                load:
+                  q_row: {execution_mode: serial, describe: 'Read the head_dim FP8 query bytes of this (row, head) into reg_q as q_wide, each of the 32 chains taking its own 16 prefix dims and 2 rope dims'}
+                  kv_row: {execution_mode: serial, describe: 'Resolve key j by the Contract Paged_kv_lookup and read its head_dim FP8 bytes into reg_kv, 18 dims per chain; the first value_dim bytes are v_row'}
+                store:
+                  o_row: {execution_mode: async_unordered, describe: 'Scale the 16 chain dims of o_un by combined, narrow them to bf16 and write them to their own dims of attention_output, once per row'}
+                  lse: {execution_mode: async_unordered, describe: 'Write base_lse to the attention_lse entry of this row and head from one chain, a single writer; with no lse buffer it writes nothing'}
+            Pipe:
+              - load:q_row
+              - for(j):
+                  - load:kv_row(j)
+                  - compute:score(j)
+                  - compute:softmax(j)
+                  - compute:accumulate(j)
+              - compute:row_scale
+              - store:o_row
+              - store:lse
+REALIZATION:
+  Require:
+    - Item: DESIGN.Work_schedule::MAIN.Mapping
+      Choice: Launch ceil_div(total_query_count*head_count, 8) CTAs of 256 threads with 0 dynamic shared memory, and retire the surplus warps of the last CTA by a warp-uniform test before any input read
+      Reason: Worker_count counts only warps that own a work item, so the eight-warp packing and its idle warps are launch scale; the test must be warp-uniform to keep all 32 chains converged for the all-reduce, and 0 dynamic shared memory leaves residency bounded by registers and warp slots
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: Realise the 32 chains as the 32 lanes of the warp and merge them with five xor warp shuffles of stride 16, 8, 4, 2, 1 under an all-lane mask
+      Reason: The xor form is an all-reduce, so every chain holds the same score; each chain then advances its own m_run and d_run and one chain writes attention_lse, which needs identical scores
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: Read the 18 dims each chain owns as one 16-byte vector plus one 2-byte vector for the query row and every key row; head_dim = 576 keeps every row offset 16-byte aligned
+      Reason: The per-key path is serial with no prefetch, so two row memory instructions per chain per key instead of 18 scalar byte loads keep issue latency off the recurrence; the page-table entry read stays a separate access
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: Narrow and write the 16 output dims of a chain as eight bf16x2 pairs with round-to-nearest-even, keeping the narrowing the math declares
+      Reason: Halves the store instruction count against 16 separate 2-byte writes per chain on a path whose epilogue runs once per row

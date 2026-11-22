@@ -1,0 +1,387 @@
+META_DATA:
+  Name: fmha_fp8_per_token_head
+  Describe: Bottom-right causal multi-head attention over paged FP8-E4M3 KV with inline per-(token, kv-head) FP32 scales; BF16 Q in, BF16 out written in place
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py::Model.forward
+  Version: 2
+  Dispatch:
+    id: decode_split_kv
+    when: 'head_dim = 128 and rows = max_seqlen_q * g < 64, the decode/MTP band of the own mma.sync family, which the merged tcgen05 prefill cannot claim because its crossover gate requires rows > 64. With n_split > 1 the block merge runs: not (tile_count*kv_head_count*16 >= 8*sms and ceil_div(n_split,256/dc) <= 3). Unchecked prerequisites: power-of-two page_size and g, batch_count <= 32'
+DESIGN:
+  Math_reshape:
+    Thesis: 'The Contract computation is kept, but evaluated in the log2 domain on narrowed tensor-core operands and cut twice: the host splits the key range into chunks across CTAs, and inside a chunk four warps take every fourth block, so a 16-row tile gains parallelism at both levels and pays two extra merges'
+    Rewrite:
+      - Name: Packed tile rows and causal bounds
+        Math: |
+          A worktile holds 16 packed rows of one request b and one kv head hy. Row r (0 <= r < 16) is query
+          index tok(r) = tok0 + floor(r / g) of request b and query head hy * g + (r mod g), with
+          tok0 = m_blk * (16 / g) and g = head_count / kv_head_count, so the row's query vector is
+          q_row(r) = q[q_start(b) + tok(r), hy * g + (r mod g)] of the Contract's q. Valid rows are
+          r < n_rows = min(16, (q_len(b) - tok0) * g); rows r >= n_rows gather the duplicate query index
+          q_len(b) - 1 and are never written. A valid row's inclusive key bound is the Contract's
+          visible(tok(r)), so the tile's exclusive key bound is
+          hi = visible(tok0 + n_rows / g - 1) + 1 = kv_len(b) - q_len(b) + tok0 + n_rows / g >= 1.
+        Symbol:
+          tok: {meaning: Query index of a packed tile row}
+          tok0: {meaning: First query index of this tile}
+          n_rows: {meaning: Valid packed rows of this tile}
+          hi: {meaning: Exclusive key bound of this tile}
+        Ledger:
+          Baseline: Only the n_rows valid rows of the tile gathered and scored
+          Gain: The g query heads of one kv head share one tile, so a gathered key block serves g rows and one tensor-core tile covers 16 rows
+          Cost: All 16 packed rows are gathered and scored even when n_rows < 16; at g = 1 and q_len(b) = 1, 15 of 16 rows are duplicates whose results are discarded
+      - Name: Operand narrowing and score scaling
+        Math: |
+          qk_scale = softmax_scale * log2(e) is folded once on the host, and each gathered key scale becomes
+          kst(j) = kscale(j) * qk_scale in FP32. The QK product narrows its operands: gathered E4M3 key
+          payload converts to FP16, exact for every finite E4M3 value, and BF16 query rows widen to FP16 once
+          per tile, so score(r, j) = mma32(f16(q_row(r)), f16(kvec(j))) * kst(j) with an FP32 accumulator
+          over the head_dim-deep k steps, for 0 <= j < hi. Keys above a row's bound take score = -inf; a
+          block wholly at or below bmin, the tile's smallest bound, skips that select. The value payload
+          keeps its exact BF16 form bf16(vvec(j)) as the B operand of PV. That widening is exact only in the
+          FP16 normal range: below 2^-14 it rounds into subnormals, above 65504 it overflows to +-inf.
+          Frozen |q| is of order one (peaked x4): the overflow side is unreached but the subnormal side is
+          reached. The Contract leaves q unbounded, so overflow stays a source limitation.
+        Symbol:
+          qk_scale: {meaning: Host-folded log2-domain score scale, value: softmax_scale * 1.44269504088896340736}
+          score: {meaning: Log2-domain scores of one KV block, shape: [{row: 16}, {key: 16}], dtype: fp32}
+        Arithmetic:
+          Accumulate: FP32 accumulation over head_dim/16 ascending matrix-multiply steps of depth 16; each product of the narrowed operands is exact in FP32
+        Ledger:
+          Baseline: BF16 key image and BF16 QK operands, with softmax_scale and the key scale applied as two separate FP32 products
+          Gain: Key payload conversion drops from four arithmetic steps per pair to one and stays exact for every finite E4M3 value
+          Cost: Widening Q to FP16 rounds below 2^-14 into subnormals and overflows above 65504 to +-inf; kst adds one FP32 rounding
+      - Name: KV chunk split and warp slices
+        Math: |
+          The tile's keys [0, hi) are cut into n_split contiguous chunks. chunk_bn = ceil_div(
+          ceil_div(hi, n_split), 16) * 16 and chunk s covers [kv_lo, kv_hi) with kv_lo = s * chunk_bn
+          and kv_hi = min((s + 1) * chunk_bn, hi), so it is non-empty exactly when kv_lo < hi, that is
+          s < nse = min(n_split, ceil_div(hi, chunk_bn)). A non-empty chunk holds
+          ntot = ceil_div(kv_hi - kv_lo, 16) blocks of 16 keys; an empty chunk runs no block and
+          publishes nothing. Inside a non-empty chunk the blocks are dealt to the four warp slices:
+          slice w (0 <= w < 4) walks the blocks w + 4 * ib in ascending ib, for
+          nw = ceil_div(max(0, ntot - w), 4) iterations, so a slice with w >= ntot holds no block.
+          Every slice still runs the chunk's nblk = ceil_div(ntot, 4) iterations and idles on the
+          ones it does not own, which keeps the four slices at one shared iteration count.
+        Symbol:
+          chunk_bn: {meaning: 'Key length of one chunk, block aligned'}
+          nse: {meaning: Chunks of this tile that hold keys}
+          ntot: {meaning: KV blocks in this chunk}
+          nw: {meaning: KV blocks held by warp slice w of this chunk}
+          nblk: {meaning: 'Block iterations of this chunk, all four slices'}
+      - Name: Block-online softmax in the log2 domain
+        Math: |
+          A warp slice walks its own blocks in ascending ib. Per row, with m_run(-1) = -inf, l_run(-1) = 0,
+          o_run(-1) = 0 and mx = max_j score(r, j) over the block (a fully masked block gives mx = -inf):
+            nm = max(m_run, mx); sf = nm if nm is finite else 0; alpha = 2^(m_run - sf)
+            p(r,j) = 2^(score(r,j) - sf); pw_run(r,j) = bf16(p(r,j) * vscale(j)); m_run' = nm
+            l_run' = l_run * alpha + sum16_j p(r,j)
+            o_run'(r, e) = o_run(r, e) * alpha + mma32(pw_run, bf16(vvec))(r, e)
+          2^x maps -inf to 0, so an all-masked block leaves the state unchanged, and sf rules out (-inf)-(-inf):
+          when no key of this slice is visible to the row, nm = -inf gives alpha = 0 and p = 0, so the state
+          stays (-inf, 0, 0) for the rest of the slice and both merges below weigh it 0; a slice owning no
+          block publishes that same initial state. pw_run is the Contract's pw at the block-relative maximum.
+        Symbol:
+          m_run: {meaning: Running row maximum in the log2 domain, shape: [{row: 16}], dtype: fp32, retention: 'carry_forward (tile, kv_head, split, w); ib=-1..nw-1'}
+          l_run: {meaning: Running row denominator from unrounded weights, shape: [{row: 16}], dtype: fp32, retention: 'carry_forward (tile, kv_head, split, w); ib=-1..nw-1'}
+          o_run: {meaning: Unnormalized running output rows, shape: [{row: 16}, {d: head_dim}], dtype: fp32, retention: 'carry_forward (tile, kv_head, split, w); ib=-1..nw-1'}
+        Arithmetic:
+          Approx: Every 2^x is one MUFU exponential with about 2^-22 relative error that maps -inf to exactly 0
+          Accumulate: l_run sums the unrounded weights in FP32, block after block in ascending key order within one warp slice
+        Ledger:
+          Baseline: One pass over the row's keys against the global maximum, as the Contract defines
+          Cost: Each block multiplies o_run and l_run by alpha, adding head_dim FP32 multiplies per row per slice whenever alpha differs from 1
+      - Name: Warp-slice merge
+        Math: |
+          At the end of the chunk every slice publishes its state for all 16 rows, including the
+          slices that ran no block, and the chunk merges them online, per row r and dim e:
+            part_m = max_w m_run(w); sf = part_m if part_m is finite else 0; scv(w) = 2^(m_run(w) - sf)
+            part_l = sum32_w scv(w) * l_run(w); part_o(r, e) = sum32_w scv(w) * o_run(w)(r, e)
+          An idle slice contributes m_run = -inf, so scv(w) = 0 drops its zero l_run and o_run terms.
+          A row no slice could see leaves part_m = -inf, part_l = 0 and part_o = 0, which the output
+          step turns into a zero weight rather than a division by zero; for a valid row that only
+          happens in a chunk s >= 1, whose whole range lies above visible(tok(r)).
+        Symbol:
+          part_m: {meaning: Chunk row maximum in the log2 domain, shape: [{row: 16}], dtype: fp32, retention: 'keep_value (tile, kv_head, split)'}
+          part_l: {meaning: Chunk row denominator, shape: [{row: 16}], dtype: fp32, retention: 'keep_value (tile, kv_head, split)'}
+          part_o: {meaning: Unnormalized chunk output rows, shape: [{row: 16}, {d: head_dim}], dtype: fp32, retention: 'keep_value (tile, kv_head, split)'}
+        Arithmetic:
+          Approx: The slice weight reuses the exponential declared in Block-online softmax in the log2 domain
+          Accumulate: Both sums are FP32 over the four warp slices in ascending slice order
+        Ledger:
+          Baseline: One warp holding the whole chunk, so the block recurrence already ends at the chunk maximum
+          Cost: Per chunk, 4 * 16 * (head_dim + 2) FP32 values round-trip through shared memory, and each output element takes four products and three sums more
+      - Name: Chunk merge and output
+        Math: |
+          With n_split > 1 the merge over the non-empty chunks is, per row r and dim e:
+          m_all = max_s part_m(s); w(s) = 2^(part_m(s) - m_all), so a chunk left at -inf weighs 0;
+          l_all = sum32_s w(s) * part_l(s); inv = 1 / l_all, or 0 when l_all <= 0; and
+          attention_out(r, e) = bf16(inv * sum32_s w(s) * part_o(s, r, e)). With n_split = 1 the chunk
+          is the whole range, nothing is materialized, and attention_out(r, e) = bf16(part_o(r, e) *
+          inv) with inv = 1 / part_l(r), or 0 when part_l <= 0. In both cases only the rows r < n_rows
+          are written, and every element of the Contract's out is written exactly once: by the direct
+          output write when n_split = 1, and by the merge over the chunk records when n_split > 1.
+        Arithmetic:
+          Approx: The merge weight reuses the exponential declared in Block-online softmax in the log2 domain
+          Accumulate: Both sums are FP32 over the nse chunks, regrouped by the merge work decomposition instead of one ascending chain
+        Ledger:
+          Baseline: One softmax pass over the tile's whole key range, with no materialized intermediate
+          Cost: 'A PV term can differ by one BF16 ulp: weights narrow at the block-relative scale. n_split > 1 writes a 16*(head_dim+2)-word global record per chunk'
+  Work_schedule:
+    Thesis: BM = 16 rows, BN = 16 keys; one CTA per (tile, kv head, chunk), four KV-slice warps, heaviest tile first. tile_count = ceil_div(max_seqlen_q*g,16)*batch_count; unit = tile_count*kv_head_count; cap = min(1024,max(1,floor(3*sms/unit))), or 1024 if that floor < 8; ws_cap = floor(96*2^20/(unit*130*16))
+    Step:
+      MAIN:
+        Describe: One CTA scores 16 packed rows of one request against its KV chunk, its four warps taking every fourth block, and writes the rows or a partial record
+        Decomposition:
+          Strategy: nt(b)=ceil_div(q_len(b)*g,16); p(b)=sum_{a<b}nt(a); p(b)<=tile<p(b+1) fixes b, m_blk=nt(b)-1-(tile-p(b)); tile >= p(batch_count) exits with no work
+          Partition:
+            tile: {meaning: 'One (request, m-block) tile of the launch bound', size: tile_count, tile: 1}
+            kv_head: {meaning: 'One kv head, shared by g query heads', size: kv_head_count, tile: 1}
+            split: {meaning: One KV chunk of the tile's visible keys, size: '1 if base>=sms else max(1,min(ceil_div(6*sms,base),ceil_div(max_seqlen_k,chunk),cap,ws_cap))', tile: 1, range: [1, 1024]}
+          Worktile:
+            Invariant: {q_tile: {meaning: Packed query rows gathered for this tile, shape: [{row: 16}, {d: head_dim}], dtype: bf16}}
+            Iteration:
+              k_block: {meaning: Gathered FP8 key payload of one block, shape: [{key: 16}, {d: head_dim}], dtype: fp8_e4m3fn, direction: ascending}
+              v_block: {meaning: Gathered FP8 value payload of the same block, shape: [{key: 16}, {d: head_dim}], dtype: fp8_e4m3fn, direction: ascending}
+              ks_block: {meaning: FP32 key descale of the block's keys, shape: [{key: 16}], dtype: fp32, direction: ascending}
+              vs_block: {meaning: FP32 value descale of the block's keys, shape: [{key: 16}], dtype: fp32, direction: ascending}
+          Target:
+            Single_tile:
+              attention_out: {meaning: 'Final rows, written in place when n_split is 1', shape: [{row: 16}, {d: head_dim}], dtype: bf16}
+              part_o: {meaning: 'Unnormalized chunk output, when n_split > 1', shape: [{row: 16}, {d: head_dim}], dtype: fp32}
+              part_m: {meaning: Chunk row maximum in the log2 domain, shape: [{row: 16}], dtype: fp32}
+              part_l: {meaning: Chunk row denominator, shape: [{row: 16}], dtype: fp32}
+        Mapping:
+          Strategy: sms = the device multiprocessor count; warp w scores all 16 rows against the chunk's blocks w + 4*ib, keeps its own state, and the four merge in smem
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: tile_count * kv_head_count * n_split
+        Schedule:
+          Strategy: n_split = the split partition size; base=ceil_div(total_q*g,16)*kv_head_count; chunk=256 halved to 64 while max_seqlen_k>=1024 and base*n_split<sms
+          Worktile_order:
+            - {by: split, direction: ascending}
+            - {by: kv_head, direction: ascending}
+            - {by: tile, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: [assigned_done]
+      COMBINE:
+        Describe: Merge the chunk partials of one tile and kv head into the final BF16 output rows, one row group and dim chunk per CTA
+        Decomposition:
+          Strategy: dc = 64 halved toward 8 while the merge grid is under 2*sms; rpt = clamp(floor(tile_count*kv_head_count*16*ceil_div(head_dim,dc)/(8*sms)), 1, 16)
+          Partition:
+            tile: {meaning: 'Same (request, m-block) tile as the MAIN step', size: tile_count, tile: 1}
+            kv_head: {meaning: 'One kv head, shared by g query heads', size: kv_head_count, tile: 1}
+            row_group: {meaning: Block of packed rows of the tile, size: 16, tile: rpt}
+            dim: {meaning: Block of output dimensions, size: head_dim, tile: dc}
+          Worktile:
+            Iteration:
+              part_o: {meaning: Chunk output partials of these rows and dims, shape: [{split: nse}, {row: rpt}, {d: dc}], dtype: fp32, direction: ascending}
+              part_m: {meaning: Chunk maxima of these rows, shape: [{split: nse}, {row: rpt}], dtype: fp32, direction: ascending}
+              part_l: {meaning: Chunk denominators of these rows, shape: [{split: nse}, {row: rpt}], dtype: fp32, direction: ascending}
+          Target:
+            Single_tile: {attention_out: {meaning: Merged output rows of this dim chunk, shape: [{row: rpt}, {d: dc}], dtype: bf16}}
+            Tile_reduction: {dimension: split, input: ['ref:DESIGN.Math_reshape::part_o', 'ref:DESIGN.Math_reshape::part_m', 'ref:DESIGN.Math_reshape::part_l'], output: 'ref:CONTRACT.Algorithm_requirement::attention_out', method: 'ref:DESIGN.Math_reshape::Chunk merge and output'}
+        Mapping:
+          Strategy: '256 threads: SG = 256/dc of them share one output dim and split the chunk range between them, and a block tree merges their partials'
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: tile_count * kv_head_count * ceil_div(16, rpt) * ceil_div(head_dim, dc)
+        Schedule:
+          Strategy: Submitted only when n_split > 1; a tile beyond the request table, or a row group starting beyond n_rows, exits before the wait and writes nothing
+          Worktile_order:
+            - {by: row_group, direction: ascending}
+            - {by: dim, direction: ascending}
+            - {by: kv_head, direction: ascending}
+            - {by: tile, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: [assigned_done]
+    Flow:
+      Launch:
+        - {step: [MAIN]}
+        - {step: [COMBINE], start_after: MAIN.launch_ready}
+      Handoff:
+        part_o: &partials {producer: MAIN, consumer: [COMBINE], storage: global, ready: MAIN.kernel_done, wait_at: COMBINE.partials_wait}
+        part_m: *partials
+        part_l: *partials
+  Tile_pipeline:
+    Thesis: 'Each warp pipelines its own KV slice: page metadata two blocks ahead in registers, the whole FP8 block one ahead in registers, one private shared K/V image converted just before use, so the main loop needs no CTA-wide barrier. Only the query image and the final four-slice merge span the CTA'
+    Step:
+      MAIN:
+        Index: {ib: {meaning: 'Block iteration of this chunk, all four slices', definition: [0, nblk]}}
+        Storage:
+          row_meta: {meaning: 'Staged cu_seqlens, row offsets and bounds', depth: 1, location: smem, shape: [{word: 81}],
+            dtype: int32, total_size: 324}
+          key_meta: {meaning: 'Per-key offsets and scales, four slices, two slots', depth: 2, location: smem, shape: [{slice: 4}, {key: 16}, {word: 6}],
+            dtype: int32, total_size: 3072, view: {key_table(ib): {slot_index: ib % 2}}}
+          q_image: {meaning: Query rows widened to FP16 at a padded 136 pitch, depth: 1, location: smem, shape: [{row: 16}, {d: 136}],
+            dtype: fp16, total_size: 4352}
+          kv_image: {meaning: 'Four warp K and V images, later the merge scratch', depth: 1, location: smem, shape: [{element: 17408}],
+            dtype: fp16, total_size: 34816, view: {k_image: {region: {element: [0, 8704]}}, v_image: {region: {element: [8704, 17408]}}, warp_state: {region: {element: [0, 16640]}}}}
+          page_regs: {meaning: 'Page index, slot and both scales of one block', depth: 1, location: register, shape: [{slice: 4}, {key: 16}, {word: 4}],
+            dtype: int32, total_size: 1024}
+          kv_raw: {meaning: 'Raw FP8 K and V of one block, prefetched whole', depth: 1, location: register, shape: [{slice: 4}, {key: 16}, {d: head_dim}, {payload: 2}],
+            dtype: fp8_e4m3fn, total_size: 16384}
+          score: {meaning: Scores of the block this warp slice is processing, depth: 1, location: register, shape: [{slice: 4}, {row: 16}, {key: 16}],
+            dtype: fp32, total_size: 4096}
+          o_run: {meaning: Unnormalized output accumulator per warp slice, depth: 1, location: register, shape: [{slice: 4}, {row: 16}, {d: head_dim}],
+            dtype: fp32, total_size: 32768}
+          m_run: {meaning: Running row maximum in the log2 domain, depth: 1, location: register, shape: [{slice: 4}, {row: 16}],
+            dtype: fp32, total_size: 256}
+          l_run: {meaning: Running row denominator of the tile, depth: 1, location: register, shape: [{slice: 4}, {row: 16}],
+            dtype: fp32, total_size: 256}
+        Role:
+          MAIN:
+            Info:
+              Describe: Each of the four warps walks its own KV slice end to end over all 16 rows, then all four merge their states once and write the rows
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  tile_coord: {execution_mode: serial, describe: 'Resolve the tile index to the request b and m-block, per warp so both are CTA-uniform, and derive this chunk''s range; b < 0 or kv_lo >= hi exits'}
+                  row_map: {execution_mode: serial, describe: 'Publish each row''s query offset and causal bound into row_meta CTA-wide, then copy the 16 bounds into registers and reduce the smallest, bmin'}
+                  q_image: {execution_mode: serial, describe: 'Retire this thread''s query copies, widen the BF16 rows it copied to FP16 in place, then publish q_image CTA-wide'}
+                  key_table: {execution_mode: serial, describe: Publish block ib's K and V byte offsets and the folded scale kst into this warp's key_meta slice at slot ib%2; done covers warp-wide visibility}
+                  score_mask: {execution_mode: serial, describe: Scale score(ib) by kst and set keys above each row's bound to -inf; the select is skipped when the whole block is at or below bmin}
+                  row_softmax: {execution_mode: serial, describe: 'Update m_run and l_run, turn score(ib) into the unrounded weights, and rescale o_run by alpha unless every lane votes alpha == 1'}
+                  row_merge: {execution_mode: serial, describe: 'Read all four warp_state slices of row r, redundantly per thread, and reduce them to part_m, the weights scv and the denominator part_l'}
+                matmul:
+                  q_image@k_image: {execution_mode: serial, describe: 'QK of block ib: read the 16 rows of q_image and this warp''s 16 keys of k_image as fragments and multiply into score(ib), FP32 accumulate'}
+                  pw@v_image: {execution_mode: serial, describe: 'PV of block ib: A is score(ib) as weights times vscale rounded to BF16, B is this warp''s transposed v_image slice, FP32 accumulate into o_run'}
+                load:
+                  q_tile: {execution_mode: async_unordered, describe: Issue asynchronous 16-byte copies of the 16 packed query rows into q_image; rows beyond n_rows duplicate the last token}
+                  page_meta: {execution_mode: async_unordered, describe: 'Read block ib''s page indices and both FP32 scales of this warp''s slice into page_regs, two blocks ahead of use; keys at or beyond hi clamp to hi-1'}
+                  kv_payload: {execution_mode: async_unordered, describe: 'Issue this warp''s whole 16-key block as 4-byte FP8 K and V global loads into kv_raw, addressed from key_meta slot ib%2'}
+                store:
+                  kv_image: {execution_mode: serial, describe: 'Convert kv_raw(ib) into this warp''s FP16 K and BF16 V slices of kv_image; done covers warp-wide visibility, on the last block by an explicit warp sync'}
+                  warp_state: {execution_mode: serial, describe: 'Write this warp''s o_run for all 16 rows plus one (m_run, l_run) pair per row into its warp_state slice, over the K and V images; done is CTA-wide'}
+                  attention_out: {execution_mode: serial, describe: 'Write bf16(part_o * (1 / part_l)) for row r into the caller''s out tensor, one output dim per thread'}
+                  split_partial: {execution_mode: serial, describe: 'Write row r''s unnormalized part_o into the chunk''s workspace record, one output dim per thread, and its (part_m, part_l) pair from one elected thread'}
+                signal: {dependents: {execution_mode: serial, describe: One elected lane per CTA grants the dependent grid leave to launch; CTAs that exited earlier satisfy it by completing}}
+            Pipe:
+              - compute:tile_coord
+              - if (b >= 0):
+                  - signal:dependents
+                  - if (kv_lo < hi):
+                      - compute:row_map
+                      - load:q_tile
+                      - load:page_meta(0)
+                      - compute:q_image
+                      - if (nw > 0):
+                          - compute:key_table(0)
+                          - load:kv_payload(0)
+                          - if (nw > 1):
+                              - load:page_meta(1)
+                          - store:kv_image(0)
+                      - for(ib):
+                          - if (ib + 1 < nw):
+                              - compute:key_table(ib+1)
+                              - load:kv_payload(ib+1)
+                          - if (ib + 2 < nw):
+                              - load:page_meta(ib+2)
+                          - if (ib < nw):
+                              - matmul:q_image@k_image(ib)
+                              - compute:score_mask(ib)
+                              - compute:row_softmax(ib)
+                              - matmul:pw@v_image(ib)
+                          - if (ib + 1 < nw):
+                              - store:kv_image(ib+1)
+                      - store:warp_state
+                      - for(r=0:n_rows):
+                          - compute:row_merge(r)
+                          - if (n_split == 1):
+                              - store:attention_out(r)
+                          - if (n_split > 1):
+                              - store:split_partial(r)
+            Waiting:
+              Prepared:
+                - '{issue compute:q_image} ← [{done load:q_tile}]'
+                - '{issue compute:key_table(ib)} ← [{done load:page_meta(ib)}]'
+                - '{issue store:kv_image(ib)} ← [{done load:kv_payload(ib)}]'
+                - '{issue matmul:q_image@k_image(ib)} ← [{done store:kv_image(ib)}]'
+                - '{issue matmul:pw@v_image(ib)} ← [{done store:kv_image(ib)}, {done compute:row_softmax(ib)}]'
+              Released:
+                - '{issue store:kv_image(ib+1)} ← [{done matmul:q_image@k_image(ib)}, {done matmul:pw@v_image(ib)}]'
+                - '{issue compute:key_table(ib+2)} ← [{done matmul:pw@v_image(ib)}]'
+                - '{issue store:warp_state} ← [{done matmul:q_image@k_image(ib)}, {done matmul:pw@v_image(ib)}]'
+      COMBINE:
+        Event:
+          partials_wait: ['{done MAIN[0]::await:partials}']
+        Storage:
+          tile_meta: {meaning: Staged cu_seqlens and the resolved tile coordinate, depth: 1, location: smem, shape: [{word: 35}],
+            dtype: int32, total_size: 140}
+          split_stat: {meaning: 'Chunk maxima, denominators and merge weights', depth: 1, location: smem, shape: [{split: 1024}, {field: 3}],
+            dtype: fp32, total_size: 12288}
+          thread_partial: {meaning: Per-thread numerator partial of one row, depth: 1, location: smem, shape: [{thread: 256}],
+            dtype: fp32, total_size: 1024}
+          warp_partial: {meaning: Warp partials of the row maximum and denominator, depth: 1, location: smem, shape: [{warp: 8}],
+            dtype: fp32, total_size: 32}
+        Role:
+          MAIN:
+            Info:
+              Describe: 256 threads merge the chunk partials of rpt rows and dc dims, one row at a time, with block-wide maximum, denominator and numerator reductions
+              Member: warp[0:8]
+              Using_verb:
+                load:
+                  tile_meta: {execution_mode: serial, describe: Stage cu_seqlens into tile_meta}
+                  split_stat: {execution_mode: serial, describe: Read the nse chunk maxima and denominators of row r from its workspace records into split_stat}
+                compute:
+                  tile_coord: {execution_mode: serial, describe: 'Resolve the tile index to the request b and m-block from the staged cu_seqlens, then to this CTA''s row bounds r_lo, r_hi and dim chunk'}
+                  row_stat: {execution_mode: serial, describe: 'Block-reduce the row maximum m_all, publish w(s) = 2^(part_m(s) - m_all) into split_stat, then block-reduce l_all and inv'}
+                  row_dot: {execution_mode: serial, describe: Each of the SG threads of one dim accumulates its strided chunks of row r into thread_partial}
+                store: {attention_out: {execution_mode: serial, describe: The SG threads of one dim merge their partials and write bf16(value * inv) into out for row r}}
+                await: {partials: {execution_mode: serial, describe: 'Wait until the primary grid''s partial records are device-visible, as granted by the dependent-launch protocol'}}
+            Pipe:
+              - load:tile_meta
+              - compute:tile_coord
+              - if (b >= 0):
+                  - if (r_lo < n_rows):
+                      - await:partials
+                      - for(r=r_lo:r_hi):
+                          - load:split_stat(r)
+                          - compute:row_stat(r)
+                          - compute:row_dot(r)
+                          - store:attention_out(r)
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: Warp-level 16x8x16 matrix multiply with FP16 operands for QK and BF16 operands for PV, fed by fragment loads from this warp's own shared images
+      Reason: The Design keeps a whole 16-row output accumulator and one block of scores in registers per warp and reloads the loop-invariant Q fragments per block; a shared-accumulator engine would change the roles and the storage account
+    - Item: DESIGN.Tile_pipeline::MAIN.Storage.kv_image
+      Choice: Warp-scope synchronization only, no CTA-wide barrier, between a block's converting stores and that block's fragment reads, plus an explicit warp sync on the slice's last block
+      Reason: Each warp writes and reads only its own K and V slice, so the visibility the fragment loads need is warp-scope; on the last block no key_table follows to carry that sync
+    - Item: DESIGN.Tile_pipeline::MAIN.Storage.kv_image
+      Choice: A CTA-wide barrier before the merge stores overlay the K and V images, and a second one before any warp reads another warp's slice
+      Reason: The merge scratch reuses those bytes and reads all four slices across warps, which the warp-scope synchronization of the main loop does not cover
+    - Item: DESIGN.Tile_pipeline::MAIN.Storage.q_image
+      Choice: A CTA-wide barrier after the BF16-to-FP16 widening, with the widening restricted to the 16-byte chunks this thread copied
+      Reason: Asynchronous copy completion is per thread, so widening a row another thread is still copying reads a stale BF16 word as FP16 and inflates the score; all four warps read all 16 rows
+    - Item: DESIGN.Work_schedule::MAIN.Mapping
+      Choice: Launch 128 threads per CTA with 42576 bytes of dynamic shared memory, raised by a one-time function attribute and checked against the 232448-byte budget
+      Reason: The role member count and storage account do not give the launch size; the metadata block rounds up to a 16-byte multiple of 3408 bytes, and the 166 registers per thread sit inside the 170 that keep 3 resident CTAs per SM
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.MAIN
+        - DESIGN.Tile_pipeline::COMBINE.MAIN
+      Choice: griddepcontrol.launch_dependents from one elected lane of every MAIN CTA that reaches it, and griddepcontrol.wait in COMBINE before its first workspace read
+      Reason: Supplies the launch permission and the visibility the Handoff declares; without the wait the merge could read partial records that are not yet device-visible
+    - Item: DESIGN.Work_schedule.Flow.Launch
+      Choice: Set the programmatic-serialization launch attribute on the COMBINE grid only, and launch the primary under ordinary stream ordering
+      Reason: Relaxing the primary's own stream order would let it read inputs the caller has not restored yet; only the secondary needs the early leave
+    - Item: DESIGN.Work_schedule::MAIN.Decomposition.Partition.split
+      Choice: Reject n_split above 1024 before the merge launch
+      Reason: split_stat holds 1024 chunk entries and nse is not clamped, so a larger count would index past the shared arrays and silently return wrong values
+    - Item: DESIGN.Work_schedule.Flow.Launch
+      Choice: Record the two submissions once per input binding into a CUDA graph on a private non-blocking stream, after the direct launch of the same work, and replay it on the current stream
+      Reason: A replay re-runs the same kernels over the current buffer contents, so the work, the events and the workspace pointer baked into the graph are unchanged; the binding cache keeps that pointer alive
+    - Item: DESIGN.Math_reshape::Block-online softmax in the log2 domain
+      Choice: ex2.approx.f32 for every power of two in the softmax and in both merges, with no flush-to-zero or fast-math change to the surrounding FP32 arithmetic
+      Reason: The declared 2^-22 bound and the exact -inf to 0 mapping are what the masked recurrence, the zero weight of an idle slice and the merge weight of an empty chunk rely on
+  Forbid:
+    - Item: DESIGN.Work_schedule::MAIN.Mapping
+      Choice: A minimum-blocks-per-multiprocessor argument on this kernel's launch bounds
+      Reason: The compiler reads it as permission to spend more registers; the source records 190 registers instead of 166 for this instantiation at 128 threads, which is 2 resident CTAs per SM instead of 3 and 5.1% worse geomean over the six decode shapes
+    - Item: DESIGN.Tile_pipeline::MAIN.Storage.q_image
+      Choice: Hoisting the Q fragments into registers instead of reloading them from q_image for every KV block
+      Reason: The rows are loop invariant, but the source records hoisting them as neutral at head_dim 64 and 1.6 to 2.4% worse at 128, because the registers come out of the 170-register budget that keeps 3 CTAs per SM
+    - Item: DESIGN.Tile_pipeline::MAIN.Storage.kv_raw
+      Choice: A register prefetch depth below this instance's whole 16-chunk block that does not leave a whole number of 4-chunk groups
+      Reason: The staging tail divides the remaining chunks by the group size and truncates, so an incongruent depth never fetches the last chunks and the matrix multiply reads uninitialised shared memory

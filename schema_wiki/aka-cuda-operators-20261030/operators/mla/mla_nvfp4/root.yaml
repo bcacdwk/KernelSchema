@@ -1,0 +1,596 @@
+META_DATA:
+  Name: mla_nvfp4
+  Describe: Dense NVFP4 MLA decode/MTP attention over a paged shared K=V 512-dim latent KV cache, producing BF16 output and optional natural-log lse
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/solution.py::Model.forward
+  Version: 2
+  Dispatch:
+    when: max_b seq_lens[b] < 8192, so the host plan applies the Uniform_split_policy of the shared Contract and every 2-CTA cluster receives exactly one (request, row group, KV split) piece. Also requires compute capability (10, 3) and a workspace_buffer large enough for the planned split partials, split lse, work table, unit offsets, per-token split counts, request offsets and sink copy
+CONTRACT:
+  Algorithm_requirement:
+    Constant:
+      head_dim: {value: 512, meaning: 'Latent channels shared by Q, K, V and output'}
+      page_size: {value: 64, meaning: KV tokens held in one physical cache page}
+      scale_group: {value: 16, meaning: Channels sharing one E4M3 NVFP4 block scale}
+      kv_tile: {value: 128, meaning: KV tokens per softmax group and split granularity}
+      row_tile: {value: 128, meaning: Query rows per row group sharing one split list}
+      p_log2_offset: {value: 6, meaning: log2 prescale of P before E4M3; sink seeds z=2^6}
+      e4m3_max: {value: 448, meaning: Max finite E4M3 magnitude; clamp bound of V and P}
+    Input:
+      query: {meaning: 'Packed E2M1 query payload, two codes per byte', shape: [{token: total_q}, {head: num_heads}, {packed_byte: head_dim/2}], dtype: uint8}
+      query_scale: {meaning: 'Query E4M3 block-scale bytes, one per scale_group', shape: [{token: total_q}, {head: num_heads}, {group: head_dim/scale_group}], dtype: uint8}
+      kv_cache: {meaning: Paged packed E2M1 payload of shared K=V latent KV, shape: [{page: num_pages}, {slot: page_size}, {packed_byte: head_dim/2}], dtype: uint8}
+      kv_scale: {meaning: 'KV E4M3 block-scale bytes, one per scale_group', shape: [{page: num_pages}, {slot: page_size}, {group: head_dim/scale_group}], dtype: uint8}
+      block_tables: {meaning: Physical page ids; only used slots are read, shape: [{request: batch_count}, {page_slot: max_pages}], dtype: int32}
+      seq_lens: {meaning: KV context length of each request in tokens, shape: [{request: batch_count}], dtype: int32, range: [1, 262144]}
+      workspace_buffer: {meaning: Mutable scratch; contents are not outputs, shape: [{byte: workspace_bytes}], dtype: uint8}
+      sm_scale: {meaning: Softmax scale multiplied into QK scores, shape: [], dtype: python_float}
+      sinks: {meaning: Per-head attention-sink logit in ln domain, shape: [{head: num_heads}], dtype: fp32, nullable: true, default: None}
+      out_buffer: {meaning: 'Caller out parameter, written in place, returned', shape: [{token: total_q}, {head: num_heads}, {d: head_dim}], dtype: bf16, nullable: true, default: None}
+      lse_buffer: {meaning: 'Caller lse parameter, written in place if present', shape: [{token: total_q}, {head: num_heads}], dtype: fp32, nullable: true, default: None}
+      return_lse: {meaning: 'Selects returning (out, lse) instead of out alone', shape: [], dtype: python_bool, default: false}
+      seq_lens_cpu: {meaning: Host replica of seq_lens for planning; must match, shape: [{request: batch_count}], dtype: int32, nullable: true, default: None}
+      backend: {meaning: 'Backend selector; unused by math, fixed impl cake', shape: [], dtype: python_str, default: cake}
+    Output:
+      out: {meaning: Attention output; always the first returned value, shape: [{token: total_q}, {head: num_heads}, {d: head_dim}], dtype: bf16}
+      lse: {meaning: Natural-log lse per row; returned iff return_lse, shape: [{token: total_q}, {head: num_heads}], dtype: fp32}
+    Compute:
+      - Name: Domain
+        Math: |
+          batch_count = seq_lens row count = block_tables row count, with 1 <= batch_count <= 32.
+          total_q = query token row count and query_len = total_q / batch_count, which must be an integer: every request carries the same number of query tokens, 1 <= query_len <= 16.
+          num_heads in {16, 32, 64, 128} and total_q * num_heads >= 128.
+          num_pages = kv_cache page count and max_pages = block_tables column count, with max_pages >= ceil(seq_lens[b] / page_size) for every request b.
+          1 <= seq_lens[b] <= 262144, seq_lens[b] >= query_len and sum_b seq_lens[b] <= 1048576.
+          block_tables[b, i] in [0, num_pages) for every used slot i < ceil(seq_lens[b] / page_size); unused entries hold arbitrary int32 values and are never read.
+          All device tensors are contiguous and resident on one CUDA device; when seq_lens_cpu is present it equals seq_lens elementwise.
+        Symbol: {query_len: {meaning: Integer query tokens per request, shape: [], dtype: not_applicable}}
+      - Name: Decode_nvfp4
+        Math: |
+          For a 4-bit code c: e2m1(c) = (-1 if c >= 8 else 1) * lut[c mod 8] with lut = [0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], so e2m1(8) = -0. sf(u) is the exact FP32 value of the fp8_e4m3fn byte u. nibble(byte, 0) and nibble(byte, 1) are the low and high 4-bit codes stored in that byte.
+          q_dec[r, h, d] = e2m1(nibble(query[r, h, d // 2], d mod 2)) * sf(query_scale[r, h, d // scale_group])
+          k_dec[p, j, d] = e2m1(nibble(kv_cache[p, j, d // 2], d mod 2)) * sf(kv_scale[p, j, d // scale_group])
+          for 0 <= r < total_q, 0 <= h < num_heads, 0 <= p < num_pages, 0 <= j < page_size, 0 <= d < head_dim.
+          Every product is exact in FP32. K and V read the same decoded latent rows: one shared KV head serves all query heads (MQA over the 512-dim latent).
+        Symbol:
+          q_dec: {meaning: Decoded query latent values, shape: [{token: total_q}, {head: num_heads}, {d: head_dim}], dtype: fp32}
+          k_dec: {meaning: Decoded shared K=V latent cache values, shape: [{page: num_pages}, {slot: page_size}, {d: head_dim}], dtype: fp32}
+      - Name: Prepare_v
+        Math: |
+          v_pv[p, j, d] = fp32(fp8_e4m3fn(clamp(fp16(k_dec[p, j, d]), -e4m3_max, e4m3_max)))
+          Both conversions round to nearest even; the E4M3 step saturates at the clamp bounds. QK scoring keeps the unrounded decoded values k_dec; only the PV value operand uses v_pv.
+        Symbol: {v_pv: {meaning: E4M3-rounded value operand used by PV, shape: 'ref:k_dec.shape', dtype: fp32}}
+      - Name: Addressing
+        Math: |
+          each request flattens its query rows (token, head) token-major: row r in [0, query_len * num_heads) has token t = r // num_heads and head h = r mod num_heads, and its global output row is g = b * query_len + t.
+          Key j of request b, 0 <= j < seq_lens[b], is gathered through the page table at page = block_tables[b, j // page_size] and slot = j mod page_size:
+          k_row(b, j, d) = k_dec[page, slot, d] and v_row(b, j, d) = v_pv[page, slot, d].
+          each row (b, t, h) sees exactly the keys j <= visible(b, t) = seq_lens[b] - query_len + t; later keys are masked. seq_lens[b] >= query_len leaves every row at least one visible key.
+      - Name: Score
+        Math: |
+          Notation: exp2(x) = 2^x, log2 is its inverse and ln is the natural logarithm.
+          s(g, h, j) = ( sum_{d=0}^{head_dim-1} q_dec[g, h, d] * k_row(b, j, d) ) * sm_scale / ln 2 for visible keys, and s(g, h, j) = -inf for masked keys j > visible(b, t), where g = b * query_len + t.
+          each dot product is evaluated in FP32 over the exact decoded values with TF32 disabled; scores are carried in the log2 domain. No approximate hardware exp or reciprocal instruction defines the reference truth.
+        Symbol: {s: {meaning: Log2-domain row score; -inf on masked keys, shape: [{key: 'seq_lens[b]'}], dtype: fp32}}
+      - Name: Split_partition
+        Math: |
+          tiles(b) = ceil(seq_lens[b] / kv_tile); row_groups = ceil(query_len * num_heads / row_tile); num_sms is the SM count of the executing device.
+          Row group gg of request b covers flattened rows [gg * row_tile, min((gg + 1) * row_tile, query_len * num_heads)).
+          Each (b, gg) gets an ordered list splits(b, gg) of half-open KV token intervals (left, right) partitioning [0, tiles(b) * kv_tile); key iteration inside an interval stops at seq_lens[b].
+          These boundaries are numerically binding: multi-split rows round their partials to BF16 (step Split_partial). The reference reconstructs them from the public shape and device policy given by the next two steps.
+        Symbol:
+          num_sms: {meaning: 'Device SM count integer, read at runtime', shape: [], dtype: not_applicable}
+          splits: {meaning: 'Ordered KV intervals of one (request, row group)', shape: not_applicable, dtype: not_applicable}
+      - Name: Uniform_split_policy
+        Math: |
+          Applies when max_b seq_lens[b] < 8192; every row group of request b shares the same intervals.
+          width = max_b tiles(b); kv_bytes = (sum_b seq_lens[b]) * (head_dim/2 + head_dim/scale_group); partial_bytes = batch_count * query_len * num_heads * head_dim * 4.
+          While (sum_b ceil(tiles(b) / width)) * row_groups * 2 < 2 * num_sms: cand = max(8, ceil(width / 2)); stop refining when cand >= width or ceil(max_b tiles(b) / cand) * partial_bytes > 0.35 * kv_bytes; otherwise width = cand.
+          splits(b, gg) = [ (q * width * kv_tile, min((q + 1) * width, tiles(b)) * kv_tile) for 0 <= q < ceil(tiles(b) / width) ].
+      - Name: Balanced_split_policy
+        Math: |
+          Applies when max_b seq_lens[b] >= 8192.
+          total = (sum_b tiles(b)) * row_groups; units = max(1, min(num_sms // 2, total // 8)); while units > 1 and ceil(max_b tiles(b) / (total / units)) + 1 > 64: units = units // 2.
+          cuts(u) = u * total // units for 0 <= u <= units.
+          each (b, gg) pair occupies the consecutive tile span [off, off + tiles(b)) of the concatenated sequence in request-major, row-group-minor order, with off(b, gg) = sum_{b2 < b} row_groups * tiles(b2) + gg * tiles(b).
+          splits(b, gg) = [ ((max(cuts(u), off) - off) * kv_tile, (min(cuts(u + 1), off + tiles(b)) - off) * kv_tile) for every u with cuts(u) < off + tiles(b) and cuts(u + 1) > off ]; never empty since tiles(b) >= 1.
+      - Name: Split_state_init
+        Math: |
+          Fix query row (g, h) with token t of request b, row group gg, and one interval (left, right) of splits(b, gg).
+          FP32 state: m = -inf (log2-domain running maximum), z = 0 (unrounded denominator), a[d] = 0 for 0 <= d < head_dim.
+          If sinks is present and this is the first interval: m = sinks[h] / ln 2 and z = 2^p_log2_offset, seeding a zero-value virtual key of natural-log score sinks[h] into the first split only.
+        Symbol:
+          m: {meaning: Delayed log2-domain running maximum per row/split, shape: [], dtype: fp32}
+          z: {meaning: Unrounded denominator per row and split, shape: [], dtype: fp32}
+          a: {meaning: FP32 value accumulator of one row and split, shape: [{d: head_dim}], dtype: fp32}
+      - Name: Block_update
+        Math: |
+          Loop over key blocks [begin, min(begin + kv_tile, seq_lens[b], right)) for begin = left, left + kv_tile, ... while begin < min(seq_lens[b], right):
+            block_max = max_j s(g, h, j) over the block, or -inf when every key of the block is masked;
+            m_next = m if max(m, block_max) - m <= 2 else max(m, block_max); at m = block_max = -inf the test is false and m_next = -inf, so the log2 maximum advances only on a rise of more than 2;
+            safe = m_next if finite else 0; rescale = exp2(m - safe), which is 0 at m = -inf;
+            p(j) = exp2(s(g, h, j) - safe + p_log2_offset), masked keys giving 0; p_q(j) = fp32(fp8_e4m3fn(clamp(p(j), 0, e4m3_max))), saturating RNE;
+            a[d] = a[d] * rescale + sum_j p_q(j) * v_row(b, j, d); z = z * rescale + sum_j p(j) with the unrounded p; m = m_next.
+      - Name: Split_partial
+        Math: |
+          live = z > 0.
+          partial[d] = a[d] / (z if live else 1).
+          If splits(b, gg) holds more than one interval, partial[d] = fp32(bf16(partial[d])): a BF16 partial materializes at every split boundary, while a single-split row keeps its FP32 partial.
+          lse_split = (m + log2(z) - p_log2_offset) * ln 2 when live, otherwise -inf; this is the natural-log lse statistic of the split, and a seeded sink contributes exp(sinks[h]) to its sum.
+        Symbol:
+          partial: {meaning: 'Normalized output row of one split, BF16 if multi', shape: [{d: head_dim}], dtype: fp32}
+          lse_split: {meaning: Natural-log lse of one split; -inf when not live, shape: [], dtype: fp32}
+      - Name: Merge_output
+        Math: |
+          For each query row, over the (lse_split, partial) pairs of its intervals:
+          total_lse = ln( sum_s exp(lse_split_s) ), evaluated in FP32 after subtracting max_s lse_split_s; an interval with lse_split = -inf contributes weight w_s = exp(lse_split_s - total_lse) = 0.
+          merged[d] = sum_s w_s * partial_s[d] in FP32.
+          out[g, h, d] = bf16(merged[d]) with RNE rounding, where g = b * query_len + t.
+          When present, the lse buffer receives lse[g, h] = total_lse.
+          A single-split row reduces to w = 1: out = bf16(partial) and lse = lse_split.
+        Symbol: {total_lse: {meaning: Merged natural-log lse of one row over its splits, shape: [], dtype: fp32}}
+      - Name: Call_semantics
+        Math: |
+          All inputs are bound at model construction and forward takes no arguments.
+          forward returns (out, lse) when return_lse is true and out alone otherwise; a provided out_buffer or lse_buffer is written in place with its storage identity preserved and its full logical tensor overwritten, the split partition covering every query row exactly once. The returned out is that out_buffer and the returned lse is that lse_buffer; an absent buffer is allocated fresh and carries the same values.
+          workspace_buffer may be read and written freely and its contents after the call are unspecified; every other input is read-only.
+    Golden_reference:
+      Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/reference.py::Model.forward
+      Tolerance:
+        out: Source only; atol=.01, rtol=.05, mismatch_frac=0, relative_to=candidate; no formula; no defaults
+        lse: Source only; atol=.01, rtol=.05, mismatch_frac=0, relative_to=candidate; no formula; no defaults
+      Gap: Reference needs out buffer, returns None lse if return_lse without lse; contract allocates fresh
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      thread: Single hardware thread of a warp owning private register storage; elected single threads issue the TMA copies and the tcgen05 MMA of the main kernel, and per-lane indexing drives row statistics, split merges and vector loads
+      warp: 32 threads of one CTA executing in lockstep with shuffle reductions; the main kernel fixes per-warp roles (softmax warps 0-3, correction warps 4-7, transform warps 8-13, load warp 14, mma warp 15) and the combine kernel assigns one warp per (query token, head) row
+      warpgroup: Four consecutive warps (128 threads) of one CTA, the aligned scope of the setmaxnreg register-budget redistribution that raises the softmax warpgroup to 208 registers and lowers correction to 112 and the transform, load and mma warpgroups to 96
+      cta: Thread block resident on one SM; owns the smem and tmem storage referenced by Storage.location, the main kernel running 512 threads with 189440 bytes of dynamic smem and a 512-column tmem allocation of which 480 columns hold scores, PV accumulators, scales and transformed Q, and the combine kernel running 256 threads without dynamic smem
+      cluster: Two CTAs co-scheduled as one pair (__cluster_dims__(2,1,1) with spread scheduling preference); the pair shares one cta_group::2 tcgen05 MMA over the jointly allocated TMEM, synchronizes with cluster barriers and addresses peer smem through mapa
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: Keep query and cache packed in E2M1 with E4M3 block scales and let the block-scale tensor core apply them, carry softmax in the log2 domain with a delayed maximum and a 2^p_log2_offset prescale so probabilities fit E4M3, and split the KV range so a short decode batch still fills the device
+    Rewrite:
+      - Name: Block_scale_score_product
+        Math: |
+          Neither q_dec nor k_dec is materialized. For a query row (g,h) of request b and a key j of the interval,
+          d(g,h,j) = sum_{d=0}^{head_dim-1} q_dec[g,h,d] * k_row(b,j,d)
+          with q_dec, k_dec, k_row and v_row as the shared Contract defines them in Decode_nvfp4, Prepare_v and Addressing. The product is a block-scaled 4-bit matrix product in which each E4M3 block scale multiplies inside the accumulation, so no FP32 copy of the decoded operands exists, and the head_dim reduction of one KV tile is accumulated as eight sequential 64-channel block-scaled steps. d carries no sm_scale factor.
+          The value operand of the same tile is formed while it is staged: v_row(b,j,d) equals the v_pv of Prepare_v, obtained by multiplying the gathered E2M1 code by its E4M3 block scale in FP16 and rounding once to E4M3 with saturation.
+        Symbol: {d: {meaning: Unscaled FP32 row-key product of one tile, shape: [{key: kv_tile}], dtype: fp32}}
+        Arithmetic:
+          Accumulate: FP32 accumulation in eight sequential 64-channel block-scaled steps; the value operand multiplies E2M1 by E4M3 in FP16, exact here, then rounds once
+        Ledger:
+          Baseline: Decode q_dec and k_dec to FP32 and reduce the head_dim product on the FP32 multiply path
+          Gain: Operand bytes per key row head_dim*4 -> head_dim/2 + head_dim/scale_group; no FP32 decode of query or cache is materialized
+          Cost: The reduction is regrouped into eight fixed 64-channel accumulation steps, so its summation order is not one FP32 pass over head_dim
+      - Name: Score_scale_in_exponent
+        Math: |
+          scale_log2 = sm_scale / ln 2 is fixed once per call. The value s(g,h,j) = d(g,h,j) * scale_log2 that the shared Contract defines is never formed on its own. With the running log2-domain maximum m and safe = m_next when m_next is finite, else 0,
+          p(g,h,j) = exp2(fma32(d(g,h,j), scale_log2, p_log2_offset - safe))
+          so the scale, the 2^p_log2_offset prescale and the maximum shift are one FP32 fused multiply-add feeding one base-2 exponential. Masked keys j > visible(b,t) stay at -inf and give p = 0.
+          tile_max(i) = max of d(g,h,j) over the keys of KV tile i, or -inf when every key of that tile is masked; the scaled block maximum used by the recurrence is tile_max(i) * scale_log2.
+        Arithmetic:
+          Approx: 'exp2 is the device approximate base-2 exponential with flush-to-zero and the main kernel compiles with fast math; bound unknown: not recorded'
+      - Name: Half_split_online_softmax
+        Math: |
+          Fix row (g,h) of request b in row group gg with interval (left, right) of splits(b,gg), tile_count = (right - left) / kv_tile, key j(i,u) = left + i*kv_tile + u. Key half c in {0, 1} owns u in [32c, 32c+32) and [64+32c, 64+32c+32), the same 32 keys of each of the two pages.
+          Initial: m = -inf, z_half(c) = 0, a[d] = 0; when sinks is present and left = 0, m = sinks[h] / ln 2 and z_half(0) = 2^p_log2_offset while z_half(1) stays 0.
+          For i = 0 .. tile_count-1: cand = max(m, tile_max(i) * scale_log2); m_next = m if m > -inf and cand - m <= 2 else cand; safe = m_next if finite else 0; alpha = exp2(m - safe) if m > -inf else 1; m = m_next.
+          z_half(c) = z_half(c) * alpha + the sum of unrounded p over the keys of half c of tile i.
+          a[d] = a[d] * alpha + sum over all kv_tile keys of tile i of p_q(j) * v_row(b,j,d), with p_q(j) = fp8_e4m3fn(clamp(p(g,h,j), 0, e4m3_max)) by saturating RNE.
+          At the interval end z = z_half(0) + z_half(1); a[d] holds the unnormalized interval value.
+        Symbol:
+          tile_count: {meaning: KV tiles in the interval of one piece, value: (right - left) / kv_tile}
+          m: {meaning: 'Delayed log2-domain row maximum, both halves', shape: [], dtype: fp32, retention: 'carry_forward (g,h); i=-1..tile_count-1'}
+          z_half: {meaning: Unrounded row denominator of one key half, shape: [], dtype: fp32, retention: 'carry_forward (g,h,c); i=-1..tile_count-1'}
+          a: {meaning: FP32 value accumulator of one row and interval, shape: [{d: head_dim}], dtype: fp32, retention: 'carry_forward (g,h); i=-1..tile_count-1'}
+          p_q: {meaning: E4M3-rounded probability tile of one KV tile, shape: [{key: kv_tile}], dtype: fp8_e4m3fn}
+        Arithmetic:
+          Accumulate: Each half sums only its own 64 unrounded values per tile in FP32 and the two halves merge once at the interval end; a sums p_q*v over all kv_tile keys
+        Ledger:
+          Baseline: One denominator per row advanced once per kv_tile-key block, as the shared Contract states it
+          Gain: The cross-half exchange is one maximum per tile plus one sum at the interval end, instead of a kv_tile-wide reduction per row
+          Cost: The denominator order becomes two half sums merged at the interval end, so z differs in its last FP32 digits from a single pass
+      - Name: Reciprocal_split_output
+        Math: |
+          live = z > 0; inv_z is the approximate reciprocal of z, and 0 when z <= 0.
+          partial[d] = a[d] * inv_z, in place of the division by z that the shared Contract writes; when not live, a[d] is already 0 so partial[d] = 0.
+          lse2_split = m + log2(z) - p_log2_offset, which is the lse_split of the shared Contract divided by ln 2 and is kept in the log2 domain.
+          If the row group has a single interval: out[g,h,d] = bf16(partial[d]) and lse[g,h] = lse2_split * ln 2, both written by the worktile that produced them.
+          Otherwise partial_store[d] = bf16(partial[d]) and lse2_split are materialized for the merge step, which also performs the natural-log conversion.
+        Symbol:
+          partial_store: {meaning: BF16 split partial row handed to the merge, shape: [{d: head_dim}], dtype: bf16, retention: 'keep_value (g,h)'}
+          lse2_split: {meaning: Split lse statistic in the log2 domain, shape: [], dtype: fp32, retention: 'keep_value (g,h)'}
+        Arithmetic:
+          Approx: 'log2 and the normalizing reciprocal are the approximate device instructions with flush-to-zero; bound unknown: not recorded'
+        Ledger:
+          Baseline: Normalize each split by an exact FP32 division per element and carry the statistic in the natural-log domain
+          Gain: One approximate reciprocal per row replaces head_dim divisions, and no ln conversion happens per split
+          Cost: Normalization and the statistic use an approximate reciprocal and log2, and a multi-split row rounds partial to BF16
+      - Name: Log2_split_merge
+        Math: |
+          For a query row whose row group has split_count = count(splits(b,gg)) > 1 intervals, over its stored pairs (lse2_split_s, partial_store_s):
+          mx = max_s lse2_split_s, or 0 when every lse2_split_s = -inf;
+          total_lse2 = mx + log2(sum_s exp2(lse2_split_s - mx));
+          w_s = exp2(lse2_split_s - total_lse2), which is 0 for a split with lse2_split_s = -inf;
+          merged[d] = sum_{s=0}^{split_count-1} fp32(partial_store_s[d]) * w_s, accumulated in FP32 in ascending s;
+          out[g,h,d] = bf16(merged[d]) and lse[g,h] = total_lse2 * ln 2.
+          a row with split_count = 1 keeps the values its producing worktile already wrote and is neither read nor written here.
+        Symbol:
+          split_count: {meaning: KV splits covering one query row, value: 'count(splits(b, gg))'}
+          total_lse2: {meaning: Merged log2-domain lse of one row, shape: [], dtype: fp32}
+        Arithmetic:
+          Approx: 'exp2 and log2 are the approximate device instructions; this step is compiled without fast math; bound unknown: not recorded'
+        Ledger:
+          Baseline: Merge the splits in the natural-log domain with an exact exp and ln per weight and per row
+          Gain: Weights and the merged statistic stay in the log2 domain, giving one exp2 per row and split and one log2 per row
+          Cost: Each split row is read as BF16, 2*head_dim bytes per row and split, and the weights use an approximate exp2
+  Work_schedule:
+    Thesis: The host flattens the batch into one piece per (request, row group, KV split) and gives each piece to one 2-CTA cluster, so a short decode batch still fills the device. A second submission merges only the rows whose group was split
+    Step:
+      MAIN:
+        Describe: Compute one KV split of row_tile flattened query rows of one request; a single-split row group writes out and lse, a split one writes the partials
+        Decomposition:
+          Strategy: Piece p is (b, q, gg) ascending in that order over the Uniform_split_policy intervals, and owns the adjacent work-table items 2p and 2p+1
+          Partition: {piece: {meaning: 'One request, row group and KV split', size: row_groups * sum_b ceil(tiles(b) / width), tile: 1}}
+          Worktile:
+            Invariant:
+              q_payload: {meaning: Packed E2M1 query rows of this row group, shape: [{row: row_tile}, {packed_byte: head_dim/2}], dtype: 'ref:CONTRACT.Algorithm_requirement::query.dtype'}
+              q_scale: {meaning: E4M3 query block scales of the same rows, shape: [{row: row_tile}, {group: head_dim/scale_group}], dtype: 'ref:CONTRACT.Algorithm_requirement::query_scale.dtype'}
+              page_slice: {meaning: Physical page ids this piece gathers through, shape: [{page_slot: 'ceil(seq_lens[b] / page_size)'}], dtype: 'ref:CONTRACT.Algorithm_requirement::block_tables.dtype'}
+            Iteration: {kv_raw: {meaning: Packed KV payload and block scales of one tile, shape: [{key: kv_tile}, {byte: head_dim/2 + head_dim/scale_group}], dtype: 'ref:CONTRACT.Algorithm_requirement::kv_cache.dtype', direction: ascending}}
+          Target:
+            Single_tile:
+              row_out: {meaning: 'BF16 out rows, or split partial rows if split', shape: [{row: row_tile}, {d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}
+              row_lse: {meaning: 'Natural-log lse rows, or log2 split lse', shape: [{row: row_tile}], dtype: 'ref:CONTRACT.Algorithm_requirement::lse.dtype'}
+        Mapping:
+          Strategy: One cluster runs one piece; member r takes rows [64r, 64r+64) and stages the value channels [128r, 128r+128) and [256+128r, 256+128r+128)
+          Worker: {unit: cta, unit_count: 2}
+          Worker_count: row_groups * sum_b ceil(tiles(b) / width)
+          Placement: {unit: cluster, unit_count: 1}
+          Member: [{row: [0, row_tile/2]}, {row: [row_tile/2, row_tile]}]
+        Schedule:
+          Strategy: The host writes the work table, unit offsets, per-token split counts, request offsets and sink copy into workspace_buffer before this submission
+          Worktile_order: [{by: piece, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+      COMBINE:
+        Describe: Merge the BF16 split partials of one query token and eight heads into out and lse; rows whose group has one split stay as MAIN wrote them
+        Decomposition:
+          Strategy: One warp takes one head and merges the split_count pieces of its row group; heads past num_heads and rows with split_count = 1 do no work
+          Partition:
+            token: {meaning: Query token row, size: total_q, tile: 1}
+            head: {meaning: Head merged by one warp, size: num_heads, tile: 8}
+          Target:
+            Single_tile:
+              row_out: {meaning: Merged BF16 rows of this head block, shape: [{head: 8}, {d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}
+              row_lse: {meaning: Merged natural-log lse of those rows, shape: [{head: 8}], dtype: 'ref:CONTRACT.Algorithm_requirement::lse.dtype'}
+            Tile_reduction: {dimension: piece, input: ['ref:DESIGN.Math_reshape::partial_store', 'ref:DESIGN.Math_reshape::lse2_split'], output: ['ref:CONTRACT.Algorithm_requirement::out', 'ref:CONTRACT.Algorithm_requirement::lse'], method: 'ref:DESIGN.Math_reshape::Log2_split_merge'}
+        Mapping:
+          Strategy: Submitted only when some row group has more than one split; otherwise every row was written directly by MAIN
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: total_q * ceil_div(num_heads, 8)
+        Schedule:
+          Strategy: Each warp reads the host-prepared per-token split count; a token whose count is 1 keeps the rows MAIN wrote and needs no wait
+          Worktile_order:
+            - {by: head, direction: ascending}
+            - {by: token, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch:
+        - {step: [MAIN]}
+        - {step: [COMBINE], start_after: MAIN.kernel_done}
+      Handoff:
+        partial_store: {producer: MAIN, consumer: [COMBINE], storage: global}
+        lse2_split: {producer: MAIN, consumer: [COMBINE], storage: global}
+  Tile_pipeline:
+    Thesis: 'Five fixed warp roles per CTA advance one kv_tile-token interval at a time: tensor copies, on-the-fly value re-quantization, block-scale scores, delayed-maximum softmax, in-place accumulator rescale and a one-tile-late value product; a member with no valid row still runs it all'
+    Step:
+      MAIN:
+        Index:
+          i: {meaning: KV tile ordinal inside the interval of this piece, definition: [0, tile_count]}
+          page: {meaning: page_size-key page inside one KV tile, definition: [0, kv_tile/page_size]}
+          n: {meaning: Score product ordinal over the pages of one piece, definition: {flatten: [i, page]}}
+        Storage:
+          q_payload: {meaning: Packed E2M1 query rows of this piece, depth: 1, location: smem, shape: [{row: row_tile/2}, {packed_byte: head_dim/2}],
+            dtype: uint8, total_size: 2*row_tile/2*head_dim/2}
+          q_scale: {meaning: E4M3 query scales of the same rows, depth: 1, location: smem, shape: [{row: row_tile/2}, {group: head_dim/scale_group}],
+            dtype: uint8, total_size: 2*row_tile/2*head_dim/scale_group}
+          raw_kv: {meaning: Raw KV payload and block scales of one tile, depth: 3, location: smem, shape: [{element: kv_tile*(head_dim/2 + head_dim/4)/2 + kv_tile*head_dim/scale_group}],
+            dtype: uint8, total_size: 2*3*(kv_tile*(head_dim/2 + head_dim/4)/2 + kv_tile*head_dim/scale_group), view: {kv_payload(i): {slot_index: i%3, region: {element: [0, kv_tile*(head_dim/2 + head_dim/4)/2]}}, kv_scales(i): {slot_index: i%3, region: {element: [kv_tile*(head_dim/2 + head_dim/4)/2, kv_tile*(head_dim/2 + head_dim/4)/2 + kv_tile*head_dim/scale_group]}}}}
+          v_stage: {meaning: E4M3 value tile of this member channel half, depth: 2, location: smem, shape: [{key: kv_tile}, {channel: head_dim/2}],
+            dtype: fp8_e4m3fn, total_size: 2*2*kv_tile*head_dim/2, view: {v(i): {slot_index: i%2}}}
+          p_stage: {meaning: 'E4M3 probability slots, later output staging', depth: 2, location: smem, shape: [{row: row_tile/2}, {key: kv_tile}],
+            dtype: fp8_e4m3fn, total_size: 2*2*row_tile/2*kv_tile, view: {p(i): {slot_index: i%2}}}
+          tmem: {meaning: 'Score, output, scale and query operand columns', depth: 1, location: tmem, shape: [{row: 128}, {column: 480}],
+            dtype: fp32, total_size: 2*128*480*4, view: {s(n): {region: {column: [(n%2)*32, (n%2)*32+32]}}, o: {region: {column: [64, 320]}}, q_sf: {region: {column: [320, 352]}}, k_sf(n): {region: {column: [352+(n%2)*32, 352+(n%2)*32+32]}}, q_op: {region: {column: [416, 480]}}}}
+          row_state: {meaning: Per-row rescale factor published to the rescaler, depth: 1, location: smem, shape: [{row: row_tile/2}],
+            dtype: fp32, total_size: 2*row_tile/2*4}
+          xchg_max: {meaning: Cross-half row maximum exchange, depth: 1, location: smem, shape: [{row: row_tile}],
+            dtype: fp32, total_size: 2*row_tile*4}
+          xchg_sum: {meaning: Cross-half row denominator exchange, depth: 1, location: smem, shape: [{row: row_tile}],
+            dtype: fp32, total_size: 2*row_tile*4}
+          page_ids: {meaning: Prefetched physical page ids of 16 tiles, depth: 1, location: smem, shape: [{page: 16*kv_tile/page_size}],
+            dtype: int32, total_size: 2*16*kv_tile/page_size*4}
+        Role:
+          SOFTMAX:
+            Info:
+              Describe: Read each page score fragment, keep the delayed row maximum and the per-half denominator, publish E4M3 probabilities and form the row outputs
+              Member: warp[0:4]
+              Register: 208
+              Using_verb:
+                compute:
+                  row_init: {execution_mode: serial, describe: 'Read the work-table entry of this piece, derive its row coordinates, per-lane validity and all_rows_valid, and set m, z_half and the sink seed'}
+                  s_frag: {execution_mode: serial, describe: Read the 32-column s(n) fragment of this warp key half into registers and set the keys at or beyond the row causal limit to -inf}
+                  row_max: {execution_mode: serial, describe: 'Reduce the masked tile scores, exchange the maximum with the other key half through xchg_max, apply the delayed rule and form alpha'}
+                  exp_value: {execution_mode: serial, describe: Evaluate p by Score_scale_in_exponent and add the unrounded values of this key half into z_half}
+                  p_tile: {execution_mode: serial, describe: Round p to saturating E4M3 and write the row_tile/2 by kv_tile slot p(i) for the value product}
+                  row_stat: {execution_mode: serial, describe: 'Exchange z_half through xchg_sum, then form z, inv_z by approximate reciprocal and lse2_split'}
+                  o_block: {execution_mode: serial, describe: 'Read 32 columns of o for block c, scale by inv_z and pack BF16 rows; the two key halves of a member split its head_dim output channels'}
+                store:
+                  out_block: {execution_mode: async_unordered, describe: 'Stage block c in this warp half of p_stage, freed by the last value product, and issue one bulk tensor store of its 32 rows and 32 channels'}
+                  out_row: {execution_mode: serial, describe: Each lane with a valid row writes its own 32 channels of block c to out or to the split partials; invalid lanes write nothing}
+                  lse: {execution_mode: serial, describe: 'Key-half-0 lanes with a valid row write lse, or lse2_split plus -inf in the split slots this row does not use'}
+                await:
+                  s_ready: {execution_mode: serial, describe: Wait until the score fragment of page n is visible in this member}
+                  row_state_free: {execution_mode: serial, describe: Wait until the rescaler of this member has read the alpha published for tile i-1}
+                  p_free: {execution_mode: serial, describe: Wait until the value product of tile i-2 has finished reading the p slot i%2}
+                  o_ready: {execution_mode: serial, describe: Wait until the last value product of this piece has completed for both members}
+                  stores_drained: {execution_mode: serial, describe: Wait until every staged bulk store of this piece has finished reading its staging}
+                signal:
+                  alpha: {execution_mode: serial, describe: 'Publish alpha for tile i in row_state, where both key halves write the same row value, and notify the rescaler of this member'}
+                  p_ready: {execution_mode: serial, describe: Notify member 0 that this member has written the whole p slot of tile i}
+                release:
+                  s_slot: {execution_mode: serial, describe: Return the s(n) score region of this member once its fragment is in registers}
+                  o_acc: {execution_mode: serial, describe: Return the o accumulator once all eight block reads are complete}
+                  epi_stage: {execution_mode: serial, describe: Return the staging buffer of block c inside p_stage once the bulk store of that block has read it; the global write may still be in flight}
+            Pipe:
+              - compute:row_init
+              - for(i=0:tile_count):
+                  - for(page):
+                      - await:s_ready(n[i,page])
+                      - compute:s_frag(n[i,page])
+                      - release:s_slot(n[i,page])
+                  - compute:row_max(i)
+                  - await:row_state_free(i)
+                  - signal:alpha(i)
+                  - compute:exp_value(i)
+                  - await:p_free(i)
+                  - compute:p_tile(i)
+                  - signal:p_ready(i)
+              - await:o_ready
+              - compute:row_stat
+              - for(c=0:head_dim/64):
+                  - compute:o_block(c)
+                  - if(c == head_dim/64 - 1):
+                      - release:o_acc
+                  - if(all_rows_valid == 1):
+                      - if(c >= 2):
+                          - release:epi_stage(c-2)
+                      - store:out_block(c)
+                  - if(all_rows_valid == 0):
+                      - store:out_row(c)
+              - if(all_rows_valid == 1):
+                  - await:stores_drained
+              - store:lse
+            Waiting:
+              Prepared:
+                - '{done await:s_ready(n)} ← [{done MMA[0]::matmul:q(n)@k(n)}]'
+                - '{done await:o_ready} ← [{done MMA[0]::matmul:p(tile_count-1)@v(tile_count-1)}]'
+                - '{done await:row_state_free(i)} ← [{done CORRECTION::signal:row_state_free(i-1)}]'
+              Released: ['{done await:p_free(i)} ← [{done MMA[0]::matmul:p(i-2)@v(i-2)}]']
+          CORRECTION:
+            Info:
+              Describe: Stage the query operand and the per-page key scales into TMEM, and rescale the output accumulator in place when a row alpha differs from 1
+              Member: warp[4:8]
+              Register: 112
+              Using_verb:
+                compute:
+                  q_operand: {execution_mode: serial, describe: Read the query payload and scales from smem and write the q_op and q_sf TMEM regions in the layout the block-scale product requires}
+                  k_sf: {execution_mode: serial, describe: Read the key scale bytes of page n from the raw slot and write them into the k_sf(n) TMEM region}
+                  rescale: {execution_mode: serial, describe: 'Multiply the 256 columns of o by the alpha of each row, reading and writing the same TMEM region'}
+                await:
+                  q_ready: {execution_mode: serial, describe: Wait until the query payload and scales of this piece are in this member smem}
+                  raw_ready: {execution_mode: serial, describe: Wait until the raw payload and scales of one tile are in this member slot}
+                  k_sf_free: {execution_mode: serial, describe: Wait until the score product of page n-2 has finished reading key scale slot n%2}
+                  alpha: {execution_mode: serial, describe: Wait until the softmax role of this member has published alpha for tile i}
+                  pv_complete: {execution_mode: serial, describe: Wait until the value product of one tile has completed}
+                signal:
+                  q_sf_ready: {execution_mode: serial, describe: Notify member 0 that both members have staged the query operand and its scales}
+                  k_sf_ready: {execution_mode: serial, describe: Notify member 0 that both members have staged the key scales of page n}
+                  row_state_free: {execution_mode: serial, describe: 'Read alpha from row_state, establish rescale_needed(i) and return row_state to the softmax role of this member'}
+                  p_ready: {execution_mode: serial, describe: 'Notify member 0 that the rescale of tile i is finished, so the value product may accumulate into o'}
+                release: {raw_scales: {execution_mode: serial, describe: Return the raw slot of one tile after this member has read its key scale bytes}}
+            Pipe:
+              - await:q_ready
+              - compute:q_operand
+              - signal:q_sf_ready
+              - for(i[0:2]):
+                  - for(page):
+                      - await:raw_ready(i)
+                      - await:k_sf_free(n[i,page])
+                      - compute:k_sf(n[i,page])
+                      - signal:k_sf_ready(n[i,page])
+                  - release:raw_scales(i)
+              - for(i=0:tile_count):
+                  - await:alpha(i)
+                  - signal:row_state_free(i)
+                  - if(rescale_needed(i) == 1):
+                      - compute:rescale(i)
+                  - signal:p_ready(i)
+                  - if(i >= 1):
+                      - await:pv_complete(i-1)
+                  - if(i + 2 < tile_count):
+                      - for(page):
+                          - await:raw_ready(i+2)
+                          - await:k_sf_free(n[i+2,page])
+                          - compute:k_sf(n[i+2,page])
+                          - signal:k_sf_ready(n[i+2,page])
+                      - release:raw_scales(i+2)
+              - await:pv_complete(tile_count-1)
+            Waiting:
+              Prepared:
+                - '{done await:q_ready} ← [{done LOAD::load:q}]'
+                - '{done await:raw_ready(i)} ← [{done LOAD::load:kv_raw(i)}]'
+                - '{done await:k_sf_free(n)} ← [{done MMA[0]::matmul:q(n-2)@k(n-2)}]'
+                - '{done await:alpha(i)} ← [{done SOFTMAX::signal:alpha(i)}]'
+                - '{done await:pv_complete(i)} ← [{done MMA[0]::matmul:p(i)@v(i)}]'
+                - '{issue compute:rescale(i)} ← [{done MMA[0]::matmul:p(i-1)@v(i-1)}]'
+          TRANSFORM:
+            Info:
+              Describe: Re-quantize the gathered E2M1 payload of each tile with its E4M3 block scales into the E4M3 value half of this member
+              Member: warp[8:14]
+              Register: 96
+              Using_verb:
+                compute: {v: {execution_mode: serial, describe: 'Convert the kv_tile keys of tile i into E4M3 for the head_dim/2 channels of this member by Block_scale_score_product, writing v(i)'}}
+                await:
+                  raw_ready: {execution_mode: serial, describe: Wait until the raw payload and scales of tile i are in this member slot}
+                  v_free: {execution_mode: serial, describe: Wait until the value product of tile i-2 has finished reading the v slot i%2}
+                signal: {v_ready: {execution_mode: serial, describe: Notify member 0 that both members have written the value tile of tile i}}
+                release: {raw_payload: {execution_mode: serial, describe: Return the raw slot of tile i after this member has read its payload and scales}}
+            Pipe:
+              - for(i=0:tile_count):
+                  - await:raw_ready(i)
+                  - await:v_free(i)
+                  - compute:v(i)
+                  - signal:v_ready(i)
+                  - release:raw_payload(i)
+            Waiting:
+              Prepared: ['{done await:raw_ready(i)} ← [{done LOAD::load:kv_raw(i)}]']
+              Released: ['{done await:v_free(i)} ← [{done MMA[0]::matmul:p(i-2)@v(i-2)}]']
+          LOAD:
+            Info:
+              Describe: Resolve the page table and issue the asynchronous tensor copies of the query rows and of each tile key payload and scales
+              Member: warp[14:15]
+              Register: 96
+              Using_verb:
+                load:
+                  q: {execution_mode: async_unordered, describe: 'Copy the row_tile/2 query rows and their scales of this member into q_payload and q_scale, announcing the whole byte count; done covers both regions'}
+                  page_ids: {execution_mode: serial, describe: 'Read the physical page ids of the next 16 tiles of this request into page_ids, zero-filling ids beyond the page count of the request'}
+                  kv_raw: {execution_mode: async_unordered, describe: 'Copy tile i into raw slot i%3: own keys in full, peer keys own-channel half, both page scales; an odd page count repeats one page'}
+                await: {raw_free: {execution_mode: serial, describe: Wait until every reader of the raw slot i%3 has returned it}}
+            Pipe:
+              - load:q
+              - for(i=0:tile_count):
+                  - if(i % 16 == 0):
+                      - load:page_ids(i)
+                  - await:raw_free(i)
+                  - load:kv_raw(i)
+            Waiting:
+              Released: ['{done await:raw_free(i)} ← [{done MMA[0]::matmul:q(n[i-3,1])@k(n[i-3,1])}, {done TRANSFORM::release:raw_payload(i-3)}, {done CORRECTION::release:raw_scales(i-3)}]']
+          MMA:
+            Info:
+              Describe: Issue the block-scale score products and the one-tile-late value products for the pair, and multicast every completion to both members
+              Member: cta[0].warp[15:16]
+              Register: 96
+              Using_verb:
+                matmul:
+                  q@k: {execution_mode: async_ordered, describe: Block-scale product of q_op with the raw key payload of page n over head_dim into s(n); the first step of a page overwrites the region}
+                  p@v: {execution_mode: async_ordered, describe: 'Product of p(i) with the value tiles of both members into o; the product of tile 0 overwrites o, so no separate clearing exists'}
+                await:
+                  q_ready: {execution_mode: serial, describe: Wait until the query payload and scales are in member 0 smem}
+                  q_sf_ready: {execution_mode: serial, describe: Wait until both members have staged the query operand and its scales in TMEM}
+                  raw_ready: {execution_mode: serial, describe: Wait until the raw payload of tile i is in the member 0 slot}
+                  k_sf_ready: {execution_mode: serial, describe: Wait until both members have staged the key scales of page n}
+                  s_free: {execution_mode: serial, describe: Wait until the softmax roles of both members have returned score slot n%2}
+                  v_ready: {execution_mode: serial, describe: Wait until both members have written the value tile of tile i}
+                  p_ready: {execution_mode: serial, describe: Wait until both members have written the probability tile of tile i and finished its rescale}
+            Pipe:
+              - await:q_ready
+              - await:q_sf_ready
+              - for(i=0:tile_count):
+                  - for(page):
+                      - await:raw_ready(i)
+                      - await:k_sf_ready(n[i,page])
+                      - await:s_free(n[i,page])
+                      - matmul:q(n[i,page])@k(n[i,page])
+                  - if(i >= 1):
+                      - await:v_ready(i-1)
+                      - await:p_ready(i-1)
+                      - matmul:p(i-1)@v(i-1)
+              - await:v_ready(tile_count-1)
+              - await:p_ready(tile_count-1)
+              - matmul:p(tile_count-1)@v(tile_count-1)
+            Waiting:
+              Prepared:
+                - '{done await:q_ready} ← [{done LOAD::load:q}]'
+                - '{done await:q_sf_ready} ← [{done CORRECTION[*]::signal:q_sf_ready}]'
+                - '{done await:raw_ready(i)} ← [{done LOAD::load:kv_raw(i)}]'
+                - '{done await:k_sf_ready(n)} ← [{done CORRECTION[*]::signal:k_sf_ready(n)}]'
+                - '{done await:s_free(n)} ← [{done SOFTMAX[*]::release:s_slot(n)}]'
+                - '{done await:v_ready(i)} ← [{done TRANSFORM[*]::signal:v_ready(i)}]'
+                - '{done await:p_ready(i)} ← [{done SOFTMAX[*]::signal:p_ready(i)}, {done CORRECTION[*]::signal:p_ready(i)}]'
+      COMBINE:
+        Role:
+          MAIN:
+            Info:
+              Describe: Merge the split partials of one query row in one warp, 16 channels and two split slots per lane
+              Member: warp[0:8]
+              Using_verb:
+                compute:
+                  row_plan: {execution_mode: serial, describe: 'Derive the head of this warp and read the split count of the token, establishing merge_needed; a warp past num_heads does nothing'}
+                  total_lse2: {execution_mode: serial, describe: Reduce the split statistics of this row to total_lse2 by a warp maximum and an exp2 sum in the log2 domain}
+                  acc: {execution_mode: serial, describe: 'Add the 16 BF16 partial channels of split s, widened to FP32 and weighted by exp2 of its difference from total_lse2'}
+                store:
+                  lse: {execution_mode: serial, describe: Lane 0 writes the natural-log lse of this row}
+                  out: {execution_mode: serial, describe: Pack the accumulated FP32 channels to BF16 and write the output row}
+            Pipe:
+              - compute:row_plan
+              - if(merge_needed == 1):
+                  - compute:total_lse2
+                  - store:lse
+                  - for(s=0:split_count):
+                      - compute:acc(s)
+                  - store:out
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN.MMA
+      Choice: tcgen05.mma.cta_group::2 issued by one elected thread of member 0, kind mxf4nvf4 with block_scale and scale_vec 4X for the score product and kind f8f6f4 for the value product, each completion committed with a multicast covering both members
+      Reason: The pair-wide score and value products, the shared TMEM accumulator and every consumer wait on both CTAs depend on one member issuing for the pair and notifying both
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: Launch 512 threads per CTA in a (2,1,1) cluster with spread scheduling preference, 189440 bytes of dynamic smem per CTA and a 512-column TMEM allocation of which 480 columns are used
+      Reason: The role map covers warps 0 to 15 of each CTA, and the registered regions plus the barrier block and alignment padding fill the smem, so one cluster is the resident unit
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: Initialize every mbarrier and allocate the 512-column TMEM block once per cluster behind a cluster-wide barrier before any role starts, and deallocate it behind a second cluster barrier at the end
+      Reason: The initial phase of each barrier encodes a free slot and the roles read the TMEM base from smem, so both must exist and be visible pair-wide before the first action
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.SOFTMAX
+        - DESIGN.Tile_pipeline::MAIN.CORRECTION
+        - DESIGN.Tile_pipeline::MAIN.TRANSFORM
+        - DESIGN.Tile_pipeline::MAIN.LOAD
+        - DESIGN.Tile_pipeline::MAIN.MMA
+      Choice: Redistribute the register budget to 208 for SOFTMAX, 112 for CORRECTION and 96 for TRANSFORM, LOAD and MMA, lowering the giving roles before any role raises its own budget
+      Reason: SOFTMAX holds two 32-value score fragments plus an output block, and the budgets only fit if the roles that give up registers do so first
+    - Item:
+        - DESIGN.Math_reshape::p_q
+        - DESIGN.Math_reshape::lse2_split
+        - DESIGN.Math_reshape::total_lse2
+      Choice: Use the approximate base-2 exponential and logarithm and the approximate reciprocal of the device, with flush-to-zero, and compile the main translation unit with fast math
+      Reason: These approximations and their flush-to-zero behaviour are the declared numerical path of the design, so replacing them changes the values the Contract tolerance was measured against
+    - Item: CONTRACT.Algorithm_requirement::workspace_buffer
+      Choice: Carve the split partials, split lse, work table, unit offsets, per-token split counts, request offsets and sink copy out of workspace_buffer at 256-byte alignment, and refuse the call when the buffer is smaller than the layout total
+      Reason: The planned split count and row count decide the layout total, which at corners of the declared domain exceeds the workspace the task input generator provides
+    - Item: DESIGN.Work_schedule::COMBINE
+      Choice: Compile and launch the merge as its own 256-thread submission without dynamic smem and without the fast-math flag of the main translation unit, and only when some row group has more than one split
+      Reason: The merge keeps its own declared approximations, and a batch whose every row group has one split produces no partial to merge

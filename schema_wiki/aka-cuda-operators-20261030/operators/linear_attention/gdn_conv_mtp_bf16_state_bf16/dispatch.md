@@ -1,0 +1,67 @@
+# gdn_conv_mtp_bf16_state_bf16
+
+## 范围
+
+本次收录固定实现 `candidate/solution.py::Model.forward` 的设备侧设计。host 侧只做校验与几何推导，不做数值归一：14 个张量以借用引用解包（`THPVariable_Unpack`，无 pybind 拷贝），`TORCH_CHECK` 固定 dtype、维度与关键 stride（`mixed_qkv.stride(1)==1`、conv_state 通道连续、`conv_weight.stride(0)==4`、state 的 `size(2)==size(3)==128` 且 `stride(3)==1`、out 与 output_gate 同形），并由形状推出 channels、request_count=n、spec_width=width、value_head_count=hv、qk_head_count=h=(channels-hv*128)/256、ratio=hv/h。out 为 None 时在 Python 侧 `torch.zeros_like(output_gate)` 后传入，返回值即该对象。每次调用的设备工作都在 `gdn_launch` 内的一次或两次 kernel 提交中完成，无库数值调用，也没有阻塞调用者流的 host/device 同步（录图路径只在私有捕获流上 `cudaStreamSynchronize`，融合标志缓冲只在首次分配、容量增长或换设备时另有一次 zero-init）；所有张量按实际 stride 寻址（生产输入的 mixed_qkv 与 output_gate 是同一 guarded backing 上的视图，故 ms0 大于 channels）。不含生产 baseline（`problem/solution.py` 包装的 `QwenGatedDeltaNetAttention._forward_core_decode_spec_fused_norm`，原库 validation.status=numerical_failure，只作背景，不作正确性依据）。
+
+`gdn_launch` 只在 n>0 时提交。进入哪套设备方案由下列 host 判定决定，它们是配置选择而非算法分支，按 common 的规则不留在 YAML：每份完整设计固定一档，其余取值记入本目录。
+
+- `vec` ∈ {0,1,2,3}：state 的 stride(0..2) 与 data_ptr 的 4/8/16 元素对齐档，决定 gdn kernel 与状态访问宽度。
+- `conv_vec`：channels、conv_state.stride(0)、conv_state.stride(2)、mixed_qkv.stride(0) 均为偶数，且 conv_state/mixed 4B 对齐、conv_weight 16B 对齐，决定 conv kernel 的通道粒度。
+- 融合门限：`vec==3 && conv_vec && ceil(channels/512)*n <= 160` 时走单 launch 融合，否则走两 launch PDL 路径。
+
+10 个固定用例的 state_slot_padding 与 conv_slot_padding 均取 {32,4096,65536}，全部落在 vec==3 且 conv_vec；其中 shape 0（n=8、channels=10240、convTotal=160）与 shape 5（n=32、channels=2048、convTotal=128）满足融合门限。`performance/ncu/result.json` 与之吻合：这两例每次捕获只有 1 个 `gdn_fk_kernel`，其余 8 例为 `conv3_kernel` + `gdn_w11v8_kernel<(bool)1>` 两个 kernel；整个 performance 记录中没有 `gdn_w11_kernel`、`gdn_v1_kernel` 或 `conv_kernel` 的任何一次执行。这三者只在 shape_range 允许的任意 slot padding（例如 state_slot_padding=4 或 1、conv_slot_padding=1）下进入，未被固定用例覆盖。
+
+有效域内的工作与副作用照常核对，不与 no-op 混淆：`len[i]=0` 的请求其 conv/gdn 块直接返回，不写 out 行也不写状态；非活跃请求（源槽为 0，或 accepted 越界）由 gdn 块把 len*128 个 out 元素写零并返回，不写检查点；活跃请求的 out 行由该 (request, head) 块在尾段全部写满，故 out 的每个元素都有确定生产者。源码另保留 `len>8` 的回退循环与 `len<=8` 活跃门以维持非法域行为，在 Contract 有效域（len<=spec_width<=8）内回退循环为空、活跃门恒真，属防御路径，不构成额外设计。
+
+待核实与来源限制（不影响机制判断与代表选择）：融合门限 160 来自源码记录的常驻块容量（`__launch_bounds__(256,2)`，2 块/SM × 148 SM ≈ 296）约 0.55 倍与 ab3/ab7/ab9 实测取舍，无 GPU、不复现，各设计按来源事实将其记为设计条件而非硬件保证；快速 sigmoid（`tanh.approx.f32` 实现 0.5+0.5*tanh(x/2)）喂 conv 的 silu、gate 两分支与 beta，decay/softplus 保持精确，源码声称绝对误差约 3.1e-4 且在 atol=0.01/rtol=0.05 预算内，未验证，作为来源限制随各设计的数学层保留；外部验收器实现不在快照内（已记 source_gap issue），只影响外部通过边界；`gdn_w11v8_kernel<false>` 与 `gdn_w11_kernel<false>` 两个模板实例在 `gdn_launch` 的四路选择中从不被启动，属死代码，不进设计。
+
+## 完整设计
+
+主计算分两段，三份完整设计共用同一骨架，只在协作组织上分岔。conv 段以 (request, channel chunk) 为工作：取 slot=state_indices[i,0] 从 off=accepted-1 起的三列历史，与本请求 len 行 mixed_qkv 拼成流，4 抽头 FP32 累加后 silu，就地以 BF16 写回 mixed_qkv，同时把调用前的原始 token 追加到 conv_state 列 2..len+1、把列 0/1 移为旧 off+1/off+2。gdn 段以 (request, value head) 为工作：一个 256 线程 CTA 独立承担该请求该值头的全部 len 步，8 个 warp 分摊 128 行状态，状态以 FP32 常驻寄存器跨步携带；每步算 pred 与 delta、更新状态、向正槽写 BF16 检查点并得出 raw 读出；RMSNorm 延迟到步循环之后，用跨 warp 的平方和部分和与 raw 暂存槽一次 barrier 汇总，再按 (step, channel) 分发写出 out。四个 Contract 输出按段分工：mixed_qkv_updated 与 conv_state_updated 由 conv 段的就地写回形成，result 与 state_updated 的 BF16 检查点在 gdn 段形成。两段唯一的耦合是“conv 写后的 mixed_qkv 必须对 gdn 可见”（root.yaml 记为 `Flow.Handoff::m`，等待点 `GDN.mixed_ready`），源码给两种实现：两次提交之间的 PDL（生产者 `CONV.MAIN` 的 `signal:launch_permission` 调 `cudaTriggerProgrammaticLaunchCompletion`，消费者带 `ProgrammaticStreamSerialization` 属性并在 `await:conv` 调 `cudaGridDependencySynchronize`），或单次提交内用设备侧 per-request 原子到达/离开计数与有限自旋。这两种交接方式，加上 gdn 块内两种互不相同的状态归属与归约组织，构成三份需要各自贯通的完整设计。
+
+root 选两 launch PDL 路径的 vec==3 档实例（state 三 stride 16 元素整除、基址 32B 对齐，即记录 (b) 中 root 侧的那一档）：它是固定用例中 8/10 实际进入、认证测量覆盖的主实例，接口最清楚（两段各一次提交，跨段依赖只由 PDL 表达），便于理解与比较。它不追求最通用也不充当另两份的祖先：融合路径改的是提交与协作，v1 布局改的是块内归属与归约，二者都不是 root 加参数能表达的。
+
+| 设计 | 具体机制与保留理由 | 关系 |
+| --- | --- | --- |
+| [root](root.yaml) | 两次提交 + PDL 交接的 vec==3 档实例（state 三 stride 16 元素整除、基址 32B 对齐），已定稿为 step `CONV` 与 `GDN`（各一个 `MAIN` role，下列记录均按此定位）：`conv3_kernel`（每线程 2 通道、4B 访问、uint4 抽头、len<=8 行预取突发、入口即触发 PDL）与 `gdn_w11v8_kernel<true>`（L(8) 布局：warp 持 16 行、lane 持 16 列、每线程 4 行×16 列的 FP32 寄存器 `carried_state`；q/k 以 p=c+4*(c>>4) 重映射存 160 宽 smem（`q_stage`/`k_stage`）；每步由一个 warp 算 invq/invk/dotk 并顺带暂存 q 与 k_hat；pred 与 readout 只在 8 个同列组 lane 间做 3 级 shfl_xor；读出用折叠式 raw = dec*invq*(S·q_raw) + delta*(q_raw·k_raw)*invq*invk，避免二次遍历更新后状态；状态预载与检查点用 256 位 `ld/st.global.v8.b32`）。保留理由：认证测量覆盖的主实例，块内归属、归约范围、读出折叠与延迟 RMSNorm 构成一套自洽且区别于另两份的协作组织。 | 阅读入口，保存唯一 Contract，三区全部本地定义；`Dispatch.when` 已写实为 state.stride(0..2) 16 整除且 32B 基址（即 vec==3 档）、conv_vec、mixed_qkv.stride(0) 与 output_gate.stride(0..1) 4 整除且 8B 基址、out.stride(0..1) 为偶且 out 基址 4 字节对齐、且 ceil_div(channels,512)*request_count > 160，精确条件以 root.yaml 为准 |
+| [fused_single_launch](fused_single_launch.yaml) | 单次提交融合两段：grid = convTotal + hv*n 个 256 线程块，按线性 blockIdx.x 划分 conv/gdn 角色（conv 块 ID 更小、gdn 块按 i*hv+j 排列），两 step 同属一条 concurrent `Flow.Launch`。conv 角色（step `CONV`）沿用 conv3 的通道分块，收尾设备 fence + tid0 `atomicAdd` 到达计数（`signal:arrival`），任何退出路径都递增且从不等待；gdn 角色（step `GDN`）把与 conv 无关的工作（`load:state_preload` 256 位状态预载、`stage_independent` gate/norm_weight/decay/beta/dst 暂存）提到 `await:conv` 之前，再由 `await:conv` 有限自旋（tid0 对 `flags[i] >= cxb`，`__nanosleep` 退避），barrier 后 tid0 递增离开计数（`release:flags`），第 hv 个离开者把两个计数清零（自复位，故可被图重放）；无 kernel 边界 ⇒ 等待后的 `norm_factors` 与 `stage_v` 对 mixed 一律用 `ld.global.cg` 读到 L2 一致点（gate/a/b/A_log/dt_bias/indices/state 不由 conv 写，故仍用普通读）。按单请求计数等待是充分的：conv 工作按请求局部，只写本请求的 mixed 行与该请求 slot 的历史列，无跨请求数据依赖。无死锁的依据是 conv 角色从不等待、线性 ID 更小，且门限保证全部 conv 块在首波常驻；源码把“块按线性 ID 顺序派发”记为 de facto 行为，本设计已按来源限制将其如实保留，不升格为硬件保证。保留理由：工作归属（一次提交两种角色）、主协作（设备侧计数 + 自旋替代 PDL）、跨调用寿命（grow-only 零初始化标志缓冲、指针入图键）与内存一致性要求都需重新贯通，不是给两 launch 方案加队列。 | 与 root 并列，Contract 与 `Math_reshape` 整区解析到 root（`from: root`，源码记录融合路径与 conv3+w11v8 的运算与次序相同），`Work_schedule` 与 `Tile_pipeline` 本地定义——一次提交承担两种角色，设备侧计数与自旋取代 root 的两条 `Flow.Launch`，`Flow.Handoff::m` 的等待（wait_at `GDN.mixed_ready`）由 `await:conv` 的有限自旋承担而非 PDL；仅在 state.stride(0..2) 16 整除且 32B 基址（vec==3 档）、conv_vec、mixed_qkv.stride(0) 与 output_gate.stride(0..1) 4 整除且 8B 基址、out.stride(0..1) 为偶且 out 基址 4 字节对齐、且 ceil_div(channels,512)*request_count <= 160 时进入，并要求标志缓冲在调用开始时全为零（首次分配 zero-init，此后由 `release:flags` 自复位，容量增长或换设备时重新 zero-init），精确条件以 fused_single_launch.yaml 为准 |
+| [warp_row_reduction](warp_row_reduction.yaml) | 同为两次提交 + PDL，但 gdn 块内换一套归属：lane 持 16 行 × 4 列（S[16][4]），sm_q/sm_k 为普通 128 宽布局，invk/invq 在步循环内逐元素乘，pred 与 readout 对每行做整 warp 蝶形归约（每步 16 行 × 2 次 warp_sum），readout 直接取更新后状态（无折叠式），检查点与状态预载为每 lane 16 行 × 4 列的 uint2 8 字节访问（定稿固定 vec==1 档，即 `gdn_v1_kernel<true>`）；prologue 为 b1 暂存 q/k/v/gate 加 b2 每 warp 冗余重算 invq/invk，步循环前有 `await:staged` 与 `await:norms` 两次 barrier，RMS 尾段用 1/128 而非 1/1024（因每行只存一份而非 8 份重复）。保留理由：主要协作（归约范围与读出路径）、暂存组织与数学改写形式整体不同，且是源码为 state 未 8 对齐档实际选用的方案（注释记录其在小网格标量档比 W11 快，29.4/27.0us 对 53.5/45.1us），不是 root 的参数变体。 | 与 root 并列，Contract 全部解析到 root；三区均本地定义——`Math_reshape` 因归约范围、直接读出路径与尾段 1/128 与 root 不同，`Work_schedule` 因 GDN 的不变量集合暂存原始 q/k（`k_steps`，root 暂存 `k_hat_steps`），`Tile_pipeline` 因块内归属与 barrier 位置不同；CONV 侧与 `Flow` 的两条提交、`Handoff::m` 同 root（同一 conv3_kernel 与 PDL 结构）。`Dispatch.when` 按设计真实访问条件写实：state.stride(0..2) 4 整除且 8B 基址（更强对齐档的输入也满足，host 实际将其路由至 root 档（含 vec==2 参数记录）或融合档，属允许的范围重叠）、conv_vec、mixed_qkv.stride(0) 与 output_gate.stride(0..1) 4 整除且 8B 基址、out.stride(0..1) 为偶且 out 基址 4 字节对齐，精确条件以 warp_row_reduction.yaml 为准。定稿固定 vec==1 档；vec==0（`gdn_v1_kernel<false>`）的标量状态访问按其参数记录（见变体与组合），与标量 conv 的组合见组合记录 |
+
+## 变体与组合
+
+### 标量 conv 通道映射与末端 PDL 触发（局部）
+
+- 基线：[root](root.yaml) 的 `DESIGN.Work_schedule::CONV`（`Partition.channel` tile 512、`Mapping.Worker_count` = ceil_div(channels,512)*request_count）与 `DESIGN.Tile_pipeline::CONV.MAIN`（存储 `token_rows`、`conv_operands`，动作 `signal:launch_permission`、`load:token_rows`、`compute:convolve`、`store:history_shift`、`store:history_append`）。
+- 差异与联动：改为每线程 1 个通道，`Partition.channel` tile 512→256、grid.x = ceil_div(channels,256)、`Worker_count` 随之改为 ceil_div(channels,256)*request_count；历史三列与 4 个抽头按标量 bf16 读，`token_rows` 的 8 行预取突发取消（该存储不再需要），token 在 len 循环内直接载入，`conv_operands` 退化为每线程的三值滑窗与四抽头；`signal:launch_permission` 由入口动作改为循环之后的收尾动作。触发位置只决定依赖网格何时被允许启动，消费者仍靠 `GDN` 的 `await:conv`（`cudaGridDependencySynchronize`）等待 conv 完整完成与可见；标量路径用同一 `sigmoidf`（即 root `Math_reshape` 的 `sig_fast`）与同一左到右 FP32 累加序，历史移位与追加同为已存字的精确拷贝，故 `mixed_qkv_updated` 与 `conv_state_updated` 的值不变，实际联动只是消费者 prologue 的重叠窗口从生产者执行期缩到收尾期。
+- 条件与依据：`conv_vec` 不成立时进入（channels、conv_state.stride(0)、conv_state.stride(2)、mixed_qkv.stride(0) 有奇数，或 conv_state/mixed 未 4B 对齐、conv_weight 未 16B 对齐），例如 conv_slot_padding=1；不与融合路径共存（融合要求 conv_vec）。来源 `conv_kernel` 与 `gdn_launch` 的 else 分支，固定用例未覆盖。
+
+### gdn 状态访问宽度档位（参数）
+
+- 基线：[root](root.yaml) 的 `DESIGN.Tile_pipeline::GDN` 中 `load:state_preload` 与 `store:checkpoint` 对 `carried_state` 每线程 4 行×16 列份额的访问，以及 `REALIZATION.Prefer` 选定的 256 位形式。
+- 差异与联动：root 每 row-tile 一次 256 位 `ld/st.global.v8.b32`，可降为每 row-tile 两个 uint4 的 16B 访问（`gdn_w11_kernel<true>`）：L(8) 布局、`Math_reshape` 全部公式、smem 组织（含 `q_stage`/`k_stage` 的 160 宽置换）、归约范围、`await:staged` 与 `await:steps` 的位置及检查点字节图像全不变，只是访问指令数与所需对齐不同（state 的三个 stride 只需 8 元素整除、基址只需 16B 对齐，而非 16 元素整除与 32B 对齐）。选用本参数时该 256 位 `Prefer` 不再适用，`Dispatch.when` 的 state 对齐前提相应放宽为 8 元素整除与 16B 基址；root.yaml 本身不改。
+- 条件与依据：由 state.stride(0..2) 与 data_ptr 的 4/8/16 元素对齐档（a4/a8/a16）决定，vec==3 走 root、vec==2 走本条参数。更弱的 8B（uint2）与标量（两个 u16 拼一个 unsigned）访问宽度属 vec==1/0 档，而这两档整体换用 [warp_row_reduction](warp_row_reduction.yaml) 的归属与归约——vec==1 档是该节点定稿的 uint2 形式，vec==0 标量形式见下条参数记录，故那是该设计自己的参数，不是 root 的参数；本条只记 root 侧可降的一档。来源为 `gdn_launch` 的四路 kernel 选择与 a4/a8/a16 判定，固定用例全部落在 vec==3。
+
+### warp_row_reduction 的标量状态访问（vec==0 档）（参数）
+
+- 基线：[warp_row_reduction](warp_row_reduction.yaml) 的 `DESIGN.Tile_pipeline::GDN.MAIN` 中 `load:state_preload` 与 `store:checkpoint` 对每线程 16 行 × 4 列份额的 8 字节（uint2）访问，以及 `REALIZATION.Prefer` 选定的 8 字节向量形式。
+- 差异与联动：标量档（来源 `gdn_v1_kernel<false>`）把每行一次 uint2 载入换成四次 2 字节载入拼成两个 u32 字，把 uint2 检查点换成每行四次标量 f2b 存储；该 `Prefer` 项不再适用。数学公式、暂存组织（b1 对 mixed/gate 仍是 uint2 载入）、整 warp 归约与 barrier 位置全不变。`Dispatch.when` 的差额只删去 state 三 stride 4 整除与 8B 基址子句；mixed_qkv.stride(0) 与 output_gate.stride(0..1) 4 整除且 8B 基址（b1 暂存在两个模板实例中相同）以及 out.stride(0..1) 为偶且 out 基址 4 字节对齐（尾段配对分支在两个模板实例中相同）必须保留。
+- 条件与依据：state 的三 stride 或基址弱于 4 元素整除 + 8B 对齐时进入，host 的 a4/a8/a16 判定与四路 kernel 选择据此取 `gdn_v1_kernel<false>`（vec==0 档，源码注释记为 odd paddings）；shape_range 的 state_slot_padding ∈ [0,65536] 允许奇数（如 1），使 state.stride(0) 为奇数而落入本档。固定用例的 state_slot_padding 均为 {32,4096,65536}，performance 记录中没有任何 v1 执行，故本档无实测，不得据源码分支推断性能。
+
+### out 尾段的存储宽度分支（参数）
+
+- 基线：[root](root.yaml) 的 `DESIGN.Tile_pipeline::GDN.MAIN` 动作 `compute:out_rows`（消费 `raw_stage` 与 `sq_stage`），数学层为 `Math_reshape` 延迟 RMSNorm 改写中 out 的写出式。
+- 差异与联动：root 取 out.stride(0) 与 out.stride(1) 均为偶数的配对分支：每线程写 2 个相邻通道、做一次 4B 配对存储（idx2 = k*256+tid，sq = idx2>>6，m = (idx2&63)*2）；任一为奇数时退回逐元素标量存储（idx 遍历 len*128，sq = idx>>7，m = idx&127），`compute:out_rows` 的每线程通道份额由 2 变 1。两分支的乘积与顺序相同（raw*rv*norm_weight*gate），故 `result` 的值不变，只是存储指令数与所需对齐不同。
+- 条件与依据：由 out 的实际 stride 与基址决定；固定用例的 out 是 [t,hv,128] 连续视图且基址 4 字节对齐，走配对分支。[fused_single_launch](fused_single_launch.yaml) 的尾段与 root 逐字相同（同一奇偶配对分支、同一 4 字节配对存储，rv 同为 1/1024），对应其 `DESIGN.Tile_pipeline::GDN.MAIN` 的 `compute:out_rows`，本条对它同样适用，共同差额只写这一次；[warp_row_reduction](warp_row_reduction.yaml) 有同一 stride 分支但 rv 用 1/128，对应其 `DESIGN.Tile_pipeline::GDN.MAIN` 的 `compute:out_rows`（标量回退分支同为 1/128）。配对分支的 4 字节存储落在偶数元素偏移上，地址模 4 同余于 out 基址，而 host 对 out 无对齐校验，故三份设计的 when 均含 out 基址 4 字节对齐子句；标量回退只写单个 bf16，无此要求。
+
+### 单槽 CUDA-graph 重放提交（局部）
+
+- 基线：[root](root.yaml) 的 `DESIGN.Work_schedule::Flow.Launch` 两条提交（含 `Handoff::m` 的 PDL 表达）；同样适用于 [fused_single_launch](fused_single_launch.yaml)（其 `Flow.Launch` 为单条 concurrent）与 [warp_row_reduction](warp_row_reduction.yaml)（其 `Flow.Launch` 与 root 同为两条），共同差额只写这一次。
+- 差异与联动：调用者提供 out 时（use_graph = had_out）改为录图重放提交，提交方式由直接 launch 变为“命中即重放、未命中先录制再重放”，`Flow.Launch` 的 step 归属、顺序与 `Handoff::m` 的等待关系不变。键为 48 个 8 字节字（`unsigned long long key[48]`，源码自称 48-word），实际填入 14 个 data_ptr、21 个 stride/维度/头数、scale 与 norm_eps 的位模式、gate_sigmoid、vec、融合标志指针与 device，余位补零；命中即在当前流 `cudaGraphLaunch`，未命中则在私有非阻塞侧流上 `cudaStreamSynchronize` + BeginCapture/EndCapture 录制同一 launch 序列、实例化后重放。录制只记录执行结构、不缓存结果，每次重放都在当前流重新执行同一 kernel 序列并读当前内存，故 Contract 的全部原地写回与副作用照常发生；捕获或重放失败、或累计未命中超过 64 次即永久禁用并回落直接提交，语义不变。与融合路径的联动是必要的：标志缓冲由 kernel 自复位（第 hv 个离开者清零），重放才不需要 host 纪元，且标志指针入键保证缓冲扩容后重新录制。
+- 条件与依据：out 为 None 时不启用（每次新分配的指针 churn 只会耗尽捕获额度）。来源为 `gdn_forward` 的 `GdnGraphCache` 与 `Model.forward` 的 had_out。另有 `__call__ = forward` 绕过 `nn.Module._call_impl` 的 host 派发优化，不改变设备工作，属实现细节。
+
+### conv 档与 gdn 档的独立组合（组合）
+
+- 基线：[root](root.yaml) 的 `Work_schedule.Step.CONV` + `Step.GDN` 与 `Flow.Launch`/`Flow.Handoff::m`（即 conv3 + w11v8 档）；另两份完整设计 [fused_single_launch](fused_single_launch.yaml)、[warp_row_reduction](warp_row_reduction.yaml)。
+- 差异与联动：`conv_vec` 与 `vec` 取自不同张量的 stride 与对齐，互相独立，因此两 launch 路径下 2 个 conv 档 × 4 个 gdn 档接口相容：conv 侧按上面的局部记录替换 `CONV` 的 tile、存储与触发动作，gdn 侧按对齐档落到 root 的 `GDN`（vec==3，含 vec==2 参数记录）或 [warp_row_reduction](warp_row_reduction.yaml) 的 `GDN`（vec==1 定稿形式；vec==0 经其标量状态访问参数记录）中承担同一 (request, value head) 工作的 step，不按配对新建节点；两段的分解不同（(request, channel chunk) 对 (request, head)），只经 `Handoff::m`（mixed_qkv 与 PDL）交接，替换一侧不影响另一侧的归属与提交。融合路径是唯一被门限绑死的组合（要求 conv_vec 且 vec==3），不能与标量 conv 或低对齐档组合。
+- 条件与依据：来源为 `gdn_launch` 中 use_fk / conv_vec / vec 三个判定。按 kernel 归属的实测证据（`performance/ncu`）只覆盖固定用例进入的两档组合（融合档与 conv3+w11v8 档）；CERTIFIED_BEST 的 domain 套件只有整体时延、没有 kernel 归属，故其余组合不得据源码分支推断性能。

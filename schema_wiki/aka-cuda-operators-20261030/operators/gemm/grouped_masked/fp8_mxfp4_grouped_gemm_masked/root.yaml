@@ -1,0 +1,515 @@
+META_DATA:
+  Name: fp8_mxfp4_grouped_gemm_masked
+  Describe: Masked per-expert grouped GEMM of MXFP8 activations and packed MXFP4 weights with 32-element power-of-two scales, written BF16 in place
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/solution.py::Model.forward
+  Version: 4
+  Dispatch:
+    when: >-
+      The entire shared Contract domain; declared sizes already satisfy the tiling preconditions (k_dim % 128 = 0, n_dim % 256 = 0, group_count <= 256). Caller-side invocation conditions, validated at entry and rejected otherwise: six contiguous CUDA tensors with matching dtypes and scale shapes, five 16-byte-aligned operand base pointers, positive E/M/N/K, present masked_m. Advisory expected_m does not gate this design.
+CONTRACT:
+  Algorithm_requirement:
+    Input:
+      a: {meaning: 'Activation tuple (a_q, a_sf); see Operand_layout', shape: [], dtype: python_tuple}
+      b: {meaning: 'Weight tuple (b_q, b_sf); see Operand_layout', shape: [], dtype: python_tuple}
+      d: {meaning: Caller-owned buffer backing output d_out in place, shape: [{expert: group_count}, {row: capacity}, {out: n_dim}], dtype: bf16}
+      masked_m: {meaning: Active row count per expert, shape: [{expert: group_count}], dtype: int32, range: 0 <= masked_m <= capacity}
+      expected_m: {meaning: Advisory average active rows per expert, shape: [], dtype: python_int}
+      recipe: {meaning: 'Recipe declaration; construction passes (1,1,32)', shape: [], dtype: python_tuple, nullable: true, default: None}
+      recipe_a: {meaning: Recipe override for operand a; constructed None, shape: [], dtype: python_none, default: None}
+      recipe_b: {meaning: Recipe override for operand b; constructed None, shape: [], dtype: python_none, default: None}
+      compiled_dims: {meaning: Compilation hint; construction passes nk, shape: [], dtype: python_str, default: nk}
+      disable_ue8m0_cast: {meaning: UE8M0-cast disable flag; constructed False, shape: [], dtype: python_bool, default: false}
+    Output: {d_out: {meaning: In-place result written on active rows of input d, shape: [{expert: group_count}, {row: capacity}, {out: n_dim}], dtype: bf16}}
+    Compute:
+      - Name: Operand_layout
+        Math: |
+          a = (a_q, a_sf) and b = (b_q, b_sf) are Python tuples of stored-precision operands.
+          Runtime sizes follow the declared request domain: group_count in {8, 16, 32, 64}; capacity is a multiple of 128 with 128 <= capacity <= 1024; (n_dim, k_dim) in {(1536, 2048), (3072, 4096), (4096, 1536), (4096, 7168), (7168, 2048)}; masked_m has group_count entries with 0 <= masked_m[e] <= capacity, so an expert may be empty.
+          One scale block covers 32 consecutive k positions: block t of a row covers j in [32*t, 32*t+32); k_dim/32 and k_dim/2 are integers on the declared domain.
+          Each b_q byte packs two weight codes: for packed index u the low nibble (bits 0-3, unsigned) carries k index j = 2*u and the high nibble (bits 4-7) carries j = 2*u+1.
+          a_sf and b_sf hold UE8M0-decoded scale values: each equals 2^i for an integer i with -126 <= i <= 127.
+          The fixed input construction sets expected_m = max(1, ceil(sum_e masked_m[e] / group_count)).
+        Symbol:
+          a_q: {meaning: MXFP8 E4M3 activation payload; tuple a member 1, shape: [{expert: group_count}, {row: capacity}, {k: k_dim}], dtype: fp8_e4m3fn}
+          a_sf: {meaning: Activation block scales; tuple a member 2, shape: [{expert: group_count}, {row: capacity}, {block: k_dim/32}], dtype: fp32}
+          b_q: {meaning: Packed MXFP4 E2M1 weight codes; tuple b member 1, shape: [{expert: group_count}, {out: n_dim}, {packed_k: k_dim/2}], dtype: int8}
+          b_sf: {meaning: Weight block scales; tuple b member 2, shape: [{expert: group_count}, {out: n_dim}, {block: k_dim/32}], dtype: fp32}
+      - Name: Operand_decode
+        Math: |
+          Decode the stored payloads to FP32 operand values; scales are powers of two, so the decoded values are the exact products of payload and scale.
+          E2M1 magnitude table mag = [0, 1/2, 1, 3/2, 2, 3, 4, 6]; for a 4-bit code c, e2m1(c) = mag(c mod 8), negated when c >= 8 (so c = 8 decodes to -0).
+          c[e,n,j] = low nibble of b_q[e,n,floor(j/2)] if j is even, otherwise its high nibble
+          av[e,i,j] = a_q[e,i,j] * a_sf[e,i,floor(j/32)]
+          bv[e,n,j] = e2m1(c[e,n,j]) * b_sf[e,n,floor(j/32)]
+          for 0 <= e < group_count, 0 <= i < capacity, 0 <= n < n_dim, 0 <= j < k_dim; the expert axis and all positions are independent.
+        Symbol:
+          av: {meaning: Decoded FP32 activation operand value, shape: 'ref:a_q.shape', dtype: fp32}
+          bv: {meaning: Decoded FP32 weight operand value, shape: [{expert: group_count}, {out: n_dim}, {k: k_dim}], dtype: fp32}
+      - Name: Masked_grouped_product
+        Math: |
+          y[e,i,n] = sum_{j=0}^{k_dim-1} av[e,i,j] * bv[e,n,j]
+          evaluated in FP32; the summation order is not prescribed.
+          y is defined only for the active rows 0 <= i < masked_m[e] of each expert e; an expert with masked_m[e] = 0 has no active rows and defines no product. Rows masked_m[e] <= i < capacity are inactive and have no required value.
+        Symbol: {y: {meaning: 'FP32 dot product, defined on active rows only', shape: 'ref:d.shape', dtype: fp32}}
+      - Name: Output_writeback
+        Math: |
+          d[e,i,n] = bf16(y[e,i,n]) for 0 <= e < group_count, 0 <= i < masked_m[e], 0 <= n < n_dim.
+          Inactive rows masked_m[e] <= i < capacity of d carry no numerical contract: acceptance compares only the active prefix rows, and a native masked implementation may overwrite padding rows inside d.
+          Inputs a, b and masked_m are read-only, and storage outside the d buffer remains unchanged.
+          The call returns None; the in-place update of d is the only externally visible result, so expected_m, recipe, recipe_a, recipe_b, compiled_dims and disable_ue8m0_cast do not affect it.
+    Golden_reference:
+      Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/reference.py::Model.forward
+      Tolerance:
+        d_out: Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0.0; formula/basis absent; no defaults
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      thread: Single execution lane of a warp; owns the register storage of its private values.
+      warp: 32 threads executing in lockstep inside one CTA; the fixed source organizes the 8 warps of its 256-thread CTA into distinct specialized roles.
+      cta: Thread block scheduled as a unit on one SM and composed of its warps; owns the smem shared by its threads and the tmem tensor memory that the fixed source allocates per CTA for tensor-core accumulators and scale factors.
+      cluster: CTAs co-scheduled on SMs of one GPU processing cluster, size fixed at launch, with cluster-scope barriers and peer smem addressing; the fixed source contains an optional 2-CTA variant that its default certified build does not launch.
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: >-
+      UE8M0 codes let the tensor core apply the 32-block scales exactly (Contract powers of two); av/bv never materialize. Tiles evaluate transposed - weights on the fixed 128-row axis, activations shrunk to align16(eff), <=15 padding columns wasted; only summation order differs from the reference
+    Rewrite:
+      - Name: UE8M0 exponent codes for the block scales
+        Math: |
+          a_sf and b_sf are exact powers of two by the Contract (2^i, -126 <= i <= 127), so each
+          scale maps bijectively onto an 8-bit UE8M0 exponent code consumed by the block-scaled
+          product:
+          sfa_code[e,i,q] = log2(a_sf[e,i,q]) + 127
+          sfb_code[e,n,q] = log2(b_sf[e,n,q]) + 127
+          for 0 <= q < k_dim/32, with codes in [1, 254]; the hardware decoding 2^(code-127)
+          reproduces the Contract scale exactly, so the conversion adds no rounding. A scale off
+          the power-of-two range would have its mantissa silently dropped; the Contract excludes
+          such inputs.
+        Symbol:
+          sfa_code: {meaning: UE8M0 exponent code of an activation block scale, shape: 'ref:CONTRACT.Algorithm_requirement::a_sf.shape', dtype: ue8m0}
+          sfb_code: {meaning: UE8M0 exponent code of a weight block scale, shape: 'ref:CONTRACT.Algorithm_requirement::b_sf.shape', dtype: ue8m0}
+        Ledger:
+          Baseline: f32 scales multiplied into decoded FP32 operands elementwise (Contract Operand_decode)
+          Gain: Staged scale bytes per k stage 6144 -> 1536 per activation tile; elementwise FP32 scale multiplies group_count*(capacity+n_dim)*k_dim -> 0
+          Cost: One in-kernel pass per stage re-reads 1536 staged f32 words and rewrites 384 packed UE8M0 words (1536 B); global f32 scale reads unchanged
+      - Name: Block-scaled transposed tile product
+        Math: |
+          Worktile (e, mb, np, jlo, njl) comes from the Work_schedule decode; it covers expert e's
+          rows [128*mb, 128*mb+eff), eff = masked_m[e]-128*mb in [1,128], eff_a = ceil_div(eff,16)*16,
+          and weight rows [256*np+128*j, +128) per active j in [jlo, jlo+njl). Transposed orientation
+          (rows = weight rows, columns = activation rows); for 0 <= n_l < 128, 0 <= i_l < eff_a:
+          acc_j[n_l,i_l] = sum_{q<k_dim/32} 2^(sfa_code[e,128*mb+i_l,q]-127) * 2^(sfb_code[e,256*np+128*j+n_l,q]-127) * dot32(a_q[e,128*mb+i_l,32q:32q+32], e2m1(c[e,256*np+128*j+n_l,32q:32q+32]))
+          with 2^(code-127) = a_sf / b_sf exactly; e2m1 and c per Contract.
+          Summands are exact in FP32 (E4M3 x E2M1 <= 6 bits, scale products powers of two),
+          so acc_j[n_l,i_l] = y[e,128*mb+i_l,256*np+128*j+n_l] up to summation order (free).
+          q = 0 overwrites acc_j; later q accumulate ascending. Padding columns eff <= i_l < eff_a are
+          evaluated and stored with the tile (no numerical contract); columns i_l >= eff_a are not evaluated.
+        Symbol: {acc: {meaning: 'FP32 tile product, transposed (weight-major)', shape: [{out: 128}, {row: eff_a}], dtype: fp32, retention: 'carry_forward (e,mb,np,j); q=0..k_dim/32-1'}}
+        Arithmetic:
+          Accumulate: >-
+            Tensor-core FP32 accumulation: fixed per-slice reduction tree with UE8M0 codes applied in the datapath; slices ascend in q; not the reference order
+        Ledger:
+          Baseline: The Contract's Masked_grouped_product as FP32 dots of decoded FP32 operands av/bv over active rows
+          Gain: MACs move to the block-scaled tensor core; av/bv never materialized (0 vs group_count*(capacity+n_dim)*k_dim*4 bytes); padding <= 15 columns per block
+          Cost: Padding columns still consume tensor-core work; the activation fetch rounds eff_a up to the box ladder {16,32,64,128}
+      - Name: Masked narrowing into d
+        Math: |
+          For each worktile and each active n-tile j in [jlo, jlo+njl):
+          d[e, 128*mb+i_l, 256*np+128*j+n_l] = bf16(acc_j[n_l,i_l])
+          for 0 <= i_l < eff_a and 0 <= n_l < 128, RNE narrowing per the Contract's Output_writeback.
+          Rows i_l < eff are the Contract's active rows. Rows eff <= i_l < eff_a stay inside the same
+          expert's capacity (128*mb + eff_a <= capacity) and are written with the narrowed product of
+          fetched inactive-row data, carrying no numerical contract - the padding-row overwrite that
+          Output_writeback permits for a native masked implementation. Block rows i_l >= eff_a
+          receive no write; an expert with masked_m[e] = 0 has no worktile, so its d rows keep the
+          caller's content.
+        Ledger:
+          Baseline: Direct row-major write of the narrowed y on active rows only (the Contract's Output_writeback)
+          Cost: Extra transposing staging copy per stored element (2B+2B on chip); stores cover all eff_a rows, writing <=15 contract-free padding rows per block
+  Work_schedule:
+    Thesis: >-
+      Persistent launch of sm_count CTAs, one per SM (device SM count; 148 certified). The masked work set exists only on device: every warp group re-decodes it privately. 16-m-block sub-groups keep weights L2-resident; the tail split cuts up to one wave of makespan; split siblings refetch A/SFA via L2
+    Step:
+      MAIN:
+        Describe: >-
+          Math_reshape tile product of one 128-row activation block x one weight n-pair (tail: single n-tile) over all k_dim, written bf16 in place on d
+        Decomposition:
+          Strategy: >-
+            nmb(e)=ceil_div(masked_m[e],128); n_pairs=n_dim/256; T=n_pairs*Σ_e nmb(e); R=T%sm_count; positions,split_from=T+R,T-R if 2R<=sm_count else T,T
+          Partition: {pos: {meaning: 'Scheduled position: full pair-tile or tail half', size: positions, tile: 1, range: [0, null]}}
+          Worktile:
+            Iteration:
+              a_payload: {meaning: Activation payload of this m-block for one stage, shape: [{row: eff_a}, {k: 128}], dtype: 'ref:CONTRACT.Algorithm_requirement::a_q.dtype', direction: ascending}
+              a_sf_stage: {meaning: f32 activation block scales for one k stage, shape: [{row: 128}, {block: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::a_sf.dtype', direction: ascending}
+              b_payload: {meaning: 'Packed weight bytes of active n-tiles, one stage', shape: [{out: 128*njl}, {packed_k: 64}], dtype: 'ref:CONTRACT.Algorithm_requirement::b_q.dtype', direction: ascending}
+              b_sf_stage: {meaning: f32 weight block scales of the active n-tiles, shape: [{out: 128*njl}, {block: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::b_sf.dtype', direction: ascending}
+          Target:
+            Single_tile: {d_tile: {meaning: 'BF16 in-place block on d, padding rows included', shape: [{row: eff_a}, {out: 128*njl}], dtype: 'ref:CONTRACT.Algorithm_requirement::d_out.dtype'}}
+        Mapping:
+          Strategy: >-
+            h=pos-split_from; f,jlo,njl=pos,0,2 if h<0 else split_from+floor(h/2),h%2,1; each warp group decodes positions privately, no broadcast
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: sm_count
+        Schedule:
+          Strategy: >-
+            P(e)=n_pairs*Σnmb<e; e: P(e)<=f<P(e+1); l=f-P(e); d=16*n_pairs; grp=floor(l/d); ig=l%d; nh=min(16,nmb(e)-16*grp); mb=16*grp+ig%nh; np=floor(ig/nh)
+          Worktile_order: [{by: pos, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, stride: sm_count}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: >-
+      Warp-specialized 4-slot smem ring persistent across tiles (no per-tile drain): TMA fills, pack warps convert scales, one lane issues in-order tc ops, 4 warps drain the single acc buffer via transposed staging; next tiles overlap the last stores (acc release at last TMEM read)
+    Step:
+      MAIN:
+        Index:
+          t: {meaning: Local ordinal in this worker's worktile sequence, definition: worktile}
+          k: {meaning: k-stage ordinal within one worktile, definition: [0, k_dim/128]}
+          s: {meaning: Ring-stage ordinal across worktiles; slot s%4, definition: {flatten: [t, k]}}
+        Storage:
+          a_ring: {meaning: 'Activation E4M3 payload ring slot, 128B swizzle', depth: 4, location: smem, shape: [{row: 128}, {k: 128}],
+            dtype: fp8_e4m3fn, total_size: 65536, view: {a_tile(s): {slot_index: s%4}}}
+          b_ring: {meaning: Weight pair; TMA unpacks E2M1 nibbles to bytes, depth: 4, location: smem, shape: [{out: 256}, {k: 128}],
+            dtype: uint8, total_size: 131072, view: {'b_tile(s,j)': {slot_index: s%4, region: {out: [j*128, j*128+128]}}}}
+          sfa_ring: {meaning: Activation SF f32 staging; packed UE8M0 in place, depth: 4, location: smem, shape: [{row: 128}, {block: 4}],
+            dtype: fp32, total_size: 8192, view: {sfa_f32(s): {slot_index: s%4}, sfa_packed(s): {slot_index: s%4, region: {block: [0, 1]}}}}
+          sfw_ring: {meaning: Weight SF f32 staging; packed UE8M0 in place, depth: 4, location: smem, shape: [{out: 256}, {block: 4}],
+            dtype: fp32, total_size: 16384, view: {'sfw_f32(s,j)': {slot_index: s%4, region: {out: [j*128, j*128+128]}}, 'sfw_packed(s,j)': {slot_index: s%4, region: {out: [j*128, j*128+128], block: [0, 1]}}}}
+          cd_stage: {meaning: 'BF16 writeback staging image, d row-major', depth: 1, location: smem, shape: [{row: 16}, {out: 256}],
+            dtype: bf16, total_size: 8192, view: {cd_pair: {}, cd_half(r): {region: {out: [(r%2)*128, (r%2)*128+128]}}}}
+          acc_tmem: {meaning: FP32 accumulator; TMEM lanes = weight rows, depth: 1, location: tmem, shape: [{out: 128}, {row: 256}],
+            dtype: fp32, total_size: 131072, view: {acc(j): {region: {row: [j*128, j*128+128]}}}}
+          sfw_tmem: {meaning: 'Weight UE8M0 scale columns, 4 per sub-block', depth: 1, location: tmem, shape: [{out: 128}, {column: 8}],
+            dtype: uint32, total_size: 4096, view: {'sfw_tm(s,j)': {region: {column: [j*4, j*4+4]}}}}
+          sfa_tmem: {meaning: 'Activation UE8M0 scale columns, one 4-col group', depth: 1, location: tmem, shape: [{row: 128}, {column: 4}],
+            dtype: uint32, total_size: 2048, view: {sfa_tm(s): {}}}
+          pack_regs: {meaning: Per-lane f32 scale copies held across slot wait, depth: 1, location: register, shape: [{element: 1536}],
+            dtype: fp32, total_size: 6144}
+          epi_regs: {meaning: Narrowed BF16 slice held from capture to stage, depth: 1, location: register, shape: [{row: 16}, {out: 256}],
+            dtype: bf16, total_size: 8192}
+        Role:
+          LOAD:
+            Info:
+              Describe: >-
+                Warp 0: one elected lane issues all ring TMA loads under the slot-release handshake; its other 31 lanes idle between entry and exit
+              Member: warp[0:1]
+              Using_verb:
+                compute:
+                  entry_scan:
+                    execution_mode: serial
+                    describe: >-
+                      CTA-wide entry (all warps): any_active = OR(masked_m>0) under two barriers, CTA exits if false; a second pass sums the m-block total behind T
+                load:
+                  sf_tiles:
+                    execution_mode: async_unordered
+                    describe: >-
+                      Elected lane TMAs stage s's SF f32 tiles to slot s%4 - activation (128 rows x 4 blocks) plus one weight tile per active j - and posts expect_tx
+                  ab_tiles:
+                    execution_mode: async_unordered
+                    describe: >-
+                      Elected lane TMAs stage s's payloads to slot s%4: A box = smallest of {16,32,64,128} covering eff_a; B = 8192 packed bytes per active j, evict_last
+                await:
+                  resources_ready:
+                    execution_mode: serial
+                    describe: >-
+                      CTA barrier after MMA's notification init and PACK's TMEM alloc; done once all warps arrive, publishing both to every role
+                  slot_free:
+                    execution_mode: serial
+                    describe: >-
+                      Wait slot s%4's release phase from use s-4 (MMA's completion commit); done: prior payload and scale regions fully read, safe to overwrite
+                  loops_done:
+                    execution_mode: serial
+                    describe: >-
+                      CTA-wide exit rendezvous; done once all warps arrive, so every handshake and store has retired
+                release:
+                  tmem_cols:
+                    execution_mode: serial
+                    describe: >-
+                      Warp 0 deallocates the CTA's 512 TMEM columns after the exit rendezvous
+            Pipe:
+              - compute:entry_scan
+              - if(any_active):
+                  - await:resources_ready
+                  - for(t):
+                      - for(s[t]):
+                          - await:slot_free(s)
+                          - load:sf_tiles(s)
+                          - load:ab_tiles(s)
+                  - await:loops_done
+                  - release:tmem_cols
+            Waiting:
+              Released: ['{done await:slot_free(s)} ← [{done MMA::signal:stage_consumed(s-4)}]']
+          PACK:
+            Info:
+              Describe: >-
+                Warps 2-3: per-lane in-place f32->UE8M0 packing of staged scale tiles (warp 2 activation, warp 3 weight); warp 2 also allocates TMEM
+              Member: warp[2:4]
+              Using_verb:
+                compute:
+                  entry_scan:
+                    execution_mode: serial
+                    describe: >-
+                      Same CTA-wide entry pass as LOAD; both warps participate and exit with the CTA when all experts are empty
+                  pack_sf:
+                    execution_mode: serial
+                    describe: >-
+                      Lanes overwrite the staged f32s' first quarter with packed UE8M0 words (sub-block q at word 128*q), fence async proxy, arrive on full per lane
+                load:
+                  sf_f32:
+                    execution_mode: serial
+                    describe: >-
+                      Lanes read slot s%4's staged f32 scales into pack_regs - warp 2: 16 f32/lane; warp 3: 32 f32/lane - captured before slot release
+                await:
+                  resources_ready:
+                    execution_mode: serial
+                    describe: >-
+                      Same CTA barrier as LOAD, entered after this role's TMEM allocation
+                  sf_landed:
+                    execution_mode: serial
+                    describe: >-
+                      Wait slot s%4's scale-landing phase of this use (LOAD's SF expect_tx); done: staged f32 scale words readable
+                  slot_reusable:
+                    execution_mode: serial
+                    describe: >-
+                      Wait slot s%4's release phase from use s-4; done: prior packed words fully read, region safe to overwrite in place
+                  loops_done: {execution_mode: serial, describe: Same CTA-wide exit rendezvous as LOAD}
+                acquire:
+                  tmem_cols:
+                    execution_mode: serial
+                    describe: >-
+                      Warp 2 allocates the CTA's 512 TMEM columns, records the base in smem, relinquishes the permit; warp 3 skips to the rendezvous
+            Pipe:
+              - compute:entry_scan
+              - if(any_active):
+                  - acquire:tmem_cols
+                  - await:resources_ready
+                  - for(t):
+                      - for(s[t]):
+                          - await:sf_landed(s)
+                          - load:sf_f32(s)
+                          - await:slot_reusable(s)
+                          - compute:pack_sf(s)
+                  - await:loops_done
+            Waiting:
+              Prepared: ['{done await:sf_landed(s)} ← [{done LOAD::load:sf_tiles(s)}]']
+              Released: ['{done await:slot_reusable(s)} ← [{done MMA::signal:stage_consumed(s-4)}]']
+          MMA:
+            Info:
+              Describe: >-
+                Warp 1: elected lane inits notifications, then issues per stage the scale copies, block-scaled MMAs and commits; tc ops retire in issue order
+              Member: warp[1:2]
+              Using_verb:
+                compute:
+                  entry_scan:
+                    execution_mode: serial
+                    describe: >-
+                      Same CTA-wide entry pass as LOAD; this warp participates and exits with the CTA when all experts are empty
+                  init_barriers:
+                    execution_mode: serial
+                    describe: >-
+                      Elected lane inits mbarriers: full=65 (1 expect_tx + 64 pack lanes), scale-landing=1, release=1, acc-ready=1, acc-release=128; fence publishes
+                matmul:
+                  wtile@atile:
+                    execution_mode: async_ordered
+                    describe: >-
+                      Four K=32 block-scaled MMAs, weight n-tile j x activation tile into acc(j); first of a tile overwrites, rest accumulate; only j in [jlo,jlo+njl)
+                load:
+                  sf_stage:
+                    execution_mode: async_ordered
+                    describe: >-
+                      Elected lane UTCCP-copies stage s's packed words to TMEM scale columns: both weight sub-blocks (active window or not) and the activation group
+                await:
+                  resources_ready:
+                    execution_mode: serial
+                    describe: >-
+                      Same CTA barrier as LOAD, entered after this role's notification init
+                  acc_free:
+                    execution_mode: serial
+                    describe: >-
+                      Wait acc-release of worktile t-1 (128 EPI lane arrivals); done: prior tile's TMEM reads retired, acc columns overwritable; t=0 passes fresh
+                  stage_ready:
+                    execution_mode: serial
+                    describe: >-
+                      Wait slot s%4's full phase of this use; done once LOAD's payload tx landed and 64 pack arrivals joined: payloads and packed scales readable
+                  loops_done: {execution_mode: serial, describe: Same CTA-wide exit rendezvous as LOAD}
+                signal:
+                  stage_consumed:
+                    execution_mode: async_ordered
+                    describe: >-
+                      tcgen05 commit arriving on slot s%4's release once all tc ops issued so far retire; frees the slot for refill
+                  acc_ready:
+                    execution_mode: async_ordered
+                    describe: >-
+                      tcgen05 commit arriving on acc-ready once the tile's final product retires; publishes acc(j) columns to EPILOGUE
+            Pipe:
+              - compute:entry_scan
+              - if(any_active):
+                  - compute:init_barriers
+                  - await:resources_ready
+                  - for(t):
+                      - await:acc_free(t)
+                      - for(s[t]):
+                          - await:stage_ready(s)
+                          - load:sf_stage(s)
+                          - for(j=jlo(t):jlo(t)+njl(t)):
+                              - matmul:wtile(s,j)@atile(s)
+                          - signal:stage_consumed(s)
+                      - signal:acc_ready(t)
+                  - await:loops_done
+            Waiting:
+              Prepared: ['{done await:stage_ready(s)} ← [{done LOAD::load:ab_tiles(s)}, {done PACK::compute:pack_sf(s)}]']
+              Released: ['{done await:acc_free(t)} ← [{done EPILOGUE::release:acc(t-1)}]']
+          EPILOGUE:
+            Info:
+              Describe: >-
+                Warps 4-7: per tile capture acc from TMEM (each warp its own 32 lanes), narrow to BF16, stage transposed in smem, vector-store 16-row slices to d
+              Member: warp[4:8]
+              Using_verb:
+                compute:
+                  entry_scan:
+                    execution_mode: serial
+                    describe: >-
+                      Same CTA-wide entry pass as LOAD; the four warps participate and exit with the CTA when all experts are empty
+                  capture_pair:
+                    execution_mode: serial
+                    describe: >-
+                      Per si: warps TMEM-read their 32 lanes x 16 cols of both acc halves (j1 first) and narrow to BF16 in epi_regs; last si retires all tile reads
+                  stage_pair:
+                    execution_mode: serial
+                    describe: >-
+                      STSM-transposes si's captured BF16 into the single 8 KB cd_stage image (16 rows x 256 cols); end-of-action cross-warp rendezvous publishes it
+                  capture_half:
+                    execution_mode: serial
+                    describe: >-
+                      Per si: same capture for the single n-tile jlo (16 cols) into epi_regs; the last si retires all of the tile's TMEM reads
+                  stage_half:
+                    execution_mode: serial
+                    describe: >-
+                      STSM-transposes si's captured BF16 into alternating 4 KB cd_stage halves, half r%2 by cross-tile slice count r; 16x128 image; rendezvous at end
+                store:
+                  d_pair:
+                    execution_mode: serial
+                    describe: >-
+                      4 passes of 16B vector stores by 128 threads: 16 rows x 256 cols at d row e*capacity+128*mb+16*si+r, cols [256*np,+256); cd swizzle inverted
+                  d_half:
+                    execution_mode: serial
+                    describe: >-
+                      2 passes: 16 rows x 128 cols at cols [256*np+128*jlo,+128), reading the current cd_stage half; done once stores retire
+                await:
+                  resources_ready: {execution_mode: serial, describe: Same CTA barrier as LOAD}
+                  acc_ready:
+                    execution_mode: serial
+                    describe: >-
+                      Wait acc-ready phase of worktile t (MMA's final-product commit); done: acc(j) columns for j in [jlo,jlo+njl) readable
+                  loops_done: {execution_mode: serial, describe: Same CTA-wide exit rendezvous as LOAD}
+                release:
+                  acc:
+                    execution_mode: serial
+                    describe: >-
+                      All 128 lanes arrive on acc-release after a proxy fence once tile t's TMEM reads retire; staging and stores may still be in flight
+            Pipe:
+              - compute:entry_scan
+              - if(any_active):
+                  - await:resources_ready
+                  - for(t):
+                      - await:acc_ready(t)
+                      - if(njl(t) == 2):
+                          - for(si=0:eff_a(t)/16):
+                              - compute:capture_pair(si)
+                              - if(si == eff_a(t)/16-1):
+                                  - release:acc(t)
+                              - compute:stage_pair(si)
+                              - store:d_pair(si)
+                      - if(njl(t) == 1):
+                          - for(si=0:eff_a(t)/16):
+                              - compute:capture_half(si)
+                              - if(si == eff_a(t)/16-1):
+                                  - release:acc(t)
+                              - compute:stage_half(si)
+                              - store:d_half(si)
+                  - await:loops_done
+            Waiting:
+              Prepared: ['{done await:acc_ready(t)} ← [{done MMA::signal:acc_ready(t)}]']
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN.LOAD
+      Choice: >-
+        Its TMA loads are 2-D tiled bulk copies; the weight map uses element type 16U4_ALIGN16B so each E2M1 nibble expands to one 8-bit smem container under 128B swizzle, and mbarrier transaction bytes count packed wire bytes (8192 per 128x128 weight tile)
+      Reason: >-
+        b_ring's capacity, the product descriptor offsets and the full-notification expect_tx accounting all assume unpack-on-landing; pre-expanded globals or plain copies change the staged image and the completion counts
+    - Item: DESIGN.Tile_pipeline::MAIN.MMA
+      Choice: >-
+        tcgen05.mma cta_group::1 kind::mxf8f6f4 block_scale (UE8M0 scales from TMEM) for every product, tcgen05.cp 32x128b.warpx4 for scale staging, tcgen05.commit for both notifications; the CTA's tc ops retire in issue order
+      Reason: >-
+        The per-32-block scale application maps onto the block-scale datapath; single-buffered TMEM scale columns and acc reuse rely on in-order retirement and commit-tracked completion - no barrier separates adjacent stages
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: >-
+        All notifications are smem mbarriers waited by phase parity persisting across worktiles; counts: full=65 (1 expect_tx + 64 pack lanes), scale-landing=1, slot-release=1, acc-ready=1, acc-release=128
+      Reason: >-
+        The ring's cross-worktile continuity and the 4-slot reuse edges assume parity-tracked phases never reset per tile; the counts bind the arrival sets the roles declare
+    - Item: DESIGN.Tile_pipeline::MAIN.PACK
+      Choice: >-
+        pack_sf's per-lane generic-proxy smem writes of the packed codes, then fence.proxy.async.shared::cta before the lane's full arrival
+      Reason: >-
+        The tc scale copier reads staged words through the async proxy; without the fence the arrival could precede the packed words and products would stage stale bytes
+    - Item:
+        - DESIGN.Math_reshape::sfa_code
+        - DESIGN.Math_reshape::sfb_code
+      Choice: >-
+        Their computation extracts the IEEE-754 exponent byte of the staged f32 scale ((bits>>23)&0xFF)
+      Reason: >-
+        Exact under the Contract's power-of-two scale guarantee (any mantissa would be silently dropped) and avoids a per-element log2 in the ring's critical path
+    - Item: DESIGN.Tile_pipeline::MAIN.EPILOGUE
+      Choice: >-
+        tcgen05.ld 16x256b capture (each warp reads only its own 32 TMEM lanes), stmatrix.sync.aligned.m8n8.x4.trans.b16 staging, tcgen05.fence before/after thread sync at proxy-crossing waits
+      Reason: >-
+        The transposed writeback view and TMEM lane ownership force per-warp lane capture plus transposing smem stores; the proxy fences order acc reads and releases for the acc edges
+    - Item: DESIGN.Work_schedule::MAIN
+      Choice: >-
+        Launch sm_count CTAs x 256 threads with __launch_bounds__(256,1) and 230,400 B opt-in dynamic smem in one image (4 ring slots of 55,296 B + 8,192 B staging + notification words, 1024B-aligned), via cudaFuncSetAttribute
+      Reason: >-
+        Persistent one-CTA-per-SM residency, ring depth and staging capacity assume this launch shape; idle lanes of the two issue warps occupy the footprint
+    - Item: DESIGN.Tile_pipeline::MAIN.PACK
+      Choice: >-
+        tmem_cols: one whole-budget tcgen05.alloc of 512 columns (268 used: 256 acc + 8 weight-scale + 4 activation-scale), base published via smem; paired tcgen05.dealloc by LOAD after the exit rendezvous
+      Reason: >-
+        Whole-budget allocation matches the static budget check and avoids column bookkeeping; dealloc after the rendezvous guarantees all tc ops retired
+    - Item: DESIGN.Work_schedule::MAIN
+      Choice: >-
+        TMA tensor maps for payloads, scales and d are encoded host-side and cached by (six pointers, E,M,N,K), passed as kernel params; masked_m is read fresh on device every call
+      Reason: >-
+        The cache saves descriptor encoding and param assembly only - no device work - so cached launches never freeze mask values; the call boundary stays one launch on the caller's stream
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::MAIN.MMA
+      Choice: >-
+        Chunk-unroll the k-stage loop into ring-depth bodies with compile-time slot indices so descriptors hoist to registers; runtime-slot path for alignment and remainder stages
+      Reason: >-
+        Value-identical; collapses the elected lane's per-stage issue stream to ~5 ops; source-measured +1.2% geomean over the ten fixed cases, positive on all ten
+    - Item: DESIGN.Tile_pipeline::MAIN.LOAD
+      Choice: >-
+        ab_tiles: evict_last L2 hint on weight requests; 256B L2 promotion on all tensor maps
+      Reason: >-
+        Value-identical cache hints retaining the reused weight working set against output-store streaming; source reproduced -4.8%/-4.2% on two fixed cases
+  Forbid:
+    - Item: DESIGN.Work_schedule::MAIN
+      Choice: >-
+        Restructuring the launch into 2-CTA clusters sharing the weight stream via cta_group::2 tc ops with cluster TMA multicast or a software peer relay
+      Reason: >-
+        Source-measured slower: cluster-barrier floor ~280 ns/stage, cta_group::2 TMA ~530 ns/stage; software relay +97% on the heaviest case, hardware multicast alone -3.1%

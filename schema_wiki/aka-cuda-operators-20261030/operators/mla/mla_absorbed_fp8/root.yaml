@@ -1,0 +1,432 @@
+META_DATA:
+  Name: mla_absorbed_fp8
+  Describe: Absorbed MLA attention over FP8 E4M3 paged Q/KV with bottom-right causal masking, writing BF16 output and optional FP32 natural-log lse in place
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/candidate/solution.py::Model.forward
+  Version: 4
+  Dispatch:
+    when: >-
+      Calls that take the tcgen05 path - the device reports compute capability 10.0, 10.1 or 10.3, or the implementation is forced to v1 - whose host split policy resolves to one split, that is workspace_buffer is absent or has no elements or the work-item count items of DESIGN.Work_schedule is at least 148, and whose build keeps the hi/lo E4M3 probability words enabled.
+CONTRACT:
+  Algorithm_requirement:
+    Constant:
+      head_dim: {value: 576, meaning: 'Absorbed query/key dim, 512 latent plus 64 rope'}
+      value_dim: {value: 512, meaning: Value/output dim; values alias the key prefix}
+    Input:
+      query: {meaning: Packed FP8 query rows of all tokens, shape: [{token: total_query_count}, {head: head_count}, {dim: head_dim}], dtype: fp8_e4m3fn}
+      kv_cache: {meaning: Paged FP8 key storage; values alias key prefix, shape: [{page: page_count}, {kv_head: 1}, {slot: page_size}, {dim: head_dim}], dtype: fp8_e4m3fn}
+      workspace_buffer: {meaning: Caller scratch bytes; not a result, shape: [{byte: workspace_byte_count}], dtype: uint8}
+      qk_nope_head_dim: {meaning: Unused ABI geometry int; construction passes 128, shape: [], dtype: python_int}
+      kv_lora_rank: {meaning: Unused ABI geometry int; construction passes 512, shape: [], dtype: python_int}
+      qk_rope_head_dim: {meaning: Unused ABI geometry int; construction passes 64, shape: [], dtype: python_int}
+      block_tables: {meaning: Page ids per request for logical key blocks, shape: [{batch: batch_count}, {entry: table_stride}], dtype: int32, range: 'entries read for request b, at index j / page_size for 0 <= j < seq_lens[b], satisfy 0 <= value < page_count; unreferenced trailing entries are unused'}
+      seq_lens: {meaning: Key-value length of each request, shape: [{batch: batch_count}], dtype: int32, range: 'each element in [1, 262144]; sum over batch <= 2097152'}
+      max_seq_len: {meaning: Declared max key-value length; not used in math, shape: [], dtype: python_int}
+      sparse_mla_top_k: {meaning: Unused sparse-MLA knob; construction passes 0, shape: [], dtype: python_int, default: 0}
+      out: {meaning: Caller-owned buffer written in place and returned, shape: [{token: total_query_count}, {head: head_count}, {dim: value_dim}], dtype: bf16}
+      bmm1_scale: {meaning: Scales the raw query-key dot product, shape: [], dtype: python_float, default: 1.0}
+      bmm2_scale: {meaning: Scales the value contributions, shape: [], dtype: python_float, default: 1.0}
+      sinks: {meaning: Per-head sink logit added in log domain; or None, shape: [{head: head_count}], dtype: fp32, nullable: true, default: None}
+      skip_softmax_threshold_scale_factor: {meaning: Unused ABI knob; construction passes None, shape: [], dtype: python_none, default: None}
+      enable_pdl: {meaning: Unused ABI knob; construction passes False, shape: [], dtype: python_bool, nullable: true, default: None}
+      backend: {meaning: Unused ABI selector; construction trtllm-gen, shape: [], dtype: python_str, default: auto}
+      is_var_seq: {meaning: Unused ABI flag; construction passes True, shape: [], dtype: python_bool, default: True}
+      uses_shared_paged_kv_idx: {meaning: Unused ABI flag; construction passes True, shape: [], dtype: python_bool, default: True}
+      lse: {meaning: 'Caller-owned lse buffer, written when provided', shape: [{token: total_query_count}, {head: head_count}], dtype: fp32, nullable: true, default: None}
+      return_lse: {meaning: 'Selects returning (out, lse) or out alone', shape: [], dtype: python_bool, default: False}
+      cute_dsl_impl: {meaning: Unused ABI selector; construction passes auto, shape: [], dtype: python_str, default: auto}
+      kv_scale_format: {meaning: Unused ABI selector; construction passes auto, shape: [], dtype: python_str, default: auto}
+      cum_seq_lens_q: {meaning: Varlen query offsets; None in uniform layout, shape: [{offset: batch_count + 1}], dtype: int32, nullable: true, range: 'strictly increasing with cum_seq_lens_q[0] = 0 and cum_seq_lens_q[batch_count] = total_query_count', default: None}
+      max_q_len: {meaning: Declared max query length; not used in math, shape: [], dtype: python_int, nullable: true, default: None}
+      multi_ctas_kv_counter_buffer: {meaning: Unused ABI knob; construction passes None, shape: [], dtype: python_none, default: None}
+      sparse_mla_top_k_lens: {meaning: Unused ABI knob; construction passes None, shape: [], dtype: python_none, default: None}
+      enable_dcp: {meaning: Unused ABI knob; construction passes False, shape: [], dtype: python_bool, default: False}
+      cp_world: {meaning: Unused ABI knob; construction passes 1, shape: [], dtype: python_int, default: 1}
+      cp_rank: {meaning: Unused ABI knob; construction passes 0, shape: [], dtype: python_int, default: 0}
+      causal_seqlens_kv_global: {meaning: Unused ABI knob; construction passes None, shape: [], dtype: python_none, default: None}
+      use_fp16_softmax: {meaning: Unused ABI knob; construction passes None, shape: [], dtype: python_none, default: None}
+      return_lse_base: {meaning: Unused ABI knob; construction passes basee, shape: [], dtype: python_str, nullable: true, default: None}
+    Output:
+      attention_output: {meaning: Attention output written in place into input out, shape: [{token: total_query_count}, {head: head_count}, {dim: value_dim}], dtype: bf16}
+      attention_lse: {meaning: Natural-log lse written in place into input lse, shape: [{token: total_query_count}, {head: head_count}], dtype: fp32, nullable: true}
+    Compute:
+      - Name: Token_layout
+        Math: |
+          batch_count = seq_lens.shape[0]; all tensor inputs are contiguous. Two call layouts exist:
+          - Uniform-batch layout: query and out are 4D contiguous tensors [batch: batch_count, query: uniform_query_length, head: head_count, dim: head_dim or value_dim]; qlen[b] = uniform_query_length for every b; total_query_count = batch_count * uniform_query_length; query i of request b has global token index t = b * uniform_query_length + i; cum_seq_lens_q and max_q_len are None.
+          - Varlen layout: query and out are 3D packed tensors [token: total_query_count, head: head_count, dim: head_dim or value_dim]; cum_seq_lens_q is required; qlen[b] = cum_seq_lens_q[b+1] - cum_seq_lens_q[b]; request b owns the global tokens t in [cum_seq_lens_q[b], cum_seq_lens_q[b+1]) with intra-request index i = t - cum_seq_lens_q[b].
+          In both layouts, lse (when provided) is the 2D tensor [token: total_query_count, head: head_count].
+        Symbol: {qlen: {meaning: Query token count of request b; integer vector, shape: [{batch: batch_count}], dtype: not_applicable}}
+      - Name: Domain_relations
+        Math: |
+          Fixed task domain and scale relations:
+          1 <= batch_count <= 32; head_count in {12, 16, 32, 64, 96, 128}; page_size in {1, 32, 64, 128}; kv_heads = 1, so every query head shares the single key-value head (MQA absorption); 1 <= qlen[b] <= 8192 and qlen[b] <= seq_lens[b] for every b; sum_{b=0}^{batch_count-1} qlen[b] = total_query_count <= 16384; table_stride >= max_{b} ceil(seq_lens[b] / page_size), and the fixed construction adds one slack table column whose entries are never read.
+      - Name: Paged_kv_lookup
+        Math: |
+          For request b and logical key position j with 0 <= j < seq_lens[b]:
+            page = block_tables[b, j / page_size] (integer division)
+            slot = j - (j / page_size) * page_size (remainder; page_size is a power of two in the task domain)
+            k_row(b, j)[d] = kv_cache[page, 0, slot, d] for 0 <= d < head_dim
+            v_row(b, j)[c] = k_row(b, j)[c] for 0 <= c < value_dim
+          The gathered rows do not depend on the query head because the single kv head is shared; values alias the first value_dim components of the stored key rows.
+        Symbol:
+          k_row: {meaning: 'Stored FP8 key row at logical position (b, j)', shape: [{dim: head_dim}], dtype: fp8_e4m3fn}
+          v_row: {meaning: 'First value_dim components of k_row(b, j)', shape: [{dim: value_dim}], dtype: fp8_e4m3fn}
+      - Name: Attention_scores
+        Math: |
+          Fix one global token t (request b, intra-request index i) and one head h, and let kv_length = seq_lens[b] for this step. For 0 <= j < kv_length:
+            s[j] = bmm1_scale * sum_{d=0}^{head_dim-1} query[t, h, d] * k_row(b, j)[d]
+          The FP8 E4M3 operands participate as their exact values in FP32 arithmetic with RNE rounding; bmm1_scale already folds the softmax scale and the Q/K dequantization scales. b, h and i are mutually independent.
+        Symbol: {s: {meaning: 'Scores over key positions for one (token, head)', shape: [{key: kv_length}], dtype: fp32}}
+      - Name: Causal_visibility
+        Math: |
+          Masking is fixed bottom-right causal attention without a sliding window: the task domain fixes causal = true and window_left = -1, and the ABI has no causal-mode switch.
+          For request b and query index i with 0 <= i < qlen[b]:
+            visible_max(b, i) = seq_lens[b] - qlen[b] + i
+            visible_key_set(b, i) = { j integer : 0 <= j <= visible_max(b, i) }
+          Since qlen[b] <= seq_lens[b], visible_max(b, i) >= i >= 0: every query sees at least one key, so the reductions over visible_key_set below never run over an empty set.
+        Symbol:
+          visible_max: {meaning: Largest visible key position; integer, shape: [], dtype: not_applicable}
+          visible_key_set: {meaning: Key positions visible under causal masking, shape: not_applicable, dtype: not_applicable}
+      - Name: Softmax_output
+        Math: |
+          Fix one global token t (request b, intra-request index i) and one head h; let visible_count = visible_max(b, i) + 1 and let s[j] denote the scores of this (token, head) pair. All arithmetic is FP32:
+            m = max_{j in visible_key_set(b, i)} s[j]
+            z = sum_{j in visible_key_set(b, i)} exp(s[j] - m)
+            p[j] = exp(s[j] - m) / z for j in visible_key_set(b, i)
+            base_lse = m + ln(z), the natural logarithm, equal to ln(sum_{j in visible_key_set(b, i)} exp(s[j]))
+            o_acc[c] = sum_{j in visible_key_set(b, i)} p[j] * v_row(b, j)[c] for 0 <= c < value_dim
+          visible_key_set(b, i) is nonempty, so m is finite and z > 0.
+        Symbol:
+          p: {meaning: Softmax probabilities over the visible keys, shape: [{key: visible_count}], dtype: fp32}
+          base_lse: {meaning: 'Natural-log sum of exp scores, before sink', shape: [], dtype: fp32}
+          o_acc: {meaning: 'Weighted value accumulation, before sink/scale', shape: [{dim: value_dim}], dtype: fp32}
+      - Name: Output_values
+        Math: |
+          For each global token t and head h, with base_lse and o_acc of that (token, head):
+          If sinks is None:
+            attention_lse[t, h] = base_lse
+            renorm = 1
+          Otherwise:
+            attention_lse[t, h] = ln(exp(base_lse) + exp(sinks[h]))
+            renorm = exp(base_lse - attention_lse[t, h])
+          attention_output[t, h, c] = bf16(bmm2_scale * renorm * o_acc[c]) for 0 <= c < value_dim
+          Equivalently, when sinks is provided the sink adds exp(sinks[h]) to the softmax denominator while contributing no value. attention_output and attention_lse are indexed in packed token order; in the uniform-batch layout the values land through the 4D view whose flatten(0, 1) is the packed form. The bf16(...) narrowing with RNE is the only precision reduction applied to the FP32 results; attention_lse stays FP32 and is the natural logarithm (return_lse_base is fixed to basee).
+      - Name: Writes_and_return
+        Math: |
+          Results and side effects of one forward call:
+          - attention_output: every element of the caller-owned out buffer takes the value defined in Output_values; the full logical tensor is overwritten and initial contents are arbitrary.
+          - attention_lse: when the lse buffer is provided, every element takes attention_lse[t, h]; when lse is None, nothing is written for it.
+          - Return: forward returns (out, lse) when return_lse is true and out alone when return_lse is false; the returned tensors are the same caller-owned buffer objects that hold attention_output and attention_lse, so return identity and aliasing are preserved. When return_lse is true while lse is None, the second returned element is None.
+          - workspace_buffer is caller-provided scratch: the implementation may read and write it for transient partial results; its post-call contents are not a result.
+          - Only out, lse (when provided) and workspace_buffer are modified; storage outside these declared write regions is preserved.
+    Golden_reference:
+      Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_absorbed_fp8/problem/reference.py::Model.forward
+      Tolerance:
+        attention_output: atol=.01, rtol=.05, max_mismatch_fraction=.001, max_rel_l2=.01, relative_to=candidate; no defaults
+        attention_lse: atol=.01, rtol=.05, max_mismatch_fraction=0, max_rel_l2 absent, relative_to=candidate; no defaults
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      thread: Lowest execution level, a single lane of one warp, holding its private values in the thread-scope storage named register
+      warp: 32 threads executing in lockstep inside one cta, the level at which the fixed source issues shuffle reductions in the SIMT kernel and warp-synchronous tcgen05.ld/tcgen05.st in the tcgen05 kernel
+      cta: Thread block co-scheduled as a whole on one SM and composed of whole warps (256-thread attention CTAs and 128-thread combine CTAs in the fixed source), owning the CTA-scope storages named smem (dynamic shared memory, raised per kernel via cudaFuncAttributeMaxDynamicSharedMemorySize) and tmem (tensor memory allocated per CTA through tcgen05.alloc cta_group::1)
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: >-
+      E4M3 tensor-core products with FP32 accumulation, the softmax scale and log2(e) folded into the exponential argument, and a lazy log2-domain shift that rescales the accumulator only on growth past 2.75. Weights trade precision for that path: a saturating E4M3 word plus an E4M3 residual word.
+    Rewrite:
+      - Name: Work-item rows, key range and score tile
+        Math: |
+          A work item covers 128 consecutive packed (token, head) rows of one request: row0 = tile*128, valid_rows = min(128, qlen*head_count - row0), row r has q_idx = (row0+r)/head_count, head = (row0+r) - q_idx*head_count, token = q_start + q_idx, q_start being the request's first packed token.
+          With kv_length = seq_lens[b] and max_q_idx = (row0+valid_rows-1)/head_count: last_key = kv_length - qlen + max_q_idx + 1, ntiles = ceil_div(last_key, bk). Query-major rows make the last valid row the most visible: every tile is scanned and a row whose visible_max falls inside it is masked.
+          For tile t, row r, local key u and j = bk*t + u:
+            s_tile(t)[r, u] = sum_{d=0}^{head_dim-1} query[token, head, d] * k_row(b, j)[d]
+          s_tile is un-scaled: the Contract's s[j] = ln(2)*s_tile(t)[r,u]*qk_scale, qk_scale = bmm1_scale*log2(e). qk_scale never multiplies s_tile; it enters as fma32(s_tile, qk_scale, .) in step 3 and max(s_tile)*qk_scale in step 2, exact since qk_scale > 0 commutes with max.
+        Symbol:
+          s_tile: {meaning: Un-scaled FP32 score tile of one key tile, shape: [{row: 128}, {key: bk}], dtype: fp32}
+          qk_scale: {meaning: Softmax scale folded with the base change to log2, value: bmm1_scale * 1.4426950408889634}
+          bk: {meaning: Keys per recurrence tile, binding: 'bind:DESIGN.Work_schedule::bk'}
+        Arithmetic:
+          Accumulate: The head_dim-term product accumulates in FP32 as 18 sequential 32-dim tensor-core steps; the grouping inside a step is the E4M3 path's, not serial
+        Ledger:
+          Baseline: Contract s[j] = bmm1_scale * sum_d query*k_row as head_dim FP32 multiply-adds per (row, key)
+          Gain: Score MACs move to the E4M3 tensor core, 128*bk*head_dim = 4718592 per tile per item, and the scale multiply folds into the exponential argument
+          Cost: Keys outside visible_key_set and rows past valid_rows are still gathered and multiplied, up to 128*bk*head_dim = 4718592 MACs per tile
+      - Name: Lazy log2-domain shift for the row maximum
+        Math: |
+          Per row r, carried over the tiles of its work item, m_shift(-1)[r] = NEG_INF = -3.402823466e38, and the tile maximum runs only over visible keys:
+            mrow(t)[r] = max{ s_tile(t)[r,u] : bk*t+u in visible_key_set(b, q_idx) }, NEG_INF when empty
+            mx(t)[r] = NEG_INF when mrow(t)[r] = NEG_INF, else mrow(t)[r]*qk_scale
+            need(t)[r] = mx(t)[r] > m_shift(t-1)[r] + rescale_thresh
+            m_shift(t)[r] = mx(t)[r] + shift_head if need(t)[r], else m_shift(t-1)[r]
+            alpha(t)[r] = 0 if need(t)[r] and m_shift(t-1)[r] = NEG_INF; exp2(m_shift(t-1)[r] - m_shift(t)[r]) if need(t)[r]; else 1
+          alpha rescales the carried denominator and accumulation of the same row (steps 4 and 5), so a row starts from alpha = 0 with an untouched accumulator. m_shift is a shift, not the running maximum: it trails by shift_head, moves only on growth past rescale_thresh, and step 6 recovers base_lse from it. A tile where the row sees no key leaves mrow at NEG_INF and changes nothing.
+        Symbol:
+          m_shift: {meaning: Log2-domain softmax shift of one row, shape: [], dtype: fp32, retention: 'carry_forward (token,head); t=-1..ntiles-1'}
+          alpha: {meaning: Rescale factor of one row at one tile, shape: [], dtype: fp32}
+          rescale_thresh: {meaning: log2 growth that triggers a shift update, value: 2.75}
+          shift_head: {meaning: log2 headroom above the tile maximum, value: 2.0}
+        Ledger:
+          Baseline: Online softmax rescaling the carried output accumulator at every key tile
+          Gain: Accumulator rescale passes drop from ntiles to the tiles whose maximum grows past rescale_thresh; one pass moves 448*128 FP32 values
+          Cost: Weights in one accumulator span rescale_thresh + shift_head = 4.75 more log2 units, pushing weights 12 below the shift into E4M3 subnormals
+      - Name: Probability as an E4M3 word plus a residual
+        Math: |
+          For row r, tile t and each local key u, with j = bk*t + u:
+            e(t)[r,u] = 0 when j is not in visible_key_set(b, q_idx)
+                      = exp2(fma32(s_tile(t)[r,u], qk_scale, log2_p_scale - m_shift(t)[r])) otherwise
+            p_hi(t)[r,u] = fp8_e4m3fn(e(t)[r,u]), saturating and round to nearest even
+            p_lo(t)[r,u] = fp8_e4m3fn(fp16(e(t)[r,u]) - fp16(p_hi(t)[r,u]))
+          so e = p_scale * exp(s[j] - ln(2)*m_shift): the Contract's unnormalised weight times a fixed prescale, measured from the shift instead of the maximum. Both factors cancel in the ratio step 6 forms. p_scale*2^rescale_thresh = 430 stays under the E4M3 maximum 448, so no weight saturates, and a rescale tile's largest weight is p_scale*2^-shift_head = 16. Step 4 uses p_hi and p_lo as two E4M3 operands accumulated into the same FP32 column.
+        Symbol:
+          e: {meaning: Prescaled unnormalised weight before quantisation, shape: [], dtype: fp32}
+          p_hi: {meaning: Saturating E4M3 word of a weight, shape: [{row: 128}, {key: bk}], dtype: fp8_e4m3fn}
+          p_lo: {meaning: E4M3 word holding the fp16 residual of a weight, shape: [{row: 128}, {key: bk}], dtype: fp8_e4m3fn}
+          p_scale: {meaning: Fixed prescale keeping weights in E4M3 range, value: 64}
+          log2_p_scale: {meaning: log2 of the prescale, value: 6}
+        Arithmetic:
+          Approx: 'exp2 is the device approximate base-2 exponential, subnormal results flushed; unknown: no bound in the source, sampled relative L2 1.04e-3 of 1e-2'
+          Accumulate: e is summed into the group denominator in four FP32 chains of eight weights, merged once per tile
+        Ledger:
+          Baseline: Contract o_acc = sum_j p[j]*v_row(j) with FP32 probabilities against FP8 values
+          Gain: Value MACs move to the E4M3 tensor core, 128*bk*value_dim = 4194304 per tile per item
+          Cost: 'Two E4M3 words per weight: the probability tile doubles to 16384 bytes per tile, the value product doubles, and weight error becomes fp16-level'
+      - Name: Value accumulation with the tail regrouped
+        Math: |
+          Per row r, carried over the tiles and zero before the first, u running over the tile's visible local keys and v_row the Contract's alias of the gathered key row:
+            o_un(t)[r,c] = alpha(t)[r]*o_un(t-1)[r,c] + sum_u p_hi(t)[r,u]*v_row(bk*t+u)[c] + sum_u p_lo(t)[r,u]*v_row(bk*t+u)[c]
+          for 0 <= c < value_dim - tail_dims. The last tail_dims dims cannot share that accumulator; their tile product is formed separately and added in registers:
+            tail_tile(t)[r,c] = sum_u p_hi(t)[r,u]*v_row(bk*t+u)[value_dim-tail_dims+c] + sum_u p_lo(t)[r,u]*v_row(bk*t+u)[value_dim-tail_dims+c]
+            o_tail(t)[r,c] = alpha(t)[r]*o_tail(t-1)[r,c] + tail_tile(t)[r,c]
+          Masked keys contribute nothing because their e is 0. After the last tile:
+            o_total[r,c] = o_un(ntiles-1)[r,c] for c < value_dim - tail_dims, else o_tail(ntiles-1)[r, c - value_dim + tail_dims]
+          o_total is the Contract's o_acc scaled by dsum, which step 6 divides out.
+        Symbol:
+          o_un: {meaning: Unnormalised accumulation of the kept output dims, shape: [{dim: value_dim - tail_dims}], dtype: fp32, retention: 'carry_forward (token,head); t=-1..ntiles-1'}
+          tail_tile: {meaning: One tile product of the last tail_dims output dims, shape: [{dim: tail_dims}], dtype: fp32}
+          o_tail: {meaning: Unnormalised accumulation of the tail output dims, shape: [{dim: tail_dims}], dtype: fp32, retention: 'carry_forward (token,head); t=-1..ntiles-1'}
+          o_total: {meaning: Unnormalised accumulation of all value_dim dims, shape: [{dim: value_dim}], dtype: fp32}
+          tail_dims: {meaning: Output dims re-accumulated once per tile, value: 64}
+        Arithmetic:
+          Accumulate: FP32 throughout. Dims below value_dim - tail_dims form one chain over all tiles; the tail dims sum per tile and add the partials, so grouping differs
+        Ledger:
+          Baseline: All value_dim output dims accumulated in one tensor-memory accumulator
+          Gain: The accumulator fits 448 of the 512 tensor-memory columns, leaving the score tile's 64 columns to serve as the tail destination
+          Cost: tail_dims dims per row are read out and re-added once per tile, 128*64 FP32 reads and adds per tile, and their grouping becomes per-tile
+      - Name: Both groups reduce the maximum, one merge
+        Math: |
+          Two column groups quantise one 128 x bk score tile, group g owning key columns [32g, 32g+32). Both reduce mrow(t)[r] over all bk raw columns, own half first, so mrow, mx, need, m_shift and alpha of a row take identical values in both groups without any exchange. Each group then quantises and sums only its own columns:
+            dsum_local(g)(t)[r] = alpha(t)[r]*dsum_local(g)(t-1)[r] + sum_{u in [32g, 32g+32)} e(t)[r,u]
+          from 0, and the denominator is merged once per work item after the last tile:
+            dsum[r] = dsum_local(0)(ntiles-1)[r] + dsum_local(1)(ntiles-1)[r]
+          Both groups apply the same alpha sequence, so dsum is the sum of every e of the row up to FP32 regrouping and step 6 divides it out exactly once.
+        Symbol:
+          dsum_local: {meaning: Group-local sum of the prescaled weights, shape: [], dtype: fp32, retention: 'carry_forward (token,head,g); t=-1..ntiles-1'}
+          dsum: {meaning: Merged denominator of one row, shape: [], dtype: fp32}
+        Ledger:
+          Baseline: One worker reduces the row maximum and quantises all bk keys in a single denominator chain
+          Gain: Exponential and quantisation work per group per tile halves to 128*32 weights
+          Cost: Both groups reduce all bk raw columns, 128*64 comparisons per tile, and dsum sums two 32-column partials, so its rounding differs
+      - Name: Normalisation, sink merge and output narrowing
+        Math: |
+          Per valid row r (r < valid_rows) after the last tile, (t, h) = (token, head) of that row:
+            inv[r] = bmm2_scale/dsum[r], and 0 when dsum[r] <= 0, defensive: a valid row rescales at its first visible tile and ends with dsum >= p_scale*2^-shift_head = 16
+            base_lse[r] = ln(2)*(m_shift(ntiles-1)[r] + log2(dsum[r]) - log2_p_scale)
+            sinks None: oscale[r] = 1 and attention_lse[t,h] = base_lse[r]
+            else with sink = sinks[h] and g = max(base_lse[r], sink):
+              attention_lse[t,h] = g + ln(exp2((base_lse[r]-g)*log2(e)) + exp2((sink-g)*log2(e)))
+              oscale[r] = exp2((base_lse[r] - attention_lse[t,h])*log2(e))
+            iscale[r] = inv[r]*oscale[r]
+            attention_output[t,h,c] = bf16(o_total[r,c]*iscale[r]) for 0 <= c < value_dim
+          base_lse is the Contract's m + ln(z): m_shift absorbs the base change and log2_p_scale the prescale, so o_total/dsum is the Contract's o_acc. The bf16 narrowing is the only reduction of the FP32 results, attention_lse stays FP32, and rows past valid_rows write neither output.
+        Symbol: {iscale: {meaning: Factor turning the accumulation into output, shape: [], dtype: fp32}}
+        Arithmetic:
+          Approx: 'log2, ln and the sink merge use the device FP32 log, log2 and approximate exp2; unknown: no bound in the source, sampled lse absolute deviation 7.7e-6'
+        Ledger:
+          Baseline: Divide every output dim by the denominator and exponentiate in the natural domain
+          Gain: One division per row replaces value_dim divisions, and the sink merge costs two exponentials and one logarithm per row
+  Work_schedule:
+    Thesis: >-
+      One worker owns 128 consecutive packed (token, head) rows of one request and scans their whole visible key range, so the recurrence and accumulator stay local and every output row has one writer. The range is never split, so the epilogue writes both outputs directly with no cross-worker merge.
+    Step:
+      MAIN:
+        Describe: >-
+          Compute attention_output and attention_lse when provided for 128 consecutive packed (token, head) rows of one request over every key they can see
+        Decomposition:
+          Strategy: >-
+            bk = 64; item -> request b and block tile, uniform tpb = ceil_div(qlen*head_count,128), b = item/tpb, tile = item%tpb; varlen scans cum_seq_lens_q
+          Partition: {item: {meaning: 'One 128-row (token, head) block of one request', size: items, tile: 1, range: [1, null]}}
+          Worktile:
+            Invariant:
+              query_rows: {meaning: The item's FP8 query rows; padding rows are zero, shape: [{row: 128}, {dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::query.dtype'}
+              page_table_row: {meaning: Page ids of the item's request, shape: [{entry: table_stride}], dtype: 'ref:CONTRACT.Algorithm_requirement::block_tables.dtype'}
+            Iteration: {kv_tile: {meaning: 'Keys [bk*t, bk*t+bk) gathered through the table', shape: [{key: bk}, {dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::kv_cache.dtype', direction: ascending}}
+          Target:
+            Single_tile:
+              output_rows: {meaning: attention_output of the item's valid rows, shape: [{row: valid_rows}, {dim: value_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::attention_output.dtype'}
+              lse_rows: {meaning: 'attention_lse of the same rows, when provided', shape: [{row: valid_rows}], dtype: 'ref:CONTRACT.Algorithm_requirement::attention_lse.dtype'}
+        Mapping:
+          Strategy: >-
+            One worker per item: 188416 bytes of shared memory plus all 512 tensor-memory columns admit one resident worker per SM, so workers run in waves
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: items
+        Schedule:
+          Strategy: >-
+            items = batch_count*tpb uniform, else ceil_div(total_query_count*head_count,128) + batch_count; surplus items have valid_rows = 0
+          Worktile_order: [{by: item, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: [assigned_done]
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: >-
+      One lane issues all products for two four-warp column groups, so the pace is the matrix pipe plus softmax tensor-memory traffic. The next key tile is issued between the score product and its wait, the previous 448-dim wait is deferred past this tile's score issue, and the tail dims commit apart
+    Step:
+      MAIN:
+        Index:
+          t: {meaning: Key-tile ordinal within the current work item, definition: [0, ntiles]}
+          c: {meaning: Epilogue output chunk drained by one group, definition: [0, 7]}
+        Storage:
+          tmem: {meaning: Output accumulator and shared score/tail columns, depth: 1, location: tmem, shape: [{row: 128}, {column: 512}],
+            dtype: fp32, total_size: 262144, view: {o_un: {region: {column: [0, 448]}}, s_tile(t): {region: {column: [448, 512]}}, tail_tile(t): {region: {column: [448, 512]}}}}
+          smem_q: {meaning: Query block in the descriptor's swizzled layout, depth: 1, location: smem, shape: [{row: 128}, {dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 73728, view: {query_rows: {}}}
+          smem_kv: {meaning: 'Double-buffered gathered key tile, also the value', depth: 2, location: smem, shape: [{key: bk}, {dim: head_dim}],
+            dtype: fp8_e4m3fn, total_size: 73728, view: {kv_tile(t): {slot_index: t%2}}}
+          smem_p: {meaning: 'Double-buffered probability tile, two E4M3 words', depth: 2, location: smem, shape: [{row: 128}, {key: bk}, {word: 2}],
+            dtype: fp8_e4m3fn, total_size: 32768, view: {p_hi(t): {slot_index: t%2, region: {word: [0, 1]}}, p_lo(t): {slot_index: t%2, region: {word: [1, 2]}}}}
+          smem_dsum: {meaning: Cross-group exchange of group-local denominators, depth: 1, location: smem, shape: [{group: 2}, {row: 128}],
+            dtype: fp32, total_size: 1024, view: {dsum_local: {}}}
+          smem_stage: {meaning: Staged rows aliasing the freed query and key bytes, depth: 1, location: smem, shape: [{row: 128}, {byte: 1048}],
+            dtype: uint8, total_size: 134144}
+          reg_tail: {meaning: Register accumulator of the tail output dims, depth: 1, location: register, shape: [{row: 128}, {dim: tail_dims}],
+            dtype: fp32, total_size: 32768, view: {o_tail: {}}}
+          reg_state: {meaning: Carried shift and group-local denominator per row, depth: 1, location: register, shape: [{row: 128}, {group: 2}, {stat: 2}],
+            dtype: fp32, total_size: 2048, view: {m_shift: {region: {stat: [0, 1]}}, dsum_local: {region: {stat: [1, 2]}}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: >-
+                Eight warps in two column groups of four: warp w is group w/4 covering rows [32*(w mod 4), +32), so each group spans all 128 rows, one row per lane
+              Member: warp[0:8]
+              Using_verb:
+                compute:
+                  barrier_init: {execution_mode: serial, describe: 'One lane sets the completion words bar_s, bar_pv and bar_pv2 to expect one arrival each and releases them cluster-wide; reads no input or old value'}
+                  softmax: {execution_mode: serial, describe: 'Read all bk columns of s_tile(t), apply step 2 to dsum_local, o_tail and the output columns, write p_hi(t)/p_lo(t) to smem_p and add e to dsum_local'}
+                  tail_drain: {execution_mode: serial, describe: 'Each group reads its own 32 of the 64 scratch columns holding tail_tile(t) by a warp-synchronous load closed by its wait, and adds them to o_tail'}
+                  dsum_merge: {execution_mode: serial, describe: 'Write dsum_local to smem_dsum at (group, row), CTA barrier, then add the other group word: dsum = dsum_local(0) + dsum_local(1) at one shared shift'}
+                  row_scale: {execution_mode: serial, describe: 'Per row from dsum, m_shift, bmm2_scale and sinks: inv, base_lse, the log-domain sink merge and iscale, as step 6 defines; base_lse feeds store:lse'}
+                  o_chunk: {execution_mode: serial, describe: 'Group g drains tmem output columns [32*(g+2c), +32) by a warp-synchronous load and its wait, scales the row 32 values by iscale and packs bf16 pairs'}
+                  o_tail: {execution_mode: serial, describe: Multiply the row's 32 register-held tail dims of o_tail by iscale and pack bf16 pairs}
+                matmul:
+                  query_rows@kv_tile: {execution_mode: async_unordered, describe: 'One lane issues 18 products of 32 query dims from smem_q and smem_kv slot t%2 into tmem [448,512), the first clearing them; done covers operand reads'}
+                  p@v_tail: {execution_mode: async_unordered, describe: 'One lane issues per 32-key step a product of p_hi(t) and one of p_lo(t) against dims [448,512) of kv_tile(t) into tail_tile(t), the first clearing it'}
+                  p@v_main: {execution_mode: async_unordered, describe: 'One lane issues per 32-key step p_hi(t) and p_lo(t) products against dims [0,448) of kv_tile(t) into o_un; the item''s first clears, later accumulate'}
+                load:
+                  q_tile: {execution_mode: async_unordered, describe: 'Copy query_rows into smem_q by 16-byte asynchronous copies, zeroing the rows past valid_rows so padded lanes multiply zeros and results are dropped'}
+                  kv_tile: {execution_mode: async_unordered, describe: 'Per key, four threads resolve bk*t+u through page_table_row, clamped past kv_length, and copy its head_dim bytes into smem_kv slot t%2 by async copies'}
+                store:
+                  o_chunk: {execution_mode: async_unordered, describe: 'Write the chunk packed 64 bytes for the thread row into its smem_stage row when valid_rows > 32, else straight to that row of attention_output'}
+                  o_tail: {execution_mode: async_unordered, describe: 'Write those 64 bytes to dims [448+32*group, +32) of the smem_stage row when valid_rows > 32, else straight to attention_output'}
+                  lse: {execution_mode: async_unordered, describe: 'Group 0 lanes write base_lse to attention_lse for their own valid rows, so each row is written once; with no lse buffer the action writes nothing'}
+                  row_dst: {execution_mode: async_unordered, describe: 'Group 0 lanes publish each valid row attention_output address into the destination words of smem_stage, so the row copy needs no per-row division'}
+                  o_rows: {execution_mode: async_unordered, describe: 'Warp w copies staged rows w, w+8 and on below valid_rows, each 1024 bytes in two passes of 32 lanes x 16 bytes, four full 128-byte lines per pass'}
+                await:
+                  kv_ready: {execution_mode: serial, describe: 'Wait for every outstanding copy group, then a CTA barrier and after-sync fence: smem_q at t=0, smem_kv slot t%2 and the tmem base become readable'}
+                  s_ready: {execution_mode: serial, describe: 'Wait on bar_s; done covers s_tile(t) complete in tmem columns [448,512) and readable by the warp-synchronous loads of compute:softmax(t)'}
+                  pv_main: {execution_mode: serial, describe: 'Wait on bar_pv for the argument tile: its dims [0,448) products are accumulated into the tmem output columns, so the next rescale may rewrite them'}
+                  pv_tail: {execution_mode: serial, describe: 'Wait on bar_pv2; done covers tail_tile(t) readable in the scratch columns, while the same tile dims [0,448) products may still be queued'}
+                  stage_ready: {execution_mode: serial, describe: CTA barrier; done covers every staged row byte in smem_stage and every published destination word being readable by all eight warps}
+                signal: {p_ready: {execution_mode: serial, describe: 'Before-sync fence, async-proxy publication of p_hi(t) and p_lo(t), CTA barrier, after-sync fence; done covers both groups'' words visible to products'}}
+                acquire: {tmem: {execution_mode: serial, describe: Warp 0 reserves all 512 tensor-memory columns as one allocation and gives up the CTA's allocation permit; the base is read after the first barrier}}
+                release: {tmem: {execution_mode: serial, describe: 'Before-sync fence and CTA barrier, then warp 0 returns all 512 columns; done covers all warps tensor-memory reads, the last being compute:o_chunk(6)'}}
+            Pipe:
+              - if(valid_rows > 0):
+                  - acquire:tmem
+                  - compute:barrier_init
+                  - load:q_tile
+                  - load:kv_tile(0)
+                  - for(t):
+                      - await:kv_ready(t)
+                      - matmul:query_rows@kv_tile(t)
+                      - if(t > 0):
+                          - await:pv_main(t-1)
+                      - if(t + 1 < ntiles):
+                          - load:kv_tile(t+1)
+                      - await:s_ready(t)
+                      - compute:softmax(t)
+                      - signal:p_ready(t)
+                      - matmul:p(t)@v_tail(t)
+                      - matmul:p(t)@v_main(t)
+                      - await:pv_tail(t)
+                      - compute:tail_drain(t)
+                  - await:pv_main(last(t))
+                  - compute:dsum_merge
+                  - compute:row_scale
+                  - for(c):
+                      - compute:o_chunk(c)
+                      - store:o_chunk(c)
+                  - compute:o_tail
+                  - store:o_tail
+                  - store:lse
+                  - if(valid_rows > 32):
+                      - store:row_dst
+                      - await:stage_ready
+                      - store:o_rows
+                  - release:tmem
+            Waiting:
+              Prepared:
+                - '{done await:kv_ready(t)} ← [{done load:kv_tile(t)}]'
+                - '{done await:s_ready(t)} ← [{done matmul:query_rows@kv_tile(t)}]'
+                - '{done await:pv_tail(t)} ← [{done matmul:p(t)@v_tail(t)}]'
+                - '{done await:pv_main(t)} ← [{done matmul:p(t)@v_main(t)}]'
+                - '{done await:stage_ready} ← [{done store:o_chunk(c)}, {done store:o_tail}, {done store:row_dst}]'
+              Released:
+                - '{issue load:kv_tile(t)} ← [{done matmul:query_rows@kv_tile(t-2)}, {done matmul:p(t-2)@v_tail(t-2)}, {done matmul:p(t-2)@v_main(t-2)}]'
+                - '{issue compute:softmax(t)} ← [{done matmul:p(t-2)@v_tail(t-2)}, {done matmul:p(t-2)@v_main(t-2)}]'
+                - '{issue matmul:p(t)@v_tail(t)} ← [{done compute:softmax(t)}]'
+                - '{issue matmul:query_rows@kv_tile(t)} ← [{done compute:tail_drain(t-1)}]'
+REALIZATION:
+  Require:
+    - Item: DESIGN.Work_schedule::MAIN.Mapping
+      Choice: 256 threads per CTA, __launch_bounds__(256, 1), and a 188416-byte dynamic shared memory request raised through cudaFuncAttributeMaxDynamicSharedMemorySize before the launch.
+      Reason: The raised attribute makes the 188416-byte dynamic request grantable, and __launch_bounds__(256, 1) keeps register pressure within one CTA per SM; with the 512-column tensor-memory allocation they admit one resident worker per SM, so Worker_count workers run in waves.
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: tcgen05.alloc cta_group::1 of all 512 columns once in the prologue, tcgen05.relinquish_alloc_permit immediately after it, and one tcgen05.dealloc after the epilogue barrier.
+      Reason: acquire:tmem and release:tmem hold the whole tensor memory for one work item, and the relinquish makes any later allocation by this CTA undefined, so it cannot be deferred or repeated
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: tcgen05.mma.cta_group::1.kind::f8f6f4 with shared-memory descriptors for all three products, each closed by tcgen05.commit to its own mbarrier initialised to one arrival.
+      Reason: Provides the FP32 tensor-memory accumulation the math requires and the per-product completion the three awaits consume; separate commits let the tail drain run while the 448-dim products stay queued
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: tcgen05.ld and tcgen05.st .sync.aligned 32x32b for every tensor-memory access, with a warp vote making the rescale branch uniform across each warp
+      Reason: The rescale reads, scales and writes back whole 32-column chunks; divergence inside a warp-synchronous access is undefined, and the vote keeps one path with factor 1 where unneeded
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: fence.proxy.async.shared::cta before every product reading the probability tile, and tcgen05.fence::before_thread_sync plus after_thread_sync around each barrier ordering tensor-memory accesses.
+      Reason: The probability words are written through the generic proxy and read through the async proxy, so without these fences the products may read stale operands or the drains may reorder across the barriers
+    - Item:
+        - DESIGN.Tile_pipeline::MAIN.Storage.smem_q
+        - DESIGN.Tile_pipeline::MAIN.Storage.smem_kv
+        - DESIGN.Tile_pipeline::MAIN.Storage.smem_p
+      Choice: A shared-memory tile layout the tcgen05 descriptor can encode, using 64-byte swizzle atoms with the chunk index swizzled inside each eight-row block
+      Reason: The products take descriptors rather than addresses, so a layout the descriptor cannot describe reads the wrong operands; every copy and store address must match it.
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::MAIN.MAIN
+      Choice: 16-byte cp.async.cg copies for load:q_tile and load:kv_tile, with each key's page-table entry loaded before its copy burst is issued.
+      Reason: A key's address depends on an independent table entry and page_size can be 1, so no bulk tensor copy describes the tile; splitting the table load keeps its latency off the tensor pipe's feed path.

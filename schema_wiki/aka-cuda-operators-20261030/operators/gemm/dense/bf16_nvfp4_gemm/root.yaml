@@ -1,0 +1,209 @@
+META_DATA:
+  Name: bf16_nvfp4_gemm
+  Describe: Dense GEMM of BF16 activations against NVFP4 weights with per-group E4M3 scales, optionally alpha-scaled, FP32-accumulated, with BF16 output
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/solution.py::Model.forward
+  Version: 2
+  Dispatch:
+    when: Whole Contract domain. Needs only asynchronous shared-memory copies, warp-scope BF16 matrix multiply and 66816 bytes of dynamic shared memory per CTA; no cluster, tensor map, tensor memory, global workspace or second submission. A partial m block is handled inside the worktile by zero-staged activation rows and row-guarded writes
+CONTRACT:
+  Algorithm_requirement:
+    Constant:
+      scale_block: {value: 16, meaning: k positions sharing one weight scale}
+      codes_per_byte: {value: 2, meaning: E2M1 codes packed per byte of b}
+    Input:
+      a: {meaning: Activation matrix A of the GEMM, shape: [{m: m}, {k: k}], dtype: bf16}
+      b: {meaning: Packed NVFP4 weight payload of matrix B, shape: [{n: n}, {k_byte: k/codes_per_byte}], dtype: uint8}
+      b_descale: {meaning: Per-group weight scales of matrix B, shape: [{n: n}, {k_group: k/scale_block}], dtype: fp8_e4m3fn}
+      alpha: {meaning: Optional global scale; None means no scaling, shape: [{element: 1}], dtype: fp32, nullable: true, range: [-2, 2], default: None}
+      backend: {meaning: Backend selector string; unused in computation, shape: [], dtype: python_str}
+      out_dtype: {meaning: Output format selector; unused in computation, shape: [], dtype: torch.dtype, range: == torch.bfloat16}
+      out_buffer: {meaning: Caller-owned destination buffer (ABI param out), shape: [{m: m}, {n: n}], dtype: bf16}
+      block_size: {meaning: Declared scale block size; unused in computation, shape: [], dtype: python_int, default: 16}
+      enable_pdl: {meaning: Programmatic dependent launch toggle; unused, shape: [], dtype: python_bool, default: True}
+    Output: {out: {meaning: GEMM result written in place into out_buffer, shape: [{m: m}, {n: n}], dtype: bf16}}
+    Compute:
+      - Name: Weight_dequantization
+        Math: |
+          Sizes n and k are correlated: (n, k) in {(4096, 12288), (6656, 2560), (8192, 2560), (12288, 4096), (24576, 4096)}, so k_group = k / scale_block is an integer.
+          The tensors a, b, b_descale and out_buffer are row-major contiguous; b_descale is unswizzled.
+          For 0 <= j < n and 0 <= l < k, the stored E2M1 code of weight element (j, l) is
+            code(j, l) = b[j, l // codes_per_byte] mod 16 if l is even
+            code(j, l) = b[j, l // codes_per_byte] // 16 if l is odd
+          and the dequantized value is
+            w[j, l] = e2m1(code(j, l)) * b_descale[j, l // scale_block]
+          where e2m1(c) = mag(c mod 8) for 0 <= c < 8 and e2m1(c) = -mag(c mod 8) for 8 <= c < 16,
+          with mag(d) = [0, 0.5, 1, 1.5, 2, 3, 4, 6][d] for d = 0..7, so e2m1(8) = -0.
+          The product uses exact input values in FP32.
+        Symbol: {w: {meaning: Dequantized weight matrix B, shape: [{n: n}, {k: k}], dtype: fp32}}
+      - Name: Scaled_product_and_writeback
+        Math: |
+          Size m satisfies 1 <= m <= 8192; the row index i and column index j are independent.
+          None denotes Python None; the scalar multiplier is s = alpha[0] if alpha is not None else 1.
+          For 0 <= i < m and 0 <= j < n:
+            out[i, j] = bf16(s * sum_{l=0}^{k-1} a[i, l] * w[j, l])
+          The sum accumulates in FP32 over exact input values, s is applied before the single bf16 conversion, and bf16 rounds RNE.
+          out aliases out_buffer: the result overwrites the full logical (m, n) region of the caller-owned buffer without reading its prior contents, no other memory is written, a, b, b_descale and alpha are read-only, and the same tensor object is returned unchanged.
+    Golden_reference:
+      Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/reference.py::Model.forward
+      Tolerance:
+        out: Source; atol=0.01, rtol=0.05, max_mismatch_fraction=0.0; formula/relative basis absent; no defaults
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      thread: Single CUDA thread of a CTA on one SM; owns private register storage (register) for operands and accumulators.
+      warp: 32 threads of one CTA executing in lockstep; issues warp-scope mma.sync tensor-core MMA in the fallback GEMM path.
+      cta: Thread block on one SM; owns dynamic shared memory (smem) for staged tiles and barriers, and CTA-scope tensor memory (tmem) allocated via tcgen05.alloc for MMA accumulators.
+      cluster: CTAs co-scheduled on SMs of one GPU processing cluster; size fixed at launch; member smem is also addressable at cluster scope (shared::cluster).
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: Keep Contract's numerical path; change only where the weight decode happens and which unit carries the products. The exact BF16 weight operand lets the whole k reduction run on the matrix path with one FP32 accumulator per output element, at four times the packed weight volume
+    Rewrite:
+      - Name: Decode weight bytes through a shared BF16 table
+        Math: |
+          byte_lut is formed once before any product and reused by every k block.
+          For 0 <= j < n and 0 <= l < k, let c = b[j, l // codes_per_byte] be the byte holding
+          code(j, l) of Contract's Weight_dequantization, with e2m1 the decode Contract defines:
+            wq[j, l] = bf16(byte_lut[c][l mod 2] * b_descale[j, l // scale_block])
+          byte_lut[c][0] and byte_lut[c][1] are the two e2m1 values packed in c, so one table
+          read decodes the two elements sharing a byte and one group-scale multiply serves both.
+          wq[j, l] equals Contract's w[j, l], so wq replaces w in every product below.
+          Only the k block being consumed is formed; it is used by that block's products and no
+          part of it is needed afterwards.
+        Symbol:
+          byte_lut: {meaning: BF16 pair decoded from one packed weight byte, shape: [{byte: 256}, {half: 2}], dtype: bf16, retention: keep_value invocation, value: 'byte_lut[q][0] = bf16(e2m1(q mod 16)); byte_lut[q][1] = bf16(e2m1(q div 16))'}
+          wq: {meaning: BF16 weight operand of B with the same value as w, shape: [{n: n}, {k: k}], dtype: bf16}
+        Arithmetic:
+          Accumulate: The multiply inside the BF16 narrowing runs in BF16 with one RNE rounding, not the default FP32; an e2m1 value times an e4m3 scale needs <= 6 bits
+        Ledger:
+          Baseline: Weight_dequantization of Contract evaluated per element in FP32 at each use, with no BF16 weight operand formed
+          Gain: Per weight element, one FP32 multiply becomes half a table read plus half a packed BF16 multiply, and products move to the BF16 matrix path
+          Cost: Decoded operands take 2 bytes per element against 0.5 byte packed, so each k block stages 4x the packed volume; plus a 1024-byte table per worker
+      - Name: One FP32 accumulator per output over the whole k
+        Math: |
+          group_count = k / 16 is the number of consecutive 16-element groups of k; group g
+          covers [16*g, 16*g + 16). Contract's domain makes k a multiple of 64, so group_count
+          is an integer. s = alpha[0] if alpha is not None else 1, as Contract defines it, and
+          acc(-1) is the m x n FP32 zero value. For g = 0 to group_count-1 in ascending g:
+            acc(g) = mma32(a[:, 16*g:16*g + 16], wq[:, 16*g:16*g + 16]ᵀ, acc(g-1))
+          out[i, j] = bf16(s * acc(group_count-1)[i, j]) for 0 <= i < m and 0 <= j < n, written
+          into out_buffer as Contract requires.
+        Symbol: {acc: {meaning: FP32 whole-k accumulator per output element, shape: [{m: m}, {n: n}], dtype: fp32, retention: 'carry_forward (i,j); g=-1..group_count-1'}}
+        Arithmetic:
+          Accumulate: One FP32 accumulator per output spans the whole k in ascending 16-element groups; products are exact in FP32, only the group-internal order differs
+        Ledger:
+          Baseline: Scaled_product_and_writeback of Contract evaluated as one FP32 sum over the whole k per output element
+          Gain: FP32 MACs on the vector path m*n*k -> 0, with the same m*n*k MACs moved onto the matrix unit in 16-element groups
+          Cost: The k reduction is reassociated into ascending 16-element groups, so acc is not bit-identical to Contract's left-to-right sum
+  Work_schedule:
+    Thesis: One CTA owns one 128 x 64 output tile and its whole k reduction, so no partial result leaves the worker and no second submission or workspace is needed. The grid is the tile count, one tile preassigned per CTA, with 8-row grouped rasterization. No k splitting, so a thin m underfills the device
+    Step:
+      MAIN:
+        Describe: Compute one 128 x 64 tile of out over the whole k, decoding its packed weight columns, multiplying by the matching activation rows and writing out
+        Decomposition:
+          Strategy: bk = 64; k_tile_count = k / bk. Contract makes n and k multiples of 64, so the n partition and k_tile_count are exact and there is no n or k tail
+          Partition:
+            m: {meaning: Block of activation rows of the output tile, size: m, tile: 128}
+            n: {meaning: Block of weight rows forming the output columns, size: n, tile: 64}
+          Worktile:
+            Iteration:
+              a_block: {meaning: Activation rows of one k block of this tile, shape: [{m: 128}, {k: 64}], dtype: 'ref:CONTRACT.Algorithm_requirement::a.dtype', direction: ascending}
+              b_block: {meaning: Packed weight bytes of one k block of this tile, shape: [{n: 64}, {k_byte: 32}], dtype: 'ref:CONTRACT.Algorithm_requirement::b.dtype', direction: ascending}
+              scale_block: {meaning: Weight group scales of one k block of this tile, shape: [{n: 64}, {k_group: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::b_descale.dtype', direction: ascending}
+          Target:
+            Single_tile: {out_tile: {meaning: Tile of out that this worktile writes, shape: [{m: 128}, {n: 64}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: worktile_count
+        Schedule:
+          Strategy: In the final partial m group the worker takes m as worker_id modulo its m count, which rotates the ascending m order; coverage stays a bijection
+          Worktile_order:
+            - {by: m, group: 8, direction: ascending}
+            - {by: n, direction: ascending}
+            - {by: m, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: All 256 threads form one symmetric role; the same warps stage, decode, multiply and write, separated only by CTA-wide barriers. Three ring slots let the loads run two k blocks ahead, but the single decoded-operand slot forces each decode to sit exposed between two barriers
+    Step:
+      MAIN:
+        Index: {t: {meaning: k block walked by this worktile, definition: [0, k_tile_count]}}
+        Storage:
+          a_ring: {meaning: Staged activation rows of one k block, depth: 3, location: smem, shape: [{m: 128}, {k: 64}],
+            dtype: bf16, total_size: 3*128*64*2, view: {a_block(t): {slot_index: t%3}}}
+          bp_ring: {meaning: Staged packed weight bytes of one k block, depth: 3, location: smem, shape: [{n: 64}, {byte_pitch: 40}],
+            dtype: uint8, total_size: 3*64*40, view: {b_block(t): {slot_index: t%3}}}
+          sc_ring: {meaning: Staged weight group scales of one k block, depth: 3, location: smem, shape: [{n: 64}, {k_group: 4}],
+            dtype: fp8_e4m3fn, total_size: 3*64*4, view: {scale_block(t): {slot_index: t%3}}}
+          bdq: {meaning: Decoded BF16 weight operand of the block in use, depth: 1, location: smem, shape: [{n: 64}, {k: 64}],
+            dtype: bf16, total_size: 64*64*2, view: {wq_block(t): {}}}
+          byte_lut: {meaning: BF16 decode table built once per worker, depth: 1, location: smem, shape: [{byte: 256}, {half: 2}],
+            dtype: bf16, total_size: 256*2*2}
+          acc: {meaning: FP32 accumulators of this worktile output tile, depth: 1, location: register, shape: [{m: 128}, {n: 64}],
+            dtype: fp32, total_size: 128*64*4}
+        Role:
+          MAIN:
+            Info:
+              Describe: Stage the operands of every k block, decode the weight operand, accumulate the products and write this worktile output tile
+              Member: warp[0:8]
+              Using_verb:
+                compute:
+                  byte_lut: {execution_mode: async_unordered, describe: Build the 256-entry byte_lut of DESIGN.Math_reshape with one entry per thread; done means every warp can read all entries}
+                  wq_block: {execution_mode: serial, describe: Decode b_block(t) and scale_block(t) into wq_block(t) in the single bdq slot by step 1 of DESIGN.Math_reshape; one 16-element scale group per thread}
+                matmul: {a_block@wq_block: {execution_mode: serial, describe: Accumulate a_block(t) by wq_block(t) transposed into acc by step 2 of DESIGN.Math_reshape; the eight warps hold disjoint 32 x 32 sub-tiles of acc}}
+                load:
+                  a_block: {execution_mode: async_ordered, describe: Stage this worktile activation rows for k block t into slot t%3 of a_ring from a; rows at or beyond m stage as zeros; done means readable CTA-wide}
+                  b_block: {execution_mode: async_ordered, describe: Stage the 64 packed weight rows of this worktile for k block t into slot t%3 of bp_ring from b; done as for a_block}
+                  scale_block: {execution_mode: async_ordered, describe: Stage the four group scales of those rows for k block t into slot t%3 of sc_ring from b_descale; done as for a_block}
+                store: {out_tile: {execution_mode: serial, describe: Read acc and the scalar s then narrow s * acc to BF16 and write this tile into out; only rows below m are written so zero-staged rows are dropped}}
+            Pipe:
+              - compute:byte_lut
+              - for(p=0:min(2, k_tile_count)):
+                  - load:a_block(p)
+                  - load:b_block(p)
+                  - load:scale_block(p)
+              - for(t):
+                  - compute:wq_block(t)
+                  - matmul:a_block(t)@wq_block(t)
+                  - if(t + 2 < k_tile_count):
+                      - load:a_block(t+2)
+                      - load:b_block(t+2)
+                      - load:scale_block(t+2)
+              - store:out_tile
+            Waiting:
+              Prepared:
+                - '{issue compute:wq_block(t)} ← [{done compute:byte_lut}, {done load:b_block(t)}, {done load:scale_block(t)}]'
+                - '{issue matmul:a_block(t)@wq_block(t)} ← [{done load:a_block(t)}]'
+REALIZATION:
+  Require:
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: One plain launch of ceil_div(m, 128) * (n / 64) CTAs of 256 threads with 66816 bytes of dynamic shared memory on the caller current stream, raising the per-function dynamic shared memory limit once; no attributes, events, clusters or graph capture
+      Reason: Flow declares one submission with no start_after, so stream order is the only completion relation; 66816 bytes exceeds the 48 KB default dynamic shared memory limit, and the source replay layer does not cover this configuration
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: Asynchronous shared-memory copies grouped into one commit group per k block, exactly one commit per loop iteration including the iterations that stage nothing, and a wait that leaves one group in flight
+      Reason: The three ring slots and the two-block prefetch make completion of a_ring, bp_ring and sc_ring cumulative in issue order, as the async_ordered loads promise; a missing empty commit shifts every later wait onto a slot that has not landed
+    - Item: DESIGN.Tile_pipeline::MAIN
+      Choice: A CTA-wide barrier ahead of the first decode of each k block and ahead of the first product of that block
+      Reason: The load and compute actions promise role-wide done and visibility while one symmetric role performs them, so the ring slot, the single bdq slot and byte_lut become readable across warps only at a barrier
+  Prefer:
+    - Item: DESIGN.Math_reshape::wq
+      Choice: Paired BF16 multiply of one byte_lut entry by the broadcast group scale, giving two weight operands per instruction; keep the values and the single BF16 rounding
+      Reason: Halves the decode instruction count for products that step 1 of DESIGN.Math_reshape already fixes as exact

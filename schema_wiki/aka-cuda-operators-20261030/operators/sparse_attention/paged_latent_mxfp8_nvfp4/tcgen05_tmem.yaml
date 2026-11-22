@@ -1,0 +1,312 @@
+META_DATA:
+  Name: paged_latent_mxfp8_nvfp4
+  Describe: Sparse decode/MTP attention over selected rows of a paged MXFP8 SWA cache and optional paged NVFP4 compressed cache (D512 MQA) with sink rescaling
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/solution.py::Model.forward
+  Version: 2
+  Dispatch:
+    id: tcgen05_tmem
+    when: head_count = 64 calls on the tcgen05 path whose merge stays a separate submission - with BS = batch_count*query_len, raw width listn and chunks = ceil(listn/64), routing needs listn >= 128, BS * min(16, chunks) >= (nsm + 2) / 3 for the queried SM count nsm, and the caller's splits in [1, min(16, chunks)], so every split claims a chunk; calls also meeting BS * splits <= nsm, splits * 512 >= 2048 and 286720 > smem_per_sm take the fused variant instead. Needs 143360 dynamic shared bytes per CTA
+DESIGN:
+  Math_reshape:
+    Thesis: All three matrix tiles are bf16, so the caller's query is staged unconverted; the raw slot list is chunked at 64 under a valid mask, keeping the Contract's row order; the base-2 softmax lags its row maximum to skip rescales; normalization is deferred to one merge-time scale
+    Rewrite:
+      - Name: Raw-slot order and chunking
+        Math: |
+          For one query row (r, j) the raw slot list has width listn = swa_budget + cmp_budget, or swa_budget when the compressed cache is absent. Position e < swa_budget holds entry(e) = indices[r,j,e]; position e in [swa_budget, listn) holds entry(e) = extra_indices[r,j,e - swa_budget]; valid(e) = entry(e) >= 0.
+          No compaction or permutation runs: the selected positions in ascending e are the Contract's gathered rows in the Contract's order, the i-th selected position carrying k[i,:], n_sel = count({e | valid(e)}).
+          chunks = ceil(listn / nc); chunk ci covers positions [ci*nc, min((ci+1)*nc, listn)). Every chunk holds all nc raw positions; unselected positions and positions past listn carry a zero row, excluded from both products and all statistics by the valid mask.
+        Symbol:
+          nc: {meaning: Raw slot positions in one streamed chunk, value: 64}
+          listn: {meaning: Raw slot list width of one query row}
+          chunks: {meaning: Chunks in one query row's raw slot list}
+        Ledger:
+          Baseline: Selector compaction to the true n_sel before chunking, as the register-accumulator design performs
+          Gain: No compaction scans or selector scratch; the chunk count ceil(listn/nc) is fixed by the budgets, and the raw order keeps the Contract's row order
+          Cost: All nc positions of every chunk run through decode and both products, so a row selecting few tokens still streams every chunk
+      - Name: Exact bf16 operands for both products
+        Math: |
+          The query operand is the caller's q itself, staged byte-identically: the query side carries no rounding.
+          kd[e,d] = bf16(k[i(e),d]) at valid positions e, else 0.
+          Both formats decode without loss in bf16, which has 8 significand bits and FP32's exponent width: e4m3 needs 4 bits, e2m1 2, ue8m0 1, and an NVFP4 product e2m1 * e4m3 at most 7. A ue8m0 scale 2^(g-127) is exact in bf16 for g in [1, 254] (g = 0 is the exact subnormal 2^-127), so the packed bf16 multiply rounds the exact product once, a direct bf16 rounding of the Contract's row.
+          A product below 2^-126 loses bits through the subnormal range, vanishing below 2^-133; above the largest finite bf16 value it saturates or overflows. An MXFP8 scale byte outside [1, 254] takes the FP32 path: the exact product is formed in FP32 and rounded once, so kd stays bf16(k[i(e),d]) unless that product overflows or underflows. The fp8_e4m3fn NaN bytes would propagate; the frozen construction never emits them.
+        Symbol: {kd: {meaning: Selected rows in the bf16 operand format, shape: [{slot: listn}, {dim: head_dim}], dtype: bf16}}
+        Ledger:
+          Baseline: FP32 dot products of the Contract's exact decoded rows with the bf16 query
+          Gain: Operand bytes per element 4 -> 2 in both products, and the query needs no conversion pass - the staged caller bytes are already the A operand
+          Cost: kd is a bf16 rounding, exact for every NVFP4 row and for MXFP8 rows whose product stays normal, losing bits only at the subnormal and overflow ends
+      - Name: Base-2 logits from bf16 operands
+        Math: |
+          For one query row, all 64 heads and one chunk ci:
+            qk[h,e] = mm32(q[r,j,h,:], kd[e,:]) over the head_dim reduction, FP32 accumulate
+            qk_scale = sm_scale * log2(e), with log2(e) = 1.4426950408889634
+            t2[h,e] = qk[h,e] * qk_scale at valid positions e, and -inf at unselected ones or ones past listn
+          t2 is the Contract's logits in base 2, so exp(logits[h,i]) = 2^(t2[h,i]); masked columns contribute nothing to either product.
+        Symbol:
+          qk: {meaning: Unscaled FP32 QK product of one chunk and head, shape: [{slot: nc}], dtype: fp32}
+          t2: {meaning: Base-2 logits of one chunk and head, shape: [{slot: nc}], dtype: fp32}
+        Arithmetic:
+          Accumulate: The head_dim reduction runs as 32 ascending FP32 accumulations of 16 bf16 products each, one accumulation per K=16 product issue
+        Ledger:
+          Baseline: Natural-log logits from an FP32 dot product of the exact rows
+          Gain: One hardware base-2 exponential per logit serves the softmax and the sink merge with no base change
+          Cost: Two FP32 roundings per logit; every chunk evaluates all nc columns, its unselected ones masked
+      - Name: Lagged online base-2 softmax over chunks
+        Math: |
+          Per head row h, over its split's claimed chunks c = 0..claim_count-1:
+            row_max(-1) = -inf; row_sum_group(-1)[u] = 0
+            chunk_max(c) = max of t2[h,x] over the chunk's nc positions
+            row_max(c) = chunk_max(c) when chunk_max(c) != -inf and (row_max(c-1) = -inf or chunk_max(c) > row_max(c-1) + 2); otherwise row_max(c-1)
+            alpha(c) = 0 if row_max(c-1) = -inf, else 2^(row_max(c-1) - row_max(c))
+            e[h,x] = 0 if t2[h,x] = -inf, else 2^(t2[h,x] - row_max(c)); e16[h,x] = bf16(e[h,x])
+            row_sum_group(c)[u] = row_sum_group(c-1)[u] * alpha(c) + sum of e[h,x] over column group u
+          The nc positions form 8 column groups of 8, group u covering [8u, 8u+8). The lag bounds probabilities by 4, keeps row_max within 2 of the true running maximum, and makes alpha(c) exactly 1 unless the maximum rises, skipping the rescale; a rise gives alpha(c) < 1/4. An all-unselected chunk leaves row_max unchanged and adds zero probabilities.
+        Symbol:
+          e16: {meaning: Chunk probabilities in the bf16 operand format, shape: [{slot: nc}], dtype: bf16}
+          row_max: {meaning: Running lagged base-2 row maximum over claims, shape: [], dtype: fp32, retention: 'carry_forward (r,j,h); c=0..claim_count-1'}
+          row_sum_group: {meaning: Running base-2 row sum of one column group, shape: [{group: 8}], dtype: fp32, retention: 'carry_forward (r,j,h); c=0..claim_count-1'}
+        Arithmetic:
+          Approx: '2^x is the hardware ex2.approx.ftz.f32, flushing subnormal arguments and results to zero; unknown: no version-matched error bound in the fixed source'
+          Accumulate: Row sums are carried as 8 column-group partials of 8, each rescaled by alpha and added in ascending group order at the end of the claim
+        Ledger:
+          Baseline: Two passes over the selected rows, one for the maximum and sum and one for the probabilities
+          Gain: One pass yields the row statistics and the PV product; the 2-step lag skips the rescale for every chunk that does not raise the maximum by more than 2
+          Cost: A raising chunk costs up to head_dim + 8 FP32 rescale multiplies per head, and probabilities span [0, 4] instead of [0, 1]
+      - Name: Deferred-normalization PV accumulation
+        Math: |
+          pv(-1)[d2] = 0 for each of the 64 heads. Per claimed chunk c:
+            pv(c) = mma32(e16(c), kd(c), pv(c-1) * alpha(c))
+          where the alpha-rescaled accumulator, broadcasting the head's scalar over head_dim, is the initial FP32 accumulator of the chunk's product of bf16 probabilities by bf16 rows, so no separate product is formed and added. The rescale is skipped where alpha(c) = 1, wherever the lagged maximum did not rise; the claim's first chunk has alpha(0) = 0 and its product overwrites the zeroed accumulator.
+          No probability is divided by a denominator here: the sink-adjusted normalization is applied once, after the merge, as the single factor scale.
+        Symbol: {pv: {meaning: Running unnormalized attention output row, shape: [{dim: head_dim}], dtype: fp32, retention: 'carry_forward (r,j,h); c=0..claim_count-1'}}
+        Arithmetic:
+          Accumulate: Each chunk's slot reduction is 4 ascending FP32 accumulations of 16 bf16 products per output tile, two N=256 tiles, from the rescaled accumulator
+        Ledger:
+          Baseline: Probabilities divided by the final denominator before the PV product
+          Gain: One FP32 multiply per output element at the end replaces a division per probability
+          Cost: e16 rounds each probability to bf16, a relative error up to 2^-8 against fp16's 2^-11, before the PV product
+      - Name: Split partials
+        Math: |
+          One call is cut into splits cyclic claims, the caller fixing splits <= chunks once per call, so claim_count >= 1 for every split. Split sp of query row (r, j) and head h publishes at the end of its claimed sequence:
+            partial_max(sp) = row_max(claim_count-1)
+            partial_sum(sp) = sum over u of row_sum_group(claim_count-1)[u]
+            partial_out(sp)[d2] = fp16(pv(claim_count-1)[d2])
+          A split whose claimed positions are all unselected ends with row_max = -inf and publishes partial_max = -inf, partial_sum = 0, partial_out = 0, the merge identity. Every split of every head publishes exactly one triple, so the merge needs no initial value and no per-split branch.
+        Symbol:
+          splits: {meaning: Token-split fan-out chosen per call}
+          partial_max: {meaning: One head's split maximum in base 2, shape: [], dtype: fp32, retention: 'keep_value (r,j,h,sp)'}
+          partial_sum: {meaning: One head's split row sum in base 2, shape: [], dtype: fp32, retention: 'keep_value (r,j,h,sp)'}
+          partial_out: {meaning: One head's unnormalized split output row, shape: [{dim: head_dim}], dtype: fp16, retention: 'keep_value (r,j,h,sp)'}
+        Ledger:
+          Baseline: One chunk chain per request row, with each head's output written directly
+          Gain: The chunk chain shortens from chunks to ceil(chunks/splits), filling the device when rows are few; the cyclic claim balances counts and formats
+          Cost: splits*(2*head_dim + 8) bytes of partials per head, one extra submission, and an fp16 rounding of each accumulator
+      - Name: Split merge and sink normalization
+        Math: |
+          For each query row (r, j) and head h, over its splits:
+            mmax = max of partial_max(sp); w(sp) = 0 if partial_max(sp) = -inf else 2^(partial_max(sp) - mmax)
+            lsum = sum of w(sp) * partial_sum(sp)
+            lse2 = mmax + log2(lsum); sk2 = attn_sink[h] * log2(e)
+            denom2 = max(lse2, sk2) + log2(1 + 2^(-|lse2 - sk2|))
+            scale = 0 if mmax = -inf else 2^(mmax - denom2)
+            attn_out[r,j,h,d2] = bf16(scale * sum of w(sp) * fp32(partial_out(sp)[d2]))
+            lse[r,h,j] = +inf if mmax = -inf else lse2 * ln 2, with ln 2 = 0.6931471805599453
+          mmax = -inf exactly when n_sel = 0, giving the Contract's zero row and +inf; attn_sink[h] = +inf gives scale = 0 and -inf gives denom2 = lse2.
+        Arithmetic:
+          Approx: 'The powers of two use the merge kernel''s ex2.approx.f32, not the main kernel''s ftz form; unknown: no matched error bound; log2 is the FP32 library log'
+          Accumulate: The statistics reduce by a 32-lane butterfly, max for mmax and sum for lsum, splits past the fan-out contributing zero; the output sum ascends in sp
+  Work_schedule:
+    Thesis: 'Two submissions: MAIN gives one CTA per (request row, split) holding all 64 heads, so a decoded chunk serves every head and each split publishes partials to global memory; COMBINE merges them per head with the wide one-warp-per-head kernel. The fan-out duplicates the gather and Q staging per split'
+    Step:
+      MAIN:
+        Describe: Sparse attention for all 64 heads of one request row over this split's cyclically claimed chunks, publishing partials or the merge identity
+        Decomposition:
+          Strategy: chunks = ceil(listn/nc); split sp claims ci(c) = sp + c*splits for c in [0, claim_count), claim_count = ceil((chunks-sp)/splits)
+          Partition:
+            row: {meaning: 'One (batch, query) request row', size: batch_count*query_len, tile: 1}
+            split: {meaning: Token-split fan-out index, size: splits, tile: 1, range: [1, 16]}
+          Worktile:
+            Invariant:
+              q: {meaning: Query rows of this request row, shape: [{head: 64}, {dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::q.dtype'}
+              indices: {meaning: SWA selectors of this request row, shape: [{slot: swa_budget}], dtype: 'ref:CONTRACT.Algorithm_requirement::indices.dtype'}
+              extra_indices: {meaning: 'Compressed selectors of this row, if present', shape: [{slot: cmp_budget}], dtype: 'ref:CONTRACT.Algorithm_requirement::extra_indices.dtype'}
+            Iteration: {kd: {meaning: 'Chunk of nc decoded bf16 rows, zero if unselected', shape: [{slot: nc}, {dim: head_dim}], dtype: bf16, direction: ascending}}
+          Target:
+            Single_tile:
+              partial_out: {meaning: This split's unnormalized rows for 64 heads, shape: [{head: 64}, {dim: head_dim}], dtype: fp16}
+              partial_max: {meaning: This split's base-2 row maxima, shape: [{head: 64}], dtype: fp32}
+              partial_sum: {meaning: This split's base-2 row sums, shape: [{head: 64}], dtype: fp32}
+        Mapping:
+          Strategy: One CTA of 512 threads; all 64 heads are the M axis of both products, so one decoded chunk serves every head
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: (batch_count*query_len) * splits
+        Schedule:
+          Strategy: The partial scratch is private per host thread, device and stream, is fully written by every call and carries no state across calls
+          Worktile_order:
+            - {by: split, direction: ascending}
+            - {by: row, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: [assigned_done]
+      COMBINE:
+        Describe: Merge the splits of 4 consecutive (request row, head) units, apply the sink normalization and write attn_out and lse
+        Decomposition:
+          Strategy: The 4 units of a worktile are merged independently over all splits; the producer stores the splits of one head adjacently, so a warp reads one run
+          Partition: {row_head: {meaning: 'Consecutive (request row, head) output units', size: batch_count*query_len*head_count, tile: 4}}
+          Target:
+            Single_tile:
+              attn_out: {meaning: Merged output rows of the 4 heads, shape: [{head: 4}, {dim: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::attn_out.dtype'}
+              lse: {meaning: Merged log-sum-exp of the 4 heads, shape: [{head: 4}], dtype: 'ref:CONTRACT.Algorithm_requirement::lse.dtype'}
+            Tile_reduction: {dimension: split, input: [partial_out, partial_max, partial_sum], output: [attn_out, lse], method: 'DESIGN.Math_reshape::Split merge and sink normalization'}
+        Mapping:
+          Strategy: One warp per head and one lane per split, so the fan-out must not exceed 32; head_count is a multiple of 4, so no warp is left without a unit
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil_div(batch_count*query_len*head_count, 4)
+        Schedule:
+          Worktile_order: [{by: row_head, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: [assigned_done]
+    Flow:
+      Launch:
+        - {step: [MAIN]}
+        - {step: [COMBINE], start_after: [MAIN.kernel_done]}
+      Handoff:
+        partial_out: {producer: MAIN, consumer: [COMBINE], storage: global}
+        partial_max: {producer: MAIN, consumer: [COMBINE], storage: global}
+        partial_sum: {producer: MAIN, consumer: [COMBINE], storage: global}
+  Tile_pipeline:
+    Thesis: MAIN keeps one role with serial thread-side actions; overlap comes from the TMA Q staging, the next chunk's register prefetch, and single-thread tensor-core products whose commit-driven parity waits end each phase. One CTA resides per SM; COMBINE is a barrier-free pass
+    Step:
+      MAIN:
+        Index: {c: {meaning: Local chunk ordinal in this split's cyclic claim, definition: [0, claim_count]}}
+        Storage:
+          q_slot: {meaning: 'Staged bf16 query rows, later fp16 output staging', depth: 1, location: smem, shape: [{head: 64}, {dim: head_dim}],
+            dtype: bf16, total_size: 65536, view: {q: {}, partial_out: {}}}
+          k_slot: {meaning: Decoded bf16 rows of the current chunk, depth: 1, location: smem, shape: [{slot: nc}, {dim: head_dim}],
+            dtype: bf16, total_size: 65536, view: {kd: {}}}
+          p_slot: {meaning: bf16 probabilities of the current chunk, depth: 1, location: smem, shape: [{head: 64}, {slot: nc}],
+            dtype: bf16, total_size: 8192, view: {e16: {}}}
+          tmem_acc: {meaning: 'TMEM accumulator: PV output and QK product regions', depth: 1, location: tmem, shape: [{row: 128}, {column: 512}],
+            dtype: fp32, total_size: 262144, view: {qk: {region: {column: [256, 288]}}, pv: {region: {column: [0, 256]}}}}
+          score_acc: {meaning: Scaled and masked logits of the current chunk, depth: 1, location: register, shape: [{head: 64}, {slot: nc}],
+            dtype: fp32, total_size: 16384, view: {t2: {}}}
+          exchange_slot: {meaning: 'Cross-group chunk maxima, then row-sum partials', depth: 1, location: smem, shape: [{element: 512}],
+            dtype: fp32, total_size: 2048, view: {group_max: {}, group_sum: {}}}
+          valid_slot: {meaning: Per-position selection flags of the current chunk, depth: 1, location: smem, shape: [{slot: nc}],
+            dtype: int32, total_size: 256, view: {valid: {}}}
+          raw_slot: {meaning: Prefetched raw compressed records of one chunk, depth: 2, location: register, shape: [{slot: nc}, {record: 528}],
+            dtype: uint8, total_size: 67584, view: {raw(c): {slot_index: c % 2}}}
+          row_state: {meaning: Running lagged row maximum and 8 group sums, depth: 1, location: register, shape: [{head: 64}, {element: 9}],
+            dtype: fp32, total_size: 2304, view: {row_max: {region: {element: [0, 1]}}, row_sum_group: {region: {element: [1, 9]}}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: Gather, decode and stream each claimed chunk through single-thread-issued tcgen05 products with TMEM accumulation, then publish this split's partials
+              Member: warp[0:16]
+              Using_verb:
+                compute:
+                  kd: {execution_mode: serial, describe: 'Decode raw(c) from raw_slot into k_slot''s bf16 rows, zeros for invalid rows, and set valid_slot; done covers the publish fence and CTA barrier'}
+                  t2: {execution_mode: serial, describe: 'Each thread reads its 8-column qk slice from tmem_acc, scales by sm_scale*log2(e), masks valid_slot-clear columns to -inf, keeping t2 in score_acc'}
+                  row_max: {execution_mode: serial, describe: 'Exchange score_acc t2 slice maxima via exchange_slot group_max, reduce to chunk_max and apply the lag rule to row_max; done covers the barrier'}
+                  pv_rescale: {execution_mode: serial, describe: Warp-collective TMEM read-modify-write scaling tmem_acc's pv region by each head's alpha(c); skipped with no access when the warp's alphas are all 1}
+                  prob: {execution_mode: serial, describe: 'Form e = 2^(t2 - row_max) from score_acc t2, rescale row_sum_group by alpha and add its 8 values, write bf16(e) to p_slot; done covers the barrier'}
+                  row_sum: {execution_mode: serial, describe: 'Exchange the groups'' row_sum_group partials via exchange_slot group_sum, adding in ascending group order into partial_sum; done covers the barrier'}
+                  staged_out: {execution_mode: serial, describe: 'Read tmem_acc''s pv region, convert to fp16 partial_out, write 520-half staging rows over q_slot spilling into k_slot; done covers the barrier'}
+                matmul:
+                  q@kd: {execution_mode: async_ordered, describe: 'Thread 0 issues 32 K=16 tcgen05 products of q_slot by k_slot into tmem_acc''s qk region, FP32 accumulate, step 0 overwriting; commits'}
+                  e16@kd: {execution_mode: async_ordered, describe: 'Thread 0 issues 4 K=16 steps of p_slot''s e16 by transposed k_slot into tmem_acc''s N=256 pv tiles, accumulating except the claim''s first step; commits'}
+                load:
+                  raw: {execution_mode: async_unordered, describe: 'Gather chunk ci(c)''s 64 raw slot records into raw_slot: each thread reads its row''s selector entry and, if non-negative, its value and scale bytes'}
+                  q: {execution_mode: async_unordered, describe: 'Thread 0 bulk-copies the 64 bf16 query rows into q_slot''s SW64 layout via the tensor map, expecting 65536 bytes on the copy barrier; no conversion'}
+                store: {partials: {execution_mode: serial, describe: 'Write (partial_max, partial_sum) per head to the global statistics scratch and copy staging rows to the output scratch, splits of one head adjacent'}}
+                await:
+                  q: {execution_mode: serial, describe: 'Wait the copy barrier''s transaction completion for load:q, making q_slot readable as the A operand before the first QK issue'}
+                  qk: {execution_mode: serial, describe: 'Wait the product barrier''s parity covering matmul:q@kd(c)''s commit, making this chunk''s tmem_acc qk region readable by every thread'}
+                  pv: {execution_mode: serial, describe: 'Wait the product barrier''s next parity; the commit covers both products of chunk c, ending their reads of q_slot, k_slot and p_slot'}
+                acquire: {tmem: {execution_mode: serial, describe: 'Warp 0 initializes both mbarriers, leases the 512 TMEM columns and relinquishes permits; done covers the barrier publishing the lease base'}}
+                release: {tmem: {execution_mode: serial, describe: Warp 0 returns the leased 512 TMEM columns after the CTA barrier ensured every thread's TMEM reads completed}}
+            Pipe:
+              - load:raw(0)
+              - acquire:tmem
+              - load:q
+              - for(c=0:claim_count):
+                  - compute:kd(c)
+                  - if(c == 0):
+                      - await:q
+                  - matmul:q@kd(c)
+                  - if(c + 1 < claim_count):
+                      - load:raw(c+1)
+                  - await:qk(c)
+                  - compute:t2(c)
+                  - compute:row_max(c)
+                  - if(c > 0):
+                      - compute:pv_rescale(c)
+                  - compute:prob(c)
+                  - matmul:e16@kd(c)
+                  - await:pv(c)
+              - compute:row_sum
+              - compute:staged_out
+              - store:partials
+              - release:tmem
+            Waiting:
+              Prepared:
+                - '{issue compute:kd(c)} ← [{done load:raw(c)}]'
+                - '{done await:q} ← [{issue load:q}]'
+                - '{done await:qk(c)} ← [{issue matmul:q@kd(c)}]'
+                - '{done await:pv(c)} ← [{issue matmul:e16@kd(c)}]'
+      COMBINE:
+        Storage:
+          merge_acc: {meaning: FP32 merged output slices of the 4 heads, depth: 1, location: register, shape: [{head: 4}, {dim: head_dim}],
+            dtype: fp32, total_size: 8192}
+          partial_batch: {meaning: Four splits of fp16 partials held in registers, depth: 1, location: register, shape: [{head: 4}, {split: 4}, {dim: head_dim}],
+            dtype: fp16, total_size: 16384}
+        Role:
+          MAIN:
+            Info:
+              Describe: Merge one head per warp, reducing its splits into the statistics and the output, then store both results
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  merge_stats: {execution_mode: serial, describe: 'Read this head''s partial_max, partial_sum and attn_sink, lane s holding split s, and reduce them to mmax, w(sp), lsum, lse2, denom2 and scale'}
+                  merged_out: {execution_mode: serial, describe: 'Accumulate w(sp)*fp32(partial_out(sp)) over ascending sp into merge_acc, holding four splits in partial_batch; zero-weight splits still load'}
+                store: {outputs: {execution_mode: serial, describe: 'Write bf16(scale*merge_acc) into attn_out and fp32 lse, or +inf when mmax = -inf, for this CTA''s 4 heads'}}
+            Pipe:
+              - compute:merge_stats
+              - compute:merged_out
+              - store:outputs
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN.Storage
+      Choice: Raise the per-function dynamic shared-memory limit to the 143360 bytes MAIN allocates before its launch, and launch MAIN with 512 threads per CTA under a budget that keeps exactly one CTA resident per SM
+      Reason: The single-slot query, row, probability, exchange and flag regions plus slack exceed the 48 KB default, and the caller's fan-out rule sizes splits against the queried SM count assuming this one-CTA residency
+    - Item: DESIGN.Tile_pipeline::MAIN.Role.MAIN
+      Choice: Issue both products as single-thread weight-stationary tcgen05.mma with FP32 accumulation, publishing completion by tcgen05.commit to the product mbarrier the await actions consume by parity; order smem operand writes with the async-proxy fence and TMEM accesses with the thread-sync fences
+      Reason: Provides the issue, completion and visibility guarantees that the pipe's await edges, the single-slot region reuse and the TMEM accumulator lifetime depend on, while all 16 warps continue vector work during the products
+    - Item: DESIGN.Tile_pipeline::MAIN.Storage.tmem_acc
+      Choice: Lease the 512 TMEM columns per CTA at entry, relinquish further allocation permits, and return the same columns before the kernel exits
+      Reason: TMEM is a per-CTA leased resource; the power-of-two lease is the smallest covering the 288 columns in use, and an unreturned allocation would stall later CTAs
+    - Item: DESIGN.Tile_pipeline::MAIN.Storage.q_slot
+      Choice: Keep the fp16 staging rows within the 65536-byte q region plus the 1024 bytes the last 520-half row spills into the k region, and issue no k region read after the final chunk's PV product completed
+      Reason: The 520-half stride needs 66560 bytes, 1024 more than the q region holds; the spill into k_slot is safe only because the last await:pv already ended every tensor-core read of it
+    - Item: DESIGN.Tile_pipeline::MAIN.Role.MAIN
+      Choice: Stage Q in load:q with tensor-map bulk copies under a CUtensorMap encoded for the caller's q as bf16 with 64-byte swizzle and 32-dim boxes
+      Reason: The design binds load:q completion to the copy barrier's announced transaction bytes consumed by await:q; a different staging primitive would change that wait contract, as the catalogued cp.async variant does explicitly
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::MAIN.Role.MAIN
+      Choice: Cache the Q tensor map per host thread and re-encode it only when the q pointer, head_count, row count or device changes
+      Reason: Caches only the descriptor, never data - every launch still reads the current q bytes - and removes the per-call encode cost; omitting the cache leaves the design correct
+    - Item: DESIGN.Work_schedule::Flow.Launch
+      Choice: Record the two submissions as a two-node CUDA graph reused while every address, shape, device, stream and fan-out key field is unchanged, patch only the merge node's lse argument when a fresh allocation moves it, and launch directly while the stream is capturing
+      Reason: Caches launch structure only - both kernels execute on every graph launch and all data are read at execution time - removing per-call launch API cost, and the capture fallback keeps graph creation legal inside a caller's own capture
+    - Item: DESIGN.Tile_pipeline::COMBINE.Role.MAIN
+      Choice: Read the split partials with evict-first 16-byte loads and keep four splits in flight before accumulating
+      Reason: Every partial element is read exactly once, and the batch keeps eight 16-byte requests per lane in flight so the merge runs at DRAM rate
+  Forbid:
+    - Item:
+        - DESIGN.Math_reshape::Exact bf16 operands for both products
+        - DESIGN.Math_reshape::kd
+        - DESIGN.Math_reshape::e16
+      Choice: Mixing fp16 and bf16 operands inside one of the two matrix products, for example an fp16 probability tile against the bf16 rows or a converted fp16 query tile
+      Reason: SM103 traps with an illegal instruction on a mixed f16/bf16 operand pair, so all three tiles of a product must share one format

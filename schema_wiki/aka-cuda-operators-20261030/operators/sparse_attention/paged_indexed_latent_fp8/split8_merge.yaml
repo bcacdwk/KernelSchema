@@ -1,0 +1,483 @@
+META_DATA:
+  Name: paged_indexed_latent_fp8
+  Describe: Sparse latent attention gathering paged FP8 E4M3 KV rows by per-token physical indices into a caller-provided BF16 output
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/candidate/launch.cu::s4_split_forward
+  Version: 1
+  Dispatch:
+    id: split8_merge
+    when: qk_dim = 512, and the split selection (token_count <= 32 and head_count <= 64 and topk_budget >= 1024) holds
+DESIGN:
+  Math_reshape:
+    Thesis: The selection masking and online exp2 softmax are kept, but each token row's tiles divide into eight independently normalized split windows publishing raw FP32 partials and (max,sum) stats; a per-row merge rebases them in the exp2 domain, cancels the 2^8 prescale and applies bmm2_scale once
+    Rewrite:
+      - Name: Selection as masked tiles in eight windows
+        Math: |
+          active_topk(t) = max(0, min(n(t), topk_budget)), equal to n(t) inside the declared ranges,
+          tile_count(t) = ceil_div(active_topk(t), 128); tile d covers absolute prefix positions
+          [128*d, 128*(d+1)). Position c keeps the stored id sel_id(t,c) = block_tables[t,0,c] and
+          takes part only when valid(t,c) = (c < active_topk(t)) and (sel_id(t,c) >= 0), so the m(t)
+          valid positions reproduce the Contract's compacted s(t) while every other position receives
+          weight zero; positions at or beyond topk_budget carry a filler id and are never valid. Each
+          row's tiles divide into eight consecutive windows: chunk(t) = ceil_div(tile_count(t), 8),
+          first_tile(t,s) = s*chunk(t), split_tiles(t,s) = max(0, min(chunk(t), tile_count(t) -
+          first_tile(t,s))) for 0 <= s < 8. split_tiles = 0 is an empty split with no work;
+          tile_count >= 1 keeps split 0 nonempty and active_topk = 0 gives all eight splits empty.
+        Symbol:
+          active_topk: {meaning: Clamped selection count of token row t}
+          tile_count: {meaning: KV tiles traversed for token row t}
+          sel_id: {meaning: Stored physical row id at a prefix position}
+          valid: {meaning: Predicate for positions taking part in the sums}
+          chunk: {meaning: Tiles per split window of token row t}
+          first_tile: {meaning: Absolute first tile of split s}
+          split_tiles: {meaning: Tiles split s covers; 0 marks an empty split}
+        Ledger:
+          Baseline: Compacting the non-negative prefix entries into a dense list before scoring, as the golden reference does
+          Gain: No compaction pass and no ragged per-token buffer; both products run on dense 128-row tiles across all tiles of the row
+          Cost: Per item 128*split_tiles - (its valid positions) gathered rows of 512 E4M3 features are scored then masked; a -1 id still gathers physical row 0
+      - Name: Scores from one E4M3 product per tile
+        Math: |
+          One work item covers one token row t, one group g of 64 heads and one split s, with
+          query_block = query[t,0,64*g:64*g+64,:]. For tile-local column c of local tile d the
+          gathered row is kv_block(d)[c,:] = kv_row(max(sel_id(t,128*(first_tile(t,s)+d)+c),0)), so a
+          negative id still gathers physical row 0; a filler position gathers its own tile's first
+          stored id, or row 0 when that id is -1, and is invalid either way. The value features of a
+          valid position are the leading value_dim = 512 features of the same gathered row, so one
+          row feeds both products. The unscaled score block is the Contract's qk_dim-feature dot
+          product without bmm1_scale, accumulated in FP32: raw_score(d)[h,c] = mm32(query_block[h,:],
+          kv_block(d)[c,:]); every later use multiplies by ssl inside exp2, matching exp(score[h,j])
+          at the valid position with that index. Masking precedes every reduction: masked_score(d)[h,c] = raw_score(d)[h,c] if valid(t,128*(first_tile(t,s)+d)+c) else -inf.
+        Symbol:
+          raw_score: {meaning: Unscaled QK dot product block of one tile, shape: [{head: 64}, {kv: 128}], dtype: fp32}
+          ssl: {meaning: Base-2 softmax scale of the invocation, value: bmm1_scale * log2(e)}
+        Ledger:
+          Baseline: Evaluating score[h,j] as bmm1_scale times a qk_dim-term FP32 dot product on the FMA path
+          Gain: 64*128*qk_dim multiply-adds per tile move to the E4M3 tensor-core path reading the stored operands directly
+          Cost: The FP32 accumulation order is the tensor core's, not the reference's; E4M3 products are exact in FP32, so no new product rounding
+      - Name: Per-split online exp2 softmax, E4M3 weights
+        Math: |
+          Per head row h of the item and split s, for d = 0..split_tiles(t,s)-1, with row_max(-1) =
+          -inf, row_sum(-1) = 0 and value_acc(-1) = 0 initialized per (t,h,s), empty maxima -inf and empty sums 0:
+            row_max(d) = max(row_max(d-1), maximum over c of masked_score(d)[h,c])
+            rescale(d) = exp2(ssl*(row_max(d-1) - row_max(d))) if row_max(d-1) > -inf, else 1
+            top(d) = 0 if row_max(d) == -inf else row_max(d)
+            prob(d)[c] = exp2(fma32(masked_score(d)[h,c], ssl, -(ssl*top(d) - 8)))
+            prob_e4m3(d)[c] = fp8_e4m3fn(prob(d)[c])
+            row_sum(d) = fma32(row_sum(d-1), rescale(d), sum over c of prob(d)[c])
+            value_acc(d) = mma32(prob_e4m3(d), value_block(d), rescale(d) * value_acc(d-1))
+          A non-valid c has prob and prob_e4m3 equal to 0, and value_block(d)[c,v] = kv_block(d)[c,v].
+        Symbol:
+          row_max: {meaning: Running row maximum of unscaled scores, shape: [], dtype: fp32, retention: 'carry_forward (t,h,s); d=-1..split_tiles-1'}
+          rescale: {meaning: Accumulator rescale factor of one tile, shape: [{head: 64}], dtype: fp32}
+          prob: {meaning: Unrounded exp2 weight tile before narrowing, shape: [{head: 64}, {kv: 128}], dtype: fp32}
+          prob_e4m3: {meaning: E4M3 weight tile consumed by the value product, shape: [{head: 64}, {kv: 128}], dtype: fp8_e4m3fn}
+          row_sum: {meaning: Running row sum of unrounded weights, shape: [], dtype: fp32, retention: 'carry_forward (t,h,s); d=-1..split_tiles-1'}
+          value_acc: {meaning: Running weighted value accumulator of one head row, shape: [{value: value_dim}], dtype: fp32, retention: 'carry_forward (t,h,s); d=-1..split_tiles-1'}
+        Arithmetic:
+          Approx: 'exp2 uses an approximate flush-to-zero primitive; unknown: no error bound for it is derivable from the fixed source'
+          Accumulate: The prob sum is accumulated as two 64-column partial sums per row and merged once per item; the prob argument and that sum flush subnormals to zero
+        Ledger:
+          Baseline: One online softmax over all tile_count tiles of a token row in a single worker, as the non-split design runs
+          Gain: The per-row chain of tile_count sequential tile updates shortens to split_tiles <= ceil_div(tile_count,8), so eight workers can share a row
+          Cost: Up to eight rescaled accumulators and eight (max,sum) stat pairs per row replace one; E4M3 weights still carry up to 2^-4 relative error
+      - Name: Partial result publication per split
+        Math: |
+          With d_last = split_tiles(t,s) - 1, for each head row h of the item's group with
+          64*g+h < head_count, the item publishes its final states as one global scratch entry per
+          (t,h,s):
+            split_max(t,h,s) = ssl * row_max(d_last)
+            split_sum(t,h,s) = row_sum(d_last)
+            partial(t,h,s,v) = value_acc(d_last)[v],  0 <= v < value_dim
+          split_max is stated in the exp2 domain and split_sum still carries the 2^8 prescale, so
+          both cancel in the merge. Empty splits publish nothing and head rows at or above
+          head_count publish nothing; the corresponding scratch entries stay unwritten and are never
+          read by the merge. bmm2_scale is not applied in this step.
+        Symbol:
+          split_max: {meaning: exp2-domain final row maximum of one split, shape: [], dtype: fp32, retention: 'keep_value (t,h,s)'}
+          split_sum: {meaning: Final unrounded weight sum of one split, shape: [], dtype: fp32, retention: 'keep_value (t,h,s)'}
+          partial: {meaning: Raw unnormalized accumulator rows of one split, shape: [{value: value_dim}], dtype: fp32, retention: 'keep_value (t,h,s)'}
+        Ledger:
+          Baseline: Scaling the item's accumulator by its own row sum and bmm2_scale, narrowing to BF16 and writing the caller's out rows directly
+          Cost: Per token row and head up to 8*512 fp32 partial values and 16 fp32 stats are materialized globally instead of one 1024-byte BF16 row
+      - Name: Cross-split merge in the exp2 domain
+        Math: |
+          For every token row t and head h < head_count the merge recomputes chunk(t) and
+          tile_count(t); the nonempty splits are {s : first_tile(t,s) < tile_count(t)}:
+            merge_max(t,h) = maximum of split_max(t,h,s) over the nonempty splits, empty maxima -inf
+            merge_weight(t,h,s) = exp2(split_max(t,h,s) - merge_max(t,h)) for such s, else 0
+            merge_denominator(t,h) = sum over {s : merge_weight(t,h,s) > 0} of merge_weight(t,h,s)*split_sum(t,h,s)
+            norm(t,h) = bmm2_scale / merge_denominator(t,h) if merge_denominator(t,h) > 0 else 0
+            out[t,0,h,v] = bf16((sum over {s : merge_weight(t,h,s) > 0} of merge_weight(t,h,s)*partial(t,h,s,v)) * norm(t,h)), 0 <= v < value_dim
+          The 2^8 prescale and each split's exp2 reference cancel, so a row with a valid position equals the Contract's weighted sum with E4M3-rounded weights.
+          Non-positive weights (empty splits, exp2 underflow, or -inf - (-inf) when nothing is valid) enter neither sum;
+          merge_denominator = 0 gives norm = 0 and the Contract's zero row.
+        Symbol:
+          merge_weight: {meaning: exp2-domain reweighting of one split's share, shape: [], dtype: fp32}
+          norm: {meaning: Row normalization factor applied after the merge, shape: [], dtype: fp32}
+        Arithmetic:
+          Approx: 'The merge weights evaluate exp2 with an approximate base-2 exponential; unknown: no error bound is derivable from the fixed source'
+          Accumulate: The per-column sum adds up to eight split contributions by FP32 fused multiply-add in ascending split order; the denominator accumulates the same way
+        Ledger:
+          Baseline: Normalizing each row's accumulator by its own row sum inside the attention kernel and writing the BF16 out rows there
+          Cost: A second global pass reads up to 8*512 fp32 partials and 16 stats per row, and bmm2_scale applies once per element after accumulation
+  Work_schedule:
+    Thesis: One CTA is one worker; one item is one token row, a 64-head group and one of eight KV split windows, an eightfold larger grid for short high-topk requests. All roles skip empty windows by one predicate, so no zero-tile item enters the body protocol; idle workers absorb never-started CTAs' items
+    Step:
+      ATTENTION:
+        Describe: Gather the item's split window in 128-row tiles, run both products and the online softmax, and publish raw FP32 partial rows and split statistics
+        Decomposition:
+          Strategy: qk_dim = 512, blocks are 64x512 and 128x512; empty items (split_tiles = 0, evaluated from seq_lens) are claimed then skipped by all body roles
+          Partition:
+            token: {meaning: Token row of the query, size: token_count, tile: 1}
+            head: {meaning: Head of the query in groups of 64, size: head_count, tile: 64}
+            split: {meaning: One of eight consecutive KV tile windows, size: 8, tile: 1}
+          Worktile:
+            Invariant: {q_block: {meaning: Query features of the item's 64-head group, shape: [{head: 64}, {feature: qk_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::query.dtype'}}
+            Iteration:
+              kv_block: {meaning: Gathered KV rows of one tile of the split window, shape: [{kv: 128}, {feature: qk_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::kv_cache.dtype', direction: ascending}
+              id_block: {meaning: Stored row ids of the same 128 absolute columns, shape: [{kv: 128}], dtype: 'ref:CONTRACT.Algorithm_requirement::block_tables.dtype', direction: ascending}
+          Target:
+            Single_tile:
+              partial_block: {meaning: Raw accumulator rows of the item's split, shape: [{head: 64}, {value: value_dim}], dtype: fp32}
+              stats_block: {meaning: Final scaled maximum and row sum per head row, shape: [{head: 64}, {stat: 2}], dtype: fp32}
+        Mapping:
+          Strategy: One CTA per worker, 512 threads in seven concurrent roles, 191104 bytes of dynamic shared memory and all 512 tensor-memory columns, one worker per SM
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: token_count*ceil_div(head_count,64)*8
+        Schedule:
+          Strategy: refill_exhausted holds when the reply a role reads at the end of a round reports no canceled CTA; all seven role loops then stop taking items
+          Worktile_order:
+            - {by: token, direction: ascending}
+            - {by: head, direction: ascending}
+            - {by: split, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: {clc_try_cancel: 'A scheduler warp cancels one not-yet-started CTA of the same grid per round; its linear id becomes the next item, published via a two-slot reply ring'}
+            Exit: refill_exhausted
+      MERGE:
+        Describe: Recombine each token and head row's published partial rows and statistics into the normalized BF16 output row and write it to out
+        Decomposition:
+          Strategy: Recomputes tile_count and chunk from seq_lens as the attention step does, so entries of empty splits, never written, are never read
+          Partition:
+            token: {meaning: Token row of the output, size: token_count, tile: 1}
+            head: {meaning: Single head of the output row, size: head_count, tile: 1}
+          Worktile:
+            Invariant:
+              partial_block: {meaning: Partial rows of the row's eight splits, shape: [{split: 8}, {value: value_dim}], dtype: fp32}
+              stats_block: {meaning: Max and sum statistics of the row's eight splits, shape: [{split: 8}, {stat: 2}], dtype: fp32}
+          Target:
+            Single_tile: {out_row: {meaning: Normalized output row of this token and head, shape: [{value: value_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}}
+            Tile_reduction: {dimension: split, input: ['ref:DESIGN.Math_reshape::partial', 'ref:DESIGN.Math_reshape::split_max', 'ref:DESIGN.Math_reshape::split_sum'], output: 'ref:CONTRACT.Algorithm_requirement::out', method: 'ref:DESIGN.Math_reshape::Cross-split merge in the exp2 domain'}
+        Mapping:
+          Strategy: One CTA per worker, 256 threads in a single role; a 36-byte shared exchange carries weights and normalization from the leading thread
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: token_count*head_count
+        Schedule:
+          Worktile_order:
+            - {by: token, direction: ascending}
+            - {by: head, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch:
+        - {step: [ATTENTION]}
+        - {step: [MERGE], start_after: [ATTENTION.kernel_done]}
+      Handoff:
+        partial: {producer: ATTENTION, consumer: [MERGE], storage: global}
+        split_max: {producer: ATTENTION, consumer: [MERGE], storage: global}
+        split_sum: {producer: ATTENTION, consumer: [MERGE], storage: global}
+  Tile_pipeline:
+    Thesis: Seven warp roles share one nonempty-item sequence; empty claim rounds advance only the reply ring. Two-slot KV, score and probability rings bound the lead to two tiles, the single tensor-memory accumulator alternates value product and rescale, and the six-slot id ring stages twelve tiles ahead
+    Step:
+      ATTENTION:
+        Index:
+          u: {meaning: Ordinal of claim rounds including empty ones, definition: worktile}
+          j: {meaning: Marker position present only in nonempty rounds, definition: [0, 'min(1,split_tiles)']}
+          t: {meaning: Nonempty-item ordinal in this worker's sequence, definition: {flatten: [u, j]}}
+          d: {meaning: KV tile ordinal within the item's split window, definition: [0, split_tiles]}
+          n: {meaning: KV tile ordinal continuing across nonempty items, definition: {flatten: [t, d]}}
+          r: {meaning: Staging pass of the item's ids in pairs of tiles, definition: [0, 'ceil_div(split_tiles,2)']}
+          g: {meaning: Staging pass ordinal continuing across items, definition: {flatten: [t, r]}}
+        Storage:
+          q_slot: {meaning: Query block of the current work item, depth: 1, location: smem, shape: [{head: 64}, {feature: 512}],
+            dtype: fp8_e4m3fn, total_size: 32768, view: {q_block(t): {}}}
+          kv_ring: {meaning: Gathered KV tile ring feeding both products, depth: 2, location: smem, shape: [{kv: 128}, {feature: 512}],
+            dtype: fp8_e4m3fn, total_size: 131072, view: {kv_block(n): {slot_index: n%2}}}
+          index_ring: {meaning: Staged row ids with two consecutive tiles per slot, depth: 6, location: smem, shape: [{kv: 256}],
+            dtype: int32, total_size: 6144, view: {id_block(g): {slot_index: g%6}}}
+          prob_ring: {meaning: E4M3 probability tiles handed to the value product, depth: 2, location: smem, shape: [{head: 64}, {kv: 128}],
+            dtype: fp8_e4m3fn, total_size: 16384, view: {prob_e4m3(n): {slot_index: n%2}}}
+          tmem_acc: {meaning: Score phases and the output accumulator, depth: 1, location: tmem, shape: [{lane: 128}, {column: 512}],
+            dtype: fp32, total_size: 262144, view: {raw_score(n): {region: {column: [(n%2)*128, (n%2)*128+128]}}, value_acc: {region: {column: [256, 512]}}}}
+          rescale_slot: {meaning: Rescale factor per head row and column half, depth: 2, location: smem, shape: [{head: 64}, {half: 2}],
+            dtype: fp32, total_size: 1024, view: {rescale(n): {slot_index: n%2}}}
+          sum_slot: {meaning: Final row sum per head row and column half, depth: 1, location: smem, shape: [{head: 64}, {half: 2}],
+            dtype: fp32, total_size: 512, view: {row_sum(t): {}}}
+          final_max_slot: {meaning: Final row maximum handed to the stats write, depth: 1, location: smem, shape: [{head: 64}, {half: 2}],
+            dtype: fp32, total_size: 512, view: {row_max(t): {}}}
+          reply_ring: {meaning: Claim replies published by the scheduler role, depth: 2, location: smem, shape: [{element: 4}],
+            dtype: uint32, total_size: 32, view: {claim(u): {slot_index: u%2}}}
+        Role:
+          INDEX:
+            Info:
+              Describe: Stage the stored physical row ids of the item's split window into a six-slot ring, one pass per two consecutive tiles
+              Member: warp[9:10]
+              Register: 136
+              Using_verb:
+                load: {ids: {execution_mode: async_unordered, describe: Copy 256 ids of pass g from the item's first-tile column onward into index_ring slot g%6 by async 16-byte copies; done publishes them to both readers}}
+                await: {next_work: {execution_mode: serial, describe: Read the round-u reply from reply_ring slot u%2 and return the slot; done covers both and an empty reply ends the item sequence}}
+            Pipe:
+              - for(u):
+                  - for(t[u]):
+                      - for(g[t]):
+                          - load:ids(g)
+                  - await:next_work(u)
+            Waiting:
+              Prepared: ['{issue await:next_work(u)} ← [{done SCHED::compute:claim(u)}]']
+              Released: ['{issue load:ids(g)} ← [{done LOAD::release:id_slot(g-6)}, {done SOFTMAX::release:id_slot(g-6)}]']
+          LOAD:
+            Info:
+              Describe: Bring the item's query block and each tile's gathered KV rows into shared memory on the shared item sequence
+              Member: warp[12:16]
+              Register: 72
+              Using_verb:
+                load:
+                  q: {execution_mode: async_unordered, describe: One elected lane of the first warp issues four TMA loads filling q_slot with 64 head rows of 512 features; tail-group rows are zero-filled}
+                  kv: {execution_mode: async_unordered, describe: Four warps issue 128 gather4 TMA requests covering every row group and feature chunk of kv_ring slot n%2; done publishes 65536 bytes}
+                await: {next_work: {execution_mode: serial, describe: Read the round-u reply from reply_ring slot u%2 and return the slot; done covers both and an empty reply ends the item sequence}}
+                signal: {tmem_free: {execution_mode: serial, describe: Signal that this role no longer uses tmem_acc whose region it never reads or writes}}
+                acquire: {throttle: {execution_mode: serial, describe: Take throttle slot u%2 once the scheduler role has returned it; done covers the mark that keeps the loaders within two items of the claim stream}}
+                release: {id_slot: {execution_mode: serial, describe: Return index_ring slot g%6 once the staged ids have been consumed as gather addresses; the gathers themselves may still be in flight}}
+            Pipe:
+              - for(u):
+                  - acquire:throttle(u)
+                  - for(t[u]):
+                      - load:q(t)
+                      - for(n[t]):
+                          - load:kv(n)
+                          - if(d % 2 == 1 or d == last(d)):
+                              - release:id_slot(g[t, floor(d/2)])
+                  - await:next_work(u)
+              - signal:tmem_free
+            Waiting:
+              Prepared:
+                - '{issue load:kv(n)} ← [{done INDEX::load:ids(g[t, floor(d/2)])}]'
+                - '{issue await:next_work(u)} ← [{done SCHED::compute:claim(u)}]'
+              Released:
+                - '{issue load:q(t)} ← [{done QK::release:q_slot(t-1)}]'
+                - '{issue load:kv(n+2)} ← [{done QK::matmul:q(t)@k(n)}, {done PV::matmul:p(n)@v(n)}]'
+              Allowed: ['{issue acquire:throttle(u+2)} ← [{done SCHED::release:throttle(u)}]']
+          SOFTMAX:
+            Info:
+              Describe: Read each score tile from tensor memory, carry the online row maximum and sum, and publish the rescale factor and the E4M3 probability tile
+              Member: warp[0:4]
+              Register: 152
+              Using_verb:
+                compute:
+                  mask: {execution_mode: serial, describe: Read the tile's 128 staged ids from index_ring and form each thread's invalid-column mask and valid-column count for its own 64-column half}
+                  score: {execution_mode: serial, describe: Read raw_score(n) from tmem_acc and set masked and over-window columns to -inf before reducing this role's row maximum; done ends its reads}
+                  acc_scale: {execution_mode: serial, describe: Merge the two halves' maxima into row_max and write rescale(n) to rescale_slot slot n%2; done publishes it to the correction role}
+                  prob: {execution_mode: serial, describe: Narrow prob(n) to E4M3 into prob_ring slot n%2 and write zeros for a half with no valid column; done publishes the tile to the value role}
+                  row_sum: {execution_mode: serial, describe: Rescale this half's running row_sum by rescale(n) and add this half's unrounded prob(n); the halves keep separate running sums}
+                  final_stats: {execution_mode: serial, describe: Write the item's row_sum into sum_slot and row_max into final_max_slot; done publishes both to the correction role}
+                await: {next_work: {execution_mode: serial, describe: Read the round-u reply from reply_ring slot u%2 and return the slot; done covers both and an empty reply ends the item sequence}}
+                signal: {tmem_free: {execution_mode: serial, describe: Drain this role's outstanding tmem_acc reads and signal that it no longer uses the region}}
+                release: {id_slot: {execution_mode: serial, describe: Return index_ring slot g%6 once the invalid-column mask of the pass's last tile is captured}}
+            Pipe:
+              - for(u):
+                  - for(t[u]):
+                      - for(n[t]):
+                          - compute:mask(n)
+                          - if(d % 2 == 1 or d == last(d)):
+                              - release:id_slot(g[t, floor(d/2)])
+                          - compute:score(n)
+                          - compute:acc_scale(n)
+                          - compute:prob(n)
+                          - compute:row_sum(n)
+                      - compute:final_stats(t)
+                  - await:next_work(u)
+              - signal:tmem_free
+            Waiting:
+              Prepared:
+                - '{issue compute:mask(n)} ← [{done INDEX::load:ids(g[t, floor(d/2)])}]'
+                - '{issue compute:score(n)} ← [{done QK::matmul:q(t)@k(n)}]'
+                - '{issue await:next_work(u)} ← [{done SCHED::compute:claim(u)}]'
+              Released:
+                - '{issue compute:prob(n)} ← [{done PV::matmul:p(n-2)@v(n-2)}]'
+                - '{issue compute:final_stats(t)} ← [{done CORRECTION::release:sum_slot(t-1)}]'
+          CORRECTION:
+            Info:
+              Describe: Rescale the tensor-memory accumulator when a tile lowers a row factor, then publish the item's raw FP32 partial rows and split statistics
+              Member: warp[4:8]
+              Register: 144
+              Using_verb:
+                compute:
+                  rescale: {execution_mode: serial, describe: Read rescale(n) from rescale_slot slot n%2 and multiply the tmem_acc value_acc region by it in place when any row of this role is below 1}
+                  row_stats: {execution_mode: serial, describe: Merge the two half sums of sum_slot into the row sum and read final_max_slot; a formed reciprocal has no consumer here; done ends both reads}
+                store:
+                  stats: {execution_mode: serial, describe: Write the item's split_max and split_sum into the global stats entry of each head row below head_count; only first-column-half threads write}
+                  partial: {execution_mode: serial, describe: Read value_acc in 16-column chunks and write the unscaled raw FP32 rows of the heads below head_count into the item's partial entry}
+                await: {next_work: {execution_mode: serial, describe: Read the round-u reply from reply_ring slot u%2 and return the slot; done covers both and an empty reply ends the item sequence}}
+                signal: {tmem_free: {execution_mode: serial, describe: Drain this role's outstanding tmem_acc reads and signal that it no longer uses the region}}
+                release:
+                  o_slot: {execution_mode: serial, describe: Return the single value_acc region so the value role may add tile n or initialize it for the item's first tile}
+                  sum_slot: {execution_mode: serial, describe: Return sum_slot and final_max_slot to the softmax role once the item's statistics have been read}
+            Pipe:
+              - for(u):
+                  - for(t[u]):
+                      - for(n[t]):
+                          - if(d > 0):
+                              - compute:rescale(n)
+                          - release:o_slot(n)
+                      - compute:row_stats(t)
+                      - release:sum_slot(t)
+                      - store:stats(t)
+                      - store:partial(t)
+                  - await:next_work(u)
+              - signal:tmem_free
+            Waiting:
+              Prepared:
+                - '{issue compute:rescale(n)} ← [{done SOFTMAX::compute:acc_scale(n)}, {done PV::matmul:p(n-1)@v(n-1)}]'
+                - '{issue compute:row_stats(t)} ← [{done SOFTMAX::compute:final_stats(t)}, {done PV::matmul:p(n[t, split_tiles-1])@v(n[t, split_tiles-1])}]'
+                - '{issue await:next_work(u)} ← [{done SCHED::compute:claim(u)}]'
+              Released: ['{issue release:o_slot(n)} ← [{done SOFTMAX::compute:acc_scale(n)}]']
+          QK:
+            Info:
+              Describe: Issue the score products of the item's query block against each KV tile; the first product of a tile initializes its score block
+              Member: warp[8:9]
+              Register: 136
+              Using_verb:
+                matmul: {q@k: {execution_mode: async_ordered, describe: Sixteen 32-feature E4M3 products of q_slot by kv_ring slot n%2 into tmem_acc raw_score(n); done covers the block and both operand reads}}
+                await:
+                  s_drain: {execution_mode: serial, describe: Per-item drain waiting until the softmax role has finished reading the item's last score tile before this role advances}
+                  next_work: {execution_mode: serial, describe: Read the round-u reply from reply_ring slot u%2 and return the slot; done covers both and an empty reply ends the item sequence}
+                  all_tmem_free: {execution_mode: serial, describe: Wait until every tensor-memory user of this CTA has signalled}
+                signal: {tmem_free: {execution_mode: serial, describe: Signal that this role has issued its last tensor-core product and no longer uses tmem_acc}}
+                release:
+                  q_slot: {execution_mode: serial, describe: Return q_slot to the loader role; done covers the tensor-core commit proving this role's reads of q_slot for the item are finished}
+                  tmem: {execution_mode: serial, describe: Return the 512-column tensor-memory allocation; done covers the deallocation}
+            Pipe:
+              - for(u):
+                  - for(t[u]):
+                      - for(n[t]):
+                          - matmul:q(t)@k(n)
+                      - release:q_slot(t)
+                      - await:s_drain(t)
+                  - await:next_work(u)
+              - signal:tmem_free
+              - await:all_tmem_free
+              - release:tmem
+            Waiting:
+              Prepared:
+                - '{issue matmul:q(t)@k(n)} ← [{done LOAD::load:q(t)}, {done LOAD::load:kv(n)}]'
+                - '{issue await:next_work(u)} ← [{done SCHED::compute:claim(u)}]'
+              Released:
+                - '{issue matmul:q(t)@k(n+2)} ← [{done SOFTMAX::compute:score(n)}]'
+                - '{done await:s_drain(t)} ← [{done SOFTMAX::compute:score(n[t, split_tiles-1])}]'
+                - '{done await:all_tmem_free} ← [{done LOAD::signal:tmem_free}, {done SOFTMAX::signal:tmem_free}, {done CORRECTION::signal:tmem_free}, {done PV::signal:tmem_free}]'
+          PV:
+            Info:
+              Describe: Issue the value products accumulating the item's output rows; the first tile of an item initializes the accumulator
+              Member: warp[11:12]
+              Register: 136
+              Using_verb:
+                matmul: {p@v: {execution_mode: async_ordered, describe: Eight E4M3 products of prob_ring slot n%2 by transposed kv_ring slot n%2 into tmem_acc value_acc; done covers the result and both operand reads}}
+                await: {next_work: {execution_mode: serial, describe: Read the round-u reply from reply_ring slot u%2 and return the slot; done covers both and an empty reply ends the item sequence}}
+                signal: {tmem_free: {execution_mode: serial, describe: Signal that this role has issued its last tensor-core product and no longer uses tmem_acc}}
+            Pipe:
+              - for(u):
+                  - for(t[u]):
+                      - for(n[t]):
+                          - matmul:p(n)@v(n)
+                  - await:next_work(u)
+              - signal:tmem_free
+            Waiting:
+              Prepared:
+                - '{issue matmul:p(n)@v(n)} ← [{done SOFTMAX::compute:prob(n)}, {done LOAD::load:kv(n)}, {done CORRECTION::release:o_slot(n)}]'
+                - '{issue await:next_work(u)} ← [{done SCHED::compute:claim(u)}]'
+          SCHED:
+            Info:
+              Describe: Claim the item coordinates of not-yet-started CTAs and publish them to the other six roles through a two-slot reply ring
+              Member: warp[10:11]
+              Register: 136
+              Using_verb:
+                compute: {claim: {execution_mode: serial, describe: Once the six roles have returned reply slot u%2 issue clusterlaunchcontrol.try_cancel and decode the reply there; done publishes it}}
+                await: {drain: {execution_mode: serial, describe: After the terminating reply absorb the two remaining reply-slot returns so the ring is idle before this role exits}}
+                release: {throttle: {execution_mode: serial, describe: Wait until the loader role has taken throttle slot u%2 and return it; done lets the loaders start their round u+2}}
+            Pipe:
+              - for(u):
+                  - release:throttle(u)
+                  - compute:claim(u)
+              - await:drain
+            Waiting:
+              Released: ['{issue compute:claim(u)} ← [{done INDEX::await:next_work(u-2)}, {done LOAD::await:next_work(u-2)}, {done SOFTMAX::await:next_work(u-2)}, {done CORRECTION::await:next_work(u-2)}, {done QK::await:next_work(u-2)}, {done PV::await:next_work(u-2)}]']
+              Allowed: ['{issue release:throttle(u)} ← [{done LOAD::acquire:throttle(u)}]']
+      MERGE:
+        Storage:
+          weights_slot: {meaning: Per-split merge weights published by one thread, depth: 1, location: smem, shape: [{split: 8}],
+            dtype: fp32, total_size: 32, view: {merge_weight(s): {region: {split: [s, s+1]}}}}
+          norm_slot: {meaning: Row normalization published by the leading thread, depth: 1, location: smem, shape: [],
+            dtype: fp32, total_size: 4, view: {norm: {}}}
+        Role:
+          MAIN:
+            Info:
+              Describe: Form the row's merge weights and normalization on the leading thread, then aggregate the partial rows into the BF16 output row
+              Member: warp[0:8]
+              Using_verb:
+                compute: {weights: {execution_mode: serial, describe: The leading thread derives merge_max and forms merge_weight(s) and norm into both slots from the nonempty splits' stats; done covers the CTA barrier}}
+                store: {out: {execution_mode: serial, describe: Each thread aggregates its two value columns over the positive-weight splits with fused multiply-adds; scales by norm and writes the rounded BF16 pair}}
+            Pipe:
+              - compute:weights
+              - store:out
+REALIZATION:
+  Require:
+    - Item:
+        - DESIGN.Tile_pipeline::ATTENTION.QK
+        - DESIGN.Tile_pipeline::ATTENTION.PV
+      Choice: tcgen05.mma.cta_group::1.kind::f8f6f4 with FP32 tensor-memory accumulators, each burst closed by tcgen05.commit to the mbarrier named by the consuming role
+      Reason: The Released edges free the KV, score and probability slots on one notification covering both the accumulator update and the operand reads, which only the tensor-core commit provides
+    - Item: DESIGN.Tile_pipeline::ATTENTION.PV
+      Choice: Read the value operand from the same kv_ring slot through an MN-major transposed operand descriptor instead of the K-major form the score product uses, and stage no separate value tile
+      Reason: Storage registers one KV region for both operands; a separate value copy would double the 131072-byte ring and break the single release shared by the two products
+    - Item: DESIGN.Tile_pipeline::ATTENTION.LOAD
+      Choice: cp.async.bulk.tensor gather4 loads against a 2-D tensor map of the physical cache rows and a 4-D tiled map for the query block, both announcing their byte counts to the receiving mbarrier
+      Reason: The selection is an arbitrary list of physical rows, so only a gather form fills a dense 128-row tile; the announced 65536 and 32768 bytes are the publication the score product waits on
+    - Item: DESIGN.Work_schedule::ATTENTION.Schedule
+      Choice: Launch through cudaLaunchKernelExC with an explicit single-CTA cluster dimension so that clusterlaunchcontrol.try_cancel can reclaim not-yet-started CTAs of the same grid
+      Reason: Refill is the only source of work after the preassigned coordinate, so without a cluster launch neither the claim sequence nor the refill_exhausted exit condition is available
+    - Item: CONTRACT.Hardware_specification.Execution.cta
+      Choice: Launch the attention step with 512 threads and 191104 bytes of dynamic shared memory, raise the max dynamic shared memory attribute once per device and keep one CTA resident per SM
+      Reason: All 16 warps hold a role, and the registered regions with barriers and alignment padding reach 191104 bytes, including 1536 bytes of exchange regions this design does not use
+    - Item: DESIGN.Tile_pipeline::ATTENTION.Storage.tmem_acc
+      Choice: Allocate all 512 tensor-memory columns from one warp before the roles start, publish the base address in shared memory, relinquish the alloc permit and deallocate from the score-product role
+      Reason: The score phases and the output accumulator are views of one allocation that outlives every work item, and the closing signal of all tensor-memory users is the only return point
+    - Item: DESIGN.Math_reshape::prob
+      Choice: Evaluate exp2 with ex2.approx.ftz.f32, keeping the flush-to-zero behaviour of the declared path
+      Reason: Arithmetic.Approx declares it as an approximate flush-to-zero operation, so exact or subnormal-preserving substitutes would realize a different numeric path
+    - Item: DESIGN.Math_reshape::prob_e4m3
+      Choice: Narrow with cvt.rn.satfinite.e4m3x2.f32
+      Reason: The declared round-to-nearest saturating narrowing is what bounds the weight error at 2^-4 and keeps the 2^8-prescaled weights finite in E4M3
+    - Item: DESIGN.Math_reshape::merge_weight
+      Choice: Evaluate the merge weights with exp2f, the approximate base-2 exponential of the CUDA math library
+      Reason: The merge step's Arithmetic.Approx declares this exp2 as approximate, so an exact substitute would realize a different numeric path
+    - Item: DESIGN.Work_schedule::Flow
+      Choice: Submit the merge step as a second kernel of 256 threads per output row on the same CUDA stream, immediately after the attention kernel
+      Reason: Same-stream submission realizes the start_after ATTENTION.kernel_done edge and the global visibility of partial, split_max and split_sum that the merge reads require
+  Prefer:
+    - Item:
+        - DESIGN.Math_reshape::row_sum
+        - DESIGN.Math_reshape::value_acc
+      Choice: Evaluate the row-sum accumulation and the accumulator rescale with packed two-element FP32 instructions, preserving each element's operations and rounding
+      Reason: Both are per-tile passes over 64 and 512 elements per row, so packing halves the instruction count without touching the declared numeric path
+  Forbid:
+    - Item:
+        - DESIGN.Tile_pipeline::ATTENTION.LOAD
+        - DESIGN.Tile_pipeline::ATTENTION.PV
+      Choice: Reviving the loader's disabled separate value-load branch that survives as dead code in the fixed source
+      Reason: The value operand is the kv_ring slot read transposed by the value product, so a second value buffer would double the 131072-byte ring and change the registered storage account
+    - Item:
+        - DESIGN.Tile_pipeline::ATTENTION.SOFTMAX
+        - DESIGN.Math_reshape::row_sum
+      Choice: Seeding row_sum from the disabled sink path that survives in the softmax role's row initialization
+      Reason: row_sum(-1) = 0 is the declared initial state and the Contract has no sink input, so a seed would change every normalized weight with no defined source

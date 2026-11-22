@@ -1,0 +1,343 @@
+META_DATA:
+  Name: fmha_bf16
+  Describe: Varlen batched BF16 flash multi-head attention over paged KV with GQA/MQA sharing, causal and window masking, optional sinks and base-2 LSE output
+  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_bf16/candidate/solution.py::Model.forward
+  Version: 4
+  Dispatch:
+    when: head_dim 128 (dq = dv) and total_q * group > 64 * batch_count, so the host plans m_tile 128 and n_tile 64; splits_ub stays 1, i.e. tiles_ub * kv_head_count reaches the wave target (one resident wave when causal, two when not) or a length cap collapses it; m_tile stays 128, i.e. the 256-row dual-M-half flip is off because (total_q * group // 256 + batch_count) * kv_head_count is under the multiprocessor count or window_left >= 0; the paged k and v tensor descriptors encoded
+CONTRACT:
+  Algorithm_requirement:
+    Input:
+      query: {meaning: Packed varlen BF16 queries of all requests, shape: [{token: total_q}, {head: head_count}, {d: head_dim}], dtype: bf16}
+      kv_cache: {meaning: 'Tuple (k, v) of the paged KV cache tensors', shape: [], dtype: python_tuple}
+      k: {meaning: 'Paged key cache, kv_cache member 0, HND layout', shape: [{page: page_count}, {kv_head: kv_head_count}, {page_row: page_size}, {d: head_dim}], dtype: bf16}
+      v: {meaning: 'Paged value cache, kv_cache member 1', shape: [{page: page_count}, {kv_head: kv_head_count}, {page_row: page_size}, {d: head_dim}], dtype: bf16}
+      workspace_buffer: {meaning: Caller scratch bytes; no result stored in it, shape: [{byte: workspace_bytes}], dtype: uint8}
+      block_tables: {meaning: Page index of every key position per request, shape: [{batch: batch_count}, {page_slot: page_table_width}], dtype: int32}
+      seq_lens: {meaning: Valid KV length of each request in keys, shape: [{batch: batch_count}], dtype: int32, range: [1, 262144]}
+      max_q_len: {meaning: Declared max per-request query length, shape: [], dtype: python_int, range: [1, 8192]}
+      max_kv_len: {meaning: Declared max per-request KV length, shape: [], dtype: python_int, range: [1, 262144]}
+      bmm1_scale: {meaning: Scalar logit scale of every q-k dot product, shape: [], dtype: python_float}
+      bmm2_scale: {meaning: Scalar scale applied to every value vector, shape: [], dtype: python_float}
+      batch_size: {meaning: 'Declared request count, unused by computation', shape: [], dtype: python_int, range: [1, 32]}
+      cum_seq_lens_q: {meaning: Exclusive prefix sums of query lengths, shape: [{entry: batch_count + 1}], dtype: int32, range: [0, 16384]}
+      cum_seq_lens_kv: {meaning: Exclusive prefix sums of KV lengths; unused, shape: [{entry: batch_count + 1}], dtype: int32, range: [0, 1048576]}
+      window_left: {meaning: Sliding-window size in keys; <0 disables, shape: [], dtype: python_int, range: [-1, 262143], default: -1}
+      out: {meaning: Caller-owned buffer written in place; required, shape: [{token: total_q}, {head: head_count}, {d: head_dim}], dtype: bf16}
+      out_dtype: {meaning: Output format object; must equal dtype of out, shape: [], dtype: torch.dtype, nullable: true, range: == torch.bfloat16, default: None}
+      o_sf_scale: {meaning: Output scale-factor option; must be None, shape: [], dtype: python_none, default: None}
+      o_sf_vec_size: {meaning: Output scale vec-size option; must be None, shape: [], dtype: python_none, default: None}
+      kv_layout: {meaning: KV page layout selector; fixed to HND, shape: [], dtype: python_str, range: == HND, default: HND}
+      enable_pdl: {meaning: 'Production PDL hint, unused by computation', shape: [], dtype: python_bool, nullable: true, default: None}
+      sinks: {meaning: 'Per-head attention-sink logits, log domain', shape: [{head: head_count}], dtype: fp32, nullable: true, default: None}
+      kv_cache_sf: {meaning: KV cache scale-factor option; must be None, shape: [], dtype: python_none, default: None}
+      skip_softmax_threshold_scale_factor: {meaning: Softmax threshold scale option; None only, shape: [], dtype: python_none, default: None}
+      uses_shared_paged_kv_idx: {meaning: 'Production flag, unused by the computation', shape: [], dtype: python_bool, default: true}
+      causal: {meaning: Enables bottom-right aligned causal masking, shape: [], dtype: python_bool, default: true}
+      lse: {meaning: 'Caller-owned lse buffer, written when given', shape: [{token: total_q}, {head: head_count}], dtype: fp32, nullable: true, default: None}
+      return_lse: {meaning: 'Selects returning the (out, lse) result pair', shape: [], dtype: python_bool, default: false}
+      multi_ctas_kv_counter_buffer: {meaning: Multi-CTA counter option; must be None, shape: [], dtype: python_none, default: None}
+      use_fp16_softmax: {meaning: FP16 softmax option; must be None, shape: [], dtype: python_none, default: None}
+      uses_spcompress: {meaning: Sparse compression option; must be None, shape: [], dtype: python_none, default: None}
+      backend: {meaning: 'Production backend selector, unused', shape: [], dtype: python_str, default: trtllm-gen}
+    Output:
+      out_result: {meaning: Attention output written in place into out, shape: [{token: total_q}, {head: head_count}, {d: head_dim}], dtype: bf16}
+      lse_result: {meaning: Base-2 lse written in place into lse buffer, shape: [{token: total_q}, {head: head_count}], dtype: fp32, nullable: true}
+    Compute:
+      - Name: request_geometry
+        Math: |
+          batch_count = len(seq_lens) = len(cum_seq_lens_q) - 1, 1 <= batch_count <= 32; rows of query, out and lse are packed THD: request b owns rows cum_seq_lens_q[b] <= r < cum_seq_lens_q[b+1].
+          qlen_b = cum_seq_lens_q[b+1] - cum_seq_lens_q[b], 1 <= qlen_b <= 8192, total_q = sum_{b=0}^{batch_count-1} qlen_b <= 16384.
+          kv_len_b = seq_lens[b], 1 <= kv_len_b <= 262144, sum_{b=0}^{batch_count-1} kv_len_b <= 1048576, and qlen_b <= kv_len_b for every request.
+          (head_count, kv_head_count, head_dim) is one of (8,2,64), (8,8,128), (12,12,64), (16,1,128), (16,1,256), (16,4,128), (32,8,128); group = head_count / kv_head_count; head h reads KV head h // group (group = 1 is MHA).
+          page_size in {16, 32, 64, 128}; page_table_width >= max_b ceil(kv_len_b / page_size); key j of request b, 0 <= j < kv_len_b, sits in page block_tables[b, j // page_size] at row j % page_size.
+          max_q_len and max_kv_len only declare per-request maxima; all lengths come from cum_seq_lens_q and seq_lens.
+        Symbol:
+          qlen_b: {meaning: Number of query rows of request b, shape: [], dtype: not_applicable}
+          kv_len_b: {meaning: Valid KV length of request b in keys, shape: [], dtype: not_applicable}
+          group: {meaning: Integer GQA group size head_count / kv_head_count, shape: [], dtype: not_applicable}
+      - Name: attention_scores
+        Math: |
+          For query row r of request b, head h and key j with 0 <= j < kv_len_b, let pg = block_tables[b, j // page_size] and off = j % page_size.
+          score(r, h)[j] = bmm1_scale * sum_{d=0}^{head_dim-1} query[r, h, d] * k[pg, h // group, off, d]
+          Rows and heads are mutually independent; BF16 inputs participate as exact values and the products and sums are FP32 arithmetic.
+        Symbol: {score: {meaning: Pre-mask logits of one query row and head, shape: [{key: kv_len_b}], dtype: fp32}}
+      - Name: causal_window_mask
+        Math: |
+          For query row r = cum_seq_lens_q[b] + i with 0 <= i < qlen_b, the bottom-right aligned key coordinate is visible(r) = kv_len_b - qlen_b + i, so 0 <= visible(r) < kv_len_b and the last row of a request sees all its keys.
+          A key j is visible from row r iff each enabled bound holds, j <= visible(r) when causal is True and j >= visible(r) - window_left when window_left >= 0; causal False drops the upper bound and window_left < 0 drops the lower one.
+          masked(r, h)[j] = score(r, h)[j] if j is visible and -inf otherwise.
+          Since j = visible(r) passes both enabled bounds, every row has a nonempty visible set.
+        Symbol: {masked: {meaning: Logits after masking; invisible keys are -inf, shape: [{key: kv_len_b}], dtype: fp32}}
+      - Name: softmax_output
+        Math: |
+          For each query row r of request b and head h,
+          row_max(r, h) = max_{0 <= j < kv_len_b} masked(r, h)[j]
+          row_sum(r, h) = sum_{j=0}^{kv_len_b-1} exp(masked(r, h)[j] - row_max(r, h)); invisible keys contribute exp(-inf) = 0 and the visible set is nonempty, so row_sum(r, h) >= 1.
+          p(r, h)[j] = exp(masked(r, h)[j] - row_max(r, h)) / row_sum(r, h) for visible j and 0 otherwise.
+          y(r, h)[d] = sum_{j=0}^{kv_len_b-1} p(r, h)[j] * (bmm2_scale * v[block_tables[b, j // page_size], h // group, j % page_size, d]) for 0 <= d < head_dim.
+          Every sum and product is FP32; y is the normalized output before sink adjustment and BF16 rounding.
+        Symbol:
+          row_max: {meaning: Max masked logit of one query row and head, shape: [], dtype: fp32}
+          row_sum: {meaning: Softmax denominator over the visible keys, shape: [], dtype: fp32}
+          y: {meaning: Normalized FP32 output before sink adjustment, shape: [{d: head_dim}], dtype: fp32}
+      - Name: sinks_lse_and_writeback
+        Math: |
+          base_lse(r, h) = row_max(r, h) + ln(row_sum(r, h)), the natural log of the total unnormalized mass of the row.
+          If sinks is None: total_lse(r, h) = base_lse(r, h) and out_result[r, h, d] = bf16(y(r, h)[d]).
+          Otherwise total_lse(r, h) = ln(exp(base_lse(r, h)) + exp(sinks[h])) and out_result[r, h, d] = bf16(y(r, h)[d] * exp(base_lse(r, h) - total_lse(r, h))).
+          When lse is not None, lse_result[r, h] = total_lse(r, h) / ln(2), the FP32 base-2 lse, written regardless of return_lse; when lse is None, lse_result is None.
+          out_result is written in place into out and lse_result into lse; the call returns (out, lse) when return_lse is True and out otherwise, keeping tensor identity; no other input changes and workspace_buffer may be used as scratch.
+    Golden_reference:
+      Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_bf16/problem/reference.py::Model.forward
+      Tolerance:
+        out_result: Source only; atol=.01, rtol=.05, max_mismatch_fraction=0; formula/relative basis absent; no defaults
+        lse_result: Source only; atol=.01, rtol=.05, max_mismatch_fraction=0; formula/relative basis absent; no defaults
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      thread: Single CUDA thread, one lane of a warp; holds its private state in the thread-scope register file (register)
+      warp: Group of 32 threads executing in lockstep inside one CTA; the issue scope of the warp-level mma.sync and tcgen05 matrix operations and of the warp shuffles used by the fixed implementation
+      cta: Thread block launched as one kernel grid element and scheduled as a unit on one SM; owns the CTA-scope shared memory (smem) staging Q, K and V and, on the tcgen05 kernel paths, the CTA tensor memory (tmem) allocation
+    Feature:
+      mechanism: null
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis: Contract's softmax is kept but evaluated online in base 2 over n_tile-key stages, one pass over the visible keys with a fixed-size per-row state instead of a materialized score row, and the value scale folded into one writeback multiplier; each ledger records the rounding its step moves
+    Rewrite:
+      - Name: GQA row packing of the query tile
+        Math: |
+          A worktile is one (tile, kv_head) pair and holds m_tile packed rows of a single request, so no tile spans two requests.
+          tile_count(b) = ceil_div(qlen_b * group, m_tile) and tile_offset(b) = sum_{a<b} tile_count(a); tile t of request b starts at m0 = (t - tile_offset(b)) * m_tile and holds mrows = min(m_tile, qlen_b * group - m0) rows.
+          Row i of the tile is packed row u = m0 + i, which is Contract's query row r = cum_seq_lens_q[b] + min(u div group, qlen_b - 1) at head h = kv_head * group + (u mod group), so the group heads sharing kv_head occupy consecutive packed rows.
+          Rows with i >= mrows repeat the request's last token and write no output; a tile with mrows == 0 holds no rows at all.
+        Symbol:
+          m_tile: {meaning: Packed query rows in one worktile, binding: 'bind:DESIGN.Work_schedule::m_tile'}
+          total_m: {meaning: Packed query rows over all requests, value: total_q * group}
+        Ledger:
+          Baseline: Contract's rows evaluated one (token, head) at a time
+          Gain: The group heads sharing a KV head become m_tile rows of one product, so each key block is fetched and scored once per group instead of once per head
+          Cost: Row counts round up to m_tile, so up to m_tile-1 padding rows per request are staged, scored and exponentiated, then discarded
+      - Name: Per-tile key window and aligned stage grid
+        Math: |
+          vis(u) = kv_len_b - qlen_b + (u div group) is the bottom-right key coordinate of row u, and Contract's causal_window_mask decides visibility from it.
+          lo = window_left >= 0 ? max(0, vis(m0) - window_left) : 0 and hi = causal ? min(vis(m0 + mrows - 1) + 1, kv_len_b) : kv_len_b bound the keys at least one row of the tile can see, so hi <= lo leaves the tile empty.
+          kv0 = lo - (lo mod n_tile) and stage_count = ceil_div(hi - kv0, n_tile); stage c holds the keys kv0 + c * n_tile + j for 0 <= j < n_tile, and every stage of a nonempty tile is walked even where some of its rows see none of it.
+          rlo(u) = max(window_left >= 0 ? max(0, vis(u) - window_left) : 0, lo) and rhi(u) = min(causal ? vis(u) : kv_len_b - 1, hi - 1) are row u's inclusive visible bounds inside the stage grid.
+        Symbol:
+          n_tile: {meaning: Keys covered by one stage, binding: 'bind:DESIGN.Work_schedule::n_tile'}
+          stage_count: {meaning: Stages one worktile walks}
+          rlo: {meaning: Inclusive lower visible key of row u}
+          rhi: {meaning: Inclusive upper visible key of row u}
+        Ledger:
+          Baseline: Every key of the request examined for every row
+          Gain: Only [lo, hi) is fetched and scored per tile, which under causal masking is roughly the tile's own prefix rather than all kv_len_b keys
+          Cost: lo rounds down to n_tile so up to n_tile-1 keys are fetched and masked per row, and the last stage repeats clamped keys past hi-1
+      - Name: Base-2 online softmax with deferred rescale
+        Math: |
+          Per tile row i (packed row u = m0 + i), in base 2, over stages c = 0 .. stage_count-1; the row max precedes scaling by qk_scale2, valid only for qk_scale2 > 0.
+          s(c)[j] = dot32(q_tile[i], k_block(c)[j]), unscaled, at key kv0 + c*n_tile + j.
+          x(c)[j] = s(c)[j] if rlo(u) <= kv0 + c*n_tile + j <= rhi(u) else -inf
+          m = mbase(c-1); rmax(c) = max_j x(c)[j]; mn(c) = max(m, rmax(c)*qk_scale2); msafe(c) = mn(c) == -inf ? 0 : mn(c)
+          deferred(c) = msafe(c) - m < lazy_thresh; alpha(c) = deferred(c) ? 1 : exp2(m - msafe(c)); mbase(c) = deferred(c) ? m : msafe(c)
+          p(c)[j] = exp2(x(c)[j]*qk_scale2 - mbase(c)); p2(c) = bf16(p(c)); l(c) = alpha(c)*l(c-1) + sum32_j p(c)[j]
+          o(0) = mm32(p2(0), v_block(0)); o(c) = mma32(p2(c), v_block(c), alpha(c)*o(c-1)) for c >= 1; mbase(-1) = -inf, l(-1) = 0.
+          A fully masked stage gives rmax = -inf: it is deferred and inert when m is finite, but at c = 0 msafe clamps to 0, alpha = 0 and mbase(0) = l(0) = 0.
+        Symbol:
+          qk_scale2: {meaning: Logit scale converted to base-2 exponents, value: bmm1_scale * log2(e)}
+          lazy_thresh: {meaning: Base-2 max growth below which rescale is skipped, value: 16}
+          x: {meaning: Masked unscaled logits of one stage, shape: [{key: n_tile}], dtype: fp32}
+          p: {meaning: Unrounded base-2 weights of one stage, shape: [{key: n_tile}], dtype: fp32}
+          p2: {meaning: BF16 weights read by the value product, shape: [{key: n_tile}], dtype: bf16}
+          mbase: {meaning: Running base-2 maximum of one row, shape: [], dtype: fp32, retention: 'carry_forward (tile,kv_head,i); c=0..stage_count-1'}
+          l: {meaning: Running unnormalized base-2 row sum, shape: [], dtype: fp32, retention: 'carry_forward (tile,kv_head,i); c=0..stage_count-1'}
+          o: {meaning: Unnormalized output row before scaling, shape: [{d: head_dim}], dtype: fp32, retention: 'carry_forward (tile,kv_head,i); c=0..stage_count-1'}
+        Arithmetic:
+          Approx: exp2 is ex2.approx.ftz, 2^-22 relative error on normal results, subnormals flush to zero, exp2(-inf) = 0; arguments never exceed lazy_thresh
+          Accumulate: The sum of p pairs keys by residue mod 4 into two FP32 accumulators combined at the stage end; the row max is one reduction over all n_tile values
+        Ledger:
+          Baseline: Contract's row_max, row_sum and y over the whole visible range with natural exp
+          Gain: One pass over the keys with a fixed per-row state (mbase, l, o), so no kv_len_b-long score row is materialized and no second key pass is needed
+          Cost: p2 narrows to bf16 while l sums unrounded fp32 p; deferred rescale lets weights reach 2^lazy_thresh; masked keys are still exponentiated
+      - Name: Value scale, sinks and output writeback
+        Math: |
+          With C = stage_count - 1: lse2 = mbase(C) + log2(l(C)) and inv = bmm2_scale / l(C).
+          When sinks is not None: sink2 = sinks[h] * log2(e); total2 = max(lse2, sink2) + log2(1 + exp2(-|sink2 - lse2|)); os = exp2(lse2 - total2); inv = inv * os; lse2 = total2.
+          out_result[r, h, d] = bf16(o(C)[d] * inv) for 0 <= d < head_dim, and lse_result[r, h] = lse2 when lse is not None.
+          Rows with i >= mrows evaluate the same expressions and write neither output. Contract gives every writing row a visible key, so l(C) > 0 unless that key's weight exp2(x*qk_scale2 - mbase(C)) underflows the approximated exp2's flush threshold, which no recorded workload reaches; inv = bmm2_scale / l(C) carries no guard.
+        Arithmetic:
+          Approx: The log2 and exp2 of this step are the accurate library functions, not the approximated exponential of the softmax step
+        Ledger:
+          Baseline: Contract scales each value vector by bmm2_scale and divides y by row_sum
+          Gain: bmm2_scale, 1/l and the sink factor collapse into one per-row multiplier applied once at writeback, so no per-key scaling pass exists
+          Cost: One FP32 rounding moves from each key's value to the row's final product, and the sink merge uses a max-shifted log-add-exp
+  Work_schedule:
+    Thesis: One CTA owns a whole (kv_head, m_tile packed rows) tile and its entire visible key range, so the row state never leaves the CTA and no partial result, merge or second submission exists; the batch-rounded tile bound leaves slack tiles that exit empty
+    Step:
+      MAIN:
+        Describe: Compute the whole visible key range of one (kv_head, m_tile packed rows) tile and write its final out rows and base-2 lse
+        Decomposition:
+          Strategy: m_tile = 128 rows, n_tile = 64 keys; tiles_ub = total_m // m_tile + batch_count, an upper bound whose batch_count slack tiles issue no action
+          Partition:
+            tile_y: {meaning: Grid coordinate selecting one m_tile row block, size: tiles_ub, tile: 1}
+            kv_head: {meaning: KV head whose pages this tile reads and produces, size: kv_head_count, tile: 1}
+          Worktile:
+            Invariant: {q_tile: {meaning: Packed query rows of this tile for one KV head, shape: [{row: m_tile}, {d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::query.dtype'}}
+            Iteration:
+              k_block: {meaning: Keys of one aligned stage of the tile range, shape: [{key: n_tile}, {d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::k.dtype', direction: ascending}
+              v_block: {meaning: Values of the same stage as k_block, shape: [{key: n_tile}, {d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::v.dtype', direction: ascending}
+          Target:
+            Single_tile:
+              out_rows: {meaning: Final attention output rows of this tile, shape: [{row: m_tile}, {d: head_dim}], dtype: 'ref:CONTRACT.Algorithm_requirement::out.dtype'}
+              lse_rows: {meaning: 'Base-2 lse rows, written only when lse is given', shape: [{row: m_tile}], dtype: 'ref:CONTRACT.Algorithm_requirement::lse.dtype'}
+        Mapping:
+          Strategy: Each CTA derives its request, row block and key range from cum_seq_lens_q and seq_lens at entry; the host supplies only the plan and KV descriptors
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: kv_head_count * tiles_ub
+        Schedule:
+          Strategy: kv_head fastest; tile = tiles_ub-1-tile_y when causal and tile_y otherwise, so the longest visible key ranges start first across the grid
+          Worktile_order:
+            - {by: tile_y, direction: ascending}
+            - {by: kv_head, direction: ascending}
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: Six warps per CTA split into a bulk-tensor lead, a matrix-issue lead and four row-owning softmax warps, so page-table latency, tensor-core issue and the softmax chain advance concurrently; the tensor pipe, the two-slot KV ring and 256 TMEM columns bound the pace, and an empty tile runs no action
+    Step:
+      MAIN:
+        Index: {c: {meaning: KV stage index within this worktile, definition: [0, stage_count]}}
+        Storage:
+          q_smem: {meaning: Staged packed query rows of this tile, depth: 1, location: smem, shape: [{row: 128}, {d: 128}],
+            dtype: bf16, total_size: 32768, view: {q_tile: {}}}
+          k_ring: {meaning: Key blocks of the two-slot KV ring, depth: 2, location: smem, shape: [{key: 64}, {d: 128}],
+            dtype: bf16, total_size: 32768, view: {k_block(c): {slot_index: c%2}}}
+          v_ring: {meaning: Value blocks of the two-slot KV ring, depth: 2, location: smem, shape: [{key: 64}, {d: 128}],
+            dtype: bf16, total_size: 32768, view: {v_block(c): {slot_index: c%2}}}
+          s_tmem: {meaning: Score block written by the score product, depth: 1, location: tmem, shape: [{row: 128}, {column: 64}],
+            dtype: fp32, total_size: 32768, view: {s(c): {}}}
+          p_tmem: {meaning: 'Parity-buffered BF16 weights, two per word', depth: 2, location: tmem, shape: [{row: 128}, {column: 32}],
+            dtype: fp32, total_size: 32768, view: {p2(c): {slot_index: c%2}}}
+          o_tmem: {meaning: Output accumulator rows of this tile, depth: 1, location: tmem, shape: [{row: 128}, {column: 128}],
+            dtype: fp32, total_size: 65536, view: {o(c): {}}}
+        Role:
+          SOFTMAX:
+            Info:
+              Describe: Own one packed row each, stage the query tile, turn every score block into weights and running row state, and write the tile's outputs
+              Member: warp[0:4]
+              Using_verb:
+                compute:
+                  probability: {execution_mode: serial, describe: 'Mask s(c) by rlo(u) and rhi(u), then derive rmax, deferred, alpha, p(c) and the stage sum, and advance mbase(c) and l(c)'}
+                  probability_block: {execution_mode: serial, describe: 'Narrow p(c) to bf16 into p_tmem slot c%2; that slot''s previous reader, the value product of stage c-2, is covered by this stage''s score wait'}
+                  rescale: {execution_mode: serial, describe: 'Multiply this row of o_tmem by alpha(c); the warp enters when any of its lanes has alpha below 1, so a deferred stage skips it entirely'}
+                  epilogue: {execution_mode: serial, describe: 'Rendezvous the four warps, form lse2 and inv, apply the sink factor when sinks is given, and write bf16 out rows and, when lse is given, fp32 lse'}
+                load:
+                  q: {execution_mode: serial, describe: 'Stage the tile''s query rows in q_smem with 16-byte async copies, wait for them, then join the CTA rendezvous publishing q_smem to the async proxy'}
+                  score: {execution_mode: serial, describe: 'Read this thread''s row of s_tmem for stage c into registers with the fused load-and-row-maximum, giving s(c) and rmax(c) before masking'}
+                signal: {stage_ready: {execution_mode: serial, describe: 'Publish that p_tmem slot c%2 holds stage c''s weights and that this stage''s o_tmem rescale, when it ran, has landed'}}
+                acquire: {tmem: {execution_mode: serial, describe: 'Thread 0 initializes the three roles'' mbarriers and this warp allocates the 256 TMEM columns, then a CTA rendezvous publishes both'}}
+                release:
+                  score_region: {execution_mode: serial, describe: 'Publish that all four warps finished reading stage c''s score row, so the next score product may overwrite s_tmem'}
+                  tmem: {execution_mode: serial, describe: Return the CTA's TMEM columns after the closing CTA-wide rendezvous proves every role's tensor-memory access complete}
+            Pipe:
+              - if(mrows > 0 and hi > lo):
+                  - acquire:tmem
+                  - load:q
+                  - for(c):
+                      - load:score(c)
+                      - release:score_region(c)
+                      - compute:probability(c)
+                      - compute:probability_block(c)
+                      - if(c > 0 and warp_any(alpha(c) < 1)):
+                          - compute:rescale(c)
+                      - signal:stage_ready(c)
+                  - compute:epilogue
+                  - release:tmem
+            Waiting:
+              Prepared:
+                - '{issue load:score(c)} ← [{done MMA_LEAD::matmul:query@key(c)}]'
+                - '{issue compute:rescale(c)} ← [{done MMA_LEAD::matmul:probability@value(c-1)}]'
+                - '{issue compute:epilogue} ← [{done MMA_LEAD::matmul:probability@value(last(c))}]'
+              Released: ['{done release:tmem} ← [{done MMA_LEAD::matmul:query@key(last(c))}, {done MMA_LEAD::matmul:probability@value(last(c))}]']
+          TMA_LEAD:
+            Info:
+              Describe: Issue every paged bulk-tensor box for the key and value ring, keep the slot barriers armed one refill ahead and prefetch the page indices
+              Member: warp[4:5]
+              Using_verb:
+                load:
+                  key: {execution_mode: async_unordered, describe: 'Bulk-tensor boxes of key(c) into k_ring slot c%2, its slot barrier armed with an expected byte count; rows past hi-1 clamp and duplicate'}
+                  value: {execution_mode: async_unordered, describe: 'Bulk-tensor boxes of value(c) into v_ring slot c%2, its slot barrier armed with an expected byte count; rows past hi-1 clamp and duplicate'}
+                  page_id: {execution_mode: async_unordered, describe: Read from block_tables the page indices of the argument stage's key rows into registers held until its boxes issue; unused past the last stage}
+            Pipe:
+              - if(mrows > 0 and hi > lo):
+                  - load:key(0)
+                  - load:value(0)
+                  - load:page_id(1)
+                  - for(c):
+                      - if(c + 1 < stage_count):
+                          - load:key(c+1)
+                          - load:value(c+1)
+                      - load:page_id(c+2)
+            Waiting:
+              Prepared:
+                - '{issue load:key(0)} ← [{done SOFTMAX::acquire:tmem}]'
+                - '{issue load:value(0)} ← [{done SOFTMAX::acquire:tmem}]'
+                - '{issue load:key(c)} ← [{done load:page_id(c)}]'
+                - '{issue load:value(c)} ← [{done load:page_id(c)}]'
+              Released:
+                - '{issue load:key(c)} ← [{done MMA_LEAD::matmul:probability@value(c-2)}]'
+                - '{issue load:value(c)} ← [{done MMA_LEAD::matmul:probability@value(c-2)}]'
+              Allowed:
+                - '{issue load:key(c)} ← [{done load:key(c-2)}, {done load:value(c-2)}]'
+                - '{issue load:value(c)} ← [{done load:key(c-2)}, {done load:value(c-2)}]'
+          MMA_LEAD:
+            Info:
+              Describe: Wait the operand and region conditions of every stage and issue both tensor-core products in the order that keeps completion coverage
+              Member: warp[5:6]
+              Using_verb:
+                matmul:
+                  query@key: {execution_mode: async_ordered, describe: 'Score product of q_tile and key(c) into s_tmem by head_dim/16 tensor-core steps with a zero accumulator, then commit its completion'}
+                  probability@value: {execution_mode: async_ordered, describe: 'Output product of p2(c) in p_tmem and value(c) into o_tmem by n_tile/16 steps, initializing at c = 0 and accumulating after, then commit'}
+            Pipe:
+              - if(mrows > 0 and hi > lo):
+                  - matmul:query@key(0)
+                  - for(c):
+                      - matmul:probability@value(c)
+                      - if(c + 1 < stage_count):
+                          - matmul:query@key(c+1)
+            Waiting:
+              Prepared:
+                - '{issue matmul:query@key(0)} ← [{done SOFTMAX::load:q}, {done TMA_LEAD::load:key(0)}]'
+                - '{issue matmul:probability@value(c)} ← [{done SOFTMAX::signal:stage_ready(c)}, {done TMA_LEAD::load:value(c)}]'
+                - '{issue matmul:query@key(c+1)} ← [{done SOFTMAX::release:score_region(c)}, {done TMA_LEAD::load:key(c+1)}]'
+REALIZATION:
+  Require:
+    - Item: DESIGN.Tile_pipeline::MAIN.MMA_LEAD
+      Choice: tcgen05.mma cta_group::1 kind::f16 issued by one elected lane, with tcgen05.commit after each product; this role's async_ordered accumulation is that commit, which covers every matrix op the lane issued before it
+      Reason: The commit is cumulative per issuing lane, so committing after the value product and then after the following score product is what makes the score notification also prove the value product and the previous score reads finished
+    - Item: DESIGN.Tile_pipeline::MAIN.TMA_LEAD
+      Choice: cp.async.bulk.tensor.4d boxes against host-encoded CUtensorMap descriptors of paged k and v, SWIZZLE_128B with box {64, min(n_tile, page_size), 1, 1}, each slot armed by mbarrier arrive.expect_tx and a fence.proxy.async before its boxes
+      Reason: The swizzle writes exactly the atom-major smem layout the matrix descriptors assume, a box of min(n_tile, page_size) rows cannot straddle a page, and arming before issue is what makes the transaction-byte count for that slot correct
+    - Item: DESIGN.Tile_pipeline::MAIN.SOFTMAX
+      Choice: tcgen05.alloc of 256 TMEM columns at entry and tcgen05.dealloc after the closing CTA rendezvous; 192 threads per CTA and 100992 B dynamic smem, declared with a minimum of two resident CTAs per SM
+      Reason: The 256 columns are exactly the score, weight and accumulator regions, and two resident CTAs per SM cap the per-thread register budget that the 64-value row state and the two control warps must fit
+  Prefer:
+    - Item: DESIGN.Tile_pipeline::MAIN.SOFTMAX
+      Choice: The fused tensor-memory load that returns the row's 64 scores and their maximum in one instruction, keeping the per-element operations and rounding of DESIGN.Math_reshape
+      Reason: Removes a 63-comparison reduction tree from every stage of the row-owning softmax warps, which pace this CTA
