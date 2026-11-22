@@ -99,8 +99,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape
 │   ├── 3.design.math_reshape.md
 │   ├── 4.design.work_schedule.md
 │   ├── 5.design.tile_pipeline.md
-│   ├── 6.realization.md
-│   └── archived/        旧版草稿与旧 README（只读，不再维护）
+│   └── 6.realization.md
 ├── kernel_wiki/         算子实现与证据库；README、分类索引与本地检索入口
 │   ├── aka-cuda-operators-20261030/operators/  44 题主批次，按功能与稳定 ID 组织
 │   └── aka-four-problems-20261019/            Template 四题固定来源快照
@@ -111,7 +110,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape
 
 - `kernel_wiki` 保存任务与实现，`schema_wiki` 接收提取或撰写的设计；输出路径按 `kernel_wiki/catalog.json` 的 `paths.readme` 父目录镜像，具体操作见[输出目录导航](schema_wiki/README.md)。设计来源仍以 `META_DATA.Source` 等实际引用为准。
 - 任务目录中的文件身份、共享 Contract 与派生关系见[公共约定](schema_docs/0.common.md#派生节点与-dispatch)。
-- 基础 Harness 设施尚未纳入仓库，实际实现使用任务提供的构建、测试与测量入口。
+- [实现 workflow](schema_implement/README.md) 对接 AKA 标准流程；构建、测试与测量以所选任务和后端的实际入口为准。
 
 ### 阅读入口
 
