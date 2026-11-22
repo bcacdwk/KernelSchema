@@ -320,7 +320,7 @@ def main(argv=None):
             state = coder.read_json(run / 'state.json')
         else:
             state = {'config':{'model':args.model or 'qwen3.8-max[1m]','effort':args.effort or 'max',
-                      'max_calls':args.max_calls or 6,'timeout_s':args.timeout_s or 900,'gpu':args.gpu},
+                      'max_calls':args.max_calls or 6,'timeout_s':args.timeout_s or 3600,'gpu':args.gpu},
                      'calls_used':0,'manifest':{},'feedback_ids':[],'feedback_paths':[],
                      'consumed_feedback':0,'action':None,'initialized':False}
             coder.save(run / 'state.json',state)

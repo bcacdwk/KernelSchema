@@ -357,6 +357,59 @@ def command(args, output_schema, read_dirs, candidate=None):
     return result
 
 
+def grep_content_hits(arguments, content):
+    """Retain only DOC paths/counts from numbered, nonempty native Grep matches."""
+    if arguments.get("output_mode") != "content":
+        return []
+    if isinstance(content, str):
+        parts = [content]
+    elif isinstance(content, list):
+        parts = [part["text"] for part in content if isinstance(part, dict)
+                 and part.get("type") == "text" and isinstance(part.get("text"), str)]
+    else:
+        return []
+    counts = {}
+    for part in parts:
+        for line in part.splitlines():
+            # A ':' marks a match; '-' marks context. Names/counts/status text
+            # cannot establish that the writer received a DOC body line.
+            match = re.fullmatch(r"(?:([1-9][0-9]*)|(.+\.md):[1-9][0-9]*):(.*\S.*)", line)
+            if not match:
+                continue
+            path = match[2] or arguments.get("path")
+            if isinstance(path, str) and Path(path).name in DOC_NAMES[1:]:
+                counts[path] = counts.get(path, 0) + 1
+    return [{"path": path, "lines": count} for path, count in sorted(counts.items())]
+
+
+def has_doc_read(reads, out, docs):
+    """Require this call's successful Read or path-bound Grep body evidence."""
+    for record in reads:
+        if record.get("status") != "completed":
+            continue
+        arguments = record.get("input", {})
+        if record.get("tool") == "Read":
+            path = arguments.get("file_path")
+            if isinstance(path, str) and (out / path).resolve() in docs:
+                return True
+        if record.get("tool") != "Grep" or arguments.get("output_mode") != "content":
+            continue
+        scope = arguments.get("path", ".")
+        if not isinstance(scope, str):
+            continue
+        scope = (out / scope).resolve()
+        for hit in record.get("content_hits", []):
+            path = hit.get("path")
+            if not isinstance(path, str) or type(hit.get("lines")) is not int or hit["lines"] <= 0:
+                continue
+            # Native paths can be absolute, cwd-relative, or relative to the
+            # searched directory. A match must remain inside the requested scope.
+            paths = {(out / path).resolve(), (scope / path).resolve()}
+            if any(doc in paths and (scope == doc or scope in doc.parents) for doc in docs):
+                return True
+    return False
+
+
 def parse_stream(stdout, stderr, returncode):
     draft = {"final_answer": None, "structured_output": None, "reads": [], "session_ids": [],
              "returncode": returncode, "diagnostics": [], "stderr": stderr, "writes": [],
@@ -406,6 +459,8 @@ def parse_stream(stdout, stderr, returncode):
                 if item.get("type") == "tool_result" and item.get("tool_use_id") in tools:
                     record = tools[item["tool_use_id"]]
                     record["status"] = "error" if item.get("is_error") else "completed"
+                    if record["tool"] == "Grep" and not item.get("is_error"):
+                        record["content_hits"] = grep_content_hits(record["input"], item.get("content"))
                     if item.get("is_error"):
                         content = item.get("content", "")
                         record["error"] = content if isinstance(content, str) else [
@@ -623,7 +678,7 @@ class Run:
         prompt = self.inputs.file(prompt_file, self.inputs.root / "instructions.md")
         self.inline_reads = [str(path) for path in (docs[0], method, prompt, *task_materials)]
         text = self.inputs.text([prompt, docs[0], method, *task_materials])
-        text += "\nREADABLE DOC1–6 and Template (use Read for the relevant sections before writing):\n"
+        text += "\nREADABLE DOC1–6 and Template (read relevant sections with Read or numbered Grep content in this call):\n"
         text += "\n".join(map(str, [*docs[1:], *template_files]))
         text += "\nOPTIONAL complete Template format example (not current Task/device/stack evidence):\n"
         text += "\n".join(map(str, example_files))
@@ -705,12 +760,10 @@ class Run:
                                                                                  for error in errors[:8]), repairable=bool(files or draft.get("structured_output")))
         self.last_reads = draft.get("reads", [])
         if phase != "select":
-            read_paths = {str((self.out / record["input"].get("file_path", "")).resolve())
-                          for record in draft.get("reads", [])
-                          if record.get("tool") == "Read" and record.get("status") == "completed"}
-            docs = {str(self.inputs.root / "schema_docs" / name) for name in DOC_NAMES[1:]}
-            if not read_paths & docs:
-                raise Failure("write_failed", "Writer must actually Read the relevant DOC1–6 material before deciding")
+            docs = {self.inputs.root / "schema_docs" / name for name in DOC_NAMES[1:]}
+            if not has_doc_read(self.last_reads, self.out, docs):
+                raise Failure("write_failed", "Writer must read relevant DOC1–6 content in this call "
+                              "(completed Read or Grep with numbered content matches)")
         answer = deepcopy(draft["structured_output"])
         if candidate is not None:
             delivered = answer["files"]
@@ -728,7 +781,7 @@ def parser(mode):
     result.add_argument("--model", default=DEFAULT_MODEL)
     result.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default="max")
     result.add_argument("--max-calls", type=int, default=3 if mode == "design" else 2)
-    result.add_argument("--timeout-s", type=float, default=900)
+    result.add_argument("--timeout-s", type=float, default=3600)
     if mode == "design":
         result.add_argument("--reference", action="append", default=[], type=Path)
     else:

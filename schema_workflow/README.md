@@ -28,7 +28,7 @@ python3 schema_workflow/workflow.py --task schema_workflow/examples/vector_add/t
 
 [环境记录](examples/vector_add/environment.json) 是已有 `get_env` 返回的服务缓存，含采集时间、已报告设备和软件版本，以及非候选实测、非未来分配保证的限制；这些文字会一并进入 Design 材料。候选运行环境和成绩仍由本次 Implement 反馈报告。
 
-默认模型 `qwen3.8-max[1m]`、effort `max`；`--model/--effort` 统一传到三个入口。`--max-versions` 默认 3（含初始版），`--max-calls-per-schema` 默认 6；Design 最多 3 次，每版 Optimize 合计最多 2 次。`--timeout-s` 默认 900，交业务 CLI 限制单次写作与评测等待。第三起点第一次 Optimize 最多 1 次，预留另一次读取本次实测。
+默认模型 `qwen3.8-max[1m]`、effort `max`；`--model/--effort` 统一传到三个入口。`--max-versions` 默认 3（含初始版），`--max-calls-per-schema` 默认 6；Design 最多 3 次，每版 Optimize 合计最多 2 次。`--timeout-s` 默认 3600 秒，可用正有限值在首建覆盖，交业务 CLI 限制单次写作与评测等待；resume 继续使用原运行配置，不改变固定 `eval.options.timeout_s`。第三起点第一次 Optimize 最多 1 次，预留另一次读取本次实测。
 
 ## 交付与有限收尾
 

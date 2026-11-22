@@ -9,7 +9,7 @@ python3 schema_implement/implement_kernel.py --resume R --feedback F
 
 `--schema` 可以是目录或其中一个 YAML；始终固定完整目录、dispatch、from 链和 Template 有效来源。`--kernel` 可以是完整源码目录或自足 Python 文件；`--feedback` 可以重复。全新 `--out` 不得覆盖/包含输入或落入保护/产品目录。恢复只沿原输入、模型、目录和累计上限；已完且无新反馈直接返回原结果。
 
-默认模型 `qwen3.8-max[1m]`、effort `max`、最多 6 次 coder、每次 coder 和每次远端等待分别 900 秒；`--model/--effort/--max-calls/--timeout-s` 可在首建覆盖。每次调用先计数，坏返回和超时也消耗次数。进度到 stderr，初始化后的 stdout 只有绝对 result.json 路径；退出码 `0/1/2` 表示 complete/incomplete/interrupted。参数错误不建立运行。
+默认模型 `qwen3.8-max[1m]`、effort `max`、最多 6 次 coder、每次 coder 和每次远端等待分别 3600 秒；`--model/--effort/--max-calls/--timeout-s` 可在首建覆盖（超时须为正有限值）；resume 继续使用原运行配置。每次调用先计数，坏返回和超时也消耗次数。进度到 stderr，初始化后的 stdout 只有绝对 result.json 路径；退出码 `0/1/2` 表示 complete/incomplete/interrupted。参数错误不建立运行。
 
 模型通过 native `claude` 的 Read/Glob/Grep 阅读全部 raw/effective 设计、DOC、固定判据和完整源码。它不能写文件或提交 GPU。host 接收完整 `files`、入口与落实说明；不采用 patch 或 shell 指令。保持当前 HOME、CLI 登录来源与 CLAUDE_CONFIG_DIR；关闭 hooks/settings 后，仅将已有 settings.json.env 的连接字段补到 CLI 环境，不将凭据写进产物。
 

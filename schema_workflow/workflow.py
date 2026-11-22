@@ -437,7 +437,7 @@ def main(argv=None):
                       for key in ('task', 'eval_task', 'schema', 'kernel', 'gpu')}
             config.update(model=args.model or 'qwen3.8-max[1m]', effort=args.effort or 'max',
                           max_versions=args.max_versions or 3, max_calls_per_schema=args.max_calls_per_schema or 6,
-                          timeout_s=args.timeout_s or 900, reference=list(map(str, args.reference)))
+                          timeout_s=args.timeout_s or 3600, reference=list(map(str, args.reference)))
             state = {'config': config, 'inputs': {}, 'versions': [], 'action': None, 'design': None,
                      'last_usable': None, 'latest_attempt': None, 'required_fix': False, 'verified_decision': None}
         workflow = Workflow(run, state)

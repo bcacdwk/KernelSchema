@@ -12,7 +12,7 @@
 python3 schema_design/design_schema.py --task path/to/task.md --out path/to/new-design
 ```
 
-入口按自身位置定位 checkout，可从其他工作目录执行绝对脚本路径。默认使用 Claude CLI、`qwen3.8-max[1m]`、effort `max`；可用 `--model`、`--effort` 覆盖，`--max-calls` 默认 3，`--timeout-s` 默认 900 秒。`--reference` 可重复；host 同时读取 Kernel Wiki catalog 并实际发现 Schema Wiki 的 root/dispatch，通常先选至多三个互补近邻、再写、最后只按具体诊断修稿。没有适用近邻仍从明确 Task 设计。
+入口按自身位置定位 checkout，可从其他工作目录执行绝对脚本路径。默认使用 Claude CLI、`qwen3.8-max[1m]`、effort `max`；可用 `--model`、`--effort` 覆盖，`--max-calls` 默认 3，`--timeout-s` 默认 3600 秒，可用正有限值覆盖。`--reference` 可重复；host 同时读取 Kernel Wiki catalog 并实际发现 Schema Wiki 的 root/dispatch，通常先选至多三个互补近邻、再写、最后只按具体诊断修稿。没有适用近邻仍从明确 Task 设计。
 
 选材只用 Read/Glob/Grep；写作另用 Write/Edit 逐层保存本次候选目录直属的 YAML/dispatch 文件，最终 JSON 只交文件名、说明与缺项，DOC0 与本方法进入首请求，DOC1–6 和 Template 可实际读取。host 固定原字节及来源、保留完整 raw/effective/from，收取完整 YAML/dispatch 后规范化并严格重读校验。现有 Qwen 连接及登录来源保留，用户 hooks/MCP/插件不执行；认证不会进入材料或产物。只消费已有 reference/案例/误差判据，不自动生成 oracle；仅有语义明确的文字任务也可先完成设计，关键缺项如实返回。
 

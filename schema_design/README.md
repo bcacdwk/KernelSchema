@@ -6,9 +6,9 @@
 python3 schema_design/design_schema.py --task path/to/task.md --out path/to/new-design
 ```
 
-默认 Claude CLI + `qwen3.8-max[1m]` + effort `max`；`--reference` 可重复，`--model/--effort` 可覆盖，`--max-calls` 默认 3，`--timeout-s` 默认 900。脚本按自身位置定位 checkout，可用绝对脚本路径从其他 cwd 运行。需要 Python 3.10+、PyYAML 6、jsonschema 4 和已配置的 Claude CLI；help/import 不读认证或启动模型。
+默认 Claude CLI + `qwen3.8-max[1m]` + effort `max`；`--reference` 可重复，`--model/--effort` 可覆盖，`--max-calls` 默认 3，`--timeout-s` 默认 3600 秒，可用正有限值覆盖。脚本按自身位置定位 checkout，可用绝对脚本路径从其他 cwd 运行。需要 Python 3.10+、PyYAML 6、jsonschema 4 和已配置的 Claude CLI；help/import 不读认证或启动模型。
 
-host 读取 catalog 并发现真正的 root/dispatch，通常一调用选材、一调用写作、最后一调用修具体诊断。固定 Task/绑定资料/原位置与摘要，保留完整 raw/effective/from；模型实际查阅 DOC/Template，通过仅限本次候选文件的 Write/Edit 逐层保存草稿，最终 JSON 只返回文件名；host 收取完整文件，规范化并严格重读检查。这里只消费已有验收材料，不自动创建 oracle，不运行 kernel。
+host 读取 catalog 并发现真正的 root/dispatch，通常一调用选材、一调用写作、最后一调用修具体诊断。固定 Task/绑定资料/原位置与摘要，保留完整 raw/effective/from；模型每次写作或修稿均实际查阅相关 DOC/Template；host 接受本次成功 Read，或 `Grep(output_mode="content", -n=true)` 返回的非空 DOC1–6 正文命中。目录搜索须能定位实际命中文档，文件列表、计数、无匹配和错误不计；只保存命中路径与行数，不保存整段工具返回。模型通过仅限本次候选文件的 Write/Edit 逐层保存草稿，最终 JSON 只返回文件名；host 收取完整文件，规范化并严格重读检查。这里只消费已有验收材料，不自动创建 oracle，不运行 kernel。
 
 输出必须是全新目录，不覆盖输入或保护资料。`input/` 保存固定材料与来源清单，`drafts/NN.json` 保存真正回答、公开工具记录及诊断，`drafts/NN/` 保留原始候选，`schema/` 保存新候选，`notes.md` 说明边界；只有 `result.json.schema` 非空才是可交接 Schema。坏稿保留不冒充成功。材料过大明确失败，不截断。
 
