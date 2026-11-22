@@ -363,3 +363,85 @@ def test_repair_with_exhausted_calls_gets_new_failure_diagnosis(run,tmp_path):
     assert value['feedback']!=old['feedback']
     assert coder.read_json(folder/value['feedback'])['diagnosis']['kind']=='implementation_failed'
     assert coder.read_json(folder/old['feedback'])['diagnosis']['kind']=='done'
+
+
+def test_fixed_references_are_separate_from_repair_feedback(tmp_path,monkeypatch):
+    source=tmp_path/'language.json'
+    original=(EXAMPLE/'triton_3_7_1_language.json').read_bytes()
+    source.write_bytes(original)
+    repair=tmp_path/'repair.md'
+    repair.write_text('A distinct implementation repair note, not a language reference.')
+    folder=tmp_path/'run'
+    _,reference=agate.load_eval(EXAMPLE/'eval')
+    client=FakeClient(reference)
+    monkeypatch.setattr(agate,'connect',lambda _: (client,'cpu-fake'))
+    def inspect(prompt,run,attempt,state,persist,dirs):
+        assert 'Fixed supplementary references' in prompt
+        assert 'references cannot replace CONTRACT' in prompt
+        fixed=run/state['reference_paths'][0]
+        assert (fixed/source.name).read_bytes()==original
+        # The source may disappear/change after capture; this attempt uses fixed bytes.
+        source.write_text('{"changed":"after capture"}')
+        return writer([reply()])(prompt,run,attempt,state,persist,dirs)
+    monkeypatch.setattr(coder,'invoke',inspect)
+    assert impl.main(['--task',str(EXAMPLE/'task.md'),'--schema',str(EXAMPLE/'schema'),
+                      '--eval-task',str(EXAMPLE/'eval'),'--gpu','L20D','--out',str(folder),
+                      '--reference',str(source),'--feedback',str(repair)])==0
+    result=coder.read_json(folder/'result.json')
+    evidence=coder.read_json(folder/result['feedback'])
+    assert len(evidence['materials'])==1
+    material=evidence['materials'][0]
+    assert material['origin']==str(source) and material['files']=={source.name:coder.sha(original)}
+    assert material['sha256']==coder.digest(material['files'])
+    fixed=(folder/result['feedback']).parent/material['path']
+    assert (fixed/source.name).read_bytes()==original
+    assert evidence['environment']=={'gpu_name':'observed fake device'}
+    assert str(repair) not in json.dumps(evidence['materials'])
+    with pytest.raises(SystemExit) as error:
+        impl.main(['--resume',str(folder),'--reference',str(source)])
+    assert error.value.code==2
+    (fixed/source.name).write_text('modified fixed material')
+    monkeypatch.setattr(agate,'connect',lambda _:pytest.fail('changed material reached SDK'))
+    assert impl.main(['--resume',str(folder)])==1
+    assert coder.read_json(folder/'result.json')['stop_reason']=='input_changed'
+
+
+@pytest.mark.parametrize('case',['missing_json','missing_markdown','escape','absolute','parent_directory','candidate_binding'])
+def test_reference_boundary_fails_during_initialization(tmp_path,monkeypatch,case):
+    source=tmp_path/'material.json'
+    outside=tmp_path/'outside.txt'
+    outside.write_text('Not included by a standalone source snapshot.')
+    if case=='missing_markdown':
+        source=source.with_suffix('.md')
+        source.write_text('[required source](missing.md)')
+    elif case=='candidate_binding':
+        source.write_text(json.dumps({'kernel':{'files':{'entry.py':'old candidate digest'}}}))
+    else:
+        link={'missing_json':'missing.json','escape':'outside.txt','absolute':str(outside),'parent_directory':'.'}[case]
+        source.write_text(json.dumps({'path':link}))
+    folder=tmp_path/'run'
+    monkeypatch.setattr(agate,'connect',lambda _:pytest.fail('invalid material reached SDK'))
+    monkeypatch.setattr(coder,'invoke',lambda *args:pytest.fail('invalid material reached coder'))
+    assert impl.main(['--task',str(EXAMPLE/'task.md'),'--schema',str(EXAMPLE/'schema'),
+                      '--eval-task',str(EXAMPLE/'eval'),'--gpu','L20D','--out',str(folder),
+                      '--reference',str(source)])==1
+    result=coder.read_json(folder/'result.json')
+    assert result['stop_reason']=='needs_input' and result['calls_used']==0
+    assert result['kernel'] is None
+    assert not list(folder.rglob('request.json'))
+
+
+def test_complete_reference_directory_preserves_local_link_topology(tmp_path):
+    source=tmp_path/'sources'
+    (source/'docs').mkdir(parents=True)
+    (source/'index.json').write_text('{"path":"docs/language.md"}')
+    (source/'docs/language.md').write_text('[details](../facts.json)')
+    (source/'facts.json').write_text('{"fact":"fixed CPU material"}')
+    target=tmp_path/'fixed'
+    info=coder.snapshot_reference(source,target)
+    assert info['origin']==str(source) and coder.inventory(target)==coder.inventory(source)
+    assert (target/'docs/../facts.json').read_bytes()==(source/'facts.json').read_bytes()
+    (source/'docs/language.md').write_text('[escape](../../other.json)')
+    (tmp_path/'other.json').write_text('{}')
+    with pytest.raises(coder.Problem,match='escaping local link'):
+        coder.snapshot_reference(source,tmp_path/'rejected')

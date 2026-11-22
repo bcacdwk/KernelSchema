@@ -39,12 +39,12 @@ python3 -m pip install '.[implement,test]'
 python3 schema_design/design_schema.py --task T/task.md --out R/design
 python3 schema_implement/implement_kernel.py --task T/task.md --eval-task T/eval --schema S --gpu L20D --out R/implement
 python3 schema_optimize/optimize_schema.py --task T/task.md --schema S --kernel K --feedback F --out R/optimize
-python3 schema_workflow/workflow.py --task schema_workflow/examples/vector_add/task.md --eval-task schema_workflow/examples/vector_add/eval --reference schema_workflow/examples/vector_add/environment.json --gpu L20D --out .schema_workflow/runs/vector_add-new
+python3 schema_workflow/workflow.py --task schema_workflow/examples/vector_add/task.md --eval-task schema_workflow/examples/vector_add/eval --reference schema_workflow/examples/vector_add/environment.json --reference schema_workflow/examples/vector_add/triton_3_7_1_language.json --gpu L20D --out .schema_workflow/runs/vector_add-new
 ```
 
 默认沿现有 Claude CLI 的 `qwen3.8-max[1m]` / `max` 连接配置，可用 `--model/--effort` 覆盖。四入口 `--timeout-s` 默认 3600 秒，首建可用正有限值覆盖，限制单次写作及适用的远端等待；resume 沿用原配置，固定 `eval.options.timeout_s` 不变。输出目录必须全新；stdout 只返回绝对 `result.json` 路径，退出码 `0/1/2` 对应 complete/incomplete/interrupted。材料不足和未结清评测如实保留，Schema 写成不等于 kernel 已验证。
 
-从 Task 开始时，`--reference` 可重复提供已固定的环境资料或相关设计；示例环境文件来自 Agate 服务缓存，包含时间和适用限制，不是候选测量。已有 Schema 起点不接受此参数。Design/Optimize 在各次候选目录内逐步写入文件，host 核对原输入、实际文件和 Contract；固定参考与测试仍由任务方提供。
+从 Task 开始时，`--reference` 可重复提供环境、语言资料或相关设计。普通资料继续交给 Implement，并随其反馈供 Optimize 读取；Schema 近邻仅用于 Design。示例环境文件来自 Agate 服务缓存，语言文件摘录固定版本的官方文档，两者均不代表候选测量。Workflow 的已有 Schema 起点不接受此参数；独立 Implement 可用 `--reference` 提供该 Schema 已绑定的补充资料。Design/Optimize 在各次候选目录内逐步写入文件，host 核对原输入、实际文件和 Contract；固定参考与测试仍由任务方提供。
 
 三个起点、有限收尾与恢复见 [Workflow](schema_workflow/README.md)；固定两分支任务与比较器见 [vector_add 示例](schema_workflow/examples/vector_add/README.md)。独立入口的细节分别见 [Design](schema_design/README.md)、[Implement](schema_implement/README.md) 和 [Optimize](schema_optimize/README.md)。本次实施、CPU 与真实运行状态见 [EXECUTION](schema_discussion/standalone_modules_20261122/EXECUTION.md)。
 

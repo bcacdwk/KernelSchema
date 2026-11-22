@@ -8,18 +8,17 @@
 
 环境材料固定到 `KernelSchema@51f6b2399d29bafbeacf401de45afa7011160dc8:schema_workflow/examples/vector_add/environment.json`。它来自 SDK 0.14.37 的只读 `get_env('L20D')`，2026-11-22 12:29:54 UTC 获取，`source=cache`、`probed_at=2026-11-22T11:48:31.084555+00:00`；该查询没有创建 GPU job。服务缓存报告 PyTorch 2.9.0+cu130、CUDA 13.0、Triton 3.7.1、nvcc/ptxas 13.1.115。root Version 2 据此更新实现栈，未报告的 Python 版本明确留缺项。
 
-此记录不是候选实测，也不保证未来分配保持相同环境；它不提供完整硬件或编程手册。Wiki 未绑定资料保留尖括号占位，不能当成已就绪的能力依据。实际候选的设备、工具链、正确性与计时以本次 Implement 返回为准。环境记录内的这些限制会随 `--reference` 一并送给 Design；不把手写目标 Schema 作为该命令的设计参考。
+此记录不是候选实测，也不保证未来分配保持相同环境；它不提供完整硬件或编程手册。Wiki 未绑定资料保留尖括号占位，不能当成已就绪的能力依据。实际候选的设备、工具链、正确性与计时以本次 Implement 返回为准。
+
+[triton_3_7_1_language.json](triton_3_7_1_language.json) 补充所选 Triton 版本的官方语言资料：`v3.7.1` 对应提交 `f797708c0626e5f9840ca5b0a98790e2c7cb09ad`，同提交的版本声明、load/store 原文、摘要、获取时间和 MIT 许可一并保留。它明确 false mask 不加载或存储对应地址；不声称周围算术也被屏蔽，不提供 GPU 实测或具体生成指令的证据。
+
+真实实施从 Task、环境和语言资料独立 Design，使用新交付中正式绑定资料的 Schema。手写 Schema 保留为结构开发示例，仍有资料占位；不能把它视为已具备全部实现依据，也不把它作为以下 Design 的目标答案。
 
 ```sh
 python3 schema_template/check_yaml.py schema_workflow/examples/vector_add/schema/root.yaml --read-only
-python3 schema_implement/implement_kernel.py --task schema_workflow/examples/vector_add/task.md --eval-task schema_workflow/examples/vector_add/eval --schema schema_workflow/examples/vector_add/schema --gpu L20D --out .schema_workflow/runs/vector-add-implement
-python3 schema_workflow/workflow.py --task schema_workflow/examples/vector_add/task.md --reference schema_workflow/examples/vector_add/environment.json --eval-task schema_workflow/examples/vector_add/eval --gpu L20D --out .schema_workflow/runs/vector-add
+python3 schema_design/design_schema.py --task schema_workflow/examples/vector_add/task.md --reference schema_workflow/examples/vector_add/environment.json --reference schema_workflow/examples/vector_add/triton_3_7_1_language.json --out .schema_workflow/runs/vector-add-design
+python3 schema_implement/implement_kernel.py --task schema_workflow/examples/vector_add/task.md --eval-task schema_workflow/examples/vector_add/eval --schema .schema_workflow/runs/vector-add-design/schema --reference schema_workflow/examples/vector_add/environment.json --reference schema_workflow/examples/vector_add/triton_3_7_1_language.json --gpu L20D --out .schema_workflow/runs/vector-add-implement
+python3 schema_workflow/workflow.py --task schema_workflow/examples/vector_add/task.md --reference schema_workflow/examples/vector_add/environment.json --reference schema_workflow/examples/vector_add/triton_3_7_1_language.json --eval-task schema_workflow/examples/vector_add/eval --gpu L20D --out .schema_workflow/runs/vector-add
 ```
 
-第二条使用固定示例 Schema，第三条从 Task 开始让 Design 选材写作。每次使用全新 out；恢复采用原目录的 `--resume`。没有已有成功结果或速度承诺，必须查看本次固定全案例的真实反馈。
-
-也可只执行独立 Design，使用相同的普通参考文件：
-
-```sh
-python3 schema_design/design_schema.py --task schema_workflow/examples/vector_add/task.md --reference schema_workflow/examples/vector_add/environment.json --out .schema_workflow/runs/vector-add-design
-```
+第二、三条分别展示独立 Design 与 Implement；确认 Design complete 后，Implement 使用其实际交付目录。第四条由 Workflow 串联同样的入口，普通资料会继续交给 Implement 和 Optimize。每次使用全新 out；恢复采用原目录的 `--resume`。没有已有成功结果或速度承诺，必须查看本次固定全案例的真实反馈。

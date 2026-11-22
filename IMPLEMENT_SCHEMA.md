@@ -2,7 +2,7 @@
 
 本入口供 KS 自有 Coder 根据既有 schema 从零实现，或按设计修复已有 kernel。目标是在任务已选环境中落实 Contract 与 Design，直接通过独立 Agate SDK 交付对应版本的代码、固定全案例的正确性与计时，以及有依据的实现反馈。
 
-独立入口是 `python3 schema_implement/implement_kernel.py --task T/task.md --eval-task T/eval --schema S --gpu L20D --out R`；沿原目录恢复使用 `--resume R`，可重复 `--feedback F` 补充同设计修复意见。可用 `--kernel K` 提供完整源码 seed。默认 `claude` CLI、`qwen3.8-max[1m]`、effort `max`；每次 coder 与每次远端等待的 `--timeout-s` 默认 3600 秒，首建可用正有限值覆盖，resume 沿用原配置，固定 `eval.options.timeout_s` 不变。CLI、依赖和结果见 [Implement 模块](schema_implement/README.md)。模型只读材料并交完整文件集，host 负责固定输入、落盘、提交和查询原 job。
+独立入口是 `python3 schema_implement/implement_kernel.py --task T/task.md --eval-task T/eval --schema S --gpu L20D --out R`；沿原目录恢复使用 `--resume R`，可重复 `--feedback F` 补充同设计修复意见。首建可重复 `--reference M` 固定该 Schema 已绑定的环境、语言等补充资料，resume 不能更换；补充资料与修复反馈分别保存，资料不授予修改 Contract 的权限。可用 `--kernel K` 提供完整源码 seed。默认 `claude` CLI、`qwen3.8-max[1m]`、effort `max`；每次 coder 与每次远端等待的 `--timeout-s` 默认 3600 秒，首建可用正有限值覆盖，resume 沿用原配置，固定 `eval.options.timeout_s` 不变。CLI、依赖和结果见 [Implement 模块](schema_implement/README.md)。模型只读材料并交完整文件集，host 负责固定输入、落盘、提交和查询原 job。
 
 从任务的完整实例开始，遇到具体问题再查询下文链接，不需要先通读全部规范。字段语义与默认规则由 [common](schema_docs/0.common.md) 和 DOC 1–6 定义；Contract 与 Design 的[修改权限](README.md#2-schema-是什么)不因实现方便、性能更好或测试通过而改变。YAML 文件操作、版本维护和检查使用[模板说明](schema_template/README.md)。
 

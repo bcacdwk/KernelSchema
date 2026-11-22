@@ -79,7 +79,7 @@ def parser():
     for name in ('task', 'eval-task', 'schema', 'kernel', 'out', 'resume'):
         p.add_argument('--' + name, type=Path)
     p.add_argument('--reference', action='append', type=Path, default=[],
-                   help='existing reference file or Schema directory for the Task → Design start; repeatable')
+                   help='reference file/directory for the Task → Design start; ordinary materials also reach Implement')
     p.add_argument('--feedback', action='append', type=Path, default=[])
     p.add_argument('--gpu')
     p.add_argument('--model')
@@ -90,12 +90,21 @@ def parser():
     return p
 
 
+def schema_reference_directory(path):
+    """Use the same root/dispatch boundary as Design, without parsing Schema."""
+    path = Path(path)
+    directory = path if path.is_dir() else path.parent
+    if ((directory / 'dispatch.md').is_file()
+            and any((directory / name).is_file() for name in ('root.yaml', 'root.yml'))):
+        return directory
+    return None
+
+
 def input_paths(args):
     for path in [args.task, args.eval_task, args.schema, args.kernel, *args.feedback, *args.reference]:
         if path:
             # Design treats a supplied file beside root/dispatch as a complete Schema reference.
-            schema_reference = (path in args.reference and (path.parent / 'dispatch.md').is_file()
-                                and any((path.parent / name).is_file() for name in ('root.yaml', 'root.yml')))
+            schema_reference = path in args.reference and schema_reference_directory(path) is not None
             yield path.parent if path.is_file() and (path == args.schema or schema_reference) else path
 
 
@@ -216,6 +225,9 @@ class Workflow:
                     args += ['--' + option.replace('_', '-'), self.state['config'][option]]
             if v['seed']:
                 args += ['--kernel', v['seed']]
+            for path in self.state['config'].get('reference', []):
+                if schema_reference_directory(path) is None:
+                    args += ['--reference', path]
             feedback = list(dict.fromkeys([*v['feedback'], *extra]))
         for path in feedback:
             args += ['--feedback', path]

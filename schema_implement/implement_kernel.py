@@ -31,6 +31,8 @@ def parser():
     p.add_argument('--schema', type=Path)
     p.add_argument('--kernel', type=Path)
     p.add_argument('--feedback', type=Path, action='append', default=[])
+    p.add_argument('--reference', type=Path, action='append', default=[],
+                   help='fixed supplementary file or complete directory; repeatable on a new run')
     p.add_argument('--gpu')
     p.add_argument('--out', type=Path)
     p.add_argument('--resume', type=Path)
@@ -43,7 +45,7 @@ def parser():
 
 def validate_args(p, args):
     if args.resume:
-        if any(getattr(args,k) is not None for k in ('task','eval_task','schema','kernel','gpu','out','model','effort','max_calls','timeout_s')):
+        if any(getattr(args,k) is not None for k in ('task','eval_task','schema','kernel','gpu','out','model','effort','max_calls','timeout_s')) or args.reference:
             p.error('--resume only accepts additional --feedback; original inputs/model/limits are fixed')
         if not (args.resume / 'state.json').is_file():
             p.error('--resume requires an existing Implement state.json')
@@ -61,7 +63,7 @@ def validate_args(p, args):
     out_resolved = out.resolve()
     if any(out_resolved == x.resolve() or out_resolved.is_relative_to(x.resolve()) for x in protected):
         p.error('--out is in a protected/product directory')
-    for path in [args.task,args.eval_task,args.schema,args.kernel,*args.feedback]:
+    for path in [args.task,args.eval_task,args.schema,args.kernel,*args.feedback,*args.reference]:
         if path:
             source = path.resolve()
             if source == out_resolved or source.is_relative_to(out_resolved) or (source.is_dir() and out_resolved.is_relative_to(source)):
@@ -94,6 +96,8 @@ def feedback(run, state, attempt, kind, detail, *, rows=None, environment=None, 
              'kernel':({'path':'kernel','sha256':candidate['sha256'],'files':candidate['files']} if candidate else None),
              'schema':({'path':os.path.relpath(run / 'inputs/schema',attempt), 'sha256':schema['sha256'],
                         'files':schema['files'], 'effective_identity':state['effective_identity']} if schema else None),
+             'materials':[{'path':os.path.relpath(run / name,attempt), **state['manifest'][name]}
+                          for name in state.get('reference_paths', [])],
              'implementation_notes':(attempt / 'notes.md').read_text() if (attempt / 'notes.md').exists() else '',
              'gaps':(reply or state.get('reply') or {}).get('gaps', []),
              'cases':rows or [], 'environment':environment or {},
@@ -174,6 +178,11 @@ def initialize(run, args, state):
     if args.kernel:
         capture(args.kernel, 'inputs/seed')
         state['seed'] = 'inputs/seed'
+    state['reference_paths'] = []
+    for index, source in enumerate(dict.fromkeys(args.reference)):
+        dest = f'inputs/reference/{index:03d}'
+        state['manifest'][dest] = coder.snapshot_reference(source, run / dest)
+        state['reference_paths'].append(dest)
     for name in ['IMPLEMENT_SCHEMA.md', 'schema_docs/0.common.md', 'schema_docs/1.contract.algorithm_requirement.md',
                  'schema_docs/2.contract.hardware_specification.md', 'schema_docs/3.design.math_reshape.md',
                  'schema_docs/4.design.work_schedule.md','schema_docs/5.design.tile_pipeline.md',
@@ -199,6 +208,8 @@ def prompt(run, state, attempt):
         'Fixed eval (reference, input, all cases, tolerance/timing): ' + str(run / 'inputs/eval'),
         'DOC1–6, Template README/starter: ' + str(rules),
         'Task external bindings: ' + str(run / 'inputs/task_materials'),
+        'Fixed supplementary references (read complete files, preserve source scope): ' +
+            json.dumps([str(run / p) for p in state.get('reference_paths', [])]),
         'Complete previous source/seed: ' + (str(run / seed) if seed else 'none'),
         'External repair feedback (read raw and all referenced artifacts): ' + json.dumps([str(run / p) for p in state['feedback_paths']]),
         'Most recent actual feedback: ' + (str(run / state['last_feedback']) if state.get('last_feedback') else 'none'),

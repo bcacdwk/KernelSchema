@@ -125,7 +125,7 @@ def test_three_starts_complete_and_do_not_replay(setup,start,capsys):
 
 @pytest.mark.parametrize('changed', ['environment.json', 'neighbor/dispatch.md'])
 @pytest.mark.parametrize('neighbor_entry', ['neighbor', 'neighbor/root.yaml'])
-def test_references_reach_only_design_and_changes_block_resume(setup, monkeypatch, changed, neighbor_entry):
+def test_references_reach_design_and_only_materials_reach_implement(setup, monkeypatch, changed, neighbor_entry):
     base,plan,launch=setup
     reference=base/'environment.json'
     reference.write_text('{"source":"cache","arch":"sm_103"}')
@@ -141,7 +141,9 @@ def test_references_reach_only_design_and_changes_block_resume(setup, monkeypatc
     args=events[0]['argv']
     expected=[str(reference),str(base/neighbor_entry)]
     assert [args[index+1] for index,key in enumerate(args) if key=='--reference']==expected
-    assert all('--reference' not in event['argv'] for event in events[1:])
+    implement_args=events[1]['argv']
+    assert [implement_args[index+1] for index,key in enumerate(implement_args) if key=='--reference']==[str(reference)]
+    assert '--feedback' not in implement_args and '--reference' not in events[2]['argv']
     state=w.read(base/'run/state.json')
     assert state['config']['reference']==expected
     assert str(reference) in state['inputs'] and str(neighbor) in state['inputs']
@@ -243,6 +245,25 @@ def test_revise_new_version_retests_and_uses_latest_source(setup):
     assert events[2]['argv'][events[2]['argv'].index('--schema')+1].endswith('v001/optimize/01/schema')
 
 
+def test_fixed_materials_reach_each_new_version_without_readding_on_repair(setup):
+    base,plan,launch=setup
+    reference=base/'language.json'
+    reference.write_text('{"language":"CPU fixture"}')
+    neighbor=base/'neighbor'
+    neighbor.mkdir()
+    (neighbor/'root.yml').write_text('Schema reference')
+    (neighbor/'dispatch.md').write_text('reference boundary')
+    code,_=launch([{'module':'design'},I(),O(decision='repair',required=True),I(calls=2),
+                   O(decision='revise'),I(),O()],start='task',
+                  extra=['--reference',str(reference),'--reference',str(neighbor/'dispatch.md')])
+    assert code==0
+    attempts=[event['argv'] for event in w.read(plan)['events'] if event['module']=='implement']
+    for args in (attempts[0],attempts[2]):
+        assert [args[i+1] for i,key in enumerate(args) if key=='--reference']==[str(reference)]
+    assert '--resume' in attempts[1] and '--reference' not in attempts[1]
+    assert len(w.read(base/'run/state.json')['versions'])==2
+
+
 def test_design_gap_without_source_can_revise(setup):
     base,plan,launch=setup
     code,_=launch([I(status='incomplete',reason='design_gap',kernel=False),O(decision='revise',required=True),I(),O()])
@@ -332,52 +353,89 @@ def test_immutable_pair_change_detected_on_completed_resume(setup):
     assert w.read(plan)==before
 
 
-def test_real_implement_feedback_is_accepted_by_real_optimize(tmp_path, monkeypatch):
-    """Exercise the actual cross-module material bindings; only model/GPU are fake."""
-    from schema_optimize.tools import runner as optimize
-    entry = MODULE.parents[1] / 'schema_implement/implement_kernel.py'
-    impl_spec = importlib.util.spec_from_file_location('workflow_interface_implement', entry)
-    impl = importlib.util.module_from_spec(impl_spec)
-    impl_spec.loader.exec_module(impl)
-    example = MODULE.parent / 'examples/vector_add'
-    run = tmp_path / 'implement'
-    run.mkdir()
-    args = impl.parser().parse_args(['--task',str(example/'task.md'),'--schema',str(example/'schema'),
-            '--eval-task',str(example/'eval'),'--gpu','L20D','--out',str(run)])
-    state = {'config':{'model':'qwen3.8-max[1m]','effort':'max','max_calls':2,'timeout_s':1,'gpu':'L20D'},
-             'calls_used':0,'manifest':{},'feedback_ids':[],'feedback_paths':[],
-             'consumed_feedback':0,'action':None,'initialized':False}
-    impl.initialize(run,args,state)
-    config,reference = impl.agate.load_eval(run/'inputs/eval')
-    class Client:
-        def submit_job(self,kind,request): return {'job_id':'cpu-original-job'}
-        def get_job(self,job_id,**kw):
-            ids=reference['shapes']
-            return {'job_id':job_id,'status':'succeeded','cleanup_pending':False,'result':{
-                'passed':{stage:{i:{'status':'passed'} for i in ids} for stage in ('compile','correctness','performance')},
-                'correctness':{'shapes':{i:{'cases':[{'outputs':[{'passed':True,'error':None}],'error':None}]} for i in ids}},
-                'performance':{'shapes':{i:{'timing_stats':{'median_ms':0.01,'runs':100},'benchmark_mode':'eager'} for i in ids}},
-                'environment':{'gpu_name':'CPU fake'}}}
-    def writer(prompt,run,attempt,state,persist,dirs):
-        state['calls_used'] += 1
-        persist()
-        return {'files':[{'path':'entry.py','content':'class Model:\n    def forward(self,x,y): return x+y\n'}],
-                'entry_point':'entry.py','notes':'CPU fixture realizes both fixed dispatch branches; no real GPU claim','gaps':[]}
-    # Request construction uses the installed official SDK; only submission/results are fake.
-    result=impl.execute(run,state,client_factory=lambda _: (Client(),'cpu-fake-transport'),writer=writer)
-    assert result['status']=='complete'
-    out=tmp_path/'optimize'
-    args=optimize.parser('optimize').parse_args(['--task',str(example/'task.md'), '--schema',str(example/'schema'),
-            '--kernel',str(run/result['kernel']),'--feedback',str(run/'result.json'),'--out',str(out)])
+def test_real_workflow_implement_and_optimize_preserve_reference_materials(tmp_path,monkeypatch):
+    """Use real business CLIs/material paths; Design output, model and GPU are CPU fixtures."""
+    example=MODULE.parent/'examples/vector_add'
+    language=example/'triton_3_7_1_language.json'
+    bundle=tmp_path/'manual'
+    bundle.mkdir()
+    (bundle/'index.md').write_text('[local facts](facts.json)')
+    (bundle/'facts.json').write_text('{"fact":"CPU local-link material"}')
+    source=tmp_path/'source.py'
+    source.write_text('def cpu_source_context(): return 1\n')
+    materials=[language,example/'environment.json',bundle,source]
+    script=r'''
+import json, shutil, sys
+from pathlib import Path
+sys.path.insert(0, CHECKOUT)
+from schema_implement.tools.tests.test_implement import impl, FakeClient, reply, writer
+mode=Path(__file__).stem
+example=Path(EXAMPLE)
+language=example/'triton_3_7_1_language.json'
+if mode=='design':
+    args=sys.argv[1:]
+    out=Path(args[args.index('--out')+1])
     out.mkdir()
-    execution=optimize.Run(args,'optimize')
-    def decide(prompt,output_schema,phase):
-        assert 'entry.py' in prompt and 'cpu-original-job' in prompt and 'CPU fake' in prompt
-        execution.result['calls_used'] += 1
-        return {'decision':'keep','required_fix':False,'notes':'CPU protocol decision on fixed material', 'files':[], 'missing':[]}
-    monkeypatch.setattr(execution,'call',decide)
-    assert optimize.execute(execution)==0
-    assert execution.result['decision']=='keep'
+    shutil.copytree(example/'schema',out/'schema')
+    (out/'notes.md').write_text('CPU Schema fixture; no Design/model acceptance claim')
+    (out/'result.json').write_text(json.dumps({'status':'complete','stop_reason':'done',
+        'calls_used':1,'schema':'schema','notes':'notes.md'}))
+    print(out/'result.json')
+    raise SystemExit(0)
+if mode=='implement':
+    _,reference=impl.agate.load_eval(example/'eval')
+    impl.agate.connect=lambda _: (FakeClient(reference),'CPU fake transport')
+    def inspect(prompt,run,attempt,state,persist,dirs):
+        assert 'Fixed supplementary references' in prompt
+        records=[state['manifest'][path] for path in state['reference_paths']]
+        assert len(records)==4 and not any(Path(item['origin']).name=='schema' for item in records)
+        for path,item in zip(state['reference_paths'],records):
+            original=Path(item['origin'])
+            root=original if original.is_dir() else original.parent
+            for name,digest in item['files'].items():
+                raw=(run/path/name).read_bytes()
+                assert raw==(root/name).read_bytes() and impl.coder.sha(raw)==digest
+        (run/'cpu_material_read.json').write_text(json.dumps(records))
+        return writer([reply()])(prompt,run,attempt,state,persist,dirs)
+    impl.coder.invoke=inspect
+    raise SystemExit(impl.main())
+from schema_optimize.tools import runner as optimize
+def decide(self,prompt,output_schema,phase):
+    assert language.read_text() in prompt and 'CPU local-link material' in prompt
+    assert 'job-original' in prompt and 'observed fake device' in prompt
+    records=list(self.inputs.records.values())
+    fixed=next(item for item in records if Path(item['source']).name==language.name)
+    assert '/inputs/reference/' in fixed['source'] and fixed['source']!=str(language)
+    assert (self.out/fixed['snapshot']).read_bytes()==language.read_bytes()
+    feedback=next(json.loads((self.out/item['snapshot']).read_text()) for item in records
+                  if Path(item['source']).name=='feedback.json' and 'materials' in json.loads((self.out/item['snapshot']).read_text()))
+    assert any(item['origin']==str(language) and item['files'][language.name]==fixed['sha256']
+               for item in feedback['materials'])
+    (self.out/'cpu_material_read.json').write_text(json.dumps({'record':fixed,'materials':feedback['materials']}))
+    self.result['calls_used']+=1
+    return {'decision':'keep','required_fix':False,'notes':'CPU fixture verifies material delivery only',
+            'files':[],'missing':[]}
+optimize.Run.call=decide
+raise SystemExit(optimize.main())
+'''.replace('CHECKOUT',repr(str(MODULE.parents[1]))).replace('EXAMPLE',repr(str(example)))
+    for name in ('design','implement','optimize'):
+        path=tmp_path/(name+'.py')
+        path.write_text(script)
+        monkeypatch.setitem(w.SCRIPTS,name,path)
+    original={str(path):w.digest(path) for path in (example/'task.md',example/'eval',*materials)}
+    run=tmp_path/'run'
+    args=['--task',str(example/'task.md'),'--eval-task',str(example/'eval'),
+          '--gpu','L20D','--out',str(run),'--reference',str(example/'schema')]
+    for path in materials:
+        args+=['--reference',str(path)]
+    assert w.main(args)==0
+    result=w.read(run/'result.json')
+    assert result['status']=='complete'
+    observed=w.read(run/'v001/optimize/01/cpu_material_read.json')
+    assert len(observed['materials'])==len(materials)
+    assert observed['record']['sha256']==hashlib.sha256(language.read_bytes()).hexdigest()
+    assert len(w.read(run/'v001/implement/cpu_material_read.json'))==len(materials)
+    assert {str(path):w.digest(path) for path in (example/'task.md',example/'eval',*materials)}==original
 
 
 def test_recover_committed_child_without_relaunch_or_double_count(setup):

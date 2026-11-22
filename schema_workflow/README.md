@@ -18,7 +18,11 @@ python3 schema_workflow/workflow.py --resume R
 
 新运行必须给 Task 和全新 out；Schema 可以是目录或其中 YAML，kernel 可以是完整源码目录或自足文件，feedback 可重复。只有文字任务时可以先 Design，之后 Implement 具体报告缺少的固定 eval/GPU。外部成绩只作起始证据。
 
-`--reference` 可重复，接普通资料文件或完整 Schema 目录，仅透传给 Task 起点的初始 Design；与 `--schema` 同时使用会报参数错误。给出 Schema 内文件时，按 Design 已有的 root/dispatch 文件边界固定完整目录摘要。相对路径按启动 Workflow 时的 cwd 解析，参考原路径及摘要纳入固定输入；Design 自行保存参考快照及实际来源。Workflow 不解析资料、不查询环境。resume 沿用原参考，不能另传 `--reference`，原文件或目录内容改变时拒绝继续。
+`--reference` 可重复，接普通资料文件、完整资料目录或完整 Schema 目录，用于 Task 起点的初始 Design；与 `--schema` 同时使用会报参数错误。给出 Schema 内文件时，按 Design 已有的 root/dispatch 文件边界固定完整目录摘要。Schema 目录及其中的文件仅作 Design 近邻；其他资料在每个新版本第一次 Implement 时通过其 `--reference` 继续传递，后续 Optimize 沿 Implement 反馈的 `materials` 读取固定正文和原来源摘要。修复 resume 沿用该版本原快照，不重复加入资料。
+
+普通资料须自足，或由包含全部本地依赖的目录保留相对路径；Implement 初始化拒绝无法保全的缺失/绝对/逃逸链接和候选 Schema/kernel 摘要绑定，见 [Implement 资料边界](../schema_implement/README.md)。资料只提供依据，不覆盖固定 Task/Schema，也不充当本次实测。Workflow 不解析 Schema 语义、不自动查询环境或抓取 Wiki。
+
+相对路径按启动 Workflow 时的 cwd 解析，参考原路径及摘要纳入固定输入；各阶段保留自己的参考快照及来源。resume 沿用原参考，不能另传 `--reference`，原文件或目录内容改变时拒绝继续。
 
 使用现有服务环境参考的完整示例：
 

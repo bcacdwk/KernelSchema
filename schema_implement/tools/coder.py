@@ -109,6 +109,69 @@ def snapshot(source, dest):
     return {'origin': str(source), 'files': before, 'sha256': digest(before)}
 
 
+def snapshot_reference(source, dest):
+    """Keep a supplementary file/tree intact for downstream local-link readers."""
+    source = Path(source).absolute()
+    info = snapshot(source, dest)
+    root = source if source.is_dir() else source.parent
+    fixed_names = set(info['files'])
+    # Match the explicit local-link forms consumed by Optimize's closure. Do not
+    # rewrite raw material, collect arbitrary neighbors, or reopen an origin later.
+    path_keys = {'path', 'schema', 'kernel', 'feedback', 'notes', 'request', 'response', 'source_path',
+                 'request_path', 'response_path', 'feedback_path', 'notes_path', 'kernel_path', 'archive'}
+    for name in fixed_names:
+        original = root / name
+        try:
+            content = (Path(dest) / name).read_text(encoding='utf-8')
+        except UnicodeError:
+            continue
+        links = []
+        if original.suffix == '.json':
+            try:
+                value = json.loads(content)
+            except ValueError:
+                value = None
+            if isinstance(value, dict):
+                for key in ('schema', 'kernel'):
+                    binding = value.get(key)
+                    if isinstance(binding, dict) and {'files', 'sha256', 'effective_identity'} & binding.keys():
+                        raise Problem('needs_input', 'Supplementary references cannot carry candidate Schema/kernel bindings; '
+                                      'supply candidate evidence through --feedback: ' + str(original))
+            def visit(item, binding=False):
+                if isinstance(item, dict):
+                    for key, part in item.items():
+                        if (key in path_keys and isinstance(part, str) and '\n' not in part
+                                and (binding or (original.parent / part).exists() or '/' in part
+                                     or re.search(r'\.(?:json|md|txt|ya?ml|py|cu|cpp)$', part))):
+                            links.append((part, True))
+                        else:
+                            visit(part, binding=key in {'schema', 'kernel'})
+                elif isinstance(item, list):
+                    for part in item:
+                        visit(part)
+            visit(value)
+        elif original.suffix in {'.md', '.txt'}:
+            links.extend((link, True) for link in re.findall(r'\[[^\]]*\]\(([^)]+)\)', content))
+            links.extend((link, False) for link in re.findall(r'`([^`\n]+)`', content)
+                         if '/' in link or re.search(r'\.(?:py|json|ya?ml|md|cu|cpp)$', link))
+        for link, required in links:
+            link = link.strip().strip('<>').split('#', 1)[0]
+            if not link or re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*:', link) or '@' in link or '*' in link:
+                continue
+            target = Path(link).expanduser()
+            absolute = target.is_absolute()
+            target = target if absolute else original.parent / target
+            if not absolute and not target.exists() and not required:
+                continue
+            relative = os.path.relpath(target, root)
+            included = relative in fixed_names or (source.is_dir() and target.is_dir() and
+                        (relative == '.' or any(item.startswith(relative + '/') for item in fixed_names)))
+            if absolute or not target.exists() or not included:
+                raise Problem('needs_input', 'Supplementary reference has a missing or escaping local link: '
+                              f'{original}: {link}; supply a complete directory with relative links')
+    return info
+
+
 def check_manifest(run, manifest):
     for rel, info in manifest.items():
         if inventory(run / rel) != info['files']:

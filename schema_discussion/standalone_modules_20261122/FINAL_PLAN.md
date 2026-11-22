@@ -12,6 +12,8 @@
 
 - [Issue 04](ISSUE_04.md)：实际默认 Qwen/max 的完整写作需要 1775 秒，因此四入口默认单次等待统一为有界、可覆盖的 3600 秒，原运行的已固定上限不变。DOC 阅读接受本次真正返回正文的精确 Read 或 Grep 命中，拒绝只有文件名、计数、空结果或错误的查询；不再把工具名差异误当未阅读。
 
+- [Issue 05](ISSUE_05.md)：真实 Implement 暴露必要语言绑定缺口；新增可追溯的 Triton3.7.1 官方资料，由新 Design 正式绑定，旧 Contract/失败不回填。Implement 首建新增可重复 `--reference` 保存已绑定的补充资料；Workflow 将普通资料继续传给它，Schema 近邻仍仅供 Design。补充资料与修复反馈分开，反馈以固定实物路径供 Optimize 读取；不自动联网抓 Wiki，不增加恢复或评测平台。
+
 模型、effort、调用总额、核心职责、Task/eval 与保护区均保持；正文中旧的 900 秒默认已被上述实测修订替代。当前执行与结果见 [EXECUTION](EXECUTION.md)。
 
 ## 1. 已定范围与最小文件
