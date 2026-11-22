@@ -119,10 +119,12 @@ def read_evidence(root: Path, path: str, start_line: int, end_line: int,
         raise EvidenceSelectionError(f"invalid evidence range (file has {len(lines)} lines)")
     selected = "\n".join(lines[start_line - 1:end_line])
     if type(quote_offset) is not int or not 0 <= quote_offset < len(selected):
-        raise EvidenceSelectionError("quote_offset must select a character within the evidence range")
+        raise EvidenceSelectionError(f"quote_offset {quote_offset!r} must select a character within the evidence range "
+                                     f"(selected length {len(selected)}; valid offsets 0..{len(selected) - 1})")
     quote = selected[quote_offset:quote_offset + 320]
     if not quote.strip():
-        raise EvidenceSelectionError("evidence excerpt is empty; select the relevant range/quote_offset")
+        raise EvidenceSelectionError(f"evidence excerpt is empty; select the relevant range/quote_offset "
+                                     f"(selected length {len(selected)}; quote_offset {quote_offset})")
     return {"path": path, "sha256": file_hash, "line_start": start_line,
             "line_end": end_line, "quote": quote}
 

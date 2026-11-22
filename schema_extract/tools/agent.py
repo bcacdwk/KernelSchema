@@ -149,7 +149,10 @@ def _schema_check(schema, response, attempt_id):
     validator.check_schema(schema)
     errors = list(validator(schema).iter_errors(response))
     return {"schema_valid": not errors, "nonce_valid": isinstance(response, dict) and response.get("attempt_id") == attempt_id,
-            "schema_errors": [{"path": list(error.absolute_path), "validator": error.validator} for error in errors[:12]]}
+            "schema_errors": [{"path": list(error.absolute_path), "validator": error.validator,
+                               "message": error.message[:600], "message_omitted_characters": max(0, len(error.message) - 600)}
+                              for error in errors[:12]],
+            "schema_error_count": len(errors), "schema_errors_omitted": max(0, len(errors) - 12)}
 
 
 def read_result(attempt: dict, *, exit_code: int | None, termination: dict, outcome="completed") -> dict:
@@ -193,13 +196,17 @@ def read_result(attempt: dict, *, exit_code: int | None, termination: dict, outc
             outcome = "cli_error"
         elif attempt["session_id"] is not None and parsed["session_id"] != attempt["session_id"]:
             outcome = "session_mismatch"
-        elif not output_match or not checked["schema_valid"] or not checked["nonce_valid"]:
+        elif not output_match:
+            outcome = "cli_error"
+        elif not checked["schema_valid"] or not checked["nonce_valid"]:
             outcome = "receipt_error"
     return {**invocation, "outcome": outcome, "exit_code": exit_code, "termination": termination,
             "session_id": parsed["session_id"], "response": response, "native_status": parsed["native_status"],
             "requested_model": attempt["model"], "requested_effort": attempt["effort"],
             **{key: parsed[key] for key in ("reported_model", "reported_models", "reported_effort", "cli_reported_model")},
-            "response_validation": {**checked, "native_output_matches": output_match},
+            "response_validation": {**checked, "native_output_matches": output_match,
+                                    "failure_kind": "native_output_mismatch" if not output_match else
+                                                    "proposal_schema" if not checked["schema_valid"] else None},
             "trace": parsed["trace"], "event_types": list(parsed["trace"]["event_counts"]),
             "parse_error_lines": parsed["trace"]["parse_error_lines"],
             "usage": result_usage(parsed, outcome=outcome, termination=termination),

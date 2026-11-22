@@ -662,7 +662,7 @@ class StageFlowTests(unittest.TestCase):
             self.accept(attempt, {**result, "response": self.backend.proposal(attempt)})
         self.assertEqual(self.store.load(self.state["run_id"]), original)
 
-    def test_native_source_range_repairs_are_finite_and_resume_exactly(self):
+    def test_native_source_range_repairs_use_scope_budget_and_resume_exactly(self):
         source = self.directory / "source/kernel.py"
         source_lines = len(source.read_text().splitlines())
         fake = self.directory / "native-cli"
@@ -705,8 +705,8 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
             self.assertTrue(result["native_status"]["success"])
             session_id = result["session_id"]
             self.state = _receive(self.store, self.state, self.lock, attempt, result, None)
-            self.assertEqual(self.state["status"], "running" if count <= 2 else "invalid_receipt")
-            self.assertEqual(self.state["reason"]["code"], "receipt_repair" if count <= 2 else "receipt_repair_limit_reached")
+            self.assertEqual(self.state["status"], "running")
+            self.assertEqual(self.state["reason"]["code"], "receipt_repair")
             self.assertIn(f"source_evidence[0] kernel.py:1-{source_lines + 1}", self.state["reason"]["summary"])
             self.assertIn(f"file has {source_lines} lines", self.state["reason"]["summary"])
             self.assertEqual(self.state["sessions"]["P2"]["worker"], session_id)

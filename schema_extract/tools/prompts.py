@@ -10,7 +10,8 @@ import sys
 
 from .artifacts import _same, design_context, load_root, load_yaml
 from .common import ExtractError, digest, manifest, read_json, regular_file, rules_root, seal, sha256, source_root, write_json
-from .receipts import REOPEN_TARGETS, call_identity, required_artifact_evidence
+from .receipts import (REOPEN_TARGETS, call_identity, handoff_requirement, required_artifact_evidence,
+                       required_source_evidence)
 from .snapshots import frozen_reader
 from .stages import STAGES, call_limit, effective_nodes, owner_for, read_specs, required_conclusions, scope_for
 
@@ -267,6 +268,8 @@ def build_prompt(state: dict, lock: dict, attempt: dict, *, rules_lock: dict | N
         read_specs=[str(rules / name) for name in _read_specs(attempt) if name not in documents],
         feedback=owner.get("feedback", []), process_records=materials["records"],
         required_conclusions=required_conclusions(attempt), required_evidence=definition["evidence"],
+        required_evidence_locators=required_source_evidence(attempt, bindings),
+        handoff_requirement=handoff_requirement(attempt),
         required_artifact_evidence=sorted(required_artifact_evidence(state, attempt, attempt["dependency_digests"], resolution=resolution.get("design_resolution"))),
         selected_designs=selected, writing_plan=state.get("writing_plan"), node_entry=node_entry,
         plan_draft=state.get("plan_draft") if attempt["stage"] in {"P2", "P4"} else None,

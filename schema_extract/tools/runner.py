@@ -713,7 +713,7 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
 
 def _recover_call(store: Store, state: dict, lock: dict, attempt: dict, result: dict, *, kind: str, reason: str,
                   fresh_context=False) -> dict:
-    """A finite same-role repair preserves safe edits and an already established UUID."""
+    """Preserve safe drafts; ordinary receipt repair spends the existing scope budget."""
     updated = deepcopy(state)
     if kind == "receipt_repair":
         check_proposal_identity(result.get("response"), attempt)
@@ -753,7 +753,7 @@ def _recover_call(store: Store, state: dict, lock: dict, attempt: dict, result: 
                        "result_sha256": digest(read_json(recorded) if recorded.is_file() else result)}
     owner["feedback"] = [*owner["feedback"], owner["reason"]]
     limit = updated["config"]["retry_limit"]
-    if scope[key] > limit:
+    if scope[key] > limit and (kind != "receipt_repair" or attempt.get("purpose") == "maintenance"):
         owner["status"] = "invalid_receipt" if kind == "receipt_repair" else "cli_error"
         scope["status"] = owner["status"]
         owner["reason"]["code"] += "_limit_reached"
@@ -804,8 +804,24 @@ def _receive(store: Store, state: dict, lock: dict, attempt: dict, result: dict 
         if not result or not result.get("termination", {}).get("confirmed"):
             raise ExtractError("agent termination is unconfirmed; this attempt remains fenced")
         outcome = result.get("outcome")
+        response_validation = result.get("response_validation", {})
+        if response_validation.get("native_output_matches") is False:
+            if attempt["mode"] != "normal":
+                raise ExtractError("native output channels disagree; current decision is rejected")
+            return _recover_call(store, state, lock, attempt, result, kind="cli_retry",
+                                 reason="native output channels disagree; current proposal is rejected, finite CLI retry policy applies.",
+                                 fresh_context=recovering)
         if outcome == "receipt_error":
-            raise ReceiptFormatError("Agent CLI response did not satisfy the scoped proposal schema")
+            diagnostics = []
+            for entry in response_validation.get("schema_errors", []):
+                location = "proposal" + "".join(f"[{part}]" if isinstance(part, int) else "." + str(part)
+                                               for part in entry.get("path", []))
+                diagnostics.append(f"{location}: {entry.get('message', entry.get('validator', 'schema error'))}" +
+                    (f" [message omitted {entry['message_omitted_characters']} characters]"
+                     if entry.get("message_omitted_characters") else ""))
+            raise ReceiptFormatError(diagnostics or "Agent CLI response did not satisfy the scoped proposal schema",
+                omitted=response_validation.get("schema_errors_omitted", 0),
+                unchecked=("evidence file reads and dependent semantic checks",))
         if outcome == "cli_error" and attempt["mode"] == "normal":
             return _recover_call(store, state, lock, attempt, result, kind="cli_retry",
                                  reason=f"CLI {outcome}；合法草稿与原计数已保留，按原调用计数重试。",

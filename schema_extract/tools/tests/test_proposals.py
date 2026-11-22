@@ -7,14 +7,15 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from schema_extract.tools.artifacts import validate_plan, write_yaml
 from schema_extract.tools.audit import _receipt_response
 from schema_extract.tools.common import ExtractError, manifest
 from schema_extract.tools.reading import read_evidence
-from schema_extract.tools.receipts import ReceiptFormatError, normalize_response, validate_receipt
-from schema_extract.tools.stages import DOCUMENT_CONCLUSIONS, required_conclusions
+from schema_extract.tools.receipts import ReceiptFormatError, normalize_response, proposal_schema, validate_receipt
+from schema_extract.tools.stages import DOCUMENT_CONCLUSIONS, node_signature, required_conclusions
 from schema_extract.tools.tests import test_artifact_transactions as artifact_fixture
 
 
@@ -302,9 +303,9 @@ class ProposalTests(unittest.TestCase):
             (root / "unlisted.txt").write_text("Unlisted evidence\n")
             proposal = deepcopy(self.proposal)
             proposal[key][0]["path"] = "unlisted.txt"
-            with self.subTest(key=key), self.assertRaisesRegex(ExtractError, "allowed values") as caught:
+            with (self.subTest(key=key), self.assertRaisesRegex(ReceiptFormatError, "allowed values"),
+                  patch("schema_extract.tools.receipts.read_evidence", side_effect=AssertionError("unlisted path read"))):
                 self.normalize(proposal)
-            self.assertNotIsInstance(caught.exception, ReceiptFormatError)
             (root / "unlisted.txt").unlink()
         (self.source / "linked.py").symlink_to(self.source / "kernel.py")
         for path in ("../source/kernel.py", str(self.source / "kernel.py"), "linked.py"):
@@ -318,6 +319,98 @@ class ProposalTests(unittest.TestCase):
                 invalid[key][0][field] = value
                 with self.subTest(key=key, field=field, value=value), self.assertRaises(ExtractError):
                     validate_receipt(invalid, self.state(), self.lock, self.attempt, self.artifacts, [])
+
+    def test_handoff_schema_is_private_and_gate_counts_unicode_and_nonempty_lines(self):
+        schema = proposal_schema(self.attempt)
+        description = schema['properties']['handoff']['description']
+        self.assertIn('1200 Unicode characters', description)
+        self.assertIn('20 nonempty lines', description)
+        schema['properties']['handoff']['description'] = 'mutated copy'
+        self.assertEqual(proposal_schema(self.attempt)['properties']['handoff']['description'], description)
+        self.assertNotIn('1200', proposal_schema({**self.attempt, 'stage': 'P5'})['properties']['handoff']['description'])
+        for value in ('界' * 1200, 'a\n\n' * 20):
+            self.proposal['handoff'] = value
+            self.assertEqual(validate_receipt(self.normalize(), self.state(), self.lock, self.attempt,
+                                             self.artifacts, [])['handoff'], value)
+        for value, actual in (('界' * 1201, '1201 Unicode characters'), ('a\n' * 21, '21 nonempty lines'), (' \n ', '0 nonempty lines')):
+            self.proposal['handoff'] = value
+            with self.assertRaisesRegex(ReceiptFormatError, actual):
+                validate_receipt(self.normalize(), self.state(), self.lock, self.attempt, self.artifacts, [])
+
+    def test_same_file_host_does_not_replace_implementation_and_any_allowed_locator_suffices(self):
+        (self.source / 'other.py').write_text('def route(x): return x\n')
+        self.lock['source']['files'] = manifest(self.source)
+        self.lock['source']['bindings']['host'] = [{'path': 'other.py', 'symbol': 'route'},
+                                                   {'path': 'kernel.py', 'symbol': 'route'}]
+        self.assertEqual(validate_receipt(self.normalize(), self.state(), self.lock, self.attempt, self.artifacts, [])['decision'], 'approve')
+        self.attempt.update(stage='P3', node_signature=node_signature(self.selected[0]))
+        self.proposal.pop('plan')
+        self.proposal['conclusions'] = self.conclusions()
+        self.lock['source']['bindings']['entrypoint'] = {'path': 'kernel.py', 'symbol': 'route'}
+        with self.assertRaisesRegex(ReceiptFormatError, 'missing source evidence categories: implementation'):
+            validate_receipt(self.normalize(), self.state(), self.lock, self.attempt, self.artifacts, [])
+        self.proposal['source_evidence'].append({**self.proposal['source_evidence'][0], 'category': 'implementation'})
+        receipt = self.normalize()
+        self.assertEqual(validate_receipt(receipt, self.state(), self.lock, self.attempt, self.artifacts, []), receipt)
+
+    def test_stage_decision_handoff_matrix_uses_the_same_independent_gate(self):
+        original = deepcopy(self.proposal)
+        self.lock['source']['bindings'] = {name: {'path': 'kernel.py', 'symbol': 'route'} for name in
+                                          ('entrypoint', 'host', 'io', 'input', 'reference', 'acceptance', 'scope')}
+        for stage in ('P1', 'P2', 'P3', 'P4', 'P5', 'P6'):
+            for decision in ('complete', 'continue', 'approve', 'revise', 'blocked'):
+                with self.subTest(stage=stage, decision=decision):
+                    attempt = {**self.attempt, 'stage': stage, 'role': 'worker' if decision in {'complete', 'continue'} else 'reviewer'}
+                    shape = proposal_schema(attempt)
+                    value = {key: deepcopy(original[key]) for key in original if key in shape['properties']}
+                    value.update(decision=decision, handoff='界' * 1201)
+                    if stage == 'P1': value['comparisons'] = []
+                    if stage == 'P4': value['plan'] = []
+                    if stage == 'P6': value.update(affected_nodes=[], revision_scope=[])
+                    value['source_evidence'][0]['line_end'] = 2
+                    with self.assertRaises(ReceiptFormatError) as caught:
+                        normalize_response(value, self.lock, attempt, self.artifacts)
+                    self.assertEqual('handoff:' in str(caught.exception), stage in {'P2', 'P3', 'P4'} and decision == 'approve')
+
+    def test_independent_diagnostics_keep_original_indices_and_real_counts(self):
+        value = deepcopy(self.proposal)
+        value['source_evidence'][0].update(category='implementation', line_end=2)
+        value['artifact_evidence'][1]['quote_offset'] = 999
+        value['conclusions'][0]['evidence'] = [99]
+        value['handoff'] = '界' * 1201
+        with self.assertRaises(ReceiptFormatError) as caught:
+            self.normalize(value)
+        text = str(caught.exception)
+        for expected in ('source_evidence[0]', 'file has 1 lines', 'artifact_evidence[1]', 'selected length',
+                         'conclusions[0].evidence[0]', 'count 1; valid indices 0..0',
+                         'missing source evidence categories: host', '1201 Unicode characters', 'not checked:'):
+            self.assertIn(expected, text)
+        self.assertEqual(len(caught.exception.diagnostics), 5)
+        value = deepcopy(self.proposal)
+        value['source_evidence'] *= 30
+        for item in value['source_evidence']: item['line_end'] = 2
+        with self.assertRaises(ReceiptFormatError) as caught:
+            self.normalize(value)
+        self.assertEqual(len(caught.exception.diagnostics), 30)
+        self.assertIn('source_evidence[29]', caught.exception.diagnostics[29])
+        self.assertIn('omitted 18 diagnostics', str(caught.exception))
+        for item in value['source_evidence']: item['line_end'] = 1
+        self.assertEqual(len(self.normalize(value)['source_evidence']), 30)
+
+    def test_invalid_containers_do_not_read_files_and_fixed_source_drift_stays_hard(self):
+        value = deepcopy(self.proposal)
+        value.update(source_evidence='not an array', artifact_evidence=[None], handoff=10)
+        with (patch('schema_extract.tools.receipts.read_evidence', side_effect=AssertionError('unsafe file read')),
+              self.assertRaises(ReceiptFormatError) as caught):
+            self.normalize(value)
+        for expected in ('proposal.source_evidence', 'proposal.artifact_evidence[0]', 'proposal.handoff', 'not checked:'):
+            self.assertIn(expected, str(caught.exception))
+        value = deepcopy(self.proposal)
+        value['source_evidence'][0]['line_end'] = 2
+        (self.source / 'kernel.py').write_text('changed source\n')
+        with self.assertRaises(ExtractError) as caught:
+            self.normalize(value)
+        self.assertNotIsInstance(caught.exception, ReceiptFormatError)
 
     def test_audit_checkpoint_identity_is_stable_across_processes(self):
         # Isolate storage IO; keep the real audit selection and serialization.

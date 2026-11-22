@@ -81,6 +81,13 @@ class ReviewProtocolTests(unittest.TestCase):
                     self.assertEqual(value["reference_source"], "fixture@fixed:reference.py::reference")
                     self.assertEqual(value["required_conclusions"], required_conclusions(call))
                     self.assertEqual(value["required_evidence"], STAGES[stage]["evidence"])
+                    self.assertEqual(set(value['required_evidence_locators']), set(STAGES[stage]['evidence']))
+                    for category, locators in value['required_evidence_locators'].items():
+                        binding = self.lock['source']['bindings']['entrypoint' if category == 'implementation' else category]
+                        self.assertEqual(locators, binding if isinstance(binding, list) else [binding])
+                    self.assertEqual(value['handoff_requirement']['description'],
+                                     proposal_schema({**call, 'input_fingerprint': 'fixture', 'plan_revision': 1})['properties']['handoff']['description'])
+                    self.assertEqual(value['handoff_requirement']['required'], stage in {'P2', 'P3', 'P4'})
                     self.assertEqual(value["session_scope"], session_scope(call))
                     self.assertEqual(value["calls"]["max_calls"], 35)
                     self.assertEqual(value["reading_order"], ["current_specs", "current_artifacts", "fixed_source", "process_records"])

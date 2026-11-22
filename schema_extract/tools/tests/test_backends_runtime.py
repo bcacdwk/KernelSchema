@@ -241,7 +241,19 @@ class BackendRuntimeTests(unittest.TestCase):
         self.assertIsNone(result["usage"]["additive_tokens"]["input_tokens"])
         write_json(Path(attempt["directory"]) / "cli-tmp/response.json", {"attempt_id": attempt["attempt_id"]})
         replay = read_result(attempt, exit_code=0, termination={"confirmed": True})
-        self.assertEqual(replay["outcome"], "receipt_error")
+        self.assertEqual(replay["outcome"], "cli_error")
+        self.assertEqual(replay["response_validation"]["failure_kind"], "native_output_mismatch")
+        events_path = Path(attempt["directory"]) / "events.jsonl"
+        events = [json.loads(line) for line in events_path.read_text().splitlines()]
+        # Corrupt both channels differently: native disagreement takes priority
+        # over the invalid proposal in the final-message event.
+        for event in events:
+            if event.get('type') == 'item.completed' and event.get('item', {}).get('type') == 'agent_message':
+                event['item']['text'] = json.dumps({'attempt_id': attempt['attempt_id'], 'invalid': True})
+        events_path.write_text('\n'.join(json.dumps(event) for event in events) + '\n')
+        replay = read_result(attempt, exit_code=0, termination={"confirmed": True})
+        self.assertFalse(replay['response_validation']['schema_valid'])
+        self.assertEqual(replay['outcome'], 'cli_error')
 
     def test_native_success_schema_nonce_session_and_complete_trace_are_independent(self):
         attempt = self.attempt()

@@ -33,6 +33,83 @@ IDENTITY_FIELDS = ("run_id", "attempt_id", "input_fingerprint", "stage", "role",
 class ReceiptFormatError(ExtractError):
     """Proposal shape, required judgments or evidence selection needs model resubmission."""
 
+    def __init__(self, diagnostics, *, unchecked=(), omitted=0):
+        entries = [diagnostics] if isinstance(diagnostics, str) else list(diagnostics)
+        self.diagnostics = entries
+        self.unchecked = list(unchecked)
+        self.omitted = omitted + max(0, len(entries) - 12)
+        shown = entries[:12]
+        shortened = sum(max(0, len(entry) - 600) for entry in shown)
+        text = "\n".join(entry[:600] for entry in shown)
+        if self.omitted or shortened:
+            text += f"\n[omitted {self.omitted} diagnostics; truncated {shortened} diagnostic characters]"
+        if self.unchecked:
+            text += "\n[not checked: " + ", ".join(self.unchecked) + "]"
+        super().__init__(text)
+
+
+HANDOFF_STAGES = frozenset({"P2", "P3", "P4"})
+HANDOFF_CHARACTERS = 1200
+HANDOFF_LINES = 20
+
+
+def handoff_requirement(attempt: dict) -> dict:
+    applies = attempt["stage"] in HANDOFF_STAGES
+    return {"decision": "approve", "required": applies,
+            "max_characters": HANDOFF_CHARACTERS if applies else None,
+            "max_nonempty_lines": HANDOFF_LINES if applies else None,
+            "description": (f"For {attempt['stage']} approve, handoff must be nonempty, at most "
+                            f"{HANDOFF_CHARACTERS} Unicode characters and {HANDOFF_LINES} nonempty lines."
+                            if applies else "No approval handoff limit applies at this stage; keep necessary handoff concise.")}
+
+
+def required_source_evidence(attempt: dict, bindings: dict) -> dict:
+    """Project the gate's current categories and allowed entry locators."""
+    result = {}
+    for category in STAGES[attempt["stage"]]["evidence"]:
+        entry = bindings["entrypoint" if category == "implementation" else category]
+        result[category] = [dict(locator) for locator in (entry if isinstance(entry, list) else [entry])]
+    return result
+
+
+def _record_diagnostics(value: dict, lock: dict, attempt: dict) -> list[str]:
+    """Independent obligations after structural validation, without file reads."""
+    errors = []
+    if value["decision"] in {"complete", "approve"}:
+        categories = {entry["category"] for entry in value["source_evidence"]}
+        required = required_source_evidence(attempt, lock["source"]["bindings"])
+        missing = set(required) - categories
+        if missing:
+            errors.append("source_evidence: missing source evidence categories: " + ", ".join(sorted(missing)))
+        for category, locators in required.items():
+            if category in missing:
+                continue
+            if not any(item["category"] == category and item["path"] in {entry["path"] for entry in locators}
+                       for item in value["source_evidence"]):
+                errors.append(f"source_evidence: missing bound {category} entry anchor; allowed locators: {locators}")
+    count = len(value["source_evidence"])
+    for key in ("conclusions", "issues", "framework_candidates", "comparisons"):
+        for index, item in enumerate(value.get(key, [])):
+            for position, selected in enumerate(item["evidence"]):
+                if not 0 <= selected < count:
+                    errors.append(f"{key}[{index}].evidence[{position}]: evidence index {selected} is outside "
+                                  f"source_evidence (count {count}; valid indices 0..{count - 1})")
+    request = value.get("reopen")
+    if request:
+        for position, selected in enumerate(request["evidence"]):
+            if not 0 <= selected < count:
+                errors.append(f"reopen.evidence[{position}]: evidence index {selected} is outside "
+                              f"source_evidence (count {count}; valid indices 0..{count - 1})")
+    obligation = handoff_requirement(attempt)
+    if obligation["required"] and value["decision"] == obligation["decision"]:
+        handoff = value["handoff"]
+        lines = len([line for line in handoff.splitlines() if line.strip()])
+        if not handoff.strip() or len(handoff) > HANDOFF_CHARACTERS or lines > HANDOFF_LINES:
+            errors.append(f"handoff: approval needs a short nonempty handoff (<={HANDOFF_CHARACTERS} characters, "
+                          f"<={HANDOFF_LINES} nonempty lines); "
+                          f"actual {len(handoff)} Unicode characters, {lines} nonempty lines")
+    return errors
+
 
 def call_identity(attempt: dict) -> dict:
     return {key: attempt[key] for key in (*IDENTITY_FIELDS,
@@ -91,7 +168,7 @@ def receipt_schema(attempt: dict) -> dict:
         "issues": {"type": "array", "items": obj({"kind": TEXT, "scope": TEXT, "detail": TEXT,
                                                    "recovery_condition": TEXT, "evidence": INDICES})},
         "framework_candidates": {"type": "array", "items": obj({"id": TEXT, "scope": TEXT, "summary": TEXT, "evidence": INDICES})},
-        "handoff": TEXT,
+        "handoff": {**TEXT, "description": handoff_requirement(attempt)["description"]},
     }
     if attempt["role"] == "reviewer":
         manifests = [attempt["dependency_digests"], *(item["files"] for item in attempt.get("adjudication_candidates", []))]
@@ -177,7 +254,7 @@ def _artifact_baseline(value: dict, attempt: dict) -> dict:
         candidates = {entry["checkpoint"]: entry for entry in attempt["adjudication_candidates"]}
         chosen = candidates.get(value["adjudication"]["checkpoint"])
         if not chosen:
-            raise ExtractError("selection must name an actually provided canonical candidate")
+            raise ReceiptFormatError("adjudication.checkpoint: selection must name an actually provided canonical candidate")
         fixed = chosen["files"]
     return fixed
 
@@ -193,6 +270,7 @@ def normalize_response(value: dict, lock: dict, attempt: dict, artifacts: Path) 
     if attempt["role"] == "reviewer" and changed:
         raise ExtractError("reviewer proposal differs from its read-only checkpoint bytes")
     submitted = {attempt["node"] + ".yaml": files[attempt["node"] + ".yaml"]} if attempt["stage"] == "P5" else files
+    errors = []
     def anchors(key, root, hashes):
         result = []
         for index, selection in enumerate(value[key]):
@@ -204,48 +282,72 @@ def normalize_response(value: dict, lock: dict, attempt: dict, artifacts: Path) 
                 anchor = read_evidence(root, path, selection["line_start"], selection["line_end"],
                                        quote_offset=selection["quote_offset"], expected_sha256=hashes[path])
             except EvidenceSelectionError as exc:
-                raise ReceiptFormatError(f"{location}: {exc}") from exc
+                errors.append(f"{location}: {exc}")
+                continue
             except (OSError, ValueError) as exc:
                 raise ExtractError(f"{location}: {exc}") from exc
             if key == "source_evidence":
                 anchor.update(source_id=lock["source"]["id"], category=selection["category"])
             result.append({**anchor, "note": selection["note"]})
         return result
+    source_anchors = anchors("source_evidence", source_root(lock), lock["source"]["files"])
+    artifact_anchors = anchors("artifact_evidence", artifacts, files)
+    if errors:
+        errors.extend(_record_diagnostics(value, lock, attempt))
+        raise ReceiptFormatError(errors, unchecked=("dependent semantic judgments and stage checks",))
     return {**{key: item for key, item in value.items() if key != "attempt_id"},
             "format": "schema_extract.receipt.v2", "identity": call_identity(attempt),
             "artifacts": [{"path": path, "sha256": checksum} for path, checksum in sorted(submitted.items())],
             "changed_files": changed,
-            "source_evidence": anchors("source_evidence", source_root(lock), lock["source"]["files"]),
-            "artifact_evidence": anchors("artifact_evidence", artifacts, files)}
+            "source_evidence": source_anchors, "artifact_evidence": artifact_anchors}
 
 
-def validate_shape(value, schema: dict, location="receipt") -> None:
+def validate_shape(value, schema: dict, location="receipt", *, _errors=None) -> None:
+    errors = [] if _errors is None else _errors
+
+    def finish():
+        if _errors is None and errors:
+            raise ReceiptFormatError(errors, unchecked=("evidence file reads and dependent semantic checks",))
+
     kind = schema["type"]
     if isinstance(kind, list):
         if value is None and "null" in kind:
             return
         kind = next(option for option in kind if option != "null")
     if kind == "object":
-        if not isinstance(value, dict) or not set(schema["required"]) <= set(value) <= set(schema["properties"]):
-            raise ReceiptFormatError(f"{location}: wrong fields")
+        if not isinstance(value, dict):
+            errors.append(f"{location}: expected object")
+            finish()
+            return
+        missing, extra = set(schema["required"]) - set(value), set(value) - set(schema["properties"])
+        if missing or extra:
+            errors.append(f"{location}: wrong fields; missing={sorted(missing)}, unexpected={sorted(extra)}")
         for key in value:
-            validate_shape(value[key], schema["properties"][key], f"{location}.{key}")
+            if key in schema["properties"]:
+                validate_shape(value[key], schema["properties"][key], f"{location}.{key}", _errors=errors)
     elif kind == "array":
         if not isinstance(value, list):
-            raise ReceiptFormatError(f"{location}: expected list")
+            errors.append(f"{location}: expected list")
+            finish()
+            return
         for i, item in enumerate(value):
-            validate_shape(item, schema["items"], f"{location}[{i}]")
+            validate_shape(item, schema["items"], f"{location}[{i}]", _errors=errors)
         if "minItems" in schema and len(value) < schema["minItems"] or "maxItems" in schema and len(value) > schema["maxItems"]:
-            raise ReceiptFormatError(f"{location}: wrong number of items")
+            errors.append(f"{location}: wrong number of items ({len(value)})")
     elif kind == "integer":
         if type(value) is not int:
-            raise ReceiptFormatError(f"{location}: expected integer")
+            errors.append(f"{location}: expected integer")
+            finish()
+            return
     elif kind == "string" and not isinstance(value, str):
-        raise ReceiptFormatError(f"{location}: expected string")
+        errors.append(f"{location}: expected string")
+        finish()
+        return
     if "enum" in schema and value not in schema["enum"]:
-        raise ExtractError(f"{location}: value does not match call identity or allowed values")
+        errors.append(f"{location}: value does not match call identity or allowed values")
     if "minimum" in schema and value < schema["minimum"]:
-        raise ReceiptFormatError(f"{location}: below minimum")
+        errors.append(f"{location}: below minimum {schema['minimum']}")
+    finish()
 
 
 def _anchor(evidence: dict, directory: Path, hashes: dict) -> None:
@@ -261,7 +363,7 @@ def _anchor(evidence: dict, directory: Path, hashes: dict) -> None:
         raise ExtractError(f"evidence is not UTF-8: {name}") from exc
     first, last, quote = evidence["line_start"], evidence["line_end"], evidence["quote"]
     if not 1 <= first <= last <= len(lines):
-        raise ExtractError(f"invalid evidence range (file has {len(lines)} lines): {name}:{first}-{last}")
+        raise ReceiptFormatError(f"invalid evidence range (file has {len(lines)} lines): {name}:{first}-{last}")
     if not quote.strip() or len(quote) > 320:
         raise ExtractError(f"evidence quote does not match cited lines or exceeds 320 characters: {name}:{first}-{last}")
     if quote not in "\n".join(lines[first - 1:last]):
@@ -378,32 +480,27 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
     if len(declared) != len(value["artifacts"]) or declared != submitted_files:
         raise ExtractError("receipt artifact digests differ from actual contents")
     source = lock["source"]
-    bindings = source["bindings"]
-    for evidence in value["source_evidence"]:
+    errors = _record_diagnostics(value, lock, attempt)
+    for index, evidence in enumerate(value["source_evidence"]):
         if evidence["source_id"] != source["id"]:
             raise ExtractError("evidence source version mismatch")
         # A role may follow calls into helpers in the frozen tree. Completion also
         # anchors each required role's bound entry below, without relabeling helpers.
-        _anchor(evidence, source_root(lock), source["files"])
-    for evidence in value["artifact_evidence"]:
-        _anchor(evidence, artifacts, files)
-    for item in [*value["conclusions"], *value["issues"], *value["framework_candidates"]]:
-        if any(index < 0 or index >= len(value["source_evidence"]) for index in item["evidence"]):
-            raise ReceiptFormatError("conclusion/issue evidence index is outside source_evidence")
+        try:
+            _anchor(evidence, source_root(lock), source["files"])
+        except ReceiptFormatError as exc:
+            errors.append(f"source_evidence[{index}]: {exc}")
+    for index, evidence in enumerate(value["artifact_evidence"]):
+        try:
+            _anchor(evidence, artifacts, files)
+        except ReceiptFormatError as exc:
+            errors.append(f"artifact_evidence[{index}]: {exc}")
+    if errors:
+        raise ReceiptFormatError(errors, unchecked=("dependent semantic judgments and stage checks",))
     final = value["decision"] in {"complete", "approve"}
     if final:
         if resolution and resolution.get("diagnostic"):
             raise ExtractError("completion requires valid actual Design sources: " + resolution["diagnostic"])
-        categories = {entry["category"] for entry in value["source_evidence"]}
-        required = set(STAGES[attempt["stage"]]["evidence"])
-        if not required <= categories:
-            raise ReceiptFormatError("missing source evidence categories: " + ", ".join(sorted(required - categories)))
-        for category in required:
-            key = "entrypoint" if category == "implementation" else category
-            locators = bindings[key] if isinstance(bindings[key], list) else [bindings[key]]
-            if not any(item["category"] == category and item["path"] in {entry["path"] for entry in locators}
-                       for item in value["source_evidence"]):
-                raise ReceiptFormatError(f"missing bound {category} entry anchor")
         artifact_subjects = set()
         if attempt["role"] == "reviewer":
             required_files = required_artifact_evidence(state, attempt, files, resolution=resolution)
@@ -458,10 +555,6 @@ def validate_receipt(value: dict, state: dict, lock: dict, attempt: dict,
         raise ExtractError("only a reopen decision may carry an upstream request")
     if not value["checks"] and not value["checks_note"].strip():
         raise ReceiptFormatError("explain why no check command was run")
-    if value["decision"] == "approve" and attempt["stage"] in {"P2", "P3", "P4"}:
-        handoff = value["handoff"]
-        if not handoff.strip() or len(handoff) > 1200 or len([line for line in handoff.splitlines() if line.strip()]) > 20:
-            raise ReceiptFormatError("approval needs a short handoff (<=1200 characters, <=20 nonempty lines)")
     if attempt["stage"] in {"P2", "P4"} and final:
         selected = state.get("selected_designs") if attempt["stage"] == "P4" else None
         signature = validate_plan(attempt["stage"], value["plan"], parser_root=parser_root, selected_designs=selected)
