@@ -1,0 +1,148 @@
+{
+  "artifact_files": [
+    "dispatch.md",
+    "root.yaml",
+    "simt_warp_row.yaml",
+    "split_k_reduce.yaml",
+    "umma_single_cta.yaml",
+    "weight_band_mma.yaml"
+  ],
+  "attempt_id": "2ec6e8ac-f534-4c44-8e19-7a87aa84a390",
+  "baseline": "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/runs/2b64ba84-64b3-4d10-86fe-65c351ce571c/attempts/2ec6e8ac-f534-4c44-8e19-7a87aa84a390/materials/baseline",
+  "baseline_materials": null,
+  "checked_nodes": [
+    "root",
+    "simt_warp_row",
+    "umma_single_cta",
+    "weight_band_mma"
+  ],
+  "first_draft": false,
+  "format": "schema_extract.stage_check.v1",
+  "maintenance_fields": null,
+  "node": "split_k_reduce",
+  "node_entry": {
+    "id": "split_k_reduce",
+    "instance": "ws10sk::w4a16_ws10sk_kernel<<<tiles10*sk, 320, 229504>>>(tmapA(bf16), tmapB(uint8), s_ptr, (float*)g_sk, M, N, K, group_m=8, sk) + ws10sk::sk_reduce_kernel<<<ceil(M*N/4/256), 256, PSS>>>(g_sk, c_ptr, alpha_ptr, M*N/4, sk) — cfg144，sk=sk_pick>=2（域内 Ta∈{20,32,96}，K=2560 只能取 2）"
+  },
+  "revision_scope": [],
+  "role": "reviewer",
+  "rules_root": "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/ceeaf4c407486fd07fa600ec68c2d84193343d1b6cd7fb58f1cacc0e2e2ecd7f/rules",
+  "selected_designs": [
+    {
+      "id": "root",
+      "instance": "kernels.cu::w4a16_kernel<<<ceil(M/128)*(N/64), 256, SMEM_BYTES=66816>>>(a_ptr, b_ptr, s_ptr, alpha_ptr, c_ptr, M, N, K) — launch_mm 的最终 else 与 cfg1；固定选择 BM=128/BN=64/BK=64/STAGES=3/THREADS=256/GROUP_M=8，单缓冲 BDQ + 256 项 nibble LUT"
+    },
+    {
+      "id": "umma_single_cta",
+      "instance": "ws10::w4a16_ws10_kernel<<<tiles10=ceil(M/128)*(N/128), 320, 229504>>>(tmapA(bf16,SW128,64x128), tmapB(uint8,SW_NONE,32x128), s_ptr, alpha_ptr, c_ptr, M, N, K, group_m=8, st8=1) — cfg28；BM/BN/BK=128、A_STAGES=4、BDQ_STAGES=2、tcgen05 cta_group::1、TMEM 128 列"
+    },
+    {
+      "id": "pair_two_pass",
+      "instance": "ws50b::deq_pass2_kernel<<<ceil(N*(K/16)/2/256), 256>>>(b_ptr, s_ptr, (__nv_bfloat16*)g_ws50b, N*(K/16)/2, K/16, trig=0) + ws50b::w4a16_ws50b_kernel<<<2*min(pairs13, sm_count()/2), 320, 196784, cluster=2, PSS>>>(tmapA(bf16), tmapB(g_ws50b,SW128), alpha_ptr, c_ptr, M, N, K, group_m=(m_pairs>=10?16:8)) — cfg119；BMp/BNp/BK=256/512/64、RING=4、TMEM 512 列"
+    },
+    {
+      "id": "pair_stream_k",
+      "instance": "ws50sk::deq_pass_kernel<<<ceil(N*(K/16)/256), 256>>>(b_ptr, s_ptr, (__nv_bfloat16*)g_ws75b, N*(K/16), K/16, trig=0) + ws50sk::w4a16_ws50sk_kernel<<<2*min(pairs13, sm_count()/2), 320, 196784, cluster=2>>>(tmapA, tmapB(g_ws75b), alpha_ptr, c_ptr, (__half*)g_sk75, (unsigned*)(g_sk75+sk75_part), M, N, K, group_m=8) — cfg176；SegPlan 段序列 + head/tail f16 部分结果与 FLG 标志页，无 PSS"
+    },
+    {
+      "id": "split_k_reduce",
+      "instance": "ws10sk::w4a16_ws10sk_kernel<<<tiles10*sk, 320, 229504>>>(tmapA(bf16), tmapB(uint8), s_ptr, (float*)g_sk, M, N, K, group_m=8, sk) + ws10sk::sk_reduce_kernel<<<ceil(M*N/4/256), 256, PSS>>>(g_sk, c_ptr, alpha_ptr, M*N/4, sk) — cfg144，sk=sk_pick>=2（域内 Ta∈{20,32,96}，K=2560 只能取 2）"
+    },
+    {
+      "id": "weight_band_mma",
+      "instance": "smv9::w4a16_smv9_kernel<16,0,0><<<N/32, 288, Cfg<16>::SMEM_BYTES>>>(tmapW(uint8,SW128,128x32), tmapSF(uint8,SW_NONE,16x32), tmapA(a_ptr bf16,SW128,64xmpad), alpha_ptr, c_ptr, M, N, K, mpad=min(M,16)) — cfg192；BNw=32、BK=256、W_RINGS=8、A_RINGS=4、__launch_bounds__(288,2)"
+    },
+    {
+      "id": "simt_warp_row",
+      "instance": "gv::gv_kernel<1,NB><<<ceil(N/8), 256, 0>>>(a_ptr, b_ptr, s_ptr, alpha_ptr, c_ptr, M, N) — cfg170，NB=K/512∈{5,8,24}、AP=0；无动态 smem、无张量核心"
+    }
+  ],
+  "source": {
+    "bindings": {
+      "acceptance": [
+        {
+          "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/CERTIFIED_BEST.json",
+          "symbol": ""
+        }
+      ],
+      "directory": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm",
+      "entrypoint": {
+        "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/solution.py",
+        "symbol": "Model.forward"
+      },
+      "host": {
+        "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/solution.py",
+        "symbol": "Model.forward"
+      },
+      "id": "bf16_nvfp4_gemm",
+      "input": {
+        "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/input.py",
+        "symbol": "_make_inputs"
+      },
+      "io": [
+        {
+          "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/metadata.json",
+          "symbol": ""
+        }
+      ],
+      "reference": {
+        "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/reference.py",
+        "symbol": "Model.forward"
+      },
+      "scope": [
+        {
+          "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/shape_range.json",
+          "symbol": ""
+        },
+        {
+          "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/shape_cases.json",
+          "symbol": ""
+        }
+      ],
+      "selection": {
+        "catalog": "kernel_wiki/catalog.json",
+        "id": "bf16_nvfp4_gemm",
+        "kind": "catalog"
+      }
+    },
+    "files": {
+      "kernel_wiki/EVIDENCE.md": "7a02597d740c16c1771b059fc049f54e3df57375581e3700b59b8f1d55653013",
+      "kernel_wiki/README.md": "89ab7f14195eac665002878d7fdc1cc97727be17af896421960ddfb8b768435c",
+      "kernel_wiki/aka-cuda-operators-20261030/CONVENTIONS.md": "365d03d91cb0a79beeab71860e0a63fb667886522fe3a40b9adf335ce4501e55",
+      "kernel_wiki/aka-cuda-operators-20261030/PROBLEM_NOTES.md": "e2b4cbc7cf8467e4c4ca0e05b72125d3b7802a67a4cfe2a3354adcd2e149b814",
+      "kernel_wiki/aka-cuda-operators-20261030/README.md": "89bc80211f70ca4a3560c91824db1405ab64e6eeeac69d0b28b4ed03789ac973",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/README.md": "3c50eabb2fcaa0d6cce374597cc4c7ed1ee1e6db9406187c1ad71419d97ed107",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu": "a69dd11441b91597ec041fa9200c67643f0090032b280e77c8c0b79365e00c8a",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/solution.py": "2b1e09118db1a442a02f659eb1c4a01cfdcf38eb4c4fd4c3c43f7644efeedcbd",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/CERTIFIED_BEST.json": "5021259dc715376e7e26debf923d90353a1f3a01c041bc289f311091640a6227",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/SELECTION.json": "bc29019a670ce19d8e4bee89bac8cdb5eea69d0fd4b9992e2499c3f24bb60015",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/SUMMARY.json": "1fdd9fd29084248ca5bd0a4a52730910645faafab5a0e8b79f7311ed10b77819",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/ncu/0.csv": "d0def36aea9490dce440c81e7dd4616e9f5c96eb63175397fb6f32498353e9fa",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/ncu/1.csv": "90d06680c339016388f782a96757cc8d33d3db7c5259f1035956a45c4d720abe",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/ncu/2.csv": "b8235631c4ec934d60bcdae4cdf13a14c1a1ba33bce0d45c9ba6032d7486f9fa",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/ncu/3.csv": "45955eaadbd636c808f661728eae18d44e4c47bbd4de0a1660410a1fd9f8ac02",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/ncu/4.csv": "98960383ff86393b2b8bae19f40a2c6e9a9ddebe35c43c5bc0a3ad8828875e3b",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/ncu/5.csv": "879886c20d5f80209c5352eb2f6f0f6d98a218f8807b854df8584308935cf5df",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/ncu/6.csv": "e3069d2ede49ee130ddfae063f6ccff89f0d87616264fea8bc7ff18b85955fc4",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/ncu/7.csv": "5315b3b543c0917bc188234a50d6179b5ce60486ad7f932af4eecac63dc67521",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/ncu/8.csv": "2b693be9abb038bdcdc66b45c3e698b956b726158705b9ce0aec526a401b1be0",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/ncu/9.csv": "2fd962002e7b42a80fcc39b1c58f8d6abdd49a8ebbf9e413dff2b361659701c2",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/ncu/result.json": "e7b56cc14e6d884dedde2826f84584d758358e41536d644e824f012f541e4c0d",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/performance/shapes.csv": "090d06a93af321aed6a26ab96f8d6c8781e38b2cb30a1f656ed5a31852013777",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/input.py": "58a158c338bb3e18e66af2ca4f81b2bbe771b312014d5f0af6a6128580cd9691",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/metadata.json": "cf4dad065f7b9d2904aec7792432b76acf4732aac2ab1e101042f9b78c2da721",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/reference.py": "d02118af40a0287a963e9f45cf213e17f835025ecf59ee9bcf36212c5a3d6925",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/roofline.json": "e6660dbaf1399a5cba843b18e338e5674f881b5a524fa0108501bc6971df4d4c",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/shape_cases.json": "36c95817872e4a20c3f7b03fecf0e65d8c8807e30793a33e0f3bdfb6fd95a9c0",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/shape_range.json": "e0029d6cc31ce1d46abf1c31e4ad7297003ace9d76c4fbd7c351c48dbf34b331",
+      "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/solution.py": "7cac924ec5e10b4e349269e34f41be3fc530253a830a3694ee794f08a2ee308f",
+      "kernel_wiki/catalog.json": "1d636b97a6efad05af0dc854a54929d150c937b7bc8abc7e71d6a8e3eba00941"
+    },
+    "id": "106ab6c49ac4522ebcdef786d57a14027efe85b16fbb079e4a31e676d330e692",
+    "ref": "484902855fe7be82a74fe7c394503d1d7d222dbb",
+    "repository_id": "KernelSchema"
+  },
+  "source_root": "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/snapshots/ceeaf4c407486fd07fa600ec68c2d84193343d1b6cd7fb58f1cacc0e2e2ecd7f/source",
+  "stage": "P5",
+  "workspace": "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/runs/2b64ba84-64b3-4d10-86fe-65c351ce571c/attempts/2ec6e8ac-f534-4c44-8e19-7a87aa84a390/workspace"
+}

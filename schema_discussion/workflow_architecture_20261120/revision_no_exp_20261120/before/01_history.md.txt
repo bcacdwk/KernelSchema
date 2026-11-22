@@ -1,0 +1,187 @@
+# 过程及决策历史
+
+## 2026-11-20 / H001：启动调研
+
+- 用户要求先研究与初步大纲，再由用户作关键判断，之后撰写完整计划。
+- 主代理确认采用三轮六位 max 子代理、随后一位 xhigh 整合的首阶段安排；每轮最多两个子代理。
+- 已阅读 KernelSchema 与 AKA_experiment 的 AGENTS.md；二者要求主代理担当 supervisor，复杂工作交由子代理，等待主动回报。用户本次明确指定的 max/xhigh 优先于文件中默认 high。
+- 发现 KernelSchema 已有未提交变更，纳入工作区保护；当前仅在本讨论目录写入研究材料。
+- 尚无用户批准的架构选择；不把 submodule、独立 implement 后端或循环触发策略视为最终决定。
+
+后续条目只追加事实、交接和决策；如果某项建议被替代，保留原历史并标明原因。
+
+## 2026-11-20 / H002：第一轮启动与版本基线
+
+- 启动 `r1_schema_inventory` 与 `r1_aka_inventory`，均为全新上下文、`gpt-6-astra` / `max`。
+- 两位分别核实 KernelSchema 当前可运行能力，以及上游 AKA 与实验仓库的生命周期和扩展点。
+- 三仓 HEAD、分支及工作区摘要保存在 `baseline.json`。AKA_experiment 初始状态为 76 个修改、4767 个删除、84 项 untracked；这不是本任务产生的变更，不能假设其为干净稳定基线。
+- 已把实验仓工作树与 HEAD 的区别作为第一轮必要调查项交接。
+
+## 2026-11-20 / H003：第一轮中间发现（待最终报告补齐证据）
+
+- Schema 调研确认：design/optimize/implement 的当前入口是角色流程文档；Template 已有来源、有效视图与身份相关工具，值得复用。`dispatch.md` 不是可执行路由，`REALIZATION.Feedback` 也不是通用实现报告。
+- AKA 调研确认：AKA_experiment 的 `assets/aka` 是 vendored 上游代码加本地 overlay，并非 submodule；其当前 schema 适配主要是给 Claude coder 注入固定 schema 材料，不含 design/optimize planner。
+- 第二轮必须据此分别讨论静态 schema 实现与动态 revision 生命周期，而非假设现有开关已经承载两者。
+- 以上是子代理主动提供的中间结论，细节、适用范围和路径证据以第一轮最终报告为准。
+
+## 2026-11-20 / H004：后续方案必须处理的现状差异
+
+- 实验仓当前注入还依赖 vendored AKA 的本地核心补丁（角色、上下文投递及会话相关字段）；上游扩展点是否足够，需要按实际版本判断。
+- AKA 的源码晋升与 schema 的实现完成是两个问题：新 episode 默认承接晋升后的 incumbent，同 episode 的会话继续或中断恢复不能直接替代跨 episode 的未完成实现延续。
+- schema 来源可能是 Runner 提取、人工审修、手工设计等；不能要求每个输入都持有 extract 的 P6 receipt。
+- 据此设定第二轮审查重点：独立功能入口与复用边界、源码/设计/评测绑定、未完成实现延续、关闭 schema 的行为保持。此处是调查议题，不是最终接口设计。
+
+## 2026-11-20 / H005：第一轮完成，第二轮架构研究启动
+
+- 第一轮正式报告：`research/r1_schema_inventory.md` 与 `research/r1_aka_inventory.md`。二者均保留事实证据、实际验证与未验证边界。
+- Schema 报告核实现有 Template 只读工具可运行，九份案例检查通过；未重演模型/GPU 流程。Wiki 有同时进行的既有提取交付，数字以观察时刻为准，不将其视为本任务产物。
+- AKA 报告指出 experiment 的官方 vendor verify 当前被既有缓存拒绝，并有两项未登记源码差异；未做清理，也不将辅助源码比对称为官方验证通过。
+- 第二轮启动 `r2_standalone_contracts` 和 `r2_aka_lifecycle`，均为新上下文、`gpt-6-astra` / `max`。
+- 前者比较自有薄 implement、AKA 外部后端和分期双后端，研究四流程的公共边界；后者比较可选适配/有限接口、workflow provider 与外层 campaign 编排，研究多层迭代与恢复。
+- 两位均被要求保留备选及代价，不将初步建议写成已确认架构；用户关键方向决策仍在前三轮与整合之后。
+
+## 2026-11-20 / H006：第二轮新增的候选与证据
+
+- 独立能力研究区分「入口独立」和「运行依赖独立」：AKA 包装可以提供自有 CLI，但仍需 AKA；参考薄执行器与 AKA 后端共享中立契约是待比较候选，不是已经决定同时维护两套完整执行系统。
+- AKA 研究发现现有 `framework_baseline='never'`、`convert_after=0` 配置，以及 search_driver 驱动单次终端 episode 的调用模式。这可能减少对原生大循环的改动，需要最终报告和第三轮反例检查确认适用边界。
+- 即使复用单 episode 模式，固定设计 prompt、partial source 起点、schema/source/evaluation 的绑定与符合性审查仍不是现成功能；不能以配置开关代替这些必要工作。
+
+## 2026-11-20 / H007：第二轮完成，第三轮交叉审查启动
+
+- 第二轮报告已落盘：`research/r2_standalone_contracts.md` 与 `research/r2_aka_lifecycle.md`。
+- 独立能力报告推荐「KS 中立交接契约 + 受限参考 implement + 可选 AKA 增强后端」；AKA 报告推荐「可选 Workflow provider + 同一 native Campaign 的单 episode 驱动 + 少数显式接点」。均为候选，未获用户确认。
+- 二者在首条交付顺序上侧重不同：前者偏向小任务 design→standalone implement 的公开价值；后者主张先验证固定 schema 跨 episode 续写与正确但更慢的结果返回。
+- AKA 报告新增原样代码验证问题：原生 single-file candidate 可拒绝无源码变化的提交，已有实现的验证不应伪造代码变更；独立 verify 路径的必要范围交第三轮审查。
+- 第三轮启动 `r3_delivery_evaluation` 与 `r3_architecture_challenge`，均为新上下文、`gpt-6-astra` / `max`。
+- 前者从公开使用、三仓迁移和实验效度审查；后者以 partial、fidelity、源码/评测错绑、恢复、预算、off 等反例挑战候选，并检查是否引入不必要的框架复杂度。
+- 第三轮不是背书或最终计划撰写，必须指出需修改/删减的建议与技术验证失败时的退路。随后按约定由新的 xhigh 子代理整合初步大纲。
+
+## 2026-11-20 / H008：第三轮完成，保留与修正的结论
+
+- 第三轮报告：`research/r3_delivery_evaluation.md` 与 `research/r3_architecture_challenge.md`。已完成用户要求的三轮六位 max 子代理研究。
+- 保留分期方向：KS 拥有真实但受限的独立能力，AKA 复用自身执行设施，EXP 消费固定版本并负责实验；不把双后端完整生命周期、通用 SDK 和复杂 fidelity 同时作为首期前置。
+- 调和顺序分歧：工程先固定 R 实现与续写；公开 demo 尽早加 design/一次 optimize；真实既有 Schema 的材料预审提前，复杂算子实际实现紧随；AKA 动态循环不阻塞独立 demo。
+- 关键修正：可选 provider 是职责/开关边界，单 episode 驱动是否比原 loop 的有限接点更轻尚未验证；原限额参数不能直接拼出可靠单步语义。
+- 关键反例：seed 安装存在 exploring 已落盘、导入未完成的崩溃窗口；public-candidate 编码不等于可直接导入的 source；framework_baseline=never 会跳过 V1 的其他职责；晋升恢复需要已持久的 fidelity 证据。
+- 原生 production 恢复前置可能重跑 reviewer，必须与新增 fidelity 去重及真实新增用量分别处理。canonical Git HEAD 可因未晋升版本事实推进，不能把 Git revision 等同 incumbent 源码变化。
+- 实验需区分原码复验、基于原码续改与仅按 Schema 重建；记录设计/执行/审核/提取成本及资料可见性，避免把 toy 或旧静态材料适配当动态 Schema 收益证据。
+- 下一步：新的 xhigh 子代理整合有证据的初步大纲；主代理向用户汇报少数产品选择。用户判断前不启动两轮最终计划撰写。
+
+## 2026-11-20 / H009：初步大纲完成，进入用户方向判断
+
+- 新上下文的 `initial_outline_synthesis`（`gpt-6-astra` / `xhigh`）已完成 `02_initial_outline.md`；主代理审阅并补充未来根 README 应说明独立功能与长期循环的交付目标。
+- 主代理整理 `03_decision_questions.md`：D1 独立 implement 承诺，D2 首发案例与推进顺序，D3 planner 接管时机。均为待答，没有把推荐记为批准。
+- 初纲区分工程切片、公开 demo 和科研收益证据；保留 R3 对候选驱动、导入事务和恢复审核的修正，也给出验证失败时的退路。
+- 本阶段交付为六份 max 调研、一个 xhigh 初纲、用户需求归纳、基线、过程历史、入口索引和决策页；只在本讨论目录写入文档/基线。
+- 完整落地计划尚未撰写，代码实现未启动。用户方向判断后，依原约定进行两轮新的 max 计划撰写，再由新的 xhigh 整合最终计划。
+- 文档收尾核对：11 份 Markdown、6 份研究报告、30 个本地链接目标均可定位，baseline.json 可解析；未将文档检查称为实现或 GPU 验收。
+
+## 2026-11-20 / H010：用户确认 D1–D3，启动决策后的计划阶段
+
+- 用户原话：“按推荐开始”。结合上一轮明确约定，该回复确认三个方向并启动落地计划撰写；不扩张为立即实施代码、启动 kernel 实验或操作远端。
+- D1 已确认：KS 保留无需 AKA 运行后端的受限真实 implement，AKA 提供增强后端。
+- D2 已确认：工程先固定 schema 实现与续写；公开 demo 尽早加入 design/一次 optimize；真实复杂题材料预审提前，实际实现随后跟进。
+- D3 已确认：同一 schema 可跨多个 coder episode；实现阶段完成或有证据的设计阻碍后才交 planner；不按每个 episode 自动改设计。
+- 主代理按原要求安排两轮全新 `gpt-6-astra` / `max` 子代理，每轮最多两位，然后由全新 `xhigh` 子代理整合完整计划；不重复询问已确认方向。
+- R4 分工：KS 的独立功能、共享契约、参考实现器及 demo；AKA 的可选适配、状态/恢复接点及三仓迁移。
+- R5 将基于 R4 交叉审查契约/状态可执行性，并补齐有限验收、实例支持面、公开交付和实验计划。只有完整计划文档是本阶段交付。
+
+## 2026-11-20 / H011：R4 启动与计划基线
+
+- 已启动全新 `r4_kernelschema_plan`、`r4_aka_integration_plan`，均为 `gpt-6-astra` / `max`，分别独占各自规划报告，不改实现。
+- 本阶段只读版本/工作区摘要保存到 `planning/baseline.json`。三仓 HEAD 与初始基线一致；KS、EXP 的既有工作树继续变化，不重用早先文件数量作为实时状态，也不进行清理。
+- 两份计划要求明确工作包 ID、前置、候选修改路径、实际交付、必要验证及失败退路；原生单 episode/V1/seed/fidelity 恢复等仍须通过适用的技术验证，不能因用户确认方向而被视为已经解决。
+
+## 2026-11-20 / H012：R4 首期支持面协调（技术默认，待 R5 复核）
+
+- 两位计划作者对齐首期默认：Claude CLI、Triton、单一 `kernel.py`、一个明确任务 evaluator。源文件清单可用于身份，但不由此自动承诺首期 helper 树或多文件格式。
+- 小 demo 候选为新增逐行 softmax，明确输入域、FP64 reference、误差公式、预分配输出及别名约束；现有复杂题先预审 FA4 decode 的原材料、栈及 root 子域，实际扩栈另列阶段。
+- Agate 优先做执行与完整 Task 验收的资格核对；不能把通用 correctness 当成比较器/副作用验收已满足。同 evaluator 的本地 GPU 路径需明确可用性，二者均不可用时不冒充实测通过，也不使独立能力强制依赖 AKA。
+- AKA 作者核实 Light 非 SOL 输入还受 native Atrex-Bench 条件约束。因此跨后端同一任务需明确适配包及逐项口径对照，不能把 KS 任意 harness 视为 Light 已支持输入。
+- 上述是按用户授权方向作出的技术默认与待验证选择，不是新的用户问卷，也不是运行结果；R5 会核查其前提和最小性。
+
+## 2026-11-20 / H013：R4 完成，R5 修订与验收计划启动
+
+- `planning/r4_kernelschema_plan.md` 已形成 KS-01～14；`planning/r4_aka_integration_plan.md` 已形成 AKA-01～12、MIG-01～06。这些是未实施工作包，并非完成清单。
+- 首期默认保持 Claude CLI/Triton/kernel.py；KS 小 demo 与 AKA native Atrex-Bench Task 的映射需同一判据。H20 为资格候选，不是已确认可用服务。
+- R4 进一步指出 active/attempt 原子替换不自动拥有 fsync 持久性，计划须明确所承诺的中断恢复边界及凭据；未进行故障注入或运行验证。
+- 启动全新 `r5_contract_execution_review`、`r5_validation_delivery_plan`，均为 `gpt-6-astra` / `max`，各自独占报告，不改 R4 原稿。
+- R5 第一位统一最小 v1 契约、摘要/source 编码、verify-only 固定语义、最新/合格代码、预算与续接、工作包 DAG；第二位完善具体 Task、真实题预审、有限验收矩阵、公开发行与 EXP pilot。
+- 主代理明确要求审查不必要依赖：既有 extract 消费不应无故等新 planner；CPU 工程不应整体等真实 GPU 资格；独立 KS/AKA 固定后端发布不应整体等 EXP 迁移。
+- R5 需产出可采用的具体修正版和必要新增工作包，随后交全新 xhigh 整合一份当前有效完整计划；D1–D3 不重开。
+
+## 2026-11-20 / H014：R5 已收敛的修正（以正式报告为准）
+
+- v1 尚未实现，沿用 `ks.workflow.v1`，不人为制造 v2；`mode=code|verify_only` 纳入固定 implement 请求，verify-only 必须有非空准确 seed，不启动 coder 或新晋升。
+- 结果区分 `code.latest` 与 `code.qualified`，原生 G/promotion 另列；unknown 是检查状态，不新增含糊的顶层成功状态。
+- 依赖修正：KS-07 写作内核开发仅需公共接口/固定反馈 fixture，不等 KS-06 实测；KS-08 既有提取消费去掉 KS-07 前置；真实 demo 仍须具备对应完整证据。
+- AKA-11 和固定后端发布去掉 MIG-04 的 EXP 消费前置，保留自身安装/真实运行资格；EXP 迁移另过门槛。
+- 验收反例应符合实际 Task：在 [-20,20] 输入域省略 max-subtract 未必数值失败，若它违背 R0 则属于 fidelity 反例，不能编造必然溢出的数值论证。
+- 上述由两位 R5 代理主动回报并相互对齐；当前仍在撰写正式修正版与有限验收矩阵，没有实现或实测。
+
+## 2026-11-20 / H015：两轮计划稿完成，进入最终整合
+
+- R5 正式报告已完成：`planning/r5_contract_execution_review.md`（378 行）与 `planning/r5_validation_delivery_plan.md`（321 行）。至此已完成用户决策后两轮、四位全新 max 子代理的计划撰写与审查。
+- 公共合同确定采用规划版 `ks.workflow.v1`：精确字节/JSON 规范、固定 mode、latest/qualified、明确 source codec、opaque continuation、检查/结果四态、独立设计修订计数。
+- 公共预算 `active_ms` 包含已准入执行及等待，按账户活动区间并集计算，明确静止暂停才排除；AKA 原 active-time 保持原口径单独约束。终态评测与必要审核也计费并预留额度，试点数值仍是待实施资格后冻结的建议。
+- 补齐了三个公开能力目录的薄入口（`schema_design/`、`schema_optimize/`、`schema_implement/`），实际算法/运行逻辑仍集中于唯一 `kernelschema` 包，extract 原入口保持。
+- 验收计划细化 row-softmax Task（36 个输入 case、两种 out 初值）、R0 的承诺与自由度、FA4 首个子请求、V01–V15 有限检查、发行文件与 EXP-01/02；所有均为未来实施要求，未运行。
+- 下一步由全新 xhigh 子代理整合完整计划和工作包索引；主代理核对依赖、文档相互引用与状态，保留原 R4/R5 作为历史，不把分项草案当多份并行权威。
+
+## 2026-11-20 / H016：最终计划交付
+
+- 全新 `final_plan_synthesis`（`gpt-6-astra` / `xhigh`）已交付 `04_implementation_plan.md` 与 `05_work_packages.md`。按用户约定，决策后两轮四位 max 与最后一位 xhigh 的工作全部完成。
+- 当前有效实施依据为这两份文档及其明确采用的 R5 附录；R4 和初纲保留历史。34 包为 KS-01～14、AKA-01～12、MIG-01～06、EXP-01/02，全部标为未开始。
+- 最终补充约定：可复用产物首次发布即置于稳定 `artifacts/<publication_id>/`；跨请求导入完整不可变 artifacts 子树，保留引用路径和字节；同路径异内容或缺闭包整次拒绝，不改写旧回执。正例和拒绝 fixture 归入既有工作包与验收项。
+- 主代理核对了产品方向、公共字段、时间口径、独立发布与 EXP 消费分门、34 包前置及首批开工内容；补齐统一 artifacts 模块位置，并修正一处相对文件链接的行号形式。
+- 首批实施已定义为 KS-01 材料、KS-10 真实题预审、MIG-01 隔离基线→AKA-01 CPU 接缝验证；本轮仅交付计划，不开始这些包，不改原 Schema/提取产物或活动实验。
+- 收尾文档核对通过：17 份 Markdown、79 个本地链接目标、10 个 JSON 示例及两份基线 JSON；34 个 ID 唯一且齐全，正向与条件依赖合并图无环。此后仅补上初纲/决策页到已存在完整计划的导航，不改变合同或工作包。
+
+## 2026-11-20 / H017：用户要求追加四轮计划复审
+
+- 用户要求：一轮两个 max 查 bug/遗漏/不合理；一轮 high 做删减精简；一轮 xhigh 判断补得对不对、删得对不对；最后一轮新的 xhigh 正式修改，并给予代理充分信任。
+- 本轮采用 2 max → 1 high → 1 xhigh 裁决 → 1 xhigh 修改，均为新上下文 `gpt-6-astra`，最多同时两位。
+- 创建 `review_20261120/`，保存主计划、工作包、两份当前采用的 R5 附录及方向决定的精确字节快照和 SHA-256 清单；正式计划前几轮保持不改。
+- 已确认 D1–D3 保留；允许删减/合并实际工作包、收缩协议与过早设计，不固定保留 34 项。前两轮提意见，第三轮明确采纳/调整/拒绝，第四轮统一修改，主代理只负责衔接与一致性核对。
+- 当前授权仍为计划审查与修订，不执行代码实现、kernel 实验或三仓迁移。
+
+## 2026-11-20 / H018：双 max 审查完成，high 精简启动
+
+- `review_max_contract` 与 `review_max_execution` 已独立完成 `review_20261120/r1_contract_audit.md`、`r1_execution_audit.md`，分别列 C-01～06、E-01～04；其中 C-06/E-03 指向同一新设计 fidelity 交接缺口，不累计为两个独立缺陷。
+- 问题包括无首份 result 时的恢复入口、Q/run/预算重放域、两类 unknown、全部历史导入与公开复用、新目标/新设计判据交接，以及 out 存储身份、V0 与 coder seed 混用、性能选择偏差。问题性质与优先级以报告为准，尚未全部裁决采纳。
+- 两位未发现需推翻 D1–D3、换首题或增加全局硬依赖的理由；未把未执行的资格 spike 一概列为 bug。执行审查只做了一项选择偏差的离线有限枚举，未运行 kernel 实验。
+- 启动全新 `review_high_simplify`（`gpt-6-astra` / `high`），授权独立提出直接删除、合并和简化；不要求保留 34 包，也不设强制删减数量。正式计划继续保持原快照，后续由 xhigh 裁决再修改。
+
+## 2026-11-20 / H019：high 精简完成，进入 xhigh 独立裁决
+
+- `review_high_simplify` 已交付 `review_20261120/r2_simplification.md`，提出 S-01～11；包括删全部历史强制导入/全局去重承诺/重复脚本、收敛规范与验收归属、单 owner 预算、当前 Schema 相对审阅、简化 pilot 选择与移除无当前对象的长期工程包。
+- 给出 18 个交付单元合并草案，保留旧 34 包的去向；这是待裁决建议，不是已批准的新数量。必要的独立实现、准确续写、fidelity、三 audit、off、真实复杂预审均明确保留。
+- 启动全新 `review_xhigh_adjudicate`（`gpt-6-astra` / `xhigh`），逐项判断 C/E 问题与 S 建议的正确性、代价及相互影响，不按代理 effort 或先后自动背书。
+- 裁决轮负责给最后修改者清楚的最小补充、实际删项、权威文档位置与交付边界；正式文本继续保持审查前版本，尚未执行删改。
+
+## 2026-11-20 / H020：独立裁决完成，最后 xhigh 正式修改
+
+- `review_xhigh_adjudicate` 完成 `review_20261120/r3_adjudication.md`，逐项裁决 C/E/S，并新增 R3-J01 处理 change_report 与终态写作审阅的潜在哈希互指；没有启动新的服务或工作包。
+- 确定 17 个交付单元 K1–K8、A1–A7、X1–X2，取代旧 34 包；high 的 18 单元只是草案，独立 fork 来源包被合并到 A3，保留各接点代码的实际 owner。
+- 调整后的关键边界：三入口本地 run 恢复与外部 backend 私有定位、同 run 去重/同父累计、检查 unknown 与未结算区分、选定真实闭包与证据主体、当前 R 的有限审阅、out storage、V0/seed、可跨进程的单 owner 预算，以及描述性的末次登记合格候选选择。
+- 权威内容就地分为 P 主计划、W 交付索引、C 合同附录、V 验收附录；重复正文和被撤销义务实际删除，旧报告由 before 快照和本轮报告保留。
+- 启动全新 `review_xhigh_modify`（`gpt-6-astra` / `xhigh`）修改上述四文档并写逐项变更报告；主代理仅维护导航/历史和最终一致性。当前是用户要求的第四轮，仍不实施仓库代码或 kernel 实验。
+
+## 2026-11-20 / H021：四轮复审及计划修订完成
+
+- 最后 `review_xhigh_modify` 已实际改写 P/W/C/V 四份正文并交付 `review_20261120/r4_change_report.md`。四轮共五位新代理按 2 max→1 high→1 xhigh 裁决→1 xhigh 修改全部完成。
+- 原 34 包全部有去向，当前只保留 K1–K8、A1–A7、X1–X2 共 17 个交付单元，全部未开始。主计划/索引/合同/验收分别持有唯一规则；原 R5 路径沿用为当前规范，原稿保存在 before 快照。
+- 核心补漏落地：首份 result 前及外部 AKA 恢复锚点、Q/run/同父预算边界、两类 unknown、out 原 storage/view、V0 与 C0、当前 R 的有限 fidelity、当轮目标，以及无哈希互指的写作发布顺序。
+- 实际删并包括：全部无关历史的强制导入、公共恢复 token 门票/跨目录全局去重、三套脚本配置别名、重复规范/DAG/发行表、一般预算树义务、独立重复配对验收、wheel/例行更新/抽象扩栈包、最快观测挑选与额外预排实验。F1、必要 dispatch、准确源码、真实资格、三 audit、off 与旧 capture 边界保留。
+- 四份有效正文分别为 196→88、232→198、378→175、321→227 行，合计 1127→688 行；这是删并后的记录，不是预设目标。
+- 修改代理已离线核对 17 单元、38 子 gate/87 条含条件依赖无环、52 条本地链接、25 个裁决标识、旧 34 去向、V01–V15，以及 before/决定页/受保护文件摘要；未执行实现或 GPU 验证。
+- 主代理阅读变更报告与当前正文、核对主要修正落点后，仅更新导航和本历史，没有再叠加设计意见；首批为实施基线后 K1.materials、K7.materials、A1.cpu。
+- 主代理收尾核对：23 份 Markdown 的 125 条本地链接/锚点、3 个 JSON 示例（含准确 source 示例摘要）、17 单元/38 子 gate、25 个裁决标识、旧 34 去向、V01–V15 和 before/决定页完整性均通过。把直接前置及描述中的条件引用全部纳入得到 90 条保守依赖边，仍无环；AKA fixed 未被 KS 真实/配对/EXP 反向阻塞。检查脚本已适配验收表第一列“ID＋说明”的格式，此过程未修改规范内容。
+
+## 2026-11-20 / H022：补齐开发子代理的实际派工安排
+
+- 用户询问计划是否明确用哪些子代理、需要几轮，以及如何实施，并指定开发子代理默认 xhigh。
+- 主代理核实现行文档已有技术实现单元、改动区域、接口/CPU/真实资格依赖和验收，但 Owner 是模块责任，原代理轮次属于规划/审查，尚无完整开发派工表。
+- 在 05_work_packages.md 的“开发代理派工与实施批次”补齐本任务默认 `gpt-6-astra / xhigh`、最多两位同时工作、按有界新任务更换代理、唯一写入者和固定版本交接；产品运行时 Claude profile 的选择不因此被替换。
+- 给出覆盖现有17单元的12个基准批次：独立demo基准B06、独立审查交付B07，后续AKA/复杂题/EXP及最终检查；实际失败修复与真实环境资格可能改变批次，未将其当工期或固定完成保证。
+- 本轮没有重新启动规划审查代理，也未开始实现；只是把已有技术计划补成可派工的开发安排，未改变四流程合同/验收或D1–D3。

@@ -1,0 +1,1098 @@
+{
+  "artifact_evidence": [
+    {
+      "line_end": 19,
+      "line_start": 19,
+      "note": "问题锚点一：'边界与缺口'中'随包 ACCEPTANCE.json 只给出通过/超限列表与 kernel_count'。同句的 Tolerance source-only、用户例外收口、shape 0/1/3/9 超阈值、online-20261024 与 final-closeout 原始回执未随包、SM103 采样、nsm/smem_per_sm 为查询值等其余表述均核实为真。",
+      "path": "dispatch.md",
+      "quote_offset": 100
+    },
+    {
+      "line_end": 62,
+      "line_start": 62,
+      "note": "问题锚点二：扇出记录'条件与依据'末句'随包可用的只有 ACCEPTANCE.json 的 kernel_count 与通过/超限 shape 列表'。同段的 nest 来源限制（launch.cu:214-220、input.py:64、root nchunk 来自真实 N）与三级路径判定表述均核实为真。",
+      "path": "dispatch.md",
+      "quote_offset": 360
+    },
+    {
+      "line_end": 9,
+      "line_start": 9,
+      "note": "收录范围：2 份完整设计（root 现存 + tcgen05_tmem 仅计划）、四条正式记录以 root.yaml 已有对象为基线并覆盖三个 launch 分支与两组几何、五条 tcgen 内部差异定为记录计划、诊断绑定不收录、无未展开独立方案。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 11,
+      "line_start": 11,
+      "note": "记录计划单元框架：类型已定（4 局部 + 1 参数）、基线为 tcgen05_tmem.yaml（仅计划）、对象名与接口绑定待正文落实、升格路径明确、源码锚点不作链接。正式与计划内容清楚可辨。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 13,
+      "line_start": 13,
+      "note": "Heads=128 记录计划：非 WS mma、TMEM 448+64 列、tail[16] 寄存器（512×16=128×64）、N256+N192+N64 且 tail 谓词每 chunk 复位、SMEM<128>=217088、成立条件 H=128 且 BS*4>nsm、shape 0 可达性。逐项与源码核实一致。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 14,
+      "line_start": 14,
+      "note": "双 64 配对记录计划：grid=(BS,splits,nhb)、每 CTA 64 KB Q、head 索引绝对化、peer=bs*nhb+hb、一波预算换半 splits、成立与选择条件 BS*4<=nsm、实测 BS=3/8/12/32 快而 BS=48 慢。逐项核实一致。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 15,
+      "line_start": 15,
+      "note": "融合归并记录计划：已按 P2 指正明列三点联动（输出生产者、2*BS*nhb 计数器跨调用零初态、own partial 位置与寿命），归并算术与 root 逐项相同、局部判定依据、常驻保证 BS*nhb*splits<=nsm 且 SMEM*2>smem_per_sm。逐项核实一致。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 16,
+      "line_start": 16,
+      "note": "启动结构记录计划：两节点图 key 覆盖字段清单、lse=nullptr 主上下文、SetParams 补丁、录图时直接双 launch、'记录结构 vs 实际提交'的定向核实、benchmark 约定与 key 命中语义。逐项核实一致。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 17,
+      "line_start": 17,
+      "note": "cp.async Q 搬运记录计划（参数）：同一 bf16 字节入同一 SW64 布局、size predicate 填零、wait_group 0 替代 expect_tx、数值与 MMA 序列不变、descriptor 缓存键。逐项核实一致。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 25,
+      "line_start": 25,
+      "note": "完整设计表 root 行：实例、机制摘要（两次前缀和压缩、排列只差求和顺序、fp16 精确转换、单缓冲解码、ldmatrix+mma.sync、跨 4 token warp 行最大、寄存器累加器、identity partial、MAIN 从不写 out/lse）与保留理由（无条件 fallback、cfg32::schedule 无条件先算、无 TMEM/descriptor/TMA 前提、WIDE 被 tcgen 原样启动）。全部与源码核实一致，且 P3 交接要求（直写零/+inf 只留在 splits=1 记录）已落实。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 26,
+      "line_start": 26,
+      "note": "完整设计表 tcgen05_tmem 行（仅计划、纯文本无假链接）：实例、掩码式非压缩 gather、循环领取、单线程 MMA+TMEM、滞后规则、bf16 概率、fp16 staging、永远两段式输出、保留理由与'三区预计全本地、无 from 边'。逐项核实一致。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 30,
+      "line_start": 30,
+      "note": "写作安排的具体源码实例链：launch.cu:387→launch_heads<64>（733-737）→attention<64><<<(BS,splits,1),512,143360>>>+图记录的 plmn_combine_wide_hb32<<<ceil(batch*query*head/4),128>>>（682-709、726-731）。行号与 grid 公式核实无误。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 31,
+      "line_start": 31,
+      "note": "相对 root 的四项实质差异（TMEM 累加器+单线程发射+commit/parity、掩码式非压缩 gather 且 chunk 数恒 ceil(listn/64)、循环步进领取、永远两段式输出形成），均属主计算/输出形成/工作分配/主协作，独立保留完整设计的判据成立。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 32,
+      "line_start": 32,
+      "note": "三区预计全部本地定义的理由（bf16 vs fp16 操作数与行序口径、grid/领取/COMBINE 执行者、TMEM+mbarrier 存储与单线程发射）及'不冻结 P5 写法、可改用已审整区、引用与摘要在 P6 对齐'。符合阶段页对拟共享的约束。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 33,
+      "line_start": 33,
+      "note": "必要先后顺序：root 已是完整基线、wait_for 为空的依据，以及五条记录计划待正文命名后升格、由 P5 汇集 P6 集中落实的目录层顺序。顺序可成立、无相互等待。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 34,
+      "line_start": 34,
+      "note": "待落实位置：Dispatch.id/when（与查询值比较或保守子域）、三区、不继承的 REALIZATION/Arithmetic 四项（bf16 与混合对 trap、计数器零初态与常驻保证、ex2.approx.ftz.f32 未知界、staging 66560>65536 / 133120>131072 及溢出落在已完成末次 PV 读取的 K 区）。容量数字复算吻合。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 38,
+      "line_start": 38,
+      "note": "变体与组合说明行：四条正式记录按对象名而非行号定位、五条计划记录的去处与升格条件、设计成立条件/源码选择条件/实验覆盖三分且'精确参数与 when 以 YAML 为准'。分层表述正确。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 44,
+      "line_start": 42,
+      "note": "cfg64 记录（参数）基线：'Selected-row order and chunking'（压缩宽度 256）、MAIN 的 Partition.head_block/Mapping、Tile_pipeline 的 Member warp[0:8]/q_slot/p_slot/reduce_slot/compute:kd 与 Require 两条——全部在 root.yaml 中实际存在且名称一致。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 43,
+      "line_start": 43,
+      "note": "cfg64 联动数值：q_slot 33280→66560、p_slot 4608→9216、reduce 576→1088、k_slot 不变、Require 105024→143424、常驻 2→1、压缩宽度 256→512 使 per 2→1、行序由排列变一致，且'逐位相同'只在 budget<=NT 成立不得写进设计。全部由 SMEM 公式与压缩代码独立重算吻合。",
+      "path": "dispatch.md",
+      "quote_offset": 350
+    },
+    {
+      "line_end": 50,
+      "line_start": 50,
+      "note": "窄 combine 条件与依据：只适用 mma 家族（两 cfg 共用同一 launch 代码）、tcgen 恒用 WIDE、选择条件 splits>1 且 wgrid<nsm、shape 8 域内推理（wgrid=16，nsm<=28 先进 tcgen 且必融合为单 kernel 与 kernel_count=2 矛盾，故 mma 分支必落窄几何）。推理复算成立。",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 55,
+      "line_start": 55,
+      "note": "splits=1 记录的差异与联动：输出生产者由 COMBINE 变回 MAIN、直写公式与 479-485 的零/+inf、三个 partial 符号消失、host 不分配 partials 不启第二 kernel。生产者变化按规则明说，联动完整。",
+      "path": "dispatch.md",
+      "quote_offset": 300
+    },
+    {
+      "line_end": 61,
+      "line_start": 61,
+      "note": "扇出记录差异：splits 取值由 host 每次调用推出而非 YAML 字段值、mma 的 plan_splits 成本模型、cfg64 的 best_one_round、tcgen 的 max_splits 与整除偏好、三级路径判定、maxchunk 与 chunks 口径不同。与 launch.cu/kernel_mma.cuh 逐项一致，且已修正 P2 指出的自相矛盾。",
+      "path": "dispatch.md",
+      "quote_offset": 200
+    },
+    {
+      "line_end": 7,
+      "line_start": 6,
+      "note": "root 的 Dispatch.when：fan-out>1、merge grid ceil_div(batch*query*head,4) 达到查询 SM 数（WIDE）、动态 smem 105024+8*(swa_budget+cmp_budget) 适配每 CTA 上限，并声明 fan-out=1 与窄几何属其他配置。与 kernel_mma.cuh:1065-1075 及记录分工一致。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 108,
+      "line_start": 106,
+      "note": "'Selected-row order and chunking'：压缩宽度 256、(t%256, t//256) 字典序、SWA [0,n1) 压缩段其后、512=2*256 使压缩段为排列只差求和顺序、nchunk=ceil(n_sel/nc)。与压缩代码一致，且是 cfg64 记录的基线对象。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 179,
+      "line_start": 175,
+      "note": "'Split partials' 公式：partial_max/sum/out 的发布与空范围 identity (-inf,0,0)、每 split 每 head 恰一份三元组。与 kernel_mma.cuh:479-505、727-745 一致；splits=1 与扇出记录均引用本步骤。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 184,
+      "line_start": 181,
+      "note": "splits 符号（meaning-only，per-call 选择）与三个 partial 符号的 retention：扇出记录'YAML 只固定 splits 的含义、范围与工作划分'的基线。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 199,
+      "line_start": 192,
+      "note": "'Split merge and sink normalization'：mmax/w/lsum/lse2/sk2/denom2/scale 与零/+inf 规则、attn_sink ±inf 行为。与 WIDE combine（806-824）及 tcgen merge_head（170-190）逐项一致，是窄/融合记录共引的算术基线。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 213,
+      "line_start": 209,
+      "note": "MAIN Decomposition.Strategy（per_split/c_first/c_last、可空范围）与 Partition（head_block size head_count/32、row、split range [2,16]）：cfg64 与 splits=1 记录引用的具名对象全部实际存在。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 228,
+      "line_start": 226,
+      "note": "MAIN Mapping：一 CTA 256 线程、32 heads 为两积的 M 轴、Worker_count=(head_count/32)*(batch*query)*splits。与 launch grid 一致，cfg64 记录引用其变化。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 248,
+      "line_start": 243,
+      "note": "COMBINE Partition.row_head（tile 4）、Target 与 Tile_reduction（dimension split、method 指向 'Split merge and sink normalization'）：窄 combine 记录引用的具名对象。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 252,
+      "line_start": 250,
+      "note": "COMBINE Mapping：一 warp 一 head、一 lane 一 split（fan-out<=32）、Worker_count=ceil_div(batch*query*head,4)。与 WIDE combine 源码及 when 的 merge grid 公式一致。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 266,
+      "line_start": 260,
+      "note": "Flow.Launch 两次提交（COMBINE start_after MAIN.kernel_done）与 Handoff 三个 partial 键（producer MAIN、consumer COMBINE、storage global）：splits=1 记录声明这些对象在该配置下不再成立，引用准确。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 280,
+      "line_start": 273,
+      "note": "MAIN Storage：q_slot 33280（32×520 fp16）、k_slot 66560、p_slot 4608（32×72）、reduce_slot 576。cfg64 记录的尺寸联动以这些具名区域为基线，数值与 SMEM 公式吻合。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 288,
+      "line_start": 281,
+      "note": "meta_slot 8*(swa_budget+cmp_budget)、score_acc/pv_acc/row_state 寄存器区：Require 的 105024+8*(…) 字节账与存储分层（smem/register）核实。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 299,
+      "line_start": 293,
+      "note": "MAIN Role Member warp[0:8] 与 compute:selector_list/row_map/q_block/kd 动作（含每线程解码切片、done 覆盖 CTA barrier）：cfg64 记录引用 Member 与 compute:kd 的变化，对象存在且语义对应。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 310,
+      "line_start": 309,
+      "note": "store:partials 与 store:identity_partial 动作：splits=1 记录声明二者被直写取代，引用准确。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 336,
+      "line_start": 330,
+      "note": "COMBINE Storage（merge_acc、partial_batch 四 split 在飞）与 Role 起始：窄记录声明 partial_batch 批处理与 Prefer 随之失效，基线对象存在。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 343,
+      "line_start": 338,
+      "note": "COMBINE Member warp[0:4] 与 merge_stats/merged_out/outputs 动作：窄记录'128 线程仍写作 warp[0:4] 但 warp 不再对应 head、merge_stats 改串行升序跳过 -inf'的基线。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 355,
+      "line_start": 349,
+      "note": "REALIZATION Require 两条（动态 smem 上限 105024+8*(…)、256 线程与每 SM 2 CTA 常驻）：cfg64 记录声明二者分别变为 143424+8*(…) 与 1 CTA/SM，基线与联动一致。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 366,
+      "line_start": 356,
+      "note": "Prefer（evict-first、四 split 在飞）与 Forbid（同一积内混合 fp16/bf16 操作数，SM103 trap）：窄记录声明 Prefer 失效、目录精度论证与 Forbid 一致，全部核实。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 155,
+      "line_start": 153,
+      "note": "Arithmetic.Approx 把 ex2.approx.f32 的误差界记为 unknown（源码确为 ex2.approx.f32，kernel_mma.cuh:161）：目录要求 tcgen05_tmem 对 ex2.approx.ftz.f32 本地同样记录，缺口表述一致。",
+      "path": "root.yaml",
+      "quote_offset": 0
+    }
+  ],
+  "attempt_id": "4bcb12e2-b1cf-4fa3-a71f-804db0152a2a",
+  "checks": [
+    {
+      "command": "sha256sum /home/shaohanyong.shy/KernelSchema/.schema_extract/v2/runs/d138394a-20a7-4397-896e-ebac43aa10bb/attempts/4bcb12e2-b1cf-4fa3-a71f-804db0152a2a/workspace/dispatch.md /home/shaohanyong.shy/KernelSchema/.schema_extract/v2/runs/d138394a-20a7-4397-896e-ebac43aa10bb/attempts/4bcb12e2-b1cf-4fa3-a71f-804db0152a2a/workspace/root.yaml",
+      "exit_code": 0,
+      "note": "回执补正前核对当前 workspace：dispatch.md=a92837f0ba80115f05331e81028f7f940767c871805f47513d4083223976e9e9、root.yaml=64e326c5c0dd212ac27b7b78d6403e989e06bec1febca7ed7168bc3ea0305346，与本次 dependency_digests 及前次已审阅内容逐字节一致，产物未变。"
+    },
+    {
+      "command": "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/runs/d138394a-20a7-4397-896e-ebac43aa10bb/attempts/4bcb12e2-b1cf-4fa3-a71f-804db0152a2a/materials/check-helper.py",
+      "exit_code": 0,
+      "note": "本次 attempt 的固定检查裸命令运行（未传额外参数、未追加分号/管道/重定向）：raw_passed=true、corrections=[]、diagnostics=[]；directory 识别 yaml_files=[root.yaml]、registered_nodes=[root]、planned_nodes=[tcgen05_tmem]、missing_nodes=[tcgen05_tmem]，root 三区 provider 均为 root、strict 校验通过；raw_sha256 与 dependency_digests 一致。"
+    }
+  ],
+  "checks_note": "本次为回执补正（feedback: receipt_repair，\"conclusion/issue evidence index is outside source_evidence\"）：前次回执的 directory 结论误引越界索引 75（source_evidence 有效索引 0–74），且 document_consistency 与 issues 的证据索引相对最终数组顺序错位（误指 shape_cases 条目而非 ACCEPTANCE 条目）。本次已核对当前 workspace 产物与前次审阅对象逐字节一致（sha256sum exit 0），重跑本次固定检查 exit 0，逐项重映射全部 conclusions/issues/framework_candidates 的证据索引至本次 source_evidence 的有效范围；全部判断与证据均为本角色亲自核实，事实未变，维持原 revise 决定。未运行 GPU、未构建扩展、未执行验收。",
+  "conclusions": [
+    {
+      "evidence": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        40,
+        41,
+        45,
+        46,
+        47,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        56,
+        57,
+        59,
+        62,
+        64,
+        65,
+        66,
+        67,
+        68
+      ],
+      "subject": "directory",
+      "text": "目录实质内容成立：最小格式合规（范围/完整设计表/变体与组合，类型全角括号，基线按对象名定位）；2 份完整设计含 root、远低于 10 份上限，无为共享区域增设的文件，tcgen05_tmem 以纯文本标'仅计划'无假链接。四条正式记录逐条对照 root.yaml 具名对象与固定源码核实：cfg64 的全部联动数值由 SMEM/NBG/MINCTA 公式独立重算吻合（105024→143424、33280→66560、4608→9216、576→1088、NBG 4→8、BLKS 4→2、常驻 2→1），'逐位相同'的限定（仅 budget<=NT）与压缩代码 per=ceil(budget/NT)、线程主序写入一致；窄 combine 的串行升序/跳过 -inf 与 WIDE 的 butterfly 正确区分，shape 8 域内推理（wgrid=16、use_tc 门槛 nsm<=28、kernel_count=2）复算成立；splits=1 的输出生产者变化、host 不分配 partials、直接写零/+inf 均有来源；扇出记录的三级判定、plan_splits 成本模型、整除偏好、nest 来源限制与 launch.cu/kernel_mma.cuh 逐项一致。五条 tcgen 内部差异的记录计划（Heads=128、nhb=2、融合归并、图启动、cp.async）的机制、条件、容量数字（SMEM<128>=217088、2*BS*nhb 计数器、staging 66560>65536/133120>131072）逐项核实，且这些机制确实只存在于 kernel_tcgen.cuh、root.yaml 无可充当基线的对象，保留为计划并写明升格路径符合记录规则。P2 已定记录层级（4 局部+1 参数）沿用且判据独立复核成立（融合归并的主计算/grid/主循环/归并算术逐项不变，变化围绕已有 COMBINE step 的执行者、own partial 位置与三点联动，局部判定正确）；P3 交接的三项措辞要求（窄不继承 butterfly、cfg64 引 'Selected-row order and chunking'、直写零/+inf 只留在 splits=1 记录）均已落实。诊断绑定不收录、'实现比 Contract 宽但记录范围仍按 Contract 域'与源码校验一致。唯一缺陷见 issues：ACCEPTANCE.json 随包内容被低估。"
+    },
+    {
+      "evidence": [
+        31,
+        32,
+        33,
+        34,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        46,
+        47,
+        48,
+        49,
+        53,
+        54,
+        55,
+        57,
+        59,
+        61,
+        62
+      ],
+      "subject": "writing_plan",
+      "text": "plan 原样回传 plan_draft：恰好覆盖已选非 root 一项 {id: tcgen05_tmem, wait_for: []}，无自依赖无循环。wait_for 为空有实际内容依据：root 已是完整基线，tcgen 三区预计全本地、无 from 边，无上游定义可等。实例链核实无误：launch.cu:387→kernel_tcgen.cuh:733-737 launch_heads<64>→attention<64><<<(BS,splits,1),512,SMEM<64>=143360>>>，归并为图记录/直接双 launch 的 cfg32::plmn_combine_wide_hb32<<<ceil(BS*H/4),128>>>（682-684、726-731），grid 公式含 query_len 正确。相对 root 的四项实质差异（TMEM 累加器+单线程发射+commit/parity 完成关系、掩码式非压缩 gather 且 chunk 数恒 ceil(listn/64)、ci+=splits 循环领取、永远两段式输出形成）均属主计算/输出形成/工作分配/主协作组织，独立完整价值成立，非引用写法变化。三区本地的理由（bf16 vs fp16 操作数、grid 与领取方式与 COMBINE 执行者、TMEM/mbarrier 存储）经源码核对成立，且明确不冻结 P5 写法、升格与对齐时点清楚。待落实位置具体可执行：when 写查询值比较、四项不继承的 REALIZATION/Arithmetic、staging 容量与寿命关系（66560>65536、133120>131072，溢出落在已完成末次 PV 读取的 K 区）——数字全部复算吻合。顺序可成立：五条记录计划待本节点正文命名后升格，由 P5 汇集、P6 集中落实，无相互等待的未来定义。"
+    },
+    {
+      "evidence": [
+        0,
+        1,
+        2,
+        11,
+        16,
+        31,
+        63,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74
+      ],
+      "subject": "coverage",
+      "text": "覆盖关系对照计划核实：host 三分支对通过校验的输入全判定（cfg32 为无条件 else，launch.cu:386-392），root 家族（含 cfg64 参数记录）与 tcgen05_tmem 合计覆盖 Contract 有效域；已识别机制均有去处——两个 mma 几何、两个 combine 几何、splits=1 直写、扇出与路径规则、tcgen 五种内部形态，无机制留成未定去向，也无独立方案被降格充数；smem_bytes/smem_bytes_hb64/use_hb64 三个诊断绑定不被 plmn_forward 调用，不收录正确。域内可达性用冻结 shape 与随包回执交叉核对：shape 0（BS=48、H=128，kernel_count=1 只能是融合 tcgen，nsm<192 时即 Heads=128 形态）、shape 8（wgrid=16 与 kernel_count=2 锁定 mma 窄几何）、shape 2（3*2*10=60 为边界情形）推理均成立。缺口照实保留：Tolerance source-only 与 metadata 只给 atol/rtol/max_mismatch_fraction 标签一致、不采用默认简写解释；性能为 2026-10-25 用户例外收口、shape 0/1/3/9 超阈值；正确性为 SM103 采样非全域；ex2 误差界未知且两套指令名（mma 的 ex2.approx.f32、tcgen 的 ex2.approx.ftz.f32）各自核实；nest 上界依赖 pages=sum(counts)+2 只记在扇出记录。唯一覆盖性错误是对随包 ACCEPTANCE.json 内容的低估（见 issues），它使'实验覆盖'清单失真但不改变任何取舍或记录分类。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_self_contained",
+      "text": "通过。目录无需历史上下文即可独立理解：范围段分别交代共同 Contract 域、固定实现实际域与本次收录范围；完整设计表两行各自给出实例、机制摘要与保留理由；正式记录含基线/差异与联动/条件与依据三信息项；计划记录写明类型、计划基线、升格条件与升格时点；写作安排给出实例、差异、拟共享、顺序与待落实位置。未来文件与源码锚点均为纯文本，无假链接；正式记录与计划记录清楚可辨，不会把计划误读为已定义对象。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_layering",
+      "text": "通过。目录不覆盖 YAML：明写'精确参数与 when 以 YAML 为准'，记录只引用 root.yaml 具名对象（Rewrite 名、Partition/Mapping 字段、Storage 区域、动作名、REALIZATION 条目）而不重定义；splits=1 记录明确其变化'落在 root 的 when 之外，故 root 本体不承担'；计划记录不预定义未来对象、拟共享不写成已证明相同（三区'预计'本地且声明不冻结 P5）；root 保存唯一 Contract 且三区全本地，检查器确认三区 provider 均为 root。记录层级判断（参数/局部）沿用 P2 已定并经独立复核，无下层补入上层决定。"
+    },
+    {
+      "evidence": [
+        69,
+        70,
+        71,
+        72,
+        73
+      ],
+      "subject": "document_consistency",
+      "text": "除一处外通过。数值全部复算吻合（105024/143424、33280→66560、4608→9216、576→1088、66560 不变、SMEM<64>=143360、SMEM<128>=217088、66560>65536、133120>131072、2*BS*nhb 计数器）；对象名与 root.yaml 实际条目一一对应；实例串与 selected_designs 一致；shape 0/2/8 的可达性推理与随包 kernel_count 相互印证；对改变提交/生产者/事件存在性的情形（splits=1 直写、融合归并、图启动）分别贯通，未把未提交与无工作混同。不一致点：第 19 行与第 62 行两处称随包 ACCEPTANCE.json 只有'通过/超限列表与 kernel_count'，而该文件实际随包提供每 shape 的 production/candidate 各 20 个 NCU 计时样本、by_order 中位数、kernel_sum_us、ratios 与 metric/GPU 身份（SUMMARY.json 另有逐 shape 比率聚合），构成对随包实验材料的错误清点，须退修；其余同句缺项表述（online-20261024 与 final-closeout 原始回执未随包、逐输出误差回执未随包）经核实为真。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_relevance",
+      "text": "通过。目录内容限于设计重点、条件、依据与必要来源限制：研究取舍（融合归并判局部的依据、'逐位相同'不得继承、图缓存只缓存启动结构的定向核实）与规范允许的来源缺口（Tolerance source-only、ex2 界未知、nest 上界、原始回执未随包）均按规则保留而非当作过程删除；无退修历史、无重复决定、无过程状态；命名清楚常见，未使用生僻自造缩写。"
+    }
+  ],
+  "decision": "revise",
+  "format": "schema_extract.proposal.v1",
+  "framework_candidates": [
+    {
+      "evidence": [
+        37,
+        40,
+        45,
+        46,
+        47,
+        49,
+        50,
+        51,
+        52,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61
+      ],
+      "id": "p2-planned-baseline-variant-placement",
+      "scope": "规则：rules/schema_extract/prompt/phases/04_dispatch_plan.md 第 1、4、5 条与 rules/schema_docs/0.common.md“选择条件与索引”“局部记录与完整方案”（每条记录最终须直接定位至少一个当前完整 YAML，未来文件只能以纯文本标'仅计划'）；工具：rules/schema_template/tools/rules/dispatch.py:141-147 与 155-167、rules/schema_extract/tools/artifacts.py:455-465",
+      "summary": "沿用原 ID，本人独立核实后确认同一根因。我亲读工具实现：dispatch.py:144-145 把任何不指向当前任务文件的 .yaml 链接判为 fail；dispatch.py:165-167 要求“变体与组合”的每个 ### 条目行范围内含至少一个指向当前完整 YAML 的链接；artifacts.py:456-463 要求仅计划行以纯文本恰含一个已选 <id>.yaml 且 registered|planned==selected、final 时不得再有 planned。因此在 P4 时点，基线只能是仅计划代表的记录无法成为正式 ### 条目，而阶段页又禁止提前创建未来文件——升格最早发生在该代表正文存在后的目录终审。本 run 可复查反例：tcgen 内部五项差异的机制全部只在 kernel_tcgen.cuh（融合归并的计数器自旋与 warp-per-head 尾部合并 539-577、Heads=128 的 tail 寄存器与 N256+N192+N64 划分 442-486、两节点图启动 649-731、cp.async Q 搬运 311-336/376-382、nhb=2 配对 263-278），root.yaml 中无任何可充当基线的对象；若为过检查强配 root.yaml 链接即写进不成立的基线关系。worker 现处理（五条置于“范围”具名单元，固定类型 4 局部+1 参数、计划基线与升格路径，检查 exit 0 且 planned_nodes 正确）在现行规则下合规，但摆放位置与措辞无明文规定，各 run 会各自发明。最小建议：在 P4 阶段页或 common 的 dispatch 小节明确“基线为仅计划代表的记录在 P4 以计划条目保留于固定位置（范围段具名单元或该代表表行之后），升格时点为该代表正文存在后的目录终审”，或让 dispatch.py 在存在 planned_nodes 时接受纯文本'<id>.yaml（仅计划）'作为 ### 条目基线、仅在 final 检查强制真实链接。不改的影响：P2/P4 交接的升格指令与检查器长期互相矛盾，目录结构在 run 间不一致。本项不改变当前语义或写权限，不阻塞本阶段。"
+    }
+  ],
+  "handoff": "本次为回执补正：产物未改（dispatch.md=a92837f0…、root.yaml=64e326c5…，已核对与前次审阅逐字节一致），仅修正前次回执的越界/错位证据索引，决定与问题范围不变。\n决定 revise，范围极窄：目录结构、四条正式记录、五条记录计划、写作安排与 plan 的实质判断均已独立核实成立，唯一待修是 dispatch.md 第 19 行与第 62 行对随包 ACCEPTANCE.json 内容的错误清点（详见 issues 与 recovery_condition）。root.yaml 不动（Version 4 保持），记录分类与层级不动，plan 不动——已按认可原样回传 [{id: tcgen05_tmem, wait_for: []}]，修句后无需重选或重排。\n给修正 worker：ACCEPTANCE.json 实含 metric（NCU gpu__time_duration.sum）、gpu/clock、逐 shape production/candidate 各 20 个 samples_us、by_order、kernel_sum_us、order_medians_us、ratios 与通过/超限列表（13、41-42、49-166 等），SUMMARY.json 另有逐 shape 比率聚合；仍缺的是 online-20261024 机制级 A/B 原始回执与 final-closeout 逐输出验证回执（PRECISION.md:3），且随包计时是最终配置测量、不能分离单机制贡献——两处句子照此改写即可，其余同句内容（Tolerance source-only、用户例外、SM103 采样、nsm/smem_per_sm 查询值、两套精度论证、ex2 界 unknown）已核实为真，不要改动。\n给 P5（tcgen05_tmem）的入口与不继承清单维持目录第 30-34 行与 P4 worker 交接原文：launch.cu:386-392→plmn_tc::launch→kernel_tcgen.cuh:733-740，主体 246-578、启动结构 618-732；本地必写四项（bf16 与混合对 trap、计数器跨调用零初态与 BS*nhb*splits<=nsm 且 SMEM*2>smem_per_sm 常驻保证、ex2.approx.ftz.f32 未知界、staging 66560>65536/133120>131072 及溢出落在已完成末次 PV 读取的 K 区）；请在交接中回传五条记录计划的真实对象名供 P6 升格。\n框架候选 p2-planned-baseline-variant-placement 已由我独立核实工具代码后确认沿用，交 Supervisor 处理，不影响本阶段语义。缺口未变：Tolerance source-only、性能用户例外（shape 0/1/3/9 超阈值）、SM103 采样非全域、ex2 界未知。本次未运行 GPU、未构建扩展、未执行验收；固定检查 exit 0。",
+  "issues": [
+    {
+      "detail": "两处对随包验收材料的内容清点与事实不符：performance/ACCEPTANCE.json 除 passed_shapes/over_1pct_shapes 与逐 shape kernel_count 外，还随包提供 metric 身份（NCU gpu__time_duration.sum）、gpu_uuid/clock_mhz，以及每个 shape 的 production 与 candidate 各 20 个 samples_us、by_order 分解、kernel_sum_us、order_medians_us 与 ratios（ACCEPTANCE.json:13、41-42、49-166 等）；performance/SUMMARY.json 另逐 shape 聚合 candidate_us/baseline_us 与比率。该段是目录对实验覆盖的权威清点，P5 作者写各记录'实验覆盖'与 P6 终审复核缺口时都会依赖它；按现文他们会误以为随包不存在任何逐 shape 计时数据。句中其余缺项表述为真且应保留：evidence/online-20261024 的机制级 A/B 原始回执与 final-closeout 的逐输出验证回执确未随包（PRECISION.md:3 明述，包内无 evidence/ 目录），ACCEPTANCE.json 内嵌的是最终配置的测量、不能分离单个机制的 A/B 贡献。",
+      "evidence": [
+        69,
+        70,
+        71,
+        72,
+        73
+      ],
+      "kind": "transcription",
+      "recovery_condition": "P4 worker 修正上述两句，如实清点随包内容（ACCEPTANCE.json 含逐 shape production/candidate NCU 计时样本、by_order 中位数、kernel_sum_us、ratios、通过/超限列表与 kernel_count；SUMMARY.json 含逐 shape 比率聚合），同时保留真实的缺失项（online-20261024 机制级 A/B 原始回执与 final-closeout 逐输出验证回执未随包；随包计时为最终配置测量，不能分离单个机制贡献）。仅改这两句，不动其他记录、分类、root.yaml 与 plan；修正后由本阶段 reviewer 重审受影响段落。",
+      "scope": "dispatch.md 第 19 行“边界与缺口”段中句（“随包 ACCEPTANCE.json 只给出通过/超限列表与 kernel_count”）与第 62 行“split 扇出与路径选择规则（参数）”的“条件与依据”末句（“随包可用的只有 ACCEPTANCE.json 的 kernel_count 与通过/超限 shape 列表”）"
+    }
+  ],
+  "plan": [
+    {
+      "id": "tcgen05_tmem",
+      "wait_for": []
+    }
+  ],
+  "reopen": null,
+  "source_evidence": [
+    {
+      "category": "host",
+      "line_end": 46,
+      "line_start": 42,
+      "note": "绑定 host 入口 Model.forward：八个入参原样交编译扩展 forward，返回 (out, lse)，out 原地写回按身份返回；host 侧无数值。支持范围段与 coverage。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 393,
+      "line_start": 386,
+      "note": "每次调用的三分支：use_tc→plmn_tc::launch，否则 use64→cfg64::launch，否则无条件 cfg32::launch。对通过校验的输入全判定，支持覆盖结论与 root 的 fallback 保留理由。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 259,
+      "line_start": 252,
+      "note": "cfg32::schedule(c) 无条件先算并作为 use_hb64_shape 的比较基线（root 保留理由）；随后 TORCH_CHECK ceil(budget/nt)<=MAXENT（cfg64 记录的准入条件之一）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 110,
+      "line_start": 99,
+      "note": "use_hb64_shape 全部源码选择条件：H%64、nest>=listn、best_one_round 非零 splits、depth 不劣于 cfg32、5*s32.sms<6*s64.sms。与 cfg64 记录的条件与依据逐项一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 67,
+      "line_start": 55,
+      "note": "同一份 kernel_mma.cuh 以 PLMN_HB=64/PLMN_NT=512 第二次包含为 cfg64：HB=64 几何是同机制的第二次实例化，支持参数记录分类与目录中 launch.cu:55-67 的引用。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 280,
+      "line_start": 275,
+      "note": "tc_nhb=(H==128 && BS*4<=nsm)?2:1 与 use_tc=H<=128 && listn>=128 && BS*nhb*min(16,chunks)>=(nsm+2)/3。支持双 64 配对、Heads=128 记录的成立条件与 shape 8/shape 2 的域内推理。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 305,
+      "line_start": 294,
+      "note": "tcgen 扇出：max_splits=min(16,chunks,max(1,nsm/(BS*nhb)))，再取达最小 depth 且整除 chunks 的最大值。与扇出记录（launch.cu:294-305）一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 333,
+      "line_start": 324,
+      "note": "part_o/part_ml 仅在 splits>1 或 use_tc 时分配：支持 splits=1 直写记录的'host 不分配 partials'联动与 tcgen 恒两段式（splits=1 也分配）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 376,
+      "line_start": 372,
+      "note": "fuse_tc 条件：BS*nhb*splits<=nsm、tc_heads==64 时另需 splits*512>=tc_heads*32、one_cta_per_sm<Heads>(smem_per_sm)。与融合归并记录的设计成立条件一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 383,
+      "line_start": 377,
+      "note": "融合形态的 2*BS*nhb 个 int32 计数器只在缓冲增长时 torch::zeros，kernel 最后一个 CTA 归零交回：跨调用状态与零初态的来源依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 220,
+      "line_start": 214,
+      "note": "nest 是 host 由缓存 page 数推出的 token 上界并夹到选择子宽度：支持扇出记录的来源限制（只高估、只多分，root Design 不依赖它）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 401,
+      "line_start": 396,
+      "note": "扩展另导出 smem_bytes/smem_bytes_hb64/use_hb64 三个诊断绑定，plmn_forward 不调用（launch.cu:116-118 注释亦明述）：目录声明不收录属实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 12,
+      "line_start": 9,
+      "note": "源码声称两个实例'逐位相同'。cfg64 记录正确限定该说法只在 budget<=NT 成立、不得写进设计当保证，与压缩顺序证据（382-423）联合核对成立。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 44,
+      "line_start": 38,
+      "note": "NBG=NT/NC、MINCTA=(NT<=256)?2:1、SLICE=D/NBG、BLKS=SLICE/32：cfg64 记录 NBG 4→8、切片 128→64 维、BLKS 4→2、常驻 2→1 的联动由此独立重算吻合。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 58,
+      "line_start": 49,
+      "note": "MAXENT=4、MAXSPLIT=16、KS=520、PS=72 与 SMEM_Q/K/P/RED/FIXED 公式：代入 HB=32 得 105024、HB=64 得 143424，q_slot 33280→66560、p_slot 4608→9216、reduce 576→1088、k_slot 66560 不变，目录数值全部复算吻合。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 79,
+      "line_start": 70,
+      "note": "16 位操作数格式论据：解码值在 f16/bf16 均精确（4/7 位尾数），SM103 对混合 f16/bf16 对 trap，故三 tile 同格式。与目录精度论证转述及 root Forbid 一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 162,
+      "line_start": 160,
+      "note": "mma 家族的 ex2 是 ex2.approx.f32（无 ftz），root.yaml Arithmetic.Approx 名称准确；与 tcgen 的 ex2.approx.ftz.f32 区分，目录'两套设计各自记录'的要求成立。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 394,
+      "line_start": 382,
+      "note": "压缩映射：per=ceil(budget/NT)（上限 MAXENT），条目 e=tid+i*NT。cfg32 对 cmp_budget=512 取 per=2、cfg64 取 1，是 cfg64 记录'压缩段行序由排列变成与递增 t 一致'的直接依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 423,
+      "line_start": 411,
+      "note": "两次 block_scan 与各线程按 i 递增连续写入，SWA 段 [0,n1)、压缩段接其后：线程主序使压缩段为 (t%NT, t//NT) 字典序，行集合不变只差求和顺序。root Math 与 cfg64 记录均与此一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 471,
+      "line_start": 468,
+      "note": "nchunk 由真实压缩计数 N 推出（非 host 的 nest 上界）：支持扇出记录'Design 不依赖 nest'的来源限制表述。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 485,
+      "line_start": 479,
+      "note": "空 chunk 范围且 splits==1：直接写零 out 与 +inf lse。与 splits=1 记录'store:identity_partial 换成直接写零与 +inf（kernel_mma.cuh:479-485）'一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 503,
+      "line_start": 486,
+      "note": "空范围且 splits>1：发布 (-inf,0) 与零 partial_out 的 merge identity，使 combine 无需分支。与 root 的 store:identity_partial 及目录 root 行'空 chunk 范围发布 identity partial'一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 746,
+      "line_start": 727,
+      "note": "splits>1 时主 kernel 只写 part_ml/part_o 后 return，不写 out/lse：root 行'MAIN 从不写 attn_out 或 lse、输出只由 COMBINE 产生'的依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 758,
+      "line_start": 748,
+      "note": "splits==1 直写路径：lse2=m2+log2(lacc)、lae2=max(lse2,sk2)+log2(1+ex2(-|lse2-sk2|))、f=ex2(m2-lae2)、lsen=lse2*LN2。与 splits=1 记录公式逐项一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 818,
+      "line_start": 806,
+      "note": "WIDE combine：lane s 持 split s、mmax/lsum 用 32-lane butterfly、per-split 权重 f=ex2(m-mmax)。root 的 COMBINE Mapping/merge_stats 与 Accumulate 措辞以此为准；窄几何不继承此措辞的记录正确。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 896,
+      "line_start": 872,
+      "note": "NARROW combine：每 (request row, head) 一个 128 线程 CTA（rh=blockIdx.x），mmax/lsum 为对 splits 的串行升序循环并跳过 -inf。与窄 combine 记录的基线差异一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 921,
+      "line_start": 903,
+      "note": "NARROW 每线程 4 个输出维（d0=tid*4，128×4=512），串行循环 continue 跳过 m==-inf，__ldcs 流式读取：与窄记录'一线程 4 维、对 splits 串行、跳过零权'及 Prefer 失效表述一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 994,
+      "line_start": 977,
+      "note": "plan_splits：maxchunk 由 nest 推出；items<nsm 时 splits=ceil(nsm/items) 并按 maxchunk 与 MAXSPLIT=16 封顶。与扇出记录的成本模型摘要一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1009,
+      "line_start": 997,
+      "note": "items>=nsm 分支：sp>1 需 per>=MINCHUNK=3，最小化 rounds*(per*64+39)，sp=1 始终候选（故 splits 可为 1）。与扇出记录及 splits=1 记录的选择条件一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1063,
+      "line_start": 1060,
+      "note": "root 实际 launch：grid=(H/HB, BS, splits)、NT=256 线程、动态 smem。与选定实例 plmn_kernel_hb32<<<dim3(head_count/32, batch_count*query_len, splits), 256, smem>>> 一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1077,
+      "line_start": 1065,
+      "note": "splits>1 才启动 combine，且 wgrid=ceil(BS*H/4)>=nsm 选 WIDE、否则 NARROW：root 的 when（merge grid 达到查询 SM 数）与窄记录的源码选择条件、shape 8 推理（wgrid=16，仅 nsm<=16 改 WIDE）均由此核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_mma.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 32,
+      "line_start": 28,
+      "note": "tcgen 的 ex2 是 ex2.approx.ftz.f32：目录要求 tcgen05_tmem 本地记录其未知误差界的表述用名准确。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 55,
+      "line_start": 43,
+      "note": "idesc 注释：SM103 对混合 f16/bf16 操作数对 trap、bf16 使 Q 无需转换 pass、解码值在 bf16 精确（4/7 位）、概率 tile 相对 fp16 少 3 位。目录精度论证转述逐项一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 72,
+      "line_start": 57,
+      "note": "Heads==64 用 tcgen05.mma.ws、Heads==128 用非 WS 形式；SMEM<Heads>=4096+Heads*1024+65536+Heads*128，代入得 SMEM<64>=143360、SMEM<128>=217088。Heads=128 记录与实例串数值核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 262,
+      "line_start": 256,
+      "note": "smem 布局 q=sm+4096、k=q+Heads*1024、prob=k+65536 与 Score/OutputCols=Heads==64?256:448：staging 容量对照（Q 区仅 Heads*1024 字节）与'TMEM 输出 448 列、score 64 列'的依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 163,
+      "line_start": 152,
+      "note": "merge_head 注释明言其算术与 cfg32::plmn_combine_wide_hb32 逐项相同（同 per-split 权重、同 log2 域 sink 重标定、同 +inf/零规则），own 取自 520-half staging 行。融合归并记录'归并算术与 root 逐项相同、own partial 留 smem'的来源依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 190,
+      "line_start": 170,
+      "note": "merge_head 实际算术：lane 持 split、butterfly mmax/lsum、f=ex2(m-mmax)、lse2/sk2/lae2/scale、mmax==-inf 时 lse=+inf。与 kernel_mma.cuh:806-824 的 WIDE 逐项对照相同，支持局部判定。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 278,
+      "line_start": 271,
+      "note": "hb=blockIdx.z、nhb=gridDim.z、hbase=hb*Heads；注释明言 head 索引绝对（hbase+local）而 smem 索引 block-local；group 按 Heads 分支。双 64 配对记录与 Heads=128 记录的 group=tid/128 表述核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 281,
+      "line_start": 280,
+      "note": "chunks=(c.listn+63)/64 恒按选择子宽度：tcgen 表行'chunk 数恒为 ceil(listn/64)'与扇出记录'maxchunk 与 chunks 口径不同'的依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 299,
+      "line_start": 288,
+      "note": "first=sp、RawTile 预取先发出，barrier 初始化/TMEM 分配/Q 搬运与之重叠：tcgen 表行'压缩字节读进寄存器与 barrier/TMEM/Q 搬运重叠'核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 336,
+      "line_start": 326,
+      "note": "cp.async 替代路径：每线程 16 字节 cp.async.cg 写入同一 SW64 布局，超出 c.H 的补齐行由 size predicate（bytes=0）填零。cp.async Q 搬运（参数）记录核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 382,
+      "line_start": 376,
+      "note": "第一个 chunk 处完成等待：use_tma 走 mbarrier wait，否则 cp.async.wait_group 0，两路径都与首 chunk 解码重叠。cp.async 记录'完成等待由 expect_tx 改成 wait_group 0'核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 343,
+      "line_start": 338,
+      "note": "for (ci=first; ci<last; ci+=splits)：split 以循环步进领取 chunk。tcgen 表行与写作安排'循环领取'的依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 395,
+      "line_start": 387,
+      "note": "QK^T 由 tid==0 单线程发 32 步 tcgen05.mma 后 tcgen05.commit(bar)。tcgen 表行'单线程发射 + commit/mbarrier 完成关系'的依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 433,
+      "line_start": 417,
+      "note": "行最大滞后规则（mx>m+2 才抬升）与 alpha!=1 时对 TMEM 累加器的 warp 集体 read-modify-write（tmem_ld16/乘 alpha/tmem_st16）；valid[] 掩码使无效槽位为 -inf。tcgen 表行相应表述与掩码式 gather 核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 452,
+      "line_start": 442,
+      "note": "Heads==128 时 tail[u] 随 alpha 缩放；概率以 __floats2bfloat162_rn 打包 bf16 写回 prob smem。Heads=128 记录与'概率以 bf16 写回 smem'核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 474,
+      "line_start": 458,
+      "note": "PV 由 tid==0 发射：Heads=64 为 2 个 N256 tile；Heads=128 为 N256+N192+N64，且 tail tile 的 accumulate 谓词是 step!=0（每 chunk 复位，因累加进寄存器 tail）。Heads=128 记录核心差额核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 486,
+      "line_start": 480,
+      "note": "Heads==128 每 chunk 后把 TMEM 的 N64 tile（tm+448+group*16）读入并累加进 tail[16]：'最后 64 维由寄存器承载、每 chunk 从 TMEM 累加进来'核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 506,
+      "line_start": 502,
+      "note": "尾部无条件把 (m, total) 写入全局 ml partials（group==0 且在 head 界内）：tcgen'即使 splits=1 也从不直写 out/lse、永远两段式'的依据之一。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 528,
+      "line_start": 516,
+      "note": "TMEM 输出与 tail 打包成 fp16 写入复用 Q 区的 row*520 staging 行：写作安排'staging 行需 Heads*520*2 字节而 Q 区只有 Heads*1024 字节'（66560>65536、133120>131072，溢出落在已完成末次 PV 读取的 K 区）的依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 546,
+      "line_start": 539,
+      "note": "h0/h1=[hbase+sp*Heads/splits, hbase+(sp+1)*Heads/splits)；融合时本 CTA 自并的 head 不写 global，其余照常发布到 po。融合归并记录的 head 划分与 own partial 位置核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 565,
+      "line_start": 549,
+      "note": "arrive==nullptr 时 return（host 保留独立 combine kernel）；融合尾部 peer=bs*nhb+hb，tid==0 以 count_release 报到后自旋 count_acquire 至 splits 个 peer 到齐。融合归并与双 64 配对记录的 peer 组与自旋核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 577,
+      "line_start": 566,
+      "note": "16 个 warp 以 h0+warp 步进 16 做 warp-per-head 合并，own 取 smem staging 行；组内最后一个 CTA（done 计数返回 splits-1）以 st.release 把 arrive/done 归零交回下次 launch。融合归并记录逐项核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 611,
+      "line_start": 604,
+      "note": "one_cta_per_sm<Heads>: SMEM<Heads>*2 > smem_per_sm（运行时查询值），注释明言自旋安全须来自真实设备属性而非编译期上界。融合归并记录的常驻保证核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 637,
+      "line_start": 627,
+      "note": "TMA descriptor 的 thread_local 缓存以 (q 指针, H, BS, device) 为键重编码：cp.async 记录的条件与依据、图记录中'描述符缓存不缓存数据'的核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 647,
+      "line_start": 640,
+      "note": "融合形态单次 launch：attention<Heads><<<dim3(c.BS, splits, nhb), 512, SMEM<Heads>>>>，无第二节点。双 64 记录的 grid=(BS,splits,nhb) 与融合记录'不再启动第二个 kernel'核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 657,
+      "line_start": 651,
+      "note": "cudaStreamIsCapturing 检查与图 key 元组（q/k1/idx1/k2/idx2/sink/sm_scale/out/H/BS/budget1/budget2/page1/rec1/page2/rec2/listn）：图记录'key 覆盖全部影响地址与形状的字段'核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 685,
+      "line_start": 680,
+      "note": "归并节点 func=cfg32::plmn_combine_wide_hb32、gridDim=ceil(BS*H/CH)、blockDim=CT=128：tcgen 独立归并恒用 root 的 WIDE combine 内核对象、无窄形态的依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 696,
+      "line_start": 686,
+      "note": "key/device/stream/splits/nhb/po/ml 任一不符即销毁 exec 与 graph 重建：图记录'任一变化即销毁重建'核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 709,
+      "line_start": 697,
+      "note": "main_ctx.lse=nullptr（主 kernel 只写私有 partials）、主节点 grid=(BS,splits,nhb)/512 线程/SMEM<Heads>、归并节点以主节点为依赖加入图：两节点图与依赖边的依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 724,
+      "line_start": 719,
+      "note": "lse 地址变化时用 cudaGraphExecKernelNodeSetParams 打补丁归并节点，随后 cudaGraphLaunch：图记录'缓存的只是启动结构、lse 实参每次补丁'核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 731,
+      "line_start": 726,
+      "note": "流在录图时不建图不查图，直接按 host 顺序双 launch（attention + plmn_combine_wide_hb32<<<ceil(BS*H/4),128>>>）。图记录与选定实例'录图时直接双 launch'核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 740,
+      "line_start": 733,
+      "note": "plmn_tc::launch 分派：nhb==2→launch_heads<64>(...,2)；H==64→launch_heads<64>(...,1)；否则 launch_heads<128>(...,1)。选定实例 kernel_tcgen.cuh:737 与 Heads=128 记录的成立条件核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/candidate/kernel_tcgen.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "io",
+      "line_end": 45,
+      "line_start": 37,
+      "note": "preserve_input_storage=true 与 iteration_protocol=restore_before_each_call（图记录'输入指针稳定而数值回卷'的依据）；correctness_tolerances 只有 atol/rtol/max_mismatch_fraction 标签、无组合公式（Tolerance source-only 记录的依据）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/metadata.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "input",
+      "line_end": 65,
+      "line_start": 61,
+      "note": "pages = sum(counts) + 2（input.py:64）：扇出记录中 nest 上界依赖的生成器约定核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/input.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "reference",
+      "line_end": 35,
+      "line_start": 27,
+      "note": "参考 gather 顺序（先 SWA 后 extra、ix>=0 保序）、无选择时 result=0/lse=+inf、logits/logsumexp/logaddexp(sink) 公式：目录范围段与 root Contract 表述的对照依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/reference.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "scope",
+      "line_end": 31,
+      "line_start": 23,
+      "note": "冻结 shape 0：16 个 lengths、query_len=3、physical_heads=128 → BS=48、H=128。Heads=128 记录域内可达性推理的输入。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/shape_cases.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "scope",
+      "line_end": 78,
+      "line_start": 64,
+      "note": "冻结 shape 2：1 个 length、query_len=3、physical_heads=128 → BS=3、H=128（nhb=2 时判据值 3*2*10=60）。范围段'shape 2 属边界情形'的输入。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/shape_cases.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "scope",
+      "line_end": 205,
+      "line_start": 191,
+      "note": "冻结 shape 8：1 个 length 4097、query_len=1、physical_heads=64 → BS=1、H=64、wgrid=16。窄 combine 记录域内可达性推理的输入。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/problem/shape_cases.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "acceptance",
+      "line_end": 26,
+      "line_start": 13,
+      "note": "metric=NCU gpu__time_duration.sum、automated_performance_passed=false、user_acceptance(2026-10-25)、validation_summary 与 performance.receipt 指向未随包的 evidence/final-closeout-20261025 文件：缺项表述中正确的部分。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/performance/ACCEPTANCE.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "acceptance",
+      "line_end": 70,
+      "line_start": 49,
+      "note": "shape 0 production 的 samples_us：随包提供每 shape 20 个 NCU 计时样本。直接反驳目录'ACCEPTANCE.json 只给出通过/超限列表与 kernel_count'的表述（issue 依据一）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/performance/ACCEPTANCE.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "acceptance",
+      "line_end": 112,
+      "line_start": 97,
+      "note": "shape 0 production 的 kernel_count/kernel_sum_us/order_medians_us 与 candidate 的 samples_us 开头：随包数据远多于列表与 kernel_count（issue 依据二）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/performance/ACCEPTANCE.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "acceptance",
+      "line_end": 166,
+      "line_start": 154,
+      "note": "shape 0 candidate 的 kernel_count=1、kernel_sum_us、order_medians_us 与 ratios、status：随包回执含逐 shape 比率与中位数（issue 依据三）；kernel_count=1 同时是 shape 0 融合形态推理的依据。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/performance/ACCEPTANCE.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "acceptance",
+      "line_end": 5,
+      "line_start": 1,
+      "note": "fixed/domain/ABI 三项 exit 0；逐输出误差/容差/超差元素的原始验证回执（final-closeout validation）未随新版源包提供；验证为 SM103 采样非全域。目录缺项表述中正确的部分。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/PRECISION.md",
+      "quote_offset": 0
+    },
+    {
+      "category": "acceptance",
+      "line_end": 5,
+      "line_start": 1,
+      "note": "2026-10-25 用户明确接受、NCU 6/10 达门槛、保留超限 shape 0/1/3/9、不改写自动性能结果：目录'性能由用户例外收口、shape 0/1/3/9 超阈值'核实。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_latent_mxfp8_nvfp4/USER_ACCEPTANCE.md",
+      "quote_offset": 0
+    }
+  ],
+  "summary": "回执补正：产物未变（dispatch.md=a92837f0…、root.yaml=64e326c5…，与前次审阅对象逐字节一致，本次固定检查 exit 0），仅修正前次回执中越界的 conclusion/issue 证据索引，全部判断由本角色亲核且维持原决定。P4 目录与写作安排实质成立：四条正式记录与 root.yaml 具名对象逐一对应、联动数值独立重算吻合，五条 tcgen 内部差异按规则保留为带类型与升格路径的记录计划，plan 单项 {tcgen05_tmem, wait_for: []} 认可并原样回传，P3 交接措辞要求均落实。唯一退修点：dispatch.md 第 19 行与第 62 行两处把随包 ACCEPTANCE.json 误写为\"只给出通过/超限列表与 kernel_count\"，实际该文件还随包提供每 shape 的 production/candidate 各 20 个 NCU 计时样本、by_order 中位数、kernel_sum_us 与 ratios（SUMMARY.json 另有比率聚合），须修正两句后重审，其余内容不动。"
+}

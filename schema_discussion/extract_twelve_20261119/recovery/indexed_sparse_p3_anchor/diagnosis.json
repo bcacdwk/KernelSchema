@@ -1,0 +1,275 @@
+{
+  "run_id": "fd1d34e0-80f0-4a48-a64f-e3952b68d456",
+  "observed_at": 1795126334.8156998,
+  "observed_at_beijing": "2026-11-20T06:12:14.815716+08:00",
+  "scope": {
+    "stage": "P3",
+    "role": "reviewer",
+    "mode": "normal",
+    "checkpoint": "263d3d4027d14ad39991fad39746a4847e42a051906eaa6b0c836c31caed5f7c"
+  },
+  "config": {
+    "agent_binary": "/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+    "backend": "claude",
+    "max_calls": 32,
+    "model": "qwen3.8-max[1m]",
+    "retry_limit": 2,
+    "reviewer_effort": "max",
+    "revision_limit": 5,
+    "worker_effort": "max"
+  },
+  "counts": {
+    "calls": 6,
+    "revisions": 1,
+    "receipt_repairs": 3,
+    "invalid_receipts": 3,
+    "adjudications": 0,
+    "signoffs": 0
+  },
+  "call_additions": [],
+  "reason": {
+    "attempt_id": "445c090d-590d-4a3d-b832-5040b464c56e",
+    "checkpoint": "263d3d4027d14ad39991fad39746a4847e42a051906eaa6b0c836c31caed5f7c",
+    "code": "receipt_repair_limit_reached",
+    "next_due_at": 1795124433.2634842,
+    "observed_at": 1795124413.2634842,
+    "result_sha256": "5f2d6669c2cefe536a4998bdb63aec3d4685ee5d05dd73f23c8105deb002b03e",
+    "scope": "P3",
+    "summary": "missing bound host entry anchor"
+  },
+  "bindings": {
+    "host": {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/candidate/solution.py",
+      "symbol": "Model.forward"
+    },
+    "entrypoint": {
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/candidate/solution.py",
+      "symbol": "Model.forward"
+    }
+  },
+  "source_evidence_count": 57,
+  "relevant_anchors": [
+    {
+      "index": 0,
+      "category": "implementation",
+      "line_end": 101,
+      "line_start": 63,
+      "note": "Bound implementation entry Model.forward: __init__ binds self._call to s4_tc_forward; the guard admits qk_dim in {512,576} with head_count <= 128 and passes the caller's out plus float scales straight through, returning the same buffer object.",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/candidate/solution.py",
+      "quote_offset": 0,
+      "quote": "class Model(torch.nn.Module):\n\n    def __init__(self):\n        super().__init__()\n        self._ext = _build()\n        self._call = self._ext.s4_tc_forward\n\n    def forward(\n        self,\n        query,\n        kv_cache,\n        block_tables,\n        seq_lens,\n        sparse_mla_top_k_lens,\n        bmm1_scale,\n        ",
+      "coordinate_valid": true
+    },
+    {
+      "index": 1,
+      "category": "host",
+      "line_end": 154,
+      "line_start": 128,
+      "note": "s4_tc_forward: ABI checks, tokens==0 early return, the split predicate tokens<=32 && heads<=64 && topk>=1024, and kernel selection — qk_dim 512 makes tail and cluster false so aka_s4_indexed_m64_d512 launches with smem 191104; root.yaml's Dispatch.when matches this routing exactly.",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/candidate/launch.cu",
+      "quote_offset": 0,
+      "quote": "void s4_tc_forward(at::Tensor q, at::Tensor kv, at::Tensor ids,\n                  at::Tensor seq, c10::optional<at::Tensor> lens, at::Tensor out,\n                  double scale1, double scale2) {\n  c10::cuda::CUDAGuard guard(q.device());\n  TORCH_CHECK(q.is_cuda() && q.dim()==4 && q.size(1)==1 && (q.size(-1)==512 || q.s",
+      "coordinate_valid": true
+    },
+    {
+      "index": 2,
+      "category": "host",
+      "line_end": 187,
+      "line_start": 177,
+      "note": "cudaLaunchKernelExC with clusterDim {1,1,1} and the spread policy, gridDim tokens*((heads+63)/64), blockDim 512, dynamicSmemBytes — the source of Worker_count, the cluster-launch Require and CLC refill availability.",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/candidate/launch.cu",
+      "quote_offset": 0,
+      "quote": "  cudaLaunchAttribute attributes[2]{};\n  attributes[0].id=cudaLaunchAttributeClusterDimension;\n  attributes[0].val.clusterDim={cluster ? 2U : 1U,1,1};\n  attributes[1].id=cudaLaunchAttributeClusterSchedulingPolicyPreference;\n  attributes[1].val.clusterSchedulingPolicyPreference=cudaClusterSchedulingPolicySpread;\n  cudaL",
+      "coordinate_valid": true
+    },
+    {
+      "index": 3,
+      "category": "host",
+      "line_end": 63,
+      "line_start": 39,
+      "note": "query_map 4-D dims {128,heads,4,tokens} box {128,64,1,1} and cache_map 2-D over physical rows {512, rows} box {128,1}, both SWIZZLE_128B with OOB_FILL_NONE — the 64x512 query block with zero-filled tail head rows and the row-wise gather encoding.",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/paged_indexed_latent_fp8/candidate/launch.cu",
+      "quote_offset": 0,
+      "quote": "CUtensorMap query_map(const at::Tensor& q) {\n  uint64_t dimensions[4] = {128, static_cast<uint64_t>(q.size(-2)), 4,\n                            static_cast<uint64_t>(q.size(0))};\n  uint64_t strides[3] = {static_cast<uint64_t>(q.size(-1)), 128, static_cast<uint64_t>(q.stride(0))};\n  uint32_t box[4] = {128,64,1,1}, step[",
+      "coordinate_valid": true
+    }
+  ],
+  "diagnosis": "Bound candidate/solution.py Model.forward is cited only as implementation; all host-category citations point to downstream candidate/launch.cu. The bound-host category/path obligation is missing. Existing coordinates are valid. This is a proposal omission, not a verifier false positive. P1 and P2 approvals remain valid.",
+  "secondary_failure": {
+    "handoff_characters": 2282,
+    "handoff_nonempty_lines": 1,
+    "limit_characters": 1200,
+    "limit_nonempty_lines": 20,
+    "note": "The unchanged handoff would fail the later approval gate. This is not yet part of Runner feedback; ordinary resume has no supplemental feedback option. No feedback is manually injected."
+  },
+  "result": {
+    "exit_code": 0,
+    "native_status": {
+      "init_count": 1,
+      "issues": [],
+      "success": true,
+      "terminals": [
+        {
+          "end_offset": 1035410,
+          "event_sha256": "aef3a7f7e62260aaa694c2f23c0e95cb30bdfefdfc428cd52b7137172f275543",
+          "is_error": false,
+          "line": 3658,
+          "offset": 931344,
+          "result_index": 0,
+          "session_id": "193dfa9a-f2da-4a01-9caa-9a24a67cd238",
+          "subtype": "success",
+          "type": "result"
+        }
+      ]
+    },
+    "outcome": "completed",
+    "parse_error_lines": [],
+    "response_validation": {
+      "native_output_matches": true,
+      "nonce_valid": true,
+      "schema_errors": [],
+      "schema_valid": true
+    },
+    "resume_session_id": "193dfa9a-f2da-4a01-9caa-9a24a67cd238",
+    "session_id": "193dfa9a-f2da-4a01-9caa-9a24a67cd238",
+    "session_status": "ready",
+    "termination": {
+      "actions": [],
+      "confirmed": true,
+      "descendants": [
+        {
+          "pgid": 1401306,
+          "pid": 1401306,
+          "ppid": 1034232,
+          "start_token": "linux:304858cb-b04e-4fee-9b88-16e0fb8eab46:151856554",
+          "stat": "S"
+        },
+        {
+          "pgid": 1401306,
+          "pid": 1401308,
+          "ppid": 1401306,
+          "start_token": "linux:304858cb-b04e-4fee-9b88-16e0fb8eab46:151856574",
+          "stat": "S"
+        },
+        {
+          "pgid": 1401306,
+          "pid": 1401329,
+          "ppid": 1401308,
+          "start_token": "linux:304858cb-b04e-4fee-9b88-16e0fb8eab46:151856618",
+          "stat": "D"
+        },
+        {
+          "pgid": 1401306,
+          "pid": 1401340,
+          "ppid": 1401308,
+          "start_token": "linux:304858cb-b04e-4fee-9b88-16e0fb8eab46:151856635",
+          "stat": "S"
+        },
+        {
+          "pgid": 1401306,
+          "pid": 1401818,
+          "ppid": 1401308,
+          "start_token": "linux:304858cb-b04e-4fee-9b88-16e0fb8eab46:151860438",
+          "stat": "S"
+        },
+        {
+          "pgid": 1404248,
+          "pid": 1404248,
+          "ppid": 1401308,
+          "start_token": "linux:304858cb-b04e-4fee-9b88-16e0fb8eab46:151885093",
+          "stat": "S"
+        },
+        {
+          "pgid": 1404248,
+          "pid": 1404249,
+          "ppid": 1404248,
+          "start_token": "linux:304858cb-b04e-4fee-9b88-16e0fb8eab46:151885097",
+          "stat": "R"
+        }
+      ],
+      "survivors": []
+    }
+  },
+  "current_session": {
+    "attempt_id": "445c090d-590d-4a3d-b832-5040b464c56e",
+    "binding": {
+      "backend": "claude",
+      "effort": "max",
+      "model": "qwen3.8-max[1m]",
+      "run_id": "fd1d34e0-80f0-4a48-a64f-e3952b68d456",
+      "session_scope": {
+        "node": "root",
+        "operation": "normal",
+        "role": "reviewer",
+        "stage": "P3"
+      }
+    },
+    "cli_version": "2.1.316 (Claude Code)",
+    "configuration_digest": "cff23d15b05b46a399de095a46ca9c7a55b91301fac10418d561572f962055d4",
+    "executable": "/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+    "format": "schema_extract.session.v1",
+    "retired_sessions": [],
+    "session_id": "193dfa9a-f2da-4a01-9caa-9a24a67cd238",
+    "status": "ready"
+  },
+  "targeted_code_comparison": {
+    "schema_extract/tools/receipts.py": {
+      "current_sha256": "3070b8c5559bc7ca9a994b9dedbe50408c1a43c4a59c5a3198081a5dc404fe15",
+      "frozen_sha256": "3070b8c5559bc7ca9a994b9dedbe50408c1a43c4a59c5a3198081a5dc404fe15",
+      "same": true
+    },
+    "schema_extract/tools/runner.py": {
+      "current_sha256": "d71c8d66f1e2c911e64a711c8f54db9f09a75f57eb2594674573c68c6f12e7ff",
+      "frozen_sha256": "d71c8d66f1e2c911e64a711c8f54db9f09a75f57eb2594674573c68c6f12e7ff",
+      "same": true
+    },
+    "schema_extract/tools/prompts.py": {
+      "current_sha256": "3ec4fe79044ba5f68f9e604bedb47ddda1a3bf96c2a89291771d7dcb69a95d99",
+      "frozen_sha256": "3ec4fe79044ba5f68f9e604bedb47ddda1a3bf96c2a89291771d7dcb69a95d99",
+      "same": true
+    },
+    "schema_extract/prompt/operations/response.md": {
+      "current_sha256": "dfee2826e3b67e3bb2c79ef2b94f251b7cd35b8d2658d3de0d0c409e1b81a174",
+      "frozen_sha256": "dfee2826e3b67e3bb2c79ef2b94f251b7cd35b8d2658d3de0d0c409e1b81a174",
+      "same": true
+    },
+    "schema_extract/prompt/operations/receipt_repair.md": {
+      "current_sha256": "3dfb80fc59e960cd891143f0607992ce3d880bed4ae74dc89228d41f383b4a17",
+      "frozen_sha256": "3dfb80fc59e960cd891143f0607992ce3d880bed4ae74dc89228d41f383b4a17",
+      "same": true
+    }
+  },
+  "input_lock_sha256": "9498058cea9a4de11b8ad6c4535c82c966478222d61e2e309794c16a1110a370",
+  "checkpoint_files": {
+    "checkpoint.json": "1ac3c6c81a4a0b49d8863e166baa359461d303e4927b9438a77e75457b3106fe",
+    "artifacts/dispatch.md": "8987af558c6d938a5f35b67db5f018d25309d995dd0b7fbc885f21d216d1a537",
+    "artifacts/root.yaml": "ac417412de3c155b376df560fcbf155f36fe98ccc97d04d567061b68dc019e4c"
+  },
+  "failed_evidence_sha256": {
+    "attempt.json": "64fb8919a0f6ff0804072150c494d9b2f5784ace75d5775720a4e44e88c9dddd",
+    "response.schema.json": "7f6a885f2589b714b991d98cc0deadabaefc2355d42bbf5e4a32480bea0f577b",
+    "prompt.txt": "4d455fadb4ae82294c6c097fc6f87b55e4f7f18c2b9b966e7d8594a24ddd5956",
+    "invocation.json": "f82e511034155eea50d743393da9f66ce61d9645bd3dcfac0556cf2849648908",
+    "launch.json": "ececa4e9b3c3a3a377c9b47003aedafcc57c5fe83dda69229666158a71de5624",
+    "events.jsonl": "0f268e5627968b3d4976b3900357ea81a0abbc6f21db8460ad8134e5a22abc0f",
+    "stderr.txt": "fbeae639cee0fcac43b5ca827b203adc808de34877bd8465bd360affe6d1054c",
+    "process.json": "b850a165905fcd52121891bd506f52aebe44fd9b7ebd1112c7c5b0e865a09a13",
+    "cli-exit.json": "7da976e54c740416d61ca2127087ce58e045038f42b0252767dfb6af1b3097f8",
+    "exit.json": "96ebf54cd6796311b5c119292562ffd4d1145074fa43090fb0e1a6ac976b8d30",
+    "response.json": "481297580ed2dc69a27d5fd44ae5c35a251371b4f07cde43c78c10a5f002a0c7",
+    "result.json": "0ba42081101cce157100e461ce1ca7da63a48389b8cfe0347e90afcd8b95b30f",
+    "event.json": "93801ec07d93d82598038829dd4c510de9a4c2ca150b520b0b24ab8c2fb0057f",
+    "processing.json": "3487e63e0c727d629587368c6d458703e094b62643a495cc61b725b6ea8a162d",
+    "receipt.json": "e7658748801056267f8ba2cbc9d9b4911242570856b61ba24cc56f4a04bfb99a",
+    "repair.json": "81daf083933da028acc3b14c61da94bc41658eb382c4d43641d052553eb78b12",
+    "finished.json": "98183869bffef0bdc75bcffab788fc8f8eb838fb858626bbf16770fc2eceec09"
+  },
+  "audit": {
+    "exit_code": 0,
+    "verification": "partial",
+    "errors": 0,
+    "unavailable": 1,
+    "evidence": "before_audit.txt"
+  },
+  "authorization": "Current user policy and Supervisor explicit delegation: one evidence-based ordinary resume in the original run within existing 32 calls; no state/receipt/prompt editing, no executor repair, no extra calls."
+}

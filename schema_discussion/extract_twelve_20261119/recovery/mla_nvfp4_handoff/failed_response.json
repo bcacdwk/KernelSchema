@@ -1,0 +1,738 @@
+{
+  "artifact_evidence": [
+    {
+      "line_end": 11,
+      "line_start": 5,
+      "note": "范围小节：实现范围（candidate/ 十个文件及各自职责，与 DELIVERY.json 的 candidate_files 一致）、调用链（forward 无参、同 stream 主 kernel + 仅 max_splits>1 时 combine、规划与分配全在构造期）、主机接受/拒绝面并明写『按 P1 已定不回填 Contract 有效域』、『只有一套可提取实现』的四项依据——逐项与源码相符",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 15,
+      "line_start": 15,
+      "note": "机制 1 工作划分：item 八字段、行 tile 128 展平行、KV tile 128 token（2 page）、一个 piece 写成相邻 v_half 0/1 两 item 交一个 2-CTA cluster、unit_first 给出 item 区间、grid=2×num_units、各 role 以 item+=2 只读偶数 item、flags 语义——与 plan.py:94-124/183-215 及 kernel.cu 各 role 循环一致",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 16,
+      "line_start": 16,
+      "note": "修订后的 V 侧表述（本轮新写）：『V 的通道半区按 rank 错开：load 角色对对端的 32 个 key 只装 2 个 64 B 字节块，rank0 取字节列 0 与 128（即通道 0-127 与 256-383）、rank1 取 64 与 192（通道 128-255 与 384-511），所以每个 CTA 的 V smem 存 128 个 key × 自己那 256 个通道，cluster 双方的 V 合起来才覆盖 PV 需要的全部 512 通道』——与 kernel.cu:3301-3322、cuda_primitives.cuh:185-190 相符",
+      "path": "dispatch.md",
+      "quote_offset": 350
+    },
+    {
+      "line_end": 16,
+      "line_start": 16,
+      "note": "修订后的 O 侧表述（本轮新写，上一轮缺陷已消除）：『O 的通道分工不经过 rank…通道由 CTA 内的 softmax 象限决定——n_half = quadrant / 2 = (warp % 4) / 2 给出 o_base = out_row*512 + n_half*128 以及 8 个 32 通道块的列坐标 n_half*128 与 n_half*128 + 256，quadrant % 2 给出 32 行半区（warp_row0 = out_row_base + quadrant%2*32），四个象限合计写出本 CTA 自己 64 行的全部 512 通道（对应 TMEM 列 64-319）』——逐项对应 kernel.cu:225-226/874/886/922/1054/1192/1468/3540-3576",
+      "path": "dispatch.md",
+      "quote_offset": 575
+    },
+    {
+      "line_end": 17,
+      "line_start": 17,
+      "note": "机制 3 主计算：512 线程、cluster(2,1,1)、189440 B 动态 smem、512 列 TMEM 用 480、五个 warp 角色与 setmaxnreg 208/112/96、QK 的 mxf4nvf4 block_scale scale_vec::4X 与 A/B/SFA/SFB/D 归属、V 的三步转换链、PV 的 f8f6f4『D 是本 CTA 的 O 累加器（TMEM 列 64-319）』与落后一拍——现在与第 16 行一致",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 18,
+      "line_start": 18,
+      "note": "机制 4 softmax 与在线归一化：quadrant/n_half/row_c、row_limit 掩码为 -inf、smem_xchg_max/sum + 64 线程 named barrier、延迟最大值（上升>2 才推进）、p 与未舍入 row_sum、E4M3 P、alpha 经 row_state 交 correction、sink 种子、correction 的 __all_sync 门控与列 64 起 256 列回写——逐项与 kernel.cu:225-268/322-345/457-477/2494-2509 相符",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 19,
+      "line_start": 19,
+      "note": "机制 5 输出形成：两条路径由每 piece 的 FLAG_DIRECT_OUT 决定（非调用者开关）、等 o_full、inv_sum/lse2、从 TMEM 分 8 块取回 O、『本 CTA 的 64 行全有效时』经 P smem + TMA 写 OT/PO 否则逐行 guarded 写、lse 只由 n_half==0 的有效行写并填 -inf——与第 16 行修订后的象限解释一致，不再矛盾",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 20,
+      "line_start": 20,
+      "note": "机制 6 归并与完成关系：grid=(total_q, ceil(num_heads/8))、256 线程、无动态 smem、一 warp 一 (token,head) 行、每 lane 16 通道 2 split（至多 64）、row_splits==1 的行完全不写、log2 域 warp shuffle 归并、同 stream 顺序执行、combine TU 不继承 fast-math——与 combine.cu:99-149、runtime.py:49-52/442-454、combine_launch.cu:85-94 相符",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 22,
+      "line_start": 22,
+      "note": "root 选择与初步承担范围：uniform 实例（max seq_lens<8192）、unit_first=range(0,num_items+1,2)、每 cluster 一个 piece、grid=num_items、item 循环只迭代一次、与 balanced 实例共用同一 kernel/combine 而只差主机划分与每 unit item 数、未选 balanced 的理由与 8/10 用例事实——与 plan.py:183-215/302-349 及 shape_cases.json 相符",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 24,
+      "line_start": 24,
+      "note": "『待后续阶段核实的边界（均不影响本次代表选择）』——五项均标注去向，本次核实其中确无会动摇代表选择的疑点",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 26,
+      "line_start": 26,
+      "note": "修订后的第一项边界：把『机制 2 中 O 的通道分工直接读自 o_base 与 TMA 列坐标，属源码事实』与『待复核的只是它与 TMEM lane/column 的对应』分开，并保留『本草案的推算不作为定义依据』——既消除了与第 16 行的矛盾，也未把推算当作定义",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 30,
+      "line_start": 27,
+      "note": "其余四项边界：barrier 到达计数与生产者集合（init 值与 kernel.cu:120-172 一致，枚举漏 raw_full/sf_empty 属非阻塞）、近似指令位置与 fast-math 归属、空工作与尾块（rank1 全无效行仍须跑完流水线、epi_bulk 为假的逐行写、page 数为奇时 page_b=page_a）、硬件占位与采样验收限制——均有去向且不影响选择",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 43,
+      "line_start": 32,
+      "note": "完整设计表（仅 root，含机制摘要、保留理由与关系列，链接 [root](root.yaml) 有效）与四条『为何没有第二份完整设计/未展开候选』的理由——格式符合最小目录要求，未把未展开候选假称参数或局部变化",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 51,
+      "line_start": 45,
+      "note": "balanced 局部记录：类型标注（局部）、基线定位 root 的 DESIGN.Work_schedule 及暂拟对象（Partition/Worker_count/Worker_assignment/Flow.Launch grid）、差异与联动（变长 unit_first、grid≈SM 数、跨 item 保留 stage/phase、首次 PV 清零、q_full/q_empty 重载、combine 不变）、条件与依据（auto 阈值 8192、8/10 用例、与 Contract 的 Balanced_split_policy 一致）及容量缺口去向",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 57,
+      "line_start": 53,
+      "note": "schedule/tiles_per_split 参数记录：基线为 uniform 划分算出的 tiles_per_split 与 choose_tiles_per_split 折半规则，差异只影响 item 数/max_splits/unit_first/grid 与 BF16 partial 舍入点，条件与依据说明绑定入口不可达且覆写会偏离 reference._split_ranges 的数值约束边界，故不进入任何完整设计的 when",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 5,
+      "line_start": 1,
+      "note": "META_DATA：Name/Describe/Source（KernelSchema@4849028…:candidate/solution.py::Model.forward）/Version 1，尚无 Dispatch——P2 只要求核对 root 的实际来源与初步承担范围，正式 when 与完整 Design 留待 P3，digest 与上一轮相同（aa9ffd85…），本次修订未触及 root.yaml",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 93,
+      "line_start": 72,
+      "note": "共享 Contract 已把设备相关划分写成 Split_partition + Uniform_split_policy + Balanced_split_policy 三步并声明其数值约束力（多 split 行 BF16 partial）——一份完整 YAML 只能选定一种划分、另一种落目录记录，这是 root 选择与 balanced 局部记录的分层依据；两式与 reference.py:12-46、plan.py 逐项一致",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 133,
+      "line_start": 111,
+      "note": "Split_partial/Merge_output/Call_semantics 已定义 BF16 partial 触发条件、FP32 LSE 归并、单 split 行退化 w=1、原地写与返回身份、完整逻辑张量被覆盖、workspace 为 scratch——支撑『直写与 combine 属同一方案的两条数据决定路径』以及修订后『两个 CTA 各写自己 64 行、合起来覆盖完整张量』的一致性",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 139,
+      "line_start": 134,
+      "note": "Golden_reference：Source 指向 problem/reference.py::Model.forward，Tolerance 对 out/lse 保留已知判据并标注 Source only/no formula/no defaults，Gap 记录参考需要 out 缓冲且 return_lse 无 lse 时返回 None——受 100 字符预算所限未含 ACCEPTANCE.json 已声明的 mode 与 max_rel_l2（P1 已提框架候选，只影响外部通过边界，不阻塞本阶段）",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 151,
+      "line_start": 140,
+      "note": "Hardware_specification：Device/Architecture/Stack/Wiki 仍为 P1/P2 豁免的占位，Execution 已登记 thread/warp/warpgroup/cta/cluster 五级及 warp 角色、512 线程/189440 B/512 列 TMEM 用 480、combine 256 线程——草案第 30 行据实说明占位与 SM100/103 差异待核，未越权填写",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 200,
+      "line_start": 163,
+      "note": "DESIGN 三区仍是 starter 骨架（全文 200 行，末行为 Tile_pipeline 的 - compute:output）；P2 不要求完整 Design，草案引用的 Partition/Worker_count/Worker_assignment/Flow.Launch 等对象名在该骨架中确有对应位置，故『暂拟对象』的指向可核",
+      "path": "root.yaml",
+      "quote_offset": 0
+    }
+  ],
+  "attempt_id": "07642a2c-7436-45d1-8eaa-55140639453b",
+  "checks": [
+    {
+      "command": "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/runs/af01989c-c712-4fcf-8ecc-3a88f10541eb/attempts/07642a2c-7436-45d1-8eaa-55140639453b/materials/check-helper.py",
+      "exit_code": 0,
+      "note": "亲自执行本次固定只读检查一次（未传额外参数、未追加管道/重定向）：exit_code=0、raw_passed=true、corrections 为空、diagnostics 为空、checked_nodes=[root]、excluded_nodes 为空、notices 为空；directory 的 yaml_files/registered_nodes 均只有 root，planned_nodes/missing_nodes 为空，与拟完整集合只有 root 一份一致；source_validation=verified 且 source_id/ref 与本次 invocation 相符（与上一轮同一固定源码，故上一轮已核实的源码事实仍适用）。检查器结果不代替语义判断，本次批准依据的是对修订行与全文的源码复核。"
+    }
+  ],
+  "checks_note": "已亲自执行 invocation.check_command 一次并记录退出码 0；未运行 GPU、编译器、验收器或采样评测（超出本次角色职责，也非有据设计继续提取的前提）。本轮为修订后复审：已重新阅读 dispatch.md 全文 58 行与 root.yaml（digest 未变），并对修订句所依赖的 kernel.cu 行逐条复核。",
+  "conclusions": [
+    {
+      "evidence": [
+        1,
+        4,
+        10,
+        11,
+        14,
+        17,
+        18,
+        19,
+        21,
+        22,
+        23,
+        24,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43
+      ],
+      "subject": "mechanisms",
+      "text": "修订后的机制概览六条均独立核实成立，上一轮的错误已消除。(1) 提交与调用：forward() 无参返回构造期 prepare 绑定的 runner，launch() 在同一 torch stream 上先发 main_entry、仅当 reduce_entry 非 None 再发 reduce_entry；规划、一次 seq_lens.cpu() 回退、workspace 各区初始化与 out/lse 新分配全在构造期；无录图/结果缓存/验证前缀，@cache 只缓存编译产物。(2) 工作分配：主机展开扁平 work table（item 八字段、行 tile 128 展平行、KV tile 128 token），一个 piece 写成相邻 v_half 0/1 两 item 交一个 2-CTA cluster，grid=2×num_units，各 role 以 item+=2 只读偶数 item，check_pairs 保证配对不变量。(3) cluster 内操作数分割（本轮修订处）：rank 决定 Q/O 的 64 行半区（q_row0 含 rank*64）与 V 的通道半区（peer 的 32 个 key 只装 2 个 64 B 字节块，rank0 取字节列 0/128 → 通道 0-127 与 256-383，rank1 取 64/192 → 128-255 与 384-511），每 CTA 的 V smem 每 stage 32768 B = 128 key × 256 通道，cluster 双方合起来覆盖 PV 需要的 512 通道；O 的通道分工不经过 rank，而由 CTA 内 softmax 象限给出（n_half=quadrant/2 → o_base=out_row*512+n_half*128 与 8 个 32 通道块的列坐标 n_half*128、n_half*128+256；quadrant%2 → 32 行半区），四象限合计写出本 CTA 自己 64 行的全部 512 通道（TMEM 列 64-319），lse/partial_lse 只由 n_half==0 的有效行写、两 CTA 合起来覆盖完整逻辑张量——与 kernel.cu:225-226/255/874/886/922/1054/1192/1468/1995-2005/3264/3301-3322/3540-3576 逐项相符。(4) 主计算：512 线程/cluster(2,1,1)/189440 B 动态 smem/512 列 TMEM 用 480，五角色与 setmaxnreg 208/112/96；QK 仅由 rank0 的 mma warp 发 mxf4nvf4.block_scale.scale_vec::4X（A=tmem_q 416 区、SFA=320 区且每 scale 字复制 4 份、SFB=352 区 2 stage、D=tmem_acc 2 stage×32 列），每 tile 两轮每轮 8 条；V 由 transform 以 e2m1x2→乘 E4M3 scale→satfinite e4m3x2 就地转换，对应 Contract 的 Prepare_v；PV 用 f8f6f4、A=E4M3 P、B=cluster 双方 V、D=tmem_acc+64/+192，落后一拍并补尾 PV，累加谓词在每 piece 首次 PV 清零。(5) softmax：quadrant→n_half/row_c、row_limit 掩码为 -CAKE_INF、xchg + 64 线程 named barrier、延迟最大值（上升>2 才推进）、p=exp2(s*scale_log2+6-safe)、分母用未舍入 p、alpha 经 row_state 交 correction 且以 __all_sync 门控 256 列回写、sink 种子仅 n_half==0 置 row_sum=64。(6) 归并：一 warp 一 (token,head) 行、每 lane 16 通道 2 split、row_splits==1 的行完全不写、log2 域 warp 归约后以 exp2 权重在 FP32 加权 BF16 partial 再打包 BF16，同 stream 顺序执行即完成关系，combine TU 不继承 fast-math。"
+    },
+    {
+      "evidence": [
+        9,
+        11,
+        14,
+        17,
+        18,
+        19,
+        50
+      ],
+      "subject": "root_choice",
+      "text": "独立认可 root 取 schedule 解析为 uniform 的真实实例，本轮修订未改变该判断。事实核实：build_work_plan 的 auto 在 max(kv_lens)>=BALANCED_MIN_KV(8192) 时取 balanced、否则 uniform；_uniform_plan 的 unit_first=range(0,len(items)+1,CLUSTER_PAIR) 使每个 cluster 恰领一个 piece、grid=2*num_units=num_items、kernel 的 item 循环只迭代一次；它是真实实例而非拼接——kernel.cu/combine.cu 与 launch 配置对两种 schedule 完全相同（同一 __global__、同一 block/cluster/smem/spread 配置），差别只在主机划分函数与每 unit 的 item 数。选择理由成立：首读只需面对角色分工、流水线与两条输出路径，不被一个 unit 多 piece 的相位推进干扰；未选 balanced 的理由（划分式 + 多 piece 循环推进的双重复杂度）有据，且『10 个固定用例中 8 个走 balanced』经 shape_cases.json 逐例核对正确（uniform 域为用例 1 的 8×4096 与用例 3 的 4097），该事实不改变 kernel 机制的同一性。root 初步承担范围（max seq_lens<8192 且满足主机接受条件）与来源身份（META_DATA.Source 指向 candidate/solution.py::Model.forward）一致；root.yaml 尚无 Dispatch、Design 仍为骨架，符合 P2 不批准完整 Design、正式 when 留待 P3 的阶段前提。修订后的第 16 行不影响本项判断（O 的行半区仍由 rank 决定，与 root/balanced 无关）。"
+    },
+    {
+      "evidence": [
+        0,
+        2,
+        3,
+        10,
+        11,
+        12,
+        14,
+        15,
+        16,
+        44,
+        45,
+        46,
+        52
+      ],
+      "subject": "selection",
+      "text": "独立认可拟完整集合含 root 共 1 份，两条记录的层级判断成立，没有需降级的完整候选，也没有『已研究但未完整展开』的独立方案。(1) combine kernel 不独立成设计：由 plan.max_splits>1 触发，其输入 partial_o/partial_lse/row_splits 的生产者、完成关系与输出归属必须与主 kernel 在同一份 Work_schedule 贯通；max_splits==1 时 partial_o 退化为从不写入的 tensor-map dummy。(2) direct-out 与 partial+combine 不是两套设计：由每 piece 的 num_splits 经 FLAG_DIRECT_OUT 决定，属数据引起的执行分支；token_splits 与 combine 的 row_splits 保证同一行只由一条路径写最终 O/LSE。(3) balanced 判为局部记录而非新的整体设计：相对 root 基线它没有新增主要计算、输出形成或主协作机制——kernel 二进制、五个 role、barrier 集合、smem/TMEM 布局、epilogue 与 combine 全部不变；改变的只是主机划分（拼接 (request,m_tile) 的 tile 序列后按 unit 均分、切口处生成 split）、由此得到的变长 unit_first、grid≈SM 数，以及既有 item 循环的迭代次数与跨 item 状态保留（stage/phase 计数、首次 PV 清零标志、q_full/q_empty 重载）；工作是主机静态划分而非动态补领，也没有新增预取或跨工作缓冲，因此围绕基线已有对象（Partition/Worker_count/Worker_assignment/Flow.Launch grid）即可说清全部差额，边界外主体继续成立，符合 common 的局部判据；reviewer.md 提到的『持久 worker 补领/提前预取/跨工作寿命』在此不构成新的整体组织。(4) schedule/tiles_per_split 覆写判为参数记录：Model.__init__ 不传这两个参数，从 Contract 调用面不可达，且覆写后划分不再等于 reference._split_ranges 由公开 shape/device 策略重建的边界（该边界决定标准答案），因此不进入任何完整设计的 when。(5) 生产对照 problem/solution.py 调用未随源提供的 FlashInfer prepared API，属来源限制。(6) cuda_primitives.cuh 末尾十个 SKIP_*/TRACE 宏全目录无引用，不成立编译期变体轴。两条记录均直接定位 root 的 DESIGN.Work_schedule 及其中对象并标明暂拟，待 P4 按真实基线落实，符合轻量线索要求；拟完整集合 1 份远低于十份上限。"
+    },
+    {
+      "evidence": [
+        5,
+        6,
+        7,
+        8,
+        13,
+        21,
+        25,
+        43,
+        44,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54
+      ],
+      "subject": "coverage",
+      "text": "本阶段应审内容已全部独立审阅，修订后的有效全文重新过一遗，调查止点判断成立。当前产物：dispatch.md 修订后全文 58 行逐行重读（变化限于第 16 行与第 26 行，其余与上一轮已核实版本逐字相同）；root.yaml 的 digest 与上一轮相同（aa9ffd85…），全文 200 行已审，本次只重读 META_DATA、Split 相关三步、Split_partial/Merge_output/Call_semantics、Golden_reference、Hardware_specification 与 Design 骨架以确认未被修改。固定源码（source_id 与 ref 本次校验为 verified、与上一轮相同）：solution.py 全文；runtime.py 的 MODULES/CUDA_FLAGS/load_*、runner 与 launch、validate 与 prepare 全链；plan.py 全文；launch.cu 的 kernel 声明与 Run 末段；combine_launch.cu 的 Run 末段；combine.cu 的 kernel 全文；cuda_primitives.cuh 的 smem/TMEM 常量与宏区；kernel.cu 的 4/41-42、120-212、214-345、452-511、855-964、1030-1059、1186-1197、1400-1489、1980-2008、2110-2139、2470-2567、2669-2768、3216-3237、3246-3445、3490-3604——修订句所依赖的行（225-226、255、874、886、922、1054、1192、1468、1995-2005、3264、3301-3322、3540-3576 及 V smem 尺寸）均本轮或上一轮亲读。kernel.cu 中大量同模式逐元素展开（掩码、fma、cvt、tcgen05.ld/st、八块 epilogue 重复体）按模式抽样核对了首块、中段（1030-1059、1186-1197）与末块（1980-2008），未逐行读完；未读部分不改变已识别机制与选择。任务材料：metadata.json、shape_range.json、shape_cases.json（含 3/4/6 用例的 kv 值）、input.py 的 workspace 供给行、reference.py 全文、DELIVERY.json、PRECISION.md、ACCEPTANCE.json 的 tolerance 声明块。草案列出的五项待核实边界均已指明去向且不影响代表选择；本次另核对其中的 barrier init 计数与源码逐项一致。P1 已完成内容一并复核：Contract 的 Domain 与 shape_range 一致，Compute 十步与 reference.py 逐项相符，Golden_reference 的 Source/Gap 属实，Tolerance 的取舍只影响外部通过边界。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_self_contained",
+      "text": "dispatch.md 无需历史上下文即可理解：实现范围按文件与职责逐一列出并指向 root.yaml 的 META_DATA.Source 取得来源身份；调用链给出入口符号与提交顺序；六条主要机制各自点明负责者、数值表示、存储、坐标与完成关系，修订后的机制 2 把行/通道归属写成了可直接对照源码的表达式（o_base、列坐标、warp_row0、ko 字节列）；root 选择给出实例定位、初步承担范围与未选另一实例的理由；两条记录均含基线、差异与联动、条件与依据；五项待核实边界各自写明去向并区分『源码事实』与『推算』（第 26 行）。未来对象以『暂拟』标明，未把计划当作已完成定义；唯一链接 [root](root.yaml) 指向实际存在的文件，无失效链接；本次修改未引入新的未定义名称或依赖历史解释的缺口。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_layering",
+      "text": "分层正确：设备相关的 split 划分由共享 Contract 的 Split_partition/Uniform_split_policy/Balanced_split_policy 定义并声明数值约束力，dispatch.md 只记录本份 YAML 选定 uniform、另一种落目录，未把主机实现限制（backend=cake、CC(10,3)、workspace 容量、max_splits<=64、check_pairs/token_splits 不变量）回填成 Contract 有效域，而是明写『这些是实现范围，按 P1 已定不回填 Contract 有效域』并把容量条件指向 P3/P5 的 Realization；修订后的机制 2 仍只描述实现层的坐标与存储分工，未改写 Contract 的输出定义（完整逻辑张量覆盖、单 split 行退化 w=1 仍由 Contract 承担）；Hardware_specification 的 Device/Architecture/Stack/Wiki 仍为 P1/P2 豁免占位，草案据实说明待核定 SM100/103 与候选仅支持 (10,3) 的差异，未越权填写；Design 三区仍为骨架，目录也未用记录文字补齐 YAML 定义。"
+    },
+    {
+      "evidence": [
+        23,
+        24,
+        27,
+        28,
+        30,
+        31,
+        36,
+        37
+      ],
+      "subject": "document_consistency",
+      "text": "全文一致本轮通过，上一轮的矛盾已消除。修订后的第 16 行与机制 3（D 是本 CTA 的 O 累加器，TMEM 列 64-319）、机制 5（本 CTA 的 64 行全有效时 bulk 写；lse 只由 n_half==0 的有效行写）以及第 26 行（O 每 CTA 为 64 行 × 512 通道，占 128 lane × 256 列）现在相互印证：每 CTA 产出并写出自己 64 行的全部 512 通道，rank 只参与行半区与 V 的通道半区；若仍按旧句理解则会出现 O 的一半无人写出、rank1 的 64 行永远没有 LSE 写入者，与 kernel.cu:1995-2005 及 Contract 的 Call_semantics 相冲，现已不再存在该读法。其余交叉引用一致：机制 1 的 grid/unit_first/item 步长与机制 6 的 combine 触发条件、变体记录的条件与 Contract 阈值、范围小节的接受条件与主机代码均相符；数值常量（18432=64×256+64×32、28672=2×(32×256+32×128)+2×64×32、32768=128×256、8192、189440、480、512/256 线程、列 0-63/64-319/320-351/352-415/416-479）逐一核对无误。一处可选措辞收紧（不阻塞）：第 16 行『cta_rank 只出现在行坐标…从不进入输出地址』宜读作『从不进入输出的通道地址』，因为 out_row 本身经 row_in_req 含 rank*64；该句的前置小句『O 的通道分工不经过 rank』已使意图清楚，P3 写正式定义时建议加上『通道』限定。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_relevance",
+      "text": "内容必要且无过程噪声：保留的是设计重点（划分与 piece 归属、cluster 内操作数分割、两次 MMA 的操作数与相位关系、在线归一化的数值路径、两条输出形成路径、归并与完成关系）、影响理解的来源限制（FlashInfer 库实现不在固定源码内、近似指令不定义参考真值、采样验收不作全域保证、workspace 容量角落已录 issue）以及带去向的待核实边界；退修过程、本轮修订说明与历史批准均未写入正文（留在过程记录）。命名清楚常见，沿用源码的 role/barrier/buffer 实际名称与 plan/kernel 符号，未出现自造缩写。两处非阻塞小缺口（第 11 行只列举十个无引用宏中的五个；第 27 行 barrier 清单漏 raw_full 与 sf_empty，均为 init 1）不影响结论正确性，已写入交接供 P3/P4 顺手补全。"
+    }
+  ],
+  "decision": "approve",
+  "format": "schema_extract.proposal.v1",
+  "framework_candidates": [],
+  "handoff": "P2 放行，进入 P3（新开 worker/reviewer 对）。上一轮 source_fidelity 退修已按源码落实并经本次复核：dispatch.md 第 16 行现在正确区分 rank 决定的行半区与 V 通道半区、以及 CTA 内 softmax 象限决定的 O 通道分工，第 26 行相应把『O 的通道分工属源码事实』与『待复核的只是它与 TMEM lane/column 的对应』分开；机制识别与代表取舍未变、无需重做。已定事项与理由：(1) 拟完整集合只有 root 一份，plan 原样回传——instance 为 schedule 解析成 uniform 的真实实例（unit_first=range(0,num_items+1,2)、每 cluster 一个 piece、grid=num_items、item 循环只迭代一次），kernel/combine 与 balanced 实例逐字节相同，差别只在 plan.py 的划分函数与每 unit 的 item 数。(2) 两条记录：balanced 划分与每 unit 多 piece（局部，max_b seq_lens[b]>=8192，10 个固定用例中 8 个走它）、prepare 的 schedule/tiles_per_split 覆写（参数，绑定入口不可达且会偏离 reference._split_ranges 的数值约束边界，不进入任何 when）。(3) combine kernel、FLAG_DIRECT_OUT 分支、生产对照的 FlashInfer 库实现均不独立成设计。关键入口：solution.py::Model.forward → runtime.prepare/launch（同 stream：launch.cu::Run 主 kernel，max_splits>1 时 combine_launch.cu::Run）；机制主体在 kernel.cu 五个 role（softmax 214-2008、correction 2010-2667、transform 2669-3244、load 3246-3329、mma 3331-3687）与 combine.cu 86-193。给 P3 的已定事实（本轮核实，可直接引用）：cta_rank 只决定 Q/O 的 64 行半区（kernel.cu:3264 的 q_row0、:255 的 row_in_req）与本 CTA 暂存的 V 通道半区（:3301-3322 的 ko 字节列 rank0=0/128、rank1=64/192）；O 的通道分工在 CTA 内由 softmax 象限给出（n_half=quadrant/2 → o_base=out_row*512+n_half*128 与列坐标 n_half*128、+256，共 8 个 32 通道块；quadrant%2 → warp_row0 的 32 行半区），四象限写出本 CTA 64 行的全部 512 通道（TMEM 列 64-319）；lse/partial_lse 只由 n_half==0 的有效行写，两 CTA 合起来覆盖完整逻辑张量；barrier init 计数与草案第 27 行一致（raw_empty 321、p_full 512、v_full 384、sfa_full/sf_full/s_empty/o_empty 256、corr_sig/corr_empty 128，其余为 1，含草案漏列的 raw_full 与 sf_empty）；TMEM 列映射 acc 0-63（S 两 stage）/64-319（O）/320-351（Q scale ×4 复制）/352-415（K scale 2 stage）/416-479（Q），smem 189440 B（V0/V1 各 16384、stride 32768；P 8192）。仍待 P3 核实：S/O 累加器的精确 TMEM lane-column 映射与 swizzle（草案第 26 行的推算不作定义依据）、各 barrier 的生产者集合与到达语义（gating MMA 者经 mapa 远端 arrive 到 rank0，MMA 完成者 multicast mask 3）、近似指令位置（ex2.approx.ftz 的 p 与 alpha、lg2.approx.ftz 的 lse2、approx_rcp 的 inv_sum、combine 的 ex2/lg2.approx；主 kernel --use_fast_math 而 combine TU 不继承）、空工作与尾块（行 tile 不满时 rank1 全无效行仍须跑完 load/transform/MMA、epi_bulk 为假的逐行写、page 数为奇时 page_b=page_a）；root 自身 when 与完整 Design 在 P3 写实，Execution 已登记的 thread/warp/warpgroup/cta/cluster 与 register/smem/tmem 是 role 与 Storage.location 的唯一名称来源。可选措辞收紧（不阻塞、不影响批准）：第 16 行『cta_rank…从不进入输出地址』宜在 P3 正式定义中写成『从不进入输出的通道地址』（out_row 本身经 row_in_req 含 rank*64）；第 11 行的无引用宏可补齐为 cuda_primitives.cuh:208-217 的全部十个。新事实去向：workspace 容量角落沿用 P1 的 source_gap issue（生成器固定 128 MiB，input.py:108），容量条件写入 P3/P5 的 Realization；Device/Architecture/Stack/Wiki 占位待按任务材料核定 metadata 的 SM100/103 与候选仅支持 (10,3) 的差异；Tolerance 未含 ACCEPTANCE.json:392-398 已声明的 mode=elementwise_and_l2 与 max_rel_l2=null，属 P1 已提的框架候选 tolerance-source-record-budget，交付时不得当作完整验收器复刻。framework_candidates 本轮为空：P1 的两项候选（tolerance-source-record-budget、execution-summary-budget-unenforced）我在当前产物中复核其事实基础仍成立（root.yaml:137-138 的 96 字符记录 vs ACCEPTANCE.json 六字段；root.yaml:144-148 五条 Execution 摘要远超 100 字符而 --skip-hardware 不报），但根因与证据均属 P1 阶段、已由 P1 reviewer 以同一稳定 ID 记录在案，本轮无新反例，故不重复提交以免同一根因出现重复台账条目。缺口：kernel.cu 的逐元素展开块按同一模式抽样核对而非逐行读完，未读部分不影响本阶段判断。",
+  "issues": [],
+  "plan": [
+    {
+      "id": "root",
+      "instance": "candidate/solution.py::Model.forward → runtime.NVFP4MLADecodeRunner.launch（prepare_nvfp4_batch_decode_with_kv_cache_mla，schedule='auto' 解析为 'uniform'，max_b seq_lens[b] < 8192）：launch.cu::Run 启动 kernel.cu::kernel_cake_nvfp4_mla_decode_6260e249381d96576baa（512 线程、__cluster_dims__(2,1,1)、spread、动态 smem 189440 B、TMEM 512 列用 480），plan.max_splits > 1 时 combine_launch.cu::Run 在同 stream 追加 combine.cu::kernel_cake_nvfp4_mla_decode_ff76ef6d8e6453ca5e3c（256 线程、grid (total_q, ceil(num_heads/8))）"
+    }
+  ],
+  "reopen": null,
+  "source_evidence": [
+    {
+      "category": "host",
+      "line_end": 53,
+      "line_start": 38,
+      "note": "绑定入口 Model.__init__ 调 prepare_nvfp4_batch_decode_with_kv_cache_mla，实参只到 backend，不传 schedule/tiles_per_split——草案第 57 行『从 Contract 调用面不可达』的依据",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 56,
+      "line_start": 55,
+      "note": "forward() 无参直接 return self.runner()，规划与分配全在构造期（草案第 7 行）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 19,
+      "line_start": 14,
+      "note": "MODULES 只登记 cake_nvfp4_mla_decode_sm_103a 一个模块，main stage 源为 launch.cu+kernel.cu 且带 --use_fast_math（草案第 11 行『只有一套可提取实现』）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 52,
+      "line_start": 49,
+      "note": "reduce stage 源为 combine_launch.cu+combine.cu、compile_flags 为空——combine 是独立翻译单元不继承 fast-math（草案第 20 行）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 169,
+      "line_start": 162,
+      "note": "launch()：同一 torch stream 先发 main_entry、仅当 reduce_entry 非 None 再发 reduce_entry，返回 (out,lse) 或 out——两次提交的完成关系来源",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 348,
+      "line_start": 329,
+      "note": "主机接受面逐项核实：同一 CUDA 设备且 contiguous；capability 必须命中 SUPPORTED_COMPUTE_CAPABILITIES 而报错文案写 10.0/10.3；seq_lens_cpu 缺席时一次 seq_lens.cpu()；min(kv)>=q_len 且 max(kv)<=max_pages*PAGE_SIZE",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 378,
+      "line_start": 360,
+      "note": "workspace_layout 总量超出 workspace_buffer 即 ValueError；out/lse 缺席时新分配；max_splits*rows_total*HEAD_DIM 的 int32 元素偏移守卫（草案第 9 行）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 412,
+      "line_start": 388,
+      "note": "构造期完成 partial_o.zero_()、partial_lse.fill_(-inf)、work_table/unit_first/q_indptr/sinks 拷入，row_splits 仅在 max_splits>1 时由 token_splits 填充——forward 内不分配、不主机同步",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 454,
+      "line_start": 442,
+      "note": "仅当 max_splits>1 才构造 reduce_kwargs，combine grid=(total_q, ceil(num_heads/REDUCE_HEADS_PER_CTA), 1)——归并是同一方案内由数据触发的第二次提交",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 53,
+      "line_start": 39,
+      "note": "SUPPORTED_COMPUTE_CAPABILITIES={(10,3):'sm_103a'}、CLUSTER_PAIR=2、ROWS_PER_TILE=128、REDUCE_HEADS_PER_CTA=8、MAX_SPLITS=64、MIN_TILES_PER_UNIT=8、BALANCED_MIN_KV=8192——草案阈值与常量逐项相符",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 124,
+      "line_start": 94,
+      "note": "WorkPlan docstring：item 八字段、cluster u 跑 unit_first[u]..unit_first[u+1] 且总是整对 v_half、多 split 走 BF16 partial+combine 而单 split 保留 FLAG_DIRECT_OUT 直写；grid=(CLUSTER_PAIR*num_units,1,1)",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 215,
+      "line_start": 183,
+      "note": "_uniform_plan：FLAG_SEED_SINK（有 sink 的 split 0）与 FLAG_DIRECT_OUT（num_splits==1）；unit_first=range(0,len(items)+1,CLUSTER_PAIR)——root 所选实例每 cluster 恰一个 piece、grid=num_items 的依据",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 282,
+      "line_start": 218,
+      "note": "_balanced_plan：把每 (request,m_tile) 的 tiles 按 request-major 拼成长度 total 的序列，num_units=max(1,min(num_units,total//8)) 并在 ceil(longest/(total/num_units))+1>64 时折半，unit u 领 [u*total//U,(u+1)*total//U)，per_unit 为变长 item 区间——只是主机划分不同，kernel 与 work table 结构不变（局部记录的判据）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 299,
+      "line_start": 285,
+      "note": "check_pairs：每 unit item 数必须是 CLUSTER_PAIR 整数倍且每对是同一 piece 的 (v_half 0, v_half 1)——kernel 只读偶数 item 的主机侧不变量",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 349,
+      "line_start": 302,
+      "note": "build_work_plan：schedule='auto' 在 max(kv_lens)>=BALANCED_MIN_KV 时取 balanced（num_units=num_sms//CLUSTER_PAIR）否则 uniform；max_splits>64 抛错；末尾 check_pairs",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 400,
+      "line_start": 363,
+      "note": "token_splits：要求 ROWS_PER_TILE % num_heads == 0、FLAG_DIRECT_OUT 与 num_splits==1 一致、每 token 行恰被一个 split 数覆盖——同一行只由一条路径写最终 O/LSE",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 420,
+      "line_start": 409,
+      "note": "partial_shapes：max_splits==1 时 partial_o 只是 [ROWS_PER_CTA,512] 的 tensor-map dummy 且从不写入，否则 [max_splits,total_q,H,512] BF16 与 [total_q,H,max_splits] FP32",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 477,
+      "line_start": 455,
+      "note": "主 kernel launch：block(512,1,1)、clusterDim(2,1,1)、clusterSchedulingPolicySpread、dynamicSmemBytes=189440、cudaLaunchKernelExC（此前 cudaFuncSetAttribute 同为 189440）——plan 中 instance 的启动身份",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 94,
+      "line_start": 85,
+      "note": "combine launch：block(256,1,1)、dynamicSmemBytes=0、同一 stream 上 cudaLaunchKernelExC 启动 kernel_cake_nvfp4_mla_decode_ff76ef6d8e6453ca5e3c",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/combine_launch.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 4,
+      "line_start": 4,
+      "note": "kernel.cu 唯一的 __global__ 定义，带 __launch_bounds__(512) 与 __cluster_dims__(2,1,1)；全目录只有它与 combine.cu:86 两个 kernel 定义",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 42,
+      "line_start": 41,
+      "note": "cta_rank 取自 %cluster_ctarank——cluster 内两 CTA 分工的唯一来源",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 172,
+      "line_start": 120,
+      "note": "全部 mbarrier 的 init 计数与草案第 27 行一致（raw_empty 321；sfa_full/sf_full/s_empty/o_empty 256；p_full 512；v_full 384；corr_sig/corr_empty 128；q_full/q_empty/raw_full/s_full/sf_empty/v_empty/p_empty/pv_done/o_full 均为 1）；草案枚举漏列 raw_full 与 sf_empty，属非阻塞小缺口",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 212,
+      "line_start": 182,
+      "note": "warp 0 以 tcgen05.alloc.cta_group::2 申请 512 列（注释『480 used』）并 relinquish；列映射 acc=+0、sfa0..3=+320/328/336/344、sfb0..7=+352..408、q=+416（草案机制 3 的 TMEM 分区）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 230,
+      "line_start": 216,
+      "note": "修订后机制 2 的核心依据：quadrant=warp%4、n_half=quadrant/2、row_c=quadrant%2*32+lane、lane_base=quadrant*32<<16、xchg_idx=n_half*64+row_c，而 rank_s=cta_rank 是另一个独立变量——n_half 是 CTA 内象限索引而非 rank；同时 setmaxnreg 96（warp 8-15）/208（softmax）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 268,
+      "line_start": 255,
+      "note": "row_in_req = m_tile*128 + rank_s*64 + row_c：rank 只决定本 CTA 的 64 行半区；row_limit=min(kv_len-q_len+token+1,kv_len)；sink 种子 row_max=sinks[h]*log2e 且仅 n_half==0 置 row_sum=64",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 345,
+      "line_start": 322,
+      "note": "越界 key 的处理：valid_0<32 时按位掩码把 sv0[i] 逐个赋 -CAKE_INF（草案机制 4『把越界 key 置 -inf』属实）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 477,
+      "line_start": 457,
+      "note": "延迟最大值与 alpha：tile_max*scale_log2 与 row_max 取大后经 smem_xchg_max + barrier.sync(64 线程) 与另一 n_half 交换；仅当 row_max>-inf 且 new_max-row_max<=2.0 时保留旧最大值；alpha=approx_exp2(row_max-safe)（-inf 取 1），等 corr_empty 后写 row_state[row_c] 并 arrive corr_sig",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 886,
+      "line_start": 873,
+      "note": "修订后机制 2 的关键依据：o_base = out_row*512 + n_half*128、part_base = (split*rows_total+out_row)*512 + n_half*128、inv_sum=approx_rcp(row_sum)（<=0 取 0）、lse2=row_max+lg2.approx.ftz(row_sum)-6、epi_bulk=(valid_rows_cta==64)、warp_tile0=smem_p+quadrant*4096、warp_row0=out_row_base+quadrant%2*32——通道偏移只含 n_half，行偏移才含 rank",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 927,
+      "line_start": 889,
+      "note": "O 累加器从 taddr+lane_base+64 与 +64+32 以 32 列为一块读回；epi_bulk 时乘 inv_sum、打包 BF16、暂存进 P smem 后由 elect 单线程 tma_store_2d((&OT)/(&PO), n_half*128, warp_row0, ...)；否则 row_valid 时以 uint4 guarded 直写 O+o_base",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1059,
+      "line_start": 1030,
+      "note": "8 个 32 通道块的第二块：从 taddr+lane_base+64+64 读回，写出列坐标 n_half*128+32（guarded 路径为 o_base+32）——印证草案『8 个 32 通道块的列坐标 n_half*128 与 n_half*128+256』的分组",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1473,
+      "line_start": 1436,
+      "note": "后四块从 taddr+lane_base+64+128(+32) 读回，写出列坐标 n_half*128+256——『+256』是同一 CTA 的第二个 128 通道组，不是对端 CTA 的通道半区（上一轮缺陷的纠正点）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 2005,
+      "line_start": 1989,
+      "note": "bulk 路径等 cp.async.bulk.wait_group.read；仅 row_valid && n_half==0 的 lane 写统计量：direct 时 LSE[out_row]=lse2*ln2，否则 partial_lse[out_row*max_splits+split]=lse2 并把该行 split>=num_splits 的槽填 -inf——n_half==0 的两个象限恰覆盖本 CTA 的 64 行，两个 CTA 合起来覆盖完整逻辑张量",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 2134,
+      "line_start": 2115,
+      "note": "correction 把 Q 的每个 32-bit scale 字连写 4 份到 TMEM 列 320+（320/321/322/323 同值），对应 block_scale MMA 的 scale_vec::4X（草案机制 3）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 2509,
+      "line_start": 2494,
+      "note": "correction 等 corr_sig 后读 row_state[row_cc] 得 alpha，arrive corr_empty；it_c>0 时以 __all_sync(alpha==1) 求 need_rescale，需要时才等 pv_done 并把 taddr+lane_base_c+64 起 256 列逐 32 列乘 alpha 回写",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 2718,
+      "line_start": 2669,
+      "note": "transform 角色 warp 8-13（role_tid=(warp-8)*32+lane，共 192 线程），src_rel/scale_rel/v_rel 表达式含 ^rank_t 与 16384/4096 偏移；每 tile 等 raw_full 与 v_empty，v_off_t=v_stage_t*32768",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 2762,
+      "line_start": 2744,
+      "note": "V 的就地量化链：cvt.rn.f16x2.e4m3x2（scale）→ cvt.rn.f16x2.e2m1x2（载荷）→ mul.rn.f16x2 → cvt.rn.satfinite.e4m3x2.f16x2，与 Contract 的 Prepare_v（fp16→clamp→饱和 RNE E4M3）逐步对应",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 3276,
+      "line_start": 3264,
+      "note": "load 角色：q_row0 = q_indptr[b]*num_heads + m_tile*128 + rank_l*64，expect_tx(q_full)=18432，Q 取 4 个 64 B 块 + QS 一块——rank 决定 Q/O 的 64 行半区，且 18432 = 64×256 + 64×32",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 3322,
+      "line_start": 3287,
+      "note": "修订后机制 2 的 V 侧依据：page 数为奇时 page_b=page_a；expect_tx(raw_full)=28672；本 rank 的 32 个 key 取 4 个 64 B 块（全 512 通道，供 QK 的 B），对端 32 个 key 只取 2 个 64 B 块且字节列按 rank 分——rank0 取列 0/128（通道 0-127 与 256-383）、rank1 取 64/192（通道 128-255 与 384-511），另加两 page 全 64 行 scale（2×2048 B）；28672 = 2×(32×256+32×128)+2×64×32",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 3373,
+      "line_start": 3351,
+      "note": "mma 角色 warp 15 且仅 cta_rank==0 执行；每 item 等 q_full/sfa_full，每 tile 等 raw_full/sf_full/s_empty 后发 tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.scale_vec::4X，A=tmem_q(+0/8/16/32/48)、B=smem_kq*h0 描述符、SFA=tmem_sfa*、SFB=tmem_sfb*、D=tmem_acc(+32 为 stage 1)",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 3506,
+      "line_start": 3495,
+      "note": "PV 比同 tile 的 QK 落后一拍：it_m>=1 时（首迭代先等 o_empty）以 first_pv_flag=((it_m-1==0)?1:0) 决定累加谓词，等 v_full/p_full 后发 tcgen05.mma.cta_group::2.kind::f8f6f4，A=smem_p+p_stage*512、B=smem_v0+v_stage*2048",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 3590,
+      "line_start": 3540,
+      "note": "PV 的 D 分别为 tmem_acc+64（B=smem_v0）与 tmem_acc+192（B=smem_v1）；完成信号一律 tcgen05_commit_cg2_multicast(mask 3) 发到两个 CTA（pv_done/p_empty/v_empty，末 tile 后 o_full，item 结束 q_empty）；尾 PV 在 tile 循环后补发——O 累加器为 TMEM 列 64-319",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 106,
+      "line_start": 99,
+      "note": "combine：query_index=blockIdx.x、head_index=blockIdx.y*8+warp（一 warp 一 (token,head) 行）、num_splits=row_splits[query_index]，仅 num_splits>1 才工作——等于 1 的行完全不写",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/combine.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 149,
+      "line_start": 134,
+      "note": "log2 域归并：global_lse2=max_split_lse2+lg2.approx.ftz(normalizer)，lane0 写 lse=global_lse2*ln2；每 lane 管 16 通道（o_base=row*512+lane*16）与 2 个 split（lane、lane+32，至多 64），以 approx_exp2 为权重把 BF16 partial 在 FP32 累加后打包 BF16 写 o",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/combine.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 207,
+      "line_start": 185,
+      "note": "V0/V1 各 16384 B、stage stride 32768；P 8192 B/stage；row_state/xchg_max/xchg_sum 各 512 B；pages 128 B；SMEM_TOTAL=189440、THREADS=512——支持修订句『每个 CTA 的 V smem 存 128 个 key × 自己那 256 个通道』（16384+16384=128×256）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/cuda_primitives.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 217,
+      "line_start": 208,
+      "note": "SKIP_XFORM/LAZY_RESCALE/IDENTITY_PAGES/SKIP_EXP/SKIP_KPUB/SKIP_PSTORE/SKIP_QK/SKIP_PV/SKIP_SMATH/TRACE 共十个宏；全目录检索只有这些 #define、无任何引用，故本源没有编译期变体轴（草案只列举前五个，结论正确、枚举不完整，非阻塞）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/cuda_primitives.cuh",
+      "quote_offset": 0
+    },
+    {
+      "category": "reference",
+      "line_end": 15,
+      "line_start": 1,
+      "note": "生产对照：docstring 声明依赖 FlashInfer d849eca46875d3561fa48f6093936304580a1698，forward 调用 flashinfer.mla.prepare_nvfp4_batch_decode_with_kv_cache_mla——库实现不在固定源码内，属来源限制而非未展开候选",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "reference",
+      "line_end": 46,
+      "line_start": 12,
+      "note": "_split_ranges：只能由公开 shape/device 策略重建 split 边界（每个边界都存在一份已存 BF16 partial），并给出 uniform（width 折半、0.35*kv_bytes 上限）与 balanced（total/units/cuts）两式，与 plan.choose_tiles_per_split/_balanced_plan 逐项一致——参数记录不得进入 when 的依据",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/reference.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "reference",
+      "line_end": 104,
+      "line_start": 56,
+      "note": "参考数学与 root.yaml Contract 逐项相符：V 经 fp16→clamp(±448)→E4M3；128-key 分组、延迟最大值（上升>2 才推进）、p=exp2(score-safe+6)、stored_p 饱和 RNE E4M3、分母/LSE 用未舍入 p、sink 只种子第一个 split、多 split 才 BF16 partial、FP32 logsumexp 归并、TF32 关闭",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/reference.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "io",
+      "line_end": 4,
+      "line_start": 4,
+      "note": "任务身份与材料事实：E2M1 Q/KV + E4M3 group16、shared K=V D512→BF16、Dense MQA page64、decode/MTP Q1..16、H16/32/64/128、B*Q*H>=128、SM100/103；shape_cases 是 10 个代表性 workload 而非完整支持域；workspace 为 scratch；『No native approximate exp/reciprocal instructions define reference truth』——草案第 28/30 行依据",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/metadata.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "input",
+      "line_end": 108,
+      "line_start": 108,
+      "note": "生成器固定提供 workspace_buffer=torch.zeros(128*1024**2, uint8)（128 MiB）——草案变体记录所引容量缺口的来源事实，与 P1 已录 source_gap issue 一致",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/input.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "scope",
+      "line_end": 95,
+      "line_start": 70,
+      "note": "用例 3 为单请求 kv=4097（max<8192 → uniform，root 实例所在域），用例 4 为单请求 kv=65537（→ balanced）；结合用例 0/2/5/7/8/9 的 8192/16385/8192/8192/16384/8193，10 个固定用例中 8 个走 balanced、用例 1 与 3 走 uniform，草案计数正确",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/shape_cases.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "scope",
+      "line_end": 29,
+      "line_start": 6,
+      "note": "声明动态域：kv_lengths 数组长度 1..32、元素 1..262144；query_len 1..16；heads∈{64,32,128,16}——与 root.yaml Contract 的 Domain 一致，候选自身的 CC(10,3)/workspace 限制未回填",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/shape_range.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "acceptance",
+      "line_end": 18,
+      "line_start": 1,
+      "note": "status=closed、acceptance_status=passed_sampled、source_file_count=10，candidate_files 恰为草案第 5 行列出的十个文件——本次实现范围的封闭集合",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/performance/DELIVERY.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "acceptance",
+      "line_end": 398,
+      "line_start": 392,
+      "note": "验收器对每个具名输出声明六个字段（atol .01、rtol .05、max_mismatch_fraction 0、max_rel_l2 null、relative_to candidate、mode elementwise_and_l2），而 root.yaml Tolerance 文本受 100 字符预算所限未含 mode 与 max_rel_l2——P1 框架候选 tolerance-source-record-budget 的事实基础在当前产物中依然存在",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/performance/ACCEPTANCE.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "acceptance",
+      "line_end": 11,
+      "line_start": 3,
+      "note": "固定域 20/20、声明域 20/20 通过，144 条数值检查 0 条非零超差，并明言采样结果不代表全域零误差或 bitwise 相同——草案第 30 行按采样事实保留、不作全域保证",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/PRECISION.md",
+      "quote_offset": 0
+    }
+  ],
+  "summary": "修订后的 dispatch.md 全文重新审阅通过：上一轮唯一实质缺陷（机制 2 把 O 的通道半区错记为按 rank 错开）已按源码改写，现在正确区分 rank 决定的行半区与 V 通道半区、以及 CTA 内 softmax 象限决定的 O 通道分工（n_half*128 与 n_half*128+256 共 8 个 32 通道块写出本 CTA 自己 64 行的全部 512 通道），并与机制 3、机制 5、第 26 行待核实项自洽；机制识别、root=uniform 实例的选择、balanced 局部记录与 schedule/tiles_per_split 参数记录的取舍本次独立核实成立，拟完整集合含 root 共 1 份。本次固定只读检查 exit 0、raw_passed、无 diagnostics，directory 只有 root.yaml，与已选集合一致。P2 放行，进入 P3。"
+}

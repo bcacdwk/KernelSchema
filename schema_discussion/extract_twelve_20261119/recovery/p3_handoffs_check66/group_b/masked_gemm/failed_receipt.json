@@ -1,0 +1,1222 @@
+{
+  "artifact_evidence": [
+    {
+      "line_end": 8,
+      "line_start": 1,
+      "note": "META_DATA：Name/Describe/Source（固定 commit + candidate/solution.py::Model.forward）/Version 3（随本轮内容修订递增），Dispatch.when 未改。when 取“整个共享 Contract 域”+入口调用条件（六 contiguous CUDA 张量与 dtype/scale shape、五指针 16B 对齐、E/M/N/K>0、masked_m 存在），并声明 expected_m 不构成门；我沿 solution.py 87-135、kernel.cu 3254-3268/3361-3370 复核无误，符合 DOC0“when 不承担原 selector 职责”（路由规则留在 dispatch.md 46-50）。",
+      "path": "root.yaml",
+      "quote": "META_DATA:\n  Name: fp8_mxfp4_grouped_gemm_masked\n  Describe: Masked per-expert grouped GEMM of MXFP8 activations and packed MXFP4 weights with 32-element power-of-two scales, written BF16 in place\n  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grou",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 22,
+      "line_start": 9,
+      "note": "CONTRACT.Input/Output：a/b 为 python_tuple、d 为 caller-owned 就地缓冲、masked_m int32 且 0<=masked_m<=capacity、expected_m/recipe*/compiled_dims/disable_ue8m0_cast 的类型与默认值。与 input.py 85-87、solution.py 116-131 的实际接口一致；contract_sha256 92d34b01… 与上一轮相同，本轮未碰共享 Contract（P3 worker 无此权限）。",
+      "path": "root.yaml",
+      "quote": "CONTRACT:\n  Algorithm_requirement:\n    Input:\n      a: {meaning: 'Activation tuple (a_q, a_sf); see Operand_layout', shape: [], dtype: python_tuple}\n      b: {meaning: 'Weight tuple (b_q, b_sf); see Operand_layout', shape: [], dtype: python_tuple}\n      d: {meaning: Caller-owned buffer backing output d_out in place, sh",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 59,
+      "line_start": 23,
+      "note": "CONTRACT.Compute 四步：Operand_layout（请求域、32 元素块、nibble 顺序、UE8M0 值域、expected_m 公式）、Operand_decode（mag 表与 c>=8 取负、av/bv）、Masked_grouped_product（FP32、次序未规定、仅活跃行有定义、空 expert 无积）、Output_writeback（bf16、非活跃行无契约、a/b/masked_m 只读、返回 None）。逐项对 reference.py 4-34、input.py 50-52/85-87、metadata.json 13-37 核对无误。",
+      "path": "root.yaml",
+      "quote": "    Compute:\n      - Name: Operand_layout\n        Math: |\n          a = (a_q, a_sf) and b = (b_q, b_sf) are Python tuples of stored-precision operands.\n          Runtime sizes follow the declared request domain: group_count in {8, 16, 32, 64}; capacity is a multiple of 128 with 128 <= capacity <= 1024; (n_dim, k_dim) i",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 63,
+      "line_start": 60,
+      "note": "Golden_reference.Source 固定到 reference.py::Model.forward；Tolerance.d_out 采用 DOC1 允许的来源记录写法“Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0.0; formula/basis absent; no defaults”，明确未采用默认判据解释；P1 比较器缺口如实保留、未挪入 Gap。",
+      "path": "root.yaml",
+      "quote": "    Golden_reference:\n      Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/reference.py::Model.forward\n      Tolerance:\n        d_out: Source only; atol=0.01, rtol=0.05, max_mismatch_fraction=0.0; ",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 85,
+      "line_start": 64,
+      "note": "Hardware_specification：Device/Architecture/Stack/Wiki 保持占位，Execution 登记 thread/warp/cta/cluster 并在摘要中锚定 register/smem/tmem 三个存储名。Design 的 Worker.unit=cta、Member=warp[a:b]、Storage.location（含新增的 register 区 epi_regs）均取自该区登记，未越出 P1 硬件占位豁免。",
+      "path": "root.yaml",
+      "quote": "  Hardware_specification:\n    Device:\n    Architecture:\n    Execution:\n      thread: Single execution lane of a warp; owns the register storage of its private values.\n      warp: 32 threads executing in lockstep inside one CTA; the fixed source organizes the 8 warps of its 256-thread CTA into distinct specialized roles",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 89,
+      "line_start": 88,
+      "note": "Math_reshape.Thesis（未改）：UE8M0 码使 tensor core 精确施加 32 块尺度、av/bv 不物化、转置 tile（权重占固定 128 行轴、激活收缩到 align16(eff)、<=15 padding 列）、与参考只差求和次序。四点分别由 input.py 50-52、kernel.cu 1328-1341、1181-1191、reference.py 4-11 支持。",
+      "path": "root.yaml",
+      "quote": "    Thesis: >-\n      UE8M0 codes let the tensor core apply the 32-block scales exactly (Contract powers of two); av/bv never materialize. Tiles evaluate transposed - weights on the fixed 128-row axis, activations shrunk to align16(eff), <=15 padding columns wasted; only summation order differs from the reference",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 104,
+      "line_start": 91,
+      "note": "Rewrite[0]（未改）：sfa_code/sfb_code=log2(scale)+127、码域 [1,254]、硬件 2^(code-127) 精确复原故无额外舍入，并如实记录“非 2 的幂会静默丢尾数，Contract 排除该输入”；两个 Symbol 以 ref: 指向 Contract 的 a_sf/b_sf.shape、dtype ue8m0。与 pack_sf4（1234-1239）一致。",
+      "path": "root.yaml",
+      "quote": "      - Name: UE8M0 exponent codes for the block scales\n        Math: |\n          a_sf and b_sf are exact powers of two by the Contract (2^i, -126 <= i <= 127), so each\n          scale maps bijectively onto an 8-bit UE8M0 exponent code consumed by the block-scaled\n          product:\n          sfa_code[e,i,q] = log2(a_s",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 108,
+      "line_start": 105,
+      "note": "上一轮 issue 2（ledger_accuracy）已修：Cost 现为“One in-kernel pass per stage re-reads 1536 staged f32 words and rewrites 384 packed UE8M0 words (1536 B); global f32 scale reads unchanged”。我按源码复核：激活 128 行×4 块=512 f32 + 权重 256 行×4 块=1024 f32 = 1536 字（6144B）；打包写入 128+256=384 字（1536B），与未改的 Gain“6144 -> 1536”自洽，计量对象与单位均可核对。",
+      "path": "root.yaml",
+      "quote": "        Ledger:\n          Baseline: f32 scales multiplied into decoded FP32 operands elementwise (Contract Operand_decode)\n          Gain: Staged scale bytes per k stage 6144 -> 1536 per activation tile; elementwise FP32 scale multiplies group_count*(capacity+n_dim)*k_dim -> 0\n          Cost: One in-kernel pass per sta",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 128,
+      "line_start": 109,
+      "note": "Rewrite[1]（未改）：worktile (e,mb,np,jlo,njl) 来自 Work_schedule 解码、eff/eff_a 定义、acc_j[n_l,i_l]=Σ_q 2^(sfa-127)·2^(sfb-127)·dot32(a_q, e2m1(c))、和项 FP32 精确、q=0 覆写、padding 列求值不写回、i_l>=eff_a 不求值；Symbol acc 带 retention carry_forward (e,mb,np,j); q=0..k_dim/32-1；Arithmetic.Accumulate 声明固定归约树、非参考次序；Ledger 记 padding 与 box ladder 代价。与 kernel.cu 1328-1341、1605-1611、2111-2124 一致。",
+      "path": "root.yaml",
+      "quote": "      - Name: Block-scaled transposed tile product\n        Math: |\n          Worktile (e, mb, np, jlo, njl) comes from the Work_schedule decode; it covers expert e's\n          rows [128*mb, 128*mb+eff), eff = masked_m[e]-128*mb in [1,128], eff_a = ceil_div(eff,16)*16,\n          and weight rows [256*np+128*j, +128) per ",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 139,
+      "line_start": 129,
+      "note": "Rewrite[2]（未改）：d[e,128*mb+i_l,256*np+128*j+n_l]=bf16(acc_j[n_l,i_l]) 仅 0<=i_l<eff，padding 列不写、空 expert 无 worktile 故 d 保持调用方内容、非活跃行不写；Ledger 记每个写出元素多一次片上转置暂存（2B write+2B read）、全局 store 流量不变。与 kernel.cu 2384-2415、2641-2678、metadata.json 的 region 定义一致。",
+      "path": "root.yaml",
+      "quote": "      - Name: Masked narrowing into d\n        Math: |\n          For each worktile and each active n-tile j in [jlo, jlo+njl):\n          d[e, 128*mb+i_l, 256*np+128*j+n_l] = bf16(acc_j[n_l,i_l])\n          for 0 <= i_l < eff and 0 <= n_l < 128; RNE narrowing per the Contract's Output_writeback.\n          Padding columns ",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 173,
+      "line_start": 140,
+      "note": "Work_schedule 全区（region hash ab6eb025… 与上一轮逐字节相同，本轮重新通读）：Thesis 定义 sm_count；MAIN.Describe；Decomposition.Strategy（nmb/n_pairs/T/R/positions/split_from）与 Partition pos；四个 Iteration 数据块与 Single_tile d_tile；Mapping.Strategy（h/f/jlo/njl、私持解码）+Worker{cta,1}+Worker_count sm_count；Schedule.Strategy（P(e)/l/d=16*n_pairs/grp/ig/nh/mb/np，g_group 固定 16）；Worktile_order、Preassigned{worker_id,sm_count}+Refill none+Exit assigned_done；Flow.Launch 单条目。与 kernel.cu 1052-1133、1181-1191、3434-3439 逐式核对通过，(mb,np) 解码为双射。",
+      "path": "root.yaml",
+      "quote": "  Work_schedule:\n    Thesis: >-\n      Persistent launch of sm_count CTAs, one per SM (sm_count = device SM count; 148 certified). The masked work set exists only on device, so every warp group re-decodes it privately. 16-m-block sub-groups keep weights L2-resident; the tail split buys up to one wave for an L2-absorbed ",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 201,
+      "line_start": 174,
+      "note": "Tile_pipeline.Thesis 与 Index/Storage：Thesis 末句“next tiles overlap the last stores (acc release at last TMEM read)”现与 Pipe 一致；Index t/k/s=flatten(t,k) 表达跨工作不重置的 ring 序号；九项原有 Storage 我按 SharedStorageT 与 TMEM 列预算重算全部相符（65,536+131,072+8,192+16,384+8,192=229,376B smem，1024 对齐后 230,400B；TMEM 131,072+4,096+2,048B=268/512 列；pack_regs 1536 f32=6,144B）。",
+      "path": "root.yaml",
+      "quote": "  Tile_pipeline:\n    Thesis: >-\n      Warp-specialized 4-slot smem ring persistent across tiles (no per-tile drain): TMA fills, pack warps convert scales, one lane issues in-order tc ops, 4 warps drain the single acc buffer via transposed staging; next tiles overlap the last stores (acc release at last TMEM read)\n    S",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 203,
+      "line_start": 202,
+      "note": "本轮新增的 epi_regs：{meaning: Narrowed BF16 slice held from capture to stage, depth: 1, location: register, shape: [{row:16},{out:256}], dtype: bf16, total_size: 8192}。这是 capture→stage 拆分后必须登记的跨动作寄存器副本（DOC5“跨动作保留…的寄存器副本同样登记”）；容量按 worker 成员（1 CTA）计逻辑总量：16 行×256 列 bf16=8,192B，等于每 si 四个写回 warp 共 4,096 个窄化元素（2 半×128 lane×16 列），与 pack_regs 计法一致；半 tile 路径只用其一半，depth=1 且两分支互斥，按整槽保守占用省略 view/region 合规；location register 不影响 smem 账，16 regs/线程对 __launch_bounds__(256,1) 的驻留无影响。",
+      "path": "root.yaml",
+      "quote": "          epi_regs: {meaning: Narrowed BF16 slice held from capture to stage, depth: 1, location: register, shape: [{row: 16}, {out: 256}],\n            dtype: bf16, total_size: 8192}",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 255,
+      "line_start": 205,
+      "note": "LOAD role（未改）：warp[0:1] 选举 lane 发全部 TMA、其余 31 lane 空转；entry_scan/sf_tiles/ab_tiles/resources_ready/slot_free/loops_done/release:tmem_cols 的声明与 Pipe 顺序（slot_free→sf_tiles→ab_tiles）、async_unordered 模式、Released 边 ← MMA::signal:stage_consumed(s-4)。与 kernel.cu 1525-1798、2715-2716 一致；Using_verb 白名单与 Pipe 动作一一对应。",
+      "path": "root.yaml",
+      "quote": "          LOAD:\n            Info:\n              Describe: >-\n                Warp 0: one elected lane issues all ring TMA loads under the slot-release handshake; its other 31 lanes idle between entry and exit\n              Member: warp[0:1]\n              Using_verb:\n                compute:\n                  entry_scan",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 309,
+      "line_start": 256,
+      "note": "PACK role（未改）：warp[2:4]；acquire:tmem_cols（warp2 分配 512 列并 relinquish、warp3 直接会合）、sf_landed→sf_f32→slot_reusable→pack_sf 顺序、per-lane 到达 full、Prepared/Released 两条边。与 kernel.cu 1479-1483、1884-1919 一致；“先读 f32 进 pack_regs 再等槽释放”使 LOAD 在 s+4 的覆写经 stage_consumed(s)←pack_sf(s) 传递受保护。",
+      "path": "root.yaml",
+      "quote": "          PACK:\n            Info:\n              Describe: >-\n                Warps 2-3: per-lane in-place f32->UE8M0 packing of staged scale tiles (warp 2 activation, warp 3 weight); warp 2 also allocates TMEM\n              Member: warp[2:4]\n              Using_verb:\n                compute:\n                  entry_sca",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 375,
+      "line_start": 310,
+      "note": "MMA role（未改）：warp[1:2]；init_barriers 的五个计数（full=65、scale-landing=1、release=1、acc-ready=1、acc-release=128）、acc_free(t) 在 k 循环之前、stage_ready→sf_stage→for(j=jlo..jlo+njl) matmul:wtile(s,j)@atile(s)→stage_consumed(s)、tile 末 signal:acc_ready(t)；四个 tc 动作 async_ordered 形成单一累积完成链；两条 Waiting 边（stage_ready 的双前驱 = full 的到达集；acc_free(t) ← EPILOGUE::release:acc(t-1)，本轮未动且仍可解析）。与 kernel.cu 1305-1354、2103-2148 一致。",
+      "path": "root.yaml",
+      "quote": "          MMA:\n            Info:\n              Describe: >-\n                Warp 1: elected lane inits notifications, then issues per stage the scale copies, block-scaled MMAs and commits; tc ops retire in issue order\n              Member: warp[1:2]\n              Using_verb:\n                compute:\n                  e",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 386,
+      "line_start": 376,
+      "note": "EPILOGUE 的 Info.Describe（“per tile capture acc from TMEM (each warp its own 32 lanes), narrow to BF16, stage transposed in smem, vector-store 16-row slices to d”）与 Member warp[4:8]、entry_scan。拆分后 Describe 的四个动词与 capture_*/stage_*/store:d_* 动作一一对应，比修前更贴合动作划分。",
+      "path": "root.yaml",
+      "quote": "          EPILOGUE:\n            Info:\n              Describe: >-\n                Warps 4-7: per tile capture acc from TMEM (each warp its own 32 lanes), narrow to BF16, stage transposed in smem, vector-store 16-row slices to d\n              Member: warp[4:8]\n              Using_verb:\n                compute:\n          ",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 402,
+      "line_start": 387,
+      "note": "上一轮 issue 1 的修正主体：capture_pair（“warps TMEM-read their 32 lanes x 16 cols of both acc halves (j1 first) and narrow to BF16 in epi_regs; last si retires all tile reads”）、stage_pair（“STSM-transposes si's captured BF16 into the single 8 KB cd_stage image (16 rows x 256 cols); end-of-action cross-warp rendezvous publishes it”）、capture_half、stage_half（4KB 半区轮换跨 tile 持续）。四个动作均 serial，且分别点名 epi_regs 与 cd_stage 存储。与 kernel.cu 2343-2355（jj=1 先、每 (jj,li) 两次 16x256b 载入+wait）、2384-2395（bf16 窄化+STSM 进 cd[0] 全 8KB）、2399（会合）、2598-2605/2641-2651（半 tile 同构）、2688-2691（tma_stage 轮换）逐条对应；DOC5 明列“资源归还”为可拆边界，故拆分合规。",
+      "path": "root.yaml",
+      "quote": "                  capture_pair:\n                    execution_mode: serial\n                    describe: >-\n                      Per si: warps TMEM-read their 32 lanes x 16 cols of both acc halves (j1 first) and narrow to BF16 in epi_regs; last si retires all tile reads\n                  stage_pair:\n                  ",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 423,
+      "line_start": 403,
+      "note": "store:d_pair（4 趟 16B、16 行×256 列、d 行 e*capacity+128*mb+16*si+r、列 [256*np,+256)、cd swizzle 反解）、store:d_half（2 趟、16 行×128 列、列 [256*np+128*jlo,+128)、读当前 cd_stage 半区）、await:acc_ready、await:loops_done，以及 release.acc 的 describe“All 128 lanes arrive on acc-release after a proxy fence once tile t's TMEM reads retire; staging and stores may still be in flight”——修后该句与 Pipe 位置一致（释放时末片 staging 尚未发起、末片 store 在其后，二者确实仍在途/待发）。与 kernel.cu 2399-2415、2668-2678、2379-2382、2635-2638 一致。",
+      "path": "root.yaml",
+      "quote": "                store:\n                  d_pair:\n                    execution_mode: serial\n                    describe: >-\n                      4 passes of 16B vector stores by 128 threads: 16 rows x 256 cols at d row e*capacity+128*mb+16*si+r, cols [256*np,+256); cd swizzle inverted\n                  d_half:\n      ",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 444,
+      "line_start": 424,
+      "note": "issue 1 的规范位置已修正：两个互斥分支均为 for(si) → compute:capture_pair/capture_half(si) → if(si==eff_a(t)/16-1) release:acc(t) → compute:stage_pair/stage_half(si) → store:d_pair/d_half(si)，最后 await:loops_done。释放因此结构性地落在“全部 TMEM 读退休之后、末片转置暂存与 store 之前”，与源码到达点一致；因 eff>=1 ⇒ eff_a>=16 ⇒ num_stores>=1，每 tile 恰好一次释放，acc-release 的 parity 协议不被破坏；cd_stage 的覆写仍由 role 内 serial 顺序（store(si-1) done → stage(si) issue）保护，等价于源码 si 循环开头的 named barrier 1。",
+      "path": "root.yaml",
+      "quote": "            Pipe:\n              - compute:entry_scan\n              - if(any_active):\n                  - await:resources_ready\n                  - for(t):\n                      - await:acc_ready(t)\n                      - if(njl(t) == 2):\n                          - for(si=0:eff_a(t)/16):\n                              ",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 446,
+      "line_start": 445,
+      "note": "EPILOGUE.Waiting.Prepared：{done await:acc_ready(t)} ← {done MMA::signal:acc_ready(t)}，左侧属本 role、右侧动作在 MMA 已声明、参数个数匹配；拆分未新增也未删除任何跨 role 边，epi_regs 的 capture→stage 依赖由 role 内 pipe 顺序覆盖（DOC5 唯一不写也成立的依赖）。",
+      "path": "root.yaml",
+      "quote": "            Waiting:\n              Prepared: ['{done await:acc_ready(t)} ← [{done MMA::signal:acc_ready(t)}]']",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 512,
+      "line_start": 447,
+      "note": "REALIZATION 全区（447 行为 REALIZATION: 键、512 行为 Forbid 的 Reason 末行；文件共 512 行，上一轮误写 447-513 已改正）。内容未改且本轮重读复核：9 条 Require（16U4_ALIGN16B 解包与线上字节计账、tcgen05.mma/cp/commit 与同 CTA 顺序退休、mbarrier parity 跨工作持续与五个计数、fence.proxy.async、指数字节提取、tcgen05.ld 16x256b/stmatrix.trans/proxy fence、sm_count×256 线程+230,400B+__launch_bounds__(256,1)、TMEM 512 列整块申请与 LOAD 侧配对释放、host TensorMap 缓存只省编码且 masked_m 按次设备读）、2 条 Prefer（DESCROLL +1.2% 十用例全正、evict_last+256B promotion −4.8%/−4.2%）、1 条 Forbid（2-CTA cluster，~280/~530ns、relay +97%、multicast −3.1%）。Item 均为 role/step/symbol 级，故 EPILOGUE 的 noun 改名不影响任何 Item 解析；逐条删除测试通过，实测数字全部回到源码注释核对准确。",
+      "path": "root.yaml",
+      "quote": "REALIZATION:\n  Require:\n    - Item: DESIGN.Tile_pipeline::MAIN.LOAD\n      Choice: >-\n        Its TMA loads are 2-D tiled bulk copies; the weight map uses element type 16U4_ALIGN16B so each E2M1 nibble expands to one 8-bit smem container under 128B swizzle, and mbarrier transaction bytes count packed wire bytes (8192 pe",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    {
+      "line_end": 7,
+      "line_start": 5,
+      "note": "目录草案的实现范围与提交身份（单次 nvcc 构建 + ctypes 绑定 fmggm_launch、每次调用一个 kernel、无库/DSL/Torch 回退、无 CUDA graph、无独立 scale 重排 pass，NCU kernel_counts 恒为 [1,1,1,1,1]）与默认 flag 组合即认证构建（grid 148、block 256、主路由 232,448B/动态 230,400B）。我沿 host/launch 路径与 SharedStorageT 求和独立复算，两个数值吻合，root.yaml 的 Flow.Launch 与 Require 启动形状与之一致。dispatch.md digest fece8b75… 本轮未变。",
+      "path": "dispatch.md",
+      "quote": "**实现范围与提交。** 固定实现是 `candidate/solution.py::Model.forward`：首次调用用 nvcc 把 `candidate/kernel.cu` 编成共享库（按源码字节与编译 flag 的哈希缓存），ctypes 绑定 `fmggm_launch`；此后每次调用只做一次参数校验（或命中缓存后跳过）、组装 12 个标量/指针实参，在 PyTorch 当前 stream 上启动**一个** kernel，返回 None，结果就地写进调用方的 `d`。没有 GEMM/attention 库、DSL 或 Torch 数值回退，没有 CUDA graph 捕获，没有独立的 scale 重排 pass——",
+      "sha256": "fece8b75ac2aac8d76bfa30a44b5139c93994fa4c49e0f96989a7adb37d23bcd"
+    },
+    {
+      "line_end": 9,
+      "line_start": 9,
+      "note": "主要机制段：一次启动+每 SM 一个常驻 CTA+8 warp 固定分工、swap-AB 块缩放 MMA 的 A/B 归属、UMMA_K=32 拆分、UE8M0 存 TMEM、tmem_full 由末条 k-block 的 commit 触发、TMEM→寄存器→bf16→stmatrix.trans→smem→向量化 st.global 的输出形成、持久 masked-grouped 调度+STAIL 半 tile、五个屏障计数与 DINTER 单缓冲写回。与当前 root.yaml 的三区内容逐项对应，无目录覆盖 YAML 的情形。",
+      "path": "dispatch.md",
+      "quote": "**主要机制（root 承担）。** 一次启动、每 SM 一个常驻 CTA（grid = `num_sms`，`__launch_bounds__(256,1)`），CTA 内 8 个 warp 固定分工：warp0 的一个选举 lane 发全部 TMA（A/B/SFA/SFB），warp1 的一个选举 lane 发 UTCCP 与 tcgen05 UMMA，warp2/3 把 TMA 落地的 f32 scale 就地打包成 UE8M0，warp4-7 做写回。主计算是 swap-AB 的块缩放 MMA：权重（E2M1，TMA 以 `16U4_ALIGN16B` 硬件解 nibble 成 8-bit 容器）作 MMA A、M=128",
+      "sha256": "fece8b75ac2aac8d76bfa30a44b5139c93994fa4c49e0f96989a7adb37d23bcd"
+    },
+    {
+      "line_end": 11,
+      "line_start": 11,
+      "note": "P2 已批准的 root 选择与初步承担范围（fmggm_kernel_dr 的 else 分支 = fmggm_bodyT<128,4>、SharedStorage=SharedStorageT<128,4>、dynamic smem=sizeof(SharedStorage)），并 leave“root 自身的 when 与完整 Design 在 P3 写实”。当前 root.yaml 的 Source/when/Design 与该身份一致，未扩容到其他配置。",
+      "path": "dispatch.md",
+      "quote": "**root 选择与初步承担范围。** root 取窄几何主体 `fmggm_bodyT<BMV=128, STG=4>`，即 `fmggm_kernel_dr` 的 else 分支、`SharedStorage = SharedStorageT<128,4>`、启动时 dynamic smem = `sizeof(SharedStorage)`。理由：它是文件作用域的默认几何与全部布局常量的基准值，接口最清楚、便于比较；10 个固定用例中 6 个（1/2/3/5/6/8）直接由它承担；`-DFMGGM_DROUTE=0` 时它就是逐位相同的认证单几何构建，说明该几何本身在完整声明域上成立——宽/解码几何只是同一 body 模板的取",
+      "sha256": "fece8b75ac2aac8d76bfa30a44b5139c93994fa4c49e0f96989a7adb37d23bcd"
+    },
+    {
+      "line_end": 23,
+      "line_start": 15,
+      "note": "“来源限制与已核实事实”七条：入口侧限制、n%256==0 假定与 j 窗口 clamp、STAIL 汇总 pass 只覆盖 group_count<=256、SF_PF/DCS 在默认构建无使用点、host 双级缓存不冻结掩码、宽几何历史缺陷按当前源码写、UE8M0 打包只取指数字节。这些限制在 root.yaml 中分别落在 when、Decomposition 域说明、Require（缓存/指数字节）与 Rewrite[0] 的来源限制句，未被补造成默认保证，也未被当作无关过程删除。",
+      "path": "dispatch.md",
+      "quote": "**来源限制与已核实事实。**\n1. 入口侧限制（不是 Contract 要求）：`k % 128 == 0`、六个张量 contiguous 且在 CUDA 上、dtype 与 scale shape 匹配、五个指针 16B 对齐、`E/M/N/K > 0`、`masked_m` 非空，否则 `forward` 抛错或 `fmggm_launch` 返回 −10…−13。\n2. n-pair 枚举假定 `n % 256 == 0`：源码为 ragged n-tail 保留了 j 窗口 clamp，但注明冻结域下永不触发；`num_n_blocks2` 直接写 `N/(2*BN)`。\n3. STAIL 的 m-block 汇总 pa",
+      "sha256": "fece8b75ac2aac8d76bfa30a44b5139c93994fa4c49e0f96989a7adb37d23bcd"
+    },
+    {
+      "line_end": 24,
+      "line_start": 24,
+      "note": "P2 留给 P3/P4 的四条线索：(a) when 取机制有效域还是派发子域、(b) g_group 需固定一个值并把 min 规则记目录、(c) 写回逐 lane 索引留给 P3/P5、(d) 目录暂拟对象名由 P4 对齐。我核对 (a)(b)(c) 已在 root.yaml 落实（when=整个 Contract 域、g_group=16 且规则在 58-62、转置关系写进 acc_tmem 视图与 capture/stage/store 的 describe 而逐 lane 地址按 DOC5 交实现），(d) 属 P4 职责。",
+      "path": "dispatch.md",
+      "quote": "**待 P3/P4 落实的线索。** (a) root 的 `when`：窄几何机制在完整声明域上成立，但实际实现只在“未命中解码门且设备路由判为窄”时进入它，P3 需决定按机制有效域还是按实际被派发子域写。(b) `g_group` 由 `min(cand*bm + ceil(num_sms/cand)*BN)` 在 {8,16} 上选出，依赖 SM 数（实测 148），而 Contract 的 Device 仍是占位；选择公式不能留在 YAML，P3 需为 root 固定一个具体值并把规则记在目录。(c) 写回侧的逐 lane 索引（`tmem_ld_16x256b_x1` 的 `|0x00100000` 偏移、STSM 地址的",
+      "sha256": "fece8b75ac2aac8d76bfa30a44b5139c93994fa4c49e0f96989a7adb37d23bcd"
+    },
+    {
+      "line_end": 30,
+      "line_start": 30,
+      "note": "“完整设计”表的 root 行：机制摘要与保留理由（默认构建主几何、认证 NCU 中实际运行的 kernel、一份即可从 Contract 输入贯通到全部输出）。与当前 root.yaml 的三区内容一致；P3 阶段目录仍为草案，最终集合与记录由 P4 落实。",
+      "path": "dispatch.md",
+      "quote": "| [root](root.yaml) | 窄几何主体 `fmggm_bodyT<128,4>`：常驻单 CTA + 8 warp 专用角色的 tcgen05 块缩放 masked grouped GEMM。swap-AB UMMA（权重 E2M1 为 A、M=128；激活 E4M3 为 B、N=`align16(eff)`）；f32 scale 由 pack warp 在 ring 槽内就地转成 UE8M0 再经 UTCCP 进 TMEM；4 深 ring、每 stage 两个权重 n-tile 共享一份激活 tile；持久 masked-grouped 调度 + STAIL 尾波半 tile 拆分；DINTER 交错 j 的转置",
+      "sha256": "fece8b75ac2aac8d76bfa30a44b5139c93994fa4c49e0f96989a7adb37d23bcd"
+    },
+    {
+      "line_end": 50,
+      "line_start": 46,
+      "note": "“几何路由（组合）”条目：host 解码门 + 设备级 wide 判据（b1/b2、7/5 阈值、多于一波），并明确路由是选择规则不写进任何 YAML、十个固定用例的归属为 0→解码、4/7/9→宽、1/2/3/5/6/8→窄。支持 root.yaml 把 when 写成机制有效域而不承载 selector 的分工。",
+      "path": "dispatch.md",
+      "quote": "### 几何路由（组合）\n\n- 基线：[root](root.yaml)，加上“宽激活 tile”和“解码 tile”两条参数记录。\n- 差异与联动：两级选择，接口相容、不引入新的整体组织。host 级在 `fmggm_launch` 里先判解码门，命中就启动 16 行实例并直接返回；否则启动 `fmggm_kernel_dr`，dynamic smem 取两个 body 的较大者（窄 body 的 4 stage）。设备级在包装 kernel 里让**每个 warp 冗余**遍历 `masked_m` 求 `b1 = Σ ceil(c/128)`、`b2 = Σ ceil(c/224)`，warp 内 shuffle 归约后按 `",
+      "sha256": "fece8b75ac2aac8d76bfa30a44b5139c93994fa4c49e0f96989a7adb37d23bcd"
+    },
+    {
+      "line_end": 62,
+      "line_start": 58,
+      "note": "“调度分组因子与 m-block 计数（参数）”条目记录 g_group 的 min(cand*bm+ceil(num_sms/cand)*BN) 规则（bm=128、num_sms=148→16；宽 body bm=224→8）与 BMSHIFT/MMC 的取舍依据。与 root.yaml 固定 g_group=16（Schedule.Strategy 的 d=16*n_pairs、nh=min(16,·)）配对正确，符合“其他取值及联动在目录记录一次”。",
+      "path": "dispatch.md",
+      "quote": "### 调度分组因子与 m-block 计数（参数）\n\n- 基线：[root](root.yaml) 的 `Scheduler::init` 中 `g_group` 与 `nmb_of`/`effective_m`。\n- 差异与联动：`g_group` 在 {8,16} 上取 `min(cand*bm + ceil(num_sms/cand)*BN)` 的一方（bm=128、num_sms=148 时为 16；宽 body 的 bm=224 时为 8），`FMGGM_GG>0` 可直接固定。BMSHIFT=1 时 `ceil(cnt/bm)` 换成 `>> bm_shift`、`effective_m` 的钳位换成 `1<<bm_s",
+      "sha256": "fece8b75ac2aac8d76bfa30a44b5139c93994fa4c49e0f96989a7adb37d23bcd"
+    },
+    {
+      "line_end": 92,
+      "line_start": 88,
+      "note": "“累加器释放与 drain 顺序（局部）”条目：基线写“按 si 同时 drain j1/j0 到一个 8 KB cd 影像、单缓冲、named barrier 1/2 分隔 STSM 与 store，tmem_empty[acc] 在最后一个 si 的最后一次 tmem_ld 之后由全 lane 到达；ACC_STAGES=1，所以 MMA warp 在下一 tile 首条 UMMA 前等这一次释放”，并登记 J0LB/J0LA/EDR/TJEB/LDBATCH 差额与互斥。修后的 root.yaml Pipe 与该基线表述一致，上一轮 issue 1 的跨文件矛盾消除，无需改目录（采方案 (a)）；条目的暂拟对象名仍待 P4 按真实基线对齐。",
+      "path": "dispatch.md",
+      "quote": "### 累加器释放与 drain 顺序（局部）\n\n- 基线：[root](root.yaml) 的 DINTER 写回——按 si 同时 drain j1/j0 到一个 8 KB cd 影像、单缓冲、named barrier 1/2 分隔 STSM 与 store，`tmem_empty[acc]` 在最后一个 si 的最后一次 `tmem_ld` 之后由全 lane 到达；ACC_STAGES=1，所以 MMA warp 在下一 tile 首条 UMMA 前等这一次释放。\n- 差异与联动：`J0LB=1` 改成 j1 先 drain，j0 累加器按 pair 奇偶在列 {0,268} 之间交替，新增 `tj1_empty` 与 ",
+      "sha256": "fece8b75ac2aac8d76bfa30a44b5139c93994fa4c49e0f96989a7adb37d23bcd"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "dispatch.md",
+      "sha256": "fece8b75ac2aac8d76bfa30a44b5139c93994fa4c49e0f96989a7adb37d23bcd"
+    },
+    {
+      "path": "root.yaml",
+      "sha256": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    }
+  ],
+  "changed_files": [],
+  "checks": [
+    {
+      "command": "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/runs/c8dd5678-2935-4efa-943a-02e848d03611/attempts/7a388176-110f-48b7-8275-a0796adc2e83/materials/check-helper.py",
+      "exit_code": 0,
+      "note": "本轮（receipt_repair）按 invocation.check_command 原样执行一次，未传额外参数、未接管道或重定向。返回 kind=read_only_stage_check、stage=P3、read_only=true、skip_hardware=true、raw_passed=true、corrections=[]、exit_code=0；内层 stage_snapshot exit_code=0、diagnostics=[]、checked_nodes=[root]、excluded_nodes=[]、directory 的 yaml_files=[root.yaml]/registered_nodes=[root]/planned_nodes=[]/missing_nodes=[]、notices 仅“Hardware skipped explicitly”。design_resolution=strict：root.yaml raw_sha256=a930fc10… 与本次 dependency_digests 一致，effective_identity=78a0552e…、contract_sha256=92d34b01…、Math_reshape c04524ca…/Work_schedule ab6eb025…/Tile_pipeline e0a22983…/use_context d18e3867… 均与我审阅并放行的那一份完全相同，证实产物本轮未变；source_validation=verified（source_id 62634b71…、repository_id KernelSchema、ref 4849028…）。helper 未修改 workspace。"
+    }
+  ],
+  "checks_note": "本轮为第二次回执补正（诊断：missing bound implementation entry anchor），产物未改、决定不变。修补只在回执侧：新增 source_evidence[0]（category=implementation，锚定绑定实现入口 candidate/solution.py::Model.forward 116-135，对应 invocation.implementation_source 与 inputs.entrypoint；该范围本人本轮亲自重读，文件共 135 行，范围有效），host 类别的同一绑定入口保留为 source_evidence[3]；其余 70 条证据为前几轮亲自核实的原路径原范围原偏移，仅索引整体后移一位，七条结论的 evidence 索引按本次新序重建，判断内容经对照当前 raw 与冻结源码复核后维持。补正前已核对当前 workspace 与已保存产物：check-helper 退出 0、raw_passed=true、无待修正，raw_sha256 a930fc10… 与 dependency_digests 一致且与我上一轮审阅放行的那份逐字节相同（effective_identity、contract、三区 region hash 全同），因此上一轮用 wc 实测的 root.yaml=512 行、dispatch.md=122 行仍然成立，REALIZATION 范围 447-512 与全部 artifact_evidence 范围有效；本轮另逐条复核每个 source_evidence 范围均在对应文件实际行数内（solution.py 135 行→116-135/87-114；kernel.cu 3445 行→最大 3434-3439；shape_range.json 105→98-104；shape_cases.json 446→234-244；input.py 110→50-52/85-87；reference.py 34→4-11/15-21/23-34；CERTIFIED_BEST.json→16-33 已重读确认为 fixed 块含 case6 45.024µs、full_pass=true；metadata.json 200→13-37）。语义审阅的实际依据：本轮改动两处（EPILOGUE 的 capture/stage 拆分与 release 位置、Rewrite[0] 的 Ledger.Cost）已回到 kernel.cu 2343-2355/2379-2382/2384-2395/2399-2415/2598-2605/2635-2638/2641-2651/2668-2678/2688-2691 与 944-956/1810-1813/1901-1919 逐行确认；未改区域按 region hash 相同与全文重读确认。未运行 GPU、未编译、未修改任何产物（本次 reviewer 对产物只读，writable_files 为空）。",
+  "conclusions": [
+    {
+      "evidence": [
+        0,
+        1,
+        2,
+        3,
+        5,
+        6,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        20,
+        21,
+        22,
+        23,
+        24,
+        27,
+        30,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        52,
+        53,
+        54,
+        55,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        72
+      ],
+      "subject": "design",
+      "text": "放行（本轮为回执补正，产物与判断均未变；绑定实现入口锚已按诊断补为 category=implementation 的 solution.py::Model.forward 116-135，并串起 forward → 单次 fmggm_launch → fmggm_kernel_dr else → fmggm_bodyT<128,4> 的提交链）。root.yaml（Version 3，raw a930fc10…、512 行）三区本地完整定义 + REALIZATION + 自身 when，覆盖从 Contract 输入到唯一输出 d_out 的全部计算、工作归属与执行关系；上一轮两条退修问题已修正，其余内容保持我已核实的形态（checker 的 contract_sha256 92d34b01… 与 Work_schedule region ab6eb025… 与上一轮逐字节相同，机械印证修改仅限 Math_reshape 的 Cost 一行与 Tile_pipeline 的 EPILOGUE 角色+一项存储）。issue 1 采推荐方案 (a)：drain_pair/drain_half 拆为 capture_pair/stage_pair 与 capture_half/stage_half，release:acc(t) 在两个分支中都结构性地落在最后一个 si 的 capture 之后、stage 与 store 之前，与源码到达点（2379-2382 在末次 tmem_ld_wait 后、该 chunk 的 stsm 2384-2395 前；半 tile 2635-2638 在 2641-2651 前）及 dispatch.md:90 基线一致；释放的语义前提未变（不早于末次 tmem_ld、全部读退休、128 lane 全员到达、经 proxy fence），Waiting 边与 MMA.acc_free(t)←EPILOGUE.release:acc(t-1) 未动；新增的 epi_regs 是 capture→stage 的跨动作寄存器副本，按 DOC5 必须登记，容量按 1 CTA 成员计逻辑总量 16×256 bf16=8,192B，与 pack_regs 计法一致、不影响 smem 账与驻留（16 regs/线程对 __launch_bounds__(256,1) 无压力）。拆分带来的两处与源码的粒度差异经核对均为设计中立：源码把末 si 前三个 chunk 的 STSM 放在到达之前，模型把它们放在释放之后——STSM 只写 role 私有的 cd_stage、MMA 从不访问，释放的前提只是 TMEM 读退休，故不丢依赖也不造依赖；窄化点仍由 Math Rewrite[2] 的 bf16(acc) 唯一定义，精度路径未变。issue 2 已改为“每 stage 重读 1536 个 staged f32 字、重写 384 个 UE8M0 打包字（1536 B）”，与 sfa_raw[512]/sfw_raw[1024] f32、nsub=1/2、dst[q*128+lane*4+rr] 逐一对应且与未改的 Gain（6144→1536 B）自洽。其余设计事实本轮重新核对仍成立：UE8M0 码在 Contract 幂次域内双射无损、和项 FP32 精确故与参考只差未规定的求和次序、eff_a=align16(eff) 的 padding 列求值不写回且 ABOX 阶梯记在 Cost、positions/split_from 与 (e,mb,np) 解码为双射、g_group 固定 16 而选择公式留在目录、十项 Storage 与 TMEM 列账重算相符（sizeof=230,400B、每槽 55,296B、268/512 列）、REALIZATION 的 9 Require/2 Prefer/1 Forbid 通过删除测试且实测数字（DESCROLL 1.01199 十用例全正、TCP −4.8%/−4.2%、PROMO 256B、relay +97%/multicast −3.1%、2SM ~280/~530ns）全部与源码注释一致。"
+    },
+    {
+      "evidence": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        10,
+        14,
+        16,
+        17,
+        18,
+        19,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        37,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        66,
+        68,
+        72
+      ],
+      "subject": "walkthrough",
+      "text": "我按修后产物自行重做固定用例 6（groups=64、capacity=256、n=1536、k=2048、group_sizes=[0,64,128,256]×16）的端到端贯通：绑定入口 host Model.forward 校验（六张量 contiguous/CUDA、dtype 与 scale shape、k%128）后缓存命中，单次 ctypes 调 fmggm_launch；expected_m=ceil(7168/64)=112 不满足解码门（<=16 && M<=128），启动 fmggm_kernel_dr（grid=g_num_sms=148、block=256、dynamic smem=sizeof(SharedStorageT<128,4>)=230,400B、调用方 raw stream）。设备路由：b1=Σceil(c/128)=4/quad×16=64、b2=Σceil(c/224)=64、n_pairs=1536/256=6，wide=(64>0)&&(384>148)&&(5*64=320>=7*64=448)=false ⇒ else 分支 = root 实例 fmggm_bodyT<128,4>。entry_scan：s_any=1（不退出）；第二趟得 Σnmb=64 ⇒ T=6*64=384；R=384%148=88、2R=176>148 ⇒ positions=384、split_from=T=384，所有 pos 走 h<0 的全 pair 分支（jlo=0、njl=2）。worker 5 领 pos {5,153,301}（449>=384 ⇒ assigned_done）：pos5 → 组走查 e=1（cum 0→1、阈值 6）、l=5、d=96、grp=0、nh=min(16,1)=1、mb=0、np=5，eff=64、eff_a=64、A box=64 行（tx_a=8192）、num_stores=4、k=2048/128=16 stage；pos153 → e=26、mb=0、np=3，eff=eff_a=128、num_stores=8；pos301 → e=51、mb=1、np=0，eff=256-128=128、num_stores=8。每 stage：LOAD 等 slot_free(s)（s<4 时 fresh parity 直通）→ SFA{4,128}+每活跃 j 的 SFB 到 scale-landing（expect_tx 2048+2048*nj=6144）→ A（box 阶梯）+每活跃 j 的 B（8192B、evict_last）到 full（expect_tx 8192+16384=24576）；PACK 等 sf_landed → 读 512/1024 f32 进 pack_regs（16/32 每 lane）→ 等 slot_reusable → 就地写 128/256 打包字 → fence.proxy.async → 64 lane 到达 full；MMA 等 acc_free(t)（t=0 直通）→ 等 stage_ready → 3 次 UTCCP（列 256/260/264，两个权重子块无条件）→ 对 j∈[0,2) 各 4 条 block_scale UMMA（idesc N=eff_a>>3，首条 accumulate=0）→ commit slot-release(s)，s=15 后再 commit acc-ready。EPILOGUE 等 acc_ready(t) → njl==2 分支：si=0..3 每个 capture_pair（每 warp 8 次 16x256b 载入、j1 先、窄化进 epi_regs）；si=3 的 capture 之后 release:acc(t)（proxy fence + 128 lane 到达 acc-release）⇒ 下一 tile 首条 UMMA 与末片的 stage_pair+4 趟 store 真实重叠；随后 stage_pair（STSM 16×256 影像进单缓冲 cd_stage + 末尾跨 warp 会合）→ store:d_pair（4 趟×128 线程 16B，d 扁平行 1*256+0..63=expert1 的全部活跃行、列 [1280,1536)）。全部 384 个位置的 (e,mb,np) 我按解码公式验证为双射，故 148 个 worker 的并集恰覆盖每个非空 expert 的 ceil(masked_m/128) 个 m-block × 6 个 n-pair = 全部活跃行 × 全 n_dim，无遗漏无重复；padding 列（eff<=i_l<eff_a）与非活跃行不写，空 expert（group 0 等）无 worktile、其 d 行保持调用方内容；全空输入在 entry_scan 后、TMEM 分配前整体退出（if 为假 ⇒ 不产生任何后续动作）。末轮：loops_done 会合后 warp0 dealloc 512 列，kernel 退出由 stream 序提供 st.global 的调用方可见性。半 tile 分支（当 2R<=sm_count 时）同构：capture_half → release → stage_half（4KB 半区按 h%2 轮换且跨 tile 持续）→ store:d_half（128 列，列基址 256*np+128*jlo）。"
+    },
+    {
+      "evidence": [
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        25,
+        26,
+        27,
+        29,
+        30,
+        31,
+        32,
+        34,
+        36,
+        37,
+        40,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        50,
+        51,
+        52
+      ],
+      "subject": "dependencies",
+      "text": "修后依赖图我重新展开核对，闭合且无环，寿命与在途访问均有依据。(1) ring 复用：{done LOAD::await:slot_free(s)} 与 {done PACK::await:slot_reusable(s)} 同源于 {done MMA::signal:stage_consumed(s-4)}，s<4 的前驱按声明窗口跳过，对应 fresh mbarrier 上 parity=1 直接通过（源码 empty 等 phase^1）；stage_consumed 是 tcgen05.commit，其完成覆盖该槽的两类读者（UMMA 的 payload 操作数读、UTCCP 的 packed SF 读），故一条边同时保护两类覆写。(2) PACK 对 f32 的读没有直边到 LOAD 的覆写，但 load:sf_f32(s-4) → compute:pack_sf(s-4)（role 内 serial）→ MMA.stage_ready(s-4) 的 Prepared 边 → stage_consumed(s-4) 传递保证读先于 s 的覆写，符合 DOC5 允许省略可推导前驱。(3) stage_ready 的双前驱（ab_tiles 的 tx 落地 + pack_sf 的 64 次到达）正是 full=65 的到达集。(4) 累加器环：MMA.acc_free(t) ← EPILOGUE.release:acc(t-1)（ACC_STAGES=1，t=0 跳过）与 EPI.acc_ready(t) ← MMA.signal:acc_ready(t)；修正后 release:acc(t) 在结构上位于末 si 的 capture（含该 tile 全部 TMEM 读退休）之后、stage 与 store 之前，因此下一 tile 首条 UMMA 与末片的转置暂存及全部 store 真实重叠——与源码 2379-2382/2635-2638 的到达点和 2103 的等待点一致。释放不早于任何 TMEM 读，故 MMA 覆写 acc 列安全；STSM 只写 role 私有的 cd_stage，与 acc 释放无耦合。(5) 单缓冲 cd_stage 与 epi_regs 的复用由 EPILOGUE role 内 serial 顺序覆盖：store(si-1) done → capture(si) → [末 si 的 release] → stage(si) → store(si)，对应源码 named barrier 1（防上一 si 的 store 读未完就覆写 cd）与 barrier 2（防 STSM 未完就读 cd，即 stage_pair 末尾声明的跨 warp 会合）；epi_regs 只在 capture→stage 之间存活，跨 tile 由同一 serial 链保护。(6) 单缓冲 sfw_tmem/sfa_tmem 没有屏障分隔相邻 stage，其安全前提（同 CTA 的 tc 操作按发射序退休）被显式写成 Require 而非隐含默认，async_ordered 的累积完成链与该前提匹配。(7) 末轮与终止：release 的 done=128 lane 全员到达；store 为 serial 故 loops_done 会合前末趟 store 已 done，dealloc 前全部 tc 操作经 EPI 的 acc_ready 等待与 capture 传递已退休；kernel 退出语义覆盖 st.global 可见性。(8) 边界情形分别贯通：空输入经 if(any_active) 为假不产生任何后续动作（acquire/release:tmem_cols 均在 if 内，等待不指向未产生事件），positions=0 与 Partition.size=0 一致；死半 tile（njl<=0）在 when 声明的 n_dim%256==0 下不可达，未入 YAML 而前提记在 when 与 Decomposition；njl==2/1 两个 if 用同一不变判定值的补条件，互斥且完备；eff>=1 ⇒ eff_a>=16 ⇒ num_stores>=1，保证每 tile 恰好一次 release，parity 协议不被破坏；所有边沿 s/t 单调前进，展开无环。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_self_contained",
+      "text": "通过。仅凭当前 root.yaml（加其自身保存的共享 Contract）即可理解本设计：Contract 定义任务与请求域；Math_reshape 定义 eff/eff_a/acc/sfa_code/sfb_code 与三步计算及精度路径；Work_schedule 的三个 Strategy 定义 nmb/n_pairs/T/R/positions/split_from/f/h/jlo/njl/P(e)/l/d/grp/ig/nh/mb/np 并固定 g_group=16，sm_count 在 Thesis 中定义为设备 SM 数；Tile_pipeline 定义 t/k/s、十项 Storage 及其视图、四 role 的动作与等待；REALIZATION 只补原语、协议与预算。本轮新增内容同样自足：capture_pair/capture_half 的 describe 点名 epi_regs 并说明“last si retires all tile reads”（这正是紧随其后的 release 的前提），stage_pair/stage_half 点名 cd_stage 并说明末尾跨 warp 会合，读者无需源码即可判断释放点为何合法。any_active 由 entry_scan 建立，通知用语义名 full/scale-landing/slot-release/acc-ready/acc-release 并在 init_barriers 给出计数，跨区 ref: 均解析到 root 自身 Contract 的已登记对象。仅存一处不影响理解的记法松动（Math 写 acc_j[n_l,i_l] 而登记名为 acc、retention 实例为 (e,mb,np,j)、流水线视图为 acc(j)），三者指向同一对象且由 shape/retention/view 可唯一确定，已作为非阻塞建议交 P4/P6。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_layering",
+      "text": "通过。Contract 只写调用者视角的任务与数值语义（含 UE8M0 值域这一影响数值的输入事实），未掺入 tile/CTA/指令；Math_reshape 只写求值、精度与物化（转置取向、padding 列、q=0 覆写、bf16 窄化点），无线程布局、屏障编号或指令组织；Work_schedule 只写分解、映射、分配与单次提交，未展开 role 或逐线程地址；Tile_pipeline 才落角色、动作、依赖、存储与事件；REALIZATION 只把上游留在抽象层的原语（16U4_ALIGN16B、tcgen05.mma/cp/commit、tcgen05.ld/stmatrix.trans、fence.proxy.async、指数字节提取）、协议（mbarrier parity 与五个计数）、预算（256 线程/230,400B/512 列 TMEM）与调用边界（host TensorMap 缓存只省编码、masked_m 按次设备读）落地，未重决数学、精度、角色、缓冲或依赖，也未把坏地址或错误复用写成 Require/Forbid。本轮的拆分严格落在流水线层：动作粒度变化（DOC5 明列“资源归还”为可拆边界）加一项寄存器存储登记，没有把下层决定上移，也没有用正文取消已声明动作——release:acc 仍是每 tile 恰好一次的真实事件。选择规则（设备路由、g_group 的 min 启发式、实验臂）全部留在 dispatch.md，YAML 内无开关、枚举或选路公式；目录未覆盖 YAML 已定选择，dispatch.md:90 的基线表述现与 YAML 一致。硬件占位限于 Hardware_specification 区内，Design 使用的执行单元名（cta/warp/thread/cluster）与存储名（smem/tmem/register，含新增的 epi_regs）均取自该区 Execution 摘要登记，未越出 P1 豁免。"
+    },
+    {
+      "evidence": [
+        37,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        52
+      ],
+      "subject": "document_consistency",
+      "text": "通过（上一轮的不一致点已消除，本轮重读全文复核）。关键一致关系：Thesis“next tiles overlap the last stores (acc release at last TMEM read)”、release.acc 的“once tile t's TMEM reads retire; staging and stores may still be in flight”、Pipe 中 release:acc(t) 位于 capture(末 si) 与 stage(末 si) 之间、以及 dispatch.md:90 的基线表述，四处现指向同一个释放点，且与源码到达点一致；capture/stage 的动作名与 EPILOGUE 的 Info.Describe（capture→narrow→stage transposed→vector-store）一一对应。名称与计数在四 role 间闭合：full=65=1 expect_tx+64 lane 与 PACK 的逐 lane 到达、scale-landing=1、slot-release=1、acc-ready=1、acc-release=128 与写回 4 warp 全 lane；eff（存储行、d_tile 的 row）与 eff_a（求值列、num_stores=eff_a/16）在三区用法统一；njl∈{1,2} 与 capture_pair/stage_pair/store:d_pair 及 capture_half/stage_half/store:d_half 两组动作、cd_pair/cd_half 两视图、b_payload 的 packed_k:64 与 b_ring 的解包 uint8 容器彼此自洽；MMA 的 Released 边引用的 EPILOGUE::release:acc(t-1) 在改名后仍存在且参数个数匹配，REALIZATION 的 Item 为 role/step/symbol 级故不受 noun 改名影响（本轮重读 447-512 行逐条确认）。数值账目互证：Storage 各 total_size 与 Require 的 55,296B/槽、230,400B、268/512 列相符（我独立重算），新增 epi_regs 属 register 不影响 smem 账；Rewrite[0] 的 Cost（重读 1536 f32 字、重写 384 打包字=1536B）与 Gain（6144→1536B）现同一口径。when 的前置条件（k%128、n%256、group_count<=256）与 Decomposition/Index 的整除用法、Partition.size 可为 0 的空工作处理一致；Version 随内容修订由 2 递增到 3，Contract 与 Work_schedule 未改（region hash 逐字节相同）。"
+    },
+    {
+      "evidence": [
+        12,
+        32,
+        33,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        67,
+        69,
+        71,
+        73
+      ],
+      "subject": "document_relevance",
+      "text": "通过。正文只保留必要数学、策略、动作契约、设计理由与影响理解的来源限制：三步 Rewrite 各有可核对的 Ledger（含 padding 列仍消耗 tensor-core 工作、box ladder 取整、多一次片上转置暂存、核内重读重写 scale 的代价），未把改写称为已证实的优化；本轮新增的 capture/stage 拆分只带来必要的动作契约与一项寄存器登记，没有引入源码临时变量级的对象（未按 v[8]/packed[4]/saddr 等逐一建 schema 对象），符合 DOC5“从当前作用域沿值的实际使用追查”。来源限制如实保留而非删除：非 2 的幂会静默丢尾数、Tolerance 的外部比较器缺口、n%256==0 与 group_count<=256 前置、host 缓存不冻结掩码、未用 j 的 scale 仍被搬运（无消费者但如实保留）。退修/待办/历史批准/实验编号（E116/E120/E101b/TJEB 等）都没有进入 YAML，实测数字只在 Prefer/Forbid 的 Reason 中以“source-measured/source reproduced”出现，未升级为设计保证，也未虚构实验；Feedback 未被使用（属 Coder 分组）。Forbid 只排除未被上游自然排除且已被源码实测否决的 2-CTA 路径，不是 Require 的机械反面。"
+    }
+  ],
+  "decision": "approve",
+  "format": "schema_extract.receipt.v2",
+  "framework_candidates": [],
+  "handoff": "P3 放行（本轮为第二次回执补正，产物未改）：root.yaml Version 3、512 行、raw a930fc10…、effective_identity 78a0552e…、check-helper exit 0 无待修正；三区全部本地定义 + REALIZATION（9 Require/2 Prefer/1 Forbid）+ Dispatch.when；Contract 与 Work_schedule 与前轮逐字节相同（contract 92d34b01…、Work_schedule region ab6eb025…），改动仅限 Math_reshape 的 Ledger.Cost 一行与 Tile_pipeline 的 EPILOGUE 角色 + 新增 epi_regs。dispatch.md（fece8b75…、122 行）未变。本轮回执修补：补上 category=implementation 的绑定入口锚（solution.py::Model.forward 116-135），host 类别同一入口保留，全部证据索引重建。\n\n上一轮两条退修已解决并复核：(1) 释放点采方案 (a)——drain_pair/drain_half 拆为 capture_pair/stage_pair 与 capture_half/stage_half，release:acc(t) 位于最后一个 si 的 capture 与 stage 之间，与源码到达点（kernel.cu 2379-2382、2635-2638）及 dispatch.md:90 基线一致，Thesis 与 release.acc 的 describe 不再与 Pipe 矛盾；跨动作保留的窄化 BF16 登记为 epi_regs（register、16×256 bf16、8,192B/CTA=16 regs/线程，不影响 smem 账与驻留）。(2) Rewrite[0] Ledger.Cost 改为“每 stage 重读 1536 个 staged f32 字、重写 384 个 UE8M0 打包字（1536 B）”，与 Gain 同一口径。\n\n已定事项与理由（P4 沿用，勿重开）：when 取机制有效域=整个 Contract 域（DROUTE=0 时该几何逐位等于认证单几何构建；DOC0 规定 when 不承担原 selector 职责），入口调用条件另列，expected_m 不构成门（host 解码门只在 fmggm_launch，body 无使用点）；g_group 固定 16，min 启发式与 BMSHIFT/MMC 取舍留在 dispatch.md 58-62；sm_count 定义为启动时查询的设备 SM 数（Device 为占位，故不断言固定容量，148 只作认证环境注记）；死半 tile 在 n_dim%256==0 下不可达，未入 YAML，前提写在 when 与 Decomposition 域说明；逐 lane 写回索引（|0x00100000、STSM 地址异或、store pass 分解）按 DOC5 留给实现，由 Require 绑定原语。\n\nP4 入口与待办：(a) dispatch.md 第 24 行线索 (d) 的对象名对齐——Storage=a_ring/b_ring/sfa_ring/sfw_ring/cd_stage/acc_tmem/sfw_tmem/sfa_tmem/pack_regs/epi_regs（新增）；Role=LOAD warp[0:1]/MMA warp[1:2]/PACK warp[2:4]/EPILOGUE warp[4:8]；EPILOGUE 的 noun 现为 capture_pair/stage_pair/capture_half/stage_half/store:d_pair/store:d_half（原暂拟的 drain_pair/drain_half 已不存在，目录 88-98 行若沿用旧名需一并改）；Index=t/k/s(flatten)；Partition 轴=pos；通知语义名 full/scale-landing/slot-release/acc-ready/acc-release。(b) 目录 15 条变体记录的基线引用按上述真实名核对，尤其“累加器释放与 drain 顺序”（基线现为 capture→release→stage→store 的顺序）与“输出写回代理”（TMA_STORE 替换的是 store:d_pair/d_half 的执行代理）。(c) 可选补充依据：kernel.cu 280-292 记录 TJEB(0.99954)/EBOX(0.99761) 在同作业被否决，目录 91 行的 TJEB/LDBATCH 条目只写了互斥约束、未写该实测结论，P4 若认为影响取舍可补一句。(d) 非阻塞文字项：Math 公式的 acc_j[n_l,i_l] 建议统一为 acc(j) 记法（与 Symbol acc、retention (e,mb,np,j)、视图 acc(j) 一致）；Work_schedule.Thesis 的“the tail split buys up to one wave for an L2-absorbed refetch”建议明确为“省下尾波时长、代价是两个半 tile 兄弟重取 A/SFA（由 L2 吸收）”。两项均不影响语义，可在 P4/P6 顺带处理，不构成再次退修理由。\n\n缺口（保留到交付）：P1 的外部比较器 source_gap 仍记在 Tolerance.d_out（“Source only; … formula/basis absent; no defaults”），本轮未改 Contract，后续不因比较器仍未补齐再次阻塞；硬件区仍为占位，检查按 --read-only --skip-hardware 跳过，Design 用到的执行单元与存储名均以 Execution 摘要登记为限。\n\n未提出 framework_candidates：本两次回执缺陷（证据行号越界、缺少绑定入口的 implementation 锚）均属回执编码问题，不涉规则不适配；先前提及的“describe 文本预算 vs DOC5 要求点名 Storage 及 view”的潜在张力，修后的 capture/stage describe 已在预算内点名 epi_regs 与 cd_stage，我未能构造实际冲突反例，故按规则不作为已核实候选提交；释放点无法“在动作内部”表达的问题由 DOC5 既有的动作拆分规则（资源归还为可拆边界）解决，不需规则变更。",
+  "identity": {
+    "attempt_id": "7a388176-110f-48b7-8275-a0796adc2e83",
+    "backend": "claude",
+    "base_checkpoint": "c00e34f2e7cbd89d1e3e0a24002812d49a15c52c36b80ef56df952a4d5d5a384",
+    "dependency_digests": {
+      "dispatch.md": "fece8b75ac2aac8d76bfa30a44b5139c93994fa4c49e0f96989a7adb37d23bcd",
+      "root.yaml": "a930fc106f62e72227cc929b21fb423fb0a65564cde04e787248d98fd7945fe3"
+    },
+    "effort": "max",
+    "generation": 0,
+    "input_fingerprint": "98e846b7bcd0dc01215e31363f3140f42194d827a9752269d240fa17beba4ed7",
+    "mode": "normal",
+    "model": "qwen3.8-max[1m]",
+    "node": "root",
+    "node_signature": "df2991267d71007aebc8f3b4d76316b9f940ceb45b2e9d6357ab037646e64585",
+    "plan_revision": 1,
+    "role": "reviewer",
+    "run_id": "c8dd5678-2935-4efa-943a-02e848d03611",
+    "selection_signature": "a7302bce4067c4490b15e584879f640c24064529760d47463c43b02812e062b6",
+    "session_scope": {
+      "node": "root",
+      "operation": "normal",
+      "role": "reviewer",
+      "stage": "P3"
+    },
+    "stage": "P3"
+  },
+  "issues": [],
+  "reopen": null,
+  "source_evidence": [
+    {
+      "category": "implementation",
+      "line_end": 135,
+      "line_start": 116,
+      "note": "绑定实现入口锚（invocation.implementation_source 与 inputs.entrypoint = candidate/solution.py::Model.forward，文件共 135 行）：解包 (a_q,a_sf)/(b_q,b_sf)，按（六 data_ptr、三 shape、expected_m）缓存实参并跳过重复 _validate，每次调用以 PyTorch 当前 raw stream 向 ctypes 绑定的 fmggm_launch 传恰好一次 12 个实参，rc!=0 抛错，返回 None、结果就地写 d。默认宏下 fmggm_launch 提交 fmggm_kernel_dr（kernel.cu 3434-3439），其 else 分支（2796-2801）即所选实例 fmggm_bodyT<128,4>（1362-1364），把绑定入口与选定 kernel 实例连成一条提交链，支持 META_DATA.Source、Flow.Launch 单条目与 when 的入口条件表述。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/solution.py",
+      "quote": "    def forward(self, a, b, d, masked_m, expected_m, recipe=None, recipe_a=None,\n                recipe_b=None, compiled_dims=\"nk\", disable_ue8m0_cast=False):\n        aq, asf = a\n        bq, bsf = b\n        key = (aq.data_ptr(), asf.data_ptr(), bq.data_ptr(), bsf.data_ptr(),\n               d.data_ptr(), masked_m.data_p",
+      "sha256": "841dad1d5cf3c7a47012e8d32dc60da7f437f60f36a107a468a1877e11f43b31",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1364,
+      "line_start": 1362,
+      "note": "root 实例入口：DROUTE 下 fmggm_bodyT<BMV,STG> 为 device 函数（DROUTE=0 时同一声明即 __global__ fmggm_kernelT，逐位相同）。支持所选实例身份与 when 取机制有效域。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "#if FMGGM_DROUTE\ntemplate <int BMV, int STG>\n__device__ __forceinline__ void fmggm_bodyT(const Params& p) {",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2801,
+      "line_start": 2796,
+      "note": "fmggm_kernel_dr 的 wide 判据（b2>0 && b1*n_pairs>num_sms && 5*b1>=7*b2）与 else → fmggm_bodyT<BM,STAGES>，即 root 实例。路由为选择规则不入 YAML，与 dispatch.md 46-50 的分工一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    const int n_pairs = (p.num_n_blocks + N_B_PER_STAGE - 1) / N_B_PER_STAGE;\n    const bool wide = (b2 > 0)\n                   && ((long long)b1 * n_pairs > (long long)p.num_sms)\n                   && (FMGGM_DROUTE_DEN * b1 >= FMGGM_DROUTE_NUM * b2);\n    if (wide) fmggm_bodyT<FMGGM_DROUTE_BM, DROUTE_WIDE_STG>(p);\n    ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "host",
+      "line_end": 135,
+      "line_start": 116,
+      "note": "host 绑定入口（inputs.host = Model.forward）：校验/缓存/单次 self._fn(*call_args, _raw_stream(device_index))/rc 处理/返回 None。支持“每次调用只提交一个 kernel、无回退路径”的 Flow.Launch 单条目与 Contract 的“返回 None、就地写 d”（_validate 87-114 为同段依据）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/solution.py",
+      "quote": "    def forward(self, a, b, d, masked_m, expected_m, recipe=None, recipe_a=None,\n                recipe_b=None, compiled_dims=\"nk\", disable_ue8m0_cast=False):\n        aq, asf = a\n        bq, bsf = b\n        key = (aq.data_ptr(), asf.data_ptr(), bq.data_ptr(), bsf.data_ptr(),\n               d.data_ptr(), masked_m.data_p",
+      "sha256": "841dad1d5cf3c7a47012e8d32dc60da7f437f60f36a107a468a1877e11f43b31",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "host",
+      "line_end": 114,
+      "line_start": 87,
+      "note": "_validate：dtype（fp8_e4m3fn/int8|uint8/fp32/bf16/int32）、六张量 contiguous 且 is_cuda、asf/bsf=(e,·,k//32)、bq=(e,n,k//2)、d=(e,m,n)、masked_m=(e,)、k%128==0。逐条对应 when 的 caller-side invocation conditions。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/solution.py",
+      "quote": "    def _validate(aq, asf, bq, bsf, d, masked_m):\n        if aq.dtype != torch.float8_e4m3fn:\n            raise TypeError(f\"a payload must be float8_e4m3fn, got {aq.dtype}\")\n        if bq.dtype not in (torch.int8, torch.uint8):\n            raise TypeError(f\"b payload must be packed fp4 int8/uint8, got {bq.dtype}\")\n    ",
+      "sha256": "841dad1d5cf3c7a47012e8d32dc60da7f437f60f36a107a468a1877e11f43b31",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "host",
+      "line_end": 3268,
+      "line_start": 3254,
+      "note": "fmggm_launch 拒绝分支（E/M/N/K>0、K%BK==0、五指针 16B 对齐、a_sf/b_sf/masked_m 非空，-10…-13）与 g_num_sms 的 cudaDeviceGetAttribute 查询。支持 when 的调用条件与 sm_count 的运行时来源（Device 占位故不断言容量）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "extern \"C\" int fmggm_launch(const void* a_q, const void* a_sf, const void* b_q, const void* b_sf,\n                            void* d, const int* masked_m,\n                            long long E, long long M, long long N, long long K,\n                            long long expected_m, void* stream) {\n    if (E <= 0 || ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "host",
+      "line_end": 3439,
+      "line_start": 3434,
+      "note": "默认启动 cudaLaunchKernel(fmggm_kernel_dr, dim3(g_num_sms), dim3(THREADS=256), args, sizeof(SharedStorage), 调用方 stream)。支持 Mapping.Worker_count=sm_count、Require 的启动形状与单次提交。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "        {\n        e = cudaLaunchKernel(reinterpret_cast<const void*>(FMGGM_MAIN_KERNEL),\n                             dim3((unsigned)g_num_sms), dim3(THREADS),\n                             args, sizeof(SharedStorage),\n                             reinterpret_cast<cudaStream_t>(stream));\n        }",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "host",
+      "line_end": 3271,
+      "line_start": 3269,
+      "note": "cudaFuncSetAttribute(FMGGM_MAIN_KERNEL, MaxDynamicSharedMemorySize, sizeof(SharedStorage))（g_attr_done 一次性）。支持 Require“230,400 B opt-in dynamic smem … via cudaFuncSetAttribute”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    if (!g_attr_done) {\n        if (cudaFuncSetAttribute(FMGGM_MAIN_KERNEL, cudaFuncAttributeMaxDynamicSharedMemorySize,\n                                 (int)FMGGM_MAIN_SMEM) != cudaSuccess) return -16;",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "host",
+      "line_end": 3310,
+      "line_start": 3296,
+      "note": "MapKey{六指针,E,M,N,K} 的 8 槽缓存；命中只做 p=ent->cached 结构体拷贝，未命中才 encode_maps。支持 Require“缓存只省描述符编码与参数组装、不省设备工作”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    MapKey key{a_q, b_q, d, a_sf, b_sf, masked_m, E, M, N, K};\n    MapEntry* ent = nullptr;\n    for (auto& e : g_map_cache) if (e.used && e.key == key) { ent = &e; break; }\n    if (!ent) {\n        ent = &g_map_cache[g_cache_cursor];\n        g_cache_cursor = (g_cache_cursor + 1) % MAP_CACHE_SLOTS;\n        ent->params_re",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "host",
+      "line_end": 3345,
+      "line_start": 3340,
+      "note": "Params：num_k_blocks=K/BK、num_n_blocks=ceil(N/BN)、num_sms=g_num_sms、num_n_blocks2=N/(2*BN)，masked_m 以裸指针进 Params。支持 Index.k=[0,k_dim/128]、n_pairs=n_dim/256 与“masked_m 每次调用在设备上重读”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "        p.num_groups = (int)E; p.shape_m = (int)M; p.shape_n = (int)N; p.shape_k = (int)K;\n        p.num_k_blocks = (int)(K / BK);\n        p.num_n_blocks = (int)((N + BN - 1) / BN);\n        p.num_sms = g_num_sms;\n        p.num_n_blocks2 = (int)(N / (2 * BN));\n        p.num_clusters = g_num_sms / 2;",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "host",
+      "line_end": 3370,
+      "line_start": 3361,
+      "note": "解码门 expected_m>=0 && expected_m<=16 && M<=128 只在 host；expected_m 不进 Params、body 内无使用点（全文仅 3257/3364 与注释）。支持 when 的“Advisory expected_m does not gate this design”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "#if FMGGM_DEC16\n    // Decode route: BMV=16 tiles, STG=5 deep B ring. Gate bounds the\n    // single-heavy-expert W refetch at M/16 <= 8 m-blocks (M<=128).\n    if (expected_m >= 0 && expected_m <= 16 && M <= 128) {\n        e = cudaLaunchKernel(reinterpret_cast<const void*>(fmggm_kernelT<16, FMGGM_DEC_STG>),\n            ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 679,
+      "line_start": 644,
+      "note": "几何常量：BM=BMV=128、BN=128、BK=128、UMMAS_PER_STAGE=4、SF_SUB=1、N_B_PER_STAGE=2、NW_SUB=2、STAGES=4、ACC_STAGES=1、STORE_M=16、THREADS=256、SFW_COL=256、SFA_COL=264、TMEM_COLS=512 与 static_assert(268<=512)。逐项对应 Storage 的 shape/depth 与 Require 的“268 used: 256 acc + 8 weight-scale + 4 activation-scale”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "constexpr int BM = FMGGM_BMV;       // rows of A (activation capacity rows) per tile\nconstexpr int BN = 128;             // rows of B (weight N) per tile\nconstexpr int BK = FMGGM_BK256 ? 256 : 128;   // K elements per stage\nconstexpr int UMMAS_PER_STAGE = BK / 32;   // kind::mxf8f6f4 UMMA_K = 32\nconstexpr int SF_SUB = ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 956,
+      "line_start": 944,
+      "note": "SharedStorageT：cd[2][16*128] uint16、b[STG][2*128*128] uint8（fp4 解包成 8-bit 容器）、a[STG][128*128]、sfw_raw[STG][1024 f32]、sfa_raw[STG][512 f32]，注释明确 TMA 落 f32、pack warp 就地转 UE8M0、子块 q 占字 [q*128,(q+1)*128)。支持十项 Storage 账、sfa/sfw 双视图，以及修后 Ledger.Cost 的 1536 个 staged f32 字（512+1024）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    uint16_t cd[TMA_STORE_STAGES][STORE_M * BN];       // bf16 store staging, 2 atoms x 2KB\n    uint8_t  b[STG][N_B_PER_STAGE * BN * BK];          // weights, fp4 unpacked to 8-bit containers\n                                                       // (DUALN: n-tile j at [stage][j*BN*BK])\n    uint8_t  a[STG][BMV * BK];  ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 983,
+      "line_start": 982,
+      "note": "using SharedStorage=SharedStorageT<BM,STAGES> 与 static_assert(sizeof<=232448)。我按字段求和 8,192+131,072+65,536+16,384+8,192+96+16+4=229,492，1024 对齐后 230,400 B，与 Require“4 ring slots of 55,296 B + 8,192 B staging + notification words, 1024B-aligned”一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "using SharedStorage = SharedStorageT<BM, STAGES>;\nstatic_assert(sizeof(SharedStorage) <= 232448, \"main config smem over opt-in max\");",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1067,
+      "line_start": 1052,
+      "note": "STAIL：total_tiles>0 && groups<=256 && N_B_PER_STAGE==2 时 R=T%num_sms，R>0&&2R<=num_sms 才 split_from=T-R、positions=T+R，否则 positions=T。YAML 用“不拆分时 split_from=T”等价表达（pos<T ⇒ h<0 ⇒ 全 pair），T=0 时两式同为 positions=0，与源码 0xFFFFFFFF 无界枚举一样不产生工作。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "#if FMGGM_STAIL\n        // total_tiles_ == 0 -> legacy unbounded enumeration (2-CTA kernel path).\n        // The s_mblocks sum only covers groups 0..255 (THREADS); the frozen\n        // domain guarantees groups <= 64, but guard general E anyway.\n        // N_B_PER_STAGE < 2 has no pair to split (BK256-class configs).\n ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1082,
+      "line_start": 1069,
+      "note": "g_group=min(cand*bm+ceil(num_sms/cand)*BN) over {8,16}；bm=128、num_sms=148 → cand8=3456、cand16=3328 ⇒ 16。YAML 固定 16、选择公式留在 dispatch.md 58-62，符合“其他取值/选择公式不入 YAML”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "#if FMGGM_GG > 0\n        g_group = FMGGM_GG;\n#else\n        // same L2-usage heuristic as the reference (grouping on M)\n        int best = 8; uint32_t best_usage = 0xFFFFFFFFu;\n        const int cands[2] = {8, 16};\n        #pragma unroll\n        for (int ci = 0; ci < 2; ++ci) {\n            const int cand = cands[ci];\n  ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1133,
+      "line_start": 1101,
+      "note": "Scheduler::next：pos=(++cur_iter)*num_sms+worker_id、pos>=positions 终止、split 区 h>>1/h&1 得 flat 与 cur_joff、cur_njl=1；组内 per_group=num_n_blocks*g_group、grp、nmb_here=min(g_group,total-first)、m_blk=first+in_grp%nmb_here、n_blk=in_grp/nmb_here。Mapping/Schedule Strategy 逐式相同，且我验证 (mb,np) 在 ig∈[0,nh*n_pairs) 上为双射。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    __device__ bool next(uint32_t& m_blk, uint32_t& n_blk) {\n#if FMGGM_STAIL\n        while (true) {\n            const uint32_t pos = (uint32_t)(++cur_iter) * (uint32_t)num_sms + worker_id;\n            if (pos >= positions) return false;\n            uint32_t flat = pos;\n            cur_joff = 0; cur_njl = N_B_PER_STAGE;",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1191,
+      "line_start": 1181,
+      "note": "effective_m：rem=cur_count-m_blk*bm（BMSHIFT=0 走真除法）、eff=min(rem,bm)、返回 (eff+15)&~15。支持 eff∈[1,128]、eff_a=ceil_div(eff,16)*16，以及存储行用 eff、求值列用 eff_a 的区分。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    __device__ int effective_m(uint32_t m_blk) const {\n#if FMGGM_BMSHIFT\n        const int bmc = 1 << bm_shift;              // == bm, power of two\n        int rem = cur_count - (int)(m_blk << bm_shift);\n        int eff = rem < bmc ? rem : bmc;\n#else\n        int rem = cur_count - (int)(m_blk * (uint32_t)bm);\n        in",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1426,
+      "line_start": 1414,
+      "note": "全空早退：s_any/s_mblocks 置 0 → __syncthreads → tid<num_groups 时 atomicOr → __syncthreads → if(!s_any) return（在 TMEM 分配之前）。支持四 role 共有的 entry_scan 与 if(any_active) 为假时不产生任何后续动作（acquire/release:tmem_cols 均在 if 内）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "#else\n    // ---- early exit when every expert is empty: no TMEM alloc, no loads/stores\n    __shared__ int s_any;\n#if FMGGM_STAIL\n    __shared__ int s_mblocks;   // total m-blocks over all experts (tail split).\n    if (tid == 0) { s_any = 0; s_mblocks = 0; }\n#else\n    if (tid == 0) s_any = 0;\n#endif\n    __syncthreads()",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1447,
+      "line_start": 1433,
+      "note": "STAIL 第二趟：c0=masked_m[tid]、mb=ceil(c0/BMV)、warp butterfly、每 warp 一次 atomicAdd(&s_mblocks)、收尾 __syncthreads；只覆盖 group_count<=256（THREADS）。支持 entry_scan 的“a second pass sums the m-block total behind T”与 when 的 group_count<=256 前置。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    {\n        const int c0 = (tid < p.num_groups) ? __ldg(p.masked_m + tid) : 0;\n#if FMGGM_MMC\n        // E70: publish the snapshot the group walk will read. c0 is already in a\n        // register here, so this is one smem store per thread and no extra traffic;\n        // the __syncthreads() that closes this pass order",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1457,
+      "line_start": 1452,
+      "note": "warp1 选举 lane mbar_init：full=FMGGM_PKELECT?3:65（注释 65 = 1 TMA expect_tx + 32 SFA + 32 SFW lanes）、sf_full=1、empty=1。支持 init_barriers 的计数与 MMA.stage_ready 的双前驱到达集。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    if (warp == 1 && elect_one()) {\n        #pragma unroll\n        for (int i = 0; i < STG; ++i) {\n            mbar_init(&sm.full[i], FMGGM_PKELECT ? 3 : 65);   // 65 = 1 TMA expect_tx + 32 SFA + 32 SFW lanes\n            mbar_init(&sm.sf_full[i], 1);  // SF f32 TMA arrival (expect_tx by TMA warp)\n            mbar_init(",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1468,
+      "line_start": 1464,
+      "note": "tmem_full[i]=1、tmem_empty[i]=128（ACC_STAGES=1 各一个）+ fence_mbar_init。支持 acc-ready=1、acc-release=128 与 release.acc 的“128 lane 全员到达”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "        #pragma unroll\n        for (int i = 0; i < ACC_STAGES; ++i) {\n            mbar_init(&sm.tmem_full[i], 1);\n            mbar_init(&sm.tmem_empty[i], 128);\n        }",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1483,
+      "line_start": 1479,
+      "note": "warp2 tmem_alloc(&sm.tmem_base, TMEM_COLS=512)+tmem_relinquish，随后 __syncthreads 发布 tmem_base 与屏障。支持 PACK.acquire:tmem_cols（warp3 直接去会合）与四 role 的 await:resources_ready。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    } else if (warp == 2) {\n        tmem_alloc(&sm.tmem_base, TMEM_COLS);\n        tmem_relinquish();\n    }\n    __syncthreads();",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1534,
+      "line_start": 1530,
+      "note": "TX_B=BN*BK/2=8192（packed gmem bytes, probe-confirmed）、TX_SFA=BM*4*4*SF_SUB=2048、TX_SFW=BN*4*4*SF_SUB=2048/n-tile。支持 ab_tiles 的 8192B/活跃 j、sf_tiles 的激活 128 行×4 块与每活跃 j 一个权重块，以及 Require 的线上字节计账。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "        // tx bytes: B tile = packed gmem bytes (8192, probe-confirmed). A tile uses\n        // the smallest row box covering align(eff_m,16): decode tiles cut A traffic 8x.\n        constexpr uint32_t TX_B = BN * BK / 2 * FMGGM_B_TX_DIV;   // packed bytes, per n-tile\n        constexpr uint32_t TX_SFA = BM * 4 * 4 * SF_",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1611,
+      "line_start": 1605,
+      "note": "ABOX 阶梯：eff<=16→map_a16、<=32→map_a32、<=64→map_a64，否则满 BM=128 box。正是 ab_tiles 的“smallest of {16,32,64,128} covering eff_a”与 Rewrite[1] Ledger.Cost 的 box ladder。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "#elif FMGGM_ABOX\n            const int eff = sched.effective_m(m_blk);\n            if (eff <= 16)      { map_a = &p.map_a16; tx_a = 16 * BK; }\n            else if (eff <= 32) { map_a = &p.map_a32; tx_a = 32 * BK; }\n            else if (eff <= 64) { map_a = &p.map_a64; tx_a = 64 * BK; }\n            else if (BM > 128 && ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1638,
+      "line_start": 1637,
+      "note": "每 stage 开头 mbar_wait(&sm.empty[stage], phase^1)。fresh 屏障上 parity=1 直接通过，对应 {done await:slot_free(s)} ← {done MMA::signal:stage_consumed(s-4)} 且 s<4 的前驱按声明窗口跳过。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "            for (int kb = 0; kb < p.num_k_blocks; ++kb) {\n                mbar_wait(&sm.empty[stage], phase ^ 1);",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1690,
+      "line_start": 1687,
+      "note": "SF f32 先发：tma_load_2d(map_sfa_sel, &sm.sf_full[stage], sm.sfa_raw[stage]+h*(BM*4), kb*(4*SF_SUB)+h*4, m_idx)。支持 LOAD pipe 中 sf_tiles 先于 ab_tiles，以及 PACK 的 Prepared 边指向 sf_tiles。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                    #pragma unroll\n                    for (int h = 0; h < SF_SUB; ++h)\n                        tma_load_2d(map_sfa_sel, &sm.sf_full[stage], sm.sfa_raw[stage] + h * (BM * 4),\n                                    kb * (4 * SF_SUB) + h * 4, m_idx);",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1719,
+      "line_start": 1715,
+      "note": "权重 SF 只对 j∈[jlo,jhi) 发请求，随后 mbar_arrive_expect_tx(sf_full, tx_sfa+TX_SFW*nj)。支持“one weight tile per active j”与半 tile 只计一份的完成计数。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                                tma_load_2d(&p.map_sfb, &sm.sf_full[stage],\n                                            sm.sfw_raw[stage] + (j * SF_SUB + h) * (BN * 4),\n                                            kb * (4 * SF_SUB) + h * 4, n_idx + (int)j * BN);\n                        }\n                    mbar_arrive_",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1772,
+      "line_start": 1766,
+      "note": "权重载荷 bdst=sm.b[stage]+(j*SF_SUB+h)*(BN*128)，FMGGM_TCP 默认走 tma_load_2d_evict_last。支持 ab_tiles 的 evict_last 与 Prefer 第 2 条。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                                for (int h = 0; h < SF_SUB; ++h) {\n                                    uint8_t* bdst = sm.b[stage] + (j * SF_SUB + h) * (BN * 128);\n                                    const int cx = kb * BK + h * 128;\n                                    const int cy = n_idx + (int)j * BN;\n#if FMGGM_TCP\n",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1798,
+      "line_start": 1794,
+      "note": "mbar_arrive_expect_tx(full, tx_a+TX_B*nj_b) 后 stage/phase 推进（stage 归零翻转 parity），且二者声明在 tile 循环外——ring 序号跨工作连续。支持 s=flatten(t,k) 与 full=65 的到达集。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                mbar_arrive_expect_tx(&sm.full[stage], kSkipLoads ? 0u :\n                                      ((FMGGM_EXPER == 17 ? 0u : tx_a) +\n                                       (FMGGM_EXPER != 6 ? TX_B * (uint32_t)nj_b : 0u)));\n                stage = stage + 1 == STG ? 0 : stage + 1;\n                phase ^= s",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1813,
+      "line_start": 1810,
+      "note": "nsub = is_act ? SF_SUB*NSFA_K : NW_SUB，窄实例即 warp2=1、warp3=2 子块 ⇒ 每 lane 16/32 个 f32。支持 PACK.load:sf_f32 的 describe、pack_regs 的 1536 f32（=512+1024）总量，以及修后 Cost 的“重读 1536 个 staged f32 字”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "        // activation SF spans NSFA_K groups of 128 rows when BMV > 128; each group\n        // is its own 512 B packed block, its own UTCCP and its own 4 TMEM columns.\n        const int nsub = is_act ? SF_SUB * NSFA_K : NW_SUB;\n        float* raw0 = is_act ? sm.sfa_raw[0] : sm.sfw_raw[0];",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1899,
+      "line_start": 1884,
+      "note": "pack warp（默认非 LDGSF）：mbar_wait(sf_full[stage], phase) → 每 lane 读 raw+q*512+(lane+32rr)*4 的 float4 进寄存器。支持 PACK 的 sf_landed→sf_f32 顺序与“读全部 f32 先于任何覆写”，使打包字落在槽内哪个 quarter 都不破坏寿命推理。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "        while (sched.next(m_blk, n_blk)) {\n            for (int kb = 0; kb < p.num_k_blocks; ++kb) {\n                if (!kSkipLoads && FMGGM_EXPER != 5 && FMGGM_EXPER != 16)\n                    mbar_wait(&sm.sf_full[stage], phase);\n                float* raw = raw0 + (size_t)stage * (is_act ? SFA_STRIDE : SFW_STRIDE);",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1919,
+      "line_start": 1901,
+      "note": "mbar_wait(empty[stage], phase^1) → __syncwarp → dst[q*128+lane*4+rr]=pack_sf4(v) 就地覆写 → fence_proxy_async → 逐 lane mbar_arrive(full[stage])（PKELECT=0）。支持 PACK 的 slot_reusable→pack_sf、Require 的 fence.proxy.async，以及修后 Cost 的“重写 384 个打包字”（激活 128 + 权重 256）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                mbar_wait(&sm.empty[stage], phase ^ 1);\n                if (FMGGM_EXPER != 5 && !kSkipLoads &&\n                    FMGGM_EXPER != 16 && FMGGM_EXPER != 18) {\n                    __syncwarp();\n                    uint32_t* dst = reinterpret_cast<uint32_t*>(raw);\n                    #pragma unroll\n        ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1239,
+      "line_start": 1234,
+      "note": "pack_sf4 只取 f32 指数字节（(bits>>23)&0xFF 等四次移位）。支持 Rewrite[0] 的 sfa_code/sfb_code=log2(scale)+127 与 Require“extracts the IEEE-754 exponent byte”，以及“非 2 的幂静默丢尾数”的来源限制。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "__device__ __forceinline__ uint32_t pack_sf4(float4 v) {\n    return ((__float_as_uint(v.x) >> 23) & 0xFFu)\n         | ((__float_as_uint(v.y) >> 15) & 0xFF00u)\n         | ((__float_as_uint(v.z) >>  7) & 0xFF0000u)\n         | ((__float_as_uint(v.w) <<  1) & 0xFF000000u);\n}",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1323,
+      "line_start": 1316,
+      "note": "UTCCP：for i_<NW_SUB 无条件拷两个权重子块到 SFW_COL+i_*4，for q_<SF_SUB*NSFA_K 拷激活组到 SFA_COL+q_*4。正是 load:sf_stage 的“both weight sub-blocks (active window or not) and the activation group”——半 tile 下未用 j 的 scale 仍被搬运，产物如实保留无消费者的搬运。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                _Pragma(\"unroll\")                                                            \\\n                for (int i_ = 0; i_ < NW_SUB; ++i_)                                          \\\n                    utccp_4x32dp128bit(tmem + SFW_COL + i_ * 4,                              \\\n                        make_smem_d",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1341,
+      "line_start": 1328,
+      "note": "UMMA 循环：j 仅在 [jlo,jhi)，每 j 发 4 条 umma_mxf8f6f4（dcol_j0/j1、idesc_tt[tt]、SFW_COL+(j*SF_SUB+q)*4、SFA_COL+q*4），accumulate=((KBV>0||t>0)?1:0)。支持 matmul:wtile(s,j)@atile(s) 的 describe 与 Math 的“q=0 覆写 acc、其后升序累加”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                _Pragma(\"unroll\")                                                            \\\n                for (uint32_t j_ = 0; j_ < N_B_PER_STAGE; ++j_) {                            \\\n                    if (j_ >= jlo && j_ < jhi) {                                             \\\n                        _Pragma(\"un",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1352,
+      "line_start": 1346,
+      "note": "__syncwarp 后选举 lane umma_commit(&sm.empty[S])，且 KBV==num_k_blocks-1 时 umma_commit(&sm.tmem_full[acc])。支持 signal:stage_consumed/acc_ready 的 async_ordered 单一完成链，以及 commit 覆盖全部先前 tc 操作（empty 同时保证 payload 与 packed SF 读完成）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "        __syncwarp();                                                                        \\\n        if (elect_one()) {                                                                   \\\n            if (FMGGM_EXPER == 20) mbar_arrive(&sm.empty[S]);                                \\\n            else                   ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2104,
+      "line_start": 2103,
+      "note": "MMA 每 tile 首句 mbar_wait(&sm.tmem_empty[acc], acc_ph^1)+tc_fence_after_sync（ACC_STAGES=1 ⇒ acc=0、acc_ph=cur_iter&1，t=0 在 fresh 屏障直通）。这是下一 tile 首条 UMMA 的唯一前驱，故释放点位置直接决定相邻工作的重叠；修后 Pipe 与源码一致。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "            mbar_wait(&sm.tmem_empty[acc], acc_ph ^ 1);\n            tc_fence_after_sync();",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2124,
+      "line_start": 2111,
+      "note": "dcol_j0=tmem+acc*(BM*N_B_PER_STAGE)、dcol_j1=+BM（E116 注释确认当前树加数为 BM），idesc_tt[4] 提升。支持 acc_tmem 的 acc(j) region=[j*128,j*128+128) 与“TMEM lanes = weight rows、列为激活行”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "            const uint32_t dcol_j0 =\n#if FMGGM_J0LB\n                tmem + j0col;\n            const uint32_t dcol_j1 = tmem + (uint32_t)BM;\n#else\n                tmem + acc * (BM * N_B_PER_STAGE);\n            // E116: this `+ 128u` was the wide arm's only remaining bug. The port\n            // rewrote the multiplier to",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2148,
+      "line_start": 2130,
+      "note": "DESCROLL 三段：对齐到 slot0 的运行期槽循环、STG 长常量槽主体、零头循环，stage/phase 跨 tile 连续。支持 Prefer 第 1 条与 ring 序号不在 tile 边界重置。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "            const int nk_ = p.num_k_blocks;\n            int kb = 0;\n            while (kb < nk_ && stage != 0) {          // align the ring to slot 0\n                FMGGM_MMA_STAGE(stage, kb, phase);\n                stage = stage + 1 == STG ? 0 : stage + 1;\n                phase ^= stage == 0;\n                ++kb;\n  ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2253,
+      "line_start": 2244,
+      "note": "EPI 每 tile：acc/acc_ph、j 窗口与 dead-half 的 continue 都在 tmem_full 等待之前（注释：MMA 跳过死半 tile 故不会有 commit）。冻结域 n%256==0 下 njt 恒为 2、njl>=1，故 YAML 不建死半 tile 分支正确，前提写在 when 与 Decomposition 域说明。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "            const uint32_t acc = (uint32_t)sched.cur_iter % ACC_STAGES;\n            const uint32_t acc_ph = ((uint32_t)sched.cur_iter / ACC_STAGES) & 1;\n            // j-window + dead-half skip MUST precede the tmem_full wait (the\n            // MMA warp skips dead half-tiles entirely: no commit would fire).\n          ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2272,
+      "line_start": 2263,
+      "note": "mbar_wait(tmem_full[acc], acc_ph)+tc_fence_after_sync；eff=effective_m、num_stores=eff/STORE_M=eff_a/16、base_m=cur_group*shape_m+m_blk*BMV、atom_off=(ew>>1)*2048。支持 await:acc_ready(t)、Pipe 的 for(si=0:eff_a(t)/16) 与 store 的行基址。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "            mbar_wait(&sm.tmem_full[acc], acc_ph);\n#endif\n            tc_fence_after_sync();\n#if FMGGM_MTRE\n            dr_te1 = clock64(); dr_wait += dr_te1 - dr_te0;\n#endif\n            const int eff = sched.effective_m(m_blk);\n            const int num_stores = eff / STORE_M;\n            const int base_m = sched.cur_",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2355,
+      "line_start": 2343,
+      "note": "DINTER 捕获：for jj=1→0（j1 先）、tcol=tmem+acc*(BM*N_B_PER_STAGE)+jj*BM、taddr=tcol+si*16+li*8、每 (jj,li) 两次 tmem_ld_16x256b_x1（第二次 |0x00100000 取另 16 lane）+ tmem_ld_wait。逐条对应 capture_pair 的“32 lanes x 16 cols of both acc halves (j1 first)”；每 si 四 warp 共 4,096 个值，即 epi_regs 的 16×256 逻辑容量。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                    for (int jj = 1; jj >= 0; --jj) {   // j1 loads first (J0LB release order)\n#if FMGGM_J0LB\n                        const uint32_t tcol = tmem + ((jj == 0) ? j0col : (uint32_t)BM);\n#else\n                        const uint32_t tcol = tmem + acc * (BM * N_B_PER_STAGE) + (uint32_t)(jj * BM);\n#endif\n     ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2382,
+      "line_start": 2379,
+      "note": "上一轮 issue 1 的判定依据（修后已对齐）：si==num_stores-1 && li==1 && jj==0 时 tc_fence_before_sync() 后全 lane mbar_arrive(&sm.tmem_empty[acc])，位置在末次 tmem_ld_wait 之后、该 chunk 的 bf16 打包与 stsm 之前。修后 Pipe 把 release:acc(t) 放在 capture_pair(末 si) 与 stage_pair(末 si) 之间，正是这一关系。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                            if (si == num_stores - 1 && li == 1 && jj == 0) {\n                                tc_fence_before_sync();\n                                mbar_arrive(&sm.tmem_empty[acc]);\n                            }",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2395,
+      "line_start": 2384,
+      "note": "该 chunk 的 __float22bfloat162_rn 窄化与 stsm_x4_trans 到 &sm.cd[0][0]+(jj*2+(ew>>1))*2048+li*1024+…（偏移最大约 8,192B，即整个 cd 双数组构成 16×256 影像）。支持 stage_pair 的“STSM-transposes si's captured BF16 into the single 8 KB cd_stage image (16 rows x 256 cols)”与 cd_pair 视图；窄化点仍由 Math Rewrite[2] 的 bf16(acc) 唯一定义。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                            uint32_t packed[4];\n                            #pragma unroll\n                            for (int i = 0; i < 4; ++i) {\n                                __nv_bfloat162 h = __float22bfloat162_rn(make_float2(v[2 * i], v[2 * i + 1]));\n                                packed[i] = *reinterpret_cas",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2415,
+      "line_start": 2399,
+      "note": "named_barrier_sync(2,128) 后 d_base=(base_m+si*16)*shape_n+n_blk*256，4 趟×128 线程的 16B st.global（row=idx>>5、chunk=idx&31、atom/g 分解、源地址 (g^(row&7))*16 反 swizzle）。支持 stage_pair 末尾的跨 warp 会合与 store:d_pair 的 describe；也说明单缓冲 cd 的覆写保护由 role 内 serial 顺序（store(si-1) done → stage(si) issue）承担，等价于源码 si 循环开头的 named barrier 1。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                    named_barrier_sync(2, 128);\n                    {\n                        uint16_t* d_base = reinterpret_cast<uint16_t*>(p.d_ptr)\n                            + (size_t)(base_m + si * STORE_M) * p.shape_n + base_n_d;\n                        const uint8_t* cd8 = reinterpret_cast<const uint8_t*>(&sm.cd",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2605,
+      "line_start": 2598,
+      "note": "半 tile（非 DINTER）捕获：taddr=tmem+acc*(BM*N_B_PER_STAGE)+(j*BM+si*16+li*8)，两次 tmem_ld_16x256b_x1 + tmem_ld_wait；j 循环在外、si 在内且 nj==1。支持 capture_half 的“same capture for the single n-tile jlo (16 cols)”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                    const uint32_t taddr = tmem + acc * (BM * N_B_PER_STAGE)\n                                           + (uint32_t)(j * BM + si * 16 + li * 8);\n#endif\n                    float v[8];\n                    if (FMGGM_EXPER != 9 && FMGGM_EXPER != 10) {\n                        tmem_ld_16x256b_x1(taddr, v);\n ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2638,
+      "line_start": 2635,
+      "note": "半 tile 的释放点：si==num_stores-1 && li==1 && j==jhi-1 时 tc_fence_before_sync + 全 lane mbar_arrive(tmem_empty[acc])，同样在打包/STSM（2641-2651）之前。确认 issue 1 的修正在 njl==1 分支也成立。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                    if (si == num_stores - 1 && li == 1 && j == (int)jhi - 1) {\n                        tc_fence_before_sync();\n                        mbar_arrive(&sm.tmem_empty[acc]);\n                    }",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2651,
+      "line_start": 2641,
+      "note": "半 tile 的窄化与 stsm 目标是 sm.cd[tma_stage][0]+atom_off+…，即 4KB 半区。支持 stage_half 的“alternating 4 KB cd_stage halves (rotation persists across tiles); 16x128 image”与 cd_half(h) 的 region out [(h%2)*128,+128)。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                        uint32_t packed[4];\n                        #pragma unroll\n                        for (int i = 0; i < 4; ++i) {\n                            __nv_bfloat162 h = __float22bfloat162_rn(make_float2(v[2 * i], v[2 * i + 1]));\n                            packed[i] = *reinterpret_cast<uint32_t*>(&h);\n  ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2678,
+      "line_start": 2668,
+      "note": "半 tile store：named_barrier(2,128) 后 base_n=((n_blk*N_B_PER_STAGE)+j)*BN=(np*2+jlo)*128，2 趟×128 线程 16B（16 行×128 列）。对应 store:d_half 的 describe。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                // plain vectorized stores: 16 rows x 128 bf16 = 256 x 16B chunks\n                named_barrier_sync(2, 128);\n                if (FMGGM_EXPER != 8 && FMGGM_EXPER != 10) {\n                    uint16_t* d_base = reinterpret_cast<uint16_t*>(p.d_ptr)\n                        + (size_t)(base_m + si * STORE_M)",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2691,
+      "line_start": 2688,
+      "note": "tma_stage 每 si 轮转（TMA_STORE_STAGES=2）且声明在 while 之外（2239 行）跨 tile 持续。支持 cd_half(h) 的 h%2 轮换与 stage_half 的“rotation persists across tiles”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "                }\n#endif\n                tma_stage = tma_stage + 1 == TMA_STORE_STAGES ? 0 : tma_stage + 1;\n            }",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2716,
+      "line_start": 2715,
+      "note": "全部 role 循环结束后的 __syncthreads() 与 if(warp==0) tmem_dealloc(tmem, TMEM_COLS)。支持 await:loops_done、LOAD.release:tmem_cols 的位置与 Require“dealloc after the rendezvous”；store 为 serial 故会合前末趟 store 已 done，“every handshake and store has retired”在模型内成立。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    __syncthreads();\n    if (warp == 0) tmem_dealloc(tmem, TMEM_COLS);",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 312,
+      "line_start": 301,
+      "note": "DINTER 注释：一个 si 同时 drain 两个 j 半到单缓冲 8KB cd 影像、16 行×256 列=512B/行、per-si named barrier 分隔 STSM 与 store，DEFAULT ON（exp7 geo x0.9922、exp8 x0.9878）。支持 cd_stage depth=1、cd_pair 视图与 capture/stage/store 三段划分的合法性。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "// DINTER: interleaved-j epilogue drain. Instead of draining j1 fully then j0\n// (each si storing a 16x128-col tile = 256B per row), drain both j halves per\n// si into one 8KB cd image and store 16 rows x 256 cols = 512B contiguous per\n// row in a single 4-pass burst. Motivation: exp2 attribution - skipping\n// st.globa",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 292,
+      "line_start": 280,
+      "note": "DESCROLL 默认开启的实测依据：同作业 A/B 几何均值 1.01199、stable-5 1.01171、十用例全正（case4 +2.03%…case0 +0.15%）、冻结 oracle 0 mismatches。核对 Prefer 第 1 条“+1.2% geomean over the ten fixed cases, positive on all ten”准确；同段记录 TJEB(0.99954)/EBOX(0.99761) 被否决。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "#ifndef FMGGM_DESCROLL\n#define FMGGM_DESCROLL 1   // DEFAULT ON (E71 dv_71fdd08a0724, full-suite same-job A/B in\n#endif                     // the symmetric order A,B,C,D,D,C,B,A at n=200 on THIS tree):\n                           // geomean of per-case means 1.01199, stable-5 (0,5,6,7,9)\n                           // 1",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 198,
+      "line_start": 193,
+      "note": "TCP 默认开启：B TMA 用 evict_last，两次复现 case3 −4.8%、case6 −4.2%，注明 value-identical cache hint。核对 Prefer 第 2 条前半准确。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "#ifndef FMGGM_TCP\n#define FMGGM_TCP 1        // DEFAULT ON: evict_last L2 policy on B TMA loads (retain\n#endif                     //     the reused B-pair working set against D-write streaming).\n                           //     Reproduced x2 (dv_5ed97ffb168a, dv_6104c299e261):\n                           //     case3 ",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3100,
+      "line_start": 3097,
+      "note": "PROMO=0（默认）时 promo_b/promo_o 均为 L2_PROMOTION_L2_256B，用于 A/B/SFA/SFB/D 全部 map。核对 Prefer 第 2 条“256B L2 promotion on all tensor maps”准确。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    const CUtensorMapL2promotion promo_b = (FMGGM_PROMO >= 1)\n        ? CU_TENSOR_MAP_L2_PROMOTION_L2_128B : CU_TENSOR_MAP_L2_PROMOTION_L2_256B;\n    const CUtensorMapL2promotion promo_o = (FMGGM_PROMO >= 2)\n        ? CU_TENSOR_MAP_L2_PROMOTION_L2_128B : CU_TENSOR_MAP_L2_PROMOTION_L2_256B;",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 97,
+      "line_start": 92,
+      "note": "E101b：case9 base 265.30、clustered idle 267.26、relay-only 523.28、relay+multicast 506.88 ⇒ 集群启动免费、软件中继 +97%、硬件多播本身 −3.1%。核对 Forbid 的 Reason 数字准确。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "//   5 = multicast + a hardware multicast tcgen05.commit for the slot-free signal\n//       instead of the producer's software relay. E101b: on case 9 base 265.30,\n//       4 (clustered, idle per stage) 267.26, 2 (relay only) 523.28, 1 (both)\n//       506.88 us - so the clustered launch is free, the software relay costs",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3293,
+      "line_start": 3286,
+      "note": "g_use_2sm=0 的理由注释：2SM measured SLOWER on L20D（cluster barrier chain ~280ns/stage floor；cg2 TMA adds ~530ns/stage），仅 FMGGM_KERNEL=2sm 且 N%256==0、SM 数偶才启用。核对 Forbid 数字并印证 dispatch.md 13 的“已研究未展开”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "        // 2SM measured SLOWER on L20D (cluster barrier chain ~280ns/stage floor;\n        // cg2 TMA adds ~530ns/stage): default 1-CTA. 2sm stays available for\n        // experiments via FMGGM_KERNEL=2sm.\n        g_use_2sm = 0;\n        // A/B override: FMGGM_KERNEL=1cta|2sm (per-shape tuning experiments)\n        if (co",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 732,
+      "line_start": 732,
+      "note": "tcgen05.cp.cta_group::1.32x128b.warpx4 —— 核对 Require“tcgen05.cp 32x128b.warpx4 for scale staging”原语名准确。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    asm volatile(\"tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\" :: \"r\"(tmem_col), \"l\"(sf_desc));",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 740,
+      "line_start": 740,
+      "note": "tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale [d],a,b,idesc,[sfa],[sfb],p —— 核对 Require 的 MMA 原语与“UE8M0 scales from TMEM”（idesc scale_format=1，见 917-919）准确。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "        \"tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale [%0], %1, %2, %3, [%4], [%5], p;\\n\\t}\"",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 744,
+      "line_start": 744,
+      "note": "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 —— 两处通知（slot-release 与 acc-ready）均由 commit 承担，支持 Require“tcgen05.commit for both notifications”与 signal 动作的 async_ordered 语义。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    asm volatile(\"tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];\" :: \"r\"(smem_u32(mbar)));",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 720,
+      "line_start": 716,
+      "note": "fence.proxy.async.shared::cta 与 tcgen05.fence::before/after_thread_sync。核对 Require 第 4 条（打包后 proxy fence 再到达 full）与第 6 条（proxy-crossing 等待前后的 tcgen05.fence，即 release.acc 的“after a proxy fence”）准确。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "__device__ __forceinline__ void fence_proxy_async() {\n    asm volatile(\"fence.proxy.async.shared::cta;\" ::: \"memory\");\n}\n__device__ __forceinline__ void tc_fence_before_sync() { asm volatile(\"tcgen05.fence::before_thread_sync;\" ::: \"memory\"); }\n__device__ __forceinline__ void tc_fence_after_sync()  { asm volatile(\"tcge",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 759,
+      "line_start": 759,
+      "note": "tcgen05.ld.sync.aligned.16x256b.x1.b32 —— 核对 Require“tcgen05.ld 16x256b capture”与 capture_pair/capture_half 的原语绑定；每 warp 只读自己 32 lane，4 warp×32=128 权重行。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    asm volatile(\"tcgen05.ld.sync.aligned.16x256b.x1.b32 {%0,%1,%2,%3}, [%4];\"",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 764,
+      "line_start": 764,
+      "note": "stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 —— 核对 Require“stmatrix … .trans … staging”与 stage_pair/stage_half 的转置暂存，以及 Rewrite[2] Ledger“one extra on-chip transposing staging copy (2B write + 2B read)”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    asm volatile(\"stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\"",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3149,
+      "line_start": 3147,
+      "note": "map_b 以 CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B + SWIZZLE_128B 编码（dims {K,E*N}、stride K/2、box {128,BN}）。核对 Require 第 1 条与 b_ring 的 uint8 容器 / Iteration b_payload 用 ref:b_q.dtype(int8)+packed_k:64 的分层表达。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/candidate/kernel.cu",
+      "quote": "    r = cuTensorMapEncodeTiled(mb, CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B, 2, const_cast<void*>(b),\n        dims, strides, box, es, CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,\n        promo_b, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);",
+      "sha256": "ad9108507308e694c7f18c6be57659fc310a5a805bd582da6d5997433cf8e2c1",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "scope",
+      "line_end": 104,
+      "line_start": 98,
+      "note": "cross_field_invariants：(n,k) 五组、len(group_sizes)==groups、m==capacity、capacity%128==0、max(group_sizes)<=capacity；配合 groups∈{8,16,32,64}、capacity∈[128,1024]。支持 when 的 k%128/n%256/group_count<=256 前置与 Contract 的请求域。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/shape_range.json",
+      "quote": "  \"cross_field_invariants\": [\n    \"(n, k) in [(1536, 2048), (3072, 4096), (4096, 1536), (4096, 7168), (7168, 2048)]\",\n    \"len(group_sizes) == groups\",\n    \"m == capacity\",\n    \"capacity % 128 == 0\",\n    \"max(group_sizes) <= capacity\"\n  ]",
+      "sha256": "3519a606a35cfe9e404ad424286e3daed91ed16cccc2970bde5fcc494c957c6b",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "scope",
+      "line_end": 244,
+      "line_start": 234,
+      "note": "固定用例 6：m/capacity=256、n=1536、k=2048、groups=64、group_sizes=[0,64,128,256]×16。本轮贯通核对所用具体调用（sum=7168 ⇒ expected_m=112；b1=b2=64 ⇒ 窄 body；n_pairs=6、T=384、R=88、2R=176>148 ⇒ 不拆分）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/shape_cases.json",
+      "quote": "  \"6\": {\n    \"init_kwargs\": {},\n    \"input_kwargs\": {\n      \"m\": 256,\n      \"n\": 1536,\n      \"k\": 2048,\n      \"groups\": 64,\n      \"mode\": \"masked\",\n      \"group_sizes\": [\n        0,\n        64,",
+      "sha256": "872fccc915b7d6a41704030d4d9979a2bf80be7c6bc4bad8f9ab578e11c86910",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "input",
+      "line_end": 52,
+      "line_start": 50,
+      "note": "exponents=ceil(log2(scale)).clamp(-126,127)、stored_scale=(exponents+127).to(uint8)、scale=exp2(exponents)。证实 Contract 的 UE8M0 值域与 Rewrite[0] 的码域 [1,254] 双射无损。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/input.py",
+      "quote": "    exponents = torch.ceil(torch.log2(scale)).clamp(-126, 127)\n    stored_scale = (exponents + 127).to(torch.uint8)\n    scale = torch.exp2(exponents)",
+      "sha256": "d410f955630d5071888860424e82b6a21ce91661094941410dc0ce78e462250c",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "input",
+      "line_end": 87,
+      "line_start": 85,
+      "note": "expected_m=max(1,ceil(sum(group_sizes)/e))、d=guarded(...) 的调用方缓冲、a=(payload, exp2(sa-127))、b=(int8 payload, exp2(sb-127))、recipe=(1,1,32)、recipe_a/b=None、disable_ue8m0_cast=False。逐条对应 Contract 的 Input 条目与 expected_m 公式。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/input.py",
+      "quote": "    p = dict(a=a, b=b, d=guarded((e, m, n), torch.bfloat16, device), masked_m=torch.tensor(s['group_sizes'], device=device, dtype=torch.int32), expected_m=max(1, (sum(s['group_sizes']) + e - 1) // e), compiled_dims='nk')\n    b = b.view(torch.int8)\n    p.update(a=(a, torch.exp2(sa.float() - 127)), b=(b, torch.exp2(sb.fl",
+      "sha256": "d410f955630d5071888860424e82b6a21ce91661094941410dc0ce78e462250c",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "reference",
+      "line_end": 11,
+      "line_start": 4,
+      "note": "FP32 oracle：y=zeros(d.shape,fp32)，仅对每 expert 活跃行按 64 行分块 einsum('mk,nk->mn')，最后 .to(d.dtype)。支持 Masked_grouped_product（FP32、次序未规定、仅活跃行有定义）与 Output_writeback 的 bf16 窄化。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/reference.py",
+      "quote": "def expected(p):\n    a, b = (activation_operand(p['a']), weight_operand(p['b']))\n    y = torch.zeros(p['d'].shape, dtype=torch.float32, device=a.device)\n    for e, count in enumerate(p['masked_m'].tolist()):\n        for lo in range(0, count, 64):\n            hi = min(count, lo + 64)\n            y[e, lo:hi] = torch.eins",
+      "sha256": "8789f550f67455db7b016db1f9a4ffc8b1b57c0761f840a66d7d95016e5d92ea",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "reference",
+      "line_end": 21,
+      "line_start": 15,
+      "note": "参考 forward：allow_tf32=False、只把 result[e,:count] 拷回 d[e,:count]、返回 None。支持“非活跃行无数值契约、返回 None、就地更新是唯一外部可见结果”，也支持 Rewrite[1]“与参考只差求和次序”的前提（参考同为精确积的 FP32 求和）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/reference.py",
+      "quote": "    def forward(self, a, b, d, masked_m, expected_m, recipe=None, recipe_a=None, recipe_b=None, compiled_dims='nk', disable_ue8m0_cast=False):\n        torch.backends.cuda.matmul.allow_tf32 = False\n        p = {'a': a, 'b': b, 'd': d, 'masked_m': masked_m, 'expected_m': expected_m, 'recipe': recipe, 'recipe_a': recipe_a",
+      "sha256": "8789f550f67455db7b016db1f9a4ffc8b1b57c0761f840a66d7d95016e5d92ea",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "reference",
+      "line_end": 34,
+      "line_start": 23,
+      "note": "activation_operand/weight_operand：q.float()*sf.repeat_interleave(32)、E2M1 LUT [0,.5,1,1.5,2,3,4,6,-0,-.5,…,-6]、codes=stack(q&15,q>>4) 后 reshape。逐条对应 Contract Operand_decode 的 mag 表、c>=8 取负（c=8→-0）、低/高 nibble 对应 j=2u/2u+1，并支持“和项在 FP32 中精确（E4M3×E2M1<=6 位有效、尺度积为 2 的幂）”。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/reference.py",
+      "quote": "def activation_operand(x):\n    q, sf = x\n    value=q.float()\n    return value*sf.float().repeat_interleave(32,-1)\n\ndef weight_operand(x):\n    q, sf = x\n    q=q.view(torch.uint8)\n    lut=torch.tensor([0.,.5,1.,1.5,2.,3.,4.,6.,-0.,-.5,-1.,-1.5,-2.,-3.,-4.,-6.],device=q.device)\n    codes=torch.stack((q&15,q>>4),-1).long()",
+      "sha256": "8789f550f67455db7b016db1f9a4ffc8b1b57c0761f840a66d7d95016e5d92ea",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "acceptance",
+      "line_end": 33,
+      "line_start": 16,
+      "note": "fixed 套件：geomean 59.64µs、十用例延迟（case6 45.024µs）、failures={}、full_pass=true。支持“默认构建即认证构建、root 几何在冻结用例上通过验收”，也是 Work_schedule Thesis“148 certified”的测量环境依据（NCU 记录的 Grid Size 同为 148）。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/performance/CERTIFIED_BEST.json",
+      "quote": "  \"protocol\": \"restore-l2-evict-event-v2\",\n  \"fixed\": {\n    \"geomean_us\": 59.6413839481033,\n    \"latency_us\": {\n      \"0\": 70.51200047135353,\n      \"1\": 6.175999995321035,\n      \"2\": 69.60000097751617,\n      \"3\": 34.84800085425377,\n      \"4\": 104.5599989593029,\n      \"5\": 207.05600082874298,\n      \"6\": 45.0240001082420",
+      "sha256": "a590eab688bc1562f617a6d09b7de79a8f8bdcc8d82bb686550bceb95d27d7aa",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    },
+    {
+      "category": "io",
+      "line_end": 37,
+      "line_start": 13,
+      "note": "benchmark_contract：mutates_inputs=[d]、defined_outputs.d.region=每 expert 活跃前缀且其余逻辑与后备存储不变、restore_before_each_call、tolerances atol=0.01/rtol=0.05/max_mismatch_fraction=0.0。支持 Contract 的就地写、Tolerance 的来源记录写法（未采用默认简写解释）与 Rewrite[2] 的写回域。",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/grouped_masked/fp8_mxfp4_grouped_gemm_masked/problem/metadata.json",
+      "quote": "  \"benchmark_contract\": {\n    \"mutates_inputs\": [\n      \"d\"\n    ],\n    \"defined_outputs\": {\n      \"d\": {\n        \"region\": \"for each expert e: d[e, :masked_m[e], :]; all remaining logical and backing storage unchanged\",\n        \"alias\": \"caller-owned buffer; documented optional C alias; nonwrite storage unchanged\"\n    ",
+      "sha256": "28fcd27434bb7e7c15f2421106f3d3b36c14852873b5e18b8f8452a79256cfdb",
+      "source_id": "62634b7139d407bce19c0f0ff26c7f58ed6e8ac3dbbb809bafc8e67db096c7f9"
+    }
+  ],
+  "summary": "本轮为回执补正（诊断：missing bound implementation entry anchor），产物未改、决定不变。已补上绑定实现入口锚：source_evidence[0] category=implementation、candidate/solution.py::Model.forward 116-135（= invocation.implementation_source 与 inputs.entrypoint，文件共 135 行，范围有效），本会话亲读，串起 forward → 单次 ctypes fmggm_launch → fmggm_kernel_dr 的 else 分支 → 所选实例 fmggm_bodyT<128,4> 的提交链；host 类别的同一绑定入口保留为 source_evidence[3]，其余证据为本人前几轮亲自核实的原范围原偏移，仅整体后移一位，七条结论的 evidence 索引按本次数组重建。补正前先核对当前 workspace：check-helper exit 0、raw_passed=true、corrections=[]，root.yaml raw_sha256 a930fc10…、effective_identity 78a0552e…、contract 92d34b01… 与三区 region hash 均与我上一轮审阅并放行的那一份逐字节相同（故 512 行的行数与 REALIZATION=447-512 的范围结论继续成立），并逐条复核全部 source/artifact 证据范围均落在各文件实际行数内。放行理由维持：上一轮两条退修已修正——EPILOGUE 拆为 capture_pair/stage_pair 与 capture_half/stage_half 后 release:acc(t) 结构性地落在最后一个 si 的 capture 之后、stage 与 store 之前，与源码到达点（kernel.cu 2379-2382、2635-2638）及 dispatch.md:90 基线一致；Rewrite[0] Ledger.Cost 改为“每 stage 重读 1536 个 staged f32 字、重写 384 个 UE8M0 打包字（1536 B）”，与 Gain 同一口径。四项判断全部通过。"
+}

@@ -1,0 +1,39 @@
+63: class Model(torch.nn.Module):
+64: 
+65:     def __init__(self):
+66:         super().__init__()
+67:         self._ext = _build()
+68:         self._call = self._ext.s4_tc_forward
+69: 
+70:     def forward(
+71:         self,
+72:         query,
+73:         kv_cache,
+74:         block_tables,
+75:         seq_lens,
+76:         sparse_mla_top_k_lens,
+77:         bmm1_scale,
+78:         bmm2_scale,
+79:         workspace_buffer,
+80:         multi_ctas_kv_counter_buffer,
+81:         out,
+82:     ):
+83:         if query.shape[-1] in (512, 576) and query.shape[-2] <= 128:
+84:             if out is None:
+85:                 out = torch.empty(
+86:                     (*query.shape[:-1], 512), dtype=torch.bfloat16, device=query.device
+87:                 )
+88:             self._call(
+89:                 query,
+90:                 kv_cache,
+91:                 block_tables,
+92:                 seq_lens,
+93:                 sparse_mla_top_k_lens,
+94:                 out,
+95:                 float(bmm1_scale),
+96:                 float(bmm2_scale),
+97:             )
+98:             return out
+99:         raise ValueError("S4 supports Q/K dimension 512 or 576 and at most 128 heads")
+100: 
+101:     __call__ = forward

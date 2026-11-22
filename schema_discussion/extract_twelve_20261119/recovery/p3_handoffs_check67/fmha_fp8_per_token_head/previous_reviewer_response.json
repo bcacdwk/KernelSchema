@@ -1,0 +1,836 @@
+{
+  "artifact_evidence": [
+    {
+      "line_end": 7,
+      "line_start": 1,
+      "note": "META_DATA：Name/Describe/Source 与 invocation.implementation_source 一致，Version 递增至 4（在本轮授权范围内）；Dispatch.when 与前两轮逐字相同——head_dim=128 ∧ rows>=64 ∧ merged 排除式（rows=64 或 peer_ctas<128 且无短 KV 放宽）∧ n_split>1 时排除 warp-per-row 归并门，并把 page/g 为 2 的幂、batch<=32 列为 Unchecked prerequisites 而非 host 保证",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 123,
+      "line_start": 119,
+      "note": "Golden_reference 未动（contract_sha256 与前两轮相同）：Source 指向 reference.py::Model.forward，Tolerance 保留 Source-only 来源记录（atol/rtol/max_mismatch_fraction/max_rel_l2 + no formula/defaults），Gap 记录 causal/window/sinks/q_scale 固定与 32x32 顺序差异",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 163,
+      "line_start": 146,
+      "note": "Math_reshape Thesis 与 R1 未动：128 个 g-packed 行的 tok/tok0/n_rows、hi=visible(tok0+n_rows/g-1)+1>=1、越界行取重复 query 且永不写出——与 fmha.cu:538-568 一致",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 171,
+      "line_start": 164,
+      "note": "R2 前半未动：qk_scale 的 host 折叠、kst=kscale*qk_scale、K→FP16 对每个有限 E4M3 精确、Q 每 tile 加宽一次、score=mma32(f16,f16)*kst、j>visible 取 -inf、V 保持精确 BF16 作 PV 的 B 操作数",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 175,
+      "line_start": 172,
+      "note": "本轮唯一改动，上轮 issue 已修正：加宽只在 FP16 normal 域内精确，下溢侧（<2^-14）落入 subnormal、上溢侧（>65504）变 ±inf 使 score 不再有限；并按来源分侧写明“the overflow side is unreached but the subnormal side is, which Cost records”，最后指出 Contract 的 q 无界故上溢偏差属来源限制而非已证等价——与 fmha.cu:103-107 逐点一致，且不再与同步骤 Cost 矛盾",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 184,
+      "line_start": 176,
+      "note": "R2 的 Symbol（qk_scale 的 value 常量、score 的 128×32 FP32）、Arithmetic.Accumulate（head_dim/16 段深度 16、窄化操作数乘积在 FP32 中精确）与 Ledger 三项未动；Cost 同时记录 subnormal 与上溢两侧，与修正后的 Math 互补而非冲突",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 195,
+      "line_start": 185,
+      "note": "R3 未动：chunk_bn=ceil_div(ceil_div(hi,n_split),32)*32、chunk s 的区间、nse=min(n_split,ceil_div(hi,chunk_bn))、ntot 与空 chunk 不跑块不发布——与 fmha.cu:544-558 及 combine 的 1384-1385 同式",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 202,
+      "line_start": 196,
+      "note": "R4 递推（第二轮已修正、本轮复核未变）：初态 m_run(-1)=-inf/l_run(-1)=0/o_run(-1)=0、mx 对全掩块为 -inf，nm=max(m_run,mx); sf = nm if nm is finite else 0; alpha=2^(m_run-sf); p=2^(score-sf)，与 fmha.cu:926-928/933 对应，不再有 (-inf)-(-inf) 的无条件求值",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 207,
+      "line_start": 203,
+      "note": "R4 分情形（第二轮已修正、本轮复核未变）：sf 排除 (-inf)-(-inf)，无可见键时状态停在 (-inf,0,0) 并由归并丢弃；chunk 0 对有效行不进入该情形（块 0 含恒可见的 key 0），chunk s>=1 中 visible bound 低于 s*chunk_bn 的行会进入——与 R5 的 w(s)=0 一致，反例已在 when 域内构造",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 217,
+      "line_start": 208,
+      "note": "R4 的 Symbol（m_run/l_run/o_run 均 carry_forward (tile,kv_head,split); n=-1..ntot-1，shape/dtype 齐备）、Arithmetic（ex2 的 2^-22 与 -inf→0；Accumulate 已改为“block after block in ascending key order”，不再固定块内归约树）与 Ledger 两项",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 225,
+      "line_start": 218,
+      "note": "R5 未动：非空 chunk 在最后一块为有效行发布 part_m/part_l/part_o；m_all=max_s part_m(s)、w(s)=2^(part_m(s)-m_all) 且“a chunk left at -inf weighs 0”、l_all、inv（l_all<=0 取 0）、attention_out=bf16(inv*Σ w*part_o)，以及 n_split=1 的直写式——与修正后的 R4 完全自洽",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 235,
+      "line_start": 226,
+      "note": "R5 的 Symbol（part_* 为 keep_value (tile,kv_head,split)，shape/dtype 齐备）、Arithmetic（复用 R4 的指数声明、按归并分解重组）与 Ledger（chunk 相对尺度下 BF16 窄化可差一个 ulp）未动",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 246,
+      "line_start": 236,
+      "note": "Work_schedule 未动（区域摘要 338e20db… 与上轮相同）：Thesis 的 BM=128/BN=32、每 (tile,kv_head,chunk) 一个 CTA、heavy-first、tile_count/unit、cap=min(1024,max(1,floor(2*sms/unit))) 与阈值 floor(2*sms/unit)<8、ws_cap=floor(...)；Partition 三轴与 split.size 的完整 n_split 表达式",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 263,
+      "line_start": 247,
+      "note": "MAIN 的 Invariant q_tile、四个 Iteration 块（k/v/ks/vs，均 ascending）、Target 的 attention_out 与 part_o/part_m/part_l 条件产出、Mapping（cta×1、4 warp 各 8 键、每 warp 32 行、sms 的散文字义）与 Worker_count=tile_count*kv_head_count*n_split 未动",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 273,
+      "line_start": 264,
+      "note": "MAIN Schedule 未动：Strategy 定义 n_split/base/chunk（256 在 msk>=1024 时减半至 64），Worktile_order 由外到内 split→kv_head→tile 与 grid.z/y/x 一致，Preassigned{worker_id,1}+Refill none+Exit assigned_done",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 282,
+      "line_start": 274,
+      "note": "COMBINE 的 Describe 与 Decomposition 未动：rpt=clamp(floor(tile_count*kv_head_count*128*ceil_div(128,dc)/(8*sms)),1,128) 与 dc 的减半规则，row_group(128,rpt) 与 dim(head_dim,dc) 分区——与 fmha.cu:2415-2456 的整数几何及 gz 一致",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 305,
+      "line_start": 283,
+      "note": "COMBINE 的 Iteration（part_o/part_m/part_l 沿 nse）、Single_tile 与 Tile_reduction（dimension: split、input 三项引用 Math_reshape、output 引用 Contract、method 引用 R5）、Mapping（256 线程、SG=256/dc）、Schedule（仅 n_split>1 提交；越界 tile 与越界行组在 wait 之前退出且不写）与 Worktile_order 未动",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 313,
+      "line_start": 306,
+      "note": "Flow 未动：两次提交 [{MAIN}] 与 [{COMBINE], start_after: MAIN.launch_ready}，Handoff 三个部分结果 storage: global、ready: MAIN.kernel_done、wait_at: COMBINE.partials_wait，省略 initialize（生产区域覆盖消费区域），anchor/alias 复用属性但各值分别登记",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 341,
+      "line_start": 314,
+      "note": "Tile_pipeline 全区未动（区域摘要 6d09a444… 与前两轮相同）：Thesis 的三级 staging、Index n:[0,ntot]、九个存储区（row_meta 1668、key_meta depth2+view slot n%2、q/k/v_image 的 136 pitch、page_regs/kv_raw/score/o_run/m_run/l_run）——容量逐项复算与 MetaS/SmemLayout 及寄存器账相符",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 366,
+      "line_start": 342,
+      "note": "MAIN 单 role（warp[0:4]）的 Using_verb 未动：compute 六项、matmul 两项（q_image@k_image、pw@v_image）、load 三项（async_unordered）、store 三项、signal:dependents；描述与源码动作族、异步/同步性质及跨 warp 可见性要求一致",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 396,
+      "line_start": 367,
+      "note": "MAIN Pipe 未动：tile_coord→if(b>=0){signal→if(ntot>0){row_map/q_tile/page_meta(0)/q_image/key_table(0)/kv_payload(0)/[ntot>1]page_meta(1)/kv_image(0)→for(n) 的 key_table(n+1)/kv_payload(n+1)/page_meta(n+2)/QK/score_mask/row_softmax/PV/kv_image(n+1)}}→if(n_split==1)/if(n_split>1) 两条互斥 epilogue；发起顺序与 fmha.cu:1017-1075 逐行对应，空 chunk 仍保留 signal 事件",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 406,
+      "line_start": 397,
+      "note": "MAIN Waiting 未动：5 条 Prepared（三个异步载入的就绪、两个 matmul 对 kv_image/row_softmax 的依赖）与 2 条 Released（单槽镜像在两个 matmul 读完前不可覆写、双槽 key_meta 的 n+2 复用距离），覆盖 barrier(A)/(B) 所保护的关系，无缺前驱也无凭空新增等待",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 444,
+      "line_start": 407,
+      "note": "COMBINE 流水线未动：Event partials_wait 指向本 step role MAIN 的 await:partials done、四个存储区容量与 fmha_combine 的静态共享一致、全 serial 的 tile_meta/tile_coord/row 循环，await 位于 b<0 与 r_lo<n_rows 两个提前返回之后、首次读 workspace 之前",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 478,
+      "line_start": 445,
+      "note": "REALIZATION 未动：7 条 Require（mma.sync 16x8x16 与 fragment 载入、k/v_image 的 CTA 屏障、128 线程/55440 字节/一次性属性与 232448 预算、griddepcontrol 触发与等待、n_split<=1024、录图与重放、ex2.approx 不附带 FTZ/fast-math）与 2 条 Forbid（minBlocks 参数、Q fragment hoist）；逐条重做删除测试后仍为上游未表达的必要条件或有据成本，无 Prefer/Feedback",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 18,
+      "line_start": 18,
+      "note": "dispatch.md 未动（摘要 4b0b26cc… 三轮相同）：P2 已定的 host n_split 规划主干（target=6*SM、chunk floor 256 与 FILL 减半、wave cap 与 wave//unit<8 归零、ws cap）——用于复核当前 cap/rpt/ws_cap 与 split.size 是否仍照实落实",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 21,
+      "line_start": 21,
+      "note": "dispatch.md 未动：n_split==1 的 direct-write epilogue 在 own-prefill 带内可达、“P3 须把两条 epilogue 分支都写全”——当前 YAML 以 if(n_split==1)/if(n_split>1) 两支满足，未以恒 split 为前提",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 29,
+      "line_start": 26,
+      "note": "dispatch.md 未动：校验三分 (a)/(b)/(c) 与要求（(c) 类写成 when/REALIZATION 的来源限制而非 host 保证、MAXS<=1024 仅在发射 combine 时）——当前 when 末句与 Require 第 5 条仍照此落实",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 39,
+      "line_start": 39,
+      "note": "dispatch.md 未动：root 的计划实例、保留理由与“P3 不得为其引用 fixed 计时”——当前 YAML 的实例身份、机制概览与无计时引用仍相符；三条 P4 记录线索的基线对象（COMBINE step、dc/rpt Strategy 与 compute:row_dot、MAIN 的 Partition/Worktile 与 Storage 字面量）均已在真实 YAML 中存在，可供 P4 直接锚定",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 90,
+      "line_start": 90,
+      "note": "dispatch.md 未动：P2 留给 P3 的 when 与两条 epilogue 分支要求已满足；三轮修正均属 R2/R4 正文与 Work_schedule 表达式精度，不改变机制识别与代表取舍，故无需返回 P2",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    }
+  ],
+  "attempt_id": "04373ca2-567e-40f0-957f-3bc8a915b625",
+  "checks": [
+    {
+      "command": "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/runs/1a493588-28a0-4097-849f-85cac55e5b16/attempts/04373ca2-567e-40f0-957f-3bc8a915b625/materials/check-helper.py",
+      "exit_code": 0,
+      "note": "本次固定 check_command（--read-only --skip-hardware，未传额外参数/管道）：raw_passed=true、corrections=[]、diagnostics=[]、exit 0；root.yaml raw 摘要 95ab6d0c… 与 invocation.dependency_digests 一致；contract_sha256=c9ab1b5b…、Work_schedule 区域摘要 338e20db…、Tile_pipeline 区域摘要 6d09a444… 三项均与上一轮完全相同（机械印证本轮只改 Math_reshape，未越权动 Contract 与另两区），Math_reshape 摘要变为 11013004…；checked_nodes=[root]，planned/missing=[decode_split_kv, tcgen05_prefill] 符合 P3 只落实 root；硬件区按政策跳过"
+    }
+  ],
+  "checks_note": "仅执行本次 check_command 一条只读检查（退出码 0，raw 严格通过、无待落地规范化）；未运行 GPU、未改产物、未委派子代理。复审方式：逐行重读当前 root.yaml 有效全文（1-479 行）并与上一轮已审文本对照，确认本轮改动仅为 Math_reshape R2 的第 172-175 行一句与 META_DATA.Version 3→4；Contract、Work_schedule、Tile_pipeline 三区由检查器的区域摘要机械印证逐字未变，REALIZATION 与 when 亦经逐行比对相同。改动句重新对照固定源码核实（fmha.cu:103-107 的“the overflow side is unreachable and the subnormal side touches ~5e-5 of samples”、input.py:28-35 的 O(1) 正态 q 与第 80 行 peaked×4），并回查它与同步骤 Ledger.Cost 的一致性。检查器不评估开放表达式与数学语义，四项判断均由本人完成；前两轮已核实的 host 规划、发射、combine、PDL 与容量事实本轮按同一固定来源复核无变化。",
+  "conclusions": [
+    {
+      "evidence": [
+        13,
+        14,
+        15,
+        16,
+        17,
+        20,
+        22,
+        23,
+        24,
+        25,
+        26,
+        28,
+        29,
+        30,
+        32,
+        33,
+        36,
+        38,
+        39,
+        40,
+        42,
+        43,
+        44,
+        46,
+        47,
+        48,
+        49,
+        9,
+        50,
+        51
+      ],
+      "subject": "design",
+      "text": "通过。root 的三区构成所选实例 fmha_main<128,128,32,4,1>（cfg8、MT=2、KF16 f16-QK、VF16/VSHIFT 关）+ host n_split 规划 + fmha_combine<128,1024> 的完整本地设计，从 Contract 输入贯通到 attention_out 的两条输出路径。Math_reshape 五步：R1 的 128 个 g-packed 行与 hi（对 fmha.cu:538-568）；R2 的 qk_scale host 折叠、kst、K→FP16 对每个有限 E4M3 精确、Q→FP16 每 tile 一次、V 保持精确 BF16，并完整记录加宽只在 FP16 normal 域内精确（对 91-97、103-107）；R3 的 chunk_bn/nse/ntot（对 544-558 与 combine 1384-1385 同式）；R4 的 sf = nm if nm is finite else 0 保护、alpha/p/l_run/o_run 递推、ex2 近似与 carry_forward 保留（对 918-929、943-957）；R5 的 part_* keep_value 与 m_all/w(s)/l_all/inv 归并及 n_split=1 直写式（对 1178-1204、1498-1556）。Work_schedule 以 MAIN/COMBINE 两次提交表达 grid=(tile_count,Hkv,n_split)/128 线程/55440 字节与 (tile_count,Hkv,ceil(128/rpt)*ceil(128/dc))/256 线程，n_split 全式、cap/ws_cap 的 floor、dc/rpt、use_w 排除门均与 _plan、build_params、launch_one 一致；COMBINE 仅在 n_split>1 提交，Tile_reduction 沿 split 维引用 R5。Tile_pipeline 单 role 四 warp 协作，page_regs（两块前）/kv_raw（一块前）/单槽 k_image,v_image 的三级 staging，5 条 Prepared 与 2 条 Released 边对应 barrier(A)/(B) 与 key_meta 双槽复用距离，signal:dependents 与 await:partials 正确分离启动许可与数据可见性。REALIZATION 7 Require + 2 Forbid 逐条重做删除测试后仍均为上游未表达的必要条件或有据成本。"
+    },
+    {
+      "evidence": [
+        0,
+        1,
+        4,
+        5,
+        6,
+        7,
+        13,
+        18,
+        20,
+        21,
+        26,
+        28,
+        33,
+        37,
+        40,
+        41,
+        45,
+        56
+      ],
+      "subject": "walkthrough",
+      "text": "重跑两例具体调用（均 head_dim=128、B=1、page_size=32，落在 when 内）。例一（n_split=1）(heads,kv_heads)=(4,1)、q_len=kv_len=64：rows=256>=64→cfg8；peer_ctas=(ceil(64/128)+1)*4=8<128 且短 KV 放宽不成立（8<12）→own；tile_count=2、base=2<148、unit=2、floor(296/2)=148>=8→cap=148、msk=64<1024 不触发 FILL→chunk=256、n_split=min(444,1,148)=1→只提交 MAIN、grid=(2,1,1)、ws_n=0；tx=0→m_blk=1（heavy-first）、tok0=32、n_rows=128、hi=64、chunk_bn=64、ntot=2，Pipe 在 n=1 末轮不产生 page_meta(2)/kv_image(2)，收尾走 if(n_split==1) 的 store:attention_out，无 COMBINE 提交、无 workspace、无 PDL 消费者。例二（n_split>1 且含全掩 chunk）(32,32,128)→g=1、q_len=256、kv_len=3455：peer_ctas=(2+1)*32=96<128、msk>1024 无放宽→cfg8；tiles_ub=2、base=64、unit=64、floor(296/64)=4<8→wave=0→cap=1024、FILL 不触发（64*14>=148）→chunk=256、n_split=min(14,ceil(3455/256)=14,1024)=14、ws_cap=94；MAIN grid=(2,32,14)；tx=0→m_blk=1、tok0=128、hi=3455、chunk=247、chunk_bn=256、nse=14；sz=13 的 chunk=[3328,3455)、ntot=4，而 bound(r)=3327+r，故 r=0 在整块 chunk 全掩：按 R4 现文 nm=-inf→sf=0→alpha=2^(-inf-0)=0、p=0，状态停在 (-inf,0,0)，发布 part_m=-inf/part_l=0/part_o=0（emit_ml 与 emit 均限 r<n_rows），combine 侧 m_all 由 chunk 0-12 有限、w(13)=2^(-inf-m_all)=0 正确丢弃，与 fmha.cu:926-928、943-945、1198-1199、1473、1498-1508 一致；dc=64（geom=1280>=2*148 不再减半）、rpt=floor(128*64*2/(8*148))=13、SG=4、need=ceil(14/4)=4>3→use_w=false 走 block 版，grid=(2,32,20)，await:partials 位于 b<0 与 r_lo>=n_rows 两个提前返回之后、首次读 workspace 之前，受 ready=MAIN.kernel_done 约束。两例的符号、工作归属、存储寿命与事件引用自洽，首轮/稳态/末轮/空 tile/空 chunk/尾行/行组尾部均已表达。"
+    },
+    {
+      "evidence": [
+        2,
+        3,
+        9,
+        10,
+        11,
+        12,
+        17,
+        35,
+        36,
+        37,
+        38,
+        43,
+        44,
+        46,
+        47,
+        48,
+        49,
+        52,
+        54,
+        55,
+        57,
+        58
+      ],
+      "subject": "dependencies",
+      "text": "设计成立所依赖的来源事实已逐项落到正式字段并核实：数值侧为 ex2.approx.f32 的 ~2^-22 与 -inf→0（R4 Approx + Require 7，也正是 sf 保护能把 alpha/p 归零、R5 能把 -inf chunk 权重归零的依据）、e4m3→f16/bf16 对每个有限值精确、bf16→f16 仅在 FP16 normal 域内精确（下溢侧丢尾数且冻结输入约 5e-5 命中、上溢侧不可达）、pack_bf16 的 RNE 舍入点、参考的 allow_tf32=False 与未舍入分母；工作规模侧为 _PREFILL_MIN_ROWS[128]=64、_PF_MIN_CTAS/_PF_SHORT_KV/_PF_TCBM、_MIN_CHUNK=256、_SPLIT_CHUNK_MIN=64、_SPLIT_RES[8]=2、_SPLIT_CAP=1024、_WS_CAP_FLOATS=96<<20、rpt_k=8、sms 取自设备属性查询，以及 build_params 的 qk_scale 常量、ws_stride=bm*(D+2)、n_tiles_ub、dc/rpt；提交与事件侧为 launch_one 的 grid/128 线程/55440 字节/232448 预算/n_split>1 才发 combine/MAXS<=1024 检查、PDL 的“许可不等于可见性”、第二见先直发再录图且录图不缓存数值、ws 指针由绑定缓存保活；容量侧存储账 1668+1536+34816+8704+8704=55428→16 对齐 55440，寄存器账 91648 字节/CTA=179 寄存器/线程，与 solution.py 记录的 cfg8 253-255 寄存器→2 CTA/SM 相容。本轮新增的依赖已成立：R2 关于“哪一侧不可达”的陈述现与 fmha.cu:105-107 逐点一致，并由 input.py 的 O(1) 正态 q 与 peaked×4 支持。未决（不阻塞）：sms 仍是 plan 内散文字义（Hardware_specification 按 P1 政策保留占位、检查 --skip-hardware），硬件区落实后应改为引用登记项并复核 when 与 cap/ws_cap；|q|>65504 的偏差保留为来源限制、未补造保证；P1 的外部比较器公式缺口原样保留（验收材料只有 promotion/计时记录）；root 无 fixed-case 实测，正文未引用 fixed 计时。"
+    },
+    {
+      "evidence": [
+        26,
+        36
+      ],
+      "subject": "document_self_contained",
+      "text": "通过。当前 raw 不需历史上下文即可读通：META_DATA/Contract/三区/REALIZATION 自足，所用名称均可在文件内定位——tile_count/unit/cap/ws_cap 在 Work_schedule Thesis，base/chunk/n_split 在 MAIN Schedule.Strategy，dc/rpt/SG 在 COMBINE，hi/n_rows/ntot/nse/chunk_bn 在 R1/R3，tok/tok0 在 R1，sms 在 MAIN Mapping.Strategy，r_lo/r_hi 可由 Partition.row_group(size 128, tile rpt) 与 COMBINE Schedule.Strategy 的越界退出唯一确定；本轮涉及的 sf 在 R4 的 Math 内联定义（“sf = nm if nm is finite else 0”），属逐块局部临时量，按 DOC3 无需登记 Symbol；R2 新增句中的 Cost 指向同步骤 Ledger.Cost，可直接定位。Contract 符号沿用原名，跨区引用 ref:DESIGN.Math_reshape::part_* 与 ref:CONTRACT.Algorithm_requirement::attention_out 均可解析。上轮妨碍独立理解的“neither edge is reached”已被可核对的分侧陈述取代，读者不再需要源码即可判定哪一侧属来源限制。"
+    },
+    {
+      "evidence": [
+        17,
+        19,
+        43,
+        52
+      ],
+      "subject": "document_layering",
+      "text": "通过。本轮改动只落在 Math_reshape 的一个 Rewrite 步骤正文内：数值路径的适用域与来源限制写在数学层（未下沉为 Tile_pipeline 动作、未写成 REALIZATION.Require/Forbid、未把坏行为当作硬条件），也未反向修改 Contract 的 q（未新增 range 或改变 dtype/meaning）。检查器的区域摘要机械印证 Contract（c9ab1b5b…）、Work_schedule（338e20db…）与 Tile_pipeline（6d09a444…）逐字未变，Version 3→4 与 when、已选代表身份均在 worker 授权范围内。分层职责仍清楚：Contract 定任务与验收来源记录，Math_reshape 定值/精度/保留与改写代价，Work_schedule 定分区-映射-排列-提交-交接（含 n_split==1 不提交 COMBINE 的条件提交），Tile_pipeline 定角色/存储/依赖/资源寿命，REALIZATION 只补 mma.sync 与 fragment、k/v_image 的 CTA 屏障、128 线程/55440 字节/232448 预算、griddepcontrol 触发与等待、MAXS<=1024、录图与重放、ex2.approx 不附带 FTZ/fast-math 等上游未表达的实现条件；目录草案未覆盖 YAML。硬件区仍为 starter 占位，仅 Execution 登记 thread/warp/cta 与 register/smem，Storage.location 取值均出自该登记。"
+    },
+    {
+      "evidence": [
+        26,
+        34,
+        36,
+        37,
+        41,
+        6,
+        46
+      ],
+      "subject": "document_consistency",
+      "text": "通过，前两轮发现的矛盾均已消除。R4 与 R5 现互相支持：R4 明确 chunk s>=1 中 visible bound 低于 s*chunk_bn 的行全程停在 (-inf,0,0)，R5 的 w(s)=2^(part_m(s)-m_all) 对这种 chunk 给 0；R2 的 Math 与 Ledger.Cost 现一致——Math 说明加宽只在 FP16 normal 域内精确、冻结输入下上溢侧不可达而下溢侧命中且由 Cost 记录，Cost 同时列出两侧作为该窄化的代价与误差来源，二者是“设计属性”与“实际可达性”的互补而非冲突；cap/rpt/ws_cap 三处取整统一为显式 floor，与 solution.py:1729 的 wave//unit 及 fmha.cu:2446 的整数除法一致；R4 Accumulate 不再固定块内归约树，与 sum32 的默认语义及实际的 lane 部分和 + 4-lane shuffle 树相容。其余一致性维持：一份 YAML 只表达一套已选方案（KF16 f16-QK + bf16-PV + VSHIFT 关），未混入其他配置；空 tile（b<0）、空 chunk（ntot=0）、尾行（n_rows）、combine 行组尾部（r_hi=min(n_rows,r_lo+rpt)）与 dim 整除均有处理；n_split==1 与 n_split>1 用同一不变值的互补条件分支，前者不提交 COMBINE、无 workspace、无 PDL 消费者；无数据效果的 signal:dependents 在空 chunk 与提前退出的 CTA 上仍保留事件；Handoff 省略 initialize 与“生产区域（r<n_rows 的 part_o/part_m/part_l）覆盖消费区域（r_lo..r_hi）”相符。"
+    },
+    {
+      "evidence": [
+        50,
+        51,
+        59,
+        36
+      ],
+      "subject": "document_relevance",
+      "text": "通过。保留内容均为设计必要：五条 Rewrite 的公式/符号/Arithmetic/Ledger 记录真实收益与代价（转换四步降一步、alpha 重标每行 head_dim 次乘法、chunk 相对尺度下 BF16 窄化可差一个 ulp、FP16 加宽两侧的行为与可达性），未把改写称为已证实的优化；when 保留 merged 路由与 warp-per-row 归并门的真实范围及三类未校验前提（page/g 为 2 的幂、batch<=32）；REALIZATION 只留通过删除测试的硬条件与两条有匹配版本来源依据的排除项（minBlocks 的 166→190 寄存器、2 CTA/SM 取代 3 与 cfg8 的 8 字节 spill；Q-hoist 在 D=64 中性、D=128/256 更差），未夹带 Design 决定、未重复上游约束、无虚构实验；来源限制（FP16 上溢、外部比较器缺口）按规范保留在正文而非删除。全文没有退修记录、待办、历史批准或重复决定，命名清楚常见（row_meta/key_meta/q_image/k_image/v_image/page_regs/kv_raw/score/o_run/m_run/l_run、tile_coord/row_map/key_table/score_mask/row_softmax/kv_image/split_partial/partials），无自造缩写，未为 root 引用 fixed 计时。"
+    }
+  ],
+  "decision": "approve",
+  "format": "schema_extract.proposal.v1",
+  "framework_candidates": [],
+  "handoff": "P3 root 放行（第三次审阅，Version 4，raw 95ab6d0c…，检查退出 0、raw 严格通过、无待落地修正）。本轮唯一改动是 Math_reshape R2 第 172-175 行的来源限制句与版本号；Contract、Work_schedule、Tile_pipeline 三区由检查器区域摘要机械印证逐字未变，REALIZATION 与 when 经逐行比对相同，改动未越出 worker 授权范围。\\n三轮累计已定（P4/P5 可直接沿用，不必重查）：①R4 的 sf = nm if nm is finite else 0 保护与“无可见键 → 状态停在 (-inf,0,0) → 归并以 w(s)=0 丢弃”的分情形，对 fmha.cu:926-928/943-945；②R2 记录 FP16 加宽仅在 normal 域精确，上溢侧（|q|>65504）在冻结输入下不可达但 Contract 的 q 无 range，故属来源限制而非已证等价，下溢侧确实命中并由 Ledger.Cost 记录，对 fmha.cu:103-107；③R4 Accumulate 不再固定块内归约树（实际分组为每 lane 8 列局部和 + 4-lane shuffle 树，属实现层事实，若日后需要 bit-level 复现再按 fmha.cu:930-942 记录）；④cap/rpt/ws_cap 统一用显式 floor，对 solution.py:1729 与 fmha.cu:2446。实例身份 cfg8=<128,128,32,4,1> + host n_split 规划 + fmha_combine<128,1024>；when 覆盖 head_dim=128 ∧ rows>=64 ∧ 非 merged ∧ 非 warp-per-row 归并门，并把 page/g 为 2 的幂、batch<=32 写成未校验前提；两条 epilogue 分支均写全；容量账 55440 字节 smem（存储账 55428+12 字节对齐）与 179/253 寄存器→2 CTA/SM 已复核。\\nP4 入口与待办（对象名已在真实 YAML 中存在，可直接锚定）：①“warp-per-row 归并 fmha_combine_w”（局部）基线 = DESIGN.Work_schedule.Step.COMBINE 与 DESIGN.Tile_pipeline.Step.COMBINE.Role.MAIN，门 tiles_ub*Hkv*BM>=8*sms ∧ need=ceil(n_split/(256/dc))<=3 已在 root 的 when 中排除，记录须说明它改的是归并 worker 组成（每行一 warp、8 行/CTA）与行内零屏障，且非 bit-identical；②“combine 几何与 VF 窗口”（参数）基线 = COMBINE.Decomposition.Strategy 的 dc/rpt 与 compute:row_dot（need>8 时源码选 VF=16 寄存器窗口，按源注释 bit-identical，root 正文未登记 VF）；③“own prefill tile 参数族”（参数）基线 = MAIN 的 Partition/Worktile 与 Storage 中的 128/32/136 字面量（cfg9/cfg2 只动 BM/BN/D）；④把草案“轻量记录线索”转为锚定真实 YAML 的正式条目，并列链接 decode_split_kv/tcgen05_prefill 的同构基线；⑤删除草案“未知边界与待核实”节及其中第 94 行的历史批准叙述。\\n给 P5 两位作者的新事实（已核实，须按各自节点落实，不得沿用旧说法）：全掩 chunk 的 (-inf,0,0) 状态与 sf 形式的有限最大值保护是这一族 online-softmax 归并的共有机制——decode_split_kv 侧见 fmha.cu:1238（WK>1 的共享内存归并）与 1151（fuse_tail，虽默认关但同形）、combine 侧见 1473；tcgen05_prefill 须按自己的 correction/归并位置写全同类分情形，不得写“行最大值恒有限”。采用同类操作数窄化的节点应同样把 FP16 上溢侧保留为来源限制，并注意“不可达”只对上溢侧成立。\\n遗留缺口（均不阻塞，随交付保留）：sms 仍是 plan 内散文字义（定义在 MAIN.Mapping.Strategy），因 Hardware_specification 按 P1 政策保留 starter 占位、检查显式 --skip-hardware；硬件区落实或后续登记设备规模后，应把 sms、8*sms 门与 2*sms 驻留改为引用登记项，并复核 when 与 cap/ws_cap 公式。P1 的外部比较器公式缺口原样保留（Tolerance 为 Source-only 记录，验收材料只有 promotion/计时记录，不含公式或相对误差基准）。|q|>65504 的偏差保留为来源限制，不补造隔离或保证。root 无 fixed-case 实测，P4 记录域内实测覆盖时不得为 root 引用 fixed 计时。decode_split_kv 与 tcgen05_prefill 两节点尚未创建，本节点三区均本地定义、无 provider 依赖，其 from/整区引用与目录并列链接由 P4/P5 处理。本轮无新增 issue、无 framework candidate。",
+  "issues": [],
+  "reopen": null,
+  "source_evidence": [
+    {
+      "category": "implementation",
+      "line_end": 1798,
+      "line_start": 1787,
+      "note": "绑定实现入口 Model.forward：35 参数 ABI，注释明确 reference.normalized() 固定 causal/window/sinks/lse/q_scale、其余参数无数值作用，且每次 forward 仍对当前缓冲内容发射 kernel——支持 Contract 的忽略项与副作用、以及录图/重放不改变实际工作的判断",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1581,
+      "line_start": 1569,
+      "note": "_pick(d,rows)：d=128 且 rows>=_PREFILL_MIN_ROWS[128] 返回 cfg8，否则 cfg4，其余 head_dim 抛错——支持 when 的 head_dim=128 ∧ rows>=64 与 cfg8 选择",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1419,
+      "line_start": 1415,
+      "note": "_PREFILL_MIN_ROWS={64:64,128:64,256:32}、_WS_CAP_FLOATS=96<<20（384 MiB）、_MIN_CHUNK=256——支持 when 的 rows>=64、Thesis 的 ws_cap=floor(96*2^20/(unit*130*128)) 与 chunk 起始 256",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 340,
+      "line_start": 335,
+      "note": "_PF_MIN_CTAS={64:36,128:128,256:64}、_PF_SHORT_KV={128:((512,12),(1024,96))}、_PF_TCBM=128——逐项对上 when 中 peer_ctas=(ceil_div(total_q,128)+batch)*heads<128 与两条短 KV 放宽",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1690,
+      "line_start": 1682,
+      "note": "merged tcgen05 抢占条件：_MY_PRE∧_PF_TC∧无 override∧rows>_PF_ROWS(=64)，再看 peer_ctas>=_PF_MIN_CTAS[d] 或短 KV 放宽——支持 when 的排除式写法与 rows=64 留在 own 路径",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1712,
+      "line_start": 1700,
+      "note": "tiles_ub=ceil(max_seqlen_q*g/bm)*batch、rec_floats=bm*(d+2)、tiles_est/base=tiles_est*kv_heads、my_pre→n_split=1——对上 Thesis 的 tile_count/unit 与 ws_cap 中的 130*128",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1729,
+      "line_start": 1713,
+      "note": "base>=sms→n_split=1；target=6*sms、chunk=256、unit=max(1,tiles_ub*kv_heads)、wave=_SPLIT_RES[cfg]*sms、wave//unit<8→wave=0、cap=min(1024,max(1,wave//unit))；第 1729 行为整数除法——支持修正后的 cap=min(1024,max(1,floor(2*sms/unit))) 与阈值 floor(2*sms/unit)<8",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1754,
+      "line_start": 1730,
+      "note": "FILL 条款（msk>=4*256 时 chunk 减半至 64，直到 base*候选 n_split>=sms）、n_split=min(ceil(target/base),ceil(msk/chunk),cap)、再按 ws cap 截断并 max(1,·)——支持 Schedule.Strategy 与 split.size 全式；例二据此得 n_split=14",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1760,
+      "line_start": 1759,
+      "note": "ws_n 仅在 n_split>1 时非零，_workspace 用 torch.empty 且只增不减——支持 Handoff 省略 initialize（消费区域被生产区域覆盖）与 n_split==1 无 workspace/无 COMBINE 提交",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1519,
+      "line_start": 1516,
+      "note": "驻留表：cfg2/cfg8/cfg9 prefill 为 128 线程 253-255 寄存器 → 2 resident CTAs/SM——支持 Require 第 3 条 Reason 中“179 of the 253 registers per thread that leave 2 resident CTAs per SM”",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1566,
+      "line_start": 1566,
+      "note": "_SPLIT_RES={2:2,3:3,4:3,5:4,8:2,9:2,37:2.5,38:6}——支持 Thesis 中 wave=2*sms 的系数来源",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1195,
+      "line_start": 1191,
+      "note": "默认构建打开 -DFMHA_DEC_F16K/VF16/VSHIFT 与两个 GATE——结合 kernel 内门控确定本实例 KF16=true（f16 QK）、VF16=false（bf16 PV）、VSH=false（位移折叠为恒等），故正文只写这一套机制是正确的",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1898,
+      "line_start": 1874,
+      "note": "第二次见到同一绑定时先 fmha_run 直接发射本次工作、再 fmha_capture 录图；keep 持有 9 个张量与 ws 引用——支持 Require 第 6 条“after the direct launch of the same work”与“the binding cache keeps that pointer alive”",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 2133,
+      "line_start": 2119,
+      "note": "launch_plan case 8 → DISPATCH(128,128,32,4,1)，即 D=128、BM=128、BN=32、WM=4、WK=1——确认 root 所选实例身份（文件 2283 行的配置表注记同样标明 cfg8 为 MT=2）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 445,
+      "line_start": 412,
+      "note": "NW=4、NT=128、DP=D+8=136、MT=BM/(16*WM)=2、KPW=BN/WM=8、CPR4=32、CPT=8、PFC=min(CPT,32)=8——支持 Mapping.Strategy（4 warp 各 8 键、每 warp 32 行）、q/k/v_image 的 136 pitch 与 kv_raw 整块预取",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 385,
+      "line_start": 380,
+      "note": "KF16=(32*WM*WK>=128)：cfg8 为 128>=128→true，K image 走 f16——支持 R2“E4M3 key payload converts to FP16”与 k_image dtype: fp16",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 403,
+      "line_start": 399,
+      "note": "VF16=!KF16 → 本实例 false，PV 的 B 操作数保持 bf16；VSH=VF16 → 位移折叠为恒等——支持 R2“the value payload keeps its exact BF16 form”与 v_image dtype: bf16，以及正文不登记位移机制",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 279,
+      "line_start": 256,
+      "note": "MetaS{cu[33],bound[BM],qbase[BM],koff/voff[2][WK][BN],kst/vst[2][WK][BN]} 与 SmemLayout（META_B 16 对齐、Q_B=BM*DP*2、KV_B=WK*BN*DP*2）——算出 3216+34816+8704+8704=55440，核对 row_meta 417 词、key_meta 2×32×6 词与 Require 第 3 条的启动预算",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 527,
+      "line_start": 482,
+      "note": "cu_seqlens 分级入 smem + barrier，每 warp 独立做 32 宽前缀和与 ballot 求 (b,m_blk)，m_blk=nt-1-(tx-lo) 实现 heavy-first，b<0 直接 return——对上 Decomposition.Strategy、compute:tile_coord 的“redundantly per warp / CTA-uniform / b<0 无工作”与 Pipe 的 if(b>=0)",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 536,
+      "line_start": 529,
+      "note": "未定义 FMHA_PDL_LATE 时 trigger 位于 b<0 return 之后、空 slice return 之前，由 threadIdx.x==0 单 lane 发出——支持 signal:dependents 在 if(ntot>0) 之外的位置，以及“提前退出的 CTA 以完成满足许可”（无数据效果的动作仍保留事件）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 559,
+      "line_start": 538,
+      "note": "q_start=m_blk*(BM/g)、n_tok=min(BM/g,qlen-q_start)、n_rows=n_tok*g、hi=kv_len-qlen+q_start+n_tok、chunk/chunk_bn、kv_lo=sz*chunk_bn、kv_lo>=hi 即空 chunk 直接 return、ntot/nblk——逐项对上 R1 的 n_rows/hi、R3 的 chunk_bn/nse/ntot 与 Pipe 的 if(ntot>0)（等价于 kv_lo<hi）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 569,
+      "line_start": 561,
+      "note": "tid<BM 时发布 qbase（tok 越界钳到 qlen-1）与 bound=kv_len-qlen+q_start+(tid>>g_log2)，随后 barrier——支持 R1“rows r>=n_rows gather the duplicate query index q_len-1 and are never written”与 compute:row_map；也是例二中 bound(0)=3327 的来源",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 646,
+      "line_start": 602,
+      "note": "issue_meta 把 btab→scale 依赖链提前两块放进寄存器（越界 kg 钳到 hi-1），commit_meta 写 koff/voff 与 kst=kscale*qk_scale、vst 并以 __syncwarp 收口，每 warp 只读自己写的元数据——支持 page_regs/key_meta 的 depth=2 与 view slot n%2、load:page_meta 的钳位说明、compute:key_table 的“warp-local then CTA-visible”与 Prepared 边",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 717,
+      "line_start": 648,
+      "note": "stash_one 在 KF16 下 K 转 f16、V 转 bf16 写单槽共享 image；fetch_kv 先读共享中的字节偏移再连发 4 字节 fp8 全局载入，PFC=CPT 时整块进寄存器——支持 kv_raw/k_image/v_image 容量、load:kv_payload 与 store:kv_image 的分工及 Thesis 的三级 staging",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 887,
+      "line_start": 844,
+      "note": "QK：D/16=8 段 k 步，每段 ldsm_x4 取 A（MT=2 个 m-tile）与一个 B fragment，KF16 下 mma_f16 以 FP32 累加进 S——支持 R2 的 mma32(f16(q_row),f16(kvec))、Arithmetic.Accumulate 的“head_dim/16 段深度 16”与 Require 第 1 条的 fragment 复用",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 917,
+      "line_start": 889,
+      "note": "先按 kst 缩放、再按 g0<=b0 的 bottom-right 判据置 -INFINITY；nomask 由 __all_sync(n0+BN-1<=bmin) 跳过 select；行最大用两次 __shfl_xor(1,2) 在 4-lane quad 内归约——支持 compute:score_mask 描述与 R2 的掩码位置（j>visible 取 -inf）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 929,
+      "line_start": 918,
+      "note": "第一轮 issue 的来源依据，已修正并本轮复核：nm=fmaxf(rm,mx) 后源码用 sf = isinf(nm) ? 0.f : nm 作指数减数，al=ex2(rm-sf)；root.yaml 第 200 行写“sf = nm if nm is finite else 0; alpha = 2^(m_run - sf); p(r,j) = 2^(score(r,j) - sf)”，与之一致，消除了 (-inf)-(-inf) 的无条件求值",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 942,
+      "line_start": 930,
+      "note": "第一轮 issue 3 的来源依据：每 lane 只累加自己的 8 列（sum0 += e00+e01，nt 升序），再由 __shfl_xor 1、2 做 4-lane 平衡树；root.yaml 第 214 行已删去块内升序断言，只保留“block after block in ascending key order”，与 sum32 不指定归约树的默认语义相容",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 957,
+      "line_start": 943,
+      "note": "rl=rl*al+sum、rm=nm，且 __any_sync((al0!=1)|(al1!=1)) 为假时整 warp 跳过 O 的 rescale——支持 R4 递推、l_run 用未舍入权重与 compute:row_softmax 的投票描述；sf=0 时 alpha=0≠1 故投票必然触发、o_run 归零，与修正后的 (-inf,0,0) 状态一致",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1014,
+      "line_start": 960,
+      "note": "PV：af=pack_bf16(S*vst) 即在 PV 前把 P*v_scale 舍入为 BF16(RNE)，B 由 ldsm_x4_t 取转置 v_image，mma_bf16 累加进 O（VF16 关）——支持 R4 的 pw_run=bf16(p*vscale)、matmul:pw@v_image 描述与 o_run 的 FP32 累加",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1075,
+      "line_start": 1017,
+      "note": "prologue 与主循环的完整发起顺序（issue_meta(0)→cp_wait→Q 加宽→barrier→commit_meta(0)+fetch_kv(0)→issue_meta(1)→stash_kv(0)→barrier→循环内 commit/fetch(ib+1)、issue_meta(ib+2)、compute(ib)、barrier(A)、stash_kv(ib+1)、barrier(B)）——逐项对上 Pipe 与 5 条 Prepared/2 条 Released 边",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1061,
+      "line_start": 1031,
+      "note": "cp.async 完成是 per-thread，故只加宽本线程搬过的 16 字节块，再由 __syncthreads 发布整块 q_image（行跨 warp 分发，确需 CTA 级可见）——支持 compute:q_image 的“Retire this thread's query copies … publish q_image CTA-wide”与其 Prepared 边",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1098,
+      "line_start": 1077,
+      "note": "wrec=((tx*Hkv+hy)*n_split+sz)*ws_stride 的记录布局：[r*D+d] 放 O、[BM*D+r] 放 m、[BM*D+BM+r] 放 l，emit/emit_ml 对 r>=n_rows 直接返回——支持 store:split_partial、Handoff 生产区域覆盖消费区域（无需 initialize）与 ws_stride=128*130",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1204,
+      "line_start": 1178,
+      "note": "WK==1 epilogue：normalise=(n_split==1) 时 inv=1/rl（rl<=0 取 0）并 bf16 直写 out，否则 inv=1 写未归一化 O 且由 (lane&3)==0 发布 (rm,rl)——支持 R5 两条输出式、Pipe 的两条互斥 epilogue 分支，以及例二中 part_m=-inf/part_l=0/part_o=0 的发布",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1242,
+      "line_start": 1233,
+      "note": "WK>1 的 CTA 内归并同样写 sf = isinf(M) ? 0.f : M 并允许 M=-inf（此时 inv=0）——与 926-928、1151、1473 一起说明有限最大值替换是该机制每处归并的固有组成，支持修正后 R4 的分情形写法，也是交 P5 两节点的新事实",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 97,
+      "line_start": 91,
+      "note": "KF16 的依据：一条指令代替四条，且每个有限 E4M3 值（含 subnormal，其 FP16 指数 >=6）在 FP16 与 BF16 中均可精确表示——支持 R2“exact for every finite E4M3 value”与 Ledger.Gain 的四步降一步",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 107,
+      "line_start": 103,
+      "note": "本轮放行所核的关键来源：bf16→f16 仅在 F16 normal 域内精确（BF16 的 8 位尾数只是加宽进 11 位），Below 2^-14 变 subnormal 并丢尾数、above 65504 上溢；且“the overflow side is unreachable and the subnormal side touches ~5e-5 of samples”——root.yaml 第 172-175 行现文与此逐点一致（上溢侧不可达、下溢侧命中且由 Cost 记录）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 108,
+      "line_start": 105,
+      "note": "同上来源的可达性分句原文（“the overflow side is unreachable and the subnormal side touches ~5e-5 of samples, each one term of a D-term dot product whose other terms are O(1)”）——上轮 issue 指出的正是把两侧合并写成“neither edge is reached”，本轮已按此原文分侧表述",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 157,
+      "line_start": 145,
+      "note": "ex2 用 ex2.approx.f32，注释给出 ~2^-22 相对误差且 -inf→0 精确；pack_bf16 为 RNE——支持 R4 Arithmetic.Approx、Require 第 7 条（不附带 FTZ/fast-math），以及 sf 保护下 alpha/p 归零与 R5 中 w(s)=0 所依赖的 -inf→0 性质",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1310,
+      "line_start": 1292,
+      "note": "fmha_combine：NT=256、静态共享 s_m/s_l/s_sc[MAXS=1024]、s_red[256]、s_warp[8]，rz=blockIdx.z/ndc、dz=blockIdx.z%ndc——支持 COMBINE 的 tile_meta/split_stat/thread_partial/warp_partial 容量、Member warp[0:8]、Worktile_order（dim 内层、row_group 外层）与 Require 第 5 条的 1024 上限",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1398,
+      "line_start": 1370,
+      "note": "combine 侧 b<0 与 r_lo>=n_rows 两处提前返回都在 FMHA_PDL_WAIT() 之前，hi/chunk_bn/nse 与 fmha_main 同式，SG=256/dc——支持 COMBINE 的 Schedule.Strategy（在 wait 之前退出且不写）、await:partials 位置、Pipe 的 if 守卫与 nse 的一致性",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1473,
+      "line_start": 1449,
+      "note": "按 s<nse 载入 s_m/s_l，块内两段归约求 M，并以 sf=isinf(M)?0:M 计算权重——支持 R5 的 m_all/w(s)，并印证 R5 一侧无需额外保护（有效行的 chunk 0 含 key 0，m_all 恒有限），故第一轮修正范围只限 R4 是正确的",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 1556,
+      "line_start": 1498,
+      "note": "l 的 warp 树 + 块树归约、inv=(L>0)?1/L:0、dok 线程按 s=sg 步进 SG 累加分块内积写 s_red，再由 sg==0 的 SG 个线程合并并 bf16(a*inv) 写出——逐项对上 compute:row_stat/row_dot/store:attention_out 与 R5 归并式；例二中 w(13)=0 使全掩 chunk 贡献为 0",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1806,
+      "line_start": 1781,
+      "note": "launch_one：SMEM_TOT=SL::BYTES（prefill 无 pad），一次性 cudaFuncSetAttribute 抬高动态 smem 上限并 TORCH_CHECK(SMEM_TOT<=232448)——支持 Require 第 3 条的 55440 字节、一次性属性与预算检查",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1874,
+      "line_start": 1833,
+      "note": "MAIN 以 grid(n_tiles_ub,Hkv,n_split)、32*WM*WK=128 线程、SMEM_TOT 发射；仅当 n_split>1 才发射 combine，并在发射前 TORCH_CHECK(n_split<=1024)，注释说明 nse 不钳位会静默给出错值——支持 Worker_count、COMBINE 的条件提交与 Require 第 5 条",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 1974,
+      "line_start": 1955,
+      "note": "use_w=(tiles_ub*Hkv*BM>=8*sms)&&(need=ceil(n_split/(256/dc))<=3)，否则 gz=ceil(BM/rpt)*ceil(D/dc) 走 fmha_combine<D,1024>——支持 when 中排除 warp-per-row 归并门的写法与 COMBINE 的 Worker_count；例二 need=4>3 故走 block 版",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 2401,
+      "line_start": 2374,
+      "note": "build_params（fmha_run/fmha_capture 共用）：qk_scale=softmax_scale*1.44269504088896340736、ws_stride=bm*(D+2)、n_tiles_ub=ceil(max_seqlen_q*g/bm)*B——支持 R2 的 qk_scale 常量值、ws 记录布局与 tile_count",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 2456,
+      "line_start": 2415,
+      "note": "第一轮 issue 4 的来源依据，已修正并本轮复核：dc 从 min(D,64) 起在 geom(dc).first<2*sms 时减半至 8；geom 内 w = bm*tiles_hkv*n/(rpt_k*sms) 为整数除法、rp=clamp(w,1,bm)、rpt_k 默认 8——root.yaml 第 277 行的 rpt=clamp(floor(...),1,128) 与之一致",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 2523,
+      "line_start": 2496,
+      "note": "capture_stream 为私有非阻塞流，fmha_capture 在其上录制与直接发射完全相同的 launch_plan 序列（注释强调录图不缓存数值、句柄只对捕获时的指针/步长有效），fmha_replay（2549-2559）在当前流重放、调用方正在录图时改为直接发射——支持 Require 第 6 条与 Flow.Launch 的提交身份",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 53,
+      "line_start": 31,
+      "note": "PDL 注释明确 launch_dependents 只是调度许可、不提供内存可见性，可见性来自 secondary 中先于任何 workspace 读取的 griddepcontrol.wait——支持 start_after: MAIN.launch_ready 与 ready/wait_at 的三时点分离及 Require 第 4 条",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 296,
+      "line_start": 285,
+      "note": "禁止 minBlocksPerMultiprocessor 的来源记录：加参数后 128 线程配置寄存器 166→190（cfg4），2 resident CTAs/SM 取代 3，六个 decode case geomean +5.1%，且 cfg8 prefill 增长 8 字节 spill——支持 Forbid 第 1 条与其 Reason（含“a spill on this tile”）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 443,
+      "line_start": 439,
+      "note": "Q A-fragment 每块重新 ldmatrix；hoist 实测 D=64 中性、D=128 差 1.6-2.4%、D=256 差 18%，原因是寄存器直接吃掉 occupancy——支持 Forbid 第 2 条与其 Reason",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/candidate/fmha.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "reference",
+      "line_end": 48,
+      "line_start": 32,
+      "note": "参考的 score*(softmax_scale*key_scale)、bottom-right allowed 掩码、next_max/safe/rescale、weights=exp(score-safe)、weighted_p=(weights*value_scale).to(bf16).float()、denom 用未舍入 weights.sum——逐条对上 Contract Compute 与 R2/R4/R5 的精度路径（含 masked 项 p=0 与参考对 -inf 的 safe 处理）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/reference.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "reference",
+      "line_end": 60,
+      "line_start": 58,
+      "note": "normalized() 固定 causal=True、window_left=-1、sinks=None、q_scale=1.0、lse=None——支持 Golden_reference.Gap 与 Contract 中被忽略的 ABI 选项",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/reference.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "reference",
+      "line_end": 85,
+      "line_start": 71,
+      "note": "参考入口签名、allow_tf32=False、内部 FP32 物化后 copy_ 回 out、返回 None——支持 Contract 的 TF32 关闭声明、in-place 输出与返回值",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/reference.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "io",
+      "line_end": 47,
+      "line_start": 35,
+      "note": "correctness_tolerances.mutated_inputs.out = atol .01 / rtol .05 / max_mismatch_fraction .001 / max_rel_l2 .01，mutates_inputs=[out]、preserve_input_storage=true——支持 Tolerance 的 Source-only 来源记录逐项数值与 Output 的原地写语义",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/metadata.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "scope",
+      "line_end": 127,
+      "line_start": 89,
+      "note": "声明域与跨字段不变量：batch 1-32、q_len 1-8192、kv_len 1-262144、total_q<=16384、Σkv<=1048576、六组 (heads,kv_heads,head_dim)、heads%kv_heads==0——是例二 (32,32,128)/B=1/q_len=256/kv_len=3455 合法性的依据",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/shape_range.json",
+      "quote_offset": 0
+    },
+    {
+      "category": "input",
+      "line_end": 35,
+      "line_start": 28,
+      "note": "q=(0.8*randn+0.6*qcenters)*qgain(0.65-1.35)*cgain(0.7-1.3)，为 O(1) 量级正态分布——支持 R2 修正后的“Frozen |q| is of order one”，并印证上溢侧（65504）不可达而下溢侧（<2^-14）确有约 5e-5 命中",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/input.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "input",
+      "line_end": 83,
+      "line_start": 79,
+      "note": "peaked 仅把 q 乘 4、balanced 置零，distribution 限 normal/tiny/peaked/zero/balanced——支持 R2 中“(peaked x4)”以及即便最极端 frozen 分布也远低于 65504 的判断",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/problem/input.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "acceptance",
+      "line_end": 1,
+      "line_start": 1,
+      "note": "验收材料是 promotion/计时记录（comparisons 的 ratio 与 fixed/domain 延迟、checker_sha256），不含比较器公式或相对误差基准——支持 Contract 保留 metadata.json 的 Source-only tolerance 记录，且 root 正文未引用 fixed 计时（符合 P2 条件）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/fmha/fmha_fp8_per_token_head/performance/CERTIFIED_BEST.json",
+      "quote_offset": 0
+    }
+  ],
+  "summary": "第三轮复审通过，P3 root 放行。本轮改动仅为 Math_reshape R2 第 172-175 行的来源限制句与 Version 3→4：新文本按 fmha.cu:103-107 分侧陈述——加宽只在 FP16 normal 域内精确，冻结 |q|（O(1) 正态、peaked×4）下上溢侧不可达、下溢侧确有命中并指向同步骤 Ledger.Cost，Contract 的 q 无界故上溢偏差属来源限制而非已证等价。上轮指出的“neither edge is reached”与 Cost 的矛盾已消除。检查器退出 0、raw 严格通过无待落地修正，contract_sha256 与 Work_schedule、Tile_pipeline 区域摘要与前两轮逐字相同，机械印证改动未越出授权范围；REALIZATION 与 when 经逐行比对未变。前两轮四项修正（R4 的 sf 有限最大值保护与 (-inf,0,0) 分情形、R2 的 FP16 上溢侧、R4 Accumulate 不再固定块内归约树、cap/rpt 的显式 floor）均已复核落地，四项判断全部通过。遗留缺口不阻塞：sms 仍是 plan 内散文字义（硬件区按 P1 政策占位）、外部比较器公式缺口原样保留、root 无 fixed-case 实测。"
+}

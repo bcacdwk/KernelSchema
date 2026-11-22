@@ -1,0 +1,232 @@
+# 执行索引：34个未开始的工作包
+
+日期：2026-11-20。当前有效规范见 [04_implementation_plan.md](04_implementation_plan.md)；本表是未来实施交接，**34包全部未开始**，没有代码、测试、模型/GPU、安装、迁移或发布完成声明。
+保留 KS-01～14、AKA-01～12、MIG-01～06，新增 EXP-01/02。V01～V15 是验收记录，不另扩工作包；技术 spike 挂在对应ID内。实现区域均为拟议路径，按仓库前缀解释。
+依赖标注“接口/材料”允许消费该包已审定子交付开工，不要求其真实运行完成；“集成/真实/发行”才是对应完成门。没有模型/GPU仅阻塞声称该能力的门，不阻止独立CPU开发。条件扩展仅在真实任务需要时开展。
+共同fixture拟放 `KS:tests/workflows/fixtures/v1/row_softmax/`，双方按固定配对读取；保留输入bundle、预期事实和模拟标记。JCS/原字节、固定mode、latest/qualified、scope、预算、三audit以及主计划§4跨请求导入规则均为强制验收依据。
+详细旧任务可查 [R4 KS §5](planning/r4_kernelschema_plan.md)、[R4 AKA §§5–9](planning/r4_aka_integration_plan.md)；字段/依赖一律以主计划、本文和明确采用的 [R5合同](planning/r5_contract_execution_review.md)、[R5验收](planning/r5_validation_delivery_plan.md) 为准。
+
+## KernelSchema
+
+### KS-01 — row-softmax材料与资格清单｜未开始
+- 前置：进入实施时核最新仓库边界、使用隔离位置；无AKA/planner/GPU完成前置。
+- 改动区域：`examples/workflows/row_softmax/{task,schema,starter,references}/`、`docs/workflows/support.md`。
+- 交付：R5验收§§2–3的ABI/72次正确性调用/完整计时/负例清单、手审R0与自由度、骨架、固定来源/许可清单；G0逐项available/missing/incompatible。
+- 完成证据：材料审查可供KS-02/04开发；Claude/设备/栈/Agate或本地资格另记实际版本与缺项（V01/V13）。材料完成不代签真实通道；缺通道继续CPU工作。
+
+### KS-02 — 唯一包、合同、Template与资源｜未开始
+- 前置：KS-01材料/合同形状。
+- 改动区域：`pyproject.toml`、`kernelschema/{__main__,api,contracts,resources,template_api,materials,artifacts}.py`、三能力目录薄入口、共同fixture。
+- 交付：严格v1读写/JCS/Ref与source codec、能力检查、Template私有命名空间适配；稳定publication前缀/完整artifacts导入；源码安装和CLI/API骨架。
+- 完成证据：任意cwd/移动bundle、键序等价/非法JSON和路径拒绝、CRLF/无尾换行往返、跨请求正例及同路径异字节拒绝（V06/V13）。无AKA/CUDA导入；资源不齐先限定源码安装。
+
+### KS-03 — Claude单调用与角色权限｜未开始
+- 前置：KS-02接口；真实profile资格独立推进。
+- 改动区域：`kernelschema/runtime/claude.py`、`kernelschema/prompts/`及实际角色调用fixture。
+- 交付：planner/coder/reviewer独立scope、固定材料allowlist、原始事件/请求与报告模型/终态/用量；从稳定源码新会话继续。
+- 完成证据：fake CLI非零/缺终态/缺用量/角色伪造拒绝，真实锁定版本参数及首调/重开可解释（V02/V08/V13）。无终止事实就fence；公开参数仍不满足则profile不准入。
+
+### KS-04 — 完整Task evaluator与执行通道｜未开始
+- 前置：KS-01固定判据、KS-02接口；不等KS-03真实模型。
+- 改动区域：示例`evaluator/{golden,baseline,input,check,timing,entry}.py`、`manifest.json`；`kernelschema/evaluation/{task,agate}.py`。
+- 交付：同一golden64/ABI/副作用/计时协议、固定staging与实际源码摘要、operation/job结算；Agate资格及同evaluator本地退路记录。
+- 完成证据：V01正例/漏out/改x/超差全量报告，V03计时样本，V06错绑、V07稳定键/unknown轨迹；真实通道单独通过。普通allclose不足则自定义执行或本地，未知作业不得切通道重提。
+
+### KS-05 — 固定实现、准确保存与续接｜未开始
+- 前置：KS-02及KS-03/04接口；真实完成需其模型/执行资格。
+- 改动区域：`kernelschema/implement/reference.py`、`kernelschema/artifacts.py`、私有单写者准入/预算状态。
+- 交付：固定Q的coder→快照→evaluator→反馈有限loop、code/verify_only、完整C与opaque continuation、父/请求累计额度、durable intent/ready/admitted/result。
+- 完成证据：V04 C1→C2准确续写，V05各seed中断/删kernel拒绝，V06/07/08错绑/unknown/pause；真实生成并评价且保存partial。仅承诺稳定C新会话，损坏状态不归零。
+
+### KS-06 — 有限fidelity与合格代码投影｜未开始
+- 前置：KS-02即可定义条目/收据接口；集成消费KS-05，真实闭合需KS-03/04资格。
+- 改动区域：`kernelschema/fidelity.py`、R0条目/方法manifest、implement结果聚合。
+- 交付：独立reviewer逐项源码位置/理由、coverage/task_uncovered、latest与qualified的逐C assessment，软性能目标分列。
+- 完成证据：V02数值正确但外部softmax/省max-subtract违规及unknown不qualified，V03慢合格completed+unmet，V06未测C2不继承。必要条目无法论证就partial/unknown，不降低设计约束。
+
+### KS-07 — design/optimize共享写作内核｜未开始
+- 前置：KS-01材料、KS-02/03接口及固定反馈fixture；**开发不等KS-06实测**。
+- 改动区域：`kernelschema/{writing,design,optimize}.py`、角色材料/权限diff、示例请求与发布逻辑。
+- 交付：参考筛选、草稿/规范化候选、全任务检查/独立语义审阅、不可变Schema/scope；keep/revise、实质设计revision计数及下一行动。
+- 完成证据：越权/来源改变/纯Feedback计数、跨请求旧R/新R闭包共存、V09发布≠准入/keep停止；真实design与一次optimize各留收据，后者展示再用KS-05/06真实反馈。首发可限单root，不复制extract。
+
+### KS-08 — extract透传与既有来源消费｜未开始
+- 前置：KS-01任务准备合同、KS-02；**不依赖KS-07**，design来源fixture后补。
+- 改动区域：`kernelschema/extract_bridge.py`、`docs/workflows/extract-to-implement.md`、既有来源消费fixture。
+- 交付：原命令/退出/ready/publication透传；手写/curated/receipt raw与闭包原字节保留；缺项清单、补齐后固定实现输入副本。
+- 完成证据：V13多来源、skip-hardware/P6不绕过Task准入、原publication冲突可见；完整导入不改旧receipt、不要求统一P6。材料缺失返回缺项，原extract内部/活动产物不迁写。
+
+### KS-09 — 有限真实demo与首发说明｜未开始
+- 前置：KS-05/06固定真实链、KS-07两入口、KS-08消费桥；本包不依赖KS-14，KS-P1发布门在两包完成后汇合。
+- 改动区域：`examples/workflows/row_softmax/{requests,run_demo.py,evidence}/`、根`README.md`、`docs/workflows/quickstart.md`。
+- 交付：fixed、真实design→implement→一次optimize；keep照实结束，revise才新Q/明确seed/重验；人工partial seed续改另标来源，回放与重跑分开。
+- 完成证据：V01–V09/V13适用项、无AKA真实模型/GPU产物与用量；不伪造第二轮或revision。缺环境可交预览/partial，但KS-P1未通过；无AKA动态/EXP前置。
+
+### KS-10 — FA4来源/范围/原栈预审｜未开始
+- 前置：固定20261019四题来源；与KS-01并行，无GPU/planner前置。
+- 改动区域：`docs/workflows/cases/fa4_decode-admission.md`、新案例材料/范围清单，既有YAML保持原件。
+- 交付：F0源包/许可/13参数/完整比较器；F1 q4_direct B1/Q4/L64/P1/block_table[0]准入；root/dispatch覆盖表及CuTe/SM103/source-tree缺项。
+- 完成证据：V15材料对照、root不能覆盖Q1/direct、空split/PageIndex/TMA/TMEM/launcher前提及公开取得方式可审查。预审只决定可进入哪个子请求，不宣称复杂运行支持。
+
+### KS-11 — 按需扩展完整源树｜未开始
+- 前置：KS-05稳定、KS-10证明真实题需要多文件；首发单文件不等待本包。
+- 改动区域：`kernelschema/artifacts.py`、source能力/profile、完整树fixture。
+- 交付：新受支持source格式的完整文件清单/删除/模式/固定文件隔离、原子安装，发布前明确新格式规范与版本能力。
+- 完成证据：V05扩展两文件C1→删除旧文件C2、各安装边界、已准入draft不覆盖、非法路径拒绝；AKA未支持仍拒绝。能力不足保留single_file，禁止overlay冒充完整快照。
+
+### KS-12 — 真实复杂子请求与必要dispatch｜未开始
+- 前置：KS-05/06、KS-10；需多文件时KS-11；独立CuTe/实际SM103/evaluator资格。交付紧随小demo，工程不等KS-09文档收尾。
+- 改动区域：复杂案例Task/profile/evaluator、请求/代码/证据/支持文档。
+- 交付：先F1，再按R5验收§5的F2十配置/F3必要节点逐项扩域，声明root Contract+选中Design及未覆盖范围。
+- 完成证据：V15真实构建/正确性/副作用/有限fidelity/完整调用性能与host稳态资格；旧30/30/kernel-sum不得复用为新结论。异步unknown或设计冲突保留blocked，改设计另记revision。
+
+### KS-13 — 跨后端固定合同与真实配对｜未开始
+- 前置：fixture从KS-02/AKA-02接口开始；集成需KS-05/06、AKA-09，真实完成再需AKA-11，不反向阻塞AKA-11。
+- 改动区域：共同v1 fixture、`docs/workflows/aka-backend.md`；AKA实现归其模块。
+- 交付：相同Task/R/scope/C/预算的两侧映射、原始费用索引/native扩展、跨请求完整闭包导入与能力拒绝。
+- 完成证据：V01三关键负例、V03/04/06/14的慢C/partial/verify/错绑；双方各自真实模型/完整evaluator/fidelity/性能，不能用KS pass代签AKA。不等AKA动态/MIG-04。
+
+### KS-14 — 资源发行与README逐门更新｜未开始
+- 前置：KS-02即可建设资源闭包；KS-P1收尾需KS-09；后续复杂/AKA说明分别消费KS-12/13实证。
+- 改动区域：包资源/锁定profile/校验和/第三方许可，`docs/workflows/{support,evidence,release-notes}.md`、根README及三能力目录。
+- 交付：CPU/模型/GPU三层安装、选中规则/Template/角色/参考/Task/证据；源码checkout首发，wheel按独立资源gate；无GPU回放明确历史身份。
+- 完成证据：V13任意cwd/干净目录、授权材料可取得、三新入口可调用；wheel声明须离树验证。README按KS-02→05/06→09→12/13和AKA实测逐步更新，无关后续能力不阻塞源码首发。
+
+## AKA适配
+
+### AKA-01 — 指定episode与唯一生命周期spike｜未开始
+- 前置：MIG-01隔离基线；无planner/真实模型/GPU前置。
+- 改动区域：`tests/schema/test_episode_boundary.py`、`workflow/schema/bridge.py`草稿及必要原loop接点。
+- 交付：真实Store/CandidateWorkspace配fake Agent/Evaluation的指定e fixture、归一化setup/finish轨迹、driver ADR。
+- 完成证据：V11终e重放零e+1、恢复结算即返、max_version/max_episodes同时有效、pause/预算零准入、HEAD/G分离。façade若复制生命周期改原loop窄admit/settled；均失败则不发布多e能力。
+
+### AKA-02 — v1映射与Atrex Task资格｜未开始
+- 前置：KS-01材料、KS-02合同/fixture；无需KS真实执行。
+- 改动区域：`workflow/schema/{backend,projection}.py`、row-softmax Atrex-Bench adapter/profile。
+- 交付：public/initial/evaluation逐项映射，真实runtime来源/标记/版本，source codec、golden64/完整副作用/计时hook与capabilities；导入沿稳定前缀。
+- 完成证据：V01/06/14同字节与错误比较器/副作用/格式拒绝；CPU形状与真实hook资格分开。目录标记/普通correctness不足则该任务unsupported，KS本地成功不能代签。
+
+### AKA-03 — 可选模块、安装接口与off｜未开始
+- 前置：AKA-01 ADR、AKA-02/KS-02接口、MIG-01基线。
+- 改动区域：`workflow/schema/{plugin,provider}.py`、fixed/orchestrated profiles、`packages/atrex-aka-schema/`、distribution OWNERS/资源配置。
+- 交付：显式选择才加载KS；off直接原provider组合，固定版本/字段验证；基础包无KS依赖。
+- 完成证据：V12移走KS并禁import、归一化prompt/tools/预算/晋升/导出一致且零Schema调用；新位置安装明确缺项。失败移除全局发现/资源依赖，不造空KS掩盖。
+
+### AKA-04 — 受信角色、正文和只读资料｜未开始
+- 前置：AKA-02/03、MIG-02逐文件补丁来源映射；可先用接口fixture。
+- 改动区域：Agent contract/runtime/native/backend调用链、campaign/session正文、runtime_resources/EpisodeWorkspace、Schema materials/tools/prompts。
+- 交付：固定assignment贯穿首调/修复/限流重试/resume/reopen；角色scope与资料allowlist、KS只读read/effective/check/reference工具。
+- 完成证据：V02/V13实际NativeAgent投递轨迹、角色伪造/Contract写入/跨R旧home/私有evaluator暴露拒绝；无自由换算法/换栈冲突正文。不支持provider显式拒绝，不整批搬EXP。
+
+### AKA-05 — never/V1准备和慢C收尾｜未开始
+- 前置：AKA-01/02/04接口与选定driver。
+- 改动区域：main_adapter准备、orchestration/campaign helper/finish；仅必要时改受限framework-baseline函数。
+- 交付：V0/metadata/pin/准确C production/G约束及review费用职责表；never+helper或受限V1 ADR，C独立导出。
+- 完成证据：V03/V11慢合格首版不必晋升、V0恢复不重建、metadata/pin与C/G分别核对；V1替代另过同R/预算/提交前资格及恢复。闭合不了拒绝任务，不降低ABBA。
+
+### AKA-06 — seed安装与跨e准确续写｜未开始
+- 前置：AKA-01/02/04/05、KS-02 source编码。
+- 改动区域：new-e preparing/link/register、CandidateWorkspace source codec/install、EpisodeWorkspace；最少intent/ready/admitted关联。
+- 交付：e1未晋升C1→同R e2准确起点、完整快照与native digest映射；从当前HEAD开e，G保持独立。
+- 完成证据：V04/05在exploring/安装中/ready/register/准入各点中断，无半装/覆盖draft；CRLF往返、solution.json夹带/删kernel拒绝。未知归属就blocked，source_tree留AKA-12。
+
+### AKA-07 — fidelity资格、三audit与verify_only｜未开始
+- 前置：AKA-02/04/06、KS-06条目/收据接口；不等KS独立GPU实测。
+- 改动区域：seal后/ABBA前、terminal attempt重建、promotion_audit/audit_recovery、trusted execute及结果投影。
+- 交付：Q/Task/R/rules/scope/C/方法绑定的durable eligibility，显式进入attempt/commit-bound audit；零coder/新晋升的固定verify_only。
+- 完成证据：V02/06/10普通、未提交恢复、已提交恢复分别留证；违规不进ABBA，缺已提交资格保留历史并unknown，旧pass不贴C2。人工/离线证据有限接入，不能重评改历史。
+
+### AKA-08 — 固定backend完整返回｜未开始
+- 前置：AKA-01/02/03/04/05/06/07；单请求可多e、零planner。
+- 改动区域：`workflow/schema/{backend,projection}.py`、episode_output/Workflow导出关联。
+- 交付：capabilities/fixed/continue/verify_only、latest/qualified各自assessment、覆盖/缺项、准确源码和原始收据；native stop/G/promotion单列。
+- 完成证据：V03/04/06缺dispatch partial、慢合格completed+unmet、无源码不退G、旧token不生新调用；exit=0不冒充实现完成。未支持组合收费前拒绝。
+
+### AKA-09 — 总预算、暂停与固定恢复门｜未开始
+- 前置：准入设计从AKA-01同步开始；集成完成消费AKA-06/07/08。
+- 改动区域：Schema最少状态、native active/audit/usage、session与V0/V1/review调用前准入、Experiment结算。
+- 交付：父/请求/native最紧额度、公共active_ms活动并集、durable fence/settle-only、收据去重/真实重试记账、fsync边界故障表。
+- 完成证据：V07/08/10/11全适用轨迹；终态评测/review在额度内，未知job不重提、恢复不免费、损坏state不归零。本包是fixed工程发行门，未证点blocked而非延后到dynamic。
+
+### AKA-10 — planner与动态R准入｜未开始
+- 前置：AKA-09固定工程闭合、KS-07可调用写作/发布接口；真实动态另需其模型资格。
+- 改动区域：`workflow/schema/{provider,state}.py`；KS单次能力调用、immutable运行产物/请求关联。
+- 交付：一个owner按阶段完成/有据阻碍交planner，keep行动判断、完整跨请求闭包导入、R'发布后新Q准入、旧C/G与费用保留。
+- 完成证据：V08/09发布前后/准入前后中断不续错R，keep无行动停止，真实调用另标keep或revise。自动边界不闭合则显式下一固定请求，不谎称动态恢复支持。
+
+### AKA-11 — 独立fixed真实发行｜未开始
+- 前置：AKA-09、MIG-03独立发行配对、AKA-02所用Task/环境真实资格；**不依赖MIG-04**。dynamic说明另需AKA-10。
+- 改动区域：公开profile/证据、AKA README、`docs/{quickstart,optional-light-modules}.md`。
+- 交付：固定fork+KS的一次真实row-softmax模型/GPU调用、完整C/构建/正确性/fidelity/性能/用量、实际发生的续写；原生晋升另报。
+- 完成证据：V01/02/03/13/14适用真实记录和自身干净安装；CPU/fake不代签。缺环境只阻止对应发布，独立KS继续；跨后端总体声明由KS-13汇合。
+
+### AKA-12 — 按真实需求扩栈/格式｜未开始
+- 前置：AKA-11固定首发、KS-10预审确认需求；所选新格式/复杂profile按KS-11/12相关子交付对齐。
+- 改动区域：capabilities、原生source codec、资料/Task/evaluator接线；每次只扩一个所需组合。
+- 交付：若需要source_tree/cuda_manifest则完整删除/固定文件/恢复协议；FA4原CuTe/硬件/范围明确资格。
+- 完成证据：V05扩展和V15真实子域、when拒绝/未覆盖/fidelity；不继承single_file或H20/Triton通过。未知维持unsupported/partial，不作无限扩栈backlog。
+
+## 三仓迁移与实验
+
+### MIG-01 — 现状保护与隔离基线｜未开始
+- 前置：实施时重新读取三仓AGENTS/状态；[既有基线](planning/baseline.json)仅作历史参照。
+- 改动区域：新审查台账/隔离checkout或worktree；不改当前KS/EXP活动树和旧capture。
+- 交付：三仓commit/branch、修改/有意删除/untracked归属、拟迁入授权源码实际快照；AKA固定上游起点，KS/EXP独立位置。
+- 完成证据：所有拟迁字节可追溯、旧运行未动、无凭证/home取样；不reset/clean/stash/批量add。归属不明留原地，以已提交必要材料供AKA-01。
+
+### MIG-02 — fork补丁分层与来源映射｜未开始
+- 前置：MIG-01、AKA-01 driver ADR；上游升级不混入。
+- 改动区域：隔离AKA的core-seams/workflow/integration分层、本地patch series与迁移台账。
+- 交付：EXP overlay固定字节→通用role/context/session等必要补丁→Schema模块→测试映射，未迁实验政策保留EXP owner。
+- 完成证据：补丁逐文件可审、默认值/off影响清楚；不cherry-pick EXP根到AKA、不切当前main。远端fork未安排不阻止本地审查，远端写在实际授权范围内另实施。
+
+### MIG-03 — 固定KS与独立安装配对｜未开始
+- 前置：MIG-02、AKA-03/04安装/资源接口、KS-02可固定源码包及所选资源；不等KS-14所有后续更新。
+- 改动区域：fork `optional/KernelSchema` gitlink、distribution安装/资源规则、发行配对清单。
+- 交付：upstream/fork/KS SHA和实际包/规则/参考/evaluator摘要、公开取得/许可；只初始化所需submodule。
+- 完成证据：V12/V14新位置KS无AKA、AKA off无KS、on缺依赖明确；若声称wheel另验资源。脏KS不当固定commit；外部固定KS目录只可标开发方式。
+
+### MIG-04 — EXP vendor与KS单独物化｜未开始
+- 前置：MIG-02/03、AKA-09 fixed CPU工程门；新EXP副本/新capture。
+- 改动区域：`tools/lib/aka_vendor.py`及来源manifest、`assets/kernel-schema`/`control/schema-source.json`、environment/setup/launcher/runtime/readiness/finalize。
+- 交付：从fork确切gitlink SHA独立导出KS普通文件/模式；生成式AKA vendor保持自身校验；包metadata/resources与capture冻结来源一致。
+- 完成证据：V14官方AKA verify、KS manifest verify、fresh-child模块来源、fake fixed、新capture恢复；旧snapshot仍用原reader。失败保留上一配对，不能清缓存/活动run换版本来过门。
+
+### MIG-05 — EXP唯一产品来源与可回退消费｜未开始
+- 前置：MIG-04、AKA-11欲消费能力、EXP-01政策；dynamic消费再需AKA-10对应资格。
+- 改动区域：新launch选择/实验条件版本表与快照；旧SchemaAgent保留历史reader职责。
+- 交付：新static/fixed/dynamic来源映射、产品只在KS/fork修改后生成导入、旧捕获/未完run冻结不迁写；新run回退规则。
+- 完成证据：V14来源/资料/evaluator/预算可回读，无双份手改逻辑，新条件独立资格。若以后换checkout消费另过MIG-04，不同时长期维护两条可手改源路径。
+
+### MIG-06 — 上游更新与后续发布纪律｜未开始
+- 前置：MIG-03稳定配对、AKA-09/11已有fixed能力；与首次搬迁分开，不要求EXP先迁完。
+- 改动区域：独立更新分支、base/ours/theirs与补丁吸收/冲突台账、新发行配对；远端操作依届时授权。
+- 交付：最小冲突修复、目标上游/KS/fork锁定、新run消费说明；保留旧提交/资源/capture。
+- 完成证据：V12先off，再受影响身份/seed/fidelity/恢复与Task资格；不无差别重跑历史。失败不推广新配对，旧C只能显式进入新请求，不套旧continuation。
+
+### EXP-01 — B/F/D设计与CPU消费配置｜未开始
+- 前置：KS-01材料、MIG-01；不等AKA动态或真实GPU。
+- 改动区域：`experiments/schema-workflows-pilot-v1/{protocol,matrix,policy,materials,metrics}`规范/配置与请求模板。
+- 交付：B无Schema/F固定R0/D同R0最多一次optimize，同Task/资料/骨架/模型/运行策略/总资源；预算映射、顺序、失败/统计字段、最终候选选择规则。
+- 完成证据：CPU dry-run身份/差异可审；R0默认取KS-09首份写作合格design产物且不按速度挑，尚无时保留来源待绑定，人工替代显式标记。只产配置，不生成效果结论。
+
+### EXP-02 — 受限pilot与全样本分析｜未开始
+- 前置：EXP-01、MIG-04/05新capture、AKA-11/10真实资格、同evaluator/profile；默认design R0还需KS-09来源已固定。
+- 改动区域：预登记pilot的新run/capture/evidence/分析产物；不覆盖旧正式策略或活动实验。
+- 交付：建议row-softmax B/F/D各3重复共9run；每run8模型调用/6逻辑job/3native e/active_ms=3600000为资格后冻结的建议，终态评测/review在内；不是本轮授权或完成保证。
+- 完成证据：全部启动/未准入/失败记录，正确率/fidelity/首次合格时间成本/性能离散/unknown及初始化-使用-摊销成本；三组差异可解释才结束pilot。F1第二批先另过复杂门，不预言统计功效/收益。
+
+## 有限验收归属与发布读法
+
+| 记录 | 必须覆盖的工作包/证据类型 |
+| --- | --- |
+| V01 / V02 / V03 | KS-01/04、AKA-02真实完整判据；KS-06/AKA-07有限独立fidelity；KS-04/06、AKA-05/08慢C分流CPU+真实计时 |
+| V04 / V05 / V06 | KS-05、AKA-06/08精确续写；KS-11/AKA-12按需删除扩展；KS-02/04/05/13、AKA-02/07错绑/verify/跨请求闭包 |
+| V07 / V08 / V09 | KS-04/05、AKA-09 unknown；KS-05/09、AKA-01/09/10暂停总账；KS-07/09、AKA-10发布准入/keep，含稳定前缀冲突拒绝 |
+| V10 / V11 / V12 | AKA-07/09三audit；AKA-01/05/09指定e/初次准备；AKA-03、MIG-03/06 off归一化轨迹 |
+| V13 / V14 / V15 | KS-02/08/09/14公开独立；KS-13、AKA-11、MIG-03/04/05配对与消费分门；KS-10/12、AKA-12复杂范围 |
+
+每个证据索引记录方法、时间、Q/Task/R/C/rules/evaluator/实际环境、状态与原始文件。CPU用真实状态/codec配fake调用，只证明工程；MODEL/GPU/服务资格按实际通道留证，不用计划、空目录或历史复验代替。
+KS-P1由KS-09+KS-14源发行及其适用前置汇合；AKA-P1由AKA-11汇合；跨后端由KS-13汇合；MIG-04/05是EXP下游分叉。KS-07开发不以KS-06实测为前置，KS-08不以KS-07为前置，AKA-11不以MIG-04为前置。
+所有开发/集成/发布边按前述ID解释，条件扩栈无回边。首批具体任务是KS-01材料清单/R0、KS-10 F0/F1预审、MIG-01隔离台账→AKA-01 CPU fixture/ADR；随后KS-02及KS-03/04接口、EXP-01配置并进。
+后续实施者先交这些可审产物，再按各门补真实资格；本次计划撰写已经收口，不重问已确认产品方向，不把环境未知当作全部工作暂停或默认实际运行授权。

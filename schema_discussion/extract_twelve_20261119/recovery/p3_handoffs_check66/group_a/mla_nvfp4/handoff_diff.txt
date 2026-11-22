@@ -1,0 +1,9 @@
+--- previous_reviewer_response.handoff
++++ failed_response.handoff
+@@ -1,4 +1,4 @@
+-P3 放行 root，进 P4（新开 worker/reviewer，从真实完整 root 落实目录与有限非 root 计划）。root.yaml Version=2、digest 77be1aed… 与本次一致，只读检查 exit 0、无待落地修正；拟完整集合仍只有 root，本阶段未发现改变机制识别或代表取舍的事实，故不返回 P2。
++P3 放行 root，进 P4（新开 worker/reviewer，从真实完整 root 落实目录与有限非 root 计划）。root.yaml Version=2、raw_sha256 77be1aed…、effective_identity cdc89be0…，dispatch.md b0effb75…，与本次 dependency_digests 一致；本 attempt 只读检查 exit 0、无待落地修正。拟完整集合仍只有 root，本阶段未发现改变机制识别或代表取舍的事实，故不返回 P2。
+ 
+ 已定与依据：uniform 实例下 piece=(request,row group,KV split) 为唯一 worktile、worker=2 CTA/cluster、Preassigned count=1，来自 unit_first=range(0,num_items,2)；COMBINE 为条件性第二次提交（仅 max_splits>1），start_after MAIN.kernel_done，与 runtime.launch 同 stream 顺序一致。P2 交来的四项待核全部核实并落入正文：S 为每 page 128 lane×32 列（lane=key_half*64+row）、O 为 128 lane×256 列且输出通道分组由 CTA 内 softmax 的 key 半区决定（n_half*128 与 +256 共八块 32 通道）、cta_rank 只进行坐标与 V 通道半区；30 个 barrier 的到达数与生产者集合逐一对账（raw_empty 321=192+128+1 multicast、p_full 512、v_full 384、s_empty/sfa_full/sf_full/o_empty 256、corr_sig/corr_empty 128，其余 count=1 为 expect_tx 或 multicast commit），初相位=空槽由 REALIZATION 第三条承担；近似指令与 fast math 归属已入 Math 的 Arithmetic 与 REALIZATION（combine TU 不继承）；空工作与尾块以 all_rows_valid 两分支、LOAD 的 page_b=page_a 与 row_limit 掩码表达。跨 piece 的 o_empty/q_empty 归还在本实例无前驱可指，只保留 release:o_acc 并在 matmul:p@v 的 describe 写明首个 PV 以非累加谓词初始化累加器。
+ 
+

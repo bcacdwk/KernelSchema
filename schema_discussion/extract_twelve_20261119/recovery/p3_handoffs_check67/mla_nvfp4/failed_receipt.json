@@ -1,0 +1,1255 @@
+{
+  "artifact_evidence": [
+    {
+      "line_end": 7,
+      "line_start": 1,
+      "note": "META_DATA：Name/Describe/Source 固定到 commit 与 ::Model.forward、Version 2、Dispatch.when 写实为 uniform 域 + cc(10,3) + workspace 容量",
+      "path": "root.yaml",
+      "quote": "META_DATA:\n  Name: mla_nvfp4\n  Describe: Dense NVFP4 MLA decode/MTP attention over a paged shared K=V 512-dim latent KV cache, producing BF16 output and optional natural-log lse\n  Source: KernelSchema@484902855fe7be82a74fe7c394503d1d7d222dbb:kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/solu",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 35,
+      "line_start": 8,
+      "note": "Contract 的 Constant/Input/Output：head_dim 512、page_size 64、scale_group 16、kv_tile/row_tile 128、p_log2_offset 6、e4m3_max 448 与全部调用面对象（含 nullable/default）",
+      "path": "root.yaml",
+      "quote": "CONTRACT:\n  Algorithm_requirement:\n    Constant:\n      head_dim: {value: 512, meaning: 'Latent channels shared by Q, K, V and output'}\n      page_size: {value: 64, meaning: KV tokens held in one physical cache page}\n      scale_group: {value: 16, meaning: Channels sharing one E4M3 NVFP4 block scale}\n      kv_tile: {val",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 100,
+      "line_start": 36,
+      "note": "Compute 的 Domain/Decode_nvfp4/Prepare_v/Addressing/Score/Split_partition/Uniform+Balanced_split_policy/Split_state_init：任务数学与两套划分策略均由 Contract 定义，Design 不选路",
+      "path": "root.yaml",
+      "quote": "    Compute:\n      - Name: Domain\n        Math: |\n          batch_count = seq_lens row count = block_tables row count, with 1 <= batch_count <= 32.\n          total_q = query token row count and query_len = total_q / batch_count, which must be an integer: every request carries the same number of query tokens, 1 <= query",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 141,
+      "line_start": 101,
+      "note": "Block_update/Split_partial/Merge_output/Call_semantics 与 Golden_reference（Source、逐输出 Tolerance 来源记录、Gap）：Design 的 Ledger.Baseline 与近似声明以此为误差预算",
+      "path": "root.yaml",
+      "quote": "        Symbol:\n          m: {meaning: Delayed log2-domain running maximum per row/split, shape: [], dtype: fp32}\n          z: {meaning: Unrounded denominator per row and split, shape: [], dtype: fp32}\n          a: {meaning: FP32 value accumulator of one row and split, shape: [{d: head_dim}], dtype: fp32}\n      - Name:",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 147,
+      "line_start": 146,
+      "note": "Execution.thread/warp 摘要除单元组成与 register/smem 归属外，还写入“elected single threads issue the TMA copies and the tcgen05 MMA”“the main kernel fixes per-warp roles (softmax warps 0-3...)”等设计内容",
+      "path": "root.yaml",
+      "quote": "thread: Single hardware thread of a warp owning private register storage; elected single threads issue the TMA copies and the tcgen05 MMA of the main kernel, and per-lane indexing drives row statistics, split merges and vector loads\n      warp: 32 threads of one CTA executing in lockstep with shuffle reductions; the ma",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 149,
+      "line_start": 148,
+      "note": "Execution.warpgroup/cta 摘要写入 setmaxnreg 208/112/96 与“512 threads、189440 bytes、512 列 TMEM 用 480 列、combine 256 threads”等启动配置，与 REALIZATION 第二/四条重复",
+      "path": "root.yaml",
+      "quote": "warpgroup: Four consecutive warps (128 threads) of one CTA, the aligned scope of the setmaxnreg register-budget redistribution that raises the softmax warpgroup to 208 registers and lowers correction to 112 and the transform, load and mma warpgroups to 96\n      cta: Thread block resident on one SM; owns the smem and tm",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 152,
+      "line_start": 150,
+      "note": "Execution.cluster 把单元组成本身写成“Two CTAs co-scheduled as one pair (__cluster_dims__(2,1,1) with spread...)”，即把本设计的 cluster 规模写进共享 Contract 词汇；Feature.mechanism 仍为占位",
+      "path": "root.yaml",
+      "quote": "cluster: Two CTAs co-scheduled as one pair (__cluster_dims__(2,1,1) with spread scheduling preference); the pair shares one cta_group::2 tcgen05 MMA over the jointly allocated TMEM, synchronizes with cluster barriers and addresses peer smem through mapa\n    Feature:\n      mechanism: null",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 181,
+      "line_start": 166,
+      "note": "Math_reshape.Thesis 与 Block_scale_score_product：不物化 FP32 解码、八段 64 通道 block-scaled 累加、V 操作数 FP16 乘 E4M3 后一次舍入，Ledger 用可核对的每 key 行字节数表达收益",
+      "path": "root.yaml",
+      "quote": "  Math_reshape:\n    Thesis: Keep query and cache packed in E2M1 with E4M3 block scales and let the block-scale tensor core apply them, carry softmax in the log2 domain with a delayed maximum and a 2^p_log2_offset prescale so probabilities fit E4M3, and split the KV range so a short decode batch still fills the device\n ",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 209,
+      "line_start": 182,
+      "note": "Score_scale_in_exponent（fma32+单次 exp2、Arithmetic.Approx 写 unknown:）与 Half_split_online_softmax（key 半区、z_half、区间末合并、retention carry_forward 及 i=-1..tile_count-1）",
+      "path": "root.yaml",
+      "quote": "      - Name: Score_scale_in_exponent\n        Math: |\n          scale_log2 = sm_scale / ln 2 is fixed once per call. The value s(g,h,j) = d(g,h,j) * scale_log2 that the shared Contract defines is never formed on its own. With the running log2-domain maximum m and safe = m_next when m_next is finite, else 0,\n          p",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 243,
+      "line_start": 210,
+      "note": "Reciprocal_split_output（live/inv_z/lse2_split、单区间直写与多区间物化 partial_store/lse2_split 的 keep_value）与 Log2_split_merge（mx、total_lse2、w_s、升序 FP32 累加、单 split 不读不写）",
+      "path": "root.yaml",
+      "quote": "      - Name: Reciprocal_split_output\n        Math: |\n          live = z > 0; inv_z is the approximate reciprocal of z, and 0 when z <= 0.\n          partial[d] = a[d] * inv_z, in place of the division by z that the shared Contract writes; when not live, a[d] is already 0 so partial[d] = 0.\n          lse2_split = m + lo",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 274,
+      "line_start": 244,
+      "note": "Work_schedule.Thesis 与 MAIN：piece 分解与升序排列、Invariant/Iteration/Target（含 direct 与 partial 双语义）、Mapping(2 cta/cluster、Member 行半区与通道半区)、Preassigned count=1/Refill none/Exit assigned_done",
+      "path": "root.yaml",
+      "quote": "  Work_schedule:\n    Thesis: The host flattens the batch into one piece per (request, row group, KV split) and gives each piece to one 2-CTA cluster, so a short decode batch still fills the device. A second submission merges only the rows whose group was split\n    Step:\n      MAIN:\n        Describe: Compute one KV spli",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 306,
+      "line_start": 275,
+      "note": "COMBINE step（token×head tile 8、Tile_reduction dimension=piece 引用 partial_store/lse2_split 与 Log2_split_merge、条件性提交写在 Mapping/Schedule.Strategy）与 Flow.Launch/Handoff(storage global)",
+      "path": "root.yaml",
+      "quote": "      COMBINE:\n        Describe: Merge the BF16 split partials of one query token and eight heads into out and lse; rows whose group has one split stay as MAIN wrote them\n        Decomposition:\n          Strategy: One warp takes one head and merges the split_count pieces of its row group; heads past num_heads and rows ",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 335,
+      "line_start": 307,
+      "note": "Tile_pipeline.Thesis（含“无有效行的 member 仍跑完全流程”）、Index(i/page/n=flatten)、Storage 八条的 depth/location/shape/dtype/total_size 与 view 槽-子区映射",
+      "path": "root.yaml",
+      "quote": "  Tile_pipeline:\n    Thesis: 'Five fixed warp roles per CTA advance one kv_tile-token interval at a time: tensor copies, on-the-fly value re-quantization, block-scale scores, delayed-maximum softmax, in-place accumulator rescale and a one-tile-late value product; a member with no valid row still runs it all'\n    Step:\n",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 402,
+      "line_start": 336,
+      "note": "SOFTMAX role：Member warp[0:4]/Register 208、七个 compute+三个 store+五个 await+两个 signal+三个 release 的 describe、Pipe 的 for(i)/for(page)/for(c) 与 all_rows_valid 两分支、Waiting 三类边",
+      "path": "root.yaml",
+      "quote": "        Role:\n          SOFTMAX:\n            Info:\n              Describe: Read each page score fragment, keep the delayed row maximum and the per-half denominator, publish E4M3 probabilities and form the row outputs\n              Member: warp[0:4]\n              Register: 208\n              Using_verb:\n                c",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 459,
+      "line_start": 403,
+      "note": "CORRECTION role：q_operand/k_sf/rescale 与 for(i[0:2]) 前瞻切片、rescale_needed 分支、signal:p_ready 位置、Waiting 中 {issue compute:rescale(i)} ← {done MMA[0]::matmul:p(i-1)@v(i-1)}",
+      "path": "root.yaml",
+      "quote": "          CORRECTION:\n            Info:\n              Describe: Stage the query operand and the per-page key scales into TMEM, and rescale the output accumulator in place when a row alpha differs from 1\n              Member: warp[4:8]\n              Register: 112\n              Using_verb:\n                compute:\n      ",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 501,
+      "line_start": 460,
+      "note": "TRANSFORM 与 LOAD role：v(i) 就地重量化、raw_payload/raw_scales 归还、load:q 一次覆盖 Q+QS、page_ids 每 16 tile、kv_raw 的 own/peer 载荷与奇页重复，await:raw_free 的三个前驱",
+      "path": "root.yaml",
+      "quote": "          TRANSFORM:\n            Info:\n              Describe: Re-quantize the gathered E2M1 payload of each tile with its E4M3 block scales into the E4M3 value half of this member\n              Member: warp[8:14]\n              Register: 96\n              Using_verb:\n                compute: {v: {execution_mode: serial,",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 543,
+      "line_start": 502,
+      "note": "MMA role：Member cta[0].warp[15:16]、matmul q@k/p@v 为 async_ordered、PV 落后一拍与循环外尾 PV、六条 Prepared 边全部指向 [*] 或 [0] 的正确成员",
+      "path": "root.yaml",
+      "quote": "          MMA:\n            Info:\n              Describe: Issue the block-scale score products and the one-tile-late value products for the pair, and multicast every completion to both members\n              Member: cta[0].warp[15:16]\n              Register: 96\n              Using_verb:\n                matmul:\n          ",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 565,
+      "line_start": 544,
+      "note": "COMBINE 的 Tile_pipeline：单 role MAIN(warp[0:8])、row_plan 建立 merge_needed、if 分支下 total_lse2→lse→for(s)acc→out，无 Storage 与 Waiting（跨提交依赖由 start_after 承担）",
+      "path": "root.yaml",
+      "quote": "      COMBINE:\n        Role:\n          MAIN:\n            Info:\n              Describe: Merge the split partials of one query row in one warp, 16 channels and two split slots per lane\n              Member: warp[0:8]\n              Using_verb:\n                compute:\n                  row_plan: {execution_mode: serial, d",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 596,
+      "line_start": 566,
+      "note": "REALIZATION 七条 Require：tcgen05 cta_group::2 与 multicast 提交、启动规模/smem/TMEM、barrier 初相位与 TMEM 整块申请、寄存器先降后升、近似指令与 fast math、workspace 雕刻与拒绝、COMBINE 独立 TU 与条件提交",
+      "path": "root.yaml",
+      "quote": "REALIZATION:\n  Require:\n    - Item: DESIGN.Tile_pipeline::MAIN.MMA\n      Choice: tcgen05.mma.cta_group::2 issued by one elected thread of member 0, kind mxf4nvf4 with block_scale and scale_vec 4X for the score product and kind f8f6f4 for the value product, each completion committed with a multicast covering both member",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    {
+      "line_end": 11,
+      "line_start": 5,
+      "note": "范围：十个文件与来源身份、调用链（构造期规划/forward 内不分配）、主机接受与拒绝、只有一套可提取实现（MODULES 单模块、两个 __global__、无录图/结果缓存、无引用宏）",
+      "path": "dispatch.md",
+      "quote": "实现范围。本次收录的是固定实现 `candidate/` 的十个文件（来源身份见 root.yaml 的 `META_DATA.Source`）：主机侧 `solution.py`（绑定入口 `Model.forward`）、`runtime.py`（校验、workspace 雕刻、参数绑定、启动）、`plan.py`（主机 work plan）；设备侧 `kernel.cu` 中唯一的解码主 kernel `kernel_cake_nvfp4_mla_decode_6260e249381d96576baa`、`combine.cu` 中的归并 kernel `kernel_cake_nvfp4_mla_decode_ff76ef6",
+      "sha256": "b0effb7541db7ba343ee017cddccba71c7f7ab68615a192c38bfe94f84f9995c"
+    },
+    {
+      "line_end": 22,
+      "line_start": 15,
+      "note": "主要机制 1-6 与 root 选择理由：uniform 实例的 unit_first 等距、每 cluster 一 piece、role/barrier/smem/TMEM/epilogue/combine 与 balanced 逐字节相同，差别只在主机划分与每 unit item 数",
+      "path": "dispatch.md",
+      "quote": "1. 工作划分。`plan.build_work_plan` 在主机把一批请求展开成扁平 work table，item = `(request, m_tile, v_half, tile_start, tile_end, split, num_splits, flags)`；行 tile 是 128 个展平 (token, head) 行，KV tile 是 128 个 token（2 个 page）。一个 piece（一个 (request, m_tile, KV 区间, split)）写成相邻的 v_half 0/1 两个 item，由一个 2-CTA cluster 承担：`unit_first[u] .. unit_fir",
+      "sha256": "b0effb7541db7ba343ee017cddccba71c7f7ab68615a192c38bfe94f84f9995c"
+    },
+    {
+      "line_end": 30,
+      "line_start": 24,
+      "note": "交 P3 核实的五项边界：S/O 的 lane-column 映射、barrier 到达计数与生产者集合、近似指令位置、空工作与尾块、硬件占位与采样验收范围——本轮已逐项在 root.yaml 落实并核对",
+      "path": "dispatch.md",
+      "quote": "待后续阶段核实的边界（均不影响本次代表选择）。\n\n- cluster 内操作数分割目前只做到量级与字节数自洽（见机制 2）。P3 写 `Tile_pipeline` 的 Storage 与 role 时须按实际 descriptor、swizzle 与偏移逐条复核 S/O 累加器的 lane-column 映射（当前推算：S 每 CTA 每 page 为 64 行 × 64 key，lane 编码 (key 半区, 行)；O 每 CTA 为 64 行 × 512 通道，占 128 lane × 256 列，lane 编码 (通道组 n_half, 行)；机制 2 中 O 的通道分工直接读自 `o_base` 与 TMA 列坐标，属源",
+      "sha256": "b0effb7541db7ba343ee017cddccba71c7f7ab68615a192c38bfe94f84f9995c"
+    },
+    {
+      "line_end": 43,
+      "line_start": 32,
+      "note": "完整设计表只有 root，并逐条说明 combine、FLAG_DIRECT_OUT 两路径、uniform/balanced、FlashInfer 对照为何不各自成完整设计",
+      "path": "dispatch.md",
+      "quote": "## 完整设计\n\n| 设计 | 具体机制与保留理由 | 关系 |\n| --- | --- | --- |\n| [root](root.yaml) | uniform 划分实例下的 cluster 解码方案：一个 2-CTA cluster 承担一个 piece，主 kernel 以固定 warp 角色（softmax / correction / transform / load / mma）与 mbarrier 流水线完成 block-scaled NVFP4 QK、E4M3 V 的就地转换、E4M3 P 的 PV 与在线归一化；单 split 的 piece 直写 O/LSE，多 split 的 piece 写 BF16 par",
+      "sha256": "b0effb7541db7ba343ee017cddccba71c7f7ab68615a192c38bfe94f84f9995c"
+    },
+    {
+      "line_end": 57,
+      "line_start": 45,
+      "note": "变体与组合：balanced（局部）与 schedule/tiles_per_split 覆写（参数）两条记录的基线、差异联动与条件依据；其基线对象清单与单位表述需按本轮核实结果细化",
+      "path": "dispatch.md",
+      "quote": "## 变体与组合\n\n### balanced 划分与每 unit 多 piece（局部）\n\n- 基线：[root](root.yaml) 的 `DESIGN.Work_schedule`（暂拟对象：MAIN 的 `Decomposition.Partition`、`Mapping.Worker_count`、`Schedule.Worker_assignment` 与 `Flow.Launch` 的 grid）；`Math_reshape`、`Tile_pipeline` 的 role、流水线、存储以及 combine step 全部沿用不变。\n- 差异与联动：`plan._balanced_plan` 取代 `_uniform_p",
+      "sha256": "b0effb7541db7ba343ee017cddccba71c7f7ab68615a192c38bfe94f84f9995c"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "dispatch.md",
+      "sha256": "b0effb7541db7ba343ee017cddccba71c7f7ab68615a192c38bfe94f84f9995c"
+    },
+    {
+      "path": "root.yaml",
+      "sha256": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    }
+  ],
+  "changed_files": [],
+  "checks": [
+    {
+      "command": "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/runs/af01989c-c712-4fcf-8ecc-3a88f10541eb/attempts/d9bca411-63f2-4658-adf4-9659ea81152f/materials/check-helper.py",
+      "exit_code": 0,
+      "note": "本次 attempt 的固定只读检查（--read-only --skip-hardware 由 Runner 定位，未传额外参数）：raw_passed=true、corrections 为空、diagnostics 为空；root.yaml raw_sha256 77be1aed…、effective_identity cdc89be0…、三区 origins 均为 root 本地定义，与已审快照逐字相同；来源身份 verified。"
+    },
+    {
+      "command": "cd /home/shaohanyong.shy/KernelSchema/.schema_extract/v2/runs/af01989c-c712-4fcf-8ecc-3a88f10541eb/attempts/d9bca411-63f2-4658-adf4-9659ea81152f/workspace && wc -l root.yaml dispatch.md && sha256sum dispatch.md",
+      "exit_code": 0,
+      "note": "核对当前 workspace 与已保存产物：root.yaml 596 行、dispatch.md 57 行，dispatch.md sha256 b0effb75… 与本次 dependency_digests 一致，确认两份产物与实际审阅的 raw 相同，artifact_evidence 行号沿用有效。"
+    }
+  ],
+  "checks_note": "本轮为 receipt_repair（handoff 超长）：产物未变，亲自重跑本 attempt 的 check_command（exit 0、无待落地修正）并核对两份产物行数与 dispatch.md 摘要，确认与已完整审阅的 raw 逐字相同，故四项判断与全部源码结论沿用本轮亲自核实的证据；handoff 已压缩到限额内，保留已定事项、理由、入口、P4/P6 去向与缺口。implementation 类仍含绑定入口锚点（solution.py::Model.forward 55-56）及调用链（runtime.py 162-169 → launch.cu::Run 320 → kernel.cu 4-5；分支 combine_launch.cu::Run 37 → combine.cu 86-87）。未运行 GPU、未修改 kernel、未改动只读材料，reviewer 对产物只读。结构检查不代替语义审阅：已人工通读 root.yaml 全 596 行与 dispatch.md 全 57 行，并沿 uniform 实例核对 solution.py/runtime.py/plan.py 全文、kernel.cu 五个 role 的全部控制流与同步点（展开的逐元素块按模式抽样核对掩码、fma/exp2、E4M3 打包、八块 epilogue 与 V 转换各一段）、combine.cu 与两个 launcher 全文、cuda_primitives.cuh 全部布局常量，以及 reference.py/input.py/shape_range/shape_cases/ACCEPTANCE/PRECISION/metadata；kernel.cu 重复展开的算术块未逐行读完，此为本轮实际覆盖边界。",
+  "conclusions": [
+    {
+      "evidence": [
+        10,
+        11,
+        12,
+        13,
+        15,
+        16,
+        17,
+        19,
+        20,
+        21,
+        22,
+        28,
+        34,
+        35,
+        36,
+        38,
+        55,
+        62,
+        65,
+        66,
+        75,
+        77,
+        78,
+        79,
+        80
+      ],
+      "subject": "design",
+      "text": "root 的三区 Design 与 REALIZATION 忠实表达 uniform 实例的完整方案，从绑定入口 solution.py::Model.forward 经 runtime.launch 的两次提交贯通到 out 与 lse。数学层：QK 不物化 FP32 解码，而由 cta_group::2 kind::mxf4nvf4 block_scale scale_vec::4X 的每 page 八条 64 通道累加指令完成（首条累加谓词 0 即覆盖 s(n)），scale/2^6/最大值位移合成一条 fma32 后接 ex2.approx.ftz，P 经 cvt.rn.satfinite.e4m3x2 舍入，V 由 e2m1→FP16 乘 E4M3 scale→satfinite e4m3 就地重量化，与 reference 的 fp16→clamp(±448)→e4m3 逐步对应；分母按 key 半区各自累加、区间末合并一次，归一化用 approx_rcp、统计量留在 log2 域，多 split 行的 BF16 partial 与 log2 域归并同 reference._split_ranges/_attention 一致，单 split 行退化为直写。调度层：piece=(request,row group,KV split) 为唯一 worktile、worker=2 CTA/cluster、Preassigned{start:worker_id,count:1} 与 uniform 下 unit_first=range(0,num_items,2)、grid=2×num_units 相符；COMBINE 为条件性第二次提交，start_after MAIN.kernel_done，与 launch() 同 stream 两次调用一致，Tile_reduction 的 dimension=piece 正确指向生产 step 的 partition 轴。流水线层：五个 role 的成员区间与寄存器预算、八条 Storage 的 depth/shape/total_size（raw 3×28672、V 2×32768、P 2×8192、TMEM 480 列的五个子区）逐项对上源码常量；REALIZATION 七条通过删除测试（tcgen05 pair 提交与 multicast、启动规模与 smem/TMEM 整块申请、barrier 初相位、寄存器先降后升、近似指令与 fast math 归属、workspace 雕刻与拒绝、COMBINE 独立 TU 与条件提交），未把源码偏好升级为硬要求。"
+    },
+    {
+      "evidence": [
+        0,
+        1,
+        2,
+        3,
+        6,
+        15,
+        16,
+        17,
+        18,
+        28,
+        29,
+        39,
+        40,
+        41,
+        43,
+        45,
+        48,
+        69,
+        72,
+        76,
+        86,
+        87
+      ],
+      "subject": "walkthrough",
+      "text": "贯通两例具体调用，均从绑定入口 Model.forward → runner.launch 起算。例一 shape_cases 用例 1（8 请求×4096、q_len 3、heads 64、sink 有、return_lse 真）：max 4096<8192 落入 when → uniform；tiles=32、row_groups=ceil(192/128)=2、折半规则因 2×partial_bytes>0.35×kv_bytes 立即停止 → num_splits=1，piece 数=8×2=16、grid=32 CTA=16 cluster，每 cluster 一 piece；max_splits=1 故 reduce_entry 为 None、不提交 COMBINE（Realization 第七条）。第二个 row group 的 member 1 行坐标从 192 起全部无效：all_rows_valid=0 走 store:out_row 且无效 lane 不写，但该 member 的 LOAD/TRANSFORM/CORRECTION/MMA 照常执行（cluster 的 V 通道半区与 2-CTA MMA 需要它），Tile_pipeline.Thesis 与 if 分支正确表达。sink 存在使 m=sinks[h]/ln2、z_half(0)=2^6，与 Contract Split_state_init 一致；末 tile 因页数为偶不触发 page_b=page_a，超出 4096 的 key 由 row_limit 掩码为 -inf。输出覆盖：每 CTA 四个象限以 n_half*128 与 +256 两组各四块 32 通道 TMA 写出本 CTA 64 行的全部 512 通道，lse 仅由 n_half==0 的有效行写，两成员合计覆盖完整逻辑张量且每行恰写一次，forward 返回 (out,lse)。例二 单请求 kv=8000、q_len 1、heads 128：width 折半到 32 → num_splits=2、row_groups=1 → 2 piece、grid=4，max_splits>1 故同 stream 追加 COMBINE（grid (1,16)、256 线程）；MAIN 写 partial_o[split,row,:] 与 log2 域 partial_lse 并把未用槽填 -inf，COMBINE 按 row_splits=2 在 log2 域求 total_lse2、以 ex2.approx 权重升序累加 BF16 partial 后写 out 与 lse=total_lse2*ln2；混合批次中单 split 行的 row_splits=1，COMBINE 的 row_plan 建立 merge_needed=0，该 worktile 仍执行但完全不写，与 MAIN 的直写互不重叠。两例的符号、工作归属、资源与事件引用均可在 root.yaml 内定位，无需历史上下文。"
+    },
+    {
+      "evidence": [
+        7,
+        23,
+        24,
+        25,
+        30,
+        33,
+        37,
+        44,
+        47,
+        48,
+        50,
+        51,
+        52,
+        53,
+        56,
+        61,
+        63,
+        64,
+        67
+      ],
+      "subject": "dependencies",
+      "text": "逐条核对 Waiting 三类边与源码 barrier 的生产者集合、到达计数与槽距，全部一致且成员选择正确。跨成员到达 rank 0 的用 [*]（s_empty 256=2×128 softmax 线程经 mapa、p_full 512=softmax+correction 各 256、v_full 384=2×192 transform 线程、sfa_full/sf_full 256=2×128 correction 线程），CTA 本地的用同成员引用（corr_sig/corr_empty 128=本 CTA 四个 softmax/correction warp），MMA 完成的边一律写 MMA[0]（tcgen05.commit multicast mask 3 覆盖两成员）：await:s_ready/await:pv_complete/await:p_free/await:v_free/await:o_ready 及 LOAD 的 await:raw_free 前驱 matmul:q(n[i-3,1])@k(n[i-3,1]) 与 raw 深度 3、p/v 深度 2、k_sf 深度 2 的移位距离逐项相符。移位越界的前驱（i=0,1 的 p_free/v_free、i=0 的 row_state_free 与 rescale、i<3 的 raw_free）按声明窗口跳过，并由源码的初相位=空槽（raw/v/sf/p/o_empty 初值 1，full 类初值 0）承担，Realization 第三条把这一点显式交接。rescale 的关键边 {issue compute:rescale(i)} ← {done MMA[0]::matmul:p(i-1)@v(i-1)} 不可由 pipe 顺序推出，已正确显式写出；signal:p_ready 位于 rescale 之后，保证 PV(i) 不会与 o 的原地缩放并发。跨 step 依赖只有 partial_store/lse2_split 两条 global handoff，消费者只读 row_splits 覆盖的已写槽，故不需要 initialize（构造期的 zero_()/fill_(-inf) 与主 kernel 的 -inf 填充均无消费者，后者已如实保留为无消费者的写出）。跨 piece 的 o_empty/q_empty 归还在本实例（每 worker 一 piece）无前驱可指，release:o_acc 保留为无消费者动作、matmul:p@v 的 describe 写明首个 PV 以非累加谓词初始化累加器，处理正确。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_self_contained",
+      "text": "仅凭当前 root.yaml 与 dispatch.md 即可独立理解本阶段全部内容：Contract 给出常量、调用面、有效域、两套划分策略与逐输出验收记录；Math_reshape 的五个步骤自带 Symbol（含 retention 与 value）、Arithmetic 与 Ledger，凡引用 Contract 处均写全限定名；Work_schedule 的两个 step 各自完整给出分解、映射、调度与 Flow/Handoff；Tile_pipeline 给出 Index 域、八条 Storage 的容量与 view、每个 role 的动作白名单与 describe、Pipe 控制流与 Waiting 边；REALIZATION 的 Item 全部可解析到上游对象。表达式中出现的 width/tiles(b)/row_groups/split_count/tile_count 均可在 Contract 或 Math_reshape 的定义处唯一定位，未出现依赖历史解释、目录补写或旧稿才能读通的字段。dispatch.md 的机制说明与待核清单为阅读辅助，不构成任何定义来源。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_layering",
+      "text": "分层总体正确：Contract 只定义任务（含数值绑定的划分策略与验收记录，未把 tile 大小、cluster 规模、kernel 数量写成算法前提）；Math_reshape 只定义值、精度与物化，未写线程布局或屏障编号；Work_schedule 只定义工作、成员、提交与交接，未展开 role 与逐线程地址；Tile_pipeline 只在已定工作边界内定义 role、动作、存储与依赖；REALIZATION 只补上游未表达的原语、启动规模、初相位与编译归属，未新增角色、搬运或状态。when 只收窄范围（uniform 域 + cc(10,3) + workspace 容量），未复述 Contract 已有约束，也未承担 selector 职责。唯一偏差在共享 Contract 的 Hardware_specification.Execution：五条摘要在必要的单元组成与存储归属之外，还写入了本设计的 role 编号映射、setmaxnreg 预算、512/256 线程与 189440 字节动态 smem、480/512 TMEM 列用法，cluster 一条更把单元组成本身定义为“两个 CTA 一对”，与 REALIZATION 第二/四条及 Tile_pipeline 的 Role/Register 重复；这些内容准确且与 Design 无矛盾，P1 占位政策下 Feature 保持 null 也使部分机制事实只能落在 Execution 摘要，故不阻塞本阶段，已按非阻塞问题登记并交 P6 的共享适用性核查处置（若判定需收敛，修改权属 P1）。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_consistency",
+      "text": "全文表达一套具体已选方案，未见开关、枚举或选路公式：uniform 的 width 只作为 Contract 定义的量被 Partition.size 与 Worker_count 引用，balanced 与 schedule/tiles_per_split 覆写留在目录。随输入变化的尺寸、尾块与空工作照常核对并各自贯通：piece 数与 Worker_count 一致（row_groups×sum_b ceil(tiles/width)=num_items/2）；tile_count≥1 保证循环外尾 PV 与 await:pv_complete(tile_count-1) 有定义；for(i[0:2]) 与 if(i+2<tile_count) 在 tile_count=1 时正确退化，对应源码的 num_tiles_c>1 与 num_tiles_c>it_c+2 守卫；行数不满 128 时以 all_rows_valid 分出 bulk 与逐行两条写路径，无效 lane 不写但 member 仍跑完流水线；奇数页尾块以重复页加掩码表达。改变提交/物化/事件存在性的三类情形分别处理且未混淆：max_splits=1 时不提交 COMBINE（Realization 与 Mapping.Strategy 双处声明），提交后 row_splits=1 的 worktile 仍执行但无数据效果，-inf 填充与 release:o_acc 这类无消费者动作保留其事件。Handoff 的键引用 Math_reshape 已登记值，COMBINE 的 Tile_reduction 输入/输出/方法均为上游引用，未在本区重写公式。数值一致性亦核对：alpha 在 m=-inf 时取 1 而 Contract rescale 取 0，因该情形下 a=0 且 z_half=0（sinks 有限，故 m=-inf 只可能出现在无 sink 种子时）而不可观测；Reciprocal_split_output 已就地说明 not live 时 a 已为 0。"
+    },
+    {
+      "evidence": [],
+      "subject": "document_relevance",
+      "text": "内容必要性合格：保留了两处会改变数值的窄化点（E4M3 P、E4M3 V）、三处近似（ex2/lg2/rcp 及主 TU 的 fast math）并按规范写 unknown: 且不以采样验收充当误差界；Ledger 五条各记一类变化，计量对象明确（每 key 行操作数字节 2048→288、跨半区交换次数、每行每 split 2*head_dim 字节的 BF16 读、归约重排为八段），未把改写宣称为已证实的性能收益；来源限制如实保留（Tolerance 的 Source only 记录、Gap 只写参考入口与 Compute 的差异、workspace 容量角落指向 Realization 条件）。无退修记录、待办、历史批准或重复决定混入正文；dispatch.md 的机制说明只保留影响理解的源码事实并注明注释仅作导航。命名清楚常见（piece/row group/key half/all_rows_valid/rescale_needed），未见生僻自造缩写。可选的文字细化不影响正确内容，已随交接给出，未据此扣住产物。"
+    },
+    {
+      "evidence": [],
+      "subject": "framework_candidate_review",
+      "text": "本轮未提出也未确认任何框架候选。本次 worker 回执的 framework_candidates 为空，无可核实项；P2 交接提到的两项 P1 期候选（其一为 tolerance-source-record-budget，涉及 Tolerance 来源记录未能容纳 mode/max_rel_l2）我独立核对后不重复提交：ACCEPTANCE.json 的 mode=elementwise_and_l2 中唯一带阈值的分量就是已完整保留的 atol/rtol/max_mismatch_fraction，max_rel_l2 为 null，当前记录已声明未采用默认判据解释（no formula; no defaults），故没有新的可复查反例支持规则不适配。DOC0/DOC3/DOC4/DOC5/DOC6 的现有条款足以表达本节点全部事实（含条件性第二次提交、无消费者动作、跨 piece 边在本实例无前驱、片上区域复用为输出暂存），未遇到必须自造规则才能读通之处。"
+    }
+  ],
+  "decision": "approve",
+  "format": "schema_extract.receipt.v2",
+  "framework_candidates": [],
+  "handoff": "P3 放行 root（Version 2、raw 77be1aed…、dispatch b0effb75…、本 attempt 检查 exit 0），交 P4；完整集合仍只 root，无需返回 P2。\n已定与理由：uniform 下 unit_first 等距 2，故 piece=(request,row group,KV split) 为唯一 worktile、worker=2 CTA/cluster、Preassigned count=1；COMBINE 仅 max_splits>1 提交且 start_after MAIN.kernel_done。入口 solution.py::Model.forward→runtime.launch→launch.cu::Run→kernel.cu（分支 combine_launch.cu::Run→combine.cu）。\nP2 四项待核已落实：S 每 page 128 lane×32 列、O 128 lane×256 列且输出通道由 softmax key 半区（n_half*128 与 +256）决定；30 个 barrier 到达数与生产者集合逐一对账；近似指令与 fast math 归属入 Math/REALIZATION；空工作与尾块以 all_rows_valid 两分支、page_b=page_a、row_limit 掩码表达。跨 piece 的 o_empty/q_empty 本实例无前驱，只保留 release:o_acc。\n交 P4 改 dispatch：balanced 记录基线补 Tile_pipeline::MAIN（需 worktile 循环与跨 piece o/Q 归还边），删非字段的“Flow.Launch 的 grid”改指 Worker_count/Placement；tiles_per_split 记录改按 Contract 的 width 定位、单位为 kv_tile(128 token) 非 page；第 11 行补 ex2_emulation_f32x2(_value)/softmax_frag_exp2_cast（末者转 BF16，非 P 量化路径），第 27 行补 raw_full、sf_empty，第 16 行改“从不进入输出的通道地址”。\n可选细化（P6 酌情）：rescale_needed 未写明首 tile 恒不 rescale；partial_store/lse2_split 的 retention 未含 split 多重性；REALIZATION 第五条提近似倒数但 Item 未锚定该值；“eight 64-channel steps”实为每 page 八步。\n去向与缺口：硬件区仍 P1 占位，when 的 cc(10,3) 与 metadata 的 SM100/103 差异留待有权阶段；Execution 摘要夹带设计细节已按非阻塞 issue 交 P6（修改权属 P1）；workspace 容量角落沿用 P1 issue，条件在本节点 REALIZATION.Require；三处近似无误差界写 unknown:，采样不代表全域。源码观察：setmaxnreg 的 dec(warp4-7) 与 inc(warp0-3) 间无屏障，REALIZATION 第四条已把先降后升写成要求。",
+  "identity": {
+    "attempt_id": "d9bca411-63f2-4658-adf4-9659ea81152f",
+    "backend": "claude",
+    "base_checkpoint": "95bfe47ebdb83d115b6d978228f534e86dad96c565e08c1e155d62f8cfbf7f7b",
+    "dependency_digests": {
+      "dispatch.md": "b0effb7541db7ba343ee017cddccba71c7f7ab68615a192c38bfe94f84f9995c",
+      "root.yaml": "77be1aed5b6e9e79f1d69f63857d8a28ba28410b17cafd8138a31af5916aec00"
+    },
+    "effort": "max",
+    "generation": 0,
+    "input_fingerprint": "039d7d8e716ccaebb6f699b59b6494c9c38ce4de3da6498253df4f9aa82f47f0",
+    "mode": "normal",
+    "model": "qwen3.8-max[1m]",
+    "node": "root",
+    "node_signature": "ab0e457c10e6b132dbee68b7b414cee9992a8d088258c7fb235ec017abe881ab",
+    "plan_revision": 1,
+    "role": "reviewer",
+    "run_id": "af01989c-c712-4fcf-8ecc-3a88f10541eb",
+    "selection_signature": "4d6547deec0a6ab46979fb2c306fa9e526eb514dd7452a9e980915e20d3bb036",
+    "session_scope": {
+      "node": "root",
+      "operation": "normal",
+      "role": "reviewer",
+      "stage": "P3"
+    },
+    "stage": "P3"
+  },
+  "issues": [
+    {
+      "detail": "非阻塞的分层/最小登记偏差：Execution 摘要在 DOC2 要求的“单元组成、所在层级、所属片上存储”之外写入了本设计的实现决定——warp 条列出 softmax 0-3/correction 4-7/transform 8-13/load 14/mma 15 的角色映射，warpgroup 条写出 setmaxnreg 208/112/96，cta 条写出主 kernel 512 线程、189440 字节动态 smem、512 列 TMEM 用 480 列及 combine 256 线程，thread 条写出“elected single threads issue the TMA copies and the tcgen05 MMA”；cluster 条更把单元组成本身定义为“Two CTAs co-scheduled as one pair (__cluster_dims__(2,1,1) with spread scheduling preference)”，即把本方案的 cluster 规模写进共享 Contract 词汇。这些内容与 DESIGN.Tile_pipeline 的 Role.Member/Register、Storage.tmem 及 REALIZATION 第二/四条重复，且与 launch.cu 的实际启动配置一致，因此不构成事实错误，也不影响本阶段任何判断；风险在于共享 Contract 被单个设计的启动配置约束（P1 占位规则要求“不把单次 launch 配置写成设备上限”，DOC2 的 cluster 示例写法为“size fixed at launch”），以及未来同算子节点须与这些数字保持一致。P3 无 Contract 写权限，故不退回 P1，仅登记交 P6 的共享适用性核查处置。",
+      "evidence": [],
+      "kind": "schema_conformance",
+      "recovery_condition": "P6 终审时判定：若认为 Execution 摘要应只保留设备事实，则由具 P1 权限的作者把 role 映射、寄存器预算、线程数、动态 smem 与 TMEM 列用法收敛到 DESIGN.Tile_pipeline 与 REALIZATION（现有条目已足以承担），并把 cluster 摘要改为不固定规模的设备级描述，同时确认 Work_schedule 的 Worker/Placement 仍能从 Design 侧解析 cluster 规模；若 P6 认为在 Feature 保持占位的提取政策下这些摘要属可接受的最小登记变通，则维持原样，本条关闭，无需改动任何内容。",
+      "scope": "root.yaml CONTRACT.Hardware_specification.Execution（第 146-150 行，thread/warp/warpgroup/cta/cluster 五条摘要）"
+    }
+  ],
+  "reopen": null,
+  "source_evidence": [
+    {
+      "category": "host",
+      "line_end": 56,
+      "line_start": 55,
+      "note": "host 类绑定入口：Model.forward 无参转发到构造期返回的 runner，支持 Contract Call_semantics 与 root 的调用面",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/solution.py",
+      "quote": "def forward(self):\n        return self.runner()",
+      "sha256": "6fe11a09a630678a2594b58daf6c4ffc1834b4d5a1539a51b02ac2532dde2d0a",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 39,
+      "line_start": 38,
+      "note": "prepare_nvfp4_batch_decode_with_kv_cache_mla 在 __init__ 调用：规划、分配与 workspace 初始化均在构造期，forward 内不分配、不主机同步",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/solution.py",
+      "quote": "self.runner = _runtime.prepare_nvfp4_batch_decode_with_kv_cache_mla(\n            query,",
+      "sha256": "6fe11a09a630678a2594b58daf6c4ffc1834b4d5a1539a51b02ac2532dde2d0a",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 167,
+      "line_start": 162,
+      "note": "launch 在同一 stream 先 main_entry 再（存在时）reduce_entry，返回 (out,lse) 或 out：Flow.Launch 两条提交与 start_after MAIN.kernel_done 的实际依据",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote": "launch(self):\n        with tvm_ffi.use_torch_stream():\n            self.main_entry(*self.main_arguments)\n            if self.reduce_entry is not None:\n                self.reduce_entry(*self.reduce_arguments)\n        return (self.out, self.lse) if self.return_lse else self.out",
+      "sha256": "9bcd04dce6b8e7cede83a71949dfb523958a9ca849896a571d77c89adeb3a0c7",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 453,
+      "line_start": 442,
+      "note": "reduce_kwargs 仅在 max_splits>1 时构造，grid=(total_q, ceil(num_heads/8),1)：COMBINE 的条件性提交与 Worker_count 公式",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote": "reduce_kwargs = None\n    if max_splits > 1:\n        reduce_kwargs = dict(\n            o=out,\n            lse=lse,\n            partial_o=partial_o,\n            partial_lse=partial_lse,\n            row_splits=row_splits,\n            total_q=total_q,\n            num_heads=num_heads,\n            max_splits=max_splits,\n    ",
+      "sha256": "9bcd04dce6b8e7cede83a71949dfb523958a9ca849896a571d77c89adeb3a0c7",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 359,
+      "line_start": 344,
+      "note": "max_pages/q_len 校验、num_sms 读取与 build_work_plan 调用：Uniform_split_policy 中 num_sms 的来源与主机接受条件",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote": "max_pages = int(block_tables.shape[1])\n    if min(kv_lens) < q_len or max(kv_lens) > max_pages * PAGE_SIZE:\n        raise ValueError(\n            f\"every request needs q_len ({q_len}) <= seq_len <= max_pages * {PAGE_SIZE}\"\n        )\n    total_q = batch * q_len\n    num_sms = torch.cuda.get_device_properties(device).mult",
+      "sha256": "9bcd04dce6b8e7cede83a71949dfb523958a9ca849896a571d77c89adeb3a0c7",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 365,
+      "line_start": 360,
+      "note": "workspace_layout 总量与容量不足即 raise：REALIZATION 的 256B 雕刻+拒绝条目与 when 的容量条件",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote": "layout = workspace_layout(plan, batch=batch, num_heads=num_heads, q_len=q_len)\n    flat = workspace_buffer.view(-1).view(torch.uint8)\n    if flat.numel() < layout[\"total\"]:\n        raise ValueError(\n            f\"workspace_buffer needs {layout['total']} bytes for this batch ({plan.max_splits} KV splits), got {flat.nume",
+      "sha256": "9bcd04dce6b8e7cede83a71949dfb523958a9ca849896a571d77c89adeb3a0c7",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 338,
+      "line_start": 333,
+      "note": "SUPPORTED_COMPUTE_CAPABILITIES 只含 (10,3)：when 中 compute capability 条件的来源（报错文案写 10.0/10.3 的差异已由 dispatch 记录）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote": "capability = torch.cuda.get_device_capability(device)\n    arch = SUPPORTED_COMPUTE_CAPABILITIES.get(capability)\n    if arch is None:\n        raise ValueError(\n            f\"NVFP4 MLA decode requires compute capability 10.0 or 10.3 (got {capability[0]}.{capability[1]})\"\n        )",
+      "sha256": "9bcd04dce6b8e7cede83a71949dfb523958a9ca849896a571d77c89adeb3a0c7",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 392,
+      "line_start": 388,
+      "note": "构造期 partial_o.zero_()、partial_lse.fill_(-inf)、work_table/unit_first 拷贝：MAIN 的 Schedule.Strategy 外部供给，且这些初值不是 COMBINE 消费的必需初值",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote": "partial_o.zero_()\n    partial_lse.fill_(float(\"-inf\"))\n    work_table.copy_(work_table_rows(plan))\n    unit_first.copy_(torch.tensor(plan.unit_first, dtype=torch.int32))\n    q_indptr_host = list(range(0, total_q + 1, q_len))",
+      "sha256": "9bcd04dce6b8e7cede83a71949dfb523958a9ca849896a571d77c89adeb3a0c7",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 21,
+      "line_start": 14,
+      "note": "MODULES 只登记一个模块，main stage 源为 launch.cu/kernel.cu 且带 --use_fast_math：单一可提取实现与 Realization 的 fast-math 条目",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote": "MODULES = {\n    \"cake_nvfp4_mla_decode_sm_103a\": {\n        \"arch\": \"sm_103a\",\n        \"main\": {\n            \"sources\": [\"launch.cu\", \"kernel.cu\"],\n            \"compile_flags\": [\"--use_fast_math\"],\n            \"ffi_entry\": \"run\",\n            \"arg_plan\": [",
+      "sha256": "9bcd04dce6b8e7cede83a71949dfb523958a9ca849896a571d77c89adeb3a0c7",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 53,
+      "line_start": 49,
+      "note": "reduce stage 源为 combine_launch.cu/combine.cu，compile_flags 为空：COMBINE 独立翻译单元不继承 fast math",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote": "\"reduce\": {\n            \"sources\": [\"combine_launch.cu\", \"combine.cu\"],\n            \"compile_flags\": [],\n            \"ffi_entry\": \"run\",\n            \"arg_plan\": [",
+      "sha256": "9bcd04dce6b8e7cede83a71949dfb523958a9ca849896a571d77c89adeb3a0c7",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 325,
+      "line_start": 320,
+      "note": "schedule=='auto' 时 max(kv)>=BALANCED_MIN_KV(8192) 走 balanced，否则 uniform：root 的 when 与 Contract Uniform_split_policy 适用条件",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote": "kv_lens = [int(v) for v in kv_lens]\n    if q_len < 1 or not kv_lens or min(kv_lens) < q_len:\n        raise ValueError(\"every request needs kv_len >= q_len >= 1\")\n    if schedule == \"auto\":\n        schedule = \"balanced\" if max(kv_lens) >= BALANCED_MIN_KV else \"uniform\"\n    if schedule == \"balanced\":",
+      "sha256": "b285e88642d8fb0ee64edb90a38db52e310c92630bfa43627d62cafa61c3d7a3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 208,
+      "line_start": 192,
+      "note": "_uniform_plan 的 item 顺序 (b, split, m_tile, v_half)、start/end 区间与 FLAG_SEED_SINK/FLAG_DIRECT_OUT：MAIN 的 Decomposition.Strategy 与 piece 升序排列",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote": "b, kv_len in enumerate(kv_lens):\n        tiles = kv_tiles(kv_len)\n        num_splits = math.ceil(tiles / tiles_per_split)\n        max_splits = max(max_splits, num_splits)\n        for split in range(num_splits):\n            start = split * tiles_per_split\n            end = min(tiles, start + tiles_per_split)\n           ",
+      "sha256": "b285e88642d8fb0ee64edb90a38db52e310c92630bfa43627d62cafa61c3d7a3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 215,
+      "line_start": 209,
+      "note": "unit_first=range(0,len(items)+1,2)：uniform 下每个 cluster 恰领一个 piece，故 Preassigned count=1、Refill none、Worker_count=piece 数",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote": "return WorkPlan(\n        schedule=\"uniform\",\n        items=tuple(items),\n        unit_first=tuple(range(0, len(items) + 1, CLUSTER_PAIR)),\n        max_splits=max_splits,\n        tiles_per_split=tiles_per_split,\n    )",
+      "sha256": "b285e88642d8fb0ee64edb90a38db52e310c92630bfa43627d62cafa61c3d7a3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 180,
+      "line_start": 159,
+      "note": "choose_tiles_per_split 的折半规则（min 8、items>=2*num_sms、next_splits*partial_bytes>0.35*kv_bytes）：Contract 中 width 的唯一来源，也是 Partition.size/Worker_count 所引用的量",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote": "m_tiles = _m_tiles(q_len, num_heads)\n    total_tiles = [kv_tiles(kv) for kv in kv_lens]\n    max_tiles = max(total_tiles)\n    kv_bytes = sum(kv_lens) * (ROW_BYTES + SF_ROW_BYTES)\n    partial_bytes_per_split = len(kv_lens) * q_len * num_heads * HEAD_DIM * 4\n    tiles_per_split = max_tiles\n    while True:\n        items = ",
+      "sha256": "b285e88642d8fb0ee64edb90a38db52e310c92630bfa43627d62cafa61c3d7a3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "host",
+      "line_end": 395,
+      "line_start": 377,
+      "note": "token_splits 要求 num_heads 整除 128 并逐 token 覆盖：COMBINE 读到的 per-token split count 等于 count(splits(b,gg))，且每行只被一条路径写",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/plan.py",
+      "quote": "OWS_PER_TILE % num_heads != 0:\n        raise ValueError(\n            f\"per-token row_splits need num_heads ({num_heads}) to divide ROWS_PER_TILE ({ROWS_PER_TILE}); a token would straddle two row tiles\"\n        )\n    tokens_per_tile = ROWS_PER_TILE // num_heads\n    out = [0] * total_q\n    for it in plan.items:\n        i",
+      "sha256": "b285e88642d8fb0ee64edb90a38db52e310c92630bfa43627d62cafa61c3d7a3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 56,
+      "line_start": 55,
+      "note": "implementation 类绑定入口锚点（implementation_source 所指 candidate/solution.py::Model.forward）：整个实现链由此入口开始",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/solution.py",
+      "quote": "def forward(self):\n        return self.runner()",
+      "sha256": "6fe11a09a630678a2594b58daf6c4ffc1834b4d5a1539a51b02ac2532dde2d0a",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 169,
+      "line_start": 162,
+      "note": "调用链第一跳：NVFP4MLADecodeRunner.launch/__call__ 在同一 torch stream 上依次调 main_entry（launch.cu::Run）与可选 reduce_entry（combine_launch.cu::Run），并决定返回值形状",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/runtime.py",
+      "quote": "def launch(self):\n        with tvm_ffi.use_torch_stream():\n            self.main_entry(*self.main_arguments)\n            if self.reduce_entry is not None:\n                self.reduce_entry(*self.reduce_arguments)\n        return (self.out, self.lse) if self.return_lse else self.out\n\n    __call__ = launch",
+      "sha256": "9bcd04dce6b8e7cede83a71949dfb523958a9ca849896a571d77c89adeb3a0c7",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 320,
+      "line_start": 320,
+      "note": "调用链第二跳：launch.cu::Run 的主 kernel 主机入口，接收 Q/QS/KV/KVS/OT/PO 六个 tensor map 与 work_table/unit_first/page_table/seq_lens/q_indptr/sinks 及 grid",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/launch.cu",
+      "quote": "void Run(TensorView arg_Q, TensorView arg_QS, TensorView arg_KV, TensorView arg_KVS, TensorView arg_OT, TensorView arg_PO, TensorView arg_O, TensorView arg_LSE, TensorView arg_partial_o, TensorView arg_partial_lse, TensorView arg_work_table, TensorView arg_unit_first, TensorView arg_page_table, TensorView arg_seq_lens,",
+      "sha256": "ec488492dea9a94d59118ec95d97472bc5e93b1540bcfd88a14588e6eeeed719",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 37,
+      "line_start": 37,
+      "note": "调用链分支：combine_launch.cu::Run 的归并 kernel 主机入口（o/lse/partial_o/partial_lse/row_splits 与 grid），仅在 plan.max_splits>1 时被调用",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/combine_launch.cu",
+      "quote": "void Run(TensorView arg_o, TensorView arg_lse, TensorView arg_partial_o, TensorView arg_partial_lse, TensorView arg_row_splits, int64_t arg_total_q, int64_t arg_num_heads, int64_t arg_max_splits, int64_t grid_x, int64_t grid_y, int64_t grid_z) {",
+      "sha256": "5e439464b6af5a2751077c5a785c75db467b79a3aa7fb6dec8b8856d71a807c3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 5,
+      "line_start": 4,
+      "note": "__launch_bounds__(512) __cluster_dims__(2,1,1) 与主 kernel 名及参数表：Realization 的启动规模条目与 selected_designs 的实例身份",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "__global__ __launch_bounds__(512) __cluster_dims__(2,1,1) void\nkernel_cake_nvfp4_mla_decode_6260e249381d96576baa(const __grid_constant__ CUtensorMap Q, const __grid_constant__ CUtensorMap QS, const __grid_constant__ CUtensorMap KV, const __grid_constant__ CUtensorMap KVS, const __grid_constant__ CUtensorMap OT, const _",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 98,
+      "line_start": 84,
+      "note": "TMEM_NCOLS 480、ACC 0、SFA0-3 320/328/336/344、SFB0-7 352..408、Q 416：Storage.tmem 的 s/o/q_sf/k_sf/q_op 五个 view 区间逐项对应",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/cuda_primitives.cuh",
+      "quote": "#define TMEM_NCOLS 480\n#define TMEM_ACC_OFFSET 0\n#define TMEM_SFA0_OFFSET 320\n#define TMEM_SFA1_OFFSET 328\n#define TMEM_SFA2_OFFSET 336\n#define TMEM_SFA3_OFFSET 344\n#define TMEM_SFB0_OFFSET 352\n#define TMEM_SFB1_OFFSET 360\n#define TMEM_SFB2_OFFSET 368\n#define TMEM_SFB3_OFFSET 376\n#define TMEM_SFB4_OFFSET 384\n#define TM",
+      "sha256": "f870b3163c1e8b03425b2abf66d8ee78aa1ae8361efbf57ed0718ff1dddcf064",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 103,
+      "line_start": 99,
+      "note": "NUM_RAW_PIPE_STAGES 3、V/P/S/SF 各 2：raw_kv depth 3、v_stage/p_stage depth 2、s(n)/k_sf(n) 两版本子区",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/cuda_primitives.cuh",
+      "quote": "#define NUM_RAW_PIPE_STAGES 3\n#define NUM_V_PIPE_STAGES 2\n#define NUM_P_PIPE_STAGES 2\n#define NUM_S_PIPE_STAGES 2\n#define NUM_SF_PIPE_STAGES 2",
+      "sha256": "f870b3163c1e8b03425b2abf66d8ee78aa1ae8361efbf57ed0718ff1dddcf064",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 207,
+      "line_start": 185,
+      "note": "V0/V1(32768 stride)、P(8192)、ROW_STATE/XCHG_MAX/XCHG_SUM(512)、PAGES(128)、SMEM_TOTAL 189440、THREADS 512：Storage 各条 total_size 与 Realization 的 smem 预算",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/cuda_primitives.cuh",
+      "quote": "#define SMEM_V0_OFF 105472\n#define SMEM_V0_STAGE_BYTES 16384\n#define SMEM_V0_STRIDE 32768\n#define SMEM_V1_OFF 121856\n#define SMEM_V1_STAGE_BYTES 16384\n#define SMEM_V1_STRIDE 32768\n#define SMEM_P_OFF 171008\n#define SMEM_P_STAGE_BYTES 8192\n#define SMEM_P_STRIDE 8192\n#define SMEM_ROW_STATE_OFF 187392\n#define SMEM_ROW_STAT",
+      "sha256": "f870b3163c1e8b03425b2abf66d8ee78aa1ae8361efbf57ed0718ff1dddcf064",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 134,
+      "line_start": 129,
+      "note": "raw_empty init 321、sfa_full init 256：raw 槽的三个读者集合（transform 192+correction 128+MMA multicast 1）与 q_sf_ready 的 [*] 成员选择",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "// raw_empty: 3 barriers, init_count=321\n            mbarrier_init(smem + 40, 321);\n            mbarrier_init(smem + 48, 321);\n            mbarrier_init(smem + 56, 321);\n            // sfa_full: 1 barriers, init_count=256\n            mbarrier_init(smem + 64, 256);",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 172,
+      "line_start": 150,
+      "note": "v_full 384、corr_sig/corr_empty 128、p_full 512、s_empty/o_empty 256、p_empty/pv_done/o_full 1：各 await/signal 边的生产者集合与同成员/跨成员区分",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "// v_full: 2 barriers, init_count=384\n            mbarrier_init(smem + 136, 384);\n            mbarrier_init(smem + 144, 384);\n            // v_empty: 2 barriers, init_count=1\n            mbarrier_init(smem + 152, 1);\n            mbarrier_init(smem + 160, 1);\n            // corr_sig: 1 barriers, init_count=128\n         ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 196,
+      "line_start": 183,
+      "note": "mbarrier init 后 cluster arrive/wait，tcgen05.alloc 512 列，taddr 从 smem 读取：Realization 第三条（初始相位编码空槽、TMEM 基址须 pair 内可见）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "tile int* tmem_addr_storage = (volatile int*)(smem_raw + 240);\n    if (warp == 0) {\n        int tmem_allocation_slot = smem + 240;\n        asm volatile(\"tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32 [%0], %1;\" :: \"r\"(tmem_allocation_slot), \"r\"(512) : \"memory\");\n        __syncwarp();\n        asm volatile(\"tcge",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 222,
+      "line_start": 216,
+      "note": "warp 8-15 先 setmaxnreg.dec 96，softmax 再 inc 208：Role.Register 208/112/96 与 Realization 的先降后升顺序",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "warp >= 8 && warp <= 15) {\n        asm volatile(\"setmaxnreg.dec.sync.aligned.u32 96;\");\n    }\n\n    // ---- Role: softmax ----\n    if (warp <= 3) {\n        asm volatile(\"setmaxnreg.inc.sync.aligned.u32 208;\");",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 229,
+      "line_start": 224,
+      "note": "quadrant/n_half/quadrant%2*32+lane/lane_base=quadrant*32<<16/xchg_idx=n_half*64+row_c：TMEM lane 编码 (key half,row) 与 Half_split_online_softmax 的 key 半区划分",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "int quadrant = make_warp_uniform(warp % 4);\n            int n_half = make_warp_uniform(quadrant / 2);\n            int row_c = quadrant % 2 * 32 + lane;\n            int lane_base = quadrant * 32 << 16;\n            int xchg_idx = n_half * 64 + row_c;\n            int xchg_bar = make_warp_uniform(2 + quadrant % 2);",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 259,
+      "line_start": 242,
+      "note": "item += 2 遍历 unit 区间、work_table 八字段、row_in_req=m_tile*128+rank*64+row_c、row_limit=min(kv_len-q_len+token+1,kv_len)：Member 行半区、Addressing 与 s_frag 的因果掩码",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "for (int item_s = item_lo_s; item_s < item_hi_s; item_s += 2) {\n                int tr_item_s = tr_s & (int)(item_s == item_lo_s);\n                int b_s = work_table[item_s * 8];\n                int m_tile_s = work_table[item_s * 8 + 1];\n                int tile_start_s = work_table[item_s * 8 + 3];\n                i",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 269,
+      "line_start": 263,
+      "note": "FLAG_SEED_SINK 时 row_max=sinks[h]*log2e、仅 n_half==0 置 row_sum=64：Split_state_init 与 Half_split 初值（z_half(0)=2^6、z_half(1)=0）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "if ((flags_s & 1) != 0) {\n                    int sink_head_limit = ((head_s) < (num_heads - 1) ? (head_s) : (num_heads - 1));\n                    int sink_head = sink_head_limit;\n                    row_max = sinks[sink_head] * 1.4426950408889634f;\n                    if (n_half == 0) {\n                        row_sum",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 292,
+      "line_start": 286,
+      "note": "s_empty 经 mapa 远端 arrive 到 rank 0：MMA 的 await:s_free 必须用 SOFTMAX[*]，release:s_slot 归还本成员 s(n) 区",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "    asm volatile(\n                        \"{\\n\\t\"\n                        \".reg .b32 remAddr32;\\n\\t\"\n                        \"mapa.shared::cluster.u32 remAddr32, %0, %1;\\n\\t\"\n                        \"mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\\n\\t\"\n                        \"}\"\n                       ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 464,
+      "line_start": 457,
+      "note": "tile_max_scaled=tile_max*scale_log2（全掩码为 -inf），经 smem_xchg_max + 64 线程 named barrier 与另一 key 半区取最大：row_max 动作与 xchg_max 存储",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "float tile_max_scaled = ((tile_max > -CAKE_INF) ? tile_max * scale_log2 : -CAKE_INF);\n                    float _max_3 = max_noftz(row_max, tile_max_scaled);\n                    float new_max = _max_3;\n                    smem_xchg_max[xchg_idx] = new_max;\n                    asm volatile(\"barrier.sync %0, 64;\" :: \"r\"(",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 472,
+      "line_start": 466,
+      "note": "延迟最大值 (row_max>-inf && new_max-row_max<=2 → 保持)、safe_max、alpha=(row_max>-inf)?ex2.approx.ftz(row_max-safe):1：Half_split 的 m_next/safe/alpha 公式逐字对应",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "    if (row_max > -CAKE_INF && new_max - row_max <= 2.0f) {\n                            new_max = row_max;\n                        }\n                    }\n                    float safe_max = ((new_max == -CAKE_INF) ? 0.0f : new_max);\n                    float _exp2_0 = approx_exp2(row_max - safe_max);\n                ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 477,
+      "line_start": 474,
+      "note": "先等 corr_empty 再写 row_state[row_c]=alpha 并 arrive corr_sig：SOFTMAX 的 await:row_state_free(i) ← CORRECTION::signal:row_state_free(i-1) 与 signal:alpha",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "mbarrier_wait(corr_empty_addr, correction_empty_phase);\n                    correction_empty_phase ^= 1;\n                    row_state[row_c] = alpha;\n                    mbarrier_arrive(corr_sig_addr);",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 483,
+      "line_start": 481,
+      "note": "fma.rn.ftz.f32x2(sv, scale_log2, 6.0f-safe_max)：Score_scale_in_exponent 的 p=exp2(fma32(d,scale_log2,p_log2_offset-safe))，一次舍入而非先乘后加",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "const float2 _fma_b2_4 = {scale_log2, scale_log2};\n                            const float2 _fma_c2_5 = {6.0f - safe_max, 6.0f - safe_max};\n                            float2 _fma_pair_6 = fma_f32x2(make_float2(sv0[0], sv0[1]), _fma_b2_4, _fma_c2_5);",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 631,
+      "line_start": 627,
+      "note": "block_sum=sv0_sum+sv1_sum（未舍入 p）、row_sum=row_sum*alpha+block_sum、随后等 p_empty：z_half 递推与 await:p_free 的位置",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "block_sum = sv0_sum + sv1_sum;\n                        }\n                    }\n                    row_sum = row_sum * alpha + block_sum;\n                    mbarrier_wait(p_empty_addr + (p_stage_s) * 8, p_phase_s);",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 648,
+      "line_start": 642,
+      "note": "cvt.rn.satfinite.e4m3x2.f32 把 p 舍入为饱和 E4M3：p_q 的定义与公式中显式写出的窄化点",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "\"cvt.rn.satfinite.e4m3x2.f32 _lo, %2, %1;\\n\\t\"\n                                    \"cvt.rn.satfinite.e4m3x2.f32 _hi, %4, %3;\\n\\t\"\n                                    \"mov.b32 %0, {_lo, _hi};\\n\\t\"\n                                    \"}\"\n                                    : \"=r\"(_packed) : \"f\"(sv0[0]), \"f\"(sv0[1]),\n    ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 864,
+      "line_start": 854,
+      "note": "p_full 经 mapa arrive 到 rank 0；piece 末尾等 o_full：MMA 的 await:p_ready 需 SOFTMAX[*]+CORRECTION[*]，await:o_ready 位于 row_stat 之前",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "    asm volatile(\n                        \"{\\n\\t\"\n                        \".reg .b32 remAddr32;\\n\\t\"\n                        \"mapa.shared::cluster.u32 remAddr32, %0, %1;\\n\\t\"\n                        \"mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\\n\\t\"\n                        \"}\"\n                       ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 878,
+      "line_start": 867,
+      "note": "xchg_sum 合并两半 z、inv_sum=(row_sum>0)?approx_rcp:0、lg2.approx.ftz、lse2_s=row_max+log2-6：Reciprocal_split_output 的 live/inv_z/lse2_split 与近似声明",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "smem_xchg_sum[xchg_idx] = row_sum;\n                asm volatile(\"barrier.sync %0, 64;\" :: \"r\"(xchg_bar) : \"memory\");\n                row_sum = row_sum + smem_xchg_sum[xchg_idx ^ 64];\n                asm volatile(\"barrier.sync %0, 64;\" :: \"r\"(xchg_bar) : \"memory\");\n                float _rcp_0 = approx_rcp(row_sum);\n   ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 886,
+      "line_start": 873,
+      "note": "o_base=out_row*512+n_half*128、part_base=(split*rows_total+out_row)*512+n_half*128、epi_bulk=(valid_rows_cta==64)、warp_tile0/1 落在 P smem：输出通道由 key 半区决定、cta_rank 不进入通道地址、p_stage 复用为输出暂存",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "int out_row = (q_start_s + token_s) * num_heads + head_s;\n                int o_base = out_row * 512 + n_half * 128;\n                int part_base = (split_s * rows_total + out_row) * 512 + n_half * 128;\n                float _log2_0;\n                asm volatile(\"lg2.approx.ftz.f32 %0, %1;\" : \"=f\"(_log2_0) : \"f\"(row_s",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 924,
+      "line_start": 913,
+      "note": "epi_bulk 路径：inv_sum 缩放→BF16 打包→st.shared 暂存→tma_store_2d(OT 或 PO, n_half*128, warp_row0)：store:out_block 的 direct/partial 双目标",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "asm volatile(\"st.shared.v4.b32 [%0], {%1,%2,%3,%4};\" :: \"r\"((warp_tile0 + (lane * 64 ^ (lane * 64 >> 7 & 3) << 4))), \"r\"(o_ra_bf16[0]), \"r\"(o_ra_bf16[1]), \"r\"(o_ra_bf16[2]), \"r\"(o_ra_bf16[3]) : \"memory\");\n                    asm volatile(\"st.shared.v4.b32 [%0], {%1,%2,%3,%4};\" :: \"r\"((warp_tile0 + (lane * 64 + 16 ^ (la",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 951,
+      "line_start": 929,
+      "note": "epi_bulk 为假时 else if(row_valid) 逐行 guarded 向量写 O+o_base：store:out_row 分支与 all_rows_valid==0 的空工作表达",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "} else if (row_valid != 0) {\n                    if (direct_out != 0) {\n                        {\n                            const float2 _prescale2_43 = {inv_sum, inv_sum};\n                            #if __CUDA_ARCH__ >= 1000\n                            #pragma unroll\n                            for (int _ps = 0; _p",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1192,
+      "line_start": 1177,
+      "note": "c>=2 时先 cp.async.bulk.wait_group.read 1 再复用同一暂存 tile：release:epi_stage(c-2) 的位置与含义（源已读完、全局写仍可在途）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "                  if (elect_sync()) {\n                            asm volatile(\"cp.async.bulk.wait_group.read 1;\");\n                        }\n                        __syncwarp();\n                    }\n                    asm volatile(\"st.shared.v4.b32 [%0], {%1,%2,%3,%4};\" :: \"r\"((warp_tile0 + (lane * 64 ^ (lane * 64 ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1470,
+      "line_start": 1466,
+      "note": "第二组输出通道的 TMA 列坐标 n_half*128+256：o_block 的八块 32 通道覆盖 [128c,128c+128)∪[256+128c,384+128c)，两半区合计 512 通道",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "t_sync()) {\n                            if (direct_out != 0) {\n                                tma_store_2d((&OT), n_half * 128 + 256, warp_row0, warp_tile0);\n                            } else {\n                                tma_store_2d((&PO), n_half * 128 + 256, split_s * rows_total + warp_row0, warp_tile0);",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 1857,
+      "line_start": 1848,
+      "note": "最后一次 tcgen05.ld 等待之后、末块暂存之前经 mapa arrive o_empty：release:o_acc 放在 c==last 且早于 store:out_block",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "asm volatile(\"tcgen05.wait::ld.sync.aligned;\" ::: \"memory\");\n                {\n                    asm volatile(\"tcgen05.fence::before_thread_sync;\");\n                    asm volatile(\n                        \"{\\n\\t\"\n                        \".reg .b32 remAddr32;\\n\\t\"\n                        \"mapa.shared::cluster.u32 re",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2003,
+      "line_start": 1989,
+      "note": "epi_bulk 时 wait_group.read 0；仅 row_valid && n_half==0 写 LSE=lse2*ln2 或 partial_lse[row*max_splits+split]=lse2 并把未用 split 槽填 -inf：await:stores_drained、store:lse 与无消费者的 -inf 填充如实保留",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "if (epi_bulk != 0) {\n                    if (elect_sync()) {\n                        asm volatile(\"cp.async.bulk.wait_group.read 0;\");\n                    }\n                    __syncwarp();\n                }\n                if ((row_valid & (int)(n_half == 0)) != 0) {\n                    if (direct_out != 0) {\n       ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2063,
+      "line_start": 2060,
+      "note": "correction 用 tcgen05.st 32x32b.x16 把 Q 行写入 taddr+lane_base_c+416：q_op 区 [416,480) 与 compute:q_operand",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "volatile(\n                    \"tcgen05.st.sync.aligned.32x32b.x16.b32\"\n                    \" [%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16};\"\n                    :: \"r\"(taddr + (unsigned int)lane_base_c + 416), \"r\"(q_row_words_c[0]), \"r\"(q_row_words_c[1]), \"r\"(q_row_words_c[2]), \"r\"(q_row",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2254,
+      "line_start": 2245,
+      "note": "sfa_full 经 mapa arrive；随后等 raw_full+sf_empty，k_sf 基址 352+sf_stage*32：signal:q_sf_ready、await:k_sf_free 与 k_sf(n) 的两槽子区",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "asm volatile(\n                    \"{\\n\\t\"\n                    \".reg .b32 remAddr32;\\n\\t\"\n                    \"mapa.shared::cluster.u32 remAddr32, %0, %1;\\n\\t\"\n                    \"mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\\n\\t\"\n                    \"}\"\n                    :: \"r\"(sfa_full_addr), \"r\"(",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2358,
+      "line_start": 2355,
+      "note": "一个 tile 的两个 page scale 都读完才 arrive raw_empty：release:raw_scales(i) 位于 page 循环之后",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "                  mbarrier_arrive(raw_empty_addr + (raw_stage_c) * 8);\n                    raw_stage_c += 1;\n                    if (raw_stage_c == 3) { raw_stage_c = 0; raw_phase_c ^= 1; }",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2374,
+      "line_start": 2371,
+      "note": "if(num_tiles_c>1) 才预置 tile 1 的 k_sf：CORRECTION 的 for(i[0:2]) 切片与声明域 [0,tile_count) 求交后自然退化",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "num_tiles_c > 1) {\n                    mbarrier_wait(raw_full_addr + (raw_stage_c) * 8, raw_phase_c);\n                    mbarrier_wait(sf_empty_addr + (sf_stage_c) * 8, sf_phase_c);\n                    int sfb_base_c_0 = taddr + (unsigned int)lane_base_c + 352 + (unsigned int)(sf_stage_c * 32);",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2502,
+      "line_start": 2494,
+      "note": "等 corr_sig→读 row_state[row_cc]→arrive corr_empty→need_rescale=(it_c>0)&&!__all_sync(alpha==1)：signal:row_state_free 与 rescale_needed 的实际判据（含首 tile 恒不 rescale）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "mbarrier_wait(corr_sig_addr, _phase_corr_sig_0);\n                    _phase_corr_sig_0 ^= 1;\n                    float alpha_c = row_state[row_cc];\n                    mbarrier_arrive(corr_empty_addr);\n                    int need_rescale = 0;\n                    if (it_c > 0) {\n                        int _vote_0 = __",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2509,
+      "line_start": 2504,
+      "note": "need_rescale 时先等 pv_done 再按 32 列遍历 256 列读写同一 TMEM 区：{issue compute:rescale(i)} ← {done matmul:p(i-1)@v(i-1)} 这条边不可由 pipe 顺序推出",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "mbarrier_wait(pv_done_addr, _phase_pv_done_0);\n                        _phase_pv_done_0 ^= 1;\n                        asm volatile(\"tcgen05.fence::after_thread_sync;\");\n                        #pragma unroll\n                        for (int col = 0; col < 256; col += 32) {\n                            int o_addr = taddr",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2541,
+      "line_start": 2526,
+      "note": "rescale 之后经 mapa arrive p_full；it_c>0 且未 rescale 时补等 pv_done；if(num_tiles_c>it_c+2) 预置 i+2 的 k_sf 并 arrive raw_empty：signal:p_ready、await:pv_complete(i-1) 与 i+2 前瞻",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "asm volatile(\n                        \"{\\n\\t\"\n                        \".reg .b32 remAddr32;\\n\\t\"\n                        \"mapa.shared::cluster.u32 remAddr32, %0, %1;\\n\\t\"\n                        \"mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\\n\\t\"\n                        \"}\"\n                        :: ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2664,
+      "line_start": 2663,
+      "note": "piece 末尾最后一次 pv_done 等待：CORRECTION Pipe 收尾的 await:pv_complete(tile_count-1)",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "mbarrier_wait(pv_done_addr, _phase_pv_done_0);\n                _phase_pv_done_0 ^= 1;",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2718,
+      "line_start": 2713,
+      "note": "transform 等 raw_full+v_empty，raw_base/scale_off=raw_stage*28672+24576/v_off=v_stage*32768：await:raw_ready、await:v_free 与 raw_kv/v_stage 的 view 槽映射",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "mbarrier_wait(raw_full_addr + (raw_stage_t) * 8, raw_phase_t);\n                    mbarrier_wait(v_empty_addr + (v_stage_t) * 8, v_phase_t);\n                    asm volatile(\"fence.proxy.async.shared::cta;\" ::: \"memory\");\n                    int raw_base_t = smem_k0h0_addr + (unsigned int)(raw_stage_t * 28672);\n       ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 2756,
+      "line_start": 2748,
+      "note": "cvt.rn.f16x2.e2m1x2 → mul.rn.f16x2(E4M3 scale) → cvt.rn.satfinite.e4m3x2.f16x2：Prepare_v 与 Block_scale_score_product 中 V 操作数的 FP16 乘法+一次饱和舍入",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "\"cvt.rn.f16x2.e4m3x2 sh0, %8;\\n\"\n                                \"cvt.rn.f16x2.e4m3x2 sh1, %9;\\n\"\n                                \"mov.b32 {b0, b1, b2, b3}, %10;\\n\"\n                                \"cvt.rn.f16x2.e2m1x2 ah0, b0;\\n\"\n                                \"mul.rn.f16x2 ah0, ah0, sh0;\\n\"\n                          ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3240,
+      "line_start": 3229,
+      "note": "v_full 经 mapa arrive 到 rank 0，随后本地 arrive raw_empty 并推进 raw/v stage：signal:v_ready 的 [*] 前驱与 release:raw_payload",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "asm volatile(\n                        \"{\\n\\t\"\n                        \".reg .b32 remAddr32;\\n\\t\"\n                        \"mapa.shared::cluster.u32 remAddr32, %0, %1;\\n\\t\"\n                        \"mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\\n\\t\"\n                        \"}\"\n                        :: ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3276,
+      "line_start": 3264,
+      "note": "q_row0=q_indptr*num_heads+m_tile*128+rank*64；等 q_empty 后 expect_tx 18432 并发 5 次 TMA（Q 四次 64B 分块 + QS）：load:q 的 done 覆盖两个区域与成员行半区",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "int q_row0 = q_indptr[b_l] * num_heads + m_tile_l * 128 + rank_l * 64;\n                int first_page_l = page_table[b_l * max_pages];\n                int kv_len_l = seq_lens[b_l];\n                int num_pages_l = (kv_len_l + 64 - 1) / 64;\n                mbarrier_wait(q_empty_addr, _phase_q_empty_0);\n                ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3291,
+      "line_start": 3280,
+      "note": "每 16 tile 预取 32 个 page id（越界填 0），page 数为奇时 page_b=page_a：page_ids 存储、load:page_ids 的 if(i%16==0) 与尾块重复页",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "int batch_pos = it_l % 16;\n                    if (batch_pos == 0) {\n                        int fetch_page = 2 * (tile_start_l + it_l) + lane;\n                        int fetched = ((fetch_page < num_pages_l) ? page_table[b_l * max_pages + fetch_page] : 0);\n                        smem_pages[lane] = fetched;\n         ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3300,
+      "line_start": 3292,
+      "note": "等 raw_empty 后 expect_tx 28672，own 32 行按 x=0/64/128/192 四次拷满 256B：await:raw_free 与 kv_raw 的 own-key 全载荷",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "mbarrier_wait(raw_empty_addr + (raw_stage_l) * 8, raw_phase_l);\n                    if (elect_sync()) {\n                        mbarrier_arrive_expect_tx(raw_full_addr + (raw_stage_l) * 8, 28672);\n                        int kv_row_own_h = page_a * 64 + rank_l * 32;\n                        int kv_row_oth_h = page_a * 6",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3307,
+      "line_start": 3301,
+      "note": "rank0 取对端行 x=0/128、rank1 取 64/192：Mapping.Strategy 中 member r 的 V 通道半区 [128r,128r+128)∪[256+128r,...)",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "if (rank_l == 0) {\n                            tma_2d_gmem2smem(smem_ko0h0_addr + (unsigned int)(raw_stage_l * 28672), (&KV), 0, kv_row_oth_h, raw_full_addr + (raw_stage_l) * 8);\n                            tma_2d_gmem2smem(smem_ko1h0_addr + (unsigned int)(raw_stage_l * 28672), (&KV), 128, kv_row_oth_h, raw_full_addr +",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3366,
+      "line_start": 3356,
+      "note": "仅 cta_rank==0 的 elect 线程执行；等 q_full/sfa_full，每 page 等 raw_full+sf_full+s_empty：MMA 的 Member cta[0].warp[15:16] 与三条 Prepared 边",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "if (cta_rank == 0) {\n                    if (elect_sync()) {\n                        mbarrier_wait(q_full_addr, _phase_q_full_0_1);\n                        _phase_q_full_0_1 ^= 1;\n                        mbarrier_wait(sfa_full_addr, _phase_sfa_full_0);\n                        _phase_sfa_full_0 ^= 1;\n                   ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3374,
+      "line_start": 3373,
+      "note": "tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.scale_vec::4X，首条累加谓词 0、其余 1：Realization 第一条与 Block_scale_score_product 的八段 64 通道累加/首步覆盖 s(n)",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "asm volatile(\"{\\n\\t.reg .pred p;\\n\\tsetp.ne.b32 p, %6, 0;\\n\\ttcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.scale_vec::4X [%0], [%1], %2, %3, [%4], [%5], p;\\n\\t}\\n\" :: \"r\"(tmem_acc), \"r\"(tmem_q), \"l\"(b_desc), \"r\"(0x8100480U), \"r\"(tmem_sfa0), \"r\"(tmem_sfb0), \"r\"(0) : \"memory\");\n                                     ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3426,
+      "line_start": 3421,
+      "note": "s_full 与 sf_empty 以 multicast mask 3 提交到两个 CTA：await:s_ready/await:k_sf_free 的前驱写作 MMA[0] 而非 [*]",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "tcgen05_commit_cg2_multicast(s_full_addr + (s_stage_m) * 8, (uint16_t)(3));\n                            tcgen05_commit_cg2_multicast(sf_empty_addr + (sf_stage_m) * 8, (uint16_t)(3));\n                            sf_stage_m += 1;\n                            if (sf_stage_m == 2) { sf_stage_m = 0; sf_phase_m ^= 1; }\n      ",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3494,
+      "line_start": 3484,
+      "note": "第二个 page 的 QK 之后额外 multicast 提交 raw_empty：LOAD 的 await:raw_free 前驱为 matmul:q(n[i-3,1])@k(n[i-3,1])",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "tcgen05_commit_cg2_multicast(s_full_addr + (s_stage_m) * 8, (uint16_t)(3));\n                            tcgen05_commit_cg2_multicast(sf_empty_addr + (sf_stage_m) * 8, (uint16_t)(3));\n                            {\n                                tcgen05_commit_cg2_multicast(raw_empty_addr + (raw_stage_m) * 8, (uint16_t)",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3502,
+      "line_start": 3495,
+      "note": "it_m>=1 才发上一 tile 的 PV，且仅 it_m-1==0 时等 o_empty（初相位即空，本实例单 piece 无消费者），first_pv_flag 决定累加谓词：PV 落后一拍与 matmul:p@v 的覆盖语义",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "    if (it_m >= 1) {\n                                if (it_m - 1 == 0) {\n                                    mbarrier_wait(o_empty_addr, _phase_o_empty_0);\n                                    _phase_o_empty_0 ^= 1;\n                                }\n                                int first_pv_flag = ((it_m - 1 == 0) ?",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3523,
+      "line_start": 3505,
+      "note": "PV：A=smem_p(p_stage*512)、B=smem_v0(v_stage*2048)、D=tmem_acc+64、kind::f8f6f4：p@v 使用双方 V、写入 o 区 [64,320) 与 p_stage/v_stage 的槽距",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "                int _mma_a_lo_16 = (((smem_p_addr) >> 4) & 0x3FFF) + (p_stage_m) * 512;\n                                    int _mma_b_lo_16 = ((((smem_v0_addr) >> 4) & 0x3FFF) | 0x4000000) + (v_stage_m) * 2048;\n                                    asm volatile(\n                    \"{\\n\\t\"\n                    \".reg .pre",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 3586,
+      "line_start": 3578,
+      "note": "PV 后 multicast 提交 pv_done/p_empty/v_empty，末 tile 提交 o_full：await:pv_complete、await:p_free、await:v_free、await:o_ready 四条边的共同来源",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/kernel.cu",
+      "quote": "        tcgen05_commit_cg2_multicast(pv_done_addr, (uint16_t)(3));\n                                tcgen05_commit_cg2_multicast(p_empty_addr + (p_stage_m) * 8, (uint16_t)(3));\n                                tcgen05_commit_cg2_multicast(v_empty_addr + (v_stage_m) * 8, (uint16_t)(3));\n                                p_s",
+      "sha256": "a27ff2920841eaa6089e5e057df5ad6c562da69fcb28ac028fb10a5c20789434",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 87,
+      "line_start": 86,
+      "note": "combine kernel 名与 __launch_bounds__(256,1)、参数 (o,lse,partial_o,partial_lse,row_splits,total_q,num_heads,max_splits)",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/combine.cu",
+      "quote": "__global__ __launch_bounds__(256, 1) void\nkernel_cake_nvfp4_mla_decode_ff76ef6d8e6453ca5e3c(__nv_bfloat16* __restrict__ o, float* __restrict__ lse, __nv_bfloat16* __restrict__ partial_o, float* __restrict__ partial_lse, int* __restrict__ row_splits, int total_q, int num_heads, int max_splits)",
+      "sha256": "75a87c361b35a6f950cb63ac5220be406fbc6b8cae3d24a7dfb22f94a07de9e6",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 106,
+      "line_start": 99,
+      "note": "head_index=blockIdx.y*8+warp，head>=num_heads 不工作，num_splits=row_splits[token]，仅 num_splits>1 才进入：Partition(head tile 8)、row_plan 与 merge_needed",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/combine.cu",
+      "quote": "int query_index = blockIdx.x;\n    int head_index = blockIdx.y * 8 + warp;\n    int output_lane = lane;\n    if (head_index < num_heads) {\n        int row = query_index * num_heads + head_index;\n        int num_splits = row_splits[query_index];\n        int lse_base = row * max_splits;\n        if (num_splits > 1) {",
+      "sha256": "75a87c361b35a6f950cb63ac5220be406fbc6b8cae3d24a7dfb22f94a07de9e6",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 122,
+      "line_start": 109,
+      "note": "每 lane 读 split=lane 与 lane+32（>=num_splits 取 -inf），warp max 归约，全 -inf 时 mx=0：Log2_split_merge 的 mx 定义与“只读已写槽”故 Handoff 无需 initialize",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/combine.cu",
+      "quote": "#pragma unroll\n            for (int i = 0; i < 2; i++) {\n                int split_index = output_lane + i * 32;\n                float split_lse2 = ((split_index < num_splits) ? partial_lse[lse_base + split_index] : NEG_INF);\n                lane_split_lse2[i] = split_lse2;\n                float max_with_split = max_no",
+      "sha256": "75a87c361b35a6f950cb63ac5220be406fbc6b8cae3d24a7dfb22f94a07de9e6",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 138,
+      "line_start": 124,
+      "note": "approx_exp2 权重求和 + lg2.approx.ftz 得 global_lse2，lane0 写 lse=global_lse2*ln2：total_lse2 的 log2 域公式、近似声明与 store:lse",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/combine.cu",
+      "quote": "#pragma unroll\n            for (int lane_split = 0; lane_split < 2; lane_split++) {\n                float unnormalized_weight = approx_exp2(lane_split_lse2[lane_split] - max_split_lse2);\n                normalizer = normalizer + unnormalized_weight;\n            }\n            float warp_normalizer = normalizer;\n        ",
+      "sha256": "75a87c361b35a6f950cb63ac5220be406fbc6b8cae3d24a7dfb22f94a07de9e6",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 155,
+      "line_start": 145,
+      "note": "o_base=row*512+lane*16、split_stride=total_q*num_heads*512，按 split 升序读 BF16 partial：每 lane 16 通道、merged 升序累加与 partial_o 的 [max_splits,rows,512] 布局",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/combine.cu",
+      "quote": "int split_stride = total_q * num_heads * 512;\n            int o_base = row * 512 + output_lane * 16;\n            #pragma unroll 1\n            for (int split = 0; split < num_splits; split++) {\n                float normalized_weight = approx_exp2(partial_lse[lse_base + split] - global_lse2);\n                float split",
+      "sha256": "75a87c361b35a6f950cb63ac5220be406fbc6b8cae3d24a7dfb22f94a07de9e6",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 190,
+      "line_start": 173,
+      "note": "BF16→FP32 精确加宽、FP32 加权累加、__floats2bfloat162_rn 打包后写 o：compute:acc 与 store:out 及 out=bf16(merged)",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/combine.cu",
+      "quote": "#pragma unroll\n                    for (int vector_element = 0; vector_element < 8; vector_element++) {\n                        output_accum[vector_offset + vector_element] = output_accum[vector_offset + vector_element] + partial_values[vector_element] * split_weight;\n                    }\n                }\n           ",
+      "sha256": "75a87c361b35a6f950cb63ac5220be406fbc6b8cae3d24a7dfb22f94a07de9e6",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 92,
+      "line_start": 85,
+      "note": "grid 由 host 传入、block 256、dynamicSmemBytes=0：Realization 第七条与 COMBINE 无动态 smem（Tile_pipeline 该 step 无 Storage）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/combine_launch.cu",
+      "quote": "dim3 grid((uint32_t)grid_x, (uint32_t)grid_y, (uint32_t)grid_z);\n  dim3 block(256u, 1u, 1u);\n\n  cudaLaunchConfig_t config{};\n  config.gridDim = grid;\n  config.blockDim = block;\n  config.dynamicSmemBytes = 0u;\n  config.stream = stream;",
+      "sha256": "5e439464b6af5a2751077c5a785c75db467b79a3aa7fb6dec8b8856d71a807c3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 472,
+      "line_start": 455,
+      "note": "block 512、clusterDim(2,1,1)、Spread 调度偏好、dynamicSmemBytes 189440：Realization 第二条与 Hardware Execution 的 cluster/cta 事实来源",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/launch.cu",
+      "quote": "dim3 grid((uint32_t)grid_x, (uint32_t)grid_y, (uint32_t)grid_z);\n  dim3 block(512u, 1u, 1u);\n\n  // Extended direct-source launch for a linked CUDA kernel symbol.\n  cudaLaunchAttribute attrs[2]{};\n  int n = 0;\n  attrs[n].id = cudaLaunchAttributeClusterDimension;\n  attrs[n].val.clusterDim.x = 2u;\n  attrs[n].val.clusterDi",
+      "sha256": "ec488492dea9a94d59118ec95d97472bc5e93b1540bcfd88a14588e6eeeed719",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "implementation",
+      "line_end": 270,
+      "line_start": 264,
+      "note": "OT/PO tensor map box (32,32) BF16 swizzle 64B：store:out_block 的“32 行 32 通道一次 bulk store”",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/candidate/launch.cu",
+      "quote": "uint32_t box_dim[2] = {32u, 32u};\n  uint32_t elem_strides[2] = {1u, 1u};\n  CUtensorMap tm{};\n  const void* tensor_base = static_cast<const char*>(t.data_ptr()) + 0u;\n  CUresult r = cuTensorMapEncodeTiled(\n      &tm, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, const_cast<void*>(tensor_base), global_dim, global_strides, box_dim",
+      "sha256": "ec488492dea9a94d59118ec95d97472bc5e93b1540bcfd88a14588e6eeeed719",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "reference",
+      "line_end": 31,
+      "line_start": 19,
+      "note": "_split_ranges 的 uniform 分支（width 折半、288 字节、0.35、区间生成）与 Contract Uniform_split_policy 逐项一致，是 Split_partition“数值绑定”的依据",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/reference.py",
+      "quote": "tiles = [(length + 127) // 128 for length in lengths]\n    row_groups = (qlen * heads + 127) // 128\n    if max(lengths) < 8192:\n        width = max(tiles)\n        kv_bytes = sum(lengths) * 288\n        partial_bytes = len(lengths) * qlen * heads * 512 * 4\n        while sum((t + width - 1) // width for t in tiles) * row_g",
+      "sha256": "547b462abbe89be7718e0d19c9a49bcd5dc3e8c054bba257195b0b3479cd1ea3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "reference",
+      "line_end": 58,
+      "line_start": 56,
+      "note": "v = decoded → fp16 → clamp(-448,448) → float8_e4m3fn → float：Prepare_v 与 Design 中 V 重量化路径的对照",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/reference.py",
+      "quote": "# NVFP4 decoded V is converted through FP16 into finite E4M3 for PV.\n    # K retains its decoded NVFP4 value for blockscaled QK.\n    v = v.to(torch.float16).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float()",
+      "sha256": "547b462abbe89be7718e0d19c9a49bcd5dc3e8c054bba257195b0b3479cd1ea3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "reference",
+      "line_end": 90,
+      "line_start": 75,
+      "note": "128-key 块循环、mask、updated-max 延迟规则 <=2、safe、rescale、p=exp2(score-safe+6)、stored_p clamp448→e4m3、accum/denominator：Block_update 与 Half_split_online_softmax 的参考真值",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/reference.py",
+      "quote": "for begin in range(left, min(length, right), 128):\n                    positions = torch.arange(begin, min(begin + 128, length, right), device=q.device)\n                    pages = block_table[b, positions // page].long()\n                    key = k[pages, 0, positions % page].float()\n                    value = v[page",
+      "sha256": "547b462abbe89be7718e0d19c9a49bcd5dc3e8c054bba257195b0b3479cd1ea3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "reference",
+      "line_end": 101,
+      "line_start": 91,
+      "note": "live、partial、仅多 split 才 bf16、lse 统计、logsumexp 合并与权重：Split_partial/Merge_output 与 Reciprocal_split_output、Log2_split_merge 的等价关系（含单 split 退化为 w=1）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/reference.py",
+      "quote": "    live = denominator > 0\n                partial = accum / torch.where(live, denominator, 1.0)[:, None]\n                # Only multi-split paths materialize BF16 partial output.\n                if len(partitions[b][group]) > 1:\n                    partial = partial.to(torch.bfloat16).float()\n                partials.",
+      "sha256": "547b462abbe89be7718e0d19c9a49bcd5dc3e8c054bba257195b0b3479cd1ea3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "reference",
+      "line_end": 147,
+      "line_start": 135,
+      "note": "forward 禁用 TF32、以 FP32 中间求值再 copy_ 回调用者 out/lse：Contract Score 的“TF32 disabled/无近似指令定义真值”与原地写回语义",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/reference.py",
+      "quote": "forward(self):\n        x = self.prepared\n        torch.backends.cuda.matmul.allow_tf32 = False\n        z = normalized(x)\n        target = z['out']\n        target_lse = z['lse']\n        z['out'] = torch.empty_like(target, dtype=torch.float32)\n        if target_lse is not None:\n            z['lse'] = torch.empty_like(tar",
+      "sha256": "547b462abbe89be7718e0d19c9a49bcd5dc3e8c054bba257195b0b3479cd1ea3",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "acceptance",
+      "line_end": 399,
+      "line_start": 392,
+      "note": "tolerance: atol .01 / rtol .05 / max_mismatch_fraction 0 / max_rel_l2 null / relative_to candidate / mode elementwise_and_l2：Tolerance 的来源记录已保留全部可判定阈值与比较对象",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/performance/ACCEPTANCE.json",
+      "quote": "\"tolerance\": {\n                \"atol\": 0.01,\n                \"rtol\": 0.05,\n                \"max_mismatch_fraction\": 0.0,\n                \"max_rel_l2\": null,\n                \"relative_to\": \"candidate\",\n                \"mode\": \"elementwise_and_l2\"\n              }",
+      "sha256": "b91521fd359e6921d78bd7c8d4d8188f925cd8bd1fd6edba0cbd68eea80edddc",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "acceptance",
+      "line_end": 5,
+      "line_start": 3,
+      "note": "144 条检查 0 条超差、采样不代表全域零误差：Realization 近似条目不能升级为数值保证，三处 Approx 写 unknown: 有据",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/PRECISION.md",
+      "quote": "固定域20/20、声明域20/20通过；数值判定沿用冻结checker，未放宽容差。每个输出和mutated input分别检查，同一alias可能对应两条记录，不能累加成独立错误元素数。\n\n共144条数值检查，0条存在非零超差元素（均在该检查原有容许范围内）。最大单检查超差比例：0/524288 = 0.00000000%；位置：fixed/0，seed 2026101221，output[0]。",
+      "sha256": "a5bc8ad2d5aec6733e18f918a1e38f3ec389c3cc5ed329ea9b8c8560273ae8f1",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "scope",
+      "line_end": 40,
+      "line_start": 6,
+      "note": "kv_lengths 1..32 项且 1..262144、query_len 1..16、heads∈{64,32,128,16}：Contract Domain 与 when 的有效域边界",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/shape_range.json",
+      "quote": "v_lengths\": {\n        \"type\": \"array\",\n        \"min_length\": 1,\n        \"max_length\": 32,\n        \"items\": {\n          \"type\": \"integer\",\n          \"min\": 1,\n          \"max\": 262144\n        }\n      },\n      \"query_len\": {\n        \"type\": \"integer\",\n        \"min\": 1,\n        \"max\": 16\n      },\n      \"heads\": {\n        \"",
+      "sha256": "f84a3db565d3e916fc9f322cd45543c8db508e39590b02b0f8c731c5d50dc64a",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "scope",
+      "line_end": 66,
+      "line_start": 59,
+      "note": "cross_field_invariants: min(kv)>=query_len、sum(kv)<=1048576：Domain 的两条跨字段约束",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/shape_range.json",
+      "quote": "    \"return_lse\",\n      \"sink\"\n    ]\n  },\n  \"cross_field_invariants\": [\n    \"min(kv_lengths) >= query_len\",\n    \"sum(kv_lengths) <= 1048576\"\n  ]",
+      "sha256": "f84a3db565d3e916fc9f322cd45543c8db508e39590b02b0f8c731c5d50dc64a",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "scope",
+      "line_end": 48,
+      "line_start": 30,
+      "note": "用例 1（8×4096、q_len 3、heads 64、sink true）：贯通样本，uniform 且 max_splits=1（无 COMBINE）、有 sink 种子、每请求 2 个 row group 使第二个 row group 的 member 1 全无效行",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/shape_cases.json",
+      "quote": "\"1\": {\n    \"init_kwargs\": {},\n    \"input_kwargs\": {\n      \"kv_lengths\": [\n        4096,\n        4096,\n        4096,\n        4096,\n        4096,\n        4096,\n        4096,\n        4096\n      ],\n      \"query_len\": 3,\n      \"heads\": 64,\n      \"sink\": true,\n      \"distribution\": \"normal\",\n      \"return_lse\": true\n    }",
+      "sha256": "11ee36899590b68dfee118a6bc4cec8461b130ec3972420823cab924da4e1952",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    },
+    {
+      "category": "input",
+      "line_end": 108,
+      "line_start": 108,
+      "note": "workspace_buffer 固定 128 MiB、sinks=linspace(-1,3,h) 有限、out/lse 由 guarded 提供：Realization 容量条目的现实依据，且 sinks 有限保证 m=-inf 时 z=0（alpha 取 1 与 Contract rescale 取 0 等价）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/mla/mla_nvfp4/problem/input.py",
+      "quote": "    return dict(query=query, query_scale=qs, kv_cache=kv, kv_scale=ks, block_tables=table, seq_lens=torch.tensor(lens, dtype=torch.int32, device=device), workspace_buffer=torch.zeros(128 * 1024 ** 2, dtype=torch.uint8, device=device), sm_scale=512 ** (-0.5), sinks=torch.linspace(-1, 3, h, device=device) if kw.get('sink",
+      "sha256": "4256dfa2b30e68e29293d238525a5b19908ef44bb7130f40b87094325e13b36b",
+      "source_id": "850b9607ea2659d5fed9870e1c5b31eed04ad16027a792fb456c5cb02ca594bb"
+    }
+  ],
+  "summary": "回执补正完成（approve 结论不变）：handoff 已压缩到 1200 字符/20 行以内，保留已定事项、理由、入口、P4/P6 去向与缺口；implementation 类绑定入口锚点（solution.py::Model.forward 55-56）及调用链（runtime.py 162-169 → launch.cu::Run 320 → kernel.cu 4-5；分支 combine_launch.cu::Run 37 → combine.cu 86-87）保留。本 attempt 重跑只读检查 exit 0，并核对 root.yaml raw_sha256 77be1aed…、dispatch.md b0effb75… 与已审 raw 逐字相同，四项判断沿用本轮亲自核实的证据。P3 语义结论：uniform 实例的完整 root 忠实、自洽、分层正确、内容必要——数学改写、工作调度、微流水线与 REALIZATION 同 kernel.cu/combine.cu/plan.py/runtime.py 及 reference.py 逐项对上，空工作与尾块、单 split 直写与多 split 归并的混合批次、条件性第二次提交均分别贯通；仅登记一条非阻塞的 Contract Execution 分层观察，其余为交 P4/P6 的目录与文字细化。"
+}

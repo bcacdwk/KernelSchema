@@ -1,0 +1,954 @@
+{
+  "artifact_evidence": [
+    {
+      "line_end": 8,
+      "line_start": 1,
+      "note": "节点身份与元数据：Name/Describe 与 root 逐字一致，Source 指向 kernels.cu::ws10sk（同时覆盖主 kernel 与归并 kernel），Version 1（首版内容，机械排版规范化不递增），Dispatch.id 与文件名一致，when 为本节点自己的非空英文范围",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 8,
+      "line_start": 8,
+      "note": "when 自足地写出承担范围与必要调用条件：cc 10.3、m>32、n 为 128 倍数、k 为 256 倍数（两段整除）、m*n 为 4 倍数（每个归并线程四个完整元素）、需要 8*m*n 字节全局 FP32 工作区与两次同流提交，并显式声明分配失败时改走 umma_single_cta 的单 kernel 形态而不由本设计承担",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 11,
+      "line_start": 10,
+      "note": "Math_reshape.Thesis 说明保留 Contract 数值路线与打包转换解码、只改 k 归约，并交代两段化的收益（累加链减半、worker 翻倍）与代价（每段一个 FP32 平面 + 第二次提交），不复述公式与账本",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 25,
+      "line_start": 13,
+      "note": "Math 步骤 1 本地完整定义解码：不建表、每对解码由两次转换加一次乘法、按 k 块重复、由拥有该块的唯一 worker 解码；e(j,l)/q(j,l)/wq[j,l] 的公式与 Contract 的 code(j,l)、e2m1、b_descale 分组一致，并声明 wq 等价于 Contract 的 w；Symbol 登记 wq 的 shape/dtype",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 31,
+      "line_start": 26,
+      "note": "步骤 1 的 Arithmetic.Accumulate 声明转换与 BF16 窄化内的 FP16 乘法精确（E2M1×E4M3 ≤6 位有效位），Ledger 以 Contract 的逐元素 FP32 反量化为基线，Gain/Cost 给出打包转换替换与 4 倍 k 块搬运体积、两块同时持有",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 43,
+      "line_start": 32,
+      "note": "Math 步骤 2 定义段切分：group_count = k/16、seg_groups = group_count/sk（k 为 256 倍数故整除）、段 q 覆盖的组区间、acc(q,-1) 为零值、按升序 g 的 mma32 递推与 part(q) = acc(q, seg_groups-1)，并明确段边界不缩放不窄化、Contract 的 s 只在归并处施加",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 47,
+      "line_start": 44,
+      "note": "步骤 2 的三个符号登记：sk 由本层 value 固定为 2（本设计的唯一取值，其余取值属目录参数记录）；acc 为 carry_forward (q,i,j)、迭代范围 g=-1..seg_groups-1；part 为 keep_value invocation、shape [{seg: sk},{m: m},{n: n}]、dtype fp32，作为下游接口填全 shape 与 dtype",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 53,
+      "line_start": 48,
+      "note": "步骤 2 的 Arithmetic 只补公式未表达的累加分组事实，Ledger 以 Contract 的整 k 单链 FP32 求和为基线，Gain 写链长 group_count→seg_groups 与 sk 倍 worker，Cost 写部分结果物化 0→sk*m*n*4 字节并把 k 重结合的新增误差来源标为源码主张且 unverified（未写成精确，也未用 unknown: 记账）",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 65,
+      "line_start": 54,
+      "note": "Math 步骤 3 定义归并与写回：s 沿用 Contract 定义，total = part(0)+part(1) 按升序段序在 FP32 中相加，out = bf16(s*total) 写进 out_buffer，并声明每个输出元素恰由拥有它的那次归并产生一次、part 的每个元素只被读一次；Ledger 以“累加者自己缩放窄化写回”为基线，Cost 写读回字节、(sk-1)*m*n 次向量加法与第二次提交",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 76,
+      "line_start": 66,
+      "note": "Work_schedule.Thesis 说明两次提交与输出不再由累加者形成；MAIN 的 Describe 与 Decomposition.Strategy 就地定义 bk=128、k_tile_count=k/bk、segment_blocks=k_tile_count/sk（k 为 256 倍数故整除）并声明只有 m 有尾块且以零 staged；Partition 登记 m/n/seg 三个真正产生独立 worktile 的维度",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 86,
+      "line_start": 77,
+      "note": "MAIN 的 Worktile.Iteration 三个输入块都以“本段的”限定并给出 shape/dtype（dtype 用 ref 指向 root 共享 Contract 的 a/b/b_descale 属性）、Target.Single_tile 为本段的 128×128 FP32 part_tile（不是 out），Mapping 为 1 个 cta 一个 worker、Worker_count = worktile_count",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 97,
+      "line_start": 87,
+      "note": "MAIN 的 Schedule：Strategy 给出 worker_id → seg = worker_id mod sk 与 tile 序号 = worker_id div sk 的必要拆分（源码 sk_id/gid 的抽象），Worktile_order 覆盖且仅覆盖已声明维度（m 带 group 8 后再次出现排组内序、seg 为最内层），Worker_assignment 为一份工作预分配、无 refill、assigned_done 退出",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 108,
+      "line_start": 98,
+      "note": "REDUCE step 有自己完整的分解与目标：扁平 out_element 分区（size m*n、tile 1024）、Single_tile 即合并后的 out_block，并用 Tile_reduction 登记被合并维度 seg（在生产 step 的 Partition 中）、input 引用 Math 的 part、output 引用 Contract 的 out、method 引用 Math 步骤 3 而不重写公式",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 120,
+      "line_start": 109,
+      "note": "REDUCE 的 Mapping/Schedule（含尾部线程不读不写的空工作声明与升序排列）以及 Flow：两条 Launch 条目各含一个 step 且每个 step ID 恰好出现一次，第二条只以 MAIN.launch_ready 为启动前驱；Handoff.part 登记 producer MAIN、consumer [REDUCE]、storage global、wait_at REDUCE.part_wait，未填 initialize（生产区域恰等于消费区域）",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 130,
+      "line_start": 121,
+      "note": "Tile_pipeline.Thesis 说明 MAIN 沿用单 CTA UMMA 的角色划分但每个 worker 只走自己的一段（环、解码槽与累加链都在段内起止、累加器以 FP32 离开），REDUCE 是只等整个 MAIN grid 的扁平扫掠；Index.t 的定义域改为段内 [0, segment_blocks]；a_ring/bp_ring 的 depth、location、shape、dtype、total_size 与 view.slot_index 齐备",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 136,
+      "line_start": 131,
+      "note": "sc_reg 为 depth 2 的 register 预取区（total_size 按 depth×单槽字节×成员数计算）、bdq_ring 为 depth 2 的 smem 解码环、acc 为 depth 1 的 tmem 区且与所存唯一值同名故省略 view；五个区域的字节数合计与源码 SMEM_BYTES 一致",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 146,
+      "line_start": 137,
+      "note": "PRODUCER 角色：Member warp[8:9]、load 两个 noun 的 describe 交代全局 k 块 seg*segment_blocks+t、两个半盒、零填充与共用 40960 字节计数，await:slot_free 交代 256+1 到达构成释放；Pipe 的 if(t>=4) 与 Waiting 的 Prepared/Released 边（指向 DECODE::release:bp_slot(t-4) 与 ISSUER::release:a_slot(t-4)）与源码一致",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 155,
+      "line_start": 147,
+      "note": "PRODUCER 的 Pipe 与 Waiting 全文：循环内 if(t>=4) 才 await:slot_free，随后两个 load；Prepared 把首块装载绑定到 DECODE::compute:barrier_init 的 done，Released 把 slot_free 的 done 绑定到 t-4 的两个归还动作，未凭空增加或取消等待",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 167,
+      "line_start": 156,
+      "note": "ISSUER 角色：Member warp[9:10]、matmul 的 describe 说明八个 16 元素乘积、两个操作数槽与“本段第一个初始化 acc”，await:stage_full 与 await:wq_ready 分别说明其 done 含义，release 两个 noun 说明由矩阵完成到达归还槽位",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 180,
+      "line_start": 168,
+      "note": "ISSUER 的 Pipe 与 Waiting：每块依次 stage_full → wq_ready → matmul → 两个 release；Prepared 覆盖首块对 barrier_init 的依赖、stage_full 对两个 PRODUCER load 的依赖、wq_ready 对 DECODE signal 的依赖，Allowed 把首块矩阵乘绑定到 acquire:tmem 的 done",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 199,
+      "line_start": 181,
+      "note": "DECODE 角色的 Using_verb 精确白名单覆盖 Pipe 中全部动作：compute(barrier_init 声明不读输入不读旧值 / wq_block)、load(scale_block 提前一块预取)、store(part_tile 明确不缩放不窄化且丢弃 m 以上的行)、await(stage_full/bdq_free/acc_ready)、signal(wq_ready)、acquire(tmem 128 列并发布基址)、release(bp_slot/tmem)",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 203,
+      "line_start": 195,
+      "note": "DECODE 的 signal/acquire/release 三个动作族的 declare：wq_ready 为 256 个解码线程各到达一次并先使写入对异步代理可见、acquire:tmem 取 128 列并放弃后续申请、release:tmem 在每个解码 warp 读完累加器后经 CTA 会合归还",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 221,
+      "line_start": 200,
+      "note": "DECODE 的 Pipe 与 Waiting：段内循环含 if(t>=2) 的 bdq_free 与 if(t+1<segment_blocks) 的尺度预取，循环外 await:acc_ready → store:part_tile → release:tmem；Prepared 把 acc_ready 的 done 绑定到 ISSUER::release:bdq_slot(segment_blocks-1)，Released 绑定 t-2，条件为假的分支不生成等待实例",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 235,
+      "line_start": 222,
+      "note": "REDUCE 的 Event 别名 part_wait 展开为 {done MAIN[0]::await:grid_ready}（MAIN 在本 step 内是唯一 role 故按规范命名，成员 [0] 即单 cta worker 的 0 号成员），单角色 Pipe 为 await:grid_ready → compute:out_block，await 与 compute 均为 serial 故无需额外 Prepared 边，无片上存储故省略 Storage",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 246,
+      "line_start": 236,
+      "note": "REALIZATION 前三条 Require：两次启动的 grid/线程/动态 smem 与归并 kernel 的 PSS 属性（Reason 指出 Flow 只声明启动许可关系，且 229504 字节需按函数抬高上限）；整链图复放与捕获失败回普通启动（Reason 指出录制不执行故本次仍须算出 out）；工作区为进程级 grow-only、16 字节对齐、免初值、仅以流序复用、扩容销毁已捕获图",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 260,
+      "line_start": 247,
+      "note": "REALIZATION 第四至七条：320 线程与 launch bound（Reason 说明两个选主线程角色各登记一个 warp，故启动规模与闲置 lane 不由角色账推出）、两个 tensor map 的形状/swizzle/零填充、tcgen05.mma cta_group::1 kind::f16 与 tcgen05.commit 作为完成到达、fence.proxy.async.shared::cta 与 tcgen05.fence::after_thread_sync 两类 fence",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 271,
+      "line_start": 261,
+      "note": "REALIZATION 第八至十条：通知计数 1/257/256/1 与 tmem 128 列的申请归还及 CTA 屏障；part 的 sk 个行主序 m×n FP32 平面布局与 16 字节向量读写由 MAIN.DECODE 与 REDUCE.MAIN 共享同一条 Choice/Reason（生产者偏移与消费者步长是同一个接口）；griddepcontrol.wait 位于归并 kernel 开头且 MAIN 无对应 launch-dependents 触发，Reason 明确该 wait 因此在 MAIN grid 完成时才解析——未把启动许可夸大为设备侧提前触发",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 275,
+      "line_start": 272,
+      "note": "唯一的 Prefer 指向 MAIN.DECODE 的配对 FP16 乘法与单次配对 BF16 转换，Reason 为指令数减半且步骤 1 已把乘积固定为精确，不改变值、舍入点或角色分工，未与任何 Require 冲突；此行范围按文件实际 275 行修正（前次回执误写 272-276）",
+      "path": "split_k_reduce.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 23,
+      "line_start": 13,
+      "note": "共享 Contract 的 Input/Output 登记：本节点所有 ref:CONTRACT.Algorithm_requirement::a.dtype / b.dtype / b_descale.dtype / out.dtype 与 Tile_reduction.output 的 ::out 都能解析到这里的已登记对象及其属性，节点自身不复制 CONTRACT",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 37,
+      "line_start": 25,
+      "note": "Weight_dequantization 定义 code(j,l) 的偶奇取半、e2m1 的 mag 表与 w[j,l] = e2m1(code)*b_descale[j,l//scale_block]：Math 步骤 1 明确沿用这些名称与语义并声明 wq 等价于 w，未另起别名或改量化规则",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 49,
+      "line_start": 38,
+      "note": "Scaled_product_and_writeback 与 Golden_reference.Tolerance：out = bf16(s * 全 k 的 FP32 求和)、s 在唯一一次 bf16 转换前施加、原地写满 out_buffer 且不读旧值；本节点步骤 2/3 把该求和重结合为两段再合并，但保持 s 与单次 RNE 窄化的位置与写回义务，Tolerance 的来源限制仍留在 root",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 57,
+      "line_start": 53,
+      "note": "Hardware_specification.Execution 登记 thread/warp/cta/cluster 及其存储摘要（register、smem、tmem）：本节点 Mapping.Worker.unit: cta、Member 的 warp[a:b] 写法与 Storage.location 的 smem/register/tmem 均取自该登记，未自行定义单元或存储名",
+      "path": "root.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 50,
+      "line_start": 50,
+      "note": "最相关基线的 Work_schedule.Thesis：一个 CTA 承担一个 128×128 tile 的整段 k，部分结果不离开 worker、一次提交即可、无 cluster 无工作区——正是本节点改变的那三项，构成实质差异的对照点",
+      "path": "umma_single_cta.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 80,
+      "line_start": 79,
+      "note": "基线的 Flow 只有一条 Launch、无 Handoff：本节点新增第二条提交与 part 的 global Handoff，属提交组织与物化的结构变化而非参数变化",
+      "path": "umma_single_cta.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 150,
+      "line_start": 150,
+      "note": "基线在同一位置由 DECODE 的 store:out_tile 读 acc、乘 s、窄化成 BF16 直接写 out；本节点改为 store:part_tile 写未缩放未窄化的 FP32 平面，输出形成者从累加 worker 变成独立的归并 step",
+      "path": "umma_single_cta.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 186,
+      "line_start": 184,
+      "note": "基线的 REALIZATION 只有一条单次启动的 Require（共六条 Require、无 part 平面/两次启动/griddepcontrol.wait 三条），可证本节点的 REALIZATION 是按自身有效 Design 重填而非随引用带入",
+      "path": "umma_single_cta.yaml",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 79,
+      "line_start": 79,
+      "note": "P4 对本节点的计划与保留理由：ws10sk 主 kernel + sk_reduce、按 blockIdx.x % sk 领取 k 段、角色划分同 umma_single_cta、部分结果跨 kernel、输出由独立归并 kernel 形成、退化时引用 umma 的单 kernel 形态；交付的正文与该取舍一致（差异是摘要写 sk = sk_pick ≥ 2 而 YAML 固定 sk = 2，需在 P6 对齐）",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 46,
+      "line_start": 46,
+      "note": "【参数】split-K 路数与代价模型的记录去处：sk 取 2..8 中整除 Ta 且 Ta/sk>=8 的值、host 代价模型与启用门槛、P 大小与 total4；确认本 YAML 只固定 sk=2 一套方案、其余取值与 selector 阈值按规则留在目录，未以开关或选择公式留在 YAML",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 41,
+      "line_start": 41,
+      "note": "【局部】PDL 启动配对的记录计划把机制统一写成“前一个 kernel 在自身 store 后 __threadfence + griddepcontrol.launch_dependents”，对 cfg144 不成立（ws10sk 主 kernel 14888-15049 两者皆无，如 smv6 的 trig 分支 11244-11250 才是有触发的形式）；本节点正文已按“无触发、仅 PSS 属性”写，该条目转正式时须区分两种形式——交 P6 落实",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    },
+    {
+      "line_end": 65,
+      "line_start": 65,
+      "note": "P4 的数值类别口径：K 维切分带来额外舍入与重结合，源码对 K 切分族另记 5.6-6.8e-5 的重结合类且声明 mismatch==0，并要求各节点正文写进对应设计的精度说明、不能只写“精确”；本节点 Ledger.Cost 的转录与此一致且标明 unverified",
+      "path": "dispatch.md",
+      "quote_offset": 0
+    }
+  ],
+  "attempt_id": "dafb1609-4488-4cc3-9d70-0bc770cc508f",
+  "checks": [
+    {
+      "command": "/home/shaohanyong.shy/KernelSchema/.schema_extract/v2/runs/2b64ba84-64b3-4d10-86fe-65c351ce571c/attempts/dafb1609-4488-4cc3-9d70-0bc770cc508f/materials/check-helper.py",
+      "exit_code": 0,
+      "note": "本次 attempt 的固定只读检查（--read-only --skip-hardware 已由 Runner 定位，未传额外参数、未追加管道或重定向）：raw_passed=true、corrections 为空、diagnostics 为空；checked_nodes 含 split_k_reduce 与 root；design_resolution 为 strict，split_k_reduce 三区 provider 均为自身、chain 只含自身，resolution_nodes=[root, split_k_reduce]，raw 摘要 dd12cf8e 与本次审阅文件一致；directory 报告 pair_stream_k、pair_two_pass 仍为 missing_nodes（尚未写出，符合写作安排）。"
+    },
+    {
+      "command": "wc -l .../attempts/dafb1609-4488-4cc3-9d70-0bc770cc508f/workspace/*.yaml .../workspace/dispatch.md",
+      "exit_code": 0,
+      "note": "为修正回执证据范围而亲自核对当前 raw 行数：split_k_reduce.yaml 275 行、root.yaml 209 行、umma_single_cta.yaml 207 行、dispatch.md 81 行；据此把前次越界的 split_k_reduce.yaml 272-276 改为 272-275，并确认其余全部 artifact 证据范围均在各自文件行数之内。"
+    }
+  ],
+  "checks_note": "本次为回执补正，产物只读、未改动：split_k_reduce.yaml 仍是 Version 1、raw dd12cf8e，与上轮我完整审阅并通过的内容逐字一致（已重读文件尾部 262-275 行确认 Prefer 区块位置）。补正内容仅在回执证据侧——前次 artifact_evidence 中 split_k_reduce.yaml 的 272-276 越过文件实际 275 行，本次改为 272-275，并逐一复核其余 artifact 与 source 证据范围均在文件行数内；conclusions 的 evidence 索引按本次 source_evidence 重新编号，未挪用旧回执索引。已亲自执行本次 attempt 的 check_command（退出 0）与行数核对命令。结构检查不代替语义审阅：四项判断均由我在上一轮沿固定源码逐条核对后作出，本轮已确认来源身份未变（source_id 106ab6c4…、source_ref 484902855…、各文件 dependency_digests 与上轮完全相同），故原判断继续成立，未运行 GPU、未改 kernel。",
+  "conclusions": [
+    {
+      "evidence": [
+        9,
+        10,
+        11,
+        23,
+        24,
+        26,
+        29,
+        32,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        18,
+        19,
+        46
+      ],
+      "subject": "differences",
+      "text": "相对最相关基线 umma_single_cta（同一 ws10 引擎、同 128×128 tile、同 producer/issuer/decode 角色划分），本节点有四项实质差异且逐条有固定源码支持：(1) k 归约切成 sk=2 段——MAIN 新增 seg 分区轴，worker_id 拆为 seg = worker_id mod sk 与 tile 序号 = worker_id div sk，流水线索引域由 [0, k_tile_count] 改为段内 [0, segment_blocks]，环槽位与屏障 parity 全部改用段内局部序号（kernels.cu 14910-14911、14920-14922、14946-14947、14961-14963）。(2) 累加标志 (tl>0||i>0) 使每段第一个乘积初始化自己的 acc，段末不缩放不窄化，DECODE 把 FP32 值按 P[sk_id][M][N] 写进全局 part 平面并按 mrow<M 守卫丢行（14973、15025-15045），而基线在同一位置乘 s、窄化后直接写 out（umma_single_cta.yaml:150）。(3) 输出改由第二次提交的 sk_reduce_kernel 形成：扁平 float4 扫掠、跨平面升序相加、乘 alpha、单次 RNE 窄化写 out（15052-15072），因此输出形成者、提交数与物化都改变，不是给单 submission 方案加一个参数。(4) 两次提交之间只有启动许可关系——REDUCE 以 programmaticStreamSerializationAllowed 属性启动并自带 griddepcontrol.wait（17832-17838、15056），而主 kernel 全程无 launch_dependents 与 __threadfence（14888-15049 内核体，对照 smv6 有触发的形式 11244-11250）。这四项落在主要计算、输出形成、工作分配与主协作/提交组织上，符合 0.common 的“新的整体设计”判据，保留为独立完整 YAML 成立，与 P2/P4 已定取舍一致（dispatch.md:79）。"
+    },
+    {
+      "evidence": [
+        20,
+        21,
+        22,
+        27,
+        36,
+        37,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        12,
+        59
+      ],
+      "subject": "shared_design",
+      "text": "三个 Design 区域全部本地定义、无 from（与 design_resolution 的 origins/chain 一致），因此不存在需要展开才能读通的区，也没有靠基线批准继承的内容；唯一共享的是 root 的唯一 Contract。核对结果：所有 ref:CONTRACT.Algorithm_requirement::a.dtype / b.dtype / b_descale.dtype / out.dtype 与 Tile_reduction.output 的 ::out 都解析到 root.yaml:13-23 已登记的对象与属性；步骤 1 沿用的 code(j,l)、e2m1、b_descale 分组语义来自 root.yaml:25-37 的 Weight_dequantization 且声明 wq 等价于 w，未另起别名或改量化规则；步骤 3 的 s、单次 bf16 RNE 窄化与写满 out_buffer 的义务来自 root.yaml:38-45，与参考实现“fp32 求和 → 乘 alpha → 一次 cast”的路线一致（reference.py:12-15），Tolerance 的来源限制留在 root 未被搬动；Mapping.Worker.unit: cta、Member 的 warp[a:b] 与 Storage.location 的 smem/register/tmem 均取自 root.yaml:53-57 的 Execution 登记，未自造单元或存储名。真正共用的 ws10 引擎机制已在本节点上下文逐项重新核实并本地写明：BM/BN/BK=128、THREADS=320、A_STAGES=4/BDQ_STAGES=2、TX_BYTES=40960、SMEM_BYTES=229504（14868-14886，与 Storage 五区字节账合计相符）、四组通知计数 1/257/256/1（14928-14933）、cvt.rn.f16x2.e4m3x2 → mul.rn.f16x2 → f16x2→bf16x2 解码链及其“≤6 位有效位故精确”的源码依据（442-446、458-461、472-474）、tcgen05.mma cta_group::1 kind::f16 与 tcgen05.commit（418-419、422-424）、fence.proxy.async.shared::cta 与 tcgen05.fence::after_thread_sync（397-403）、两个 tensor map 的 dims/strides/box 与 OOB 零填充（17771-17774、15675-15682）。REALIZATION 不随引用带入：本节点十条 Require 与一条 Prefer 按自身有效 Design 重填，基线只有六条 Require 且没有 part 平面布局、两次启动与 griddepcontrol.wait 三条，可证不是照抄。"
+    },
+    {
+      "evidence": [
+        0,
+        1,
+        2,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        24,
+        25,
+        26,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        39,
+        40,
+        41,
+        43,
+        44,
+        45,
+        46,
+        59,
+        60
+      ],
+      "subject": "walkthrough",
+      "text": "取域内 m=64、n=8192、k=2560、alpha 非空贯通：forward(cfg=0) → self._mm（solution.py:77-81、111-112）→ mm_bf16_fp4_v0 得 M=64/K=2560/N=8192、alpha_ptr 非空（18042-18046、18050-18057）→ launch_mm 代价模型 Ta=20、tiles10=64<148，守卫 Ta%c==0 && Ta/c>=8 只放过 c=2，cost(2)=1*(10*1200+2400)+2*64*8192/500=16497 < 26400*0.95 → sk_pick=2（16035-16052）→ use=144（16291）；cfg144 门槛 is103 && M>32 && K%128==0 && N%128==0 && M*N%4==0 全部成立（17748-17751）。工作区 need=2*64*8192*4=4194304 字节，grow-only 分配成功才走两 kernel 链（17777-17786）。MAIN 提交 tiles*sk=128 个 CTA、320 线程、229504 字节动态 smem（17813-17816、15969-15970）：seg=blockIdx.x%2、gid=blockIdx.x/2，m_tiles=1 → gsize_m=1、pid_m=0、pid_n=gid（14907-14917），t0=seg*10、段长 10 个 128 元素块即 1280 个 k（14920-14923），与 Math 的 seg_groups=(2560/16)/2=80 一致（每块 8 个 K16 乘积 × 10 块）。每 CTA 用 4 深 a_ring/bp_ring 与 2 深 bdq_ring 走 10 块，producer 每轮预告 40960 字节并发 A 的两个 64 列半盒、B 的两个 32 字节半盒（14944-14954），issuer 等 full 与 deq 后发 8 次 umma、首块以 accum=0 初始化 acc、再两次 tc_commit 归还 A 槽与 BDQ 槽（14959-14976），解码 warp 每两线程一行做 cvt→mul→cvt 并写 swizzle 槽、fence 后对 deq 与 empty 各到达一次（14982-15021）。段末等本地块 9 的 bdq 完成后，256 个解码线程各读 2×32 列 FP32，按 (seg*64+mrow)*8192+gid*128+ch*32 以 8 次 float4 写 part，mrow>=64 被守卫丢弃（15025-15045），主 kernel 以 __syncthreads + tmem_dealloc 结束且无任何触发指令（15046-15049）。REDUCE 以 PSS 属性提交 ceil(131072/256)=512 个 CTA、256 线程（17818-17838），griddepcontrol.wait 在 MAIN grid 完成时放行（15052-15058），线程 i 取 P[i] 与 P[131072+i] 两个 float4 升序相加、乘 av、__float2bfloat16_rn 后写 out[4i..4i+3]（15059-15072），131072*4=524288=m*n 个输出各写一次，与参考实现路线一致（reference.py:12-15）。另核三类会改变执行关系的情形：m=33、n=6656、k=2560 同样落到 cfg144（tiles10=52、pairs13=13），此时 worktile_count=ceil(219648/1024)=215 而 total4=54912，第 215 份工作中 i>=54912 的线程早退，正是 REDUCE Schedule.Strategy 声明的空工作，与源码 grid=ceil(54912/256)=215 相符；alpha 为 None 时 alpha_ptr 为 null、归并取 av=1.0f，对应步骤 3 的 s=1；sk==1 或分配失败时不启动归并 kernel 而改启 ws10 单 kernel（17848-17851），when 已显式把该情形划出本设计范围，未被当成已提交工作的 no-op。"
+    },
+    {
+      "evidence": [
+        6,
+        7,
+        10,
+        11,
+        14,
+        15,
+        26
+      ],
+      "subject": "document_self_contained",
+      "text": "本节点无需历史交接、目录或旧稿即可读懂。when 自己写明承担范围（cc 10.3、m>32、n 为 128 倍数、k 为 256 倍数、m*n 为 4 倍数）及其后果（两段整除、只有 m 有尾块、每个归并线程拥有四个完整元素、尾块行零填充后被守卫丢弃），并写明必要调用条件（8*m*n 字节全局 FP32 工作区、两次同流提交）与不承担的情形（分配失败改走 umma_single_cta 的单 kernel 形态）。所有参数都在本文件内定义一次：sk 由 Math_reshape.Symbol 的 value: 2 在本层固定，seg_groups 在步骤 2 的 Math 中定义，bk/k_tile_count/segment_blocks 在 MAIN 的 Decomposition.Strategy 中定义，t 的段内定义域在 Tile_pipeline.Index 中给出，REDUCE 的 1024 元素工作量与平面间隔 m*n 在自己的 Decomposition.Strategy 中给出。名称与引用均可定位：REDUCE 只有一个 role 故按规范命名 MAIN，Event 别名 part_wait 定义在 Step.REDUCE 内、解析到该 step 的 role MAIN 成员 [0] 的 await:grid_ready，不与同名 step 混淆；Tile_reduction 的 method 指向本文件 Math_reshape 的第三步名称，input 指向本文件登记的 part；其余 ref 全部指向 root 共享 Contract 的已登记对象。三区无 from，因此不存在“靠 provider 才完整”的区；目录只承担 sk 其他取值、group_m、f16 链与无 PDL 对照等记录，YAML 的定义不依赖目录补写。"
+    },
+    {
+      "evidence": [
+        22,
+        27,
+        46,
+        50,
+        51,
+        52,
+        56,
+        57,
+        11
+      ],
+      "subject": "document_layering",
+      "text": "四层职责未被越界，下层没有补入或改写上层决定。Math_reshape 只定义值、精度与保留：解码公式与 wq、段内 mma32 递推与 acc/part 的 shape、dtype、retention、归并公式与 s 的位置、三笔账本，全程不出现线程、warp、屏障编号或槽位。Work_schedule 只定义工作与提交：m/n/seg 三个分区与其 tile、三个随局部迭代更换的输入块、MAIN 的 part_tile 与 REDUCE 的 out_block 两类 Single_tile、REDUCE 的 Tile_reduction（dimension/input/output/method 均引用上游而不重写公式）、两个 step 的 Mapping 与 Preassigned/Refill/Exit、两条 Launch 与 part 的 global Handoff，不展开 role 分工与指令；REDUCE 的 Strategy 用“256 线程 × 四个连续元素”只是解释 tile=1024 的来历与尾部空工作的判据，属分块参数与空工作的必要说明，未把逐线程地址或 mask 写进本区。Tile_pipeline 只在已定工作边界内定义执行：段内 Index、五个片上区域的容量/寿命/复用与 view.slot_index、三个角色的 Member 与 Using_verb 白名单、Pipe 的 for/if 控制流、三类 Waiting 边，以及 REDUCE 的单角色两步 Pipe 与 Event 别名。REALIZATION 只落上游留在抽象层的实现条件：两次启动的 grid/线程/动态 smem 与 PSS 属性、图复放与捕获失败回退、工作区分配与寿命、320 线程与 launch bound、tensor map 形状与零填充、tcgen05.mma/commit 作为完成到达、两类 fence、通知计数与 tmem 申请归还、part 平面布局与 16 字节向量宽度、griddepcontrol.wait 及其解析时点；每条都通过删除测试（替换会破坏已声明的完成/可见性保证或驻留条件），没有把数学、精度、工作组织、角色或依赖搬到本区，也没有仅因源码用了它就列为硬要求。目录未覆盖 YAML：sk 的其他取值、group_m、f16 链与无 PDL 对照都留在 dispatch.md 的记录计划里，本 YAML 只表达一套已选方案，未用开关、枚举或选择公式留路。"
+    },
+    {
+      "evidence": [
+        16,
+        17,
+        18,
+        27,
+        28,
+        32,
+        34,
+        39,
+        41,
+        42,
+        43,
+        44,
+        57,
+        12
+      ],
+      "subject": "document_consistency",
+      "text": "全文表达同一套具体已选方案且互相闭合。sk=2 在 Symbol.value、Partition.seg.size、part 的 seg 轴、步骤 3 只合并 part(0)+part(1)、when 的 8*m*n 字节与 REALIZATION 的 sk*m*n*4 之间保持一致；seg_groups=(k/16)/2 与 segment_blocks=(k/128)/2 相差 8 倍，正对应 ISSUER 每块发八个 K16 乘积与 Math 步骤 2 的 16 元素组；两个 step 的 Worker_count 都取 worktile_count，分别等于源码的 tiles*sk 与 ceil(total4/256)=ceil(m*n/1024)。尺寸与尾块照常核对：n、k 整除使只有 m 有尾块，尾块行由 tensor map 的 OOB 零填充 staged、由 mrow<M 守卫丢弃，因此 part 的 m×n 逻辑区域被写满，Handoff 不填 initialize 与其 Reason“消费区域恰等于生产区域”相符，未把仅预取后丢弃的字节当成需要初值。空工作按实际存在性表达：REDUCE 的尾部线程 i>=total4 不读不写，是动作无数据可处理而非动作不存在，MAIN 侧不存在空 worktile。事件存在性分别贯通：两次提交各有自己的完成事件，第二条只以 MAIN.launch_ready 为启动前驱，数据就绪另由 Handoff.wait_at → REDUCE.part_wait → {done MAIN[0]::await:grid_ready} 承担；正文与 REALIZATION 都没有把启动许可夸大成设备侧提前触发（主 kernel 确无 launch_dependents，故该 wait 在 grid 完成时解析），也没有用正文取消已登记的提交、成员或依赖。依赖边与源码逐条对应：empty 槽需 256 个解码到达加 1 个 issuer commit（计数 257）、bdq 槽由 issuer commit 释放且解码从 t=2 才等、await:acc_ready 指向本段最后一块的 bdq_slot 释放（该 commit 覆盖全部乘积）、首块矩阵乘对 acquire:tmem 的 Allowed 边；if 为假或循环切片未选中的分支不生成动作也不生成等待实例，没有为不存在的目标补边，也没有把跨 step 关系写成 :: 寻址。"
+    },
+    {
+      "evidence": [
+        13,
+        47,
+        48,
+        49,
+        55,
+        58,
+        11
+      ],
+      "subject": "document_relevance",
+      "text": "保留的都是必要内容，没有过程性文字。三步 rewrite 的公式、精度例外与账本齐备：解码的 4 倍 k 块搬运体积与两块同时持有、部分结果物化 0→sk*m*n*4 字节、累加链 group_count→seg_groups 与 sk 倍 worker、归并读回字节与 (sk-1)*m*n 次向量加法及第二次提交，都用可核对的量写出，未把链长下降直接称为性能收益。k 重结合这一新增误差来源按 DOC3 记在步骤 2 的 Ledger.Cost，并按 P4 的口径写成源码主张且标明 unverified（源码在 16345-16347 记为 sk-reassociation class、rel_l2 5.6-6.8e-5、mm==0），既没有简化成“精确”，也没有把未验证写成保证，更没有用 unknown: 记账。图复放那条 Require 通过删除测试：录制不执行，捕获或实例化失败时本次调用仍必须普通算出 out，且工作区扩容会销毁持有旧指针的已捕获图——这是真实的调用边界与寿命依赖，不是源码习惯；工作区免初值一条也保留了“消费区域等于生产区域”的依据而非只写分配细节。必要实现条件（tensor map 的零填充、tcgen05.commit 作为完成到达、两类 fence、通知计数、tmem 列数与申请归还、part 平面布局与向量宽度、griddepcontrol.wait 的解析时点）都是上游无法表达而实现必须共享的，未与上游重复；Prefer 只有一条且不改变值、舍入点或角色。退修、待办与历史批准都留在过程记录，未进入正文；命名清楚常见（MAIN/REDUCE、PRODUCER/ISSUER/DECODE、a_ring/bp_ring/sc_reg/bdq_ring/acc/part、seg/segment_blocks/seg_groups），无生僻自造缩写，也没有新增固定字段、封闭取值或未定义记法。"
+    }
+  ],
+  "decision": "approve",
+  "format": "schema_extract.proposal.v1",
+  "framework_candidates": [],
+  "handoff": "本次为回执补正，产物未动、决定不变（approve）。补正内容：前次 artifact_evidence 中 split_k_reduce.yaml 的范围 272-276 越过文件实际 275 行，本次改为 272-275，并逐一复核其余 artifact/source 证据范围均在文件行数内；已重读当前 raw 尾部与本次 attempt 的 check-helper（退出 0，raw_passed=true、零 correction），确认 split_k_reduce.yaml 仍为 dd12cf8e、root.yaml 34b026f9、dispatch.md 6aab0506、umma_single_cta.yaml 2fd3e485，与上轮完整审阅的内容身份一致，故四项判断沿用我上一轮亲自核实的结论，未靠历史批准补足。\n\n已独立核实并定案的事项：(1) 三区全部本地定义、无 from，与 P4 计划一致；共享内容只来自 root 的唯一 Contract，全部 ref 可解析。(2) sk 固定为 2 并登记在 DESIGN.Math_reshape::sk 的 value；host 代价模型的 3..8 与守卫 Ta%c==0 && Ta/c>=8（kernels.cu 16046-16052）属 selector 事实，按规则留在目录，未写进 when。(3) 两次提交写作 Flow.Launch 两条，第二条 start_after: MAIN.launch_ready，数据就绪由 Handoff.part 的 wait_at → REDUCE.part_wait → {done MAIN[0]::await:grid_ready} 承担；REDUCE 单角色按规范命名 MAIN，Event 在该 step 内解析到角色而非同名 step。(4) 主 kernel（14888-15049）确无 griddepcontrol.launch_dependents 与 __threadfence，故该 wait 在 MAIN grid 完成时解析；正文与 REALIZATION 未夸大为设备侧提前触发。(5) part 的 [seg][m][n] FP32 平面布局由 store:part_tile 与 REDUCE 的扁平 float4 扫掠共用一条 Require；工作区不填 initialize，因为 MAIN 写满 REDUCE 所读区域（尾块行由 mrow<M 守卫丢弃、不参与消费）。(6) META_DATA.Source 取 kernels.cu::ws10sk：本设计确有两个 kernel，命名空间定位符同时覆盖二者且只写一个目标，符合来源格式，无需改为函数级定位符。\n\n交 P6 汇集的目录事实（不改本节点已定取舍，也不改其他节点前提）：\n1. dispatch.md:41【局部】PDL 启动配对把机制统一写成“前一个 kernel 在自身 store 后 __threadfence + griddepcontrol.launch_dependents”。对 cfg144 不成立：ws10sk 主 kernel 两者皆无，PDL 只由归并 kernel 的 PSS 启动属性（17832-17838）加其自身 griddepcontrol.wait（15056）构成；有设备侧触发的形式见 smv6::deq_a16_kernel 的 trig 分支（11244-11250）与 cfg119。该条目转正式条目并并列 split_k_reduce 为基线时，须区分“有提前触发”与“无触发、仅 PSS 属性”两种形式，本节点正文已按后者写（REALIZATION 第 10 条）。\n2. dispatch.md:79 的完整设计摘要写“sk = sk_pick ≥ 2”，交付的 YAML 固定 sk = 2；换成链接时请对齐该取值，并把 dispatch.md:46【参数】split-K 条目落到真实对象：DESIGN.Math_reshape::sk、::part、MAIN Decomposition.Strategy 的 segment_blocks、MAIN Partition.seg、REDUCE Decomposition.Strategy 与 Target.Tile_reduction；联动写 grid=tiles*sk、P=sk*m*n*4 字节、段长 k_tile_count/sk、归并循环长度 sk，以及模型守卫 Ta%c==0 && Ta/c>=8 与启用门槛 tiles10<148 或（148<=tiles10<=192 且 Ta>=96）。\n3. 本节点 Ledger.Cost 中 rel_l2 5.6e-5..6.8e-5 的原始出处是 kernels.cu:16345-16347，源码把它标为“sk-reassociation class（skband96b adoption precedent）、mm==0”，而该注释所在分支实际是 cfg176（stream-K）。本节点按 dispatch.md:65 的“K 切分族”口径转录并标明 unverified，措辞未夸大为本次实测；P6 若把该数值类别写进 pair_stream_k 与本节点的正式精度说明，建议同时注明它是源码对 K 切分族的类别主张而非逐臂实测，避免被读成本设计的验收结论。\n4. dispatch.md:28 的工作区口径已在本节点落实（Handoff storage: global + REALIZATION 记录 grow-only、16 字节对齐、免初值、流序复用、扩容销毁已捕获图），无需在 Hardware_specification.Execution 增设存储名，也不构成回 P1 改 Contract 措辞的理由。\n\n下一位入口：pair_two_pass 与 pair_stream_k 仍未写出（检查器 missing_nodes 亦如此报告），pair_stream_k 依写作安排等待 pair_two_pass。本节点可作为 pair_stream_k 的“K 维切分 + 跨 kernel 归并”对照阅读，但两者机制不同（FP32 平面 + 独立归并 kernel + PSS，对 f16 head/tail 部分结果 + release/acquire 标志页 + 延迟 fixup），不构成整区共享来源，pair_stream_k 不得 from 本节点的任何区。沿用 P4 的缺口：冻结材料未声明设备 SM 数（本节点 grid 不受 sm_count() 截断，故不影响本份设计），数值类别均为源码主张，本次未运行 GPU、未取得实测结果。",
+  "issues": [],
+  "reopen": null,
+  "source_evidence": [
+    {
+      "category": "host",
+      "line_end": 81,
+      "line_start": 77,
+      "note": "绑定 host 入口 Model.forward：接 (a, b, b_descale, alpha=None, *, backend, out_dtype, out, block_size, enable_pdl)，首次调用绑定扩展 mm；out 为调用方缓冲区，backend/out_dtype/block_size/enable_pdl 不进入计算",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "host",
+      "line_end": 112,
+      "line_start": 111,
+      "note": "入口内唯一一次数值调用 self._mm(a, b, b_descale, alpha, out, self._cfg) 后原样返回 out：本节点的两次提交都在这一次调用内，host 不做同步，完成关系只由流序给出",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/solution.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 18046,
+      "line_start": 18042,
+      "note": "调用链第一跳 mm_bf16_fp4_v0：M=a.size(0)、K=a.size(1)、N=b.size(0)，并校验 K==2*b.size(1) 与 scale 形状 (n,k/16)，给出 Contract 规模 m/n/k 的实际来源",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 18049,
+      "line_start": 18047,
+      "note": "out 形状必须为 (m,n)，且域要求 N%64==0、K%64==0（冻结 shape_range 满足），支撑本节点 when 中 n 为 128 倍数、k 为 256 倍数的更窄子域确实是已核对的保守范围",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 18055,
+      "line_start": 18050,
+      "note": "alpha 为 None 时 alpha_ptr 为 nullptr：对应 Math 步骤 3 的 s = alpha[0] if alpha is not None else 1，以及归并 kernel 的 alpha 判空",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 18057,
+      "line_start": 18056,
+      "note": "以调用方指针与 cfg 进入 launch_mm，完成 forward → mm → launch_mm 的绑定链",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 16038,
+      "line_start": 16035,
+      "note": "split-K 代价模型的前置门槛 is103 && M>32 && K>=2560 && K%128==0 && N%128==0 && (M*N)%4==0，Ta = K/128；支撑 when 的设备与整除条件，且这些阈值属 selector 事实、未写进 when",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 16052,
+      "line_start": 16046,
+      "note": "cost(c) 模型与守卫 Ta%c==0 && Ta/c>=8、需比 sk1 好 5%：Ta=20 时只有 c=2 合格，故本节点把 sk 固定为 2 是域内 k=2560 唯一可取值，其余取值属目录参数记录",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 16291,
+      "line_start": 16291,
+      "note": "auto 分派在 sk_pick>1 时取 use=144：默认 cfg=0 时本节点确实可达，不是只能由强制臂进入",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 17751,
+      "line_start": 17748,
+      "note": "cfg144 启动分支前置条件 is103 && M>32 && K%ws10sk::BK==0 && N%ws10sk::BN==0 && (M*N)%4==0，支撑 when 的全部整除条件与 m*n 为 4 倍数（每个归并线程恰好拥有四个完整输出元素）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 17754,
+      "line_start": 17752,
+      "note": "T_all = K/128 与 tiles = ceil(M/128)*(N/128)：支撑 MAIN 的 Worker_count = worktile_count = tiles*sk 与 REALIZATION 的 grid 表达式",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 17757,
+      "line_start": 17755,
+      "note": "use==144 时 sk = sk_pick，即切分数由 host 代价模型给出；本 YAML 固定其中 sk=2，其余取值按目录规则留在 dispatch.md 的参数记录",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 17774,
+      "line_start": 17771,
+      "note": "两个 2D tensor map：a 为 bf16/(K,M)/行跨 2K 字节/64x128 盒/SW128，b 为 uint8/(K/2,N)/行跨 K/2 字节/32x128 盒/SWIZZLE_NONE，逐字对应 PRODUCER 的 Require 条目",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 17783,
+      "line_start": 17777,
+      "note": "need = sk*M*N*sizeof(float) 的进程级 static grow-only 工作区，扩容前先 v20_invalidate 再 cudaFree/cudaMalloc：支撑 Handoff.part 的 storage: global 与工作区 Require（grow-only、扩容销毁已捕获图）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 17786,
+      "line_start": 17783,
+      "note": "cudaMalloc 失败时 g_sk 置空且仅 g_sk 非空才走两 kernel 链：支撑 when 中“分配失败时本设计不承担、改走单 kernel 形态”的范围声明",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 17816,
+      "line_start": 17813,
+      "note": "cfg144 的 gmsk=8（group_m）与主 kernel 启动 tiles*sk、THREADS=320、SMEM_BYTES=229504、实参 (tmA, tmB, s_ptr, g_sk, M, N, K, 8, sk)：主 kernel 不接 alpha 也不接输出指针",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 17819,
+      "line_start": 17818,
+      "note": "total4 = M*N/4 与 sk_pdl = (use != 148)：支撑 REDUCE 的 partition size m*n / tile 1024、Worker_count = ceil(m*n/1024)，以及 PDL 由 cfg 而非 Contract 的 enable_pdl 决定",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 17831,
+      "line_start": 17827,
+      "note": "归并 kernel 的启动配置 gridDim = (total4+255)/256、blockDim 256、无动态 smem、同流：对应 REALIZATION 的 ceil_div(m*n,1024) 个 CTA、256 线程",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 17838,
+      "line_start": 17832,
+      "note": "programmaticStreamSerializationAllowed=1 的属性启动 sk_reduce_kernel(g_sk, c_ptr, alpha_ptr, total4, sk)：这是 Flow 中 start_after: MAIN.launch_ready 的唯一来源，属启动许可而非数据就绪",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 17851,
+      "line_start": 17848,
+      "note": "did_sk 为假（sk==1 或工作区分配失败）时改启 ws10::w4a16_ws10_kernel<<<tiles,...>>>(...,8,1)，即退化为 umma_single_cta 的单 kernel 形态；when 已显式排除该情形，未把它当成本设计的 no-op 分支",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14873,
+      "line_start": 14868,
+      "note": "ws10sk 编译期常量 BM=BN=BK=128、THREADS=320、A_STAGES=4、BDQ_STAGES=2：支撑 Partition tile 128、a_ring/bp_ring depth 4、bdq_ring depth 2 与 320 线程",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14877,
+      "line_start": 14874,
+      "note": "A_STAGE=32768、BP_STAGE=8192、BDQ_STAGE=32768、TX_BYTES=40960：逐一对应 Storage 各槽字节数（4*128*128*2、4*128*64、2*128*128*2）与 producer 单次预告的 40960 字节计数",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14886,
+      "line_start": 14882,
+      "note": "四个通知数组布局 full[4]/empty[4]/bdq[2]/deq[4]、OFF_MBAR=229376、SMEM_BYTES=229504 与 IDESC：支撑 smem 账合计 131072+32768+65536+128=229504 与 REALIZATION 的动态 smem 数值",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14892,
+      "line_start": 14888,
+      "note": "主 kernel 签名只接 fp32 部分结果指针 P 与 group_m、sk_n，不接 alpha 也不接输出指针：GEMM kernel 既不缩放也不写 out，是“输出不由累加者形成”这一实质差异的直接依据",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14912,
+      "line_start": 14907,
+      "note": "m_tiles/n_tiles/GROUP_M 与 sk_id = blockIdx.x % sk_n、gid = blockIdx.x / sk_n：支撑 Schedule.Strategy 的 worker_id 拆分与 seg 为最内层排列键",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14917,
+      "line_start": 14913,
+      "note": "group/first_m/gsize_m/pid_m/pid_n 的 8 行分组栅格化：组内 n 外层、m 内层，末组用 gsize_m 取模，覆盖为双射，与 Worktile_order [m group 8, n, m, seg] 一致",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14923,
+      "line_start": 14920,
+      "note": "T_all = K/BK、t0 = sk_id*(T_all/sk_n)、T = t0 + T_all/sk_n、s_pitch = K>>4：每个 worker 只走自己连续的 k 块段，支撑 Index.t 的段内定义域 [0, segment_blocks] 与段整除要求",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14933,
+      "line_start": 14928,
+      "note": "由 tid==0 一次初始化的四组通知到达计数：full=1、empty=257（256 解码线程 + 1 个 mma commit）、deq=256、bdq=1，与 REALIZATION 的“1, 257, 256 and 1”逐字对应",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14941,
+      "line_start": 14936,
+      "note": "warp0 申请 BN=128 列 TMEM 并 relinquish，随后 __syncthreads 使 taddr 全 CTA 可读：支撑 acquire:tmem 的 describe、ISSUER 的 Allowed 边与 release:tmem 前的 CTA 会合",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14949,
+      "line_start": 14944,
+      "note": "producer 仅 tid==256（warp8 lane0）执行，按全局 t∈[t0,T) 循环、用局部 tl 决定槽位 s4 与 parity，tl>=4 才等 empty，每轮一次 expect_tx(TX_BYTES)：与 PRODUCER 的 Member warp[8:9]、Pipe 的 if(t>=4) 及事务字节预告一致",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14954,
+      "line_start": 14951,
+      "note": "四次 tma_2d 用全局块坐标 t*BK / t*BK+64 与 t*(BK/2) / t*(BK/2)+32，即 A 两个 64 列半盒、B 两个 32 字节半盒，共用同一个 full 通知：支撑 load 描述中的 global k block seg*segment_blocks + t 与“同一个预告计数覆盖两者”",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14965,
+      "line_start": 14959,
+      "note": "issuer 仅 tid==288（warp9 lane0）执行，按段内 tl 的 parity 依次等 full_b[s4] 与 deq_b[s4]：对应 ISSUER 的 Member warp[9:10]、await:stage_full 与 await:wq_ready 及其 Prepared 边",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14976,
+      "line_start": 14970,
+      "note": "每块 8 次 umma_bf16、累加标志 (tl>0||i>0)?1:0 使本段第一个乘积初始化 acc，随后两次 tc_commit 分别释放 A 槽与 BDQ 槽：支撑 matmul 的“八个 16 元素乘积/this segment's first initializes acc”与 release:a_slot / release:bdq_slot",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14986,
+      "line_start": 14982,
+      "note": "解码角色为 tid<256（warp0-7），row=tid>>1、sub=tid&1 两线程分一行，按行取 sc_row 并在循环前读本段首块 t0*8 处的 8 个组尺度：支撑 DECODE 的 Member warp[0:8]、“two threads split each weight row”与 Pipe 中循环外的 load:scale_block(0)",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14992,
+      "line_start": 14989,
+      "note": "解码前等 full_b[s4]，且仅在 tl>=BDQ_STAGES(=2) 时等 bdq_b[s2] 的前一 parity：对应 await:stage_full 与 await:bdq_free“issued only from t = 2 on”及其 Released 边",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 14994,
+      "line_start": 14993,
+      "note": "只在 t+1<T（段内 t+1<segment_blocks）时预取下一块的 8 个组尺度：与 Pipe 的 if(t + 1 < segment_blocks): load:scale_block(t+1) 及 sc_reg depth 2 / slot t%2 的寄存器预取账一致",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15017,
+      "line_start": 15014,
+      "note": "解码链 cvt_fp4_f16x2 → mul_f16x2 → f16x2_to_bf16x2 并按 (ci ^ (row&7))*16 的 swizzle 写入 bdq 槽：对应 Math 步骤 1 的 wq = bf16(f16(e2m1(e))*q) 与 compute:wq_block、以及 Prefer 中的配对 FP16 乘法",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15021,
+      "line_start": 15019,
+      "note": "fence_proxy_async 后对 deq_b[s4] 与 empty_b[s4] 各到达一次：对应 signal:wq_ready（256 个解码线程到达）、release:bp_slot，以及 proxy fence 的 Require 条目",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15025,
+      "line_start": 15025,
+      "note": "源码注释点明部分结果布局 P[sk_id][M][N]：支撑 part 的 [{seg: sk},{m: m},{n: n}] FP32 平面形状与 REALIZATION 的“sk row-major m x n FP32 planes”",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15029,
+      "line_start": 15026,
+      "note": "epilogue 先按段内末块 (Tl-t0) 等 bdq 完成（该 commit 覆盖全部乘积），再算 row_base=32*(warp&3) 与 mrow=row_a0+row_base+lane：对应 await:acc_ready 的 Prepared 边引用 release:bdq_slot(segment_blocks-1) 与 store:part_tile 的“one row per lane”",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15036,
+      "line_start": 15031,
+      "note": "每 warp 两轮、每轮 tmem_ld_x32 读 32 列 FP32 并 tmem_ld_wait，写回由 mrow<M 守卫：8 warp × 4 行基址 × 32 lane = 128 行、4 个 32 列块 = 128 列，正好覆盖 128×128 的 part_tile 且尾块行被丢弃",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15042,
+      "line_start": 15038,
+      "note": "off = (sk_id*M + mrow)*N + pid_n*BN + ch*32，每 lane 8 次 float4 写：支撑 store:part_tile 的“写入 part 的 seg 段、不缩放不窄化”与 REALIZATION 的 16 字节向量存储（n 为 128 倍数保证 16 字节对齐）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15049,
+      "line_start": 15046,
+      "note": "主 kernel 以 __syncthreads + warp0 的 tmem_dealloc 结束：对应 release:tmem 的 CTA 会合；结合对 14888-15049 全体的检索，本 kernel 既无 griddepcontrol.launch_dependents 也无 __threadfence，故 REALIZATION“no matching launch-dependents trigger in MAIN”成立",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15058,
+      "line_start": 15052,
+      "note": "sk_reduce_kernel(P, C, alpha, total4, sk)：入口即 griddepcontrol.wait，随后 i = blockIdx.x*blockDim.x+threadIdx.x，i>=total4 直接返回，支撑 await:grid_ready、REDUCE 的 256 线程成员与“超出 m*n 的线程不读不写”的空工作声明",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15064,
+      "line_start": 15059,
+      "note": "以 float4 读平面 0，再按 s=1..sk-1 读 p[s*total4+i] 升序累加：对应 Math 步骤 3 的 total = part(0)+part(1)、REDUCE Decomposition.Strategy 的“两个段平面相隔 m*n 个元素”与 Tile_reduction(dimension: seg)",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15072,
+      "line_start": 15065,
+      "note": "av = alpha ? __ldg(alpha) : 1.0f，四个元素各做一次 acc*av 后 __float2bfloat16_rn，写成 C+i*4 的两个 bf16x2：与 Math 步骤 3 的 out = bf16(s*total)、单次 RNE 窄化及写满 out_buffer 的义务一致",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15970,
+      "line_start": 15969,
+      "note": "对 ws10sk::w4a16_ws10sk_kernel 一次性抬高 MaxDynamicSharedMemorySize 到 SMEM_BYTES：支撑 REALIZATION“229504 字节超过 48KB 默认上限，需按函数各抬高一次”",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 16380,
+      "line_start": 16376,
+      "note": "v20 图复放白名单显式包含 use == 144：支撑 REALIZATION“源码把同一条两 kernel 链录制为一个 CUDA graph 并复放”",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 18020,
+      "line_start": 18015,
+      "note": "源码自述“capture/instantiate failed: the chain was recorded, NOT executed. Run it plainly”：支撑该 Require 的 Reason——录制不执行，故捕获失败时本次调用仍必须普通算出 out",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15654,
+      "line_start": 15648,
+      "note": "v20_invalidate 销毁全部已捕获 graph exec 并递增 epoch：支撑工作区 Require 的“扩容时销毁每个已捕获图”，因为录制的链持有旧指针",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 419,
+      "line_start": 418,
+      "note": "umma_bf16 展开为 tcgen05.mma.cta_group::1.kind::f16（bf16×bf16→fp32 TMEM）：支撑 ISSUER 的 Require 与 Math 步骤 2 使用 mma32 记号、acc 位于 tmem",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 424,
+      "line_start": 422,
+      "note": "tc_commit 展开为 tcgen05.commit.cta_group::1.mbarrier::arrive::one：这是 release:a_slot / release:bdq_slot 承诺“异步乘积读完操作数后才归还槽”的唯一原语依据，线程到达无法提供",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 403,
+      "line_start": 397,
+      "note": "fence_proxy_async = fence.proxy.async.shared::cta，tc_fence_after_sync = tcgen05.fence::after_thread_sync：支撑两类 fence 的 Require（普通 smem 写须经异步代理可见，issuer 等待后须再 fence）",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 446,
+      "line_start": 442,
+      "note": "cvt_scale_f16x2 = cvt.rn.f16x2.e4m3x2（源码注释称 exact，两半相同）：对应 Math 步骤 1 的 q(j,l) = f16(b_descale[j, l//scale_block])",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 461,
+      "line_start": 458,
+      "note": "源码注释：f16x2 → bf16x2 对 fp4*scale 乘积精确（<=6 位有效位），支撑 Arithmetic.Accumulate“转换与 BF16 窄化内的 FP16 乘法是精确的，不是默认 FP32”",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 474,
+      "line_start": 472,
+      "note": "mul_f16x2 = mul.rn.f16x2：一次配对 FP16 乘法处理两个解码值，支撑 Prefer“配对 FP16 乘法 + 一次配对转换，保持值与单次 BF16 舍入”",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15678,
+      "line_start": 15675,
+      "note": "get_tmap 把 (inner, rows) 作为 dims、row_bytes 作为 strides、(box_in, box_rows) 作为 box：确认 Require 中“a 为 (k,m) 上 64x128 盒、b 为 (k/2,n) 上 32x128 盒”的方向与盒形状",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 15682,
+      "line_start": 15679,
+      "note": "cuTensorMapEncodeTiled 使用 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE（即零填充）：这是 load 描述中“rows past m 已为零”与 when 中“零填充后被守卫丢弃”的唯一来源",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 16347,
+      "line_start": 16345,
+      "note": "源码把 rel_l2 5.6-6.8e-5、mm==0 记为“sk-reassociation class（skband96b adoption precedent）”，该注释所在分支实际是 cfg176；本节点按 dispatch.md:65 的“K 切分族”口径转录并标明 unverified，出处与限定需在 P6 保留",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "implementation",
+      "line_end": 11250,
+      "line_start": 11244,
+      "note": "对照证据：smv6::deq_a16_kernel 在 trig 为真时才做 __threadfence + griddepcontrol.launch_dependents，说明“有设备侧提前触发”是源码中另一种独立形式；ws10sk 主 kernel 没有这段，故本节点的 launch_ready 只在 grid 完成时解析",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/candidate/kernels.cu",
+      "quote_offset": 0
+    },
+    {
+      "category": "reference",
+      "line_end": 15,
+      "line_start": 12,
+      "note": "参考实现在 fp32 中做 einsum 求和、必要时乘 alpha、最后一次性 .to(bf16)：本节点步骤 3 的 total→bf16(s*total) 保持同一精度路线，唯一差别是 k 重结合",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/reference.py",
+      "quote_offset": 0
+    },
+    {
+      "category": "scope",
+      "line_end": 53,
+      "line_start": 51,
+      "note": "域内 (n,k) 只取五个组合，k ∈ {2560,4096,12288} 均为 256 的倍数、n 均为 128 的倍数，故 when 的整除条件在域内恒成立，且 n 为 128 倍数使 m*n 必为 4 的倍数",
+      "path": "kernel_wiki/aka-cuda-operators-20261030/operators/gemm/dense/bf16_nvfp4_gemm/problem/shape_range.json",
+      "quote_offset": 0
+    }
+  ],
+  "summary": "回执补正后维持批准：split_k_reduce 节点有效全文经独立审阅通过。三区全部本地定义（无 from），共享内容只来自 root 的唯一 Contract 且所有 ref 可解析；相对 umma_single_cta 基线的四项实质差异（k 段切分与段内索引、FP32 部分结果全局物化、输出改由第二次提交的归并 kernel 形成、仅启动许可关系的 PDL 配对）均与固定源码逐条对齐。本次仅修正回执证据侧一处越界范围（split_k_reduce.yaml 272-276 → 272-275，文件实为 275 行），产物 raw dd12cf8e 未变，本次 attempt 的只读检查退出 0。无 issue、无框架候选、无定点返回；三条目录事实交 P6 汇集。"
+}

@@ -1,0 +1,196 @@
+# 四流程、AKA 接入与三仓交付：当前实施计划
+
+日期：2026-11-20。状态：**计划撰写完成，全部实施工作包未开始**。用户已确认 D1–D3 和本阶段计划撰写；本轮仅完成计划文档及其一致性检查，没有实施代码、运行 kernel 实验或迁移仓库。
+当前有效入口为本文与 [05_work_packages.md](05_work_packages.md)。新路径、API、fixture、运行预算及“通过”均为未来交付要求；后续开发按证据更新状态，不能把计划当实现结果。
+优先级：已确认[方向决策](03_decision_questions.md) → 本文及工作包索引 → 本文明确采用的 R5 附录；R4 保留任务细节和历史推导，冲突字段/依赖不再有效。
+
+## 1. 已确认方向、首发范围与所有权
+
+D1：KS 提供无需 AKA 后端的受限真实 implement，AKA 提供增强后端。D2：工程先固定设计实现与续写，尽早公开 design/一次 optimize，并同步预审真实复杂题。D3：同一设计可跨多个 coder episode，在实现阶段合格或出现有据设计阻碍后才交 planner。
+首发采用 Linux x86_64、Python 3.11 源码安装、Claude CLI、Triton、单一 `kernel.py`、一个完整 Task evaluator；准确 CLI/模型/依赖版本由资格记录冻结。单任务串行、有上限，不建设第二个通用 Agent 平台。
+首题为新增 `row_softmax_fp32_v1`。Agate 优先核验完整 Task 执行能力，退路为同 evaluator 的本地 GPU；H20 只是首先核查的候选，未取得当前可用证据。没有合格通道时真实发布门保持未通过。
+
+| 仓库 | 唯一职责 | 不扩张的边界 |
+| --- | --- | --- |
+| KernelSchema（KS） | 语言/Template、四入口、共享合同、写作内核、受限参考 implement、公开案例 | 核心安装/导入不依赖 AKA；不复制 ABBA、多任务调度和长期远端维护 |
+| AKA 适配 fork | 可选 Schema 模块、固定实现 backend、原生 coder/执行/恢复/晋升接入 | 调 KS planner/规则；不再维护 Schema parser、写作方法和第二份总账 |
+| AKA_experiment（EXP） | 固定版本消费、实验矩阵/资料/预算政策、捕获与分析 | 产品逻辑在 KS/fork 修改后生成式导入；旧捕获保留原工具链 |
+
+```text
+EXP ──固定生成式 vendor──> AKA 适配 fork ──可选固定 submodule──> KS
+KS 参考 implement ──> Claude CLI + Task evaluator + 合格执行通道
+KS 选择 AKA backend ──运行调用──> 外部已安装 adapter 的固定请求入口
+```
+
+上图是目标依赖，不是现状。每个 run 只有一个循环 owner：KS 有限 demo 调固定 backend，或 AKA 动态模块调 KS 单次 planner；不得互相启动顶层循环。
+
+| 未来目录 | 实际内容 |
+| --- | --- |
+| `schema_design/`、`schema_optimize/`、`schema_implement/` | 各有 README、配置/示例链接和 `tools/run.py` 薄入口，调用已安装的唯一包 |
+| `kernelschema/` | 顶层 `api.py/contracts.py/materials.py/resources.py/template_api.py/artifacts.py`、`writing.py/design.py/optimize.py`、`fidelity.py/extract_bridge.py`；子目录 `runtime/claude.py`、`implement/reference.py`、`evaluation/task.py/agate.py` |
+| `schema_extract/` | 保留现有命令、P1–P6、ready/publication/receipt、恢复和退出语义 |
+| `examples/workflows/row_softmax/`、`docs/workflows/` | 固定 Task/Schema/请求/evaluator/真实证据、安装与支持说明 |
+| AKA 的 `src/aka/workflow/schema/`、`packages/atrex-aka-schema/` | 可选 provider/backend/bridge、资料与 prompt、资格/投影/最少状态；默认 off 走原 provider |
+
+根目录角色文档仍为方法真源；Template 使用既有规范化/校验/来源工具，非 root 交接使用包含 root Contract 的 `effective_document`。不复制解析器，不塞两个 `tools` 到 `sys.path`；基础导入不加载 torch/CUDA。
+
+## 2. 四入口和固定设计的阶段交接
+
+| 入口 | 输入与工作 | 结果及完成含义 |
+| --- | --- | --- |
+| design | 固定 Task、规则、角色可见参考、scope；选择参考→草稿→规范化候选→权限/全任务/语义检查 | 发布完整 raw/dispatch/来源和 scope，四项写作检查通过；不代表已有可运行代码 |
+| extract | 原生来源与提取配置 | 原生交付不变；消费桥保留原件/receipt，补齐实现 Task 后另建输入；手写/curated/design 同样合法，无统一 P6 门票 |
+| optimize | 当前完整 Schema、Task、目标及可空 `feedback/evidence` | `keep/revise`、理由、`next_action=none/implement/verify`；keep 无具体行动即正常结束 |
+| implement | 固定 Task/Schema/规则/资料/scope、准确可空 seed、固定 mode、backend 与预算 | `code.latest/qualified`、逐 C 的覆盖/构建/正确性/fidelity/性能、用量、停止原因与可选 continuation |
+
+```text
+完整 Task + 已有/设计/提取后补齐的 Schema → 固定请求 Q / 设计 R
+  → coder e1 → 精确 C1 → 评价/审阅 → 同 R 的 e2…（如有明确行动与余额）
+  ├─ 一般代码缺陷/未完成：保留 C，同 R 继续或 partial
+  ├─ 当前范围完整合格：交付 qualified；无优化授权/目标则停止
+  ├─ 独立可核对的设计阻碍：交已授权外壳决定 optimize
+  └─ pause/耗尽/unknown：停止新准入，结算已有操作并返回产物
+optimize → keep：无行动即停止；明确补证走 verify_only，改码走同 R 请求
+         → revise：发布 R' → 旧事务结算/旧 scope 关闭 → 新请求准入
+```
+
+固定 backend 始终零 planner。超时、无晋升、普通编译错误、一次“写不出”、fidelity unknown 均不足以证明设计阻碍；阻碍须指出固定约束及推导/反例/实际事实。
+Coder 读 root Contract 和适用节点，列范围→设计→代码位置映射，先贯通适用路径再补必要 dispatch；root 不是通用 fallback，dispatch 不是自动路由。暂停和父预算控制所有新调用、e 与 R。
+任务方固定 Contract/evaluator；planner 只改授权设计/约束与相应元数据，coder 只写授权源码。资料按角色 allowlist 投递，摘要可见不等于私有 evaluator/隐藏用例可读；AKA 首调、修复、重试、恢复正文均须保持固定 assignment。
+普通反馈留外部；仅针对 Prefer 且具备 `repository@ref:path` 不可变实测证据的合规提案进入 `REALIZATION.Feedback`，不放宽 Require/Forbid。
+原码复验固定 `verify_only`、原码 seed 续改、共同骨架纯 Schema 重建分别报告；重建限制被提取优化源码/annotated/旧会话/二进制的投递，不能把前两类成果称为重建证据。
+
+## 3. 唯一公共合同：ks.workflow.v1
+
+本节采用 [R5 合同 §§2–6](planning/r5_contract_execution_review.md) 的字段、收据与状态；其 JSON 只作结构示例，示例固定路径统一由下一节发布约定替换。没有已发行 v1，故不制造 v2 兼容层。
+每个新规范 JSON 有精确 `protocol=ks.workflow.v1`；请求/结果用 `operation`，manifest/收据用 `kind`。未知核心字段/版本、重复键、NaN/Infinity、非 Unicode 标量在收费前拒绝。
+JSON 发布为 RFC 8785 JCS UTF-8、无 BOM/末尾换行；计数为安全范围非负整数，小数用十进制字符串。`Q=SHA256(JCS(request))`，请求不含自身摘要；YAML/Markdown/源码/原生报告全部保留原字节。
+`Ref={path,sha256}`，摘要为 `sha256:` 加 64 位小写十六进制；每次核对实际文件。所有 Ref 相对 `request.json` 所在 bundle 根，嵌套 manifest 也一样；拒绝绝对路径、`..`、空段、反斜线、控制字符、符号链接穿越和非普通文件。
+
+| 对象 | 必需核心字段/约束 |
+| --- | --- |
+| Task | `task_id`；`contract/acceptance/evaluator/environment/workload/baseline_source:Ref`；`starter_source:Ref/null`。ABI、完整副作用/比较式/输入分区/硬条件/计时均在闭包 |
+| Schema | `task_sha256`、`raw:[{node,file:Ref}]` 完整引用闭包、`dispatch:Ref/null`、`design_revision`、`parent:Ref/null`、`change`、`change_report:Ref/null`；effective 只作阅读产物 |
+| Rules / Materials | Rules 为规则/Template/角色文件 Refs 和工具版本/源码 Refs；Materials 为 `entries:[id,file,roles,origin,license]`，角色显式列出 |
+| Scope | `coverage_ids` 为 Task 输入分区；`bindings:[{coverage_ids,node,variant:null或值}]`。design 入场可空 bindings，完成输出和 implement 不可空；不是几个测试样本的列表 |
+| Source | `format/encoding/entrypoint/files:[{name,mode,size,sha256}]`；首发 `single_file/utf-8/kernel.py`、唯一文件、`0644`。实体唯一例外：相对 source manifest 目录的 `files/<name>` |
+| 请求共有 | `request_id/operation/task/rules/materials/scope/budget/backend`；backend 为 `{name,profile:Ref}`，profile 固定版本/模型/参数/能力，无凭证 |
+| implement / 写作差异 | implement 必有 `schema`、`seed:Ref/null`、`mode=code|verify_only`；design 无 schema/seed/mode；optimize 必有 schema、`feedback:[Ref]`、`evidence:[Ref]`，两列表可空 |
+| 结果共有 | `operation/request_id/request_sha256/status/stop_reason/usage/feedback/recovery/continuation`；无产物用 null/空列表 |
+| Usage | `scope=request_cumulative`、`receipts:Ref`、角色`calls`、`evaluator_jobs/tokens/active_ms/unsettled`；索引原调用收据，未知用量保留null和已知下界，不重复叠加native总数 |
+| implement 结果 | `code:{latest:Ref/null,qualified:Ref/null}`；`assessments` 按准确 `source_sha256` 列 coverage、task_uncovered、build、correctness、fidelity、performance、performance_goal |
+| 写作结果 | `schema/scope` 与 `writing_checks:{structure,permissions,semantics,publication}`；optimize 另有 decision/reason/next_action，非 none 需 action_reason 和所需输入/证据 |
+| Check / 扩展 | Check 为 `{status:pass|fail|unknown|not_run,receipt:Ref/null,reason}`；pass/fail 有收据，unknown 有原因。仅 `extensions.<owner>` 放 native e/G/HEAD/promotion 等；核心完成判定不依赖它 |
+
+source manifest 不含父 C/Q/时间/native revision，因此相同字节/模式清单得到同一 C；关系在调用收据中。CRLF、无尾换行、非 ASCII 注释按字节往返，BOM/非 UTF-8 拒绝；source 清单按 name 排序，其他集合按 R5 指定键排序去重。
+`backend.capabilities()` 声明实际支持的protocol/operation/mode/source格式、empty_start、恢复边界与token enforcement；查询不自动试跑GPU，未知组合先拒绝。影响权限/执行/验收的扩展必须被所选后端明确支持，纯信息扩展可保留或忽略。
+seed=null 只使用 Task.starter_source；两者皆 null 才为空起点，backend 不支持时先拒绝。不可读 seed/删掉必需文件不退回 G 或骨架；保存损坏草稿诊断，latest 只指最近可完整捕获的稳定 C。
+verify_only 必须有非空 seed，零 coder、零改码 episode、零新晋升；必要执行/reviewer 正常计费。mode/模型/预算不得在执行 CLI 临时覆盖；改输入产生新 Q，不能套旧 continuation。
+未来统一入口为 `kernelschema {design|optimize|implement} --request … --out …`、`implement --continue …/result.json`，以及透传 `extract -- …`；Python API 共用验证。continue 与 request/out 互斥；新入口退出 0 仅表示 result 已发布，领域状态须读结果。
+
+| 状态/下一步 | 判定 |
+| --- | --- |
+| completed | 交付当前请求完整范围且全部硬项合格的 qualified；写作则四检查合格，optimize keep 也可完成 |
+| partial | 有产物但实现/覆盖/必需证据未完成，或预算已耗尽；unknown 检查不能代签 |
+| blocked | 外部能力/材料缺失、已尝试操作终态/费用不明、有独立证据的设计阻碍 |
+| failed | 输入/协议/摘要损坏、continuation 不兼容等不可准入错误；仍保留已有产物 |
+| recovery | 仅 `none/continue/settle_only/new_request`；未知在途操作用 settle_only。new_request 不是新增授权或余额 |
+
+`continuation={backend,token}` 是后端 opaque 传输信息，绑定 Q、运行根/版本、稳定 C、准入游标和累计账目；不等于源码或可移植 checkpoint。旧 token 重放只吸收原结果或报 stale，不产生新调用。
+`latest=C2` 未测、`qualified=C1` 合格可以同时存在，并明确交付 C1；C2 不继承 C1 pass。G/晋升和 Git HEAD 分列，未晋升也可能推进 HEAD；下一 e 取当前 HEAD，比较仍用准确 G。
+
+## 4. 最终补充决策：不可变产物的跨请求组合
+
+来源：最终整合对 R5 request-root Ref 的可组合性补查。若新旧 R 都沿用 `inputs/raw/root.yaml`，同 bundle 会冲突；仅移动一个 manifest 又会使嵌套 Ref 指错根。采用以下文件发布约定，不新增 artifact 服务或改旧收据标签。
+首次发布前分配并持久化随机 128 位 `publication_id`，形成 `artifacts/<publication_id>/`；同操作恢复复用该 ID，新发布分配新 ID。所有可被 v1 Ref 引用的文件从首次冻结即位于此稳定前缀，路径一经发布永不改写或覆盖。
+输入快照、Schema、source、原始报告、用量和 request/result 的不可变历史副本均放该前缀；source 的 `manifest.json` 与 `files/` 保持同目录。顶层 `request.json/result.json` 仅是本请求入口/结果投影，不作为可导入 Ref 目标；`.runtime/` 为私有状态。
+首发导入单位取来源 bundle **完整不可变 `artifacts/` 子树**，包括此前导入依赖、原 request/result 快照及摘要主体对应的 manifest；这保留完整引用闭包。先暂存/逐 Ref 和 source 文件核验，再发布；不只拷单个 manifest，不拷顶层入口和 `.runtime/`。
+已有同路径同字节/模式可幂等复用；同路径异字节/模式、缺引用、非法路径一律拒绝整次导入，保持目标不变。禁止重写旧 receipt/manifest 路径后沿用旧摘要；输入复制与可写工作区不硬链接。原生 extract/native 报告保留原协议解释，外层包装引用其原字节。
+正例 fixture：design 请求 A 发布 `artifacts/<a>/schema/manifest.json`，raw Ref 指 `artifacts/<a>/schema/root.yaml`；implement B 完整导入 A 的 artifacts，生成 `artifacts/<b>/source/{manifest.json,files/kernel.py}` 与评测；optimize C 导入 B 的 artifacts，发布 `<c>` 新 Schema、parent 仍指 `<a>`。三个 bundle 各移动到新 cwd 后所有 Ref/source 文件可读，旧摘要不变，新旧 R 可共存。
+拒绝 fixture：向已有 `artifacts/<a>/schema/root.yaml` 的目标导入同路径不同一字节文件，必须零覆盖/零准入/零模型调用；另测只搬 manifest 导致闭包缺失时拒绝。归属 KS-02/07/08/13、AKA-02/10，纳入 V06/V09/V13；这是待验证的最终补充，不是已通过测试。
+
+## 5. 修订、证据、预算与恢复
+
+| 变化 | Schema.change / revision | 准入与证据 |
+| --- | --- | --- |
+| 首次设计或 Task 的 ABI/判据/硬件/栈改变 | `new_task`，新 Task revision=0 | 新 Q/Task 或 run；可显式 seed 旧 C，旧费用保留 |
+| 同 Task 实质设计/约束/when/dispatch 决定改变 | `new_revision`，parent+1 | 必须 diff/影响审阅，发布后另准入；重判 fidelity |
+| keep/同字节/合规纯格式或 Feedback 更新 | `unchanged`，计数不变 | 优先复用原件；新字节仍是新 Q，不能自动继承 pass |
+| 选择已有合法 scope/variant，或只变 rules/materials/seed/mode | revision 不变 | 新固定 Q；尚无设计决定的 variant 不可直接执行 |
+
+Q、设计修订次数、optimize 调用次数、coder e 次数分别统计，hash 不同不自动增加 revision。纯格式/允许字段变化可机械核对，其他实质变化须受影响审阅；未决不准入。
+正确性证明准确 C 在固定有限输入上的完整数值/ABI/副作用判据；性能证明同一 C/evaluator/环境/输入/计时的真实样本；fidelity 用有限机器项加独立只读 reviewer，绑定 Q/Task/完整 Schema 来源/rules/scope/C/方法版本并逐项给源码位置/理由。
+必需 fidelity fail/unknown 不 qualified，快也不能覆盖；机器 AST、只读投递、coder 自评不证明完整设计符合。测量 `performance=pass` 表示规定测量齐全，软目标另报 `met/unmet/unknown`；合格慢代码仍可 completed。
+执行以固定 staging 核实际装入的 C/evaluator，防可写工作区和旧 import 缓存错绑，返回受信来源摘要/环境/原始终态。复用报告须核精确主体与适用性、保留旧报告；Schema 改变需重判 fidelity，不重贴标签。
+AKA 三类 audit 路径分别验：普通 seal 后/ABBA 前；未提交恢复重建 attempt；已提交从 commit-bound promotion audit 吸收原资格/用量。资格先 durable 再晋升；已提交缺资格则保留 native 历史、Schema unknown、停止自动推进，不能新问模型改历史。
+
+预算固定为 `budget.parent:Ref/null`、`limits.calls.{planner,coder,reviewer,extract}`、`evaluator_jobs/active_ms/tokens`，可加总 `model_calls` 与 `deadline_utc`；0 禁止准入，tokens=null 表示未设 token 上限。parent 账户声明含 id/owner/limits，余额/预约由唯一 owner 私有持久状态掌握。
+同请求所有 continuation 累计；外壳总账户涵盖子请求及自身准备/planner，准入取父/请求/native 最紧限额。准备/V0/V1、失败重试、真实恢复重评、终态评测、必要 fidelity/native reviewer 全在额度内，最后一次 coder 前预留已知最低收尾额度。
+公共 `active_ms` 是账户活动区间并集，包含模型、排队、GPU 等待、review；只排除可证明的静止暂停，同一父等待/子调用不重复相加。原 native active-time 若只计 Agent 活动，独立记录并额外约束，不映射成公共时间；wall_ms 可另记含暂停日历时长。
+每次收费操作先持久 operation_id/Q/C/角色/额度预约/目标 e 或远端键，后记终态/产物/真实用量。按 producer+operation_id、receipt_id/sequence/摘要吸收增量；同收据去重，真实新调用计费；未知 token/GPU 为 null，未结算费用不填零。
+pause/耗尽/unknown 设 durable fence，只可查询吸收原事实；404/取消接受/超时不证明未执行，未结算不得换通道重提。不能免费重启 reviewer、重建 e、换 R 或复制预算账户；无法证明静止的崩溃间隔不扣除。
+source 安装遵循 intent→完整暂存/校验/落盘→ready→register/admitted；已准入或已变化 draft 不再装 seed。发布 R' 与新请求准入分开；同文件系统 flush/fsync 文件与目录、rename 后同步父目录，恢复承诺限已资格化本地 Linux 文件系统。
+
+## 6. 具体案例与技术资格
+
+row-softmax 的规范采用 [R5 验收 §§2–4](planning/r5_validation_delivery_plan.md)：`Model()`、`forward(x,out)→out`（支持关键字调用），CUDA FP32、连续同设备、合法 storage_offset；M∈{1,32}、N∈{128,1024}，有限 x∈[-20,20]、不与 out 共享 storage。
+返回必须 `is out`，写满 out，x 字节/身份不变、guard 不变；golden 用调用前 x 提升 CPU FP64 做稳定 softmax，逐元素 `abs(actual-g)≤2e-6+2e-5*abs(g)`，先拒 NaN/Inf。性能 baseline 为 FP32 `torch.softmax` 后 copy 到 out，与 golden 分开。
+4 shapes×9 输入实例=36 cases，每个 out 初值 NaN/-123.0，共72次正确性调用；随机 seeds 17/23、三常值、交替端点、单峰、近等值、行间置换 ramp，另复用同 storage 连续换输入。保留实际输入摘要、canary 与负例，不声称连续全域证明。
+计时每 shape：20 次预热，10 对 AB/BA 批次，每批100次完整 forward，批前/后同步，以 perf_counter_ns 取摊销时间；构造/编译单列。保留中位数/IQR/极值/样本数；四 shape 等权几何均值 baseline/candidate≥1 为软目标。
+手审 R0 固定 max-subtract→FP32 exp/sum/div、每 program 一整行/grid=(M,)、一个自有 Triton kernel、无显式全局中间张量/跨 CTA 通信/外部 softmax。num_warps∈{4,8}、合法归约树/编译调度为 coder 自由度；改一 program 多行才是实质设计变化。
+去掉 max-subtract 在该有限域未必数值失败，作为违反 R0 的 fidelity 反例。design 输入不偷偷包含手审 R0 答案；冻结官方 Triton fused-softmax 参考的实际版本/来源/许可，真实设计可借公开参考，不能宣称隐藏原码重建。
+FA4 预审采用 [R5 验收 §5](planning/r5_validation_delivery_plan.md)：原 20261019 四题来源、13 参数 ABI、FP8/BF16、逐元素 `0.06+0.04*abs(reference)` 及副作用。root 仅覆盖 Q4/B∈{15,16}/长 KV 的 S9，不代表全 Task。
+首个 F1 为 q4_direct：B=1、Q=4、seq_lens=[64]、P=1、block_table=[0]、N=1/S=1，其余常量/输入语义按原来源；交接含 root Contract+direct Design。随后 F2 的10配置和 F3 必要 dispatch 逐项验收。
+CuTe DSL/实际 SM103 原语、源树/evaluator、launcher 冷启动与稳态、空 split/PageIndex/TMA/TMEM 未决均须单独过门；H20/Triton 和历史30/30或kernel-sum收益不能代签。KS-10只交预审，KS-11/12按真实需要扩展。
+
+| 技术 spike / owner | 判据 | 失败替代 |
+| --- | --- | --- |
+| Claude / KS-03 | 锁定版本参数、真实终态/用量、首调/重开权限与 assignment | 用该版本公开参数；无法解释结算则 profile 不准入 |
+| Agate / KS-04 | 完整比较/副作用/计时、代码摘要、稳定提交键和终态取回 | 原 eval→受支持自定义执行同 evaluator→合格本地；unknown 先结算 |
+| Atrex / AKA-02 | 真 runtime_root、public/initial/evaluation、golden/计时映射，实际 hook 跑完整判据 | 无等价 hook 则任务 unsupported，不以通用 correctness 代签 |
+| 指定 e driver / AKA-01 | 真实 Store/Workspace+假 Agent；重放零 e+1、两上限/暂停有效、setup/finish单 owner | façade 若复制生命周期，改原 loop 窄 admit/settled；都失败不发布多 e backend |
+| never/V1 / AKA-05 | V0、metadata、pin、慢 C、准确 C production/G约束逐项闭合 | 必要 helper；仍不足受限 V1 并重验；不降 ABBA/偷换栈 |
+| seed、fidelity、off / AKA-06/07/09/03 | 完整 seed/不覆盖 draft；三 audit；无 KS 原路径启动且零新行为 | 未证恢复 blocked；缺资格 unknown；off 延迟加载并移除全局依赖 |
+
+## 7. 工作 DAG、验收与发布门
+
+完整34包的统一 ID、前置与交付见 [执行索引](05_work_packages.md)。接口开发、CPU 工程完成、真实模型/GPU资格分别记，不把 fake fixture 当真实证据。
+
+```text
+KS-01(材料) → KS-02 → KS-03/04(接口) → KS-05 → KS-06 → KS-09 ← KS-07/08
+                        └→ KS-07；KS-01/02 → KS-08；KS-02 → KS-14(资源)
+KS-10(预审) + KS-05/06 → [需要时 KS-11] → KS-12
+MIG-01 → AKA-01 → MIG-02；KS-01/02 → AKA-02 → AKA-03/04 → AKA-05～09
+AKA-03/04 + MIG-02 + KS可固定包 → MIG-03；AKA-09 + MIG-03 → AKA-11
+AKA-09 + KS-07 → AKA-10；KS-05/06 + AKA-09/11 → KS-13
+MIG-02/03 + AKA-09 → MIG-04 → MIG-05；EXP-01 + MIG-05/AKA-10/11 → EXP-02
+```
+
+KS-07开发不等KS-06实测，KS-08不等KS-07；KS-12工程不因README收尾等待KS-09。AKA-11及fixed发布不等MIG-04；独立demo不等AKA动态、复杂扩栈或EXP。图中发布边合并接口边，精确限定以索引为准。
+有限验收采用 [R5 验收 §6 V01–V15](planning/r5_validation_delivery_plan.md)：V01完整正确性；V02 fidelity；V03慢合格/计时；V04/05续写/seed中断；V06错绑/verify；V07 unknown；V08暂停预算；V09发布准入；V10三audit；V11指定e/V1；V12 off；V13公开独立；V14发行/消费；V15复杂范围。每项 owner 与证据在索引映射。
+
+| 发布门 | 必须具备的未来证据 |
+| --- | --- |
+| E0 工程预览 | Task材料/协议与适用CPU fixture可审查；不声明真实独立实现 |
+| KS-P1 独立产品 | KS-01～09适用项、KS-14源码资源闭包；无AKA环境真实fixed、准确续写能力、真实design/一次optimize及三类证据；keep照实发布 |
+| KS-P2 复杂子域 | KS-10预审、KS-12 F1与所需KS-11/新栈资格；只声明已通过子范围 |
+| AKA-P1 fixed | AKA-01～09工程、MIG-03独立配对、AKA-11真实模型/完整evaluator/fidelity/性能；不依赖EXP |
+| AKA dynamic / 跨后端 | dynamic另需AKA-10真实发布/准入轨迹；跨后端另需KS-13同Task正反例与双方真实资格 |
+| EXP-P1 / pilot | MIG-04/05固定消费/新捕获、EXP-01预登记、所用AKA fixed/dynamic真实资格；EXP-02才进入受限运行 |
+
+公开文件采用 [R5 验收 §7](planning/r5_validation_delivery_plan.md)：Task/R0/骨架/人工partial seed、完整evaluator、固定参考、五类请求模板/有限driver、按capture保存request/R/C/原始测量/独立审阅/usage/result/index，以及quickstart/support/extract消费/evidence/release-notes/许可与checksum。
+根 README 随 KS-02 标现状和开发入口，KS-05/06 标 fixed预览，KS-09/14 标真实独立demo，KS-12/13、AKA-11再列已验复杂域/可选backend，AKA-10实测后才列动态能力。长期自动循环保留方向，不宣称无人值守已完成。
+安装分CPU核心、模型运行时、GPU/Agate三层；源码checkout先交，wheel单独离树验资源。公开导出只含可分发材料，脱敏件保存与原件摘要关联；无GPU回放只读历史证据，不产生新pass。
+
+## 8. 三仓迁移、实验与开工交接
+
+MIG-01实施时重读最新状态，保护KS/EXP既有修改、删除、untracked和旧capture，另建隔离位置；不reset/clean/stash当前树，不把历史计数当实时状态。基线与演变见[历史](01_history.md)、[计划基线](planning/baseline.json)。
+AKA从已记录上游SHA开始，MIG-02逐文件映射EXP role/context/session等必要补丁，通用接点与Schema可选模块分层；不把EXP根提交直接cherry-pick到AKA。远端fork/发布在实际授权实施阶段另落实，本轮未操作。
+MIG-03固定upstream/fork/KS SHA、包/规则/资料/evaluator摘要与公开来源；不把脏KS目录当submodule提交。MIG-04因EXP投影排除gitlink/.gitmodules，从fork确切KS gitlink单独物化到`assets/kernel-schema`，记录`control/schema-source.json`并验包来源/资源/新capture恢复。
+EXP默认保持生成式vendor；新launch使用新模块，旧SchemaAgent/reader仅供旧捕获。活动run不换版本，不承诺新实现恢复旧冻结capture；回退影响下一新run。MIG-06上游更新独立分支、逐补丁审查、先off再相关fixed/恢复资格，与首次迁移分开。
+EXP-01先写B无Schema/F固定R0/D同R0最多一次optimize的同Task/模型/资料/骨架/策略/总预算协议；F−B是设计信息与实现政策总效应，D−F是该动态策略差异。原生V0/V1策略需对齐，否则标系统整体比较。
+EXP-02建议首批1题×3条件×3重复=9run，顺序BFD/FDB/DBF；每run **8模型调用、6逻辑job、3native e、3600秒（active_ms=3600000）仅为试点建议**，含终态评测/review，资格核清bootstrap成本后、样本开始前冻结；不构成现在运行授权、完成率或功效保证。
+所有启动/未准入/失败保留，最终候选选择预登记、latest/qualified/G分列；未知性能为null并报原因。初始化design/extract成本、使用/恢复成本、边际/端到端/按真实复用次数摊销分别报告；不把人工或缺失用量记零，不以3次重复声称普遍收益。细则采用[R5验收 §8](planning/r5_validation_delivery_plan.md)。
+后续进入实施时首批为KS-01材料（完整Task/R0/输入/计时/负例/来源与缺项表）、KS-10预审（F0来源闭包/F1准入结论）、MIG-01隔离台账→AKA-01指定e CPU spike/ADR；随后KS-02接口、KS-03/04分轨和EXP-01配置。任务与完成产物已定义，无需重问D1–D3；环境未知由技术gate解决。
+
+依据保留完整链：[用户简报](00_user_brief.md)、[初纲](02_initial_outline.md)、[R1 KS](research/r1_schema_inventory.md)、[R1 AKA](research/r1_aka_inventory.md)、[R2独立合同](research/r2_standalone_contracts.md)、[R2生命周期](research/r2_aka_lifecycle.md)、[R3交付](research/r3_delivery_evaluation.md)、[R3反例](research/r3_architecture_challenge.md)、[R4 KS任务细节](planning/r4_kernelschema_plan.md)、[R4 AKA/迁移细节](planning/r4_aka_integration_plan.md)。明确采用的R5合同§§2–8和R5验收§§2–8作为详细附录；本文§4是最终新增修正，其余冲突按本文和索引执行。

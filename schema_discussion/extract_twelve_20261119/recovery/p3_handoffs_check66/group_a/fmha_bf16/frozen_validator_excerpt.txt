@@ -1,0 +1,14 @@
+397:         categories = {entry["category"] for entry in value["source_evidence"]}
+398:         required = set(STAGES[attempt["stage"]]["evidence"])
+399:         if not required <= categories:
+400:             raise ReceiptFormatError("missing source evidence categories: " + ", ".join(sorted(required - categories)))
+401:         for category in required:
+402:             key = "entrypoint" if category == "implementation" else category
+403:             locators = bindings[key] if isinstance(bindings[key], list) else [bindings[key]]
+404:             if not any(item["category"] == category and item["path"] in {entry["path"] for entry in locators}
+405:                        for item in value["source_evidence"]):
+406:                 raise ReceiptFormatError(f"missing bound {category} entry anchor")
+462:         handoff = value["handoff"]
+463:         if not handoff.strip() or len(handoff) > 1200 or len([line for line in handoff.splitlines() if line.strip()]) > 20:
+464:             raise ReceiptFormatError("approval needs a short handoff (<=1200 characters, <=20 nonempty lines)")
+465:     if attempt["stage"] in {"P2", "P4"} and final:

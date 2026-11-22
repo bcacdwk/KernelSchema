@@ -1,0 +1,88 @@
+# 四流程、AKA 接入与三仓交付：当前实施计划
+
+日期：2026-11-20。状态：**计划修订完成，全部实施单元未开始**。本轮只修订文档并离线检查一致性；没有实现、模型/GPU/服务运行、安装、迁移、提交或发布完成声明。
+已确认方向见[决定页](03_decision_questions.md)。当前规范由下列四份正文分工承担，不再用主计划覆盖附录中的冲突示例；研究、R4 和审查前快照仅为历史依据。
+
+| 正文 | 唯一职责 |
+| --- | --- |
+| 本文（P） | 方向、产品/仓库边界、阶段交接、发布门和维护原则 |
+| [交付单元（W）](05_work_packages.md) | 17 个单元、改动区域、交付、唯一 owner/依赖、首批顺序及验收归属 |
+| [公共合同（C）](planning/r5_contract_execution_review.md) | 唯一 API/请求、身份与选定闭包、源码、恢复/预算、结果及 fidelity |
+| [验收与交付规范（V）](planning/r5_validation_delivery_plan.md) | 唯一 Task/案例参数、V01–V15、公开材料与有限 pilot |
+
+<a id="scope"></a>
+## 1. 已确认方向与首发边界
+
+D1：KS 提供不依赖 AKA 后端的受限真实 implement，AKA 提供增强能力。D2：工程先固定设计实现与续写，尽早公开 design/一次 optimize，同时提前预审复杂题。D3：同一设计可以跨多个 coder episode，实现阶段合格或出现有据设计阻碍后才交 planner。
+首发支持 Linux x86_64、Python 3.11 源码 checkout/editable、Claude CLI、Triton、单一 kernel.py、一个完整 Task evaluator；实际 CLI/模型/依赖版本由资格记录冻结。参考 implement 限单任务、单栈、串行、有预算上限，不复制通用 Agent 调度平台。
+首题为新增 row_softmax_fp32_v1，精确判据由[V 的 Task 规范](planning/r5_validation_delivery_plan.md#task)定义。Agate 优先核验完整执行能力，退路是运行同 evaluator 的本地 GPU；H20 仅是首先检查的候选。没有合格通道时相应真实发布门未通过，材料和 CPU 工程仍可进行。
+F1 为既有 FA4 decode 的真实子请求，材料预审与首题同步，真实交付紧随小 demo；原 CuTe/实际 SM103、完整 evaluator、host 冷启动/稳态及有限 fidelity 均需自己的资格。F1 所需源格式/adapter 在案例内实现，后续扩域由真实结果与下一请求决定。
+四个能力以真实入口和证据兑现：design 写完整 Schema，extract 保持原流程，optimize 写 keep/revise 与行动，implement 交准确代码及独立判据。仅方法 Markdown、CPU fixture 或历史性能不能称真实实现完成。
+
+<a id="ownership"></a>
+## 2. 仓库、循环与代码边界
+
+| 仓库 | 唯一职责 | 边界 |
+| --- | --- | --- |
+| KernelSchema（KS） | 语言/Template、四流程合同与入口、写作内核、有限参考 implement、案例 | 核心安装/导入无 AKA；不复制 ABBA、多任务调度或长期远端维护 |
+| AKA 适配 fork | 可选 Schema 模块、固定 backend、原生 coder/执行/恢复/晋升接点 | 消费 KS 规则/planner；不复制 Schema parser/写作方法，不另造父总账 |
+| AKA_experiment（EXP） | 固定版本消费、实验配置/资料/预算、捕获与分析 | 产品修改在 KS/fork 后生成导入，旧捕获留原工具链 |
+
+```text
+EXP ──固定生成式 vendor──> AKA 适配 fork ──可选固定 submodule──> KS
+KS 参考 implement ──> Claude CLI + Task evaluator + 合格执行通道
+KS 选择 AKA backend ──同步调用──> 外部已安装的固定 adapter
+```
+
+这是目标依赖，不是现状。每个运行只有一个顶层循环 owner：KS 有限 demo 调固定 backend，或 AKA 动态模块调 KS 单次 planner；不得互相启动顶层循环。单 owner 可以跨进程调用外部 AKA，额度、暂停和原始收据须贯穿，细则由[C 预算](planning/r5_contract_execution_review.md#budget)统一定义。
+
+| 未来区域 | 实际内容 |
+| --- | --- |
+| kernelschema/ | 唯一 CLI/Python API、contracts/materials/resources/template_api/artifacts、writing/design/optimize、fidelity/extract_bridge、runtime/claude、implement/reference、evaluation/task/agate |
+| schema_design/、schema_optimize/、schema_implement/ | 各一份简短 README，链接角色方法、唯一命令与同组 examples；不复制配置或参数说明 |
+| schema_extract/ | 现有命令、P1–P6 和原恢复/发布语义 |
+| examples/workflows/、docs/workflows/ | Task/请求/evaluator/案例与按真实资格更新的使用说明；具体文件清单归 V |
+| AKA:src/aka/workflow/schema/、packages/atrex-aka-schema/ | 可选 provider/backend/bridge、固定角色/资料、最少关联状态及资格投影；默认 off 走原 provider |
+
+根角色文档仍是方法真源；Template 使用既有工具，非 root 阅读含 root Contract。基础导入不加载 torch/CUDA；资料与固定 assignment 的唯一权限规则在[C 输入合同](planning/r5_contract_execution_review.md#api)。
+
+<a id="stages"></a>
+## 3. 固定实现阶段与 planner 交接
+
+一次 implement 固定 Task/Schema/规则/资料/scope、mode、准确 seed、backend 和预算。coder 可经历多个 episode；每次交付稳定 C，评价准确 C，再根据已结算反馈、下一行动和余额决定同 R 继续。完整公共状态只在[C 结果与阶段状态](planning/r5_contract_execution_review.md#state)定义。
+一般代码缺陷、缺 dispatch 或未写完留在同 R；正确且符合设计的慢代码可以交付，性能目标另报。实现阶段完整合格且有已授权优化目标，或有独立可核对的设计阻碍，才交外壳决定 planner。超时、普通编译错误、无晋升、unknown 检查不能自动归因为设计失败。
+optimize keep 无行动即结束；明确补证进入 verify_only，明确同 R 改码继续固定实现。revise 发布不可变新 R，旧事务结算/作用域关闭后另准入。发布与准入分离，固定 backend 始终零 planner；暂停、耗尽、未结算 fence 的具体后果遵循合同。
+当轮目标由 Materials 的 workflow_objective 承载，不能放宽 Task/Scope。方法冻结后每次 fidelity 解释当前完整 Schema，覆盖与设计符合分开判定；新 R 不能套用 R0 的常量或旧 C 的资格。
+原码复验、显式原码 seed 续改、共同骨架下的纯 Schema 重建分别报告；材料边界与比较含义见[V 的消费模式](planning/r5_validation_delivery_plan.md#pilot)。普通反馈不自动写回 Schema，合法 REALIZATION.Feedback 的边界见 C。
+
+<a id="release"></a>
+## 4. 阶段交付与发布门
+
+工程按接口、CPU 集成、真实资格分层。W 是唯一依赖表；消费稳定接口不等待整个单元的 GPU 或发行收尾。独立 KS 小 demo 不等 AKA 动态、EXP 或复杂题，AKA fixed 不等 KS 真实 demo 或 EXP；跨后端声明另汇合双方证据。
+下表定义支持声明的门，具体 owner/子 gate 见[W](05_work_packages.md)，测试内容和公开文件见[V 的验收](planning/r5_validation_delivery_plan.md#validation)及[公开材料](planning/r5_validation_delivery_plan.md#public)。复用已适用记录，不为同一声明重跑同一资格。
+
+| 发布门 | 必须具备的证据与声明范围 |
+| --- | --- |
+| E0 工程预览 | 适用材料/接口和 CPU fixture 可审查；不声明真实独立 implement |
+| KS-P1 独立产品 | K6.release：无 AKA 的真实 fixed、准确续写工程及真实 partial-seed 消费、真实 design/一次 optimize、完整 Task/有限 fidelity/性能证据、K2 消费能力与源码资源；真实 keep 照实发布 |
+| KS-P2 复杂子域 | K8.real：K7 预审后真实 F1 及实际所需栈/格式资格；仅声明通过的子范围，不冒充全 FA4 |
+| AKA-P1 fixed | A7.fixed：A1–A5 的适用工程/真实证据和独立固定源码配对；不等待 A7.pair、K6、A6 或 EXP |
+| AKA dynamic | A6.real：固定工程后按阶段调 planner、发布/准入/恢复的真实动态证据；不反向阻塞 fixed |
+| 跨后端支持 | A7.pair：同 Task/主体/判据的对接 fixture 和两后端各自适用真实记录；不以一边 pass 代签另一边 |
+| EXP-P1 / 有限 pilot | X1.consume 对欲消费能力取得固定来源/新捕获资格；X2.protocol 冻结协议后，X2.run 才依其真实门开展受限运行和全样本分析 |
+
+README/支持表只声明实际通过的门，逐能力引用 evidence/index；安装、真实重跑、无 GPU 历史回放分清。源码公开闭包、许可/固定获取方式及模型/GPU 依赖按 V 准备，不把作者缓存路径当公共交付。
+长期无人值守、多 provider、复杂远端故障维护等继续作为方向；没有真实证据不写入当前支持面。实际选中请求需要的 dispatch、完整快照和删除语义属于该请求，不能以有限首发为由省略。
+
+<a id="maintenance"></a>
+## 5. 实施基线、版本消费与维护
+
+实施前重新读取三仓 AGENTS/commit/branch/status，保护既有修改、有意删除、untracked 与旧 capture，在隔离位置工作；不 reset/clean/stash 当前树，不用历史计数代替实时状态。[既有基线](planning/baseline.json)与[历史](01_history.md)仅供追溯。基线检查是开工记录，不是额外产品包。
+AKA 从记录的上游 SHA 开始，必要 EXP role/context/session 等补丁逐文件追来源；A3 归口来源，A1/A4/A5 各自拥有实际接点实现并维护记录，A7 发行汇合。不整批 cherry-pick EXP 根提交，不把脏 KS 目录当固定 submodule commit。
+AKA 可选固定 KS；EXP 保持生成式 vendor，并从 fork 确切 KS gitlink 单独物化 KS 普通文件到 assets/kernel-schema，记录 control/schema-source.json。产品只有 KS/fork 一处可编辑来源，EXP 不手改第二份实现。
+新 launch 用新模块，旧 SchemaAgent/reader 只服务旧捕获；活动 run 不换版本，不承诺新实现恢复旧冻结 capture，回退只影响下一新 run。远端写入/发布按实际实施阶段授权落实，本轮未操作。
+维护保留四条原则：上游更新独立进行；冻结新的 upstream/fork/KS 配对；保留旧提交/资源/capture；先验证 off，再补受影响的固定实现、身份/续写/恢复与 Task 资格。不存在独立例行更新工程包。
+有限 B/F/D pilot 的材料、预算建议、终态选择与全样本成本解释统一由[V pilot](planning/r5_validation_delivery_plan.md#pilot)规定；计划不授权现在启动模型/GPU 样本，也不承诺统计功效或收益。
+下一阶段首批和后续依赖只见[W 开工顺序](05_work_packages.md#start)。D1–D3 已确认，不再把环境资格未知转成新的产品方向问卷。
+
+修订依据与逐项去向见[R3 裁决](review_20261120/r3_adjudication.md)和[本轮变更报告](review_20261120/r4_change_report.md)；[原主计划快照](review_20261120/before/04_implementation_plan.md.txt)保留历史文本，不参与当前规范。
