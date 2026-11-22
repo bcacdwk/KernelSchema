@@ -353,7 +353,8 @@ def test_immutable_pair_change_detected_on_completed_resume(setup):
     assert w.read(plan)==before
 
 
-def test_real_workflow_implement_and_optimize_preserve_reference_materials(tmp_path,monkeypatch):
+@pytest.mark.parametrize('recover_rejected',[False,True])
+def test_real_workflow_implement_and_optimize_preserve_reference_materials(tmp_path,monkeypatch,recover_rejected):
     """Use real business CLIs/material paths; Design output, model and GPU are CPU fixtures."""
     example=MODULE.parent/'examples/vector_add'
     language=example/'triton_3_7_1_language.json'
@@ -370,6 +371,7 @@ from pathlib import Path
 sys.path.insert(0, CHECKOUT)
 from schema_implement.tools.tests.test_implement import impl, FakeClient, reply, writer
 mode=Path(__file__).stem
+recover_rejected=RECOVER_REJECTED
 example=Path(EXAMPLE)
 language=example/'triton_3_7_1_language.json'
 if mode=='design':
@@ -385,7 +387,20 @@ if mode=='design':
 if mode=='implement':
     _,reference=impl.agate.load_eval(example/'eval')
     impl.agate.connect=lambda _: (FakeClient(reference),'CPU fake transport')
+    if recover_rejected and '--resume' not in sys.argv:
+        from atrex_gateway_client.errors import GatewayError
+        original_build=impl.agate.build_request
+        def legacy(*args,**kwargs):
+            wire=original_build(*args,**kwargs)
+            wire['harness']='atrex'
+            return wire
+        impl.agate.build_request=legacy
+        class Reject(FakeClient):
+            def submit_job(self,kind,request):
+                raise GatewayError(422,{'reason':'request_validation_failed','error_class':'validation'})
+        impl.agate.connect=lambda _: (Reject(reference),'CPU fake transport')
     def inspect(prompt,run,attempt,state,persist,dirs):
+        assert '--recover-rejected-request' not in sys.argv, 'request recovery must not call coder'
         assert 'Fixed supplementary references' in prompt
         records=[state['manifest'][path] for path in state['reference_paths']]
         assert len(records)==4 and not any(Path(item['origin']).name=='schema' for item in records)
@@ -411,13 +426,16 @@ def decide(self,prompt,output_schema,phase):
                   if Path(item['source']).name=='feedback.json' and 'materials' in json.loads((self.out/item['snapshot']).read_text()))
     assert any(item['origin']==str(language) and item['files'][language.name]==fixed['sha256']
                for item in feedback['materials'])
+    if recover_rejected:
+        assert feedback['diagnosis']['kind']=='done' and feedback['job']['status']=='succeeded'
+        assert not any('/attempts/01/' in item['source'] for item in records)
     (self.out/'cpu_material_read.json').write_text(json.dumps({'record':fixed,'materials':feedback['materials']}))
     self.result['calls_used']+=1
     return {'decision':'keep','required_fix':False,'notes':'CPU fixture verifies material delivery only',
             'files':[],'missing':[]}
 optimize.Run.call=decide
 raise SystemExit(optimize.main())
-'''.replace('CHECKOUT',repr(str(MODULE.parents[1]))).replace('EXAMPLE',repr(str(example)))
+'''.replace('CHECKOUT',repr(str(MODULE.parents[1]))).replace('EXAMPLE',repr(str(example))).replace('RECOVER_REJECTED',repr(recover_rejected))
     for name in ('design','implement','optimize'):
         path=tmp_path/(name+'.py')
         path.write_text(script)
@@ -428,7 +446,18 @@ raise SystemExit(optimize.main())
           '--gpu','L20D','--out',str(run),'--reference',str(example/'schema')]
     for path in materials:
         args+=['--reference',str(path)]
-    assert w.main(args)==0
+    assert w.main(args)==(1 if recover_rejected else 0)
+    if recover_rejected:
+        rejected=w.read(run/'result.json')
+        assert rejected['stop_reason']=='evaluation_failed'
+        old=w.digest(run/'v001/implement/attempts/01')
+        design=w.digest(run/'design')
+        assert w.main(['--resume',str(run),'--recover-rejected-request'])==0
+        state=w.read(run/'state.json')
+        assert len(state['versions'])==1 and state['versions'][0]['implementation']['calls_used']==1
+        assert state['last_usable']['kernel']=='v001/implement/attempts/02/kernel'
+        assert w.digest(run/'v001/implement/attempts/01')==old and w.digest(run/'design')==design
+        assert w.main(['--resume',str(run),'--recover-rejected-request'])==0
     result=w.read(run/'result.json')
     assert result['status']=='complete'
     observed=w.read(run/'v001/optimize/01/cpu_material_read.json')
@@ -436,6 +465,25 @@ raise SystemExit(optimize.main())
     assert observed['record']['sha256']==hashlib.sha256(language.read_bytes()).hexdigest()
     assert len(w.read(run/'v001/implement/cpu_material_read.json'))==len(materials)
     assert {str(path):w.digest(path) for path in (example/'task.md',example/'eval',*materials)}==original
+
+
+def test_workflow_recovery_interruption_then_queries_original_action(setup):
+    base,plan,launch=setup
+    code,_=launch([I(status='incomplete',reason='evaluation_failed'),I(status='interrupted',calls=1),I(calls=1),O()])
+    assert code==1
+    run=base/'run'
+    assert w.main(['--resume',str(run),'--recover-rejected-request'])==2
+    state_before=(run/'state.json').read_bytes()
+    assert w.main(['--resume',str(run),'--recover-rejected-request'])==2
+    assert (run/'state.json').read_bytes()==state_before
+    assert w.main(['--resume',str(run)])==0
+    events=w.read(plan)['events']
+    assert [event['module'] for event in events]==['implement','implement','implement','optimize']
+    assert len({event['out'] for event in events[:3]})==1
+    assert '--recover-rejected-request' in events[1]['argv']
+    assert '--recover-rejected-request' not in events[2]['argv']
+    state=w.read(run/'state.json')
+    assert len(state['versions'])==1 and state['versions'][0]['implementation']['calls_used']==1
 
 
 def test_recover_committed_child_without_relaunch_or_double_count(setup):

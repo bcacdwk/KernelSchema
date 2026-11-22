@@ -36,6 +36,8 @@ def parser():
     p.add_argument('--gpu')
     p.add_argument('--out', type=Path)
     p.add_argument('--resume', type=Path)
+    p.add_argument('--recover-rejected-request', action='store_true',
+                   help='resume a proven no-job validation rejection after an adapter correction, reusing the candidate')
     p.add_argument('--model')
     p.add_argument('--effort', choices=['low','medium','high','xhigh','max'])
     p.add_argument('--max-calls', type=int)
@@ -44,9 +46,11 @@ def parser():
 
 
 def validate_args(p, args):
+    if args.recover_rejected_request and (not args.resume or args.feedback):
+        p.error('--recover-rejected-request requires --resume without additional feedback')
     if args.resume:
         if any(getattr(args,k) is not None for k in ('task','eval_task','schema','kernel','gpu','out','model','effort','max_calls','timeout_s')) or args.reference:
-            p.error('--resume only accepts additional --feedback; original inputs/model/limits are fixed')
+            p.error('--resume only accepts --feedback or --recover-rejected-request; original inputs/model/limits are fixed')
         if not (args.resume / 'state.json').is_file():
             p.error('--resume requires an existing Implement state.json')
         return args.resume.resolve()
@@ -218,11 +222,92 @@ def prompt(run, state, attempt):
     ])
 
 
-def execute(run, state, *, new_feedback=False, client_factory=None, writer=None):
+def recover_rejected_request(run, state):
+    """Reuse one complete inline candidate after a proven, fixed harness rejection."""
+    def reject(detail):
+        raise Problem('recovery_not_allowed', detail)
+
+    previous = state.get('result') or {}
+    if state.get('action'):
+        reject('Original action is unresolved; resume without --recover-rejected-request to locate its original request/job')
+    if previous.get('status') != 'incomplete' or previous.get('stop_reason') != 'evaluation_failed':
+        reject('Request recovery requires a terminal evaluation_failed result')
+    source_name = state.get('current')
+    if not source_name or source_name != f'attempts/{state.get("attempts", 0):02d}':
+        reject('Original attempt identity is unavailable')
+    source = run / source_name
+    required = ['kernel','notes.md','request.json','response.json','feedback.json']
+    if any(rel(run, source / name) not in state['manifest'] for name in required):
+        reject('Original candidate and rejection evidence must have fixed manifests')
+    response = coder.read_json(source / 'response.json')
+    observed = coder.read_json(source / 'feedback.json')
+    original = coder.read_json(source / 'request.json')
+    error = response.get('error') or {}
+    if (response.get('status') != 'rejected' or error.get('status') != 422
+            or error.get('reason') != 'request_validation_failed' or error.get('error_class') != 'validation'
+            or any(response.get(k) for k in ('job_id','reserved_job_id','received_job_id','acceptance'))
+            or observed.get('job') is not None or not isinstance(original.get('candidate'), str)
+            or 'oss_files' in original):
+        reject('Only an explicit 422 validation rejection without a job or upload reservation can be recovered')
+    candidate, reply = state.get('candidate'), state.get('reply')
+    if (not candidate or not reply or reply.get('gaps') != [] or observed.get('gaps') != []
+            or previous.get('kernel') != rel(run, source / 'kernel')
+            or previous.get('feedback') != rel(run, source / 'feedback.json')
+            or previous.get('calls_used') != state['calls_used']
+            or observed.get('diagnosis', {}).get('kind') != 'evaluation_failed'
+            or observed.get('kernel', {}).get('sha256') != candidate['sha256']
+            or observed.get('kernel', {}).get('files') != candidate['files']
+            or observed.get('schema', {}).get('sha256') != state['schema']['sha256']
+            or observed.get('schema', {}).get('effective_identity') != state['effective_identity']
+            or reply.get('entry_point') != candidate['entry_point']
+            or reply.get('notes') != (source / 'notes.md').read_text()
+            or coder.inventory(source / 'kernel') != candidate['files']
+            or coder.digest(candidate['files']) != candidate['sha256']):
+        reject('Recovery requires the original complete candidate, notes, Schema binding and empty gaps')
+    if len(state['feedback_ids']) != state['consumed_feedback']:
+        reject('Unconsumed repair feedback cannot be mixed with request recovery')
+    config, reference = agate.load_eval(run / 'inputs/eval')
+    if not original.get('idempotency_key') or not original.get('name'):
+        reject('Original request identity is unavailable')
+    corrected = agate.build_request(source / 'kernel', candidate['entry_point'], config, reference,
+                                    state['config']['gpu'], original['idempotency_key'], original['name'])
+    changed = sorted(k for k in original.keys() | corrected.keys() if original.get(k) != corrected.get(k))
+    if not changed:
+        reject('The rebuilt request is unchanged; do not repeat the rejected request')
+    if changed != ['harness'] or original.get('harness') != 'atrex' or corrected.get('harness') != 'atrex_bench':
+        reject('This recovery only accepts the fixed atrex to atrex_bench harness adapter correction')
+    # All proof checks precede creating a new attempt. No old file is modified.
+    attempt = run / 'attempts' / f'{state["attempts"] + 1:02d}'
+    if attempt.exists():
+        reject('The recovery attempt already exists; locate its original state before proceeding')
+    attempt.mkdir()
+    info = coder.snapshot(source / 'kernel', attempt / 'kernel')
+    (attempt / 'notes.md').write_bytes(coder.regular(source / 'notes.md'))
+    key = 'ks-implement-' + uuid.uuid4().hex
+    corrected.update(idempotency_key=key, name='ks-' + run.name + '-' + attempt.name)
+    coder.save(attempt / 'request.json', corrected)
+    recovery = {'source_attempt':source_name, 'attempt':rel(run,attempt),
+                'rejected_request_sha256':coder.digest(original), 'rejected_key':original['idempotency_key'],
+                'changed_fields':changed, 'key':key, 'calls_used':state['calls_used'], 'previous_result':previous}
+    coder.save(attempt / 'recovery.json', recovery)
+    state['manifest'][rel(run,attempt / 'kernel')] = info
+    for name in ('notes.md','request.json','recovery.json'):
+        state['manifest'][rel(run,attempt / name)] = {'files':coder.inventory(attempt / name)}
+    state.setdefault('request_recoveries', []).append(recovery)
+    state.update(attempts=state['attempts'] + 1, current=rel(run,attempt),
+                 action={'kind':'agate','phase':'prepared','key':key,'request_sha256':coder.digest(corrected)})
+    coder.save(run / 'state.json',state)
+
+
+def execute(run, state, *, new_feedback=False, recover_rejected=False, client_factory=None, writer=None):
     persist = lambda: coder.save(run / 'state.json',state)
     client_factory = client_factory or agate.connect
     writer = writer or coder.invoke
     coder.check_manifest(run, state['manifest'])
+    if recover_rejected:
+        if not state.get('action') and state.get('result', {}).get('status') == 'complete':
+            return state['result']
+        recover_rejected_request(run, state)
     action = state.get('action')
     if action and action['kind'] == 'coder':
         if coder.active_process(action):
@@ -342,10 +427,13 @@ def main(argv=None):
                 raise Problem('needs_input','Original run initialization failed; its fixed inputs cannot be replaced on resume')
             new_feedback = add_feedback(run,state,args.feedback) if args.resume else bool(args.feedback)
             new_feedback = new_feedback or len(state['feedback_ids']) > state['consumed_feedback']
-            value = execute(run,state,new_feedback=new_feedback)
+            value = execute(run,state,new_feedback=new_feedback,recover_rejected=args.recover_rejected_request)
         except KeyboardInterrupt:
             value = result(run,state,'interrupted','interrupted',run / state['current'] if state.get('current') else None)
         except Problem as e:
+            if e.kind == 'recovery_not_allowed':
+                print(e.detail,file=sys.stderr)
+                return 2
             state['diagnostic'] = e.detail
             print(e.detail,file=sys.stderr)
             attempt = run / state['current'] if state.get('current') else next_attempt(run,state)

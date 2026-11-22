@@ -87,6 +87,8 @@ def parser():
     p.add_argument('--max-versions', type=int)
     p.add_argument('--max-calls-per-schema', type=int)
     p.add_argument('--timeout-s', type=float)
+    p.add_argument('--recover-rejected-request', action='store_true',
+                   help='resume only the current Implement directory after a proven no-job validation rejection')
     return p
 
 
@@ -109,6 +111,8 @@ def input_paths(args):
 
 
 def arguments(p, args):
+    if args.recover_rejected_request and not args.resume:
+        p.error('--recover-rejected-request requires --resume')
     if args.resume:
         if any(getattr(args, k) is not None for k in ('task', 'eval_task', 'schema', 'kernel', 'out', 'gpu',
                 'model', 'effort', 'max_versions', 'max_calls_per_schema', 'timeout_s')) or args.feedback or args.reference:
@@ -211,7 +215,7 @@ class Workflow:
         return ['--task', config['task'], '--model', config['model'], '--effort', config['effort'],
                 '--timeout-s', str(config['timeout_s'])]
 
-    def implement(self, extra=()):
+    def implement(self, extra=(), *, recover_rejected=False):
         v = self.state['versions'][-1]
         out = self.run / f'v{len(self.state["versions"]):03d}/implement'
         if v['implement']:
@@ -231,7 +235,9 @@ class Workflow:
             feedback = list(dict.fromkeys([*v['feedback'], *extra]))
         for path in feedback:
             args += ['--feedback', path]
-        self.plan('implement', out, args, feedback=feedback)
+        if recover_rejected:
+            args += ['--recover-rejected-request']
+        self.plan('implement', out, args, feedback=feedback, recover_rejected=recover_rejected)
 
     def optimize(self, external=False):
         v = self.state['versions'][-1]
@@ -273,6 +279,10 @@ class Workflow:
                 raise Problem('interrupted', 'Writing output has no trusted terminal result; locate its recorded draft/process before resuming')
             # The Implement CLI owns all original-job and coder recovery.
             args = ['--resume', str(out)]
+            # After a launched recovery, any interruption belongs to that original
+            # action. Implement must resume its stored key/job, not start recovery again.
+            if action.get('recover_rejected') and action.get('pid') is None:
+                args += ['--recover-rejected-request']
             for feedback in action.get('feedback', []):
                 args += ['--feedback', feedback]
         else:
@@ -408,8 +418,20 @@ class Workflow:
                 self.state['last_usable'] = None
                 raise Problem('input_changed', f'Original input changed: {path}')
 
-    def execute(self):
+    def execute(self, *, recover_rejected=False):
         self.check_inputs()
+        if recover_rejected:
+            if not self.state.get('action') and self.state.get('result', {}).get('status') == 'complete':
+                return self.state['result']
+            versions = self.state['versions']
+            previous = versions[-1].get('implementation') if versions else None
+            expected = f'v{len(versions):03d}/implement/result.json'
+            if (self.state.get('action') or not previous or not versions[-1].get('implement')
+                    or versions[-1]['implement'] != expected or self.state.get('latest_attempt') != expected
+                    or self.state.get('result', {}).get('stop_reason') != 'evaluation_failed'
+                    or previous.get('status') != 'incomplete' or previous.get('stop_reason') != 'evaluation_failed'):
+                raise Problem('recovery_not_allowed', 'Recovery requires the current terminal Implement evaluation failure; unresolved actions use ordinary --resume')
+            self.implement(recover_rejected=True)
         if self.state.get('result') and self.state['result']['status'] != 'interrupted' and not self.state['action']:
             return self.state['result']
         if not self.state['action']:
@@ -460,10 +482,13 @@ def main(argv=None):
                 if args.schema:
                     workflow.version(str(args.schema), str(args.kernel) if args.kernel else None, map(str, args.feedback))
                 workflow.persist()
-            value = workflow.execute()
+            value = workflow.execute(recover_rejected=args.recover_rejected_request)
         except KeyboardInterrupt:
             value = workflow.finish('interrupted', 'interrupted', 'Workflow interrupted; resume the recorded action')
         except Problem as exc:
+            if exc.reason == 'recovery_not_allowed':
+                print(exc.detail, file=sys.stderr)
+                return 2
             value = workflow.finish('interrupted' if exc.reason == 'interrupted' else 'incomplete', exc.reason, exc.detail)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             value = workflow.finish('interrupted' if state.get('action') else 'incomplete',

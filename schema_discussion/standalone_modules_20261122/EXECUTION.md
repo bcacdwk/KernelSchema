@@ -8,7 +8,7 @@
 - 产品：独立 Design、Optimize、Implement 和单脚本 Workflow 已实现。首次实现的四模块默认 CPU 集合为 **74 passed**；交稿与环境材料修复后为 **93 passed、8 subtests passed**；004 后阅读证据与等待修复为 **97 passed、70 subtests passed**。现有 Template **8 项**与 Extract **6 项**相关回归分别通过。
 - 切换：根 README、方法入口、依赖、测试收集与 ignore 已切换；旧根产品和两个登记 worktree 已移除。旧 `.tooling`、仅根 `.schema_extract/` 与空 `.worktrees/` 已全部移除。
 - 首次完整代码 commit：已提交 `4f7919bf531ad8b7ab49d5e371dfc8b7fea51a34`（`Refactor`），材料提交为父提交 `2c9c346`。提交时修掉新测试文件末尾多余空行，未改变行为；提交后工作区干净，未 push。
-- 真实 Qwen/Agate：001–004 原失败与预算保持；004 已取得完整模型稿，阅读证据与默认等待修复提交为 `7edc0d7`。005 的正常 Design 已 **complete/done、calls=2**，三文件经过正式收取、规范化和严格 Template 验收；自有 Implement 首调用写出完整两分支 kernel，但因 Contract/Wiki 明确缺少必要 Triton 掩码语义绑定而 **needs_input**，未送 GPU。累计真实 Qwen **16 次**（001–004各3、005 Design2+Implement1、另1小探针），候选 GPU **0 次**，无未结清 job。已有官方 Triton3.7.1 资料，正在补齐下游传材后用新 Design 正式绑定；完整闭环尚未成立。
+- 真实 Qwen/Agate：001–004 原失败与预算保持；004 已取得完整模型稿，阅读证据与默认等待修复提交为 `7edc0d7`。005 的正常 Design 已 **complete/done、calls=2**，三文件经过正式收取、规范化和严格 Template 验收；自有 Implement 首调用写出完整两分支 kernel，但因 Contract/Wiki 明确缺少必要 Triton 掩码语义绑定而 **needs_input**，未送 GPU。截至005终结，累计真实 Qwen **16 次**（001–004各3、005 Design2+Implement1、另1小探针），候选 GPU **0 次**，无未结清 job。已有官方 Triton3.7.1 资料，正在补齐下游传材后用新 Design 正式绑定；完整闭环尚未成立。
 
 ## 基线与环境
 
@@ -228,3 +228,28 @@ Workflow 自动进入 `v001/implement`，正式 SDK 版本0.14.37，自有 coder
 Issue05交接完成：明确新增独立Implement首建 `--reference`（可重复），与repair feedback分开固定，resume不可替换；Workflow逐新版本透传普通资料，Schema近邻仅Design，同版repair复用原资料。反馈materials仅导出固定reference的相对实物路径、原位置、逐文件与整体摘要，现有Optimize closure据此取得正文。初始化提前拒绝未保全的本地链接和混入补充资料的候选摘要，旧needs_input/resume规则与旧005不改。必要CPU：Implement/Workflow两测试文件 **63 passed in 23.45s**；补单文件/父目录边界后定向 **8 passed、56 deselected in 6.21s**，包括真实CLI材料装配（模型/GPU替身）及原字节到Optimize的核对。006的环境、官方语言JSON、自足续写说明、005实际kernel.py四份资料均通过快照预检。
 
 根README、Implement方法和示例说明同步新参数；实际命令从Task+环境+官方语言资料独立Design，再以真正交付的Schema实施，不把资料仍有占位的手写示例当作完整实施依据。没有修改手写目标Schema或把它投喂模型。官方语言JSON原SHA保持 `c6c0db0d563f16ce70b7a90976706eaafe70ced5c3c63467cffa09d5223c2b7b`。
+
+
+## 语言资料与交接修复后的正常运行 vector_add-006
+
+必要资料与交接修复提交为 `bb1c9c38c48b160d0271e258f2146adaade444ea`（`Pass references`），提交后产品干净，未push。005原Design成功与Implement needs_input如实保留；新运行复用其完整已接受Schema作Design近邻，补真实官方语言资料、原环境、自足的真实缺口说明与旧模型源码上下文。旧源码从未实测，不当新候选或旧成绩；新Design须自行正式绑定并处理语义，不能由Implement/Optimize偷偷改旧Contract。
+
+```sh
+KS_AGATE_CONFIG=/home/shaohanyong.shy/.cache/kernelschema-standalone-private/agate.json /home/shaohanyong.shy/.cache/kernelschema-standalone-venv/bin/python schema_workflow/workflow.py --task schema_workflow/examples/vector_add/task.md --eval-task schema_workflow/examples/vector_add/eval --reference schema_workflow/examples/vector_add/environment.json --reference schema_workflow/examples/vector_add/triton_3_7_1_language.json --reference .schema_workflow/runs/vector_add-005/design/schema --reference .schema_workflow/materials/vector_add-005-continuation.md --reference .schema_workflow/runs/vector_add-005/v001/implement/attempts/01/kernel/kernel.py --gpu L20D --out .schema_workflow/runs/vector_add-006
+```
+
+未传timeout/model/effort覆盖，实际默认timeout_s=3600、Qwen/max与额度不变。工具session `80137`。普通四份参考将由新入口固定交给后续Implement并随feedback交Optimize；Schema近邻不混入后续资料组。实际结果、job与全案例成绩另按本次产物补记。
+
+006 select在 **172.370秒**成功，唯一选005已接受Schema作同任务基线；明确需要正式语言绑定、将masked尾部限定到访存语义，保留Task计算/域/选路。write在 **1089.325秒**正常交出root/multi_tile/dispatch（returncode0、diagnostics=[]、missing=[]），Wiki.Language已经正式指向bb1c9c3提交的官方语言JSON，Math将padding表述为数学域限制。host具体报 **15处text预算超限**，原产品自然进入repair3/3（PID930770），仍按默认3600秒；截至启动repair，真实Qwen共19次（含在途），GPU0。
+
+等待原006时，另一个新xhigh只读取证同版算术/launch来源，未改任何006引用或产品，未调用模型/GPU。报告在 `.schema_workflow/materials/triton-3.7.1-arithmetic-check/FINDINGS.md`：Triton tensor加法经arith::AddFOp到LLVM FAdd/NVPTX add模板，官方PTX9.0默认舍入为RNE；num_warps=8的官方Config文档明确8×32线程，而arange仅保证逻辑序列，不能证明固定每线程4/2元素。对独立RNE FP32单加法、reference有限且仅flush亚正规输入/结果，保守绝对差<2^-125（约2.351e-38），远低于Task atol；不泛化到任意舍入溢出或任意低精度。此为固定源码/文档与任务数值分析，不是生成PTX、GPU观测或新资格流程。调查已收口，原006继续；必要语义与模型额外承诺按后续实际结果区分，不因泛写unbound不断从空白Design。
+
+**006 Design 正式完成**：repair在 **831.772秒**正常返回（returncode0、diagnostics=[]），host正常规范化并通过完整Template验收；result为complete/done、calls_used=3、schema=design/schema。本次repair真实使用Grep正文读取DOC2–6，公开content_hits分别保存13/20/21/30/25行，因此Issue04新分支本次已在真实业务中通过，不再只靠CPU。正式文件：root.yaml 8,276 bytes，SHA `41d474bb6e5d92953a253376ab52a93803667dcf951de5c7236d7f77498f3785`；multi_tile.yaml 4,009 bytes，SHA `0329db3f26648dbfe249046c991c15cf05cc4be50aad5341984d3b4ff68142d4`；dispatch.md 9,441 bytes，SHA `c9ea619526272442a9e9404a51a8907887b91ff8bd9e295605e00cea5d0755d1`。语言正式绑定保留，编程mask规则从Hardware.Feature移到相应设计/实现说明；硬件未知边界仍如实保留。
+
+Workflow自动进入v001/implement首个coder（PID997684，session224b5e08-fde6-4b8e-8667-5d68e5014cc7），SDK0.14.37。四组资料已实际固定于inputs/reference/000–003，原位置及逐文件/整体摘要齐全：环境、官方语言JSON、自足续写诊断、005真实旧源码；Schema近邻没有混入资料组。语言JSON字节SHA仍为c6c0db0d563f16ce70b7a90976706eaafe70ced5c3c63467cffa09d5223c2b7b。此时真实Qwen累计20次（含在途coder），尚无GPU请求；固定资料不代替实际阅读或正确性成绩。
+
+**006 首次提交的实际终态（工具/文件时间均为2026-11-22 UTC）**：coder正常success/exit0、gaps=[]并交出完整源码，draft落盘于15:58:38.171；最后固定规则文件为15:40:39.810，间隔约1078秒（非精确native耗时），小于3600边界。第一次Agate submit随后收到422/request_validation_failed，response明确rejected，未取得job_id、无GPU执行。Workflow/Implement保存incomplete/evaluation_failed，calls仍1，last_usable=null；session80137退出1，coder PID997684已不存在。原key `ks-implement-73536cd6037649288ebfcb3ec396327d` 和request/response/feedback保留。
+
+新的xhigh定位正式SDK的 `Client.validate_eval`：只做声明/内联源码验证，不上传或调度。对原请求取得唯一字段错误：body.harness应为atrex_bench或sol_execbench，而本地固定eval使用atrex别名。adapter只把wire harness映射为atrex_bench，重建请求逐项对比仅该字段变化；第二次无调度校验返回valid=true、scope=declaration_and_inline_source。两次validate不算GPU提交，诊断期间没有submit/model。安全validation_errors现在保留loc/type/msg，不保存input/ctx/认证/原始payload。
+
+Issue06另提供明确的 `--resume ... --recover-rejected-request` 窄恢复：仅接受本次确定422无job的inline完整候选，原manifest/Schema/notes/gaps核对一致，修正语义仅harness别名；新immutable attempt复制旧kernel/notes并复用原refs，保留原attempt/key/失败与calls_used1，不重调coder或Design。任何action、已知job/reservation/未知ack、无变化请求均不可借此重投；恢复一旦启动后中断，只走普通resume查原新key/job。Workflow仅重新计划原目录同版本。受影响CPU **78 passed in 39.74s**，最后定向 **13 passed**；真实006前置检查在首次mkdir前停止，attempt02尚不存在、旧证据未动。下面将提交修复后由正常Workflow入口执行唯一真实恢复。

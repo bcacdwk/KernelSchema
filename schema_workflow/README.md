@@ -59,6 +59,8 @@ R/
 
 Workflow 持目录锁，动作前和结果后原子记录。resume 固定原参数并核对原输入、已交付不可变文件；完成状态直接复用。Implement 中断只在原目录恢复，原 job 的查询与候选核对由 Implement 负责。已创建却没有可信终态的 Design/Optimize 不重放，结果具体指向需定位的子运行和进程。不能用新的子目录把未知调用当作零次。
 
+对于 Implement 已明确拒绝且未创建 job 的请求，可在修正适配器后运行 `python3 schema_workflow/workflow.py --resume R --recover-rejected-request`。Workflow 只重新安排当前版本的原 Implement 目录；严格的 422/无 job/完整候选/固定摘要/请求差异检查由 [Implement](../schema_implement/README.md) 执行。Design 不重做，模型预算与原调用次数不变；新反馈成功后照常进入 Optimize。已有未决动作拒绝该开关，应使用普通 `--resume R` 查询原请求/job；一次恢复启动后若中断，普通 resume 不再次传递恢复开关。complete 直接复用原结果。
+
 源码依赖和安装见[根 README](../README.md#独立-design--implement--optimize--workflow)，固定任务见 [vector_add](examples/vector_add/README.md)。CPU 测试：
 
 ```sh

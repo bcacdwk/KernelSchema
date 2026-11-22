@@ -14,6 +14,8 @@
 
 - [Issue 05](ISSUE_05.md)：真实 Implement 暴露必要语言绑定缺口；新增可追溯的 Triton3.7.1 官方资料，由新 Design 正式绑定，旧 Contract/失败不回填。Implement 首建新增可重复 `--reference` 保存已绑定的补充资料；Workflow 将普通资料继续传给它，Schema 近邻仍仅供 Design。补充资料与修复反馈分开，反馈以固定实物路径供 Optimize 读取；不自动联网抓 Wiki，不增加恢复或评测平台。
 
+- [Issue 06](ISSUE_06.md)：正式服务的harness使用atrex_bench，本地atrex别名由adapter转换，固定eval不变。增加显式、严格限于已知无job的422拒绝且仅此harness修正的同目录恢复；保全旧attempt，复用完整候选而不重调模型，原预算不清零。已有或未知job仍只按原身份恢复。
+
 模型、effort、调用总额、核心职责、Task/eval 与保护区均保持；正文中旧的 900 秒默认已被上述实测修订替代。当前执行与结果见 [EXECUTION](EXECUTION.md)。
 
 ## 1. 已定范围与最小文件

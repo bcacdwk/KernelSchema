@@ -14,6 +14,7 @@ spec = importlib.util.spec_from_file_location('ks_implement_test_entry', MODULE)
 impl = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(impl)
 coder, agate = impl.coder, impl.agate
+REAL_BUILD_REQUEST = agate.build_request
 EXAMPLE = MODULE.parents[1] / 'schema_workflow/examples/vector_add'
 
 
@@ -97,6 +98,28 @@ def writer(answers):
     return call
 
 
+def rejected_request(run, monkeypatch, *, multi=False):
+    sdk=pytest.importorskip('atrex_gateway_client.errors')
+    folder,state,config,reference=run
+    def legacy(*args, **kwargs):
+        wire=REAL_BUILD_REQUEST(*args, **kwargs)
+        wire['harness']='atrex'
+        return wire
+    class Reject(FakeClient):
+        def submit_job(self, kind, request):
+            self.submitted.append(copy.deepcopy(request))
+            raise sdk.GatewayError(422, {'reason':'request_validation_failed','error_class':'validation',
+                'details':{'validation_errors':[{'loc':['body','harness'],'type':'enum',
+                    'msg':"Input should be 'atrex_bench' or 'sol_execbench'"}]}})
+    monkeypatch.setattr(agate,'build_request',legacy)
+    client=Reject(reference)
+    value=impl.execute(folder,state,client_factory=lambda _:(client,'fake'),writer=writer([reply(multi=multi)]))
+    assert value['stop_reason']=='evaluation_failed' and state['calls_used']==1
+    assert not client.queries
+    monkeypatch.setattr(agate,'build_request',REAL_BUILD_REQUEST)
+    return client,legacy
+
+
 def test_full_cases_and_complete_resume_no_replay(run):
     folder,state,config,reference = run
     client = FakeClient(reference)
@@ -110,6 +133,105 @@ def test_full_cases_and_complete_resume_no_replay(run):
     assert f['job']['status']=='succeeded'
     assert f['environment']=={'gpu_name':'observed fake device'}
     assert impl.execute(folder,state,client_factory=lambda _:pytest.fail('completed run touched SDK'))==value
+    assert impl.execute(folder,state,recover_rejected=True,
+                        client_factory=lambda _:pytest.fail('completed recovery touched SDK'))==value
+
+
+def test_rejected_harness_reuses_candidate_without_coder_and_preserves_evidence(run,monkeypatch):
+    folder,state,config,reference=run
+    rejected_request(run,monkeypatch)
+    original=coder.inventory(folder/'attempts/01')
+    inputs=coder.inventory(folder/'inputs')
+    previous=coder.read_json(folder/'attempts/01/request.json')
+    state['config']['max_calls']=1
+    client=FakeClient(reference)
+    value=impl.execute(folder,state,recover_rejected=True,client_factory=lambda _:(client,'fake'),
+                       writer=lambda *a:pytest.fail('transport recovery called coder'))
+    assert value['status']=='complete' and value['calls_used']==1 and state['calls_used']==1
+    assert value['kernel']=='attempts/02/kernel' and value['feedback']=='attempts/02/feedback.json'
+    assert coder.inventory(folder/'attempts/01')==original
+    assert coder.inventory(folder/'inputs')==inputs
+    assert (folder/'attempts/02/notes.md').read_bytes()==(folder/'attempts/01/notes.md').read_bytes()
+    assert not (folder/'attempts/02/draft.json').exists()
+    assert len(client.submitted)==1 and client.submitted[0]['idempotency_key']!=previous['idempotency_key']
+    fixed=client.submitted[0]
+    assert {k for k in fixed if fixed[k]!=previous[k]}=={'harness','idempotency_key','name'}
+    assert fixed['harness']=='atrex_bench'
+    audit=state['request_recoveries'][0]
+    assert audit['source_attempt']=='attempts/01' and audit['calls_used']==1
+    assert audit['rejected_key']==previous['idempotency_key']
+    assert audit['rejected_request_sha256']==coder.digest(previous)
+    assert len(coder.read_json(folder/value['feedback'])['cases'])==7
+
+
+def test_rejected_request_cannot_repeat_unchanged_body(run,monkeypatch):
+    folder,state,config,reference=run
+    _,legacy=rejected_request(run,monkeypatch)
+    original=coder.inventory(folder)
+    monkeypatch.setattr(agate,'build_request',legacy)
+    with pytest.raises(coder.Problem,match='unchanged'):
+        impl.execute(folder,state,recover_rejected=True,client_factory=lambda _:pytest.fail('unchanged touched SDK'))
+    assert coder.inventory(folder)==original
+
+
+@pytest.mark.parametrize('pending',['submit','query'])
+def test_request_recovery_rejects_unresolved_action_then_normal_resume_uses_original(run,pending):
+    folder,state,config,reference=run
+    client=FakeClient(reference)
+    setattr(client,'fail_'+pending+'_once',True)
+    with pytest.raises(coder.Problem):
+        impl.execute(folder,state,client_factory=lambda _:(client,'fake'),writer=writer([reply()]))
+    original=copy.deepcopy(state)
+    with pytest.raises(coder.Problem,match='Original action is unresolved'):
+        impl.execute(folder,state,recover_rejected=True,client_factory=lambda _:pytest.fail('recovery touched SDK'))
+    assert state==original
+    value=impl.execute(folder,state,client_factory=lambda _:(client,'fake'),writer=writer([]))
+    assert value['status']=='complete' and value['calls_used']==1
+    if pending=='submit':
+        assert client.submitted[0]==client.submitted[1]
+    else:
+        assert len(client.submitted)==1 and all(job=='job-original' for job,_ in client.queries)
+
+
+def test_rejected_request_with_upload_reservation_cannot_recover(run,monkeypatch):
+    folder,state,config,reference=run
+    rejected_request(run,monkeypatch,multi=True)
+    original=coder.inventory(folder)
+    assert coder.read_json(folder/'attempts/01/feedback.json')['job']['id']=='job-original'
+    with pytest.raises(coder.Problem,match='without a job or upload reservation'):
+        impl.execute(folder,state,recover_rejected=True,client_factory=lambda _:pytest.fail('reserved request touched SDK'))
+    assert coder.inventory(folder)==original
+
+
+@pytest.mark.parametrize('failure',['status','reason','gaps','binding','options','known_job'])
+def test_recovery_requires_exact_rejection_and_unchanged_bindings(run,monkeypatch,failure):
+    folder,state,config,reference=run
+    rejected_request(run,monkeypatch)
+    if failure in {'status','reason'}:
+        path=folder/'attempts/01/response.json'
+        value=coder.read_json(path)
+        value['error'][failure]=401 if failure=='status' else 'unrelated_failure'
+        coder.save(path,value)
+        state['manifest']['attempts/01/response.json']={'files':coder.inventory(path)}
+    elif failure=='gaps':
+        state['reply']['gaps']=[{'kind':'needs_input','detail':'unresolved'}]
+    elif failure in {'binding','known_job'}:
+        path=folder/'attempts/01/feedback.json'
+        value=coder.read_json(path)
+        if failure=='binding': value['schema']['sha256']='wrong'
+        else: value['job']={'id':'known-job'}
+        coder.save(path,value)
+        state['manifest']['attempts/01/feedback.json']={'files':coder.inventory(path)}
+    else:
+        def changed(*args,**kwargs):
+            wire=REAL_BUILD_REQUEST(*args,**kwargs)
+            wire['options']={**wire['options'],'timeout_s':1}
+            return wire
+        monkeypatch.setattr(agate,'build_request',changed)
+    original=coder.inventory(folder)
+    with pytest.raises(coder.Problem):
+        impl.execute(folder,state,recover_rejected=True,client_factory=lambda _:pytest.fail('invalid recovery touched SDK'))
+    assert coder.inventory(folder)==original and state['calls_used']==1
 
 
 def test_same_schema_repair_uses_all_cases_and_preserves_attempt(run):
@@ -251,6 +373,30 @@ def test_real_sdk_builder_uses_fixed_explicit_options(tmp_path):
     wire=agate.build_request(kernel,'entry.py',config,ref,'L20D','key','test')
     assert wire['options']==config['options'] and len(wire['reference']['shapes'])==7
     assert wire['spec']['languages']==['triton']
+    assert config['harness']=='atrex' and wire['harness']=='atrex_bench'
+    assert wire['runner_overrides']==config['runner_overrides']
+    assert wire['atrex_bench_version']==config['atrex_bench_version']
+    assert wire['mode']=='full'
+
+
+def test_service_validation_errors_keep_field_diagnosis_without_payload_secrets():
+    sdk=pytest.importorskip('atrex_gateway_client.errors')
+    error=sdk.GatewayError(422, {'reason':'request_validation_failed','error_class':'validation',
+        'message':'raw message secret=hidden','details':{'validation_errors':[
+            {'loc':['body','harness'],'type':'enum',
+             'msg':"Input should be 'atrex_bench' or 'sol_execbench'",
+             'input':'private input','ctx':{'secret':'hidden'},'url':'https://private.invalid?token=hidden'},
+            {'loc':['body','options'],'type':'value_error','msg':'Invalid value at https://private.invalid?x=hidden'},
+            {'loc':['body','token'],'type':'value_error','msg':'token=private-token'},
+            'raw error with private input'], 'authorization':'Bearer private-token'}})
+    safe=agate.service_error(error)
+    errors=safe['details']['validation_errors']
+    assert errors[0]=={'loc':['body','harness'],'type':'enum',
+                       'msg':"Input should be 'atrex_bench' or 'sol_execbench'"}
+    assert errors[1]['msg']=='Invalid value at [url omitted]'
+    assert errors[2]['msg']=='[sensitive validation message omitted]'
+    assert len(errors)==3
+    assert all(word not in json.dumps(safe) for word in ('hidden','private','Bearer'))
 
 
 def test_completed_candidate_digest_is_checked_on_resume(run):

@@ -7,6 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import time
 import zipfile
 from urllib.parse import urlsplit
@@ -36,7 +37,7 @@ def load_eval(directory):
                  'options','runner_overrides','deps_mode','lock_clocks'}
     if not isinstance(config, dict) or set(config) - supported:
         raise Problem('needs_input', 'eval.json has unsupported fields/comparator/build requirements')
-    if config.get('harness') != 'atrex' or config.get('mode', 'full') != 'full':
+    if config.get('harness') not in ('atrex','atrex_bench') or config.get('mode', 'full') != 'full':
         raise Problem('needs_input', 'This entry requires Atrex full correctness and timing')
     languages = config.get('languages')
     if not isinstance(languages, list) or not languages or set(languages) - {'triton','python','pytorch'}:
@@ -105,7 +106,8 @@ def build_request(kernel, entry, config, reference, gpu, key, name):
     candidate = regular(kernel / entry).decode() if len(files) == 1 else {'archive':'candidate.zip','entry_point':entry}
     return build_eval_request_from_content(candidate, reference, gpu, name=name,
         spec_fields={'languages':config['languages']}, options=config['options'],
-        requirements=config.get('requirements', []), harness=config['harness'],
+        requirements=config.get('requirements', []),
+        harness='atrex_bench' if config['harness'] == 'atrex' else config['harness'],
         atrex_bench_version=config.get('atrex_bench_version'), mode='full',
         runner_overrides=config.get('runner_overrides'), deps_mode=config.get('deps_mode'),
         lock_clocks=config.get('lock_clocks'), idempotency_key=key)
@@ -124,9 +126,34 @@ def safe_response(value):
 
 
 def service_error(error):
-    # SDK messages can contain endpoints; only safe structured attribution is durable.
-    return {'type':type(error).__name__, 'status':getattr(error,'status',None),
-            'reason':getattr(error,'reason',None), 'error_class':getattr(error,'error_class',None)}
+    # Never persist SDK exception strings, raw payloads, inputs or validation context.
+    value = {'type':type(error).__name__, 'status':getattr(error,'status',None),
+             'reason':getattr(error,'reason',None), 'error_class':getattr(error,'error_class',None)}
+    details = getattr(error, 'details', None)
+    errors = details.get('validation_errors') if isinstance(details, dict) else None
+    if value['error_class'] == 'validation' and isinstance(errors, list):
+        safe = []
+        for item in errors[:32]:
+            if not isinstance(item, dict):
+                continue
+            entry = {}
+            if isinstance(item.get('loc'), (list, tuple)):
+                entry['loc'] = [part if (type(part) is int or isinstance(part, str)
+                                and re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', part)) else '[field omitted]'
+                                for part in item['loc'][:16]]
+            kind = item.get('type')
+            if isinstance(kind, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', kind):
+                entry['type'] = kind
+            message = item.get('msg')
+            if isinstance(message, str):
+                if re.search(r'(?i)authorization|access[-_ ]?key|secret|token|signature|password', message):
+                    message = '[sensitive validation message omitted]'
+                entry['msg'] = re.sub(r'https?://\S+', '[url omitted]', message)[:500]
+            if entry:
+                safe.append(entry)
+        if safe:
+            value['details'] = {'validation_errors':safe}
+    return value
 
 
 def evaluate(run, attempt, state, persist, client):
