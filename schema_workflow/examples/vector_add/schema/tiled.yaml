@@ -1,0 +1,37 @@
+META_DATA:
+  Name: vector_add_fp32
+  Describe: Add two contiguous FP32 CUDA vectors into a new output
+  Version: 1
+  Dispatch:
+    id: tiled
+    when: 513<=n<=65536
+DESIGN:
+  Math_reshape:
+    from: root
+  Work_schedule:
+    Thesis: Use 256-element tiles to expose independent work on longer vectors
+    Step:
+      MAIN:
+        Describe: Produce the output with masked contiguous loads and stores
+        Decomposition:
+          Partition: {element: {meaning: Contiguous output elements, size: n, tile: 256}}
+          Target:
+            Single_tile: {z: {meaning: Valid elements within this worktile, shape: [{element: 256}], dtype: fp32}}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: ceil(n/256)
+        Schedule:
+          Worktile_order: [{by: element, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: worker_id, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    from: root
+REALIZATION:
+  Require:
+    - Item: DESIGN.Work_schedule::MAIN.Mapping.Worker
+      Choice: Use four warps per CTA
+      Reason: Fix the physical launch size to the four participating warp members

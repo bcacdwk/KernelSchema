@@ -6,9 +6,23 @@
 
 逐层收束不要求先证明最优：当前路线已选且计算与所需能力有依据时，数值误差、实际并发驻留或性能可留待实现验证，写明待验证条件及影响后继续下推；路线未定时先完成比较；缺少决定语义或可实现性的关键依据时先补足，只推进不依赖它的工作；已有证据表明方案不成立时先修正或改选。下层发现问题时返回最早受影响的决定，写入后依次复查下游，保留未受影响部分。这些属于 Planner 自检，不增加审批。
 
+## 独立自动化入口
+
+```sh
+python3 schema_design/design_schema.py --task path/to/task.md --out path/to/new-design
+```
+
+入口按自身位置定位 checkout，可从其他工作目录执行绝对脚本路径。默认使用 Claude CLI、`qwen3.8-max[1m]`、effort `max`；可用 `--model`、`--effort` 覆盖，`--max-calls` 默认 3，`--timeout-s` 默认 900 秒。`--reference` 可重复；host 同时读取 Kernel Wiki catalog 并实际发现 Schema Wiki 的 root/dispatch，通常先选至多三个互补近邻、再写、最后只按具体诊断修稿。没有适用近邻仍从明确 Task 设计。
+
+模型只用 Read/Glob/Grep，DOC0 与本方法进入首请求，DOC1–6 和 Template 可实际读取。host 固定原字节及来源、保留完整 raw/effective/from，收取完整 YAML/dispatch 后规范化并严格重读校验。现有 Qwen 连接及登录来源保留，用户 hooks/MCP/插件不执行；认证不会进入材料或产物。只消费已有 reference/案例/误差判据，不自动生成 oracle；仅有语义明确的文字任务也可先完成设计，关键缺项如实返回。
+
+产物为 `input/`、`drafts/NN.json`、可接收的 `schema/`、`notes.md` 和 `result.json`。原稿与真实阅读记录保留，检查失败不声称设计有效。初始化后 stdout 只给一行绝对 `result.json` 路径；退出码 `0/1/2` 分别表示 complete/incomplete/interrupted，参数错误不建运行。结果含 `status, stop_reason, calls_used, schema, notes`；路径相对结果，未收到可接收 Schema 时 `schema=null`。输出目录必须全新且不覆盖输入或保护资料。
+
+自动化落实下述方法，不增加独立 Reviewer 或效果验收。交付一个覆盖全部必要域与分支的实现设计，重叠域写明优先顺序；root 不隐式兜底，文件顺序和测试样本不替代选路或任务合法域。
+
 ## 1 接收 Contract，建立设计起点
 
-已有 `root.yaml` 时直接读取给定 Contract；尚无文件时，按[模板说明](schema_template/README.md#1-确认资料与范围)创建任务目录并将任务方已确认的算法要求、固定参考入口、误差判据及硬件环境如实填入 `root.yaml`（缺少现成参考入口时先按 [DOC 1](schema_docs/1.contract.algorithm_requirement.md#golden_reference) 补齐参考实现并固定版本；若复用提取材料而 `Tolerance` 仅为未给完整公式的[验收来源记录](schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)，或前提缺漏、冲突，按[修改权限](README.md#2-schema-是什么)向任务方确认）。理解外部计算、全部输出与副作用、有效域、精度与验收要求及设备能力和已选实现栈：省略的输入 `range` 按 [DOC 1 默认值域](schema_docs/1.contract.algorithm_requirement.md#rangedefault-与空值)解释，默认计算精度与输入 dtype 分别按[数学约定](schema_docs/1.contract.algorithm_requirement.md#数学表达与参考精度)核对，硬件规则见 [DOC 2](schema_docs/2.contract.hardware_specification.md)。区分契约保证与未给出的输入分布、相关性或布局条件；不能从案例或源码重定义任务，也不能缩小有效域或放宽误差迁就方案。
+已有 `root.yaml` 时直接读取给定 Contract；尚无文件时，按[模板说明](schema_template/README.md#1-确认资料与范围)创建任务目录并将任务方已确认的算法要求、固定参考入口、误差判据及硬件环境如实填入 `root.yaml`（缺少现成参考入口时按 [DOC 1](schema_docs/1.contract.algorithm_requirement.md#golden_reference) 记录具体缺项，不自动生成 oracle；若复用提取材料而 `Tolerance` 仅为未给完整公式的[验收来源记录](schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)，或前提缺漏、冲突，按[修改权限](README.md#2-schema-是什么)向任务方确认）。理解外部计算、全部输出与副作用、有效域、精度与验收要求及设备能力和已选实现栈：省略的输入 `range` 按 [DOC 1 默认值域](schema_docs/1.contract.algorithm_requirement.md#rangedefault-与空值)解释，默认计算精度与输入 dtype 分别按[数学约定](schema_docs/1.contract.algorithm_requirement.md#数学表达与参考精度)核对，硬件规则见 [DOC 2](schema_docs/2.contract.hardware_specification.md)。区分契约保证与未给出的输入分布、相关性或布局条件；不能从案例或源码重定义任务，也不能缩小有效域或放宽误差迁就方案。
 
 从原任务说明明确代表性 workload、优先 shape、优化目标、要求实现的范围和计量边界（暂不设 YAML 字段，不在 `CONTRACT` 中自增字段）。先围绕主要 workload 逐层形成 `root` 的一套具体方案，不急于按 shape 拆节点；`root` 定位见 [common](schema_docs/0.common.md#文件与共享-contract)，配置取值与输入工作量的区别见[差异规则](schema_docs/0.common.md#参数变化与结构变化)。按[创建文件](schema_template/README.md#2-创建文件或进入已有任务)建立或续写任务，保留既定 Contract，只登记本次设计的实际依据。
 

@@ -1,0 +1,92 @@
+META_DATA:
+  Name: vector_add_fp32
+  Describe: Add two contiguous FP32 CUDA vectors into a new output
+  Version: 1
+  Dispatch:
+    when: 1<=n<=1024
+CONTRACT:
+  Algorithm_requirement:
+    Input:
+      x: {meaning: First addend, shape: [{element: n}], dtype: fp32}
+      y: {meaning: Second addend, shape: [{element: n}], dtype: fp32}
+    Output: {z: {meaning: New output tensor, shape: [{element: n}], dtype: fp32}}
+    Compute:
+      - Name: Elementwise addition
+        Math: |-
+          1<=n<=65536; x and y are contiguous one-dimensional FP32 CUDA tensors on one device.
+          Inputs and FP32 sums are finite; n=x.numel()=y.numel().
+          For 0<=i<n: z[i]=fp32(x[i]+y[i]); return z, a new contiguous tensor; leave x and y unchanged.
+          Public ABI: Model().forward(x,y).
+    Golden_reference:
+      Source: KernelSchema@2c9c346cdd0373821b633012bdfece446c766d65:schema_workflow/examples/vector_add/eval/reference.py::Model.forward
+      Tolerance:
+        z: abs(candidate-reference)<=1e-6+1e-6*abs(reference) for every output element; preserve shape, FP32 dtype and unmodified inputs
+  Hardware_specification:
+    Device: NVIDIA L20D
+    Architecture: SM103
+    Execution:
+      cta: One Triton program with co-resident warps
+      warp: 32 SIMT threads within one CTA
+    Feature:
+      register: Per-thread FP32 values
+      global_memory: Device memory for input and output tensors
+    Stack:
+      Language: Python wrapper and Triton
+      Toolchain: Image-provided PyTorch and Triton; actual versions recorded by Agate
+    Wiki:
+      Hardware: <wiki-hardware@pending:L20D/SM103.md>
+      Programming:
+        Language: <wiki-programming@pending:Triton/>
+      Microbench: <wiki-microbench@pending:L20D/>
+      Sota:
+        Kernel: <wiki-kernel@pending:vector_add/>
+        Schema: <wiki-schema@pending:vector_add/>
+      Profile: <wiki-profile@pending:L20D/>
+DESIGN:
+  Math_reshape:
+    Thesis: Keep independent FP32 addition without intermediate materialization
+    Rewrite:
+      - Name: Direct sum
+        Math: 'For 0<=i<n: z[i]=fp32(x[i]+y[i]); no reduction or approximation'
+  Work_schedule:
+    Thesis: One 1024-element worktile amortizes dispatch for short vectors
+    Step:
+      MAIN:
+        Describe: Produce the output with masked contiguous loads and stores
+        Decomposition:
+          Partition: {element: {meaning: Contiguous output elements, size: n, tile: 1024}}
+          Target:
+            Single_tile: {z: {meaning: Valid elements within this worktile, shape: [{element: 1024}], dtype: fp32}}
+        Mapping:
+          Worker: {unit: cta, unit_count: 1}
+          Worker_count: 1
+        Schedule:
+          Worktile_order: [{by: element, direction: ascending}]
+          Worker_assignment:
+            Preassigned: {start: 0, count: 1}
+            Refill: none
+            Exit: assigned_done
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis: Load both addends, add in FP32 and store only valid lanes
+    Step:
+      MAIN:
+        Role:
+          MAIN:
+            Info:
+              Describe: Execute one contiguous tile
+              Member: warp[0:4]
+              Using_verb:
+                compute: {z: {execution_mode: serial, describe: Add valid values in FP32; done produces the per-lane sum}}
+                load: {xy: {execution_mode: serial, describe: Load x and y at tile offsets with offsets<n; done makes valid FP32 values available}}
+                store: {z: {execution_mode: serial, describe: Store sums with offsets<n; done makes valid outputs visible}}
+            Pipe:
+              - load:xy
+              - compute:z
+              - store:z
+REALIZATION:
+  Require:
+    - Item: DESIGN.Work_schedule::MAIN.Mapping.Worker
+      Choice: Use four warps per CTA
+      Reason: Fix the physical launch size to the four participating warp members

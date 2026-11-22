@@ -4,6 +4,22 @@
 
 Contract 是已有前提，不随优化选择改变。字段语义、权限和引用遵循 [README](README.md#2-schema-是什么)、[common](schema_docs/0.common.md) 及 DOC 1–6；文件操作、版本维护和检查使用[模板说明](schema_template/README.md)。本流程负责设计判断及其推进顺序。
 
+## 独立自动化入口
+
+```sh
+python3 schema_optimize/optimize_schema.py --task path/to/task.md --schema path/to/schema --kernel path/to/kernel --feedback path/to/feedback.json --out path/to/new-optimize
+```
+
+`--schema` 接完整目录或任一节点 YAML，读取总是覆盖整个任务。`--kernel` 接全部源码目录或真正自足文件，包括必要 wrapper/dispatcher/helper/构建源码；`--feedback` 可重复，保留原文并从原位置追读相对引用。Implement 的 result 只是入口，还会固定其指向的完整源码、落实说明与原 request/response。仅真实 Implement `design_gap`、尚无源码且有具体诊断时可以省略 kernel，不用空文件替代。
+
+默认 Claude CLI、`qwen3.8-max[1m]`、effort `max`；可覆盖 `--model/--effort`，`--max-calls` 默认 2，`--timeout-s` 默认 900 秒。模型只用 Read/Glob/Grep；host 提供 DOC0、本方法、完整输入和 raw/effective/from，DOC1–6 与 Template 可实际读取。保留现有 Qwen 连接和登录来源，同时禁用 hooks/MCP/插件；不保存凭据。host 在规范化前后按解析值核对完整 root CONTRACT，漂移留稿拒收，不静默回填。
+
+`keep` 保持原 Schema，`required_fix=false`；`repair` 保持原设计、指出具体实现缺陷并给出修复建议，恒为 true；`revise` 返回有实质解析变化的完整新 Schema，并明确该布尔值。`required_fix` 只表示具体、未解决的 Task/Contract/必需落实问题，性能提案或未达理想速度不算。keep 不代表旧或失败 kernel 已通过本次评测。非法稿、Contract 漂移或关键缺项返回 incomplete 和 `decision=null`，不能以 keep 隐藏写作失败。
+
+产物只含 `input/`、`drafts/NN.json`、新稿 `schema/`、`notes.md`、`result.json`；keep/repair 指向未改的输入快照。结果字段是 `status, stop_reason, calls_used, schema, notes, decision, required_fix`，路径相对结果。初始化后 stdout 仅一行绝对结果路径；退出码 `0/1/2` 表示 complete/incomplete/interrupted。输出目录必须全新，不覆盖输入或保护资料。没有可信决定时 required_fix 不推导为 false。
+
+只修改 DESIGN、必要 REALIZATION/dispatch，任务、CONTRACT、kernel、oracle 与原反馈不变。有效文件检查即结束写作，不增加独立 Reviewer、性能验收或资格机制。外部成绩仅是起始证据，不当作本次验证。
+
 ## 1 接手设计，判断反馈
 
 先用 `dispatch.md` 定位目标节点、收录范围与相关变体记录，读取 `root` 的共享 Contract、目标节点的完整有效 Design（沿 [common 整区规则](schema_docs/0.common.md#design-整区引用)解析 `from` 并在当前节点上下文绑定）及本地 `REALIZATION` 和 `when`（来源的 `when` 和 `REALIZATION` 不随引用带入）。从原任务说明及上一轮交接记录确认当前采用的代表性 workload、优先 shape、优化目标、比较对象与计量范围（不在 `CONTRACT` 中自增字段）；若基线来自提取产物且 `Golden_reference.Tolerance` 仅为未给完整公式的[验收来源记录](schema_docs/1.contract.algorithm_requirement.md#固定实现提取中的验收记录)，改变数值路径或使用误差预算前先向任务方确认完整判据。区分必须覆盖的有效域、优先优化输入与已有实验样本（样本的数值、布局或分布规律可支持性能判断，不能自动成为 Contract 限制）；需要核实实现行为或测量口径时，沿引用查看源码与实验。
@@ -20,7 +36,7 @@ Contract 是已有前提，不随优化选择改变。字段语义、权限和�
 | 需要改变数学、工作组织或执行约束，或暴露设计冲突 | 定位最早受影响的设计层，作为本轮修订或候选；偏离旧 Design 的实现可以提供线索，但不能直接当作原设计的有效优化。 |
 | 需要改变算法要求、补充完整误差判据、更换设备或实现栈，或发现前提与资料冲突 | 向任务方指出具体问题及影响，不通过 Design、`REALIZATION` 或派生节点改变前提；继续不受影响的工作。 |
 
-简要说明接受、暂缓或不采纳反馈的理由，保留证据及其适用范围。没有真实 Coder 反馈时，直接依据已有设计和成本分析寻找机会，不编造反馈或实测瓶颈。
+简要说明接受、暂缓或不采纳反馈的理由，保留证据及其适用范围。真实反馈未包含性能观察时，只按已提供的诊断、设计和成本分析寻找机会，不编造实测瓶颈；独立入口仍要求具体反馈材料。
 
 ## 2 找到本轮值得改变的决定
 

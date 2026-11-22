@@ -1,0 +1,152 @@
+META_DATA:
+  Name: dual_cache_latent_bf16
+  Describe: Sparse latent attention that gathers each query token's listed rows from sliding-window and compressed BF16 KV pools into one joint softmax over shared key=value latents
+  Source: SchemaExtractSource_6d336aa35b52@6ba57ee61972a19e4cd3f3c75d2dede83118ac9d:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/candidate/solution.py::Model.forward
+  Version: 1
+CONTRACT:
+  Algorithm_requirement:
+    Constant:
+      latent_dim: {value: 512, meaning: Latent channels of one query, cache or output row}
+      swa_window: {value: 128, meaning: Sliding-window capacity of one token and width of the leading sparse_indices segment}
+    Input:
+      query: {meaning: Packed query latents of all requests, one row per token and head, shape: [{token: total_query_tokens}, {head: head_count}, {d: latent_dim}], dtype: bf16}
+      swa_kv_cache: {meaning: Paged pool of sliding-window latent rows, read as one flat row space, shape: [{page: swa_page_count}, {page_row: swa_page_rows}, {d: latent_dim}], dtype: bf16}
+      workspace_buffer: {meaning: Opaque scratch reserved for the implementation; its contents are not a result, shape: [{byte: workspace_bytes}], dtype: uint8}
+      sparse_indices: {meaning: Per-token row selections into the two pools; a negative entry marks an invalid slot, shape: [{token: total_query_tokens}, {index: index_width}], dtype: int32}
+      compressed_kv_cache: {meaning: Paged pool of compressed latent rows, read as one flat row space; required even when no compressed row is selected, shape: [{page: compressed_page_count}, {page_row: compressed_page_rows}, {d: latent_dim}], dtype: bf16}
+      sparse_topk_lens: {meaning: Per-token count of index columns in use, window segment plus global segment, shape: [{token: total_query_tokens}], dtype: int32}
+      seq_lens: {meaning: Per-request final context length in positions, shape: [{request: request_count}], dtype: int32}
+      out_buffer: {meaning: Caller destination buffer, ABI parameter out; may already hold arbitrary values, shape: [{token: total_query_tokens}, {head: head_count}, {d: latent_dim}], dtype: bf16, nullable: true, range: finite or +inf or -inf or NaN, default: None}
+      bmm1_scale: {meaning: Python float scaling every query-key product, shape: [], dtype: python_float, default: 1.0}
+      bmm2_scale: {meaning: Python float scaling the normalised output, shape: [], dtype: python_float, default: 1.0}
+      sinks: {meaning: Per-head sink logit entering the softmax as one extra term with a zero value vector, shape: [{head: head_count}], dtype: fp32, nullable: true, default: None}
+      kv_layout: {meaning: Cache layout tag; only the string HND is accepted, shape: [], dtype: python_str, default: HND}
+      cum_seq_lens_q: {meaning: Prefix sums of the per-request query lengths; boundary b is the first token row of request b, shape: [{boundary: request_count + 1}], dtype: int32}
+      max_q_len: {meaning: Declared longest per-request query length; must equal the actual maximum, shape: [], dtype: python_int}
+      enable_pdl: {meaning: Programmatic-launch hint the reference never reads, shape: [], dtype: python_bool, nullable: true, default: None}
+      swa_topk_lens: {meaning: Reserved slot; must be Python None, shape: [], dtype: python_none, default: None}
+      extra_sparse_indices: {meaning: Reserved slot; must be Python None, shape: [], dtype: python_none, default: None}
+      extra_sparse_topk_lens: {meaning: Reserved slot; must be Python None, shape: [], dtype: python_none, default: None}
+    Output:
+      out: {meaning: Joint softmax attention result of every token and head; the identical out_buffer object when given, else a new tensor with the query shape, shape: [{token: total_query_tokens}, {head: head_count}, {d: latent_dim}], dtype: bf16}
+    Compute:
+      - Name: Interface preconditions
+        Math: |
+          The frozen ABI types compressed_kv_cache, sparse_topk_lens, seq_lens, cum_seq_lens_q and max_q_len as optional, but the reference dereferences all five, so every call provides them and max_q_len equals the actual longest query length.
+          bmm1_scale and bmm2_scale are Python floats; the tensor form the ABI also types is rejected. kv_layout is the string HND. swa_topk_lens, extra_sparse_indices and extra_sparse_topk_lens are Python None. enable_pdl is never read, so no value of it changes the result.
+          query is a three-axis BF16 tensor with latent_dim channels and head_count in {8, 16, 32, 64, 128}; swa_kv_cache and compressed_kv_cache are contiguous three-axis BF16 tensors.
+          When out_buffer is None or omitted, out is a newly allocated BF16 tensor with the query shape; otherwise out_buffer keeps the query shape and BF16 dtype, out is written in place into it, and the identical object is returned.
+      - Name: Pool row spaces
+        Math: |
+          Both pools are read as flat row spaces of latent_dim channels: row r of a pool is the element range [r * latent_dim, (r + 1) * latent_dim) of its contiguous storage, so swa_row_count = swa_page_count * swa_page_rows and compressed_row_count = compressed_page_count * compressed_page_rows.
+          Paging and physical placement only decide which row indices the caller lists. The two pools are independent row spaces even when they alias one storage, which callers do when no compressed row is selected.
+          Every selected row is one shared key and value latent. Rows of the two pools are never deduplicated or merged by logical position, and an index listed twice contributes one term per occurrence.
+        Symbol:
+          swa_row_count: {meaning: Integer number of latent rows in the sliding-window pool, shape: [], dtype: not_applicable}
+          compressed_row_count: {meaning: Integer number of latent rows in the compressed pool, shape: [], dtype: not_applicable}
+      - Name: Request layout and causal visibility
+        Math: |
+          cum_seq_lens_q[0] = 0, cum_seq_lens_q[request_count] = total_query_tokens and the boundaries strictly increase, so query_len[b] = cum_seq_lens_q[b + 1] - cum_seq_lens_q[b] >= 1 for 0 <= b < request_count, total_query_tokens = sum_{b=0}^{request_count-1} query_len[b] and max_q_len = max_{0 <= b < request_count} query_len[b].
+          Request b owns the token rows cum_seq_lens_q[b] <= t < cum_seq_lens_q[b + 1] and its context length obeys seq_lens[b] >= query_len[b].
+          Token t of request b causally sees visible(t) = seq_lens[b] - query_len[b] + (t - cum_seq_lens_q[b]) + 1 positions, so 1 <= visible(t) <= seq_lens[b].
+          Declared domain: 1 <= request_count <= 32; 1 <= query_len[b] <= 4096; total_query_tokens <= 16384; query_len[b] <= seq_lens[b] <= 1048576; sum_{b=0}^{request_count-1} seq_lens[b] <= 1048576.
+        Symbol:
+          visible: {meaning: Integer count of positions one token causally sees, shape: [], dtype: not_applicable}
+      - Name: Selected rows of one token
+        Math: |
+          swa_window <= index_width <= 8320 and index_width % 4 == 0.
+          For token t: swa_count(t) = min(visible(t), swa_window) and total(t) = sparse_topk_lens[t] with swa_window <= total(t) <= index_width.
+          swa_sel(t) = [sparse_indices[t, i] : 0 <= i < swa_count(t) and sparse_indices[t, i] >= 0]
+          glob_sel(t) = [sparse_indices[t, i] : swa_window <= i < total(t) and sparse_indices[t, i] >= 0]
+          Both lists keep the column order the caller wrote. A negative entry, which callers write as -1, marks an invalid slot and is dropped independently of the two length gates. Columns with swa_count(t) <= i < swa_window or total(t) <= i < index_width are not read.
+          Listed rows obey 0 <= r < swa_row_count in swa_sel(t) and 0 <= r < compressed_row_count in glob_sel(t).
+          sel_kv(t) lists the swa_sel(t) rows of swa_kv_cache followed by the glob_sel(t) rows of compressed_kv_cache, so selected_count(t) = len(swa_sel(t)) + len(glob_sel(t)) and 0 <= selected_count(t) <= total(t).
+        Symbol:
+          selected_count: {meaning: Integer number of rows one token selects, shape: [], dtype: not_applicable}
+          sel_kv: {meaning: Selected rows of one token in list order, key and value operand, shape: [{key: selected_count}, {d: latent_dim}], dtype: 'ref:swa_kv_cache.dtype'}
+      - Name: Joint softmax over the selected rows
+        Math: |
+          Heads are independent: every formula below holds for one token t and one head h with 0 <= h < head_count, is evaluated in FP32 over the exact BF16 input values, and every sum over j runs on 0 <= j < selected_count(t). When sinks is None, the sink term sinks[h] is taken as -inf.
+          If selected_count(t) = 0, no maximum or normaliser is formed and out[t, h, c] = 0 for every h and c, also when sinks is given. Otherwise:
+          score[h, j] = bmm1_scale * sum_{c=0}^{latent_dim-1} query[t, h, c] * sel_kv(t)[j, c]
+          row_max[h] = max(max_{0 <= j < selected_count(t)} score[h, j], sinks[h])
+          prob[h, j] = exp(score[h, j] - row_max[h])
+          denominator[h] = sum_{0 <= j < selected_count(t)} prob[h, j] + exp(sinks[h] - row_max[h])
+          acc[h, c] = sum_{0 <= j < selected_count(t)} prob[h, j] * sel_kv(t)[j, c], 0 <= c < latent_dim
+          out[t, h, c] = bf16(acc[h, c] * (bmm2_scale / denominator[h]))
+          The sink is one extra softmax logit whose value vector is zero: it enters row_max and denominator only and is neither an output bias nor a scale on the selected rows. With selected_count(t) >= 1 some prob or sink term equals exp(0) = 1, so denominator[h] >= 1 and the division is defined.
+        Symbol:
+          score: {meaning: Scaled query-key products of one token, shape: [{head: head_count}, {key: selected_count}], dtype: fp32}
+          prob: {meaning: Unnormalised softmax weights of one token, shape: [{head: head_count}, {key: selected_count}], dtype: fp32}
+          denominator: {meaning: Per-head softmax normaliser of one token including the sink term, shape: [{head: head_count}], dtype: fp32}
+          acc: {meaning: Weighted value accumulation of one token, shape: [{head: head_count}, {d: latent_dim}], dtype: fp32}
+      - Name: Output write scope and side effects
+        Math: |
+          Every element of out is written exactly once per call: all total_query_tokens * head_count * latent_dim entries, including the tokens whose selected set is empty, so no element keeps a value the caller left in out_buffer.
+          The bf16 conversion of each written element is the only narrowing of the computation.
+          Every input other than out_buffer is read-only: query, both pools, sparse_indices, sparse_topk_lens, seq_lens, cum_seq_lens_q, max_q_len, both scales, sinks, kv_layout and enable_pdl. workspace_buffer is opaque scratch that an implementation may write; its contents are not part of the result and are not compared.
+    Golden_reference:
+      Source: SchemaExtractSource_6d336aa35b52@6ba57ee61972a19e4cd3f3c75d2dede83118ac9d:kernel_wiki/aka-cuda-operators-20261030/operators/sparse_attention/dual_cache_latent_bf16/problem/reference.py::Model.forward
+      Tolerance:
+        out: Source record only; declared atol=0.01, rtol=0.05, max_mismatch_fraction=0.0 for the single defined output out; combination formula, relative-error basis, non-finite policy and check routing absent; the default atol/rtol interpretation is not applied
+  Hardware_specification:
+    Device:
+    Architecture:
+    Execution:
+      thread: Single instruction-executing lane; 32 threads form one warp, and a thread issues its own cp.async copies and arrives alone on barriers
+      warp: 32 lockstep threads of one CTA; the scope of warp shuffle register exchange and of one warp-issued mma.sync
+      cta: Thread block of one kernel launch owning one dynamic shared-memory allocation; the scope of __syncthreads() and the unit the launch grid partitions work over
+      cluster: CTAs co-scheduled by a launch-time cluster dimension; peer shared memory is addressable inside it and cluster barriers synchronise its CTAs
+      sm: Streaming multiprocessor that hosts resident CTAs and supplies the shared memory one CTA allocates; the device SM count is read by the host plan
+      tensor core: Matrix-multiply unit of one SM executing warp-issued mma.sync and per-CTA or CTA-pair tcgen05.mma
+    Feature: {mechanism: null}
+    Stack:
+      Language:
+      Toolchain:
+    Wiki:
+      Hardware:
+      Programming:
+        Language:
+      Microbench:
+      Sota:
+        Kernel:
+        Schema:
+      Profile:
+DESIGN:
+  Math_reshape:
+    Thesis:
+    Rewrite:
+      - Name:
+        Math:
+  Work_schedule:
+    Thesis:
+    Step:
+      MAIN:
+        Describe:
+        Decomposition:
+          Partition: {dimension: {meaning: null, size: null, tile: null}}
+          Target:
+            Single_tile: {output: {meaning: null, shape: null, dtype: null}}
+        Mapping:
+          Worker: {unit: null, unit_count: null}
+          Worker_count:
+        Schedule:
+          Worktile_order: [{by: dimension, direction: null}]
+          Worker_assignment:
+            Refill:
+            Exit:
+    Flow:
+      Launch: [{step: [MAIN]}]
+  Tile_pipeline:
+    Thesis:
+    Step:
+      MAIN:
+        Role:
+          MAIN:
+            Info:
+              Describe:
+              Member:
+              Using_verb:
+                compute: {output: {execution_mode: null, describe: null}}
+            Pipe:
+              - compute:output

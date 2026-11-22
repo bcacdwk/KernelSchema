@@ -1,53 +1,26 @@
-# Implement workflow
+# Implement
 
-`kernelschema.api.implement` and `kernelschema implement` pass a raw Schema file
-or directory to AKA's standard Light/Agent/Executor/Evaluator workflow:
-
-```python
-from kernelschema.api import implement
-
-result = implement(
-    schema="/materials/schema", problem="/bench/problem",
-    repo_root="/checkouts/atrex-kernel-agent", platform="L20D",
-    workspace="/runs/implementation", framework="Triton", max_iters=4,
-)
-```
+把固定完整 Schema 落实成一个覆盖任务必要域和分支的 Python `Model` 入口，使用自有只读 coder 与正式 Agate SDK，在同设计累计调用余量内修复代码并全案例重验。不依赖 AKA、旧 KernelSchema runtime、Workflow 或 Extract runtime。
 
 ```sh
-kernelschema implement --schema /materials/schema --problem /bench/problem \
-  --repo-root /checkouts/atrex-kernel-agent --platform L20D \
-  --framework Triton --max-iters 4 --out /runs/implementation
+python3 schema_implement/implement_kernel.py --task T/task.md --eval-task T/eval --schema S --gpu L20D --out R
+python3 schema_implement/implement_kernel.py --resume R --feedback F
 ```
 
-Install matching AKA packages and KernelSchema source/editable in the same
-Python environment; follow AKA's [installation and native Task preparation](https://github.com/bcacdwk/atrex-kernel-agent/blob/feat/schema-workflows-v1/docs/schema-standard-workflow.md).
-The normal full evaluation needs real per-shape performance metadata for the
-selected hardware. `prepare_only=True` / `--prepare-only` loads inputs without
-calling the model or evaluator. Keep the original result and feedback: native
-completion alone does not establish candidate correctness or promotion.
+`--schema` 可以是目录或其中一个 YAML；始终固定完整目录、dispatch、from 链和 Template 有效来源。`--kernel` 可以是完整源码目录或自足 Python 文件；`--feedback` 可以重复。全新 `--out` 不得覆盖/包含输入或落入保护/产品目录。恢复只沿原输入、模型、目录和累计上限；已完且无新反馈直接返回原结果。
 
-The [standalone driver](../docs/workflows/standalone.md) explains file writing
-and the finite design → standard implement → optimize example. Writing and
-legacy qualification checks do not gate standard implementation.
+默认模型 `qwen3.8-max[1m]`、effort `max`、最多 6 次 coder、每次 coder 和每次远端等待分别 900 秒；`--model/--effort/--max-calls/--timeout-s` 可在首建覆盖。每次调用先计数，坏返回和超时也消耗次数。进度到 stderr，初始化后的 stdout 只有绝对 result.json 路径；退出码 `0/1/2` 表示 complete/incomplete/interrupted。参数错误不建立运行。
 
-## Legacy request and continuation
+模型通过 native `claude` 的 Read/Glob/Grep 阅读全部 raw/effective 设计、DOC、固定判据和完整源码。它不能写文件或提交 GPU。host 接收完整 `files`、入口与落实说明；不采用 patch 或 shell 指令。保持当前 HOME、CLI 登录来源与 CLAUDE_CONFIG_DIR；关闭 hooks/settings 后，仅将已有 settings.json.env 的连接字段补到 CLI 环境，不将凭据写进产物。
 
-Explicit `request` / `continue_run` selects the historical fixed-request
-interface, mutually exclusive with the standard `schema` arguments:
+运行需要 Python>=3.11、PyYAML、jsonschema；评测额外需要官方 `atrex-gateway-client`，本模块以发行版 **0.14.37** 核对和测试。发行渠道见 [官方安装文档](https://atrex-gateway.alibaba-inc.com/docs/skill)。不在 host 安装 torch、Triton、Bench 或 Ray。Agate 使用现有 `AGATE_AK/AGATE_SK` 或 `~/.atrex/config.json`；`KS_AGATE_CONFIG` 可指已有配置，`AGATE_URL/AGATE_PROFILE` 沿官方配置解析。不输出认证字段。
 
-```python
-from kernelschema.api import implement
-result = implement(request="/bundle/fixed.request.json", out="/new/run")
-result = implement(continue_run="/new/run")
-```
+固定 eval 目录包含 `reference.py` 的 `Model(**init_kwargs).forward(**inputs)`、`input.py` 的 `_make_inputs(**input_kwargs)`、非空 `shapes.json`、所需 `metadata.json/roofline.json` 与 `eval.json`。eval.json 使用 SDK 名称：`operator,languages,requirements,harness,atrex_bench_version,mode,options,runner_overrides,deps_mode,lock_clocks`；显式固定 options 的 atol/rtol/num_correctness_cases/bench_iters/timeout_s，不借 SDK 默认放宽原判据。当前适配器不能表达的额外比较器文件/原生构建返回 needs_input。完整例子见 [vector_add](../schema_workflow/examples/vector_add/README.md)。
 
-The legacy reference backend needs no AKA installation.
-`seed=null` selects Task.starter_source; an explicit Source selects those exact
-bytes. `verify_only` requires nonempty Source and starts zero coder calls.
-The evaluator supports the full four-shape Task only; partial scope is rejected.
+产物只有 `inputs/`、`state.json`、`result.json`、`attempts/NN/`。源码固定后不再覆盖；终态反馈固定后不覆盖，修复进入新 attempt。result 仅含 `status,stop_reason,calls_used,schema,kernel,feedback`，路径相对 result。反馈中入口、源码和 Schema 的逐文件 SHA256、整体摘要、有效来源身份、落实说明、逐 case 判定/时延/单位/统计、实际环境及 request/response/job 在一处；所有反馈路径相对反馈文件。整体摘要为按键排序、紧凑 ASCII JSON 的 `{relative_path: file_sha256}` 映射的 SHA256。
 
-Its [readonly staging and qualification boundary](../docs/workflows/stage-ro.md)
-remains an explicit compatibility path. Missing configuration/qualification
-returns blocked while retaining the exact seed.
-See [the reference interface](../kernelschema/implement/INTERFACE.md) for the
-five independent implementation gates, original-operation recovery and budget.
+自足文件按源码发送；真实多文件依赖打包，以官方 prepare_uploads/upload_file 和 `{archive,entry_point}` 提交。动作、固定请求和稳定幂等键先落盘。已知 job 仅查询该 ID；丢失提交回包沿官方幂等语义重发同一请求/键。短时 404、断连、未结清 cleanup、取消受理均不新建 job。默认不取消。SDK 0.14.37 没有旧上传签名 URL 刷新接口；上传进程丢失且原上传未确认完成时明确保留 reservation 和 interrupted，不另造 reservation 或把失败送 coder。
+
+只有所有固定 case 均有比较器实测通过和有效中位时延，且没有已知必需设计/覆盖/代码缺口时 complete。真实基础设施失败为 evaluation_failed；编译/数值/代码落实失败才允许同设计修复。样本通过不构成全动态域证明，不另建静态证明器、reviewer、排名或性能搜索。
+
+CPU 回归：`python3 -m pytest schema_implement/tools/tests -q`。Template 与所有输入只读；仅新候选源码由 host 写入。

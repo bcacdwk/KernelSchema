@@ -17,22 +17,39 @@ Kernel Schema 的核心出发点在于：压缩是智能的基础，对语义、
 | Planner 根据已有 schema 与实现反馈迭代优化 | [优化设计](OPTIMIZE_SCHEMA.md) | 有依据的设计修订（或保留原设计的结论）、影响范围及下一轮验证要求 |
 | Coder 根据选定 schema 从零实现，或修改、调优 kernel | [实现 schema](IMPLEMENT_SCHEMA.md) | 对应设计版本与来源身份的代码、验证结果及有据反馈 |
 
-`CONTRACT` 由任务方给定或确认（提取按固定来源建立）。新算子只有需求、尚无 `root.yaml` 时，先按[模板说明](schema_template/README.md#1-确认资料与范围)将已确认的算法要求、固定参考入口与硬件环境如实填入 `root.yaml`（缺少现成参考入口时先按 `Compute` 补齐并固定版本），再进入[新建设计](DESIGN_SCHEMA.md)；前提未定或冲突时向任务方确认，Planner 与 Coder 不自行设定任务或放宽验收。代表性 workload、优化目标与计量范围随原任务材料或本轮交接说明保留，不在 YAML 中自增字段。分区职责见[分区总览](#2-schema-是什么)，系统学习或查阅案例见[阅读入口](#阅读入口)。
+`CONTRACT` 由任务方给定或确认（提取按固定来源建立）。新算子尚无 `root.yaml` 时，将明确的算法要求、可用固定参考与硬件环境作为 Task 交给[新建设计](DESIGN_SCHEMA.md)，按[模板说明](schema_template/README.md#1-确认资料与范围)形成 Schema；缺少固定参考与验收时可先设计，Implement 会具体报告缺项。前提未定或冲突时如实报告，Planner 与 Coder 不自行设定任务或放宽验收。代表性 workload、优化目标与计量范围随原任务材料或本轮交接说明保留，不在 YAML 中自增字段。分区职责见[分区总览](#2-schema-是什么)，系统学习或查阅案例见[阅读入口](#阅读入口)。
 
 新建与优化均由 Planner 按“数学改写 → 工作调度 → 微流水线”逐层收束并写入；下层发现前提问题时，返回最早受影响的上层修正并复查受影响部分。
 
 Schema Extract 通过唯一入口 `schema_extract/extract_yaml.py` 执行六阶段提取、独立审阅、按实际来源返回与 Runner 原子发布（默认 Claude Code `qwen3.8-max[1m]` / `max`，各阶段与角色独立会话；Codex 可显式指定）。Linux 运行环境与命令见 [Supervisor 手册](schema_extract/README.md#开始一次试用)，角色与工具权限见[执行协议](schema_extract/tools/README.md#运行恢复与维护)，正式输出目录见 [Schema Wiki](schema_wiki/README.md)。交付须核对目标状态与凭据：`ready` 仅表示当前 P6 终审通过，登记输出目录以 `published: true` 为准，另目录 `export` 以对应发布记录与目标 `.extraction/receipt.json` 为准；待发布或中断运行的排查与接续见[恢复与交付](schema_extract/README.md#恢复与交付)。
 
-## 独立 workflow 试用
+## 独立 Design / Implement / Optimize / Workflow
 
-design/optimize 默认只写 Schema：一次 Planner 调用保存 YAML、简短原因与真实调用记录，不要求独立审阅或效果验收。可直接使用 `kernelschema design --task task.md --out run`；优化再提供 `--schema` 和 `--feedback`。见[写作 API](kernelschema/WRITING.md)。任意显式 task 可用 [`kernelschema iterate` / `api.iterate`](docs/workflows/standalone.md#finite-automatic-iteration) 串联 design（或已有 Schema）→ AKA 标准 implement → 真实反馈 optimize → 必要的下一版 implement；AKA 的 `--schema --schema-iterate` 使用同一有限循环，`keep` 停止。安装、固定 Schema 实现、版本循环及真实结果边界见 [vector-add 示例](examples/workflows/vector_add/README.md)。实现和评测沿用 AKA 标准流程，写作完成不等于效果已证实。
+四个功能目录提供源码 checkout 脚本。Design 从 Task 和可用近邻写完整 Schema；Implement 自有 coder，直接通过正式 Agate SDK 全案例评测并在同一设计内修复；Optimize 读取完整 Schema、代码与反馈，决定 keep、repair 或 revise；Workflow 调用这三个相同入口，有限迭代并保留最后可用配对。
 
-本轮整合保留 workflow 的 37 个自然提交，并落实 Extract/Template 的采用对象、回执反馈、控制提交与状态观察修订。Schema Wiki 现含 **18 项、48 YAML**；本批九个修订目录的 current 记录有限源复核与实际字节，另外三目录沿用匹配原字节的 receipt。实施范围、CPU 验证和公开历史边界见[整合报告](schema_discussion/main_integration_20261122/FINAL_REPORT.md)；旧 receipt 不批准修订后的字节。
+Python 3.11+，先在自己的环境中安装依赖：
+
+```sh
+python3 -m pip install -e '.[implement,test]'
+```
+
+`atrex-gateway-client>=0.14.37` 使用其正式发行渠道；本次验证版本为 0.14.37，安装说明见 [Implement](schema_implement/README.md)。工具从 checkout 定位规范和提示文件，不提供独立 wheel 或公共 Python API。host 不需要 torch、Triton、Bench 或 Ray。
+
+```sh
+python3 schema_design/design_schema.py --task T/task.md --out R/design
+python3 schema_implement/implement_kernel.py --task T/task.md --eval-task T/eval --schema S --gpu L20D --out R/implement
+python3 schema_optimize/optimize_schema.py --task T/task.md --schema S --kernel K --feedback F --out R/optimize
+python3 schema_workflow/workflow.py --task schema_workflow/examples/vector_add/task.md --eval-task schema_workflow/examples/vector_add/eval --gpu L20D --out .schema_workflow/runs/vector_add-001
+```
+
+默认沿现有 Claude CLI 的 `qwen3.8-max[1m]` / `max` 连接配置，可用 `--model/--effort` 覆盖。输出目录必须全新；stdout 只返回绝对 `result.json` 路径，退出码 `0/1/2` 对应 complete/incomplete/interrupted。材料不足和未结清评测如实保留，Schema 写成不等于 kernel 已验证。
+
+三个起点、有限收尾与恢复见 [Workflow](schema_workflow/README.md)；固定两分支任务与比较器见 [vector_add 示例](schema_workflow/examples/vector_add/README.md)。独立入口的细节分别见 [Design](schema_design/README.md)、[Implement](schema_implement/README.md) 和 [Optimize](schema_optimize/README.md)。本次实施、CPU 与真实运行状态见 [EXECUTION](schema_discussion/standalone_modules_20261122/EXECUTION.md)。
 
 ## 术语
 
 - **Planner**：做设计的 Agent 或人，唯一能修改 Design 区，并填写 `REALIZATION` 的 `Require / Prefer / Forbid`。
-- **Coder**：按 Contract 已选的实现栈把设计实现成代码的 Agent（如 AKA）。
+- **Coder**：按 Contract 已选的实现栈把设计实现成代码的 Agent。
 - **schema**：既指这套描述语言（分区与字段规则），也指针对某个计算任务填好的设计实例；一份完整 YAML 也叫 **plan**。每份 plan 表达一套具体已选设计，可以包含多次计算 kernel 提交；任务的 `dispatch.md` 组织完整设计和变体记录，身份与数量规则见 [common](schema_docs/0.common.md#派生节点与-dispatch)。
 - **template**：`schema_template` 提供待填写骨架与统一检查入口；内部机器规则检查字段、必填条件和可校验关系。
 - **wiki / microbench**：完整的硬件资料、指令手册，以及吞吐与延时的实测结果；schema 只引用，不抄录。
@@ -85,6 +102,10 @@ Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape
 ├── DESIGN_SCHEMA.md     按给定或已确认的 Contract 逐层设计新算子
 ├── OPTIMIZE_SCHEMA.md   判断实现反馈，逐层迭代已有设计
 ├── IMPLEMENT_SCHEMA.md  将 schema 落实为 kernel，验证并反馈
+├── schema_design/       Task、近邻选材与完整 Schema 写作
+├── schema_optimize/     代码与实测反馈驱动的 keep / repair / revise
+├── schema_implement/    自有 coder、同设计修复与正式 Agate 评测
+├── schema_workflow/     同入口的有限编排、恢复与唯一 vector_add 示例
 ├── schema_extract/      六阶段与审阅提示、Runner 执行协议、恢复维护与发布
 ├── schema_template/     共用的 YAML 操作与检查
 │   ├── README.md        创建、修订、检查与交付
@@ -110,7 +131,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape
 
 - `kernel_wiki` 保存任务与实现，`schema_wiki` 接收提取或撰写的设计；输出路径按 `kernel_wiki/catalog.json` 的 `paths.readme` 父目录镜像，具体操作见[输出目录导航](schema_wiki/README.md)。设计来源仍以 `META_DATA.Source` 等实际引用为准。
 - 任务目录中的文件身份、共享 Contract 与派生关系见[公共约定](schema_docs/0.common.md#派生节点与-dispatch)。
-- [实现 workflow](schema_implement/README.md) 对接 AKA 标准流程；构建、测试与测量以所选任务和后端的实际入口为准。
+- [独立 Implement](schema_implement/README.md) 消费固定参考、案例和比较器；构建、测试与测量以任务及正式 SDK 可表达的入口为准。
 
 ### 阅读入口
 
@@ -128,7 +149,7 @@ Design 三区按计算方式、工作组织和局部执行排列：`Math_reshape
 
 ## 5 现状与 TODO
 
-**已有：** 提取、新建设计、优化设计和实现四个任务入口，公共约定与六个分区文档，YAML 填写骨架、统一 Python 检查入口及检查器正反例测试；四个 Template 案例的九份完整设计与有限图；`kernel_wiki` 的 44 个算子与对应的 `schema_wiki` 输出目录。使用方法与校验边界见[模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
+**已有：** 提取、新建设计、优化设计和实现四个任务入口，以及串联独立能力的 Workflow，公共约定与六个分区文档，YAML 填写骨架、统一 Python 检查入口及检查器正反例测试；四个 Template 案例的九份完整设计与有限图；`kernel_wiki` 的 44 个算子与对应的 `schema_wiki` 输出目录。使用方法与校验边界见[模板说明](schema_template/README.md#校验边界)。文档中的局部示例用于解释 schema，不承担完整算子设计或性能验收。
 
 统一入口的[微流水线图选项](schema_template/README.md#微流水线图)在其支持的协议内按展示规模展开各工作阶段的动作和依赖，检查重复动作、悬空引用、成员匹配与依赖环，并在请求的 YAML 旁生成同名 PNG。它不解析文字契约，也不证明跨工作阶段的活性或全部存储复用安全。
 

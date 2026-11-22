@@ -1,6 +1,8 @@
 # 实现 schema 对应的 kernel
 
-本入口供 Coder 根据既有 schema 从零实现，或按设计修改、优化已有 kernel。目标是在任务已选环境中落实 Contract 与 Design，交付对应版本的代码、任务要求的验证结果，以及有依据的实现反馈。
+本入口供 KS 自有 Coder 根据既有 schema 从零实现，或按设计修复已有 kernel。目标是在任务已选环境中落实 Contract 与 Design，直接通过独立 Agate SDK 交付对应版本的代码、固定全案例的正确性与计时，以及有依据的实现反馈。
+
+独立入口是 `python3 schema_implement/implement_kernel.py --task T/task.md --eval-task T/eval --schema S --gpu L20D --out R`；沿原目录恢复使用 `--resume R`，可重复 `--feedback F` 补充同设计修复意见。可用 `--kernel K` 提供完整源码 seed。默认 `claude` CLI、`qwen3.8-max[1m]`、effort `max`；CLI、依赖和结果见 [Implement 模块](schema_implement/README.md)。模型只读材料并交完整文件集，host 负责固定输入、落盘、提交和查询原 job。
 
 从任务的完整实例开始，遇到具体问题再查询下文链接，不需要先通读全部规范。字段语义与默认规则由 [common](schema_docs/0.common.md) 和 DOC 1–6 定义；Contract 与 Design 的[修改权限](README.md#2-schema-是什么)不因实现方便、性能更好或测试通过而改变。YAML 文件操作、版本维护和检查使用[模板说明](schema_template/README.md)。
 
@@ -43,7 +45,7 @@
 
 设计选择已经明确、但误差或性能仍待实验确认时，按该选择实现并取得证据；关键决定尚未明确或已有证据表明要求冲突时，转入第 4 节，不自行补选。
 
-使用任务提供的构建、测试和测量设施；本仓库尚无统一 GPU Harness。验证范围由任务要求、实现范围和改动影响确定，修复后重查相关结果与约束：
+使用任务预先固定的 reference、input、shapes、比较器与 eval.json；当前独立入口支持正式 Agate SDK 的 Python Model/Triton 全案例路径。不能表达的比较器或构建要求如实反馈，不改任务适配默认值。每个新候选重新验证全部固定案例；多文件依赖整包提交，不拼接不同候选成绩：
 
 | 验证问题 | 如何判断 |
 | --- | --- |
@@ -67,10 +69,10 @@
 
 反馈应让接手者能复核：给出触发输入或执行条件、观察或推导、相关代码与证据、受阻部分和需要澄清的决定；有助于定位时附最小反例或局部执行关系。区分观察、归因与建议，说明模型假设及未核实之处。阻碍出现后继续不依赖该问题的实现或验证，不以猜测掩盖缺口。
 
-只有满足 [DOC 6 的替代反馈条件](schema_docs/6.realization.md#有证据的替代反馈)时，才追加 `REALIZATION.Feedback[]`：`Item` 指向被替代 `Prefer` 所约束的同一上游对象，`Choice` 写明替代哪条 `Prefer` 及采用什么，`Evidence` 以固定不可变修订引用真实实验记录。原 `Require / Prefer / Forbid` 保持不变，反馈只针对 `Prefer`，不为其他约束提供豁免；一般阻碍和无实验依据的建议留在任务沟通中。实验记录绑定具体有效设计的规则、完整来源身份（`source_files / origins / effective_identity`）、实现、输入、环境和参数，不沿用其他节点的反馈。更新 `Feedback[]` 后按模板[维护版本](schema_template/README.md#3-填写与修订)并[检查任务](schema_template/README.md#4-检查与处理反馈)；任一本地或上游来源改变后，重新核对来源身份并复查受影响的代码、测试与旧证据。
+只有满足 [DOC 6 的替代反馈条件](schema_docs/6.realization.md#有证据的替代反馈)时，才在实现反馈中提出 `REALIZATION.Feedback[]` 交接建议；独立 Implement 不写回本次固定 Schema：`Item` 指向被替代 `Prefer` 所约束的同一上游对象，`Choice` 写明替代哪条 `Prefer` 及采用什么，`Evidence` 以固定不可变修订引用真实实验记录。原 `Require / Prefer / Forbid` 保持不变，反馈只针对 `Prefer`，不为其他约束提供豁免；一般阻碍和无实验依据的建议留在任务沟通中。实验记录绑定具体有效设计的规则、完整来源身份（`source_files / origins / effective_identity`）、实现、输入、环境和参数，不沿用其他节点的反馈。后续获准采纳该建议并更新 `Feedback[]` 时，按模板[维护版本](schema_template/README.md#3-填写与修订)并[检查任务](schema_template/README.md#4-检查与处理反馈)；任一本地或上游来源改变后，重新核对来源身份并复查受影响的代码、测试与旧证据。
 
 ## 5 交付可定位的实现与结论
 
 提供代码位置、调用入口及构建运行依赖，标明实现版本和对应的 schema 规则、节点、各 raw 版本与完整来源身份（`source_files`、`origins`、`effective_identity`），随原任务材料或本轮交接说明保留所采用的 workload、优化目标与计时范围，说明完成范围与改动影响（部分实现注明未连通路径、诊断性简化与条件假设）。
 
-给出实际执行的构建、检查或测量入口、环境、输入范围与参数，按任务要求分别说明正确性、设计符合性和性能结论，以及失败、未执行或未覆盖的部分。引用已有实验时保留其规则、完整来源身份和口径；尚有问题时说明影响、归属及下一步需要的决定或证据。任务消息和已有记录即可承载这些信息，无需固定报告、状态字段或额外审批。引用追溯遵循 [common](schema_docs/0.common.md#来源与证据)，不将 `META_DATA.Source` 改作实现进度或实验记录。
+给出实际执行的构建、检查或测量入口、环境、输入范围与参数，按任务要求分别说明正确性、设计符合性和性能结论，以及失败、未执行或未覆盖的部分。引用已有实验时保留其规则、完整来源身份和口径；尚有问题时说明影响、归属及下一步需要的决定或证据。独立入口的 `result.json` 仅包含 `status / stop_reason / calls_used / schema / kernel / feedback`；attempt 的单一 `feedback.json` 绑定完整源码/Schema 摘要、入口、落实说明、逐案例判定/时延/统计、实际环境和原 request/job/response。推断与实测分开；已有必需缺口、未完成全案例比较或缺计时均不能 complete。服务/环境错误不交 Planner 改算法，断连或取消受理保持原 job 定位，完成且无新反馈的 resume 不重放。引用追溯遵循 [common](schema_docs/0.common.md#来源与证据)，不将 `META_DATA.Source` 改作实现进度或实验记录。
