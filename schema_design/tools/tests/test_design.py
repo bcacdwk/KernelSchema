@@ -86,7 +86,7 @@ class DesignTests(unittest.TestCase):
             self.prompts.append(prompt)
             answer = next(iterator)
             value = {**seed, "state": "finished", "final_answer": json.dumps(answer), "structured_output": answer,
-                     "reads": [{"tool": "Read", "input": {"file_path": str(out / "input/docs/3.design.math_reshape.md")},
+                     "reads": [{"tool": "Read", "input": {"file_path": str(out / "input/schema_docs/3.design.math_reshape.md")},
                                 "status": "completed"}] if reads else [], "diagnostics": []}
             if seed["phase"] == "select" and hasattr(self, "selection_description"):
                 value["reads"].append({"tool": "Read", "input": {"file_path": self.selection_description}, "status": "completed"})
@@ -212,7 +212,7 @@ assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "test-connection-secret"
 assert os.environ["ANTHROPIC_BASE_URL"] == "https://private-fixture.invalid"
 assert json.loads(Path("result.json").read_text())["calls_used"] == 1
 assert "--safe-mode" in sys.argv and "--no-session-persistence" in sys.argv
-doc = Path.cwd() / "input/docs/3.design.math_reshape.md"
+doc = Path.cwd() / "input/schema_docs/3.design.math_reshape.md"
 doc.read_text()
 print(json.dumps({{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"doc","name":"Read","input":{{"file_path":str(doc)}}}}]}}}}))
 print(json.dumps({{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"doc","content":"read"}}]}}}}))

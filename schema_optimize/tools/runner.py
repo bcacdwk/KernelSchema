@@ -97,6 +97,56 @@ def regular_files(directory):
     return sorted(files)
 
 
+def git_provenance(source, data):
+    """Describe only a locally verified commit whose blob equals the fixed bytes."""
+    root = next((parent for parent in source.parents if (parent / ".git").exists()), None)
+    if root is None:
+        return {"status": "not_in_repository"}
+    environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
+                   "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                   "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
+                   "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
+
+    def git(*arguments):
+        try:
+            result = subprocess.run(["git", "--literal-pathspecs", "-C", str(root), *arguments],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    env=environment, timeout=10, shell=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return result.stdout if result.returncode == 0 else None
+
+    if git("rev-parse", "--show-toplevel") != os.fsencode(root) + b"\n":
+        return {"status": "unavailable"}
+    revision = git("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
+    if revision is None or not re.fullmatch(rb"[0-9a-f]{40}(?:[0-9a-f]{24})?\n", revision):
+        return {"status": "unavailable"}
+    commit = revision.decode("ascii").strip()
+    relative = source.relative_to(root).as_posix()
+    facts = {"repository": root.name, "commit": commit, "path": relative}
+    tree = git("ls-tree", "-l", "-z", "--full-tree", commit, "--", relative)
+    if tree is None:
+        return {**facts, "status": "unavailable"}
+    entries = {name: metadata.split() for entry in tree.split(b"\0") if entry
+               for metadata, _, name in (entry.partition(b"\t"),)}
+    entry = entries.get(os.fsencode(relative))
+    if entry is None:
+        return {**facts, "status": "absent_from_commit"}
+    if len(entry) != 4 or entry[0] not in {b"100644", b"100755"} or entry[1] != b"blob":
+        return {**facts, "status": "not_a_regular_blob"}
+    facts["blob"] = entry[2].decode("ascii")
+    if entry[3] != str(len(data)).encode("ascii"):
+        return {**facts, "status": "different_bytes"}
+    committed = git("cat-file", "blob", facts["blob"])
+    if committed is None:
+        return {**facts, "status": "unavailable"}
+    if committed != data:
+        return {**facts, "status": "different_bytes"}
+    if not re.fullmatch(r"[^@<>:\s]+", root.name):
+        return {**facts, "status": "unusable_repository_identity"}
+    return {**facts, "status": "verified", "locator": f"{root.name}@{commit}:{relative}"}
+
+
 class Inputs:
     """One fixed byte snapshot; locators continue to name their original context."""
     def __init__(self, out):
@@ -137,7 +187,7 @@ class Inputs:
         if not old:
             self.total += len(data)
         self.records[str(source)] = {"source": str(source), "snapshot": str(destination.relative_to(self.out)),
-                                     "sha256": digest, "bytes": len(data)}
+                                     "sha256": digest, "bytes": len(data), "git": git_provenance(source, data)}
         self.save()
         return destination
 
@@ -239,13 +289,18 @@ class Inputs:
 
     def text(self, paths):
         sections = []
+        records = {self.out / item["snapshot"]: item for item in self.records.values()}
         for path in dict.fromkeys(paths):
             path = Path(path)
             try:
                 content = path.read_text(encoding="utf-8")
             except UnicodeError as exc:
                 raise Failure("needs_input", f"Required text material is not UTF-8: {path}") from exc
-            sections.append(f"\n--- COMPLETE FILE {path} ---\n{content}\n--- END FILE ---\n")
+            record = records.get(path)
+            provenance = "" if record is None else (
+                "Original source (locator context only): " + record["source"] + "\n" +
+                "Host Git byte verification: " + json.dumps(record["git"], ensure_ascii=False) + "\n")
+            sections.append(f"\n{provenance}--- COMPLETE FILE {path} ---\n{content}\n--- END FILE ---\n")
         text = "".join(sections)
         if len(text.encode()) > MAX_PROMPT_BYTES:
             raise Failure("needs_input", "Required text exceeds the 16 MiB request limit; nothing was truncated")
@@ -494,18 +549,28 @@ class Run:
         task = self.inputs.file(self.args.task, self.inputs.root / "task" / self.args.task.name)
         self.inputs.closure(self.args.task)
         task_materials = [self.out / item["snapshot"] for item in self.inputs.records.values()]
-        docs = [self.inputs.file(CHECKOUT / "schema_docs" / name, self.inputs.root / "docs" / name)
+        docs = [self.inputs.file(CHECKOUT / "schema_docs" / name, self.inputs.root / "schema_docs" / name)
                 for name in DOC_NAMES]
-        method = self.inputs.file(CHECKOUT / f"{self.mode.upper()}_SCHEMA.md", self.inputs.root / "method.md")
+        method = self.inputs.file(CHECKOUT / f"{self.mode.upper()}_SCHEMA.md", self.inputs.root / f"{self.mode.upper()}_SCHEMA.md")
         template_files = [self.inputs.file(CHECKOUT / "schema_template" / name,
-                                          self.inputs.root / "template" / name) for name in ("README.md", "starter.yaml")]
+                                          self.inputs.root / "schema_template" / name) for name in ("README.md", "starter.yaml")]
+        # A small, complete existing format example; never the target Task's answer.
+        example = CHECKOUT / "schema_template" / "examples" / "qsa_prefill"
+        example_files = [self.inputs.file(example / name,
+                        self.inputs.root / "schema_template" / "examples" / example.name / name)
+                        for name in ("README.md", "root.yaml", "dispatch.md")]
         prompt_file = CHECKOUT / f"schema_{self.mode}" / "prompt" / f"{self.mode}.md"
         prompt = self.inputs.file(prompt_file, self.inputs.root / "instructions.md")
         self.inline_reads = [str(path) for path in (docs[0], method, prompt, *task_materials)]
         text = self.inputs.text([prompt, docs[0], method, *task_materials])
         text += "\nREADABLE DOC1–6 and Template (use Read for the relevant sections before writing):\n"
         text += "\n".join(map(str, [*docs[1:], *template_files]))
-        text += f"\nInput manifest (original paths, fixed bytes, bindings): {self.inputs.root / 'manifest.json'}\n"
+        text += "\nOPTIONAL complete Template format example (not current Task/device/stack evidence):\n"
+        text += "\n".join(map(str, example_files))
+        text += f"\nInput manifest (original paths, fixed bytes, verified Git facts, bindings): {self.inputs.root / 'manifest.json'}\n"
+        text += ("Read/Glob/Grep are limited to this input snapshot. Original paths are locator context only. "
+                 "For a relative link, identify its original target and use the matching manifest snapshot; "
+                 "unlisted targets are not supplied. Do not search the original checkout or .git.\n")
         return text
 
     def repair_prompt(self, error):
@@ -544,7 +609,7 @@ class Run:
             read_paths = {str((self.out / record["input"].get("file_path", "")).resolve())
                           for record in draft.get("reads", [])
                           if record.get("tool") == "Read" and record.get("status") == "completed"}
-            docs = {str(self.inputs.root / "docs" / name) for name in DOC_NAMES[1:]}
+            docs = {str(self.inputs.root / "schema_docs" / name) for name in DOC_NAMES[1:]}
             if not read_paths & docs:
                 raise Failure("write_failed", "Writer must actually Read the relevant DOC1–6 material before deciding")
         return draft["structured_output"]

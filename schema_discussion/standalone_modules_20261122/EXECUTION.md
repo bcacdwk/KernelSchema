@@ -7,8 +7,8 @@
 - 计划：max 调研与具体计划、high 精简、xhigh 终审已完成，过程稿已吸收并清理。
 - 产品：独立 Design、Optimize、Implement 和单脚本 Workflow 已实现。四模块最终默认 CPU 集合 **74 passed**；现有 Template **8 项**与 Extract **6 项**相关回归分别通过。
 - 切换：根 README、方法入口、依赖、测试收集与 ignore 已切换；旧根产品和两个登记 worktree 已移除。旧 `.tooling`、仅根 `.schema_extract/` 与空 `.worktrees/` 已全部移除。
-- 首次完整代码 commit：整合与清理已完成，现交主代理审核并提交；当前 HEAD 仍是固定参考材料提交 `2c9c346cdd0373821b633012bdfece446c766d65`。
-- 真实 Qwen/Agate：**尚未开始，0 次本次真实模型/GPU 调用，无本次真实未结清 job。** 完整代码 commit 后由新代理执行；CPU 和 fake 成绩不代表真实闭环已成立。
+- 首次完整代码 commit：已提交 `4f7919bf531ad8b7ab49d5e371dfc8b7fea51a34`（`Refactor`），材料提交为父提交 `2c9c346`。提交时修掉新测试文件末尾多余空行，未改变行为；提交后工作区干净，未 push。
+- 真实 Qwen/Agate：`vector_add-001` 已实际调用默认 Qwen 三次，选材完成、两次写作在各自 900 秒后超时，Workflow 终态 `incomplete / write_failed`；本次 GPU 提交 0 次，无未结清 job。原失败完整保留，最小材料修复正在接续；真实闭环尚未成立。
 
 ## 基线与环境
 
@@ -76,7 +76,7 @@ CPU 覆盖实际 DOC 读取、完整 from/共享使用者、原稿保留、Contr
 - 之后 `.tooling` 已删除；运行区清理前针对两个清理根检查进程 cwd/exe/open files 均无引用，611 个 lock-like 文件无占用；27 份正式 current/receipt 无删除根引用。`.schema_extract` 的旧固定 executor/snapshot 有只读目录，普通删除遇 PermissionError；以不跟随符号链接的目录遍历核对 lstat 与当前用户所有权，仅给授权根内 8,978 个只读旧目录补 owner 写权限后续删。删除命令退出 0，根 `.schema_extract/` 及空 `.worktrees/` 均已移除，不碰正式 `.extraction/`。
 - 本目录 01–05/07–14 已吸收后删除；06 修已删链接与历史阶段表述，保留用户决定原意。保留 README、FINAL_PLAN、FINAL_REVIEW、06_decisions、EXECUTION、historical_draft/。其他旧 discussion 与正式凭据引用的历史证据均保持原样。
 
-清理终检已完成：Git 仅登记当前 main checkout；两个旧 worktree 目标及 `.tooling`、根 `.schema_extract/`、空 `.worktrees/` 均无残留；旧根四目录的 143 个已跟踪文件被删除。活动 Markdown 链接无缺失，`git diff --check` 通过。完整代码 commit 由主代理随后执行。保护区 `schema_extract/、EXTRACT_SCHEMA.md、schema_docs/、schema_template/、schema_wiki/、kernel_wiki/` 与固定 Task/eval 六文件的 git diff 当前为零；未访问或修改 AKA 工作区及实验变体。
+清理终检已完成：Git 仅登记当前 main checkout；两个旧 worktree 目标及 `.tooling`、根 `.schema_extract/`、空 `.worktrees/` 均无残留；旧根四目录的 143 个已跟踪文件被删除。活动 Markdown 链接无缺失，`git diff --check` 通过。完整代码 commit 已由主代理执行，见当前状态。保护区 `schema_extract/、EXTRACT_SCHEMA.md、schema_docs/、schema_template/、schema_wiki/、kernel_wiki/` 与固定 Task/eval 六文件的 git diff 当前为零；未访问或修改 AKA 工作区及实验变体。
 
 ## commit 后的真实运行续接
 
@@ -89,3 +89,19 @@ KS_AGATE_CONFIG=/home/shaohanyong.shy/.cache/kernelschema-standalone-private/aga
 该目录若存在先查原状态，不拿新目录洗次数或未结清 job。当前没有新真实 job 需要恢复。后续记录实际 schema/kernel、原 request/job/response、逐 case、真实 DOC/源码读取和 Optimize 决定；出现失败继续具体排障、受影响 CPU 与真实重验、最终提交。不得把本文件或 CPU 结论代替真实主链。
 
 SDK 0.14.37 没有旧上传签名 URL 刷新接口；已上传可续原请求，已提交只查原 job。上传进程在确认完成前丢失时需定位原 reservation，不能私存签名 URL 或盲建新 reservation。首版不支持正式 SDK 无法表达的额外比较器/原生构建，不能替换 Task 判据。真实服务结果若与已核对结构不同，保留原 response 并按证据适配，不能自动当成功。
+
+### Issue 01 修复交接
+
+首轮失败后，新的 xhigh 修复了写作材料缺少真实 Git 身份和可读链接的问题，详见 [ISSUE_01.md](ISSUE_01.md)。受影响 Design/Optimize CPU 为 32 passed、8 subtests passed；原 001 的三次调用和失败结论不改，修复后需要新的真实运行。
+
+范围偏离记录：i04 启动时一次 AGENTS 文件名检索误包含 HOME，返回了 AKA_experiment 及归档内的路径名；没有打开这些文件内容、没有修改，随后检索限定到 KernelSchema。后续代理命令明确使用仓库 workdir，避免再次出现；不能把这次元数据检索表述成从未触及任何实验路径。
+
+## 新真实运行 vector_add-001
+
+2026-11-22 UTC，D 在 `main@4f7919bf531ad8b7ab49d5e371dfc8b7fea51a34` 执行上述原定命令；启动前确认 `.schema_workflow/runs/vector_add-001` 不存在。配置为默认 `qwen3.8-max[1m]` / `max`、`L20D`，Task/eval 与既定材料保持原字节；认证仅以 `KS_AGATE_CONFIG` 指向仓库外私有配置。
+
+原运行和全部三次调用保存在 `.schema_workflow/runs/vector_add-001/`。Workflow 最终退出 1，`result.json` 为 `incomplete / write_failed`，`latest_attempt=design/result.json`、`last_usable=null`；Design `calls_used=3`、`schema=null`。本轮没有 GPU 提交或未结清 job；原 Workflow、Design 和两个写作 PID 在终结后均已不存在。
+
+Design 首调用真实选材成功（返回码 0、无诊断），选择空参考集：实际读取现有目录与近邻说明后，判断数学、调度、精度和 Triton 栈不匹配，按 Task 直接设计。第二、第三次调用均成功 Read `DOC1–6`、Template README/starter 和固定 manifest，但未返回完整稿，分别在 900 秒后超时；`drafts/02.json` 与 `03.json` 保留读取路径和公开诊断 `Claude exceeded 900 seconds; process group reaped`，返回码均为 143。第三次是产品自然 repair，没有更改上限或新建目录。第三次公开最终文字仅为正在写完整集合，无 structured output，不能作为完整 Schema。
+
+公开工具记录显示写作者反复查找硬件、Golden_reference 与提交来源，尝试读取未授权的 checkout 根/Template 文本案例被拒。主代理已安排新 xhigh 只读排查，并在本运行终结、PID 核实后接管最小材料修复；固定 Task/eval、模型、900 秒上限与原失败目录不变。此失败不代表项目完成，后续仍须取得完整 Schema、七案例真实 Implement 和本次反馈 Optimize 决定。

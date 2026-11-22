@@ -108,7 +108,7 @@ class OptimizeTests(unittest.TestCase):
             self.prompts.append(prompt)
             answer = next(iterator)
             value = {**seed, "state": "finished", "final_answer": json.dumps(answer), "structured_output": answer,
-                     "reads": [{"tool": "Read", "input": {"file_path": str(out / "input/docs/6.realization.md")},
+                     "reads": [{"tool": "Read", "input": {"file_path": str(out / "input/schema_docs/6.realization.md")},
                                 "status": "completed"}], "diagnostics": []}
             r.atomic_json(path, value)
             return value
@@ -274,7 +274,7 @@ prompt=sys.stdin.read()
 assert "def add(x,y): return x+y" in prompt
 assert '"latency": 2.5' in prompt
 assert "middle" in prompt and "effective_identity" in prompt
-doc=Path.cwd()/"input/docs/6.realization.md"
+doc=Path.cwd()/"input/schema_docs/6.realization.md"
 doc.read_text()
 print(json.dumps({{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"read","name":"Read","input":{{"file_path":str(doc)}}}}]}}}}))
 print(json.dumps({{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"read","content":"read"}}]}}}}))
