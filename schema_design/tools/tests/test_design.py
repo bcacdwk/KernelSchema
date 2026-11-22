@@ -84,7 +84,14 @@ class DesignTests(unittest.TestCase):
         iterator = iter(answers)
         def call(args, prompt, schema, out, path, seed):
             self.prompts.append(prompt)
-            answer = next(iterator)
+            answer = deepcopy(next(iterator))
+            if "files" in answer:
+                files = answer["files"]
+                candidate = out / seed["candidate_directory"]
+                for item in files:
+                    if r.candidate_name(item["path"]):
+                        (candidate / item["path"]).write_text(item["content"])
+                answer = {**answer, "files": [item["path"] for item in files]}
             value = {**seed, "state": "finished", "final_answer": json.dumps(answer), "structured_output": answer,
                      "reads": [{"tool": "Read", "input": {"file_path": str(out / "input/schema_docs/3.design.math_reshape.md")},
                                 "status": "completed"}] if reads else [], "diagnostics": []}
@@ -120,7 +127,7 @@ class DesignTests(unittest.TestCase):
         self.assertEqual(code, 0, (out / "notes.md").read_text())
         self.assertEqual(result["calls_used"], 2)
         self.assertFalse((self.base / "escape.yaml").exists())
-        self.assertEqual(json.loads((out / "drafts/01.json").read_text())["structured_output"], invalid)
+        self.assertEqual(json.loads((out / "drafts/01.json").read_text())["structured_output"]["files"], ["../escape.yaml"])
         self.assertIn("../escape.yaml", self.prompts[1])
         self.assertIn("HOST DIAGNOSTIC", self.prompts[1])
 
@@ -216,7 +223,14 @@ doc = Path.cwd() / "input/schema_docs/3.design.math_reshape.md"
 doc.read_text()
 print(json.dumps({{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"doc","name":"Read","input":{{"file_path":str(doc)}}}}]}}}}))
 print(json.dumps({{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"doc","content":"read"}}]}}}}))
-print(json.dumps({{"type":"result","subtype":"success","is_error":False,"result":"genuine fixture final","structured_output":json.loads({json.dumps(answer)!r})}}))
+answer = json.loads({json.dumps(answer)!r})
+candidate = Path.cwd() / "drafts/01"
+settings = json.loads(sys.argv[sys.argv.index("--settings") + 1])
+assert "Write(/" + str(candidate) + "/*.yaml)" in settings["permissions"]["allow"]
+for item in answer["files"]:
+    (candidate / item["path"]).write_text(item["content"])
+answer["files"] = [item["path"] for item in answer["files"]]
+print(json.dumps({{"type":"result","subtype":"success","is_error":False,"result":"genuine fixture final","structured_output":answer}}))
 ''')
         script.chmod(0o755)
         out = self.base / "native"
@@ -244,7 +258,7 @@ print(json.dumps({{"type":"result","subtype":"success","is_error":False,"result"
         with patch.dict(os.environ, env, clear=True), patch.object(r, "discover", return_value=[]), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
             code = r.main(["--task", str(self.task), "--out", str(out), "--max-calls", "2", "--timeout-s", "0.1"])
         result = json.loads((out / "result.json").read_text())
-        self.assertEqual((code, result["calls_used"], result["stop_reason"]), (1, 2, "write_failed"))
+        self.assertEqual((code, result["calls_used"], result["stop_reason"]), (1, 1, "write_failed"))
         for path in (out / "drafts").glob("*.json"):
             draft = json.loads(path.read_text())
             self.assertTrue(any("process group reaped" in item for item in draft["diagnostics"]))
@@ -269,7 +283,7 @@ print(json.dumps({{"type":"result","subtype":"success","is_error":False,"result"
         self.assertNotIn("UNTRUSTED_HOOK", child)
         argv = r.command(SimpleNamespace(model=r.DEFAULT_MODEL, effort="max"), r.WRITE_SCHEMA, [self.base / "input"])
         self.assertEqual(argv[argv.index("--setting-sources") + 1], "")
-        self.assertIn('{"disableAllHooks":true}', argv)
+        self.assertTrue(json.loads(argv[argv.index("--settings") + 1])["disableAllHooks"])
         self.assertNotIn("fake-secret-token", json.dumps(argv))
 
     def test_native_stream_records_read_and_final_but_not_thinking(self):

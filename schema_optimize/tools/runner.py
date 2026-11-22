@@ -1,4 +1,4 @@
-"""Local file handling and bounded, read-only Claude writing. No public API."""
+"""Local file handling and bounded Claude writing into isolated candidates. No public API."""
 from __future__ import annotations
 
 import argparse
@@ -31,9 +31,10 @@ MAX_PROMPT_BYTES = 16 * 1024 * 1024
 
 
 class Failure(Exception):
-    def __init__(self, reason, message):
+    def __init__(self, reason, message, *, repairable=True):
         super().__init__(message)
         self.reason = reason
+        self.repairable = repairable
 
 
 class Interrupted(Exception):
@@ -333,14 +334,24 @@ def connection_environment(effort):
     return environment
 
 
-def command(args, output_schema, read_dirs):
+def command(args, output_schema, read_dirs, candidate=None):
+    tools = ["Read", "Glob", "Grep"] + (["Write", "Edit"] if candidate else [])
+    allowed = ["Read", "Glob", "Grep"]
+    if candidate:
+        # Native // rules are absolute; a single * matches one path component.
+        literal = re.sub(r"([\\*?\[\]{}()!,])", r"\\\1", str(candidate))
+        allowed.extend(f"{tool}(/{literal}/{name})" for tool in ("Write", "Edit")
+                       for name in ("*.yaml", "*.yml", "dispatch.md"))
+    settings = {"disableAllHooks": True, "permissions": {"allow": allowed}}
+    denied = ["Bash", "Agent", "Task", "Skill", "WebFetch", "WebSearch"]
+    if not candidate:
+        denied += ["Edit", "Write"]
     result = ["claude", "-p", "--model", args.model, "--effort", args.effort,
               "--output-format", "stream-json", "--verbose", "--json-schema", json.dumps(output_schema),
               "--safe-mode", "--restricted", "--disable-slash-commands", "--no-chrome", "--setting-sources", "",
-              "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--settings", '{"disableAllHooks":true}',
-              "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "Read,Glob,Grep",
-              "--allowedTools", "Read,Glob,Grep", "--disallowedTools", "Bash,Edit,Write,Agent,Task,Skill,WebFetch,WebSearch",
-              "--no-session-persistence"]
+              "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--settings", json.dumps(settings),
+              "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", ",".join(tools),
+              "--disallowedTools", ",".join(denied), "--no-session-persistence"]
     for directory in sorted(set(map(str, read_dirs))):
         result.extend(("--add-dir", directory))
     return result
@@ -348,7 +359,8 @@ def command(args, output_schema, read_dirs):
 
 def parse_stream(stdout, stderr, returncode):
     draft = {"final_answer": None, "structured_output": None, "reads": [], "session_ids": [],
-             "returncode": returncode, "diagnostics": [], "stderr": stderr}
+             "returncode": returncode, "diagnostics": [], "stderr": stderr, "writes": [],
+             "public_status": {"assistant_messages": 0}, "errors": []}
     tools, terminal = {}, None
     final_text = []
     for line in stdout.splitlines():
@@ -365,24 +377,42 @@ def parse_stream(stdout, stderr, returncode):
         if event.get("session_id") and event["session_id"] not in draft["session_ids"]:
             draft["session_ids"].append(event["session_id"])
         if event.get("type") == "assistant":
-            chunks = event.get("message", {}).get("content", [])
+            message = event.get("message", {})
+            draft["public_status"]["assistant_messages"] += 1
+            for key in ("model", "stop_reason", "usage"):
+                if key in message:
+                    draft["public_status"]["last_" + key] = message[key]
+            if event.get("error"):
+                draft["errors"].append(event["error"])
+            chunks = message.get("content", [])
             final_text = [item["text"] for item in chunks if item.get("type") == "text"]
             for item in chunks:
                 if item.get("type") != "tool_use":
                     continue
                 name = item.get("name")
-                if name not in {"Read", "Glob", "Grep", "StructuredOutput"}:
+                if name not in {"Read", "Glob", "Grep", "Write", "Edit", "StructuredOutput"}:
                     draft["diagnostics"].append(f"Unexpected tool: {name}")
                 if name in {"Read", "Glob", "Grep"}:
                     record = {"tool": name, "input": item.get("input", {}), "status": "requested"}
                     draft["reads"].append(record)
                     tools[item.get("id")] = record
+                elif name in {"Write", "Edit"}:
+                    record = {"tool": name, "input": {"file_path": item.get("input", {}).get("file_path")},
+                              "status": "requested"}
+                    draft["writes"].append(record)
+                    tools[item.get("id")] = record
         if event.get("type") == "user":
             for item in event.get("message", {}).get("content", []):
                 if item.get("type") == "tool_result" and item.get("tool_use_id") in tools:
-                    tools[item["tool_use_id"]]["status"] = "error" if item.get("is_error") else "completed"
+                    record = tools[item["tool_use_id"]]
+                    record["status"] = "error" if item.get("is_error") else "completed"
+                    if item.get("is_error"):
+                        content = item.get("content", "")
+                        record["error"] = content if isinstance(content, str) else [
+                            part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
         if event.get("type") == "error":
             draft["diagnostics"].append("Claude reported an error event")
+            draft["errors"].append({key: event[key] for key in ("code", "message", "error") if key in event})
         if event.get("type") == "result":
             if terminal is not None:
                 draft["diagnostics"].append("Multiple terminal results")
@@ -390,6 +420,9 @@ def parse_stream(stdout, stderr, returncode):
     draft["final_answer"] = terminal.get("result") if terminal and "result" in terminal else "\n".join(final_text)
     if terminal:
         draft["structured_output"] = terminal.get("structured_output")
+        draft["public_status"]["terminal"] = {key: terminal[key] for key in (
+            "subtype", "is_error", "errors", "terminal_reason", "num_turns", "duration_ms", "duration_api_ms",
+            "usage", "modelUsage", "total_cost_usd") if key in terminal}
     if (returncode != 0 or not terminal or terminal.get("subtype") != "success"
             or terminal.get("is_error") is not False or terminal.get("errors")
             or terminal.get("interrupted_by_shutdown") or terminal.get("deferred_tool_use")
@@ -431,8 +464,10 @@ def native_call(args, prompt, output_schema, out, draft_path, seed):
                 text = text.replace(value, "[connection value redacted]")
         return text
     process = None
+    started = time.monotonic()
+    candidate = out / seed["candidate_directory"] if seed.get("candidate_directory") else None
     try:
-        process = subprocess.Popen(command(args, output_schema, [out / "input"]), cwd=out,
+        process = subprocess.Popen(command(args, output_schema, [out / "input"], candidate), cwd=out,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    text=True, encoding="utf-8", env=environment, shell=False, start_new_session=True)
         seed["pid"] = process.pid
@@ -461,15 +496,40 @@ def native_call(args, prompt, output_schema, out, draft_path, seed):
     draft = strict_json(scrub(json.dumps(draft, ensure_ascii=False)))
     seed.update(draft)
     seed["state"] = "finished"
+    seed["elapsed_s"] = round(time.monotonic() - started, 3)
     atomic_json(draft_path, seed)
     return seed
 
 
-FILE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["path", "content"],
-               "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}
 WRITE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["files", "notes", "missing"],
-                "properties": {"files": {"type": "array", "items": FILE_SCHEMA}, "notes": {"type": "string"},
+                "properties": {"files": {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+                               "notes": {"type": "string"},
                                "missing": {"type": "array", "items": {"type": "string"}}}}
+
+
+def candidate_name(name):
+    path = PurePosixPath(name)
+    return (len(path.parts) == 1 and name == path.name and "\\" not in name
+            and (path.suffix in {".yaml", ".yml"} or name == "dispatch.md"))
+
+
+def candidate_files(directory):
+    """Read only ordinary, direct, allowed candidate files after CLI exit."""
+    if directory.is_symlink() or not directory.is_dir():
+        raise Failure("write_failed", "Candidate directory was replaced", repairable=False)
+    files, total = [], 0
+    for path in sorted(directory.iterdir()):
+        if not candidate_name(path.name) or path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1:
+            raise Failure("write_failed", f"Unexpected candidate entry: {path.name}", repairable=False)
+        total += path.stat().st_size
+        if total > MAX_INPUT_BYTES:
+            raise Failure("write_failed", "Candidate exceeds 64 MiB; no file was truncated", repairable=False)
+        files.append({"path": path.name, "content": path.read_bytes().decode("utf-8")})
+    return files
+
+
+def snapshot_hashes(directory):
+    return {str(path.relative_to(directory)): sha(path.read_bytes()) for path in regular_files(directory)}
 
 
 def accept_files(files, out, contract=None, source_context=None):
@@ -568,7 +628,7 @@ class Run:
         text += "\nOPTIONAL complete Template format example (not current Task/device/stack evidence):\n"
         text += "\n".join(map(str, example_files))
         text += f"\nInput manifest (original paths, fixed bytes, verified Git facts, bindings): {self.inputs.root / 'manifest.json'}\n"
-        text += ("Read/Glob/Grep are limited to this input snapshot. Original paths are locator context only. "
+        text += ("Read/Glob/Grep may inspect this input snapshot and the current candidate directory. Original paths are locator context only. "
                  "For a relative link, identify its original target and use the matching manifest snapshot; "
                  "unlisted targets are not supplied. Do not search the original checkout or .git.\n")
         return text
@@ -579,8 +639,9 @@ class Run:
         draft.setdefault("host_diagnostics", []).append(str(error))
         atomic_json(path, draft)
         return ("\nHOST DIAGNOSTIC: " + str(error) +
-                "\nPREVIOUS COMPLETE RESPONSE:\n" + json.dumps(draft.get("structured_output"), ensure_ascii=False) +
-                "\nCorrect the specific issue and return the complete response again.")
+                "\nPREVIOUS FINAL RESPONSE (may be null):\n" + json.dumps(draft.get("structured_output"), ensure_ascii=False) +
+                "\nPrevious candidate files, if any, are copied into this call's candidate directory. "
+                "Read and correct them there; finish the complete collection and return only its filenames and decision.")
 
     def call(self, prompt, output_schema, phase):
         if self.result["calls_used"] >= self.args.max_calls:
@@ -593,17 +654,55 @@ class Run:
         drafts.mkdir(exist_ok=True)
         draft_path = drafts / f"{self.result['calls_used']:02d}.json"
         seed = {"phase": phase, "state": "starting", "pid": None, "inline_reads": self.inline_reads}
+        candidate = None
+        self.last_candidate_written = False
+        if phase != "select":
+            candidate = drafts / f"{self.result['calls_used']:02d}"
+            candidate.mkdir()
+            seed["candidate_directory"] = str(candidate.relative_to(self.out))
+            if phase in {"repair", "repair_write"} and self.result["calls_used"] > 1:
+                previous = drafts / f"{self.result['calls_used'] - 1:02d}"
+                if previous.is_dir():
+                    for item in candidate_files(previous):
+                        (candidate / item["path"]).write_text(item["content"], encoding="utf-8")
+            prompt += (f"\nCANDIDATE DIRECTORY (the only writable location): {candidate}\n"
+                       "Write only direct .yaml/.yml files and dispatch.md here; no subdirectories. "
+                       "Choose meaningful node filenames. Write/Edit each file as decisions become concrete; do not hold the "
+                       "whole collection for a final JSON message. Partial work is preserved but is not accepted. "
+                       "Final files[] lists only the delivered filenames, never YAML content. "
+                       "Files omitted from files[] are retained as drafts and are not delivered.\n")
         atomic_json(draft_path, seed)
         print(f"{self.mode}: {phase} call {self.result['calls_used']}/{self.args.max_calls}", file=sys.stderr)
+        before = snapshot_hashes(self.inputs.root)
+        candidate_before = snapshot_hashes(candidate) if candidate else {}
         draft = native_call(self.args, prompt, output_schema, self.out, draft_path, seed)
+        if snapshot_hashes(self.inputs.root) != before:
+            raise Failure("input_changed", "Writer changed fixed input bytes")
+        for record in draft.get("writes", []):
+            written = record.get("input", {}).get("file_path")
+            if record.get("status") != "completed":
+                continue
+            written = (self.out / written).resolve() if isinstance(written, str) else None
+            if candidate is None or written is None or written.parent != candidate or not candidate_name(written.name):
+                raise Failure("write_failed", "Native writer modified a file outside its candidate scope", repairable=False)
+        files = candidate_files(candidate) if candidate else []
+        self.last_candidate_written = bool(files)
+        draft["candidate_files"] = [{"path": item["path"], "bytes": len(item["content"].encode()),
+                                     "sha256": sha(item["content"].encode())} for item in files]
+        atomic_json(draft_path, draft)
         if draft.get("diagnostics"):
-            raise Failure("write_failed", "; ".join(draft["diagnostics"]))
+            repairable = bool(draft.get("structured_output") or
+                              (candidate and snapshot_hashes(candidate) != candidate_before))
+            detail = "; ".join(draft["diagnostics"])
+            if not repairable:
+                detail += "; no new candidate content or final decision was produced, so an identical automatic repair is not useful"
+            raise Failure("write_failed", detail, repairable=repairable)
         from jsonschema import Draft202012Validator
         errors = list(Draft202012Validator(output_schema).iter_errors(draft.get("structured_output")))
         if errors:
             # Do not put an enormous/possibly sensitive rejected instance in diagnostics.
             raise Failure("write_failed", "Malformed response at " + ", ".join("/".join(map(str, error.path)) or "root"
-                                                                                 for error in errors[:8]))
+                                                                                 for error in errors[:8]), repairable=bool(files or draft.get("structured_output")))
         self.last_reads = draft.get("reads", [])
         if phase != "select":
             read_paths = {str((self.out / record["input"].get("file_path", "")).resolve())
@@ -612,11 +711,18 @@ class Run:
             docs = {str(self.inputs.root / "schema_docs" / name) for name in DOC_NAMES[1:]}
             if not read_paths & docs:
                 raise Failure("write_failed", "Writer must actually Read the relevant DOC1–6 material before deciding")
-        return draft["structured_output"]
+        answer = deepcopy(draft["structured_output"])
+        if candidate is not None:
+            delivered = answer["files"]
+            available = {item["path"]: item for item in files}
+            if any(name not in available for name in delivered):
+                raise Failure("write_failed", "Final response names an absent or unauthorized candidate file")
+            answer["files"] = [available[name] for name in delivered]
+        return answer
 
 
 def parser(mode):
-    result = argparse.ArgumentParser(description=f"Standalone Schema {mode}; read-only model, host-written outputs")
+    result = argparse.ArgumentParser(description=f"Standalone Schema {mode}; scoped candidate writing, host-validated outputs")
     result.add_argument("--task", required=True, type=Path)
     result.add_argument("--out", required=True, type=Path)
     result.add_argument("--model", default=DEFAULT_MODEL)
@@ -866,8 +972,9 @@ def execute(run):
         except Interrupted:
             raise
         except Exception as exc:
-            if isinstance(exc, Failure) and exc.reason in {"needs_input", "input_changed"}:
+            if isinstance(exc, Failure) and (exc.reason in {"needs_input", "input_changed"} or not exc.repairable):
                 raise
+            failed_revision = failed_revision or run.last_candidate_written
             diagnostic = run.repair_prompt(exc) + "\nDo not relabel a failed revision as keep."
             run.notes.append(str(exc))
     return run.finish("incomplete", "write_failed", "No valid optimization decision was received within the call allowance", decision=None)

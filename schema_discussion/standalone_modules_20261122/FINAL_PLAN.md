@@ -3,6 +3,15 @@
 2026-11-22，xhigh 终审定稿。本文件是实施依据，自足取代本轮研究与中间方案；`06_decisions.md` 保留用户决定，`FINAL_REVIEW.md` 保留终审判断。
 用户已授权定稿后直接实施、限定清理、commit、默认 Qwen/Agate 实跑和持续查修，无需等待再次确认。本轮仅完成计划检查，以下验证均是待执行要求。
 
+## 实施中的已记录修订
+
+以下正文保留定稿时方案。真实运行后的两个局部选择已由实现和必要验证替代，相应行为以本段及模块使用说明为准：
+
+- [Issue 02](ISSUE_02.md)：Design/Optimize 的完整文件不再嵌入一个大 JSON 返回。选材只读，写作允许候选目录内直属 YAML/dispatch 的 native Write/Edit，最终只回小决定；host 保全草稿、检查输入和 Contract、规范化交付。无新稿的失败不盲修。Implement 的交稿方式未改。已通过一次真实权限/小交稿探针，但仍须业务实跑。
+- [Issue 03](ISSUE_03.md)：Workflow 增加已有 Design `--reference` 的简单透传及恢复身份检查，仅用于无 Schema 的初始 Design；示例另提供真实 Agate 缓存环境资料，固定 Task/eval 不变。不新增环境探测运行时，不把缓存当本次候选观测。
+
+模型、effort、900 秒默认、调用总额、核心职责及保护区均未因此放宽；当前执行与结果见 [EXECUTION](EXECUTION.md)。
+
 ## 1. 已定范围与最小文件
 
 - Design 从 Task 与可用近邻写 Schema；Optimize 读完整 Schema、kernel 和真实反馈，决定保持、修实现或改设计；Implement 自有 coder 与 Agate 闭合当前设计；Workflow 串联同一入口。

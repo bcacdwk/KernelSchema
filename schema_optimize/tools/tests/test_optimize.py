@@ -106,7 +106,14 @@ class OptimizeTests(unittest.TestCase):
         iterator = iter(answers)
         def call(args, prompt, schema, out, path, seed):
             self.prompts.append(prompt)
-            answer = next(iterator)
+            answer = deepcopy(next(iterator))
+            if "files" in answer:
+                files = answer["files"]
+                candidate = out / seed["candidate_directory"]
+                for item in files:
+                    if r.candidate_name(item["path"]):
+                        (candidate / item["path"]).write_text(item["content"])
+                answer = {**answer, "files": [item["path"] for item in files]}
             value = {**seed, "state": "finished", "final_answer": json.dumps(answer), "structured_output": answer,
                      "reads": [{"tool": "Read", "input": {"file_path": str(out / "input/schema_docs/6.realization.md")},
                                 "status": "completed"}], "diagnostics": []}
@@ -168,7 +175,7 @@ class OptimizeTests(unittest.TestCase):
         self.assertEqual((code, result["decision"], result["schema"]), (1, None, None))
         self.assertIs(result["required_fix"], True)
         self.assertIn("before normalization", (out / "notes.md").read_text())
-        self.assertIn("z: 0.5", (out / "drafts/01.json").read_text())
+        self.assertIn("z: 0.5", (out / "drafts/01/root.yaml").read_text())
 
     def test_contract_drift_after_normalization_is_rejected(self):
         from schema_template.tools import schema as template
@@ -204,6 +211,26 @@ class OptimizeTests(unittest.TestCase):
     def test_bad_response_does_not_infer_safe_required_fix(self):
         code, out, result = self.run_optimize([{"unexpected": "response"}])
         self.assertEqual((code, result["decision"], result["required_fix"]), (1, None, None))
+
+    def test_partial_native_timeout_cannot_be_hidden_by_keep(self):
+        out = self.base / "partial"
+        first = True
+        keep = self.fake([self.answer("keep")])
+        root = next(item for item in self.original_files() if item["path"] == "root.yaml")
+        def native(args, prompt, schema, directory, draft_path, seed):
+            nonlocal first
+            if not first:
+                return keep(args, prompt, schema, directory, draft_path, seed)
+            first = False
+            (directory / seed["candidate_directory"] / "root.yaml").write_text(root["content"])
+            return {**seed, "structured_output": None, "diagnostics": ["timeout; process group reaped"], "reads": []}
+        with patch.object(r, "native_call", native), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            code = r.main(["--task", str(self.task), "--schema", str(self.schema), "--kernel", str(self.kernel),
+                           "--feedback", str(self.feedback), "--out", str(out), "--max-calls", "2"])
+        result = json.loads((out / "result.json").read_text())
+        self.assertEqual((code, result["decision"], result["calls_used"]), (1, None, 2))
+        self.assertIn("cannot be hidden", (out / "notes.md").read_text())
+        self.assertEqual((out / "drafts/01/root.yaml").read_text(), root["content"])
 
     def test_failed_revision_cannot_turn_into_keep(self):
         code, out, result = self.run_optimize([self.answer("revise", False, self.original_files()), self.answer("keep")], count=2)

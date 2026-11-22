@@ -16,8 +16,10 @@ python3 schema_optimize/optimize_schema.py --task path/to/task.md --schema path/
 | repair | 引用未改输入快照，notes 给具体代码修复 | 恒为 true |
 | revise | 完整有效新稿，有实质解析变化 | 必须明确；仅具体必需问题为 true |
 
-Task/完整 root CONTRACT 解析值、kernel、oracle 和原反馈不变。模型只读，host 收稿并在规范化前后核对 Contract，严格重读校验。原稿、真实读取和诊断保留；非法稿/Contract 漂移/关键缺项返回 `decision=null`，不以 keep 隐藏失败。旧成绩不变成本次测量。
+Task/完整 root CONTRACT 解析值、kernel、oracle 和原反馈不变。模型只读输入，通过仅限本次候选文件的 Write/Edit 逐层保存修订，最终 JSON 只返回文件名与决定；host 收稿并在规范化前后核对 Contract，严格重读校验。原稿、真实读取和诊断保留；非法稿/Contract 漂移/关键缺项返回 `decision=null`，不以 keep 隐藏失败。旧成绩不变成本次测量。
 
-输出仅 `input/`、`drafts/NN.json`、新稿 `schema/`、`notes.md`、`result.json`，目录必须全新且不覆盖输入/保护资料。结果含 `status, stop_reason, calls_used, schema, notes, decision, required_fix`；路径相对结果，未有可信诊断的 required_fix 为 null。stdout 一行绝对结果路径，`0/1/2=complete/incomplete/interrupted`。有限调用无 resume，不另外执行 Reviewer 或性能验收。
+输出仅 `input/`、`drafts/NN.json` 和 `drafts/NN/`、新稿 `schema/`、`notes.md`、`result.json`，目录必须全新且不覆盖输入/保护资料。结果含 `status, stop_reason, calls_used, schema, notes, decision, required_fix`；路径相对结果，未有可信诊断的 required_fix 为 null。stdout 一行绝对结果路径，`0/1/2=complete/incomplete/interrupted`。有限调用无 resume，不另外执行 Reviewer 或性能验收。
 
 CPU 检查：`python3 -m unittest discover -s schema_optimize/tools/tests -p 'test_*.py'`。
+
+无新候选内容或最终决定的失败不自动重复相同调用；有部分稿时，修稿复制到新候选目录后继续。原始候选不被规范化覆盖，只有完整终态与 host 检查通过才可交接。

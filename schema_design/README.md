@@ -8,12 +8,14 @@ python3 schema_design/design_schema.py --task path/to/task.md --out path/to/new-
 
 默认 Claude CLI + `qwen3.8-max[1m]` + effort `max`；`--reference` 可重复，`--model/--effort` 可覆盖，`--max-calls` 默认 3，`--timeout-s` 默认 900。脚本按自身位置定位 checkout，可用绝对脚本路径从其他 cwd 运行。需要 Python 3.10+、PyYAML 6、jsonschema 4 和已配置的 Claude CLI；help/import 不读认证或启动模型。
 
-host 读取 catalog 并发现真正的 root/dispatch，通常一调用选材、一调用写作、最后一调用修具体诊断。固定 Task/绑定资料/原位置与摘要，保留完整 raw/effective/from；只读模型实际查阅 DOC/Template，host 收取完整文件，规范化并严格重读检查。这里只消费已有验收材料，不自动创建 oracle，不运行 kernel。
+host 读取 catalog 并发现真正的 root/dispatch，通常一调用选材、一调用写作、最后一调用修具体诊断。固定 Task/绑定资料/原位置与摘要，保留完整 raw/effective/from；模型实际查阅 DOC/Template，通过仅限本次候选文件的 Write/Edit 逐层保存草稿，最终 JSON 只返回文件名；host 收取完整文件，规范化并严格重读检查。这里只消费已有验收材料，不自动创建 oracle，不运行 kernel。
 
-输出必须是全新目录，不覆盖输入或保护资料。`input/` 保存固定材料与来源清单，`drafts/NN.json` 保存真正回答、实际读取及诊断，`schema/` 保存新候选，`notes.md` 说明边界；只有 `result.json.schema` 非空才是可交接 Schema。坏稿保留不冒充成功。材料过大明确失败，不截断。
+输出必须是全新目录，不覆盖输入或保护资料。`input/` 保存固定材料与来源清单，`drafts/NN.json` 保存真正回答、公开工具记录及诊断，`drafts/NN/` 保留原始候选，`schema/` 保存新候选，`notes.md` 说明边界；只有 `result.json.schema` 非空才是可交接 Schema。坏稿保留不冒充成功。材料过大明确失败，不截断。
 
 初始化后 stdout 仅一行绝对 `result.json` 路径；退出码 `0/1/2=complete/incomplete/interrupted`。结果为 `status, stop_reason, calls_used, schema, notes`，路径相对结果。无 resume；每个调用在启动前计数，超时回收进程组，未知进程不启动替代。
 
 保留原 HOME、Claude 配置目录及登录来源；只将配置中的连接 env 补给子进程，进程环境优先。hooks/MCP/插件禁用，凭据不进入输入、prompt、摘要或产物。CLI 工具限制不是 OS 隔离承诺。
 
 CPU 检查：`python3 -m unittest discover -s schema_design/tools/tests -p 'test_*.py'`。
+
+无新候选内容或最终决定的失败不自动重复相同调用；有部分稿时，修稿复制到新候选目录后继续。原始候选不被规范化覆盖，只有完整终态与 host 检查通过才可交接。

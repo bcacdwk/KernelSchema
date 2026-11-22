@@ -78,6 +78,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('task', 'eval-task', 'schema', 'kernel', 'out', 'resume'):
         p.add_argument('--' + name, type=Path)
+    p.add_argument('--reference', action='append', type=Path, default=[],
+                   help='existing reference file or Schema directory for the Task → Design start; repeatable')
     p.add_argument('--feedback', action='append', type=Path, default=[])
     p.add_argument('--gpu')
     p.add_argument('--model')
@@ -88,16 +90,27 @@ def parser():
     return p
 
 
+def input_paths(args):
+    for path in [args.task, args.eval_task, args.schema, args.kernel, *args.feedback, *args.reference]:
+        if path:
+            # Design treats a supplied file beside root/dispatch as a complete Schema reference.
+            schema_reference = (path in args.reference and (path.parent / 'dispatch.md').is_file()
+                                and any((path.parent / name).is_file() for name in ('root.yaml', 'root.yml')))
+            yield path.parent if path.is_file() and (path == args.schema or schema_reference) else path
+
+
 def arguments(p, args):
     if args.resume:
         if any(getattr(args, k) is not None for k in ('task', 'eval_task', 'schema', 'kernel', 'out', 'gpu',
-                'model', 'effort', 'max_versions', 'max_calls_per_schema', 'timeout_s')) or args.feedback:
+                'model', 'effort', 'max_versions', 'max_calls_per_schema', 'timeout_s')) or args.feedback or args.reference:
             p.error('--resume uses only the original inputs, model, limits and directory')
         if not (args.resume / 'state.json').is_file():
             p.error('--resume requires a Workflow state.json')
         return args.resume.resolve()
     if not args.task or not args.out:
         p.error('new runs require --task and --out')
+    if args.reference and args.schema:
+        p.error('--reference is only used by the Task → Design start without --schema')
     if args.kernel and (not args.schema or not args.feedback):
         p.error('--kernel requires --schema and --feedback')
     if args.feedback and not args.kernel:
@@ -125,12 +138,11 @@ def arguments(p, args):
         if path:
             setattr(args, name, path.expanduser().absolute())
     args.feedback = [x.expanduser().absolute() for x in args.feedback]
-    for path in [args.task, args.eval_task, args.schema, args.kernel, *args.feedback]:
-        if path:
-            source = path.parent if path == args.schema and path.is_file() else path
-            source = source.resolve()
-            if source == out or source.is_relative_to(out) or (source.is_dir() and out.is_relative_to(source)):
-                p.error('--out cannot overlap an input')
+    args.reference = [x.expanduser().absolute() for x in args.reference]
+    for path in input_paths(args):
+        source = path.resolve()
+        if source == out or source.is_relative_to(out) or (source.is_dir() and out.is_relative_to(source)):
+            p.error('--out cannot overlap an input')
     return out
 
 
@@ -395,7 +407,10 @@ class Workflow:
                 else:
                     self.implement()
             else:
-                self.plan('design', self.run / 'design', self.common() + ['--out', str(self.run / 'design'), '--max-calls', '3'])
+                args = self.common() + ['--out', str(self.run / 'design'), '--max-calls', '3']
+                for path in self.state['config'].get('reference', []):
+                    args += ['--reference', path]
+                self.plan('design', self.run / 'design', args)
         while True:
             result = self.consume(self.child())
             if result:
@@ -422,16 +437,14 @@ def main(argv=None):
                       for key in ('task', 'eval_task', 'schema', 'kernel', 'gpu')}
             config.update(model=args.model or 'qwen3.8-max[1m]', effort=args.effort or 'max',
                           max_versions=args.max_versions or 3, max_calls_per_schema=args.max_calls_per_schema or 6,
-                          timeout_s=args.timeout_s or 900)
+                          timeout_s=args.timeout_s or 900, reference=list(map(str, args.reference)))
             state = {'config': config, 'inputs': {}, 'versions': [], 'action': None, 'design': None,
                      'last_usable': None, 'latest_attempt': None, 'required_fix': False, 'verified_decision': None}
         workflow = Workflow(run, state)
         try:
             if not args.resume:
-                for path in [args.task, args.eval_task, args.schema, args.kernel, *args.feedback]:
-                    if path:
-                        path = path.parent if path == args.schema and path.is_file() else path
-                        state['inputs'][str(path)] = digest(path)
+                for path in input_paths(args):
+                    state['inputs'][str(path)] = digest(path)
                 if args.schema:
                     workflow.version(str(args.schema), str(args.kernel) if args.kernel else None, map(str, args.feedback))
                 workflow.persist()

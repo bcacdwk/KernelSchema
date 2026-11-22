@@ -14,9 +14,9 @@ python3 schema_design/design_schema.py --task path/to/task.md --out path/to/new-
 
 入口按自身位置定位 checkout，可从其他工作目录执行绝对脚本路径。默认使用 Claude CLI、`qwen3.8-max[1m]`、effort `max`；可用 `--model`、`--effort` 覆盖，`--max-calls` 默认 3，`--timeout-s` 默认 900 秒。`--reference` 可重复；host 同时读取 Kernel Wiki catalog 并实际发现 Schema Wiki 的 root/dispatch，通常先选至多三个互补近邻、再写、最后只按具体诊断修稿。没有适用近邻仍从明确 Task 设计。
 
-模型只用 Read/Glob/Grep，DOC0 与本方法进入首请求，DOC1–6 和 Template 可实际读取。host 固定原字节及来源、保留完整 raw/effective/from，收取完整 YAML/dispatch 后规范化并严格重读校验。现有 Qwen 连接及登录来源保留，用户 hooks/MCP/插件不执行；认证不会进入材料或产物。只消费已有 reference/案例/误差判据，不自动生成 oracle；仅有语义明确的文字任务也可先完成设计，关键缺项如实返回。
+选材只用 Read/Glob/Grep；写作另用 Write/Edit 逐层保存本次候选目录直属的 YAML/dispatch 文件，最终 JSON 只交文件名、说明与缺项，DOC0 与本方法进入首请求，DOC1–6 和 Template 可实际读取。host 固定原字节及来源、保留完整 raw/effective/from，收取完整 YAML/dispatch 后规范化并严格重读校验。现有 Qwen 连接及登录来源保留，用户 hooks/MCP/插件不执行；认证不会进入材料或产物。只消费已有 reference/案例/误差判据，不自动生成 oracle；仅有语义明确的文字任务也可先完成设计，关键缺项如实返回。
 
-产物为 `input/`、`drafts/NN.json`、可接收的 `schema/`、`notes.md` 和 `result.json`。原稿与真实阅读记录保留，检查失败不声称设计有效。初始化后 stdout 只给一行绝对 `result.json` 路径；退出码 `0/1/2` 分别表示 complete/incomplete/interrupted，参数错误不建运行。结果含 `status, stop_reason, calls_used, schema, notes`；路径相对结果，未收到可接收 Schema 时 `schema=null`。输出目录必须全新且不覆盖输入或保护资料。
+产物为 `input/`、`drafts/NN.json`（公开调用记录）及 `drafts/NN/`（原始候选）、可接收的 `schema/`、`notes.md` 和 `result.json`。原稿与真实阅读记录保留，检查失败不声称设计有效。初始化后 stdout 只给一行绝对 `result.json` 路径；退出码 `0/1/2` 分别表示 complete/incomplete/interrupted，参数错误不建运行。结果含 `status, stop_reason, calls_used, schema, notes`；路径相对结果，未收到可接收 Schema 时 `schema=null`。输出目录必须全新且不覆盖输入或保护资料。
 
 自动化落实下述方法，不增加独立 Reviewer 或效果验收。交付一个覆盖全部必要域与分支的实现设计，重叠域写明优先顺序；root 不隐式兜底，文件顺序和测试样本不替代选路或任务合法域。
 

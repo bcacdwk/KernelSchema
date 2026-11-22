@@ -7,6 +7,8 @@
 ```sh
 # Task → Design → Implement → Optimize
 python3 schema_workflow/workflow.py --task T/task.md --eval-task T/eval --gpu L20D --out R
+# 同一起点附带已有环境资料和 Schema 近邻
+python3 schema_workflow/workflow.py --task T/task.md --reference T/environment.json --reference S --eval-task T/eval --gpu L20D --out R
 # 已有完整 Schema → Implement → Optimize
 python3 schema_workflow/workflow.py --task T/task.md --eval-task T/eval --schema S --gpu L20D --out R
 # 已有 Schema、完整源码和反馈 → Optimize，再做本次 Implement 验证
@@ -15,6 +17,16 @@ python3 schema_workflow/workflow.py --resume R
 ```
 
 新运行必须给 Task 和全新 out；Schema 可以是目录或其中 YAML，kernel 可以是完整源码目录或自足文件，feedback 可重复。只有文字任务时可以先 Design，之后 Implement 具体报告缺少的固定 eval/GPU。外部成绩只作起始证据。
+
+`--reference` 可重复，接普通资料文件或完整 Schema 目录，仅透传给 Task 起点的初始 Design；与 `--schema` 同时使用会报参数错误。给出 Schema 内文件时，按 Design 已有的 root/dispatch 文件边界固定完整目录摘要。相对路径按启动 Workflow 时的 cwd 解析，参考原路径及摘要纳入固定输入；Design 自行保存参考快照及实际来源。Workflow 不解析资料、不查询环境。resume 沿用原参考，不能另传 `--reference`，原文件或目录内容改变时拒绝继续。
+
+使用现有服务环境参考的完整示例：
+
+```sh
+python3 schema_workflow/workflow.py --task schema_workflow/examples/vector_add/task.md --reference schema_workflow/examples/vector_add/environment.json --eval-task schema_workflow/examples/vector_add/eval --gpu L20D --out .schema_workflow/runs/vector-add
+```
+
+[环境记录](examples/vector_add/environment.json) 是已有 `get_env` 返回的服务缓存，含采集时间、已报告设备和软件版本，以及非候选实测、非未来分配保证的限制；这些文字会一并进入 Design 材料。候选运行环境和成绩仍由本次 Implement 反馈报告。
 
 默认模型 `qwen3.8-max[1m]`、effort `max`；`--model/--effort` 统一传到三个入口。`--max-versions` 默认 3（含初始版），`--max-calls-per-schema` 默认 6；Design 最多 3 次，每版 Optimize 合计最多 2 次。`--timeout-s` 默认 900，交业务 CLI 限制单次写作与评测等待。第三起点第一次 Optimize 最多 1 次，预留另一次读取本次实测。
 

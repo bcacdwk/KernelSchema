@@ -1,5 +1,6 @@
 """Orchestration behavior through real fake-CLI subprocesses; no model/SDK."""
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -115,10 +116,103 @@ def test_three_starts_complete_and_do_not_replay(setup,start,capsys):
     assert '/attempts/01/kernel' in pair['kernel'] and pair['feedback'].endswith('/attempts/01/feedback.json')
     assert set(result)=={'status','stop_reason','last_usable','latest_attempt'}
     events=before['events']
+    assert all('--reference' not in event['argv'] for event in events)
     if start=='external':
         assert [e['module'] for e in events]==['optimize','implement','optimize']
         assert [e['argv'][e['argv'].index('--max-calls')+1] for e in events if e['module']=='optimize']==['1','1']
     assert capsys.readouterr().out.splitlines()==[str(base/'run/result.json')]*2
+
+
+@pytest.mark.parametrize('changed', ['environment.json', 'neighbor/dispatch.md'])
+@pytest.mark.parametrize('neighbor_entry', ['neighbor', 'neighbor/root.yaml'])
+def test_references_reach_only_design_and_changes_block_resume(setup, monkeypatch, changed, neighbor_entry):
+    base,plan,launch=setup
+    reference=base/'environment.json'
+    reference.write_text('{"source":"cache","arch":"sm_103"}')
+    neighbor=base/'neighbor'
+    neighbor.mkdir()
+    (neighbor/'root.yaml').write_text('reference schema')
+    (neighbor/'dispatch.md').write_text('reference dispatch')
+    monkeypatch.chdir(base)
+    code,_=launch([{'module':'design'},I(),O()],start='task',
+                  extra=['--reference','environment.json','--reference',neighbor_entry])
+    assert code==0
+    events=w.read(plan)['events']
+    args=events[0]['argv']
+    expected=[str(reference),str(base/neighbor_entry)]
+    assert [args[index+1] for index,key in enumerate(args) if key=='--reference']==expected
+    assert all('--reference' not in event['argv'] for event in events[1:])
+    state=w.read(base/'run/state.json')
+    assert state['config']['reference']==expected
+    assert str(reference) in state['inputs'] and str(neighbor) in state['inputs']
+    before=w.read(plan)
+    assert w.main(['--resume',str(base/'run')])==0
+    (base/changed).write_text('changed reference bytes')
+    assert w.main(['--resume',str(base/'run')])==1
+    assert w.read(base/'run/result.json')['stop_reason']=='input_changed'
+    assert w.read(base/'run/result.json')['last_usable'] is None
+    assert w.read(plan)==before
+
+
+@pytest.mark.parametrize('start', ['schema','external'])
+def test_reference_requires_the_design_start(setup,start):
+    base,_,launch=setup
+    with pytest.raises(SystemExit) as error:
+        launch([],start=start,extra=['--reference',str(base/'feedback.json')])
+    assert error.value.code==2
+    assert not (base/'run').exists()
+
+
+def test_resume_cannot_replace_references(setup):
+    base,plan,launch=setup
+    launch([{'module':'design'},I(),O()],start='task',extra=['--reference',str(base/'feedback.json')])
+    before=w.read(plan)
+    with pytest.raises(SystemExit) as error:
+        w.main(['--resume',str(base/'run'),'--reference',str(base/'task.md')])
+    assert error.value.code==2
+    assert w.read(plan)==before
+
+
+def test_reference_cannot_contain_output_directory(setup):
+    base,_,launch=setup
+    with pytest.raises(SystemExit) as error:
+        launch([],start='task',extra=['--reference',str(base)])
+    assert error.value.code==2
+    assert not (base/'run').exists()
+
+
+def test_real_design_snapshots_environment_and_delivers_it_to_writer(setup,monkeypatch):
+    """Run the actual Design CLI material path, replacing only its model call."""
+    base,_,launch=setup
+    script=base/'design_materials.py'
+    script.write_text(f'''
+import sys
+sys.path.insert(0, {str(MODULE.parents[1])!r})
+from schema_design.tools import runner as design
+def inspect(self, prompt, output_schema, phase):
+    self.result['calls_used'] += 1
+    self.last_reads = []
+    if phase == 'select':
+        return {{'references': [], 'notes': 'CPU material delivery check'}}
+    (self.out/'cpu_writer_prompt.txt').write_text(prompt)
+    return {{'files': [], 'notes': 'CPU material delivery check; no model or GPU invocation',
+             'missing': ['CPU fixture stops after inspecting the fixed input']}}
+design.Run.call = inspect
+raise SystemExit(design.main())
+''')
+    monkeypatch.setitem(w.SCRIPTS,'design',script)
+    reference=MODULE.parent/'examples/vector_add/environment.json'
+    code,result=launch([],start='task',extra=['--reference',str(reference)])
+    assert code==1 and result['stop_reason']=='needs_input'
+    out=base/'run/design'
+    manifest=w.read(out/'input/manifest.json')
+    record=next(item for item in manifest['files'] if item['source']==str(reference))
+    original=reference.read_bytes()
+    assert (out/record['snapshot']).read_bytes()==original
+    assert record['sha256']==hashlib.sha256(original).hexdigest()
+    assert record['snapshot'] in manifest['bindings']['explicit_reference_files']
+    assert original.decode() in (out/'cpu_writer_prompt.txt').read_text()
+    assert w.read(out/'result.json')['schema'] is None
 
 
 def test_repair_resumes_one_directory_and_accumulates_calls(setup):

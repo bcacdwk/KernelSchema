@@ -8,7 +8,7 @@
 - 产品：独立 Design、Optimize、Implement 和单脚本 Workflow 已实现。四模块最终默认 CPU 集合 **74 passed**；现有 Template **8 项**与 Extract **6 项**相关回归分别通过。
 - 切换：根 README、方法入口、依赖、测试收集与 ignore 已切换；旧根产品和两个登记 worktree 已移除。旧 `.tooling`、仅根 `.schema_extract/` 与空 `.worktrees/` 已全部移除。
 - 首次完整代码 commit：已提交 `4f7919bf531ad8b7ab49d5e371dfc8b7fea51a34`（`Refactor`），材料提交为父提交 `2c9c346`。提交时修掉新测试文件末尾多余空行，未改变行为；提交后工作区干净，未 push。
-- 真实 Qwen/Agate：`vector_add-001` 已实际调用默认 Qwen 三次，选材完成、两次写作在各自 900 秒后超时，Workflow 终态 `incomplete / write_failed`；本次 GPU 提交 0 次，无未结清 job。原失败完整保留，最小材料修复正在接续；真实闭环尚未成立。
+- 真实 Qwen/Agate：`vector_add-001` 已实际调用默认 Qwen 三次，选材完成、两次写作在各自 900 秒后超时，Workflow 终态 `incomplete / write_failed`；本次 GPU 提交 0 次，无未结清 job。原失败完整保留，材料修复已提交 `c352c6bd6f2bb1c6ab686dd8c0fc3562642202a1`（`Fix materials`）；`vector_add-002` 也已终结为 `incomplete / write_failed`，两次写作仍各在 900 秒后超时、候选 GPU 提交 0 次。已把新证据交给新的 xhigh 排查交稿方式；真实闭环尚未成立。
 
 ## 基线与环境
 
@@ -96,6 +96,14 @@ SDK 0.14.37 没有旧上传签名 URL 刷新接口；已上传可续原请求，
 
 范围偏离记录：i04 启动时一次 AGENTS 文件名检索误包含 HOME，返回了 AKA_experiment 及归档内的路径名；没有打开这些文件内容、没有修改，随后检索限定到 KernelSchema。后续代理命令明确使用仓库 workdir，避免再次出现；不能把这次元数据检索表述成从未触及任何实验路径。
 
+### Issue 02 / 03：交稿与环境资料
+
+- 002 再次超时后，由新的 i07 实现限定候选目录内的 native Write/Edit，最终小 JSON 只列文件和决定；保留部分稿用于具体修复，无新稿的失败不盲重试。细节见 [ISSUE_02](ISSUE_02.md)。
+- 唯一真实交稿/权限探针使用原 Qwen/max，43.874 秒完成；候选 Write/Edit 成功，假 input 和候选子目录两次写入实际被拒，短结构化结果正常。该探针不是 Schema 业务或 GPU 验证，进程已退出。
+- 环境资料已单独提交 `51f6b2399d29bafbeacf401de45afa7011160dc8`（`Add environment`）。i08 将其通过 Workflow 的 `--reference` 交初始 Design，并补示例的实际软件版本与来源；固定 Task/eval 六文件和 Golden_reference 原身份保持不变。细节见 [ISSUE_03](ISSUE_03.md)。
+- 合并两修复后，在独立 venv 新进程执行 `python -m pytest -q`：**93 passed、8 subtests passed in 39.82s**。示例完整 Template 只读检查仍通过，2 YAML、0 would change，未 skip-hardware。没有再扩大无关测试。
+- 截至本次修复提交前，真实 Qwen 业务调用为 001/002 各 3 次，另有上述 1 次小探针；候选 GPU 评测仍为 0。另有 1 次只读 Agate 环境查询，不能混算为候选实测。003 将在修复提交后从新目录开始，原失败记录保留。
+
 ## 新真实运行 vector_add-001
 
 2026-11-22 UTC，D 在 `main@4f7919bf531ad8b7ab49d5e371dfc8b7fea51a34` 执行上述原定命令；启动前确认 `.schema_workflow/runs/vector_add-001` 不存在。配置为默认 `qwen3.8-max[1m]` / `max`、`L20D`，Task/eval 与既定材料保持原字节；认证仅以 `KS_AGATE_CONFIG` 指向仓库外私有配置。
@@ -105,3 +113,29 @@ SDK 0.14.37 没有旧上传签名 URL 刷新接口；已上传可续原请求，
 Design 首调用真实选材成功（返回码 0、无诊断），选择空参考集：实际读取现有目录与近邻说明后，判断数学、调度、精度和 Triton 栈不匹配，按 Task 直接设计。第二、第三次调用均成功 Read `DOC1–6`、Template README/starter 和固定 manifest，但未返回完整稿，分别在 900 秒后超时；`drafts/02.json` 与 `03.json` 保留读取路径和公开诊断 `Claude exceeded 900 seconds; process group reaped`，返回码均为 143。第三次是产品自然 repair，没有更改上限或新建目录。第三次公开最终文字仅为正在写完整集合，无 structured output，不能作为完整 Schema。
 
 公开工具记录显示写作者反复查找硬件、Golden_reference 与提交来源，尝试读取未授权的 checkout 根/Template 文本案例被拒。主代理已安排新 xhigh 只读排查，并在本运行终结、PID 核实后接管最小材料修复；固定 Task/eval、模型、900 秒上限与原失败目录不变。此失败不代表项目完成，后续仍须取得完整 Schema、七案例真实 Implement 和本次反馈 Optimize 决定。
+
+
+## 材料修复后的真实运行 vector_add-002
+
+2026-11-22 UTC，新的 xhigh 在 `main@c352c6bd6f2bb1c6ab686dd8c0fc3562642202a1` 启动。启动前工作区干净，确认 `.schema_workflow/runs/vector_add-002` 不存在；新运行理由是已提交的材料交付修复，原 001 的调用和失败结果保持不变。
+
+```sh
+KS_AGATE_CONFIG=/home/shaohanyong.shy/.cache/kernelschema-standalone-private/agate.json /home/shaohanyong.shy/.cache/kernelschema-standalone-venv/bin/python schema_workflow/workflow.py --task schema_workflow/examples/vector_add/task.md --eval-task schema_workflow/examples/vector_add/eval --gpu L20D --out .schema_workflow/runs/vector_add-002
+```
+
+默认 `qwen3.8-max[1m]` / `max`、`L20D`、单次 900 秒上限均未改变。初始 Workflow PID `652702`、Design PID `652741`、选材 CLI PID `652990`，工具 session `92185`。该运行已自然终结，结果见下文；中间 `interrupted` 为运行中占位，最终结论依据原进程退出及终态文件。
+
+本次选材调用成功返回（`drafts/01.json`，退出 0、无诊断），实际 17 条 Read/Glob/Grep 均完成，读取 catalog 与近邻后选择空参考集。Task/eval 六文件的 manifest Git 状态全部为 verified，reference blob 仍为 `d8c4d059869ef22c7f71e1e6f9756f94a0a02bb8`。
+
+第二次 write 调用（`drafts/02.json`，CLI PID `656013`，session `b30eecb5-2b97-4876-9cce-6b217aea912f`）再次运行 900 秒后退出 143，公开诊断为 `Claude did not finish a successful response` 与 `Claude exceeded 900 seconds; process group reaped`；最终回答为空、结构化稿为 null。19 条公开 Read/Grep 记录全部 completed：DOC1–6、Template README/starter、manifest 以及新增 QSA 格式案例的 README/dispatch/root 前 120 行都实际可读；其余读取 catalog 并搜索 L20、Triton、SM/架构名及硬件字段，没有工具拒绝。原写作 PID 已确认不存在。材料修复解决了已见来源和访问缺口，但本次证据不能说明它们解释全部超时；仍没有可验收 Schema。
+
+原流程随后自然进入 repair 第三调用（CLI PID `670838`），上限与计数不变。当时无 GPU 提交；重复超时立即报告主代理，新的 xhigh 在运行期间只读排查，未修改在途输入或产品。
+
+
+第三次 repair（`drafts/03.json`，session `621f09e8-33ee-44e9-9810-5b655775f878`）同样在 900 秒后退出 143，诊断与第二次相同，最终回答为空、结构化稿为 null。14 条 Read 均 completed：starter、QSA 格式案例 root 全文/README/dispatch、DOC1–6、manifest，以及已有近邻说明 `materials/0023/README.md`、`0029/README.md`、`0037/README.md`；没有工具拒绝。没有完整稿可进入 Template 候选验收，不能从读取成功推出设计成功。
+
+原 Workflow 自然退出 **1**，终态 `result.json` 为 **incomplete / write_failed**、`latest_attempt=design/result.json`、`last_usable=null`；Design 为 `calls_used=3/schema=null`。运行中没有 `vNNN`、request 或 response 文件，**候选 GPU 评测为 0 次**，无未结清 GPU job。Workflow/Design/三个 CLI 的 PID `652702/652741/652990/656013/670838` 全部不存在，另按 PID/PPID/PGID 核对也没有残留进程。原 001 与 002 的次数、失败结论和文件保持原样。
+
+同阶段主代理曾通过正式 SDK 执行一次只读 `get_env('L20D')` 网络查询，服务缓存环境记录位于 `.schema_workflow/environment/l20d-service-env.json`，`source=cache`、`probed_at=2026-11-22T11:48:31.084555+00:00`，含 SM103、Triton 3.7.1 等信息。这是服务缓存的环境证据，不是候选实测，没有创建 GPU job，也没有回填或改变 002 的固定材料；本阶段不能表述成从未访问 Agate 网络。
+
+终态与全部进程核实后，已直接交接给新的 xhigh `i07_design_delivery_fix` 接续产品修复；本运行负责人停止写入，不 stage/commit/push。002 只能证明来源与格式路径修复后的实际可读性及重复交稿超时，不能证明唯一根因，Design/Implement/Optimize/Workflow 真实主链仍未成立。
