@@ -13,7 +13,7 @@ from . import __version__
 from .common import ExtractError, RunnerBusy, SupervisorBusy, digest, read_json, rules_root
 from .runner import DEFAULT_CONFIG, export_checkpoint, run, summary
 from .runtime import frozen_run_invocation
-from .store import Store
+from .store import Store, control_error
 from . import monitor
 from .stages import validate_add_calls
 
@@ -303,6 +303,8 @@ def _registration_result(store, registration: dict, state: dict | None, *, queue
     launch = registration.get("background") or {}
     if result["run_status"] == "ready" and result["published"]:
         outcome, next_step = "published", "交付回执：" + str(Path(registration["output"]) / ".extraction/receipt.json")
+    elif background and launch.get("error"):
+        outcome, next_step = "delivery_pending", "inspect --run " + run_id + " --json 核对原登记与 launch；未知投递不能作为重放依据。"
     elif background and launch.get("status") in {"launching", "claimed"}:
         outcome = "already_running" if launch.get("reused") or state is None else "start_requested"
         next_step = "status " + run_id + " 查看阶段；后台启动成功不表示已完成发布。"
@@ -327,7 +329,7 @@ def _registration_result(store, registration: dict, state: dict | None, *, queue
 
 def _busy_result(state: dict, entry: dict) -> int:
     print(json.dumps({"run_id": state["run_id"], "result": "already_running" if entry.get("reused") else "preserved",
-                      "status": state["status"], "published": state["published"], "launch": entry,
+                      "status": state["status"], "published": state["published"], "launch": entry, "committed": entry.get("committed", bool(entry.get("id"))),
                       "next_step": "status " + state["run_id"] + " 查看原任务；本命令未执行到发布，也未追加调用次数。"}, ensure_ascii=False, indent=2))
     return 1
 
@@ -344,6 +346,7 @@ def _monitor_wait():
 
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
+    operation = {}
     try:
         args.repo = args.repo.resolve()
         state_root = (getattr(args, "state_root", None) or args.repo / ".schema_extract/v2").resolve()
@@ -449,7 +452,9 @@ def main(argv=None) -> int:
             _frozen_entry(store, state, command)
             request = monitor.request_restart(store, args.run_id, args.scope, args.repo)
             print(json.dumps(request, ensure_ascii=False, indent=2))
-            return 0 if request["status"] in {"authorized", "consumed"} and request.get("launch", {}).get("status") != "launch_failed" else 1
+            return 0 if (request["status"] in {"authorized", "consumed"} and
+                         request.get("launch", {}).get("status") != "launch_failed" and
+                         not request.get("launch", {}).get("error")) else 1
         if args.command == "_background":
             store = Store(state_root)
             if os.environ.get("SCHEMA_EXTRACT_ENTRY_ID") == args.launch_id:
@@ -498,6 +503,7 @@ def main(argv=None) -> int:
                     command.extend(["--add-calls", str(add_calls)])
                 store.assert_startable(args.run_id)
                 entry = _launch_context(store, state, mode=args.command, add_calls=add_calls)
+                operation = {"committed": True, "run_id": args.run_id, "launch": entry}
                 if entry.get("reused"):
                     return _busy_result(state, entry)
             elif args.command in {"pause", "cancel"}:
@@ -508,22 +514,25 @@ def main(argv=None) -> int:
                 if request is None:
                     request = store.request_control(args.run_id, args.command)
                     os.environ["SCHEMA_EXTRACT_CONTROL_REQUEST"] = request["id"]
+                operation = {"committed": True, "run_id": args.run_id, "request": request}
             if args.command == "cancel":
                 try:
                     delivery = monitor.deliver_cancel(store, request)
                 except SupervisorBusy as exc:
                     delivery = {"status": "pending", "confirmed": False, "evidence_committed": False, "reason": str(exc)}
-                print(json.dumps({"request": request, "delivery": delivery}, ensure_ascii=False, indent=2))
+                print(json.dumps({"committed": True, "request": request, "delivery": delivery}, ensure_ascii=False, indent=2))
                 return 0 if delivery.get("confirmed") else 1
             _frozen_entry(store, state, command)
             if args.command == "maintain":
                 from .maintenance import submit_request
                 request = submit_request(store, args.run_id, issue_id=args.issue_id, tasks=read_json(args.tasks.absolute()))
+                operation = {"committed": True, "run_id": args.run_id, "request": request}
                 writer = store.writer_status(args.run_id)
                 delivery = ({"status": "active_runner"} if writer == "held" else
                             monitor.start_background(store, args.run_id, args.repo, mode="maintenance")
                             if writer in {"free", "absent"} else {"status": "writer_unknown"})
-                result, code = {"request": request, "delivery": delivery}, 0 if delivery["status"] != "launch_failed" else 1
+                result, code = ({"committed": True, "request": request, "delivery": delivery},
+                                0 if delivery["status"] != "launch_failed" and not delivery.get("error") else 1)
             elif args.command == "status":
                 result = state if args.full else summary(store, state)
                 code = 0
@@ -532,7 +541,7 @@ def main(argv=None) -> int:
                     state = run(store, args.run_id)
                 except RunnerBusy:
                     state = store.load(args.run_id)
-                result, code = {"request": request, "run": summary(store, state)}, 0
+                result, code = {"committed": True, "request": request, "run": summary(store, state)}, 0
             elif args.command == "export":
                 result = export_checkpoint(store, args.run_id, args.output)
                 code = 0 if result["status"] == "published" else 1
@@ -543,6 +552,8 @@ def main(argv=None) -> int:
                             queued_only=entry.get("mode") == "queued", launch_id=entry.get("id"))
                 result = summary(store, state)
                 code = 0 if state["status"] == "ready" and state["published"] else 1
+            if entry and isinstance(result, dict):
+                result.update(committed=True, launch=entry)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return code
         config = {key: getattr(args, key) for key in ("backend", "agent_binary", "worker_effort", "reviewer_effort", "model", "revision_limit", "max_calls")
@@ -556,14 +567,16 @@ def main(argv=None) -> int:
                 if target.get("error"):
                     results.append(target)
                     continue
+                operation = {}
                 try:
                     registered, state = monitor.registered_extract(args.repo, store, target["output"], operator_id=target["operator_id"], config=config, queued=args.queue)
+                    operation = {"committed": True, "run_id": registered["run_id"], "registration": registered}
                     if state is not None and args.background and registered["authorized"]:
                         registered["background"] = monitor.start_background(store, state["run_id"], args.repo)
                     result, code = _registration_result(store, registered, state, queued=args.queue, background=args.background)
                     results.append({"operator_id": target["operator_id"], **result, "exit_code": code})
                 except (ExtractError, OSError, KeyError, TypeError, AttributeError) as exc:
-                    results.append({"operator_id": target["operator_id"], "error": str(exc)})
+                    results.append({"operator_id": target["operator_id"], **control_error(exc, operation)})
             print(json.dumps(results, ensure_ascii=False, indent=2, default=str))
             return 1 if any(value.get("error") or value.get("exit_code") for value in results) else 0
         if not args.output or args.output_root:
@@ -571,6 +584,7 @@ def main(argv=None) -> int:
         store = Store(state_root)
         registered, state = monitor.registered_extract(args.repo, store, args.output, operator_id=args.operator_id,
                                                       source=args.source, bindings=args.bindings, config=config, queued=args.queue)
+        operation = {"committed": True, "run_id": registered["run_id"], "registration": registered}
         if state is None or args.background or (registered.get("reused") and (not registered["authorized"] or state["status"] != "queued")):
             if state is not None and args.background and registered["authorized"]:
                 registered["background"] = monitor.start_background(store, state["run_id"], args.repo)
@@ -583,6 +597,7 @@ def main(argv=None) -> int:
             print(json.dumps(summary(store, state), ensure_ascii=False, indent=2))
             return 0
         entry = _launch_context(store, state, mode="queued" if state["status"] == "queued" else "resume")
+        operation["launch"] = entry
         if entry.get("reused") or entry.get("status") == "preserved":
             return _busy_result(state, entry)
         _frozen_entry(store, state, ["resume", state["run_id"], "--repo", str(args.repo), "--state-root", str(state_root)])
@@ -590,10 +605,10 @@ def main(argv=None) -> int:
         print(json.dumps(summary(store, state), ensure_ascii=False, indent=2))
         return 0 if state["status"] == "ready" and state["published"] else 1
     except SupervisorBusy as exc:
-        print(json.dumps({"status": "busy", "committed": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        print(json.dumps(control_error(exc, operation), ensure_ascii=False), file=sys.stderr)
         return 1
     except (ExtractError, OSError) as exc:
-        print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        print(json.dumps(control_error(exc, operation), ensure_ascii=False), file=sys.stderr)
         return 2
 
 

@@ -20,6 +20,7 @@ from .common import ExtractError, SupervisorBusy, digest, rules_root
 from .processes import child_exited, process_identity, process_alive, process_table, observe_owned, terminate_owned
 from .prompts import render_operation
 from . import monitor
+from .store import control_operation, control_error
 
 
 CLOCK_FORMAT = "schema_extract.clock.v1"
@@ -186,96 +187,105 @@ class Clock:
 
         launch=False is an in-process test seam, never a CLI timer option.
         """
-        thread = _uuid(thread)
-        if run_ids is not None:
-            run_ids = sorted(set(run_ids))
-            for run_id in run_ids:
-                self.store.run_dir(run_id)
-        self.store.initialize()
-        identity = process_identity(os.getpid())
-        table = process_table()
-        if identity is None:
-            raise ExtractError("cannot establish clock launcher identity")
-        # The same open-file description is inherited by the daemon. Closing
-        # the parent's descriptor is safe; LOCK_UN would also unlock the child.
-        with self.lock_path.open("a+") as lock:
-            try:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                current = _clock(self.store.read_supervisor())
-                self._check_start(current, thread, run_ids, codex_binary)
-                if not current.get("enabled"):
-                    raise ExtractError("previous clock is still stopping; inspect monitor status before start")
-                binding = _binding(current)
-                daemon = current.get("daemon", {})
-                if (_alive(daemon.get("identity"), table) is not True and
-                        not (daemon.get("status") == "starting" and _alive(daemon.get("launcher"), table) is True)):
-                    raise ExtractError("clock lock is held but its live owner is unconfirmed; inspect monitor status")
-                result = self.status()
-                if not _matches(result, binding):
-                    return {**result, "reused": False, "started": False, "reason": "start_invalidated"}
-                return {**result, "reused": True}
-            with self.store.supervisor() as ledger:
-                clock = _clock(ledger)
-                self._check_start(clock, thread, run_ids, codex_binary)
-                daemon = clock.get("daemon", {})
-                if (daemon and daemon.get("status") not in {"stopped", "launch_failed"} and
-                        _alive(daemon.get("identity"), table) is not False):
-                    raise ExtractError("recorded clock owner is not confirmed exited; inspect monitor status")
-                for _, pending in self._sending(clock):
-                    if (not pending.get("identity") or
-                            not observe_owned(pending["identity"], pending.get("descendants", []), table=table)["confirmed"]):
-                        raise ExtractError("previous queue delivery is not confirmed exited; inspect monitor status")
-                if not clock.get("enabled"):
-                    _archive(clock, clock.pop("reminder", None))
-                    clock.update(enabled=True, generation=clock["generation"] + 1, thread_id=thread,
-                                 run_ids=run_ids, started_at=self.now())
-                clock.setdefault("run_ids", run_ids)
-                clock.update(repo=str(self.repo), entrypoint=str(rules_root() / "schema_extract/extract_yaml.py"),
-                             python=sys.executable, queue_backend="codex", codex_binary=codex_binary or clock.get("codex_binary", "codex"))
-                launch_id = str(uuid4())
-                clock["daemon"] = {"id": launch_id, "status": "starting", "launcher": identity,
-                                   "created_at": self.now(), "identity": None, "heartbeat_at": None}
-                _arm(clock)
-                ledger["clock"] = clock
-                binding, selected = _binding(clock), clock["run_ids"]
-                initial = clock["last_check_number"] < 0
-            if initial:
-                self._initial_scan(binding)
-            clock = _clock(self.store.read_supervisor())
-            if not _matches(clock, binding) or clock.get("daemon", {}).get("id") != launch_id:
-                return {**self.status(), "started": False, "reason": "start_invalidated"}
-            if not launch:
-                with self.store.supervisor() as ledger:
-                    current = _clock(ledger)
-                    if current.get("daemon", {}).get("id") == launch_id:
-                        current["daemon"]["status"] = "stopped"
-                return {**self.status(), "started": False}
-            command = [sys.executable, "-B", clock["entrypoint"], "_clock", "--launch-id", launch_id,
-                       "--lock-fd", str(lock.fileno()), "--repo", str(self.repo), "--state-root", str(self.store.root)]
-            try:
-                log_path = self.store.root / "monitor-clock.log"
-                with log_path.open("ab") as log:
-                    process = subprocess.Popen(command, cwd=self.runtime_directory, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                               close_fds=True, pass_fds=(lock.fileno(),), start_new_session=True)
+        with control_operation() as outcome:
+            thread = _uuid(thread)
+            if run_ids is not None:
+                run_ids = sorted(set(run_ids))
+                for run_id in run_ids:
+                    self.store.run_dir(run_id)
+            self.store.initialize()
+            identity = process_identity(os.getpid())
+            table = process_table()
+            if identity is None:
+                raise ExtractError("cannot establish clock launcher identity")
+            # The same open-file description is inherited by the daemon. Closing
+            # the parent's descriptor is safe; LOCK_UN would also unlock the child.
+            with self.lock_path.open("a+") as lock:
                 try:
-                    child_identity, identity_error = process_identity(process.pid), None
-                except OSError as exc:
-                    child_identity, identity_error = None, str(exc)
-                with self.store.supervisor() as ledger:
-                    current = _clock(ledger)
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    current = _clock(self.store.read_supervisor())
+                    self._check_start(current, thread, run_ids, codex_binary)
+                    if not current.get("enabled"):
+                        raise ExtractError("previous clock is still stopping; inspect monitor status before start")
+                    binding = _binding(current)
                     daemon = current.get("daemon", {})
-                    if daemon.get("id") == launch_id and daemon["status"] == "starting":
-                        daemon.update(pid=process.pid, identity=child_identity, log=str(log_path))
-                        if identity_error:
-                            daemon["observation_error"] = identity_error
-                return {**self.status(), "started": True, "pid": process.pid}
-            except OSError as exc:
+                    if (_alive(daemon.get("identity"), table) is not True and
+                            not (daemon.get("status") == "starting" and _alive(daemon.get("launcher"), table) is True)):
+                        raise ExtractError("clock lock is held but its live owner is unconfirmed; inspect monitor status")
+                    outcome.update(committed=True, generation=binding["generation"], launch_id=daemon.get("id"))
+                    result = self.status()
+                    if not _matches(result, binding):
+                        return {**result, "reused": False, "started": False, "reason": "start_invalidated"}
+                    return {**result, "committed": True, "launch_id": daemon.get("id"), "reused": True}
                 with self.store.supervisor() as ledger:
-                    daemon = _clock(ledger).get("daemon", {})
-                    if daemon.get("id") == launch_id:
-                        daemon.update(status="launch_failed", error=str(exc))
-                raise ExtractError("clock launch failed; explicit start can resume: " + str(exc)) from exc
+                    clock = _clock(ledger)
+                    self._check_start(clock, thread, run_ids, codex_binary)
+                    daemon = clock.get("daemon", {})
+                    if (daemon and daemon.get("status") not in {"stopped", "launch_failed"} and
+                            _alive(daemon.get("identity"), table) is not False):
+                        raise ExtractError("recorded clock owner is not confirmed exited; inspect monitor status")
+                    for _, pending in self._sending(clock):
+                        if (not pending.get("identity") or
+                                not observe_owned(pending["identity"], pending.get("descendants", []), table=table)["confirmed"]):
+                            raise ExtractError("previous queue delivery is not confirmed exited; inspect monitor status")
+                    if not clock.get("enabled"):
+                        _archive(clock, clock.pop("reminder", None))
+                        clock.update(enabled=True, generation=clock["generation"] + 1, thread_id=thread,
+                                     run_ids=run_ids, started_at=self.now())
+                    clock.setdefault("run_ids", run_ids)
+                    clock.update(repo=str(self.repo), entrypoint=str(rules_root() / "schema_extract/extract_yaml.py"),
+                                 python=sys.executable, queue_backend="codex", codex_binary=codex_binary or clock.get("codex_binary", "codex"))
+                    launch_id = str(uuid4())
+                    clock["daemon"] = {"id": launch_id, "status": "starting", "launcher": identity,
+                                       "created_at": self.now(), "identity": None, "heartbeat_at": None}
+                    _arm(clock)
+                    ledger["clock"] = clock
+                    binding, selected = _binding(clock), clock["run_ids"]
+                    initial = clock["last_check_number"] < 0
+                    outcome.update(generation=binding["generation"], launch_id=launch_id)
+                outcome["committed"] = True
+                if initial:
+                    self._initial_scan(binding)
+                clock = _clock(self.store.read_supervisor())
+                if not _matches(clock, binding) or clock.get("daemon", {}).get("id") != launch_id:
+                    return {**self.status(), "committed": True, "launch_id": launch_id, "started": False, "reason": "start_invalidated"}
+                if not launch:
+                    with self.store.supervisor() as ledger:
+                        current = _clock(ledger)
+                        if current.get("daemon", {}).get("id") == launch_id:
+                            current["daemon"]["status"] = "stopped"
+                    return {**self.status(), "committed": True, "launch_id": launch_id, "started": False}
+                command = [sys.executable, "-B", clock["entrypoint"], "_clock", "--launch-id", launch_id,
+                           "--lock-fd", str(lock.fileno()), "--repo", str(self.repo), "--state-root", str(self.store.root)]
+                try:
+                    log_path = self.store.root / "monitor-clock.log"
+                    with log_path.open("ab") as log:
+                        process = subprocess.Popen(command, cwd=self.runtime_directory, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                                   close_fds=True, pass_fds=(lock.fileno(),), start_new_session=True)
+                    outcome["delivery"] = {"status": "started", "pid": process.pid, "evidence_committed": False}
+                    try:
+                        child_identity, identity_error = process_identity(process.pid), None
+                    except OSError as exc:
+                        child_identity, identity_error = None, str(exc)
+                    with self.store.supervisor() as ledger:
+                        current = _clock(ledger)
+                        daemon = current.get("daemon", {})
+                        if daemon.get("id") == launch_id and daemon["status"] == "starting":
+                            daemon.update(pid=process.pid, identity=child_identity, log=str(log_path))
+                            if identity_error:
+                                daemon["observation_error"] = identity_error
+                    return {**self.status(), "committed": True, "launch_id": launch_id, "started": True, "pid": process.pid,
+                            "delivery": {"status": "started", "pid": process.pid, "evidence_committed": True}}
+                except OSError as exc:
+                    if outcome.get("delivery"):
+                        raise
+                    outcome["delivery"] = {"status": "launch_failed", "error": str(exc)}
+                    with self.store.supervisor() as ledger:
+                        daemon = _clock(ledger).get("daemon", {})
+                        if daemon.get("id") == launch_id:
+                            daemon.update(status="launch_failed", error=str(exc))
+                    raise ExtractError("clock launch failed; explicit start can resume: " + str(exc)) from exc
 
     @staticmethod
     def _check_start(clock, thread, run_ids, binary):
@@ -506,119 +516,124 @@ class Clock:
             self.inflight["facts"]["observation_error"] = str(exc)
 
     def _poll_send(self):
-        pending = self.inflight
-        if pending is None:
-            # A restarted clock cannot recover a Popen wait status. Preserve an
-            # unfinished delivery until its recorded processes are truly gone.
-            for item, attempt in self._sending(_clock(self.store.read_supervisor())):
-                identity = attempt.get("identity")
-                if not identity:
-                    return {"status": "sending", "id": item["id"], "reason": "queue identity unconfirmed"}
-                observed = observe_owned(identity, attempt.get("descendants", []))
-                if not observed["confirmed"]:
-                    self._record_send(item, attempt["number"], {"status": "sending", "termination": observed,
-                                      "descendants": observed.get("descendants", [])})
-                    return {"status": "sending", "id": item["id"]}
-                outcome = {"status": "uncertain", "finished_at": self.now(), "termination": observed,
-                           "error": "queue owner exited before recording its result"}
-                self._record_send(item, attempt["number"], outcome)
-                return {"id": item["id"], **outcome}
-            return None
-        item, facts = pending["item"], pending["facts"]
-        process = pending.get("process")
-        if process is not None and "outcome" not in pending:
-            exited = child_exited(process)
-            if not facts.get("identity"):
-                try:
-                    facts["identity"] = process_identity(process.pid)
-                except OSError as exc:
-                    facts["observation_error"] = str(exc)
-            identity = facts.get("identity")
-            observed = (observe_owned(identity, facts.get("descendants", [])) if identity else
-                        {"confirmed": False, "actions": [], "survivors": [], "reason": "queue identity unconfirmed"})
-            facts.update(termination=observed, descendants=observed.get("descendants", []))
-            if exited and identity and not observed["confirmed"]:
-                observed = terminate_owned(identity, facts.get("descendants", []), include_anchor=True)
+        with control_operation() as outcome:
+            pending = self.inflight
+            if pending is None:
+                # A restarted clock cannot recover a Popen wait status. Preserve an
+                # unfinished delivery until its recorded processes are truly gone.
+                for item, attempt in self._sending(_clock(self.store.read_supervisor())):
+                    outcome.update(committed=True, id=item["id"], generation=item["generation"], attempt_number=attempt["number"])
+                    identity = attempt.get("identity")
+                    if not identity:
+                        return {"committed": True, "status": "sending", "id": item["id"], "reason": "queue identity unconfirmed"}
+                    observed = observe_owned(identity, attempt.get("descendants", []))
+                    if not observed["confirmed"]:
+                        self._record_send(item, attempt["number"], {"status": "sending", "termination": observed,
+                                          "descendants": observed.get("descendants", [])})
+                        return {"committed": True, "status": "sending", "id": item["id"]}
+                    outcome = {"status": "uncertain", "finished_at": self.now(), "termination": observed,
+                               "error": "queue owner exited before recording its result"}
+                    self._record_send(item, attempt["number"], outcome)
+                    return {"committed": True, "id": item["id"], **outcome}
+                return None
+            item, facts = pending["item"], pending["facts"]
+            outcome.update(committed=True, id=item["id"], generation=item["generation"], attempt_number=pending["number"])
+            process = pending.get("process")
+            if process is not None and "outcome" not in pending:
+                exited = child_exited(process)
+                if not facts.get("identity"):
+                    try:
+                        facts["identity"] = process_identity(process.pid)
+                    except OSError as exc:
+                        facts["observation_error"] = str(exc)
+                identity = facts.get("identity")
+                observed = (observe_owned(identity, facts.get("descendants", [])) if identity else
+                            {"confirmed": False, "actions": [], "survivors": [], "reason": "queue identity unconfirmed"})
                 facts.update(termination=observed, descendants=observed.get("descendants", []))
-            if not exited or not observed["confirmed"]:
-                self._record_send(item, pending["number"], facts)
-                return {"status": "sending", "id": item["id"]}
-            code = process.poll()
-            attempt = item["attempts"][-1]
-            stdout = Path(attempt["stdout"]).read_text(errors="replace")
-            stderr = Path(attempt["stderr"]).read_text(errors="replace")
-            match = re.search(r"Queued message ([0-9a-f-]{36}) for thread ([0-9a-f-]{36})", stdout)
-            try:
-                if code or not match or match[2] != pending["thread"]:
-                    raise QueueError(f"queue did not confirm the bound thread and message ID (exit={code}); "
-                                     + (stderr or stdout)[-500:])
-                outcome = {"status": "queued", "message_id": _uuid(match[1], "queue message")}
-            except ExtractError as exc:
-                outcome = {"status": "uncertain", "error": str(exc)}
-            pending["outcome"] = {**outcome, "exit_code": code, "finished_at": self.now()}
-        outcome = {**facts, **pending["outcome"]}
-        self._record_send(item, pending["number"], outcome)
-        self.inflight = None
-        return {"id": item["id"], **outcome}
+                if exited and identity and not observed["confirmed"]:
+                    observed = terminate_owned(identity, facts.get("descendants", []), include_anchor=True)
+                    facts.update(termination=observed, descendants=observed.get("descendants", []))
+                if not exited or not observed["confirmed"]:
+                    self._record_send(item, pending["number"], facts)
+                    return {"committed": True, "status": "sending", "id": item["id"]}
+                code = process.poll()
+                attempt = item["attempts"][-1]
+                stdout = Path(attempt["stdout"]).read_text(errors="replace")
+                stderr = Path(attempt["stderr"]).read_text(errors="replace")
+                match = re.search(r"Queued message ([0-9a-f-]{36}) for thread ([0-9a-f-]{36})", stdout)
+                try:
+                    if code or not match or match[2] != pending["thread"]:
+                        raise QueueError(f"queue did not confirm the bound thread and message ID (exit={code}); "
+                                         + (stderr or stdout)[-500:])
+                    outcome = {"status": "queued", "message_id": _uuid(match[1], "queue message")}
+                except ExtractError as exc:
+                    outcome = {"status": "uncertain", "error": str(exc)}
+                pending["outcome"] = {**outcome, "exit_code": code, "finished_at": self.now()}
+            outcome = {**facts, **pending["outcome"]}
+            self._record_send(item, pending["number"], outcome)
+            self.inflight = None
+            return {"committed": True, "id": item["id"], **outcome}
 
     def tick(self) -> dict:
         try:
             return self._tick()
-        except SupervisorBusy:
-            return {"status": "busy", "committed": False}
+        except SupervisorBusy as exc:
+            return control_error(exc)
         except OSError as exc:
-            return {"status": "observation_unknown", "error": str(exc)}
+            return {**control_error(exc), "status": "observation_unknown"}
 
     def _tick(self) -> dict:
-        owner = process_identity(os.getpid())
-        with self.store.supervisor() as ledger:
-            clock = _clock(ledger)
-            if self.launch_id and clock.get("enabled") and clock.get("daemon", {}).get("id") == self.launch_id:
-                clock["daemon"].update(heartbeat_at=self.now(), status="running")
-        observation = self.observe()
-        delivery = self._poll_send()
-        now = self.now()
-        with self.store.supervisor() as ledger:
-            clock = _clock(ledger)
-            if not clock.get("enabled") or (self.launch_id and clock.get("daemon", {}).get("id") != self.launch_id):
-                return {"status": "disabled", "delivery": delivery}
-            if self.launch_id:
-                clock["daemon"].update(heartbeat_at=now, status="running")
-                clock["daemon"].pop("error", None)
-            if delivery:
-                return {**delivery, "observation": observation}
-            _arm(clock)
-            item = clock.get("reminder")
-            next_send_at = _next_send_at(item)
-            if (self.inflight or self._sending(clock) or not _current(clock, item, now) or
-                    next_send_at is None or now < next_send_at):
-                return {"status": "waiting", "observation": observation}
-            attempts = item["attempts"]
-            prefix = self.runtime_directory / (item["id"] + "-" + str(len(attempts) + 1))
-            attempts.append({"number": len(attempts) + 1, "started_at": now, "status": "sending",
-                             "owner": owner, "launch_id": self.launch_id,
-                             "stdout": str(prefix) + ".stdout", "stderr": str(prefix) + ".stderr"})
-            item["status"] = "sending"
-            clock["queue_attempts_total"] = clock.get("queue_attempts_total", 0) + 1
-            item, sent_clock = deepcopy(item), deepcopy(clock)
-        current = _clock(self.store.read_supervisor())
-        current_item = current.get("reminder")
-        if (not _matches(current, _binding(sent_clock)) or not _current(current, current_item, self.now()) or
-                current_item["id"] != item["id"] or current_item.get("ack")):
-            self._record_send(item, len(item["attempts"]), {"status": "not_started", "finished_at": self.now()})
-            return {"status": "invalidated", "id": item["id"]}
-        try:
-            self._send(sent_clock, item)
-            self._record_send(item, len(item["attempts"]), self.inflight["facts"])
-        except SupervisorBusy:
-            raise
-        except Exception as exc:
-            if self.inflight is None:
-                self.inflight = {"item": item, "number": len(item["attempts"]), "facts": {},
-                                 "outcome": {"status": "uncertain", "error": str(exc), "finished_at": self.now()}}
-            else:
+        with control_operation() as outcome:
+            owner = process_identity(os.getpid())
+            with self.store.supervisor() as ledger:
+                clock = _clock(ledger)
+                if self.launch_id and clock.get("enabled") and clock.get("daemon", {}).get("id") == self.launch_id:
+                    clock["daemon"].update(heartbeat_at=self.now(), status="running")
+            observation = self.observe()
+            delivery = self._poll_send()
+            now = self.now()
+            with self.store.supervisor() as ledger:
+                clock = _clock(ledger)
+                if not clock.get("enabled") or (self.launch_id and clock.get("daemon", {}).get("id") != self.launch_id):
+                    return {"status": "disabled", "delivery": delivery}
+                if self.launch_id:
+                    clock["daemon"].update(heartbeat_at=now, status="running")
+                    clock["daemon"].pop("error", None)
+                if delivery:
+                    return {**delivery, "observation": observation}
+                _arm(clock)
+                item = clock.get("reminder")
+                next_send_at = _next_send_at(item)
+                if (self.inflight or self._sending(clock) or not _current(clock, item, now) or
+                        next_send_at is None or now < next_send_at):
+                    return {"status": "waiting", "observation": observation}
+                attempts = item["attempts"]
+                prefix = self.runtime_directory / (item["id"] + "-" + str(len(attempts) + 1))
+                attempts.append({"number": len(attempts) + 1, "started_at": now, "status": "sending",
+                                 "owner": owner, "launch_id": self.launch_id,
+                                 "stdout": str(prefix) + ".stdout", "stderr": str(prefix) + ".stderr"})
+                item["status"] = "sending"
+                clock["queue_attempts_total"] = clock.get("queue_attempts_total", 0) + 1
+                item, sent_clock = deepcopy(item), deepcopy(clock)
+            outcome.update(committed=True, id=item["id"], generation=item["generation"], attempt_number=len(item["attempts"]))
+            current = _clock(self.store.read_supervisor())
+            current_item = current.get("reminder")
+            if (not _matches(current, _binding(sent_clock)) or not _current(current, current_item, self.now()) or
+                    current_item["id"] != item["id"] or current_item.get("ack")):
+                self._record_send(item, len(item["attempts"]), {"status": "not_started", "finished_at": self.now()})
+                return {"status": "invalidated", "id": item["id"]}
+            try:
+                self._send(sent_clock, item)
+                self._record_send(item, len(item["attempts"]), self.inflight["facts"])
+            except SupervisorBusy:
                 raise
-        return {**self._poll_send(), "observation": observation}
+            except Exception as exc:
+                if self.inflight is None:
+                    self.inflight = {"item": item, "number": len(item["attempts"]), "facts": {},
+                                     "outcome": {"status": "uncertain", "error": str(exc), "finished_at": self.now()}}
+                else:
+                    raise
+            return {**self._poll_send(), "committed": True, "observation": observation}
 
     def run(self, launch_id: str, lock_fd=None) -> int:
         self.store.initialize()
@@ -684,49 +699,51 @@ class Clock:
         return 0
 
     def stop(self) -> dict:
-        with self.store.supervisor() as ledger:
-            clock = _clock(ledger)
-            if clock.get("enabled"):
-                clock.update(enabled=False, generation=clock["generation"] + 1, stopped_at=self.now())
-                clock.pop("observation_claim", None)
-                _archive(clock, clock.pop("reminder", None))
-                ledger["clock"] = clock
-            daemon = deepcopy(clock.get("daemon", {}))
-            sends = deepcopy(self._sending(clock))
-        # Invalidation commits before any signal, and never controls Extract.
-        outcomes = []
-        for item, attempt in sends:
-            pending = self.inflight
-            identity = attempt.get("identity")
-            known = attempt.get("descendants", [])
-            if pending and pending["item"]["id"] == item["id"] and pending["number"] == attempt["number"]:
-                identity = pending["facts"].get("identity", identity)
-                known = pending["facts"].get("descendants", known)
-            try:
-                outcome = (terminate_owned(identity, known, include_anchor=True) if identity else
-                           {"confirmed": False, "actions": [], "survivors": [], "reason": "queue identity unconfirmed"})
-            except OSError as exc:
-                outcome = {"confirmed": False, "actions": [], "survivors": [], "reason": str(exc)}
-            try:
-                self._record_send(item, attempt["number"], {"status": "sending", "stop_requested": True, "termination": outcome,
-                                                          "descendants": outcome.get("descendants", [])})
-            except SupervisorBusy:
-                outcome.update(confirmed=False, evidence_committed=False)
-            outcomes.append(outcome)
-        identity = daemon.get("identity")
-        if identity:
-            try:
-                outcomes.append(terminate_owned(identity, include_anchor=True))
-            except OSError as exc:
-                outcomes.append({"confirmed": False, "reason": str(exc)})
-        elif daemon.get("status") not in {None, "stopped", "launch_failed"}:
-            outcomes.append({"confirmed": False, "reason": "clock identity unconfirmed"})
-        self.stopping.set()
-        result = self.status()
-        confirmed = all(item["confirmed"] for item in outcomes) and result["process_lock"] in {"free", "absent"}
-        result.update(committed=True, termination={"confirmed": confirmed, "targets": outcomes},
-                      stop_status="confirmed" if confirmed else "pending")
-        return result
+        with control_operation() as outcome:
+            with self.store.supervisor() as ledger:
+                clock = _clock(ledger)
+                if clock.get("enabled"):
+                    clock.update(enabled=False, generation=clock["generation"] + 1, stopped_at=self.now())
+                    clock.pop("observation_claim", None)
+                    _archive(clock, clock.pop("reminder", None))
+                    ledger["clock"] = clock
+                daemon = deepcopy(clock.get("daemon", {}))
+                sends = deepcopy(self._sending(clock))
+            outcome.update(committed=True, generation=clock["generation"], launch_id=daemon.get("id"))
+            # Invalidation commits before any signal, and never controls Extract.
+            outcomes = []
+            for item, attempt in sends:
+                pending = self.inflight
+                identity = attempt.get("identity")
+                known = attempt.get("descendants", [])
+                if pending and pending["item"]["id"] == item["id"] and pending["number"] == attempt["number"]:
+                    identity = pending["facts"].get("identity", identity)
+                    known = pending["facts"].get("descendants", known)
+                try:
+                    outcome = (terminate_owned(identity, known, include_anchor=True) if identity else
+                               {"confirmed": False, "actions": [], "survivors": [], "reason": "queue identity unconfirmed"})
+                except OSError as exc:
+                    outcome = {"confirmed": False, "actions": [], "survivors": [], "reason": str(exc)}
+                try:
+                    self._record_send(item, attempt["number"], {"status": "sending", "stop_requested": True, "termination": outcome,
+                                                              "descendants": outcome.get("descendants", [])})
+                except SupervisorBusy:
+                    outcome.update(confirmed=False, evidence_committed=False)
+                outcomes.append(outcome)
+            identity = daemon.get("identity")
+            if identity:
+                try:
+                    outcomes.append(terminate_owned(identity, include_anchor=True))
+                except OSError as exc:
+                    outcomes.append({"confirmed": False, "reason": str(exc)})
+            elif daemon.get("status") not in {None, "stopped", "launch_failed"}:
+                outcomes.append({"confirmed": False, "reason": "clock identity unconfirmed"})
+            self.stopping.set()
+            result = self.status()
+            confirmed = all(item["confirmed"] for item in outcomes) and result["process_lock"] in {"free", "absent"}
+            result.update(committed=True, termination={"confirmed": confirmed, "targets": outcomes},
+                          stop_status="confirmed" if confirmed else "pending")
+            return result
 
     def status(self) -> dict:
         clock = deepcopy(_clock(self.store.read_supervisor()))

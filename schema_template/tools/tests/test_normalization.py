@@ -393,9 +393,70 @@ class NormalizationTests(TaskCase):
         self.write_task(data)
         plan = schema.normalize_directory(self.directory)
         self.assertEqual(plan.documents['root'].value['DESIGN']['Math_reshape']['Rewrite'][0]['Math'],
-                         'f(t) = t +\n  sum(q for q in x) + t\n'
+                         'f(t) = T +\n  sum(q for q in x) + T\n'
                          't for t in x\ny = f(x) + T + Q\n')
         schema.validate_documents(plan.files, plan.documents)
+
+    def test_unregistered_math_temporaries_keep_distinct_case_and_arithmetic(self):
+        for assignment in ('=', ':='):
+            with self.subTest(assignment=assignment):
+                data = deepcopy(self.base)
+                algorithm = at(data, ALGO)
+                algorithm['Input']['v'] = algorithm['Input'].pop('x')
+                algorithm['Compute'][0]['Math'] = 'y = 2*v + 1\n'
+                formula = f'V {assignment} v + 1\ny = V + v\n'
+                at(data, MATH)['Rewrite'][0]['Math'] = formula
+                self.write_task(data)
+                before = self.snapshot()
+                plan = schema.normalize_directory(self.directory)
+                actual = plan.documents['root'].value['DESIGN']['Math_reshape']['Rewrite'][0]['Math']
+                self.assertEqual(actual, formula)
+                values = {'v': 1}
+                exec(actual.replace(':=', '='), {}, values)
+                self.assertEqual(values['y'], 3)
+                self.assertEqual(before, self.snapshot())
+                self.assertFalse(normalization.normalize_documents(plan.files, plan.documents).candidates)
+
+    def test_registered_rename_rejects_capture_of_unregistered_math_before_writes(self):
+        for formula in ('v = V + 1\ny = V + v\n', 'v := V + 1\ny = V + v\n',
+                        'y = (lambda v: V + v)(1)\n'):
+            with self.subTest(formula=formula):
+                data = deepcopy(self.base)
+                algorithm = at(data, ALGO)
+                algorithm['Input']['V'] = algorithm['Input'].pop('x')
+                algorithm['Compute'][0]['Math'] = 'y = 2*V + 1\n'
+                at(data, MATH)['Rewrite'][0]['Math'] = formula
+                add_child(data, source='root')
+                self.write_task(data)
+                before = self.snapshot()
+                with self.assertRaisesRegex(schema.SchemaError, 'capture unbound name'):
+                    schema.normalize_directory(self.directory)
+                self.assertEqual(before, self.snapshot())
+
+    def test_registered_objects_with_distinct_case_never_become_related_aliases(self):
+        data = deepcopy(self.base)
+        at(data, ALGO)['Input']['V'] = at(data, ALGO)['Input'].pop('x')
+        at(data, ALGO)['Compute'][0]['Math'] = 'y = V\n'
+        at(data, MATH)['Rewrite'][0]['Math'] = 'y = V\n'
+        at(data, STEP)['Decomposition']['Worktile']['Invariant']['v'] = {'definition': 'V'}
+        self.write_task(data)
+        before = self.snapshot()
+        with self.assertRaisesRegex(schema.SchemaError, 'would share an identity'):
+            schema.normalize_directory(self.directory)
+        self.assertEqual(before, self.snapshot())
+
+    def test_one_provider_cannot_be_renamed_under_different_consumer_bindings(self):
+        data = deepcopy(self.base)
+        at(data, STEP)['Decomposition']['Worktile']['Invariant']['x']['shape'] = [{'i': 'V'}]
+        child = add_child(data, source='root')
+        child['DESIGN']['Math_reshape'] = deepcopy(at(data, MATH))
+        child['DESIGN']['Math_reshape']['Rewrite'][0]['Symbol'] = {
+            'V': {'meaning': 'Consumer extent', 'shape': [], 'dtype': 'int32'}}
+        self.write_task(data)
+        before = self.snapshot()
+        with self.assertRaisesRegex(schema.SchemaError, 'incompatible normalization bindings'):
+            schema.normalize_directory(self.directory)
+        self.assertEqual(before, self.snapshot())
 
     def test_local_renames_cannot_capture_outer_names_or_publish_sibling_changes(self):
         for kind in ('formal', 'quantifier', 'open_quantifier', 'pipe', 'event', 'waiting', 'view'):
@@ -552,6 +613,8 @@ class NormalizationTests(TaskCase):
         data = deepcopy(self.base)
         algorithm = at(data, ALGO)
         algorithm['Input']['X'] = algorithm['Input'].pop('x')
+        invariant = at(data, STEP)['Decomposition']['Worktile']['Invariant']
+        invariant['X'] = invariant.pop('x')
         algorithm['Compute'][0]['Math'] = 'y = X.item() + Torch.Op(X)\n'
         at(data, MATH)['Rewrite'][0]['Math'] = (
             'F(T) = T . Item() + X.Value + X.item(). X + Torch . X(T, "X.item() T")\n'

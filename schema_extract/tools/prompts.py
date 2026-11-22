@@ -137,7 +137,8 @@ def prepare_attempt_materials(state: dict, lock: dict, attempt: dict, *, rules_l
         instances = [entry for entry in selected or []
                      if identity["stage"] in {"P2", "P4"} or entry["id"] == identity["node"]]
         current = {entry["id"]: entry["instance"] for entry in state.get("selected_designs") or []}
-        relation = {entry["id"]: ("removed" if entry["id"] not in current else
+        relation = {entry["id"]: ("pending_review" if state.get("selected_designs") is None else
+                                   "removed" if entry["id"] not in current else
                                    "current_instance" if entry["instance"] == current[entry["id"]] else "changed_instance")
                     for entry in instances}
         copied = copy_file(path, "records/" + attempt_id + ".json")

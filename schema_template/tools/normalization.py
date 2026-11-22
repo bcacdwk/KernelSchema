@@ -113,7 +113,11 @@ def _sequence(value):
 
 
 class _Names:
-    """One namespace; the stored original spelling makes collisions explicit."""
+    """Declared identities with their original spelling, target and origin.
+
+    The folded key detects possible collisions; it is not evidence that two
+    differently spelled mathematical objects denote the same declaration.
+    """
     def __init__(self, previous=None):
         self.entries = dict(previous.entries) if previous is not None else {}
         self.shadowed = dict(previous.shadowed) if previous is not None else {}
@@ -123,10 +127,11 @@ class _Names:
             return
         target = name.lower() if target is None else target
         previous = self.entries.get(name.casefold())
-        if previous and (previous[1] != target or previous[0] != name and not related):
+        if previous and (previous[1] != target or previous[0] != name):
             raise SchemaError(f"{path}: name normalization is ambiguous: {name!r} and "
                               f"{previous[0]!r} at {previous[2]} would share an identity; use unambiguous declarations")
-        self.entries[name.casefold()] = (name, target, path)
+        if previous is None:
+            self.entries[name.casefold()] = (name, target, path)
 
     def add_all(self, names, *, related=False):
         for name, target, path in names.entries.values():
@@ -146,6 +151,10 @@ class _Names:
             original, _, path = self.shadowed[name]
             raise SchemaError(f"{entry[2]}: name normalization would capture outer name "
                               f"{original!r} at {path} with local {entry[0]!r}; "
+                              "use distinct names before normalizing")
+        if exact and entry is not None and entry[0] != name and entry[1] == name:
+            raise SchemaError(f"{entry[2]}: name normalization would capture unbound name "
+                              f"{name!r} with declaration {entry[0]!r}; "
                               "use distinct names before normalizing")
         return entry[1] if entry and (not exact or entry[0] == name) else name
 
@@ -170,7 +179,7 @@ def _math_tokens(value, names, path):
     quantifiers = [match for match in QUANTIFIER.finditer(value)
                    if not any(start <= match.start() < end for start, end in protected)]
     if not quantifiers:
-        return _tokens(value, names)
+        return _tokens(value, names, exact=True)
     source, padding = value.strip(), 0
     try:
         tree = ast.parse(source)
@@ -247,7 +256,7 @@ def _math_tokens(value, names, path):
                 visit(child, current)
 
     visit(tree, names)
-    return _tokens(value, names, bindings)
+    return _tokens(value, names, bindings, exact=True)
 
 
 def _name_text(value, names):
@@ -267,7 +276,7 @@ def _formal(value, path):
     return match[1], arguments
 
 
-def _formula_scopes(value, names, established, path):
+def _formula_scopes(value, names, path):
     """Bind simple definitions across operator continuations, not arbitrary prose."""
     lines = value.splitlines(keepends=True)
     definitions = [re.match(
@@ -280,7 +289,13 @@ def _formula_scopes(value, names, established, path):
     for index, match in enumerate(definitions):
         if match is None:
             continue
-        names.add(match[1], path, related=match[1].casefold() in established)
+        # A bare assignment can introduce an unregistered mathematical
+        # temporary. Preserve its spelling, including open notation such as
+        # ':=', instead of registering a guessed lowercase alias. An exact
+        # registered object already has its declaration; a function definition
+        # supplies an explicit binding for its name and formal parameters.
+        if match[2]:
+            names.add(match[1], path)
         # An explicit next definition ends a preceding standalone quantifier.
         # Its name remains in the outer scope, including for simple assignments.
         end = match.start(3) if match[2] else match.end()
@@ -450,13 +465,12 @@ class _Scope:
                 self.titles[M].append((title, self.path(prefix + ("Name",))))
         self._axes(M, self.math)
         for area, collection, names in ((A, "Compute", self.algorithm), (M, "Rewrite", self.math)):
-            established = set(names.entries)
             for index, entry in enumerate(_sequence(_get(self.value, *area, collection))):
                 formula = _get(entry, "Math")
                 if not isinstance(formula, str):
                     continue
                 parts = area + (collection, index, "Math")
-                self.formulas[parts] = _formula_scopes(formula, names, established, self.path(parts))
+                self.formulas[parts] = _formula_scopes(formula, names, self.path(parts))
         # Contract formulas are visible to later regions as mathematical names.
         self.math.add_all(self.algorithm, related=True)
         if not self.skip_hardware:

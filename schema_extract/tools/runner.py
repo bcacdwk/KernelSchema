@@ -608,8 +608,9 @@ def accept_result(store: Store, state: dict, lock: dict, attempt: dict, result: 
     if attempt["mode"] == "adjudicate" and decision == "approve":
         workspace, validation = _adjudicated_workspace(store, state, lock, attempt, receipt)
     elif attempt["role"] == "reviewer" and decision in {"approve", "revise"}:
+        reviewed_plan = (receipt.get("plan") if attempt["mode"] == "adjudicate" else state["plan_draft"])
         validation["check"] = check_stage_snapshot(workspace, parser_root=parser_root, stage=attempt["stage"],
-            selected_designs=(receipt.get("plan") if attempt["stage"] == "P2" else attempt["selected_designs"] if attempt["stage"] == "P5" else state["selected_designs"]), node=attempt["node"])
+            selected_designs=(reviewed_plan if attempt["stage"] == "P2" else attempt["selected_designs"] if attempt["stage"] == "P5" else state["selected_designs"]), node=attempt["node"])
     if attempt["stage"] == "P6":
         _final_inputs(store, state, workspace)
     graph = validation.get("check", {}).get("design_resolution")

@@ -14,7 +14,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from schema_extract.tools import audit, monitor, wakeup
-from schema_extract.tools.store import Store
+from schema_extract.tools.store import Store, control_error
 from schema_extract.tools.common import SupervisorBusy
 from schema_extract.tools.wakeup import _alive
 
@@ -72,6 +72,71 @@ class WakeupRetryTests(unittest.TestCase):
         patcher = patch.object(wakeup.subprocess, "Popen", side_effect=AssertionError("real queue forbidden"))
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def test_start_commit_facts_at_lock_spawn_and_writeback_boundaries(self):
+        for moment in ("before_registration", "before_spawn", "after_spawn"):
+            with self.subTest(moment=moment):
+                store = Store(self.root / moment)
+                store.initialize()
+                clock = wakeup.Clock(store, self.root, now=lambda: 1000)
+                thread = str(uuid4())
+                held = None
+                class Child:
+                    pid = 98765432
+                def spawn(*args, **kwargs):
+                    nonlocal held
+                    if moment == "before_spawn":
+                        raise SupervisorBusy("injected before Popen")
+                    held = (store.root / "supervisor.lock").open("a")
+                    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return Child()
+                if moment == "before_registration":
+                    held = (store.root / "supervisor.lock").open("a")
+                    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    with patch.object(wakeup.subprocess, "Popen", side_effect=spawn) as popen:
+                        with self.assertRaises(SupervisorBusy) as caught:
+                            clock.start(thread, [])
+                    result = control_error(caught.exception)
+                    self.assertEqual(result["committed"], moment != "before_registration")
+                    self.assertEqual(popen.call_count, 0 if moment == "before_registration" else 1)
+                    if moment != "before_registration":
+                        saved = store.read_supervisor()["clock"]
+                        self.assertEqual((result["launch_id"], result["generation"]), (saved["daemon"]["id"], saved["generation"]))
+                    if moment == "after_spawn":
+                        self.assertEqual(result["delivery"]["pid"], Child.pid)
+                        self.assertFalse(result["delivery"]["evidence_committed"])
+                finally:
+                    if held:
+                        held.close()
+                if moment != "before_registration":
+                    # Without evidence that the old child exited, another start
+                    # must retain its reservation, even if the returned PID was lost.
+                    with patch.object(wakeup, "_alive", return_value=None), \
+                            patch.object(wakeup.subprocess, "Popen") as repeated:
+                        with self.assertRaises(wakeup.ExtractError):
+                            clock.start(thread, [])
+                    repeated.assert_not_called()
+
+    def test_tick_commit_survives_delivery_record_busy_without_sending_twice(self):
+        fixture = ReminderFixture(self.root, ["queued"])
+        fixture.now = fixture.reminder()["due_at"]
+        wake_id = fixture.reminder()["id"]
+        record = fixture.clock._record_send
+        def busy_record(*args, **kwargs):
+            with (fixture.store.root / "supervisor.lock").open("a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return record(*args, **kwargs)
+        with patch.object(fixture.clock, "_record_send", side_effect=busy_record):
+            result = fixture.clock.tick()
+        self.assertTrue(result["committed"])
+        self.assertEqual(result["id"], wake_id)
+        self.assertEqual(len(fixture.sent), 1)
+        self.assertEqual(fixture.store.read_supervisor()["clock"]["queue_attempts_total"], 1)
+        fixture.clock.tick()
+        self.assertEqual(len(fixture.sent), 1)
+        self.assertEqual(fixture.reminder()["id"], wake_id)
+        self.assertEqual(fixture.reminder()["attempt_count"], 1)
 
     def test_latest_attempt_sets_delay_and_all_outcomes_share_persistent_limit(self):
         for second in ("queued", "uncertain"):

@@ -215,6 +215,28 @@ class ArtifactTransactions(unittest.TestCase):
         self.assertEqual(manifest(original), frozen)
         self.assertFalse((self.directory / "landed").exists())
 
+    def test_math_capture_rejects_the_whole_candidate_without_touching_raw_or_siblings(self):
+        before = self.task("before-capture", {"root": self.base, "branch": self.branch("branch")})
+        baseline = manifest(before)
+        for index, assignment in enumerate(("=", ":=")):
+            with self.subTest(assignment=assignment):
+                original = self.copy(before, "capture-raw-" + str(index))
+                value = load_root(original, parser_root=REPO)
+                value["META_DATA"]["Version"] = 2
+                algorithm = value["CONTRACT"]["Algorithm_requirement"]
+                algorithm["Input"]["V"] = algorithm["Input"].pop("x")
+                algorithm["Compute"][0]["Math"] = f"v {assignment} V + 1\ny = v + V\n"
+                write_yaml(original / "root.yaml", value, parser_root=REPO)
+                raw = manifest(original)
+                destination = self.directory / ("capture-landed-" + str(index))
+                with self.assertRaisesRegex(CandidateRejected, "capture unbound name"):
+                    normalize_candidate(before, original, destination, STARTER, stage="P1", role="worker", decision="complete",
+                                        selected_designs=selection("root", "branch"))
+                self.assertEqual(manifest(original), raw)
+                self.assertEqual(manifest(before), baseline)
+                self.assertEqual(raw["branch.yaml"], baseline["branch.yaml"])
+                self.assertFalse(destination.exists())
+
     def test_p1_shared_metadata_is_a_recorded_derivation_without_worker_node_permission(self):
         before = self.task("before", {"root": self.base, "branch": self.branch("branch")})
         previous = source_context(before, parser_root=REPO)["nodes"]["branch"]
@@ -418,11 +440,19 @@ class ArtifactTransactions(unittest.TestCase):
         inputs["X"] = inputs.pop("x")
         root["META_DATA"]["Version"] += 1
         write_yaml(contract_original / "root.yaml", root, parser_root=REPO)
-        with self.assertRaisesRegex(CandidateRejected, "outside stage scope") as caught:
+        contract_hashes = manifest(contract_original)
+        baseline_hashes = manifest(before)
+        # Unlike the punctuation-only provider change above, X has no binding
+        # to the still-lowercase x in Math and Worktile. Reject the ambiguous
+        # identities before any candidate or read-only provider is published.
+        with self.assertRaisesRegex(CandidateRejected, "would share an identity") as caught:
             normalize_candidate(before, contract_original, self.directory / "contract-landed", STARTER,
                                 stage="P1", role="worker", decision="complete")
-        self.assertEqual(set(caught.exception.validation["source_hashes"]), set(hashes) - {"dispatch.md"})
-        self.assertIn("provider.yaml", caught.exception.validation["normalized_files"])
+        self.assertEqual(manifest(contract_original), contract_hashes)
+        self.assertEqual(manifest(before), baseline_hashes)
+        self.assertFalse((self.directory / "contract-landed").exists())
+        for name in ("provider.yaml", "helper.yaml", "consumer.yaml"):
+            self.assertEqual(contract_hashes[name], baseline_hashes[name])
 
     def test_directory_future_entries_never_gain_fake_links(self):
         directory = self.task("task", planned={"future"})

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 from schema_extract.tools import maintenance
 from schema_extract.tools.agent import AgentCLI
@@ -58,11 +59,11 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
         self.cli = AgentCLI(backend="claude", executable=str(binary), model=f.state["config"]["model"])
         self.calls = []
 
-    def install(self, *, patch=False):
+    def install(self, *, patch=False, fields=None):
         f = self.flow
         maintenance.submit_request(f.store, f.state["run_id"], issue_id="correct-current-receipt", tasks=[
             {"stage": "P2", "node": "root", "action": "patch" if patch else "review",
-             "fields": [{"path": "dispatch.md", "fields": ["*"]}] if patch else [],
+             "fields": fields if fields is not None else [{"path": "dispatch.md", "fields": ["*"]}] if patch else [],
              "reason": "Independently review the completed current candidate"}])
         f.state = maintenance.consume_requests(f.store, f.state)
         f.state = maintenance.mark_drained(f.store, f.state)
@@ -110,6 +111,49 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
 
     def task(self, state=None):
         return next(iter((state or self.flow.state)["maintenance"]["tasks"].values()))
+
+    def review_result(self, attempt):
+        f = self.flow
+        proposal = f.backend.proposal(attempt)
+        proposal.pop("reopen", None)
+        proposal["revision_scope"] = attempt["revision_scope"]
+        with patch.object(f.backend, "proposal", return_value=proposal):
+            return f.result(attempt)
+
+    def test_empty_revise_reviews_the_installed_plan_and_preserves_real_feedback(self):
+        self.install(fields=[{"path": "dispatch.md", "fields": ["*"]}])
+        f = self.flow
+        attempt = f.prepare(stage="P2", role="reviewer")
+        result = self.review_result(attempt)
+        result["response"].pop("reopen", None)
+        result["response"].update(decision="revise", plan=[], revision_scope=attempt["revision_scope"], issues=[{
+            "kind": "schema_conformance", "scope": "dispatch.md", "detail": "Clarify this candidate rationale",
+            "evidence": [0], "recovery_condition": "Preserve the submitted source selection"}])
+        f.accept(attempt, result)
+        self.assertEqual(f.state["stages"]["P2"]["check_failures"], self.before["check_failures"])
+        self.assertEqual(read_json(Path(attempt["directory"]) / "check.json")["exit_code"], 0)
+        self.assertEqual(f.state["plan_draft"], self.plan)
+        self.assertIsNone(f.state["selected_designs"])
+        self.assertIsNone(f.state["stages"]["P2"]["approval"])
+        self.assertEqual(self.task()["role"], "worker")
+        self.assertIn("Clarify this candidate rationale", json.dumps(self.task()))
+
+    def test_maintenance_review_still_rejects_plan_changes_and_raw_writes(self):
+        self.install()
+        f = self.flow
+        attempt = f.prepare(stage="P2", role="reviewer")
+        result = self.review_result(attempt)
+        result["response"].pop("reopen", None)
+        result["response"]["revision_scope"] = attempt["revision_scope"]
+        result["response"]["plan"][0]["instance"] = "kernel.py::copy(other-instance)"
+        with self.assertRaisesRegex(ExtractError, "reviewer plan differs"):
+            f.accept(attempt, result)
+        result["response"]["plan"] = deepcopy(self.plan)
+        raw = Path(attempt["workspace"]) / "dispatch.md"
+        raw.write_text(raw.read_text() + "\nUnreviewed mutation\n")
+        with self.assertRaisesRegex(ExtractError, "read-only|outside stage scope"):
+            f.accept(attempt, result)
+        self.assertIsNone(f.store.load(f.state["run_id"])["stages"]["P2"]["approval"])
 
     def assert_unapproved(self, count):
         f = self.flow

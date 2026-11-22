@@ -28,6 +28,42 @@ SUMMARY_FORMAT = "schema_extract.summary.v1"
 SUPERVISOR_FORMAT = "schema_extract.supervisor.v1"
 
 
+def control_error(error: Exception, outcome: dict | None = None) -> dict:
+    """Keep this operation's durable facts when a later step cannot finish.
+
+    These are return-value facts, not another log or a guess from ledger revision.
+    A lock acquisition failure proves only that particular transaction did not
+    commit; it cannot revoke a request committed by an earlier step.
+    """
+    nested = getattr(error, "control_result", {})
+    result = {**(outcome or {}), **nested}
+    if (outcome or {}).get("committed") is True or nested.get("committed") is True:
+        result["committed"] = True
+    elif "committed" not in result:
+        result["committed"] = getattr(error, "transaction_committed", None)
+    result.update(error=str(error), status="busy" if isinstance(error, SupervisorBusy) else "error")
+    result.setdefault("delivery", {"status": "pending" if isinstance(error, SupervisorBusy) else "unknown",
+                                   "error": str(error)})
+    return result
+
+
+@contextmanager
+def control_operation():
+    """Attach original request/launch identities to a failed multi-step return."""
+    outcome = {}
+    try:
+        yield outcome
+    except (ExtractError, OSError) as exc:
+        exc.control_result = control_error(exc, outcome)
+        raise
+
+
+def _uncommitted_busy():
+    busy = SupervisorBusy("supervisor is busy; control transaction was not committed")
+    busy.transaction_committed = False
+    return busy
+
+
 def _state_stamp(path: Path) -> dict:
     """A small observation token, never an integrity or approval decision."""
     info = path.lstat()
@@ -78,7 +114,7 @@ class Store:
             try:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
-                raise SupervisorBusy("supervisor is busy; control transaction was not committed") from exc
+                raise _uncommitted_busy() from exc
             try:
                 if marker.exists():
                     if read_json(marker) != {"format": "schema_extract.store.v2"}:
@@ -119,7 +155,7 @@ class Store:
             try:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
-                raise SupervisorBusy("supervisor is busy; control transaction was not committed") from exc
+                raise _uncommitted_busy() from exc
             try:
                 value = self.read_supervisor()
                 before = deepcopy(value)
@@ -309,19 +345,21 @@ class Store:
 
     def request_control(self, run_id: str, action: str) -> dict:
         """Submit an immutable request outside the run; never edit its state."""
-        state = self.load(run_id)
-        if action not in {"pause", "cancel"}:
-            raise ExtractError("control action must be pause or cancel")
-        with self.supervisor() as ledger:
-            binding = {"input_fingerprint": state["input_fingerprint"],
-                       "executor_digest": state["executor"]["digest"]}
-            previous = ledger["controls"].get(run_id, {})
-            if action == "cancel" and previous.get("action") == action and previous.get("binding") == binding:
-                request = read_json(self.root / "requests" / run_id / (previous["id"] + ".json"))
-                return {**request, "committed": True, "reused": True}
-            request = self.append_control(ledger, run_id, action, binding=binding)
-            ledger["controls"][run_id]["binding"] = binding
-        return {**request, "committed": True}
+        with control_operation() as outcome:
+            state = self.load(run_id)
+            if action not in {"pause", "cancel"}:
+                raise ExtractError("control action must be pause or cancel")
+            with self.supervisor() as ledger:
+                binding = {"input_fingerprint": state["input_fingerprint"],
+                           "executor_digest": state["executor"]["digest"]}
+                previous = ledger["controls"].get(run_id, {})
+                if action == "cancel" and previous.get("action") == action and previous.get("binding") == binding:
+                    request = read_json(self.root / "requests" / run_id / (previous["id"] + ".json"))
+                    return {**request, "committed": True, "reused": True}
+                request = self.append_control(ledger, run_id, action, binding=binding)
+                outcome.update(committed=True, run_id=run_id, request=deepcopy(request))
+                ledger["controls"][run_id]["binding"] = binding
+            return {**request, "committed": True}
 
     def control_requests(self, run_id: str) -> list[dict]:
         directory = self.root / "requests" / run_id

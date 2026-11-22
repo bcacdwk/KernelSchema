@@ -16,6 +16,7 @@ from .processes import (launch_not_started, process_alive, process_table,
                         terminate_owned, observe_owned, gate_reaped, GATE_PROTOCOL)
 from .recovery import scoped_restart_evidence, termination_observed
 from .prompts import render_operation
+from .store import control_operation, control_error
 
 
 REASON_KINDS = {
@@ -187,6 +188,22 @@ def inspect_runs(store, run_ids=None) -> list[dict]:
                         launch=launch,
                         gate_capable="hold.v1" in view.get("executor", {}).get("capabilities", []))
             view["maintenance_request"] = deepcopy(ledger.get("maintenance_requests", {}).get(run_id))
+            controls = store.control_requests(run_id)
+            consumed = (view.get("control") or {}).get("requests", {})
+            retries = [deepcopy(item) for item in ledger.get("retries", {}).values() if item.get("run_id") == run_id]
+            recent = {}
+            for item in sorted(retries, key=lambda value: (value.get("created_at", 0), value["id"])):
+                recent[item.get("scope", "run")] = item
+            view["requests"] = {
+                "control": {"pending": [item for item in controls if item["id"] not in consumed],
+                            "recent": controls[-1] if controls else None,
+                            "latest": deepcopy(ledger.get("controls", {}).get(run_id)),
+                            "consumption_observation": deepcopy(view.get("observation"))},
+                "recovery": {"pending": [item for item in retries if item.get("status") == "authorized"],
+                             "recent_by_scope": recent},
+                "registration": {key: deepcopy(value) for key, value in ledger.get("starts", {}).get(run_id, {}).items()
+                                 if key != "launch"},
+            }
             view["maintenance_gate_capable"] = "current_maintenance.v1" in view.get("executor", {}).get("capabilities", [])
             if process_error or ledger_error:
                 view["observer_error"] = process_error or ledger_error
@@ -416,69 +433,74 @@ def deliver_cancel(store, request: dict) -> dict:
 
 
 def hold_all(store) -> dict:
-    with store.supervisor() as ledger:
-        if not ledger["active_hold"]:
-            hold_id = str(uuid4())
-            ledger["active_hold"] = hold_id
-            ledger["holds"][hold_id] = {"id": hold_id, "created_at": time.time(),
-                                          "revision": ledger["revision"] + 1, "status": "active", "members": {}}
-        hold_id = ledger["active_hold"]
-    # The gate is durable before any run is inspected or asked to pause.
-    for run_id in store.run_ids():
-        try:
-            state = store.load(run_id)
-            with store.supervisor() as ledger:
-                if ledger["active_hold"] != hold_id:
-                    break
-                member = store.hold_member(ledger, state)
-                if (member.get("request_id") and state["status"] == "paused" and
-                        state.get("control", {}).get("hold_id") == hold_id and not state["active_attempts"] and
-                        not state.get("unconfirmed_attempts") and not state.get("unsettled_attempts")):
-                    member["status"] = "paused_by_hold"
-        except Exception as exc:
-            with store.supervisor() as ledger:
-                ledger["holds"][hold_id]["members"][run_id] = {"status": "unknown", "error": str(exc)}
-    return deepcopy(store.read_supervisor()["holds"][hold_id])
+    with control_operation() as outcome:
+        with store.supervisor() as ledger:
+            if not ledger["active_hold"]:
+                hold_id = str(uuid4())
+                ledger["active_hold"] = hold_id
+                ledger["holds"][hold_id] = {"id": hold_id, "created_at": time.time(),
+                                              "revision": ledger["revision"] + 1, "status": "active", "members": {}}
+            hold_id = ledger["active_hold"]
+        outcome.update(committed=True, hold_id=hold_id, hold=deepcopy(ledger["holds"][hold_id]))
+        # The gate is durable before any run is inspected or asked to pause.
+        for run_id in store.run_ids():
+            try:
+                state = store.load(run_id)
+                with store.supervisor() as ledger:
+                    if ledger["active_hold"] != hold_id:
+                        break
+                    member = store.hold_member(ledger, state)
+                    if (member.get("request_id") and state["status"] == "paused" and
+                            state.get("control", {}).get("hold_id") == hold_id and not state["active_attempts"] and
+                            not state.get("unconfirmed_attempts") and not state.get("unsettled_attempts")):
+                        member["status"] = "paused_by_hold"
+            except Exception as exc:
+                with store.supervisor() as ledger:
+                    ledger["holds"][hold_id]["members"][run_id] = {"status": "unknown", "error": str(exc)}
+        return {**deepcopy(store.read_supervisor()["holds"][hold_id]), "committed": True}
 
 
 def release_hold(store, hold_id: str, repo: Path) -> dict:
-    with store.supervisor() as ledger:
-        if hold_id not in ledger["holds"] or ledger["active_hold"] not in {None, hold_id}:
-            raise ExtractError("hold ID is not the active or previously released hold")
-        hold = ledger["holds"][hold_id]
-        ledger["active_hold"] = None
-        hold.update(status="released", released_at=hold.get("released_at", time.time()))
-        members = deepcopy(hold["members"])
-    for run_id, member in members.items():
-        try:
-            state = store.load(run_id)
-            ledger = store.read_supervisor()
-            latest = ledger["controls"].get(run_id, {})
-            start = ledger["starts"].get(run_id, {})
-            requests = store.control_requests(run_id)
-            manual_after = any(not request.get("hold_id") and request["created_at"] >= ledger["holds"][hold_id]["created_at"]
-                               for request in requests)
-            if manual_after:
-                result = {"status": "preserved", "reason": "实际请求目录有后续手动控制。"}
-            elif member["status"] == "queued_blocked":
-                if state["status"] == "queued" and start.get("authorized"):
-                    result = start_background(store, run_id, repo, mode="queued")
+    with control_operation() as outcome:
+        with store.supervisor() as ledger:
+            if hold_id not in ledger["holds"] or ledger["active_hold"] not in {None, hold_id}:
+                raise ExtractError("hold ID is not the active or previously released hold")
+            hold = ledger["holds"][hold_id]
+            ledger["active_hold"] = None
+            hold.update(status="released", released_at=hold.get("released_at", time.time()))
+            members = deepcopy(hold["members"])
+        outcome.update(committed=True, hold_id=hold_id, hold=deepcopy(hold))
+        for run_id, member in members.items():
+            try:
+                state = store.load(run_id)
+                ledger = store.read_supervisor()
+                latest = ledger["controls"].get(run_id, {})
+                start = ledger["starts"].get(run_id, {})
+                requests = store.control_requests(run_id)
+                manual_after = any(not request.get("hold_id") and request["created_at"] >= ledger["holds"][hold_id]["created_at"]
+                                   for request in requests)
+                if manual_after:
+                    result = {"status": "preserved", "reason": "实际请求目录有后续手动控制。"}
+                elif member["status"] == "queued_blocked":
+                    if state["status"] == "queued" and start.get("authorized"):
+                        result = start_background(store, run_id, repo, mode="queued")
+                    else:
+                        result = {"status": "queued" if state["status"] == "queued" else "preserved"}
+                elif (member.get("request_id") != latest.get("id") or latest.get("hold_id") != hold_id or
+                      latest.get("revision") != member.get("control_revision")):
+                    result = {"status": "preserved", "reason": "后续手动控制覆盖了本 hold。"}
+                elif (state["status"] != "paused" or state["control"].get("hold_id") != hold_id or
+                      state["active_attempts"] or state.get("unconfirmed_attempts") or state.get("unsettled_attempts")):
+                    result = {"status": "pending", "reason": "尚未确认由本 hold 暂停；保留原状态，再次释放可重新核对。"}
                 else:
-                    result = {"status": "queued" if state["status"] == "queued" else "preserved"}
-            elif (member.get("request_id") != latest.get("id") or latest.get("hold_id") != hold_id or
-                  latest.get("revision") != member.get("control_revision")):
-                result = {"status": "preserved", "reason": "后续手动控制覆盖了本 hold。"}
-            elif (state["status"] != "paused" or state["control"].get("hold_id") != hold_id or
-                  state["active_attempts"] or state.get("unconfirmed_attempts") or state.get("unsettled_attempts")):
-                result = {"status": "pending", "reason": "尚未确认由本 hold 暂停；保留原状态，再次释放可重新核对。"}
-            else:
-                result = start_background(store, run_id, repo, mode="hold", hold_id=hold_id)
-            member["release"] = result
-        except Exception as exc:
-            member["release"] = {"status": "unknown", "error": str(exc)}
-    with store.supervisor() as ledger:
-        ledger["holds"][hold_id]["members"].update(members)
-    return deepcopy(store.read_supervisor()["holds"][hold_id])
+                    result = start_background(store, run_id, repo, mode="hold", hold_id=hold_id)
+                member["release"] = result
+            except Exception as exc:
+                member["release"] = control_error(exc)
+        outcome["hold"]["members"] = members
+        with store.supervisor() as ledger:
+            ledger["holds"][hold_id]["members"].update(members)
+        return {**deepcopy(store.read_supervisor()["holds"][hold_id]), "committed": True}
 
 
 def _identity(table=None) -> dict:
@@ -491,67 +513,69 @@ def _identity(table=None) -> dict:
 
 def reserve_launch(store, state: dict, *, mode="resume", hold_id=None, retry_id=None, background=False,
                    add_calls=0) -> dict:
-    from .maintenance import barrier
-    from .runtime import verify_execution
-    verify_execution(store, state)
-    if mode not in {"resume", "queued", "retry", "hold", "maintenance", "export"}:
-        raise ExtractError("unknown current-run launch operation")
-    table = process_table()
-    identity = _identity(table)
-    requests = store.control_requests(state["run_id"])
-    with store.supervisor() as ledger:
-        store.assert_startable(state["run_id"], ledger)
-        current = store.load(state["run_id"])
-        if (current["input_fingerprint"], current["executor"]) != (state["input_fingerprint"], state["executor"]):
-            raise ExtractError("frozen run identity changed before launch reservation")
-        if mode == "maintenance" and not (barrier(store, current, ledger) or current.get("maintenance")):
-            raise ExtractError("maintenance launch requires a current submitted request")
-        if mode == "retry":
-            request = ledger["retries"].get(retry_id)
-            if not request or request["status"] != "authorized":
-                raise ExtractError("scope recovery authorization was consumed or replaced")
-            check_restart_authority(ledger, request, state)
-        start = ledger["starts"].setdefault(state["run_id"], {"output": state["output"], "authorized": False,
-                                                             "created_at": state["created_at"]})
-        previous = start.get("launch", {})
-        if previous.get("status") in {"launching", "claimed"}:
-            owner = previous.get("identity") or previous.get("launcher")
-            alive = process_alive(owner, table)
-            if alive is not False:
-                return {**previous, "reused": True}
-        if mode == "queued" and state["status"] != "queued":
-            return {"status": "preserved", "run_id": state["run_id"], "run_status": state["status"]}
-        latest = ledger["controls"].get(state["run_id"], {})
-        if any(not value.get("confirmed") for value in latest.get("deliveries", {}).values()):
-            raise ExtractError("cancel termination is pending; reconcile its owned processes before another launch")
-        if mode == "maintenance" and (state["status"] in {"paused", "cancelled"} or
-                state["control"]["action"] or latest.get("action") in {"pause", "cancel"} or
-                any(item["id"] not in state["control"]["requests"] for item in requests)):
-            return {"status": "preserved", "run_id": state["run_id"], "reason": "manual control preserves the pending maintenance request"}
-        if mode == "queued" and latest.get("action") in {"pause", "cancel"} and not latest.get("hold_id"):
-            return {"status": "preserved", "run_id": state["run_id"], "reason": "pending manual control"}
-        if mode == "queued" and any(not request.get("hold_id") and request["id"] not in state["control"]["requests"]
-                                    for request in requests):
-            return {"status": "preserved", "run_id": state["run_id"], "reason": "unconsumed manual control request"}
-        if mode == "resume":
-            ledger["controls"][state["run_id"]] = {"revision": latest.get("revision", 0) + 1,
-                "action": "resume", "id": str(uuid4()), "hold_id": None, "at": time.time(),
-                "deliveries": deepcopy(latest.get("deliveries", {}))}
-        if mode in {"resume", "queued"}:
-            start["authorized"] = True
-        launch = {"id": str(uuid4()), "run_id": state["run_id"], "mode": mode,
-                  "hold_id": hold_id, "retry_id": retry_id, "status": "launching", "background": background,
-                  "input_fingerprint": state["input_fingerprint"], "executor_digest": state["executor"]["digest"],
-                  "launcher": identity, "created_at": time.time(),
-                  "request_ids": [request["id"] for request in requests],
-                  "control_revision": ledger["controls"].get(state["run_id"], {}).get("revision", 0)}
-        if add_calls:
-            from .stages import validate_add_calls
-            launch["add_calls"] = validate_add_calls(add_calls)
-        if not background:
-            launch.update(status="claimed", identity=identity)
-        start["launch"] = launch
-        return deepcopy(launch)
+    with control_operation() as outcome:
+        from .maintenance import barrier
+        from .runtime import verify_execution
+        verify_execution(store, state)
+        if mode not in {"resume", "queued", "retry", "hold", "maintenance", "export"}:
+            raise ExtractError("unknown current-run launch operation")
+        table = process_table()
+        identity = _identity(table)
+        requests = store.control_requests(state["run_id"])
+        with store.supervisor() as ledger:
+            store.assert_startable(state["run_id"], ledger)
+            current = store.load(state["run_id"])
+            if (current["input_fingerprint"], current["executor"]) != (state["input_fingerprint"], state["executor"]):
+                raise ExtractError("frozen run identity changed before launch reservation")
+            if mode == "maintenance" and not (barrier(store, current, ledger) or current.get("maintenance")):
+                raise ExtractError("maintenance launch requires a current submitted request")
+            if mode == "retry":
+                request = ledger["retries"].get(retry_id)
+                if not request or request["status"] != "authorized":
+                    raise ExtractError("scope recovery authorization was consumed or replaced")
+                check_restart_authority(ledger, request, state)
+            start = ledger["starts"].setdefault(state["run_id"], {"output": state["output"], "authorized": False,
+                                                                 "created_at": state["created_at"]})
+            previous = start.get("launch", {})
+            if previous.get("status") in {"launching", "claimed"}:
+                owner = previous.get("identity") or previous.get("launcher")
+                alive = process_alive(owner, table)
+                if alive is not False:
+                    return {**previous, "reused": True, "committed": True}
+            if mode == "queued" and state["status"] != "queued":
+                return {"status": "preserved", "run_id": state["run_id"], "run_status": state["status"]}
+            latest = ledger["controls"].get(state["run_id"], {})
+            if any(not value.get("confirmed") for value in latest.get("deliveries", {}).values()):
+                raise ExtractError("cancel termination is pending; reconcile its owned processes before another launch")
+            if mode == "maintenance" and (state["status"] in {"paused", "cancelled"} or
+                    state["control"]["action"] or latest.get("action") in {"pause", "cancel"} or
+                    any(item["id"] not in state["control"]["requests"] for item in requests)):
+                return {"status": "preserved", "run_id": state["run_id"], "reason": "manual control preserves the pending maintenance request"}
+            if mode == "queued" and latest.get("action") in {"pause", "cancel"} and not latest.get("hold_id"):
+                return {"status": "preserved", "run_id": state["run_id"], "reason": "pending manual control"}
+            if mode == "queued" and any(not request.get("hold_id") and request["id"] not in state["control"]["requests"]
+                                        for request in requests):
+                return {"status": "preserved", "run_id": state["run_id"], "reason": "unconsumed manual control request"}
+            if mode == "resume":
+                ledger["controls"][state["run_id"]] = {"revision": latest.get("revision", 0) + 1,
+                    "action": "resume", "id": str(uuid4()), "hold_id": None, "at": time.time(),
+                    "deliveries": deepcopy(latest.get("deliveries", {}))}
+            if mode in {"resume", "queued"}:
+                start["authorized"] = True
+            launch = {"id": str(uuid4()), "run_id": state["run_id"], "mode": mode,
+                      "hold_id": hold_id, "retry_id": retry_id, "status": "launching", "background": background,
+                      "input_fingerprint": state["input_fingerprint"], "executor_digest": state["executor"]["digest"],
+                      "launcher": identity, "created_at": time.time(),
+                      "request_ids": [request["id"] for request in requests],
+                      "control_revision": ledger["controls"].get(state["run_id"], {}).get("revision", 0)}
+            if add_calls:
+                from .stages import validate_add_calls
+                launch["add_calls"] = validate_add_calls(add_calls)
+            if not background:
+                launch.update(status="claimed", identity=identity)
+            start["launch"] = launch
+            outcome.update(run_id=state["run_id"], launch=deepcopy(launch))
+        return {**deepcopy(launch), "committed": True}
 
 
 def claim_launch(store, run_id: str, launch_id: str) -> dict:
@@ -565,6 +589,10 @@ def claim_launch(store, run_id: str, launch_id: str) -> dict:
         if (state["input_fingerprint"] != launch.get("input_fingerprint") or
                 state["executor"]["digest"] != launch.get("executor_digest")):
             raise ExtractError("frozen run identity changed after launch reservation")
+        latest = ledger["controls"].get(run_id, {})
+        if (latest.get("revision", 0) != launch.get("control_revision", 0) or
+                any(request["id"] not in launch.get("request_ids", []) for request in store.control_requests(run_id))):
+            raise ExtractError("background launch was superseded by newer control")
         if launch["mode"] == "retry":
             request = ledger["retries"].get(launch.get("retry_id"))
             if not request or request["status"] != "authorized":
@@ -575,45 +603,55 @@ def claim_launch(store, run_id: str, launch_id: str) -> dict:
 
 
 def start_background(store, run_id: str, repo: Path, *, mode="queued", hold_id=None, retry_id=None) -> dict:
-    state = store.load(run_id)
-    if store.read_supervisor()["active_hold"]:
-        with store.supervisor() as ledger:
-            store.hold_member(ledger, state)
-        return {"run_id": run_id, "status": "held", "hold_id": store.read_supervisor()["active_hold"]}
-    # Snapshot verification is deliberately outside supervisor.lock.
-    from .runtime import frozen_run_invocation
-    frozen_run_invocation(store, state, [])
-    launch = reserve_launch(store, state, mode=mode, hold_id=hold_id, retry_id=retry_id, background=True)
-    if launch.get("reused") or launch["status"] != "launching":
-        return launch
-    command = [sys.executable, "-B", str(rules_root() / "schema_extract/extract_yaml.py"),
-               "_background", run_id, "--launch-id", launch["id"], "--repo", str(repo), "--state-root", str(store.root)]
-    try:
-        log_path = store.run_dir(run_id) / "runner.log"
-        with log_path.open("ab") as stream:
-            process = subprocess.Popen(command, cwd=store.run_dir(run_id), stdin=subprocess.DEVNULL,
-                                       stdout=stream, stderr=stream, start_new_session=True, close_fds=True)
-        table, _ = _processes()
-        identity = table.get(process.pid) if table is not None else None
-        exited = process.poll()
-        with store.supervisor() as ledger:
-            current = ledger["starts"][run_id]["launch"]
-            if current["id"] == launch["id"]:
-                current.update(pid=process.pid, log=str(log_path))
-                if current["status"] == "launching":
-                    if exited is not None:
-                        current.update(status="launch_failed", exit_code=exited,
-                                       error="background Runner exited before claiming its launch")
-                    elif identity:
-                        current["identity"] = identity
-                launch = deepcopy(current)
-        return launch
-    except OSError as exc:
-        with store.supervisor() as ledger:
-            current = ledger["starts"][run_id]["launch"]
-            if current["id"] == launch["id"]:
-                current.update(status="launch_failed", error=str(exc))
-        return {"run_id": run_id, "status": "launch_failed", "error": str(exc), "id": launch["id"]}
+    with control_operation() as outcome:
+        state = store.load(run_id)
+        if store.read_supervisor()["active_hold"]:
+            with store.supervisor() as ledger:
+                store.hold_member(ledger, state)
+                hold_id = ledger["active_hold"]
+            return {"run_id": run_id, "status": "held", "hold_id": hold_id, "committed": True}
+        # Snapshot verification is deliberately outside supervisor.lock.
+        from .runtime import frozen_run_invocation
+        frozen_run_invocation(store, state, [])
+        launch = reserve_launch(store, state, mode=mode, hold_id=hold_id, retry_id=retry_id, background=True)
+        outcome.update(committed=bool(launch.get("id")), run_id=run_id, launch=deepcopy(launch))
+        if launch.get("reused") or launch["status"] != "launching":
+            return {**launch, "committed": bool(launch.get("id"))}
+        command = [sys.executable, "-B", str(rules_root() / "schema_extract/extract_yaml.py"),
+                   "_background", run_id, "--launch-id", launch["id"], "--repo", str(repo), "--state-root", str(store.root)]
+        try:
+            log_path = store.run_dir(run_id) / "runner.log"
+            with log_path.open("ab") as stream:
+                process = subprocess.Popen(command, cwd=store.run_dir(run_id), stdin=subprocess.DEVNULL,
+                                           stdout=stream, stderr=stream, start_new_session=True, close_fds=True)
+            outcome["delivery"] = {"status": "started", "pid": process.pid, "evidence_committed": False}
+            table, _ = _processes()
+            identity = table.get(process.pid) if table is not None else None
+            exited = process.poll()
+            with store.supervisor() as ledger:
+                current = ledger["starts"][run_id]["launch"]
+                if current["id"] == launch["id"]:
+                    current.update(pid=process.pid, log=str(log_path))
+                    if current["status"] == "launching":
+                        if exited is not None:
+                            current.update(status="launch_failed", exit_code=exited,
+                                           error="background Runner exited before claiming its launch")
+                        elif identity:
+                            current["identity"] = identity
+                    launch = deepcopy(current)
+            return {**launch, "committed": True, "delivery": {"status": "started", "pid": process.pid, "evidence_committed": True}}
+        except SupervisorBusy as exc:
+            result = control_error(exc, outcome)
+            return {**launch, **result, "status": launch["status"]}
+        except OSError as exc:
+            if outcome.get("delivery"):
+                return {**launch, **control_error(exc, outcome), "status": launch["status"]}
+            outcome["delivery"] = {"status": "launch_failed", "error": str(exc)}
+            with store.supervisor() as ledger:
+                current = ledger["starts"][run_id]["launch"]
+                if current["id"] == launch["id"]:
+                    current.update(status="launch_failed", error=str(exc))
+            return {**launch, "committed": True, "status": "launch_failed", "error": str(exc), "delivery": outcome["delivery"]}
 
 
 def catalog_targets(repo: Path, ids: list[str], output_root: Path) -> list[dict]:
@@ -642,87 +680,90 @@ def catalog_targets(repo: Path, ids: list[str], output_root: Path) -> list[dict]
 
 def registered_extract(repo: Path, store, output: Path, *, operator_id=None, source=None, bindings=None, config=None, queued=False):
     """One output reservation survives parent exit, duplicate CLI and creation crashes."""
-    output = output.absolute()
-    if output.resolve() != output:
-        raise ExtractError("output must not traverse symlinks")
-    source = str(Path(source).expanduser().resolve()) if source and not source.startswith("git:") else source
-    bindings = bindings.resolve() if bindings else None
-    key = digest({"repo": str(repo), "operator_id": operator_id, "source": source,
-                  "bindings": str(bindings) if bindings else None, "config": config, "output": str(output)})
-    if not store.read_supervisor().get("runs_indexed"):
-        existing, errors = [], {}
-        indexed = store.read_supervisor()["starts"]
-        for run_id in store.run_ids():
-            # Registration adopts only run/output ownership, never approvals.
-            if run_id in indexed:
-                continue
-            try:
-                state = store.load(run_id)
-                existing.append((run_id, {"run_id": run_id, "output": state["output"], "operator_id": state["operator_id"],
-                                         "created_at": state["created_at"], "authorized": False, "status": "preexisting"}))
-            except Exception as exc:
-                errors[run_id] = str(exc)
+    with control_operation() as outcome:
+        output = output.absolute()
+        if output.resolve() != output:
+            raise ExtractError("output must not traverse symlinks")
+        source = str(Path(source).expanduser().resolve()) if source and not source.startswith("git:") else source
+        bindings = bindings.resolve() if bindings else None
+        key = digest({"repo": str(repo), "operator_id": operator_id, "source": source,
+                      "bindings": str(bindings) if bindings else None, "config": config, "output": str(output)})
+        if not store.read_supervisor().get("runs_indexed"):
+            existing, errors = [], {}
+            indexed = store.read_supervisor()["starts"]
+            for run_id in store.run_ids():
+                # Registration adopts only run/output ownership, never approvals.
+                if run_id in indexed:
+                    continue
                 try:
-                    hint = _optional(store.run_dir(run_id) / "summary.json") or {}
-                    if isinstance(hint.get("output"), str) and Path(hint["output"]).is_absolute():
-                        # A stale hint can conservatively reserve an output;
-                        # it cannot authorize execution of the damaged run.
-                        existing.append((run_id, {"run_id": run_id, "output": hint["output"], "authorized": False,
-                                                  "created_at": hint.get("created_at"), "status": "unknown"}))
-                except Exception:
-                    pass
+                    state = store.load(run_id)
+                    existing.append((run_id, {"run_id": run_id, "output": state["output"], "operator_id": state["operator_id"],
+                                             "created_at": state["created_at"], "authorized": False, "status": "preexisting"}))
+                except Exception as exc:
+                    errors[run_id] = str(exc)
+                    try:
+                        hint = _optional(store.run_dir(run_id) / "summary.json") or {}
+                        if isinstance(hint.get("output"), str) and Path(hint["output"]).is_absolute():
+                            # A stale hint can conservatively reserve an output;
+                            # it cannot authorize execution of the damaged run.
+                            existing.append((run_id, {"run_id": run_id, "output": hint["output"], "authorized": False,
+                                                      "created_at": hint.get("created_at"), "status": "unknown"}))
+                    except Exception:
+                        pass
+            with store.supervisor() as ledger:
+                for run_id, record in existing:
+                    ledger["starts"].setdefault(run_id, record)
+                ledger["runs_indexed"] = True
+                ledger["index_errors"] = errors
         with store.supervisor() as ledger:
-            for run_id, record in existing:
-                ledger["starts"].setdefault(run_id, record)
-            ledger["runs_indexed"] = True
-            ledger["index_errors"] = errors
-    with store.supervisor() as ledger:
-        found = next(((run_id, value) for run_id, value in ledger["starts"].items() if value["output"] == str(output)), None)
-        preexisting = False
-        if found:
-            run_id, registration = found
-            if not registration.get("request_key"):
-                if operator_id and registration.get("operator_id") not in {None, operator_id}:
-                    raise ExtractError("output belongs to another operator run " + run_id)
-                preexisting = True
-            elif registration["request_key"] != key:
-                raise ExtractError("output is already registered to run " + run_id +
-                                   " with different request parameters; its frozen inputs are unchanged. "
-                                   "Use status " + run_id + " --full, resume that run, or extract to a different --output for new inputs/parameters")
-        else:
-            if output.exists() or output.is_symlink():
-                raise ExtractError("output must not exist")
-            from .runner import normalize_config
-            normalize_config(config)
-            run_id = str(uuid4())
-            registration = {"run_id": run_id, "output": str(output), "request_key": key,
-                            "created_at": time.time(), "authorized": not queued, "status": "registered"}
-            ledger["starts"][run_id] = registration
-        registration = deepcopy(registration)
-    if preexisting:
-        return {"run_id": run_id, "status": "preexisting", "output": str(output), "reused": True,
-                "authorized": False, "reason": "已存在的运行保留原身份；用显式 resume 控制。"}, store.load(run_id)
-    directory = store.run_dir(run_id)
-    directory.mkdir(parents=True, exist_ok=True)
-    try:
-        with store.writer(run_id):
-            if (directory / "state.json").exists():
-                state = store.load(run_id)
+            found = next(((run_id, value) for run_id, value in ledger["starts"].items() if value["output"] == str(output)), None)
+            preexisting = False
+            if found:
+                run_id, registration = found
+                if not registration.get("request_key"):
+                    if operator_id and registration.get("operator_id") not in {None, operator_id}:
+                        raise ExtractError("output belongs to another operator run " + run_id)
+                    preexisting = True
+                elif registration["request_key"] != key:
+                    raise ExtractError("output is already registered to run " + run_id +
+                                       " with different request parameters; its frozen inputs are unchanged. "
+                                       "Use status " + run_id + " --full, resume that run, or extract to a different --output for new inputs/parameters")
             else:
-                from .runner import create_run
-                _, state, _ = create_run(repo, store.root, output, operator_id=operator_id, source=source,
-                                         bindings=bindings, config=config, queued=True, run_id=run_id,
-                                         created_at=registration["created_at"])
-    except RunnerBusy:
-        return {"run_id": run_id, "status": "creation_or_runner_active", "output": str(output),
-                "reused": True, "authorized": registration["authorized"],
-                "background": store.read_supervisor()["starts"][run_id].get("launch")}, None
-    with store.supervisor() as ledger:
-        ledger["starts"][run_id]["status"] = "created"
-        if ledger["active_hold"]:
-            store.hold_member(ledger, state)
-    return {"run_id": run_id, "status": state["status"], "output": str(output), "reused": found is not None,
-            "authorized": registration["authorized"]}, state
+                if output.exists() or output.is_symlink():
+                    raise ExtractError("output must not exist")
+                from .runner import normalize_config
+                normalize_config(config)
+                run_id = str(uuid4())
+                registration = {"run_id": run_id, "output": str(output), "request_key": key,
+                                "created_at": time.time(), "authorized": not queued, "status": "registered"}
+                ledger["starts"][run_id] = registration
+            registration = deepcopy(registration)
+            outcome.update(run_id=run_id, registration=deepcopy(registration))
+        outcome.update(committed=True, run_id=run_id, registration=deepcopy(registration))
+        if preexisting:
+            return {"committed": True, "run_id": run_id, "status": "preexisting", "output": str(output), "reused": True,
+                    "authorized": False, "reason": "已存在的运行保留原身份；用显式 resume 控制。"}, store.load(run_id)
+        directory = store.run_dir(run_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            with store.writer(run_id):
+                if (directory / "state.json").exists():
+                    state = store.load(run_id)
+                else:
+                    from .runner import create_run
+                    _, state, _ = create_run(repo, store.root, output, operator_id=operator_id, source=source,
+                                             bindings=bindings, config=config, queued=True, run_id=run_id,
+                                             created_at=registration["created_at"])
+        except RunnerBusy:
+            return {"committed": True, "run_id": run_id, "status": "creation_or_runner_active", "output": str(output),
+                    "reused": True, "authorized": registration["authorized"],
+                    "background": store.read_supervisor()["starts"][run_id].get("launch")}, None
+        with store.supervisor() as ledger:
+            ledger["starts"][run_id]["status"] = "created"
+            if ledger["active_hold"]:
+                store.hold_member(ledger, state)
+        return {"committed": True, "request_key": key, "run_id": run_id, "status": state["status"], "output": str(output), "reused": found is not None,
+                "authorized": registration["authorized"]}, state
 
 
 def restart_evidence(store, state: dict, scope: str, *, table=None) -> dict:
@@ -745,43 +786,47 @@ def check_restart_authority(ledger: dict, request: dict, state: dict) -> None:
 
 
 def request_restart(store, run_id: str, scope: str, repo: Path) -> dict:
-    state = store.load(run_id)
-    evidence = restart_evidence(store, state, scope)
-    requests = store.control_requests(run_id)
-    with store.supervisor() as ledger:
-        store.assert_startable(run_id, ledger)
-        from .maintenance import publication_barrier
-        if publication_barrier(store, state, ledger):
-            raise ExtractError("scope recovery is fenced by current maintenance")
-        latest = ledger["controls"].get(run_id, {})
-        if (latest.get("action") in {"pause", "cancel"} or
-                any(item["id"] not in state["control"]["requests"] for item in requests)):
-            raise ExtractError("scope recovery cannot override a pending pause, cancel or hold")
-        previous = next((value for value in reversed(ledger["retries"].values())
-                         if value["failure_id"] == evidence["failure_id"]), None)
-        if previous and previous["status"] == "authorized":
-            try:
-                check_restart_authority(ledger, previous, state)
-            except ExtractError as exc:
-                previous.update(status="superseded", completed_at=time.time(), reason=str(exc))
+    with control_operation() as outcome:
+        state = store.load(run_id)
+        evidence = restart_evidence(store, state, scope)
+        requests = store.control_requests(run_id)
+        with store.supervisor() as ledger:
+            store.assert_startable(run_id, ledger)
+            from .maintenance import publication_barrier
+            if publication_barrier(store, state, ledger):
+                raise ExtractError("scope recovery is fenced by current maintenance")
+            latest = ledger["controls"].get(run_id, {})
+            if (latest.get("action") in {"pause", "cancel"} or
+                    any(item["id"] not in state["control"]["requests"] for item in requests)):
+                raise ExtractError("scope recovery cannot override a pending pause, cancel or hold")
+            previous = next((value for value in reversed(ledger["retries"].values())
+                             if value["failure_id"] == evidence["failure_id"]), None)
+            if previous and previous["status"] == "authorized":
+                try:
+                    check_restart_authority(ledger, previous, state)
+                except ExtractError as exc:
+                    previous.update(status="superseded", completed_at=time.time(), reason=str(exc))
+                    previous = None
+            elif previous and previous["status"] == "superseded":
                 previous = None
-        elif previous and previous["status"] == "superseded":
-            previous = None
-        if previous:
-            request = deepcopy(previous)
+            if previous:
+                request = deepcopy(previous)
+            else:
+                request = {**evidence, "id": str(uuid4()), "status": "authorized", "created_at": time.time(),
+                           "control_revision": latest.get("revision", 0),
+                           "request_ids": [item["id"] for item in requests]}
+                ledger["retries"][request["id"]] = request
+                request = deepcopy(request)
+            outcome.update(run_id=run_id, request=deepcopy(request))
+        request["committed"] = True
+        outcome.update(committed=True, run_id=run_id, request=deepcopy(request))
+        if request["status"] != "authorized":
+            return request
+        writer = store.writer_status(run_id)
+        if writer == "held":
+            request["delivery"] = "active_runner"
+        elif writer in {"free", "absent"}:
+            request["launch"] = start_background(store, run_id, repo, mode="retry", retry_id=request["id"])
         else:
-            request = {**evidence, "id": str(uuid4()), "status": "authorized", "created_at": time.time(),
-                       "control_revision": latest.get("revision", 0),
-                       "request_ids": [item["id"] for item in requests]}
-            ledger["retries"][request["id"]] = request
-            request = deepcopy(request)
-    if request["status"] != "authorized":
+            request["delivery"] = "waiting" if writer in {"free", "absent"} else "writer_unknown"
         return request
-    writer = store.writer_status(run_id)
-    if writer == "held":
-        request["delivery"] = "active_runner"
-    elif writer in {"free", "absent"}:
-        request["launch"] = start_background(store, run_id, repo, mode="retry", retry_id=request["id"])
-    else:
-        request["delivery"] = "waiting" if writer in {"free", "absent"} else "writer_unknown"
-    return request

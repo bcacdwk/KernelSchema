@@ -15,8 +15,8 @@ from uuid import uuid4
 from jsonschema import validate
 
 from schema_extract.tools.agent import AgentCLI
-from schema_extract.tools.artifacts import (DESIGN_REGIONS, load_yaml, resolve_workspace,
-                                            source_context, write_yaml)
+from schema_extract.tools.artifacts import (DESIGN_REGIONS, load_yaml, normalize_candidate,
+                                            resolve_workspace, source_context, write_yaml)
 from schema_extract.tools.common import ExtractError, SupervisorBusy, StaleResult, manifest, read_json, rules_root, write_json
 from schema_extract.tools.inputs import SourceTree
 from schema_extract.tools.prompts import build_prompt
@@ -400,6 +400,82 @@ class StageFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(ExtractError, "reviewer plan differs"):
             self.accept(reviewer, result)
         self.assertIsNone(self.store.load(self.state["run_id"])["selected_designs"])
+
+    def test_p2_empty_revise_checks_the_read_worker_draft_without_false_failures(self):
+        self.create()
+        self.step(stage="P1", role="worker")
+        self.step(stage="P1", role="reviewer")
+        self.step(stage="P2", role="worker")
+        checkpoint = self.state["checkpoint"]
+        plan = deepcopy(self.state["plan_draft"])
+        failures = self.state["stages"]["P2"]["check_failures"]
+        reviewer = self.prepare(stage="P2", role="reviewer")
+        result = self.result(reviewer)
+        materials = read_json(Path(reviewer["directory"]) / "materials" / "manifest.json")
+        records = [record for record in materials["records"] if record["stage"] == "P2"]
+        self.assertTrue(records)
+        self.assertEqual(records[0]["instance_relation"], {"root": "pending_review"})
+        result["response"].update(decision="revise", plan=[], issues=[{
+            "kind": "schema_conformance", "scope": "dispatch.md", "detail": "Clarify the real selection rationale",
+            "evidence": [0], "recovery_condition": "Preserve the selected source instance and improve its rationale"}])
+        self.accept(reviewer, result)
+        self.assertEqual(self.state["role"], "worker")
+        self.assertEqual(self.state["checkpoint"], checkpoint)
+        self.assertEqual(self.state["plan_draft"], plan)
+        self.assertEqual(self.state["stages"]["P2"]["check_failures"], failures)
+        self.assertIsNone(self.state["selected_designs"])
+        self.assertIsNone(self.state["stages"]["P2"]["approval"])
+        self.assertEqual(read_json(Path(reviewer["directory"]) / "check.json")["exit_code"], 0)
+        next_worker = self.prepare(stage="P2", role="worker")
+        self.assertIn("Clarify the real selection rationale", build_prompt(self.state, self.lock, next_worker))
+
+    def test_math_identity_survives_real_normalization_and_unapproved_checkpoint(self):
+        (self.directory / "source/kernel.py").write_text(
+            "def copy(v): V = v + 1; return V + v\n\ndef reference(v): return 2*v + 1\n")
+        for assignment in ("=", ":="):
+            for registered in ("v", "V"):
+                with self.subTest(assignment=assignment, registered=registered):
+                    self.create(backend="codex" if registered == "V" else "claude")
+                    # The source snapshot is synthetic and fixed before this run.
+                    algorithm = self.backend.base["CONTRACT"]["Algorithm_requirement"]
+                    algorithm["Input"][registered] = algorithm["Input"].pop("x")
+                    algorithm["Input"][registered].update(dtype="int32", range=[0, 10])
+                    algorithm["Output"]["y"]["dtype"] = "int32"
+                    algorithm["Compute"][0]["Math"] = f"y = 2*{registered} + 1\n"
+                    decomposition = self.backend.base["DESIGN"]["Work_schedule"]["Step"]["MAIN"]["Decomposition"]
+                    invariant = decomposition["Worktile"]["Invariant"]
+                    invariant["v"] = invariant.pop("x")
+                    invariant["v"]["dtype"] = "int32"
+                    decomposition["Target"]["Single_tile"]["y"]["dtype"] = "int32"
+                    self.step(stage="P1", role="worker")
+                    self.step(stage="P1", role="reviewer")
+                    self.step(stage="P2", role="worker")
+                    self.step(stage="P2", role="reviewer")
+                    attempt = self.prepare(stage="P3", role="worker")
+                    result = self.result(attempt)
+                    raw = Path(attempt["workspace"])
+                    value = load_yaml(raw, "root.yaml", parser_root=self.backend.rules)
+                    formula = f"V {assignment} v + 1\ny = V + v\n"
+                    value["DESIGN"]["Math_reshape"]["Rewrite"][0]["Math"] = formula
+                    write_yaml(raw / "root.yaml", value, parser_root=self.backend.rules)
+                    original_hashes = manifest(raw)
+                    base, base_info = self.store.verify_checkpoint(self.state, attempt["base_checkpoint"])
+                    preview = Path(attempt["directory"]) / "identity-preview"
+                    validation = normalize_candidate(base, raw, preview, self.backend.rules / "schema_template/starter.yaml",
+                        stage="P3", role="worker", decision="complete", selected_designs=self.state["selected_designs"])
+                    self.assertEqual(validation["check"]["exit_code"], 0)
+                    self.assertEqual(load_yaml(preview, "root.yaml", parser_root=self.backend.rules)["DESIGN"]["Math_reshape"]["Rewrite"][0]["Math"], formula)
+                    self.accept(attempt, result)
+                    accepted, _ = self.store.verify_checkpoint(self.state)
+                    math = load_yaml(accepted, "root.yaml", parser_root=self.backend.rules)["DESIGN"]["Math_reshape"]["Rewrite"][0]["Math"]
+                    values = {"v": 1}
+                    exec(math.replace(":=", "="), {}, values)
+                    self.assertEqual(values["y"], 3)
+                    self.assertEqual(math, formula)
+                    self.assertEqual(manifest(raw), original_hashes)
+                    self.assertEqual(manifest(base), base_info["files"])
+                    self.assertEqual(self.state["role"], "reviewer")
+                    self.assertIsNone(self.state["stages"]["P3"]["approval"])
 
     def test_last_control_gate_preserves_pending_recovery_handoff(self):
         from schema_extract.tools.agent import _session
