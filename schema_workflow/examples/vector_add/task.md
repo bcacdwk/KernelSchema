@@ -1,0 +1,13 @@
+# Contiguous FP32 vector addition
+
+Implement `Model().forward(x, y)` using Python/PyTorch for the public wrapper and Triton for GPU arithmetic on Agate's L20D environment. `x` and `y` are equally sized contiguous one-dimensional FP32 CUDA tensors on the same device. Every integer length `1 <= N <= 65536` is legal. Values are finite FP32 and their FP32 sums are finite. Return a new contiguous FP32 tensor `z` of shape `(N,)`, where `z[i] = fp32(x[i] + y[i])`; do not mutate either input.
+
+Two necessary design domains are `1..1024` and `513..65536`. The first uses one 1024-element tile in one CTA; the second uses contiguous 256-element tiles with `ceil(N/256)` CTAs. Both mask tails. In the overlapping domain `513..1024`, choose the first design explicitly. Deliver one `Model` entrance with both branches; root does not provide an implicit fallback. The supplied Schema is a hand-authored development example. Design may independently derive a complete schema under these task constraints.
+
+The fixed [reference](eval/reference.py) is PyTorch FP32 addition. The [input generator](eval/input.py) uses a CUDA generator seeded by `20261122 + N` and produces independent uniform values in `[-1,1)` for the fixed cases. That test distribution does not narrow the legal input domain. [shapes.json](eval/shapes.json) contains numeric case IDs `0..6` with lengths `1,512,513,1024,1025,4097,65536`. Cases cover the lower bound, overlap edges, branch transition, a multi-tile tail and the upper bound; they do not prove every legal input.
+
+For each returned element require `abs(candidate-reference) <= 1e-6 + 1e-6*abs(reference)`, using the pinned Atrex Bench comparator. Shape, dtype and no input mutation are part of correctness. [eval.json](eval/eval.json) fixes `atol`, `rtol`, full correctness and timing, one correctness realization per shape, 100 benchmark iterations, 10 warmups, eager benchmark mode and Bench `0.1.0.post20260917160311`. Do not replace this oracle or loosen these criteria. [metadata.json](eval/metadata.json) names this development task; it contains no prior result.
+
+Measure the whole `Model.forward` on each case, including output allocation, dispatch and device work as captured by Bench's eager end-to-end GPU timing. Report its measured milliseconds, statistic, dispersion and actual environment without presenting GPU event time as host wall-clock latency. There is no speed threshold or baseline; do not invent a speedup. Prefer low latency while preserving the complete task and fixed designs.
+
+These task/reference/input/case/acceptance materials were manually fixed before any product coder invocation. The runtime consumes ordinary files; it does not generate test oracles. No previous AKA run is acceptance evidence for this example.
