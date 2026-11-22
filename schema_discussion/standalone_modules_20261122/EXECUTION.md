@@ -8,7 +8,7 @@
 - 产品：独立 Design、Optimize、Implement 和单脚本 Workflow 已实现。首次实现的四模块默认 CPU 集合为 **74 passed**；交稿与环境材料修复后为 **93 passed、8 subtests passed**；004 后阅读证据与等待修复为 **97 passed、70 subtests passed**。现有 Template **8 项**与 Extract **6 项**相关回归分别通过。
 - 切换：根 README、方法入口、依赖、测试收集与 ignore 已切换；旧根产品和两个登记 worktree 已移除。旧 `.tooling`、仅根 `.schema_extract/` 与空 `.worktrees/` 已全部移除。
 - 首次完整代码 commit：已提交 `4f7919bf531ad8b7ab49d5e371dfc8b7fea51a34`（`Refactor`），材料提交为父提交 `2c9c346`。提交时修掉新测试文件末尾多余空行，未改变行为；提交后工作区干净，未 push。
-- 真实 Qwen/Agate：001–004 原失败与预算保持；004 已取得完整模型稿，阅读证据与默认等待修复提交为 `7edc0d7`。005 的正常 Design 已 **complete/done、calls=2**，三文件经过正式收取、规范化和严格 Template 验收；自有 Implement 首调用写出完整两分支 kernel，但因 Contract/Wiki 明确缺少必要 Triton 掩码语义绑定而 **needs_input**，未送 GPU。截至005终结，累计真实 Qwen **16 次**（001–004各3、005 Design2+Implement1、另1小探针），候选 GPU **0 次**，无未结清 job。已有官方 Triton3.7.1 资料，正在补齐下游传材后用新 Design 正式绑定；完整闭环尚未成立。
+- 真实主链：**vector_add-006 已 complete/done**，最终保存时间 2026-11-22T16:26:39.393135+00:00。Design calls3、Implement coder calls1、Optimize calls1且keep/required_fix=false；同一完整候选经唯一job `ev_3890054f8e2b` 的全7cases正确性与真实计时通过，本次配对与本次优化决定均进入Workflow终态。已知job全部终态、action=null；21次真实Qwen会话调用包含全部旧失败及1次native小探针，旧预算不清洗。实现修复提交至 `678df9f`，最终记录另随本文件提交。**计时边界：固定eager后端将100/10解释为ms预算，实际43–47个样本；原Task/dispatch/kernel中的次数措辞不代表字面100/10次已实测，详见示例README与下文。**
 
 ## 基线与环境
 
@@ -253,3 +253,50 @@ Workflow自动进入v001/implement首个coder（PID997684，session224b5e08-fde6
 新的xhigh定位正式SDK的 `Client.validate_eval`：只做声明/内联源码验证，不上传或调度。对原请求取得唯一字段错误：body.harness应为atrex_bench或sol_execbench，而本地固定eval使用atrex别名。adapter只把wire harness映射为atrex_bench，重建请求逐项对比仅该字段变化；第二次无调度校验返回valid=true、scope=declaration_and_inline_source。两次validate不算GPU提交，诊断期间没有submit/model。安全validation_errors现在保留loc/type/msg，不保存input/ctx/认证/原始payload。
 
 Issue06另提供明确的 `--resume ... --recover-rejected-request` 窄恢复：仅接受本次确定422无job的inline完整候选，原manifest/Schema/notes/gaps核对一致，修正语义仅harness别名；新immutable attempt复制旧kernel/notes并复用原refs，保留原attempt/key/失败与calls_used1，不重调coder或Design。任何action、已知job/reservation/未知ack、无变化请求均不可借此重投；恢复一旦启动后中断，只走普通resume查原新key/job。Workflow仅重新计划原目录同版本。受影响CPU **78 passed in 39.74s**，最后定向 **13 passed**；真实006前置检查在首次mkdir前停止，attempt02尚不存在、旧证据未动。下面将提交修复后由正常Workflow入口执行唯一真实恢复。
+
+
+## 006 同目录恢复、真实评测与最终闭环
+
+修复提交 `678df9f66ba2b364debaaaee975f07ff3ec405b5`（Fix eval）后，按正常Workflow入口执行：
+
+```sh
+KS_AGATE_CONFIG=/home/shaohanyong.shy/.cache/kernelschema-standalone-private/agate.json /home/shaohanyong.shy/.cache/kernelschema-standalone-venv/bin/python schema_workflow/workflow.py --resume .schema_workflow/runs/vector_add-006 --recover-rejected-request
+```
+
+形成同版原Implement目录内的attempt02，calls_used仍1；旧attempt01的draft/kernel/notes/request/response/feedback逐文件SHA256与恢复前完全相同，旧拒绝没有重标。attempt02源码与notes也和attempt01逐字节相同；kernel.py SHA为 `14a36dbe13735f156e2a69ec4f35923ff015ca33f8eb818d1519171ff4dae2fe`。请求语义唯一变化是harness从atrex映射为atrex_bench；新attempt名与新key明确另记在recovery.json，旧key保持。
+
+该次实际提交遇503，session80678退出2，action=submitting、ack未知，不能当作确定未创建job。新固定key为 `ks-implement-657c4772a06743309457adfa949c90da`，request摘要 `210051e114f40a99c4f4fd09265f19553bbd70063eda667f7da1e890e8dd14fa`。随后只执行普通resume（不再使用recover开关），沿同一请求/key取回job `ev_3890054f8e2b`；16:22:20 UTC已记录queued/waiting。服务选择serial、worker_budget=1、gpu_budget=1，preferred_pool_incapable是服务正常fallback，任务、案例及计时参数不变。此后只查询原job，未另建身份。
+
+**job最终succeeded，Implement complete/done**。7例的compile/correctness/performance均passed，输出的max abs/rel diff及relative_l2均为0，reference/candidate输入未修改检查均passed。源码只用两组Triton load/add/store与一个n选路入口；1024/单CTA/8warp与256/ceil(N/256)/4warp两分支都落实，root显式覆盖重叠区。实际kernel_events前四例为single_tile，后三例为multi_tile，每个forward一个kernel。样本通过不冒称穷举所有合法输入。
+
+| case | N | 正确性 | 服务原报 median (ms) | 服务原报 stddev (ms) | 完整计时样本数 |
+| --- | ---: | --- | ---: | ---: | ---: |
+| 0 | 1 | passed | 0.005120 | 0.001716 | 44 |
+| 1 | 512 | passed | 0.006784 | 0.002133 | 44 |
+| 2 | 513 | passed | 0.006976 | 0.001733 | 45 |
+| 3 | 1024 | passed | 0.007040 | 0.000437 | 44 |
+| 4 | 1025 | passed | 0.007104 | 0.000397 | 46 |
+| 5 | 4097 | passed | 0.007008 | 0.000380 | 47 |
+| 6 | 65536 | passed | 0.007136 | 0.000445 | 43 |
+
+实际job环境：NVIDIA L20D、sm_103、Python3.12.3、PyTorch2.9.0+cu130、Triton3.7.1、CUDA runtime13.0、driver580.105.08；clock_locked=false，返回clock_sm_mhz/clock_sm_max_mhz均2032、throttle_reasons=0x0000000000000000。这些来自本次response.environment，不用早先服务缓存冒充。host Python3.13.12、正式SDK0.14.37保持。
+
+**Optimize 与 Workflow**：`v001/optimize/01` 的真实调用201.546秒成功结束，returncode0/diagnostics=[]，calls_used1；decision=keep、required_fix=false、files=[]。完整代码、Schema/raw/effective/from、本次成功feedback/request/response以及四组固定资料进入正常输入装配并全文提供；本次真实Grep正文读DOC3–6及manifest，notes核对本次绑定摘要并据实际7例结果作决定，没有编造版本或收益。其引用的kernel-only 1.33–1.56微秒确实来自本次response.kernel_events，但该值来自另一轮profiler，与eager主样本不是同一次观测；其中对分项开销的约80%归因是模型推断，不当作直接测得的分解。自然keep合法，不为产生变化改写Schema。
+
+Workflow最终complete/done，action=null，required_fix=false，verified_decision=`v001/optimize/01/result.json`，last_usable固定为`v001/implement/inputs/schema`、`attempts/02/kernel`、`attempts/02/feedback.json`。session52512自然退出0。接受Schema、kernel、反馈、原request/response与优化说明均保留于该运行目录，[本工作区结果摘要](../../.schema_workflow/runs/vector_add-006/SUMMARY.md)明确列出路径与统计边界。
+
+### 计时参数与实际样本：保持原始证据
+
+本次runner_config确认atol=rtol=1e-6、num_correctness_cases=1、validation_mode=full、benchmark_mode=eager、bench_iters=100、warmup_iters=10，均与固定配置一致。新xhigh仅只读回包与正式发行源码：request_digest确认Bench版本0.1.0.post20260917160311来自job_install/version_source=request；从正式tre-ai-infra发行索引取得同版本wheel，SHA256 `977be8eee3d0c5b6aed59735eafddf69448fbf1f08fc353d277e34b6506a9f8b`，只解包读取、不安装或执行。
+
+该固定Bench的eager路径调用`triton.testing.do_bench(warmup=warmup_iters, rep=bench_iters, return_mode="all")`，Triton3.7.1明确定义这两项为ms预算。它用包含clear_cache的校准求estimate_ms，计算`n_repeat=max(1,int(rep/estimate_ms))`、`n_warmup=max(1,int(warmup/estimate_ms))`，原样返回全部times。真实样本数为44/44/45/44/46/47/43，等于runs；不是100样本过滤。回包未给校准值/逐调用trace，不能独立重放其校准，更不能用100/报告均值反算次数（主样本不含clear_cache）。
+
+Task第9行、接受Schema dispatch第5行及实测kernel第49行保留“100次/10次”的原措辞；这与固定实现单位有差别，**本次不声称字面100次测量、10次warmup已验收**。原锁定输入、Schema、代码、反馈与结果不改，不换mode、不凑样本、不做无依据重测。[示例README](../../schema_workflow/examples/vector_add/README.md)与运行SUMMARY已经显著解释。所执行的固定100/10配置、7例正确性与真实计时均保留。
+
+统计量保留服务原报定义；runs/mean/样本stddev/min/max与全部samples复算一致。case1原报median为较高中位点，不能把Python statistics.median的偶数平均值偷偷替换回包，也不声称所有分位按该Python规则计算。上表仅展示取小数位。主度量是整个Model.forward范围的eager GPU event时间，不是host墙钟；kernel_events是单独profiler，二者不用于精确开销拆分。完整只读来源/公式/统计核验在`.schema_workflow/materials/bench-timing-semantics/evidence.md`，没有新增模型或GPU调用。
+
+### 最终核对
+
+已通过正常CLI再次执行完成运行的普通resume，退出0；Workflow/Implement的state/result、attempt02 request/response/feedback、Optimize result/draft共9份文件SHA全部保持，未启动模型或新增评测。已核对本次接受配对、全部7例实际比较与输入未修改；固定Task/eval六文件仍逐字节等于2c9c346。已知native PID914674/917220/930770/997684/1057966均不存在，已知唯一GPU job终态succeeded，Workflow action=null，无未结清动作。
+
+累计真实Qwen会话调用21次：Design 001–004各3、005为2、006为3；Implement 005/006各1；Optimize006为1；另1次native交稿探针。实际候选GPU job1个；另保留一次原422拒绝、一次503 ack不明及同key普通恢复的事实，不把它们洗成从未失败。除了候选评测与原get_env，还有为诊断执行的2次无调度validate_eval及只读官方资料获取。未制造额外修稿/设计变体/GPU失败；真实keep、必要分支、语言交接、Grep阅读和拒绝请求恢复均已有本次证据；其余异常边界按已记录CPU测试，不冒称全部真实发生。

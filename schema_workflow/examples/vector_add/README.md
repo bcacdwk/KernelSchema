@@ -4,6 +4,14 @@
 
 合法长度为 `1..65536`；root 的域为 `1..1024`，tiled 为 `513..65536`，重叠区明确选择 root。root 使用一CTA/1024元素，tiled 使用每CTA256元素；两者尾块均掩码。tiled 的数学区和流水线区真实 `from: root`，工作调度本地完整定义。固定七例为 `1,512,513,1024,1025,4097,65536`，case ID 为字符串 `0..6`。
 
+## 固定后端的计时语义
+
+`eval.json` 的 `bench_iters=100`、`warmup_iters=10` 数值保持不变。固定 Bench `0.1.0.post20260917160311` 的 eager 主计时路径将它们分别传给 Triton 3.7.1 的 `rep=100`、`warmup=10`，单位是 **毫秒预算**；实际测量重复数由校准结果推导。006 的真实运行返回 **44、44、45、44、46、47、43** 个完整计时样本，并非 100 个样本经过过滤。
+
+锁定 Task 文本、006 已接受 Schema 的 `dispatch.md` 和实测 kernel 注释仍保留“100 次迭代、10 次预热”的原措辞；它与上述固定实现的单位有差别，不能据此宣称字面 100/10 次已经实测。原输入、Schema、代码及回包保持原字节，不补凑样本、不改变测量模式。报告保留服务原报中位数、标准差等统计；这是整个 `Model.forward` 范围的 eager GPU event 计时，不是 host 墙钟时间。`kernel_events` 来自另一轮 profiler，不能将两者简单相减当作直接测得的开销分解。源码依据、实际参数和结果见[执行记录](../../../schema_discussion/standalone_modules_20261122/EXECUTION.md)。
+
+## 资料与运行
+
 参考为 PyTorch FP32相加；误差、计时和固定输入来源见 Task 与 eval.json。Task 选择 Agate L20D；手写 Schema 的 NVIDIA L20D/SM103 身份与 [environment.json](environment.json) 中服务报告的 `NVIDIA L20D / sm_103` 相符，架构依据返回字段，不由型号名称推断。
 
 环境材料固定到 `KernelSchema@51f6b2399d29bafbeacf401de45afa7011160dc8:schema_workflow/examples/vector_add/environment.json`。它来自 SDK 0.14.37 的只读 `get_env('L20D')`，2026-11-22 12:29:54 UTC 获取，`source=cache`、`probed_at=2026-11-22T11:48:31.084555+00:00`；该查询没有创建 GPU job。服务缓存报告 PyTorch 2.9.0+cu130、CUDA 13.0、Triton 3.7.1、nvcc/ptxas 13.1.115。root Version 2 据此更新实现栈，未报告的 Python 版本明确留缺项。
