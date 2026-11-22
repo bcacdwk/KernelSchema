@@ -1,6 +1,6 @@
 # KernelSchema main 整合与提取修订
 
-两轮 A/B、C/D 的授权实施及独立验证已完成，当前为 **implementation_complete_ready_for_main_delivery**。根代理按 D 已审精确清单完成 Git 提交、正常推送与远端 SHA 核验。原批准字节、旧审计计划与原 receipt 保持历史原义。
+两轮 A/B、C/D 的授权实施、独立验证及 main 产品交付已完成，当前为 **completed**。产品提交 `316411c2e386eb400d999931badeb74df7349a41` 已正常推送到 origin/main 并确认。main 末尾可另有仅更新记录的提交；准确的产品提交与观察时间见 [Git 交付记录](GIT_DELIVERY.json)。原批准字节、旧审计计划与原 receipt 保持历史原义。
 
 - [最终实施报告](FINAL_REPORT.md)：实际变化、测试结果及限制。
 - [实施覆盖](IMPLEMENTATION_COVERAGE.json)：26 发现、24 候选/104 出现、20 recap、11 既有修正、16 删减与 FC01/02。
