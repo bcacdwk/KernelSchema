@@ -7,3 +7,14 @@
 子代理的默认：model：gpt-6-astra（codex)，effort=high，在一些情况下可以用xhigh。子代理只能同时运行两个，所以也可以考虑多轮/多个分别完成。如果是codex的headless，可以同时运行多个。
 
 子代理启动后，默认等待其主动的反馈和回报，在明确阻塞、必要交接、需要决策的情况再介入。不需要频繁获取子代理的中间进度、查询状态，导致影响上下文。
+
+调用 Codex headless（例如 `6.2-sol-high`）的方法：
+
+```bash
+codex --no-daemon -a never exec --ephemeral \
+  -m gpt-6.2-sol -c model_reasoning_effort="high" \
+  -s workspace-write -C /Users/hanyong/KernelSchema \
+  -o /tmp/codex_out.md "任务提示词"
+```
+
+长提示词可将末尾字符串换为 `-` 从 stdin 传入；只读任务将 `-s workspace-write` 改为 `-s read-only`；若当前宿主终端自带沙箱，执行时需放开沙箱权限以访问外网与 `~/.codex`。
