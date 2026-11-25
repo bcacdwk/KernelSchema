@@ -1,0 +1,59 @@
+\begingroup%
+\definecolor{ksBlue}{HTML}{3478B8}%
+\definecolor{ksAmber}{HTML}{C58B28}%
+\definecolor{ksRed}{HTML}{A44C46}%
+\definecolor{ksInk}{HTML}{243447}%
+\definecolor{ksPaleAmber}{HTML}{FFF8E8}%
+\begin{tikzpicture}[
+  x=1mm, y=1mm,
+  card/.style={draw, fill=white, rounded corners=2mm, line width=.7pt,
+    text=ksInk, align=flush center, font=\fontsize{9.5}{12.5}\selectfont,
+    inner xsep=2mm, inner ysep=1.7mm, outer sep=.35pt},
+  branch/.style={card, draw=ksAmber, minimum width=50mm, minimum height=22mm},
+  flow/.style={-{Stealth[length=2.25mm,width=1.65mm]}, draw=ksInk, line width=.7pt,
+    rounded corners=2mm},
+  edge text/.style={text=ksInk, fill=white, font=\fontsize{9}{12.5}\selectfont,
+    inner xsep=1mm, inner ysep=.6mm}
+]
+  \node[card, draw=ksBlue, minimum width=86mm] (idea) at (0,0)
+    {Agent 提出新的高层流水线设想\\
+    （如更改 QK 计算交错顺序 / 引入多级异步流水）};
+  \node[card, draw=ksBlue, minimum width=86mm] (rewrite) at (0,-17)
+    {被迫同步重写上千行底层实现代码\\
+    （指针偏移 · 布局转换 · 屏障同步 · 语法细节）};
+  \node[card, diamond, rounded corners=0pt, aspect=2.65, draw=ksAmber,
+    fill=ksPaleAmber, inner xsep=1mm, inner ysep=.9mm] (noise) at (0,-46)
+    {遭遇实现层摩擦与环境扰动\\
+    编译报错 / 局部未调优 / 机群测量波动};
+
+  \node[branch] (false-negative) at (-56,-91)
+    {好设计被误判淘汰\\
+    (False Negative)\\
+    Agent 误以为该流水线\\
+    方向本身不可行而放弃};
+  \node[branch] (detour) at (0,-91)
+    {退回熟悉但低效的历史弯路\\
+    如在 Blackwell 上用古老\\
+    mma.sync 替代 tcgen05};
+  \node[branch] (diverge) at (56,-91)
+    {6 路并行 Agent 走向\\
+    截然不同的演化分支\\
+    跨 Run 方差极大，\\
+    收敛终点不可预测};
+  \node[card, draw=ksRed, line width=.85pt, minimum width=95mm] (trap)
+    at (0,-123) {困于局部次优平台期：耗时漫长、Token 代价高昂};
+
+  \draw[flow] (idea) -- (rewrite);
+  \draw[flow] (rewrite) -- (noise);
+  \draw[flow, draw=ksAmber] (noise.215) |- (-56,-72) -- (false-negative.north);
+  \draw[flow, draw=ksAmber] (noise.south) -- (detour.north);
+  \draw[flow, draw=ksAmber] (noise.325) |- (56,-72) -- (diverge.north);
+  \node[edge text, anchor=south] at (-42,-71.5) {实测变慢或未写完};
+  \node[edge text, anchor=west] at (1,-75.5) {为快速拿正反馈而避难就易};
+  \node[edge text, anchor=south] at (40,-71.5) {多路并行微小差异放大};
+  \draw[flow, draw=ksRed] (false-negative.south) |- (-32,-113) --
+    (-32,-113 |- trap.north);
+  \draw[flow, draw=ksRed] (detour) -- (trap);
+  \draw[flow, draw=ksRed] (diverge.south) |- (32,-113) -- (32,-113 |- trap.north);
+\end{tikzpicture}%
+\endgroup%

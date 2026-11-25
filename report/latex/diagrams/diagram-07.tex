@@ -1,0 +1,32 @@
+\begingroup%
+\definecolor{ksBlue}{HTML}{3478B8}%
+\definecolor{ksTeal}{HTML}{27877F}%
+\definecolor{ksAmber}{HTML}{C58B28}%
+\definecolor{ksInk}{HTML}{243447}%
+\begin{tikzpicture}[
+  x=1mm, y=1mm,
+  card/.style={draw, fill=white, rounded corners=2mm, line width=.8pt,
+    text=ksInk, align=flush center, font=\fontsize{9.5}{12.5}\selectfont,
+    minimum height=22mm, inner xsep=2mm, inner ysep=1.7mm, outer sep=.4pt},
+  flow/.style={-{Stealth[length=2.6mm,width=1.9mm]}, draw=ksInk, line width=.9pt},
+  edge text/.style={text=ksInk, font=\fontsize{9}{12.5}\selectfont, inner sep=1mm}
+]
+  \node[card, draw=ksBlue, minimum width=105mm] (l1) at (0,0)
+    {\textbf{第一层：Math\_reshape（数学变换 · 纯理论层）}\\
+    等价改写计算顺序 · 在线状态递推 · 精度分叉与收益代价账本\\
+    【优化难度最高 · 理论复杂度与访存收益空间最大】};
+  \node[card, draw=ksTeal, minimum width=129mm] (l2) at (0,-37)
+    {\textbf{第二层：Work\_schedule（工作调度 · Tile 以上全局分治层）}\\
+    将数学任务切分为同构 Worktile · 映射至 SM/CTA/Cluster · 排布与动态负载均衡\\
+    【优化难度中等 · 决定设备级并行利用率与负载均衡】};
+  \node[card, draw=ksAmber, minimum width=152mm] (l3) at (0,-74)
+    {\textbf{第三层：Tile\_pipeline（微流水线 · 单个 Tile 内部并发掩盖层）}\\
+    依托 Microbench 周期先验 · 划分 Warp 角色 · 8 动词与等待边编排异步流水重叠\\
+    【优化难度相对具体 · 决定硬件单元峰值吞吐逼近度】};
+
+  \draw[flow] (l1) -- node[edge text, right=1mm]
+    {定下算什么量、跨轮携带什么状态} (l2);
+  \draw[flow] (l2) -- node[edge text, right=1mm]
+    {定下单个 Worker 分担的子任务边界} (l3);
+\end{tikzpicture}%
+\endgroup%

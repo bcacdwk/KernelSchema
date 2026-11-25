@@ -1,0 +1,63 @@
+\begingroup%
+\def\baselinestretch{1}%
+\definecolor{D10Blue}{HTML}{3478B8}%
+\definecolor{D10Teal}{HTML}{27877F}%
+\definecolor{D10Ink}{HTML}{243447}%
+\definecolor{D10Slate}{HTML}{64748B}%
+\begin{tikzpicture}[
+  x=1mm, y=1mm,
+  card/.style={draw, fill=white, rounded corners=2mm, line width=.75pt,
+    minimum height=13mm, inner xsep=3mm, inner ysep=2.5mm, outer sep=.4pt,
+    align=flush center, text=D10Ink, font=\fontsize{9.5}{12.5}\selectfont},
+  entry/.style={card, draw=D10Slate, minimum width=76mm},
+  schema/.style={card, draw=D10Blue, minimum width=65mm,
+    font=\bfseries\fontsize{9.5}{12.5}\selectfont},
+  kernel/.style={card, draw=D10Teal, minimum width=72mm},
+  edge text/.style={fill=white, inner xsep=1mm, inner ysep=.8mm, align=flush center,
+    text=D10Ink, font=\fontsize{9}{12.5}\selectfont},
+  flow/.style={draw=D10Blue, line width=.7pt, rounded corners=1.5mm,
+    -{Latex[length=2.5mm,width=1.6mm]}},
+  implement/.style={flow, draw=D10Teal, dash pattern=on 2.6pt off 2pt}
+]
+\node[entry] (zero) at (-42,0) {从零开始：Planner · Design\\
+  参考近邻生成初始 Schema};
+\node[entry] (sota) at (42,0) {从已有 SOTA 开始：Planner · Extract\\
+  逆向蒸馏现有代码 Schema};
+\node[schema] (root) at (0,-24) {Schema v1（根节点）\\基础单核静态分块流水};
+
+\node[schema] (a) at (-42,-57) {Schema v2-A（分支 A）\\2-CTA Cluster 常驻步长调度};
+\node[schema] (b) at (42,-57) {Schema v2-B（分支 B）\\Split-KV 独立计算 + 归并链};
+\node[schema] (a1) at (-42,-92) {Schema v3-A1（子代演进）\\奇偶双路 Softmax 异步掩盖 SFU};
+
+\node[kernel] (kb) at (42,-92) {Kernel 实现簇 (v1, v2, v3...)\\
+  吸收编译排错，逼近 v2-B 真实上限};
+\node[kernel] (ka) at (42,-139) {Kernel 实现簇 (v1, v2, v3...)\\
+  吸收编译排错，逼近 v2-A 真实上限};
+\node[kernel] (ka1) at (-42,-139) {Kernel 实现簇 (v1, v2, v3...)\\
+  兑现极致双路流水性能};
+
+\coordinate (entry-turn) at (0,-12);
+\coordinate (root-top-left) at ([xshift=-9mm]root.north);
+\coordinate (root-top-right) at ([xshift=9mm]root.north);
+\draw[flow] (zero.south) -- (zero.south |- entry-turn)
+  -- (root-top-left |- entry-turn) -- (root-top-left);
+\draw[flow] (sota.south) -- (sota.south |- entry-turn)
+  -- (root-top-right |- entry-turn) -- (root-top-right);
+
+\coordinate (branch-turn) at (0,-37);
+\coordinate (root-bottom-left) at ([xshift=-9mm]root.south);
+\coordinate (root-bottom-right) at ([xshift=9mm]root.south);
+\draw[flow] (root-bottom-left) -- (root-bottom-left |- branch-turn)
+  -- (a.north |- branch-turn) -- node[edge text] {Optimize：改写 Work\_schedule} (a.north);
+\draw[flow] (root-bottom-right) -- (root-bottom-right |- branch-turn)
+  -- (b.north |- branch-turn) -- node[edge text] {Optimize：拆分多阶段 Step} (b.north);
+\draw[flow] (a.south) -- node[edge text] {Optimize：深化 Tile\_pipeline} (a1.north);
+
+\coordinate (a-implementation) at (0,-111);
+\draw[implement] (a.east) -- (a.east -| a-implementation)
+  -- node[edge text, at end] {Coder · Implement（定向解压）} (a-implementation)
+  -- (ka.west -| a-implementation) -- (ka.west);
+\draw[implement] (b.south) -- node[edge text] {Coder · Implement（定向解压）} (kb.north);
+\draw[implement] (a1.south) -- node[edge text] {Coder · Implement（定向解压）} (ka1.north);
+\end{tikzpicture}%
+\endgroup%

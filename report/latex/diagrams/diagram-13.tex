@@ -1,0 +1,57 @@
+\begingroup%
+\def\baselinestretch{1}%
+\definecolor{D13Blue}{HTML}{3478B8}%
+\definecolor{D13Teal}{HTML}{27877F}%
+\definecolor{D13Ink}{HTML}{243447}%
+\definecolor{D13Slate}{HTML}{64748B}%
+\begin{tikzpicture}[
+  x=1mm, y=1mm,
+  card/.style={draw, fill=white, rounded corners=2mm, line width=.75pt,
+    minimum width=77mm, minimum height=17mm, inner xsep=2.5mm, inner ysep=2.5mm,
+    outer sep=.4pt, align=flush center, text=D13Ink, font=\fontsize{9.5}{12.5}\selectfont},
+  flow/.style={draw=D13Ink, line width=.7pt, rounded corners=1.5mm,
+    -{Latex[length=2.5mm,width=1.6mm]}}
+]
+\node[card, draw=D13Slate] (in1) at (-42,0)
+  {未实现代码的候选设计\\
+   Schema A / Schema B / Schema C\\
+   （含数学账本 · 调度波次 · 微流水事件图）};
+\node[card, draw=D13Slate] (in2) at (42,0)
+  {目标硬件 Microbench 先验\\
+   各单元指令周期 · 吞吐 · 并发代价};
+\node[card, draw=D13Blue, minimum height=14mm,
+  font=\bfseries\fontsize{9.5}{12.5}\selectfont] (model) at (0,-33)
+  {基于 Schema + Microbench 的\\
+   轻量级先验性能建模器};
+
+\node[card, draw=D13Teal, minimum height=24mm] (abs) at (-42,-70)
+  {绝对维度：理论 SOL 上界粗估\\
+   评估可发挥硬件峰值比例\\
+   辅助判断平台期与停止准则};
+\node[card, draw=D13Teal, minimum height=24mm] (rel) at (42,-70)
+  {相对维度：近似保序性 (Order-Preserving)\\
+   无需微秒级绝对精准，只需保持优劣次序\\
+   Est(A) \textless{} Est(B)\space\space==\textgreater{}\space\space Real(A) \textless{} Real(B)};
+\node[card, draw=D13Teal] (prune) at (42,-105)
+  {编码前早期快速剪枝\\
+   淘汰劣质流水，仅将高潜力 Schema\\
+   交由 Coder 实现};
+
+\coordinate (input-turn) at (0,-17);
+\coordinate (model-top-left) at ([xshift=-17mm]model.north);
+\coordinate (model-top-right) at ([xshift=17mm]model.north);
+\draw[flow] (in1.south) -- (in1.south |- input-turn)
+  -- (model-top-left |- input-turn) -- (model-top-left);
+\draw[flow] (in2.south) -- (in2.south |- input-turn)
+  -- (model-top-right |- input-turn) -- (model-top-right);
+
+\coordinate (output-turn) at (0,-49);
+\coordinate (model-bottom-left) at ([xshift=-17mm]model.south);
+\coordinate (model-bottom-right) at ([xshift=17mm]model.south);
+\draw[flow] (model-bottom-left) -- (model-bottom-left |- output-turn)
+  -- (abs.north |- output-turn) -- (abs.north);
+\draw[flow] (model-bottom-right) -- (model-bottom-right |- output-turn)
+  -- (rel.north |- output-turn) -- (rel.north);
+\draw[flow] (rel) -- (prune);
+\end{tikzpicture}%
+\endgroup%

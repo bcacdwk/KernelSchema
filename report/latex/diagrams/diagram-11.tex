@@ -1,0 +1,63 @@
+\begingroup%
+\def\baselinestretch{1}%
+\definecolor{D11Blue}{HTML}{3478B8}%
+\definecolor{D11Teal}{HTML}{27877F}%
+\definecolor{D11Amber}{HTML}{C58B28}%
+\definecolor{D11Ink}{HTML}{243447}%
+\definecolor{D11PaleBlue}{HTML}{F0F6FC}%
+\definecolor{D11PaleAmber}{HTML}{FFF8E8}%
+\begin{tikzpicture}[
+  x=1mm, y=1mm,
+  card/.style={draw, fill=white, rounded corners=2mm, line width=.75pt,
+    minimum width=69mm, inner xsep=2.5mm, inner ysep=2.5mm, outer sep=.4pt,
+    align=flush center, text=D11Ink, font=\fontsize{9.5}{12.5}\selectfont},
+  group box/.style={draw, rounded corners=2.5mm, line width=.7pt,
+    inner sep=0pt, outer sep=.4pt},
+  group title/.style={inner sep=0pt, align=flush center, text=D11Ink,
+    font=\bfseries\fontsize{10}{12.5}\selectfont},
+  flow/.style={draw=D11Ink, line width=.7pt, rounded corners=1.8mm,
+    -{Latex[length=2.5mm,width=1.6mm]}}
+]
+\node[group title] at (-42,13) {机制一：Step（内部阶段边界伸缩）};
+\node[group title] at (42,13) {机制二：Dispatch（跨负载多粒度分派）};
+
+\node[card, draw=D11Blue, minimum height=15mm] (st1) at (-42,-5)
+  {突破单一重复循环限制\\
+   显式刻画多阶段调度转变与数据交接};
+\node[card, draw=D11Blue, minimum height=25mm] (st2) at (-42,-36)
+  {支持增删 · 拆分 · 融合 Step\\
+   自由重划算子边界，\\
+   面向未来支撑 Megakernel};
+
+\node[card, draw=D11Amber, minimum height=15mm] (dp1) at (42,-5)
+  {肯定不同 Workload/Shape 需差异化设计\\
+   摒弃朴素树状全量副本带来的冗余爆炸};
+\node[card, draw=D11Amber, minimum height=25mm] (dp2) at (42,-36)
+  {三档粒度精准分层：\\
+   1. 整体重构（独立 YAML + from 整区复用）\\
+   2. 局部微调（简洁差额记录）\\
+   3. 超参变化（参数遍历域约束）};
+
+\node[card, draw=D11Teal, font=\bfseries\fontsize{9.5}{12.5}\selectfont] (goal) at (0,-82)
+  {长程迭代核心增益\\
+   保留结构探索与特化自由度\\
+   彻底消除冗余分支与边界混乱};
+
+\begin{scope}[on background layer]
+  \node[group box, draw=D11Blue, fill=D11PaleBlue,
+    fit={(-81,20) (-3,-54)}] (step-mech) {};
+  \node[group box, draw=D11Amber, fill=D11PaleAmber,
+    fit={(3,20) (81,-54)}] (disp-mech) {};
+\end{scope}
+
+\draw[flow, draw=D11Blue] (st1) -- (st2);
+\draw[flow, draw=D11Amber] (dp1) -- (dp2);
+\coordinate (merge-turn) at (0,-63);
+\coordinate (goal-left) at ([xshift=-17mm]goal.north);
+\coordinate (goal-right) at ([xshift=17mm]goal.north);
+\draw[flow, draw=D11Blue] (step-mech.south) -- (step-mech.south |- merge-turn)
+  -- (goal-left |- merge-turn) -- (goal-left);
+\draw[flow, draw=D11Amber] (disp-mech.south) -- (disp-mech.south |- merge-turn)
+  -- (goal-right |- merge-turn) -- (goal-right);
+\end{tikzpicture}%
+\endgroup%

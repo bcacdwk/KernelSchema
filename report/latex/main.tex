@@ -1,0 +1,93 @@
+% !TeX program = tectonic
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=22mm,top=23mm,bottom=24mm,headheight=22pt,headsep=7mm,footskip=12mm]{geometry}
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\setmainfont{AlibabaSans-Regular.otf}[Path=fonts/,BoldFont=AlibabaSans-Bold.otf,ItalicFont=AlibabaSans-Italic.otf,BoldItalicFont=AlibabaSans-BoldItalic.otf,Ligatures=NoCommon]
+\setsansfont{AlibabaSans-Regular.otf}[Path=fonts/,BoldFont=AlibabaSans-Bold.otf,ItalicFont=AlibabaSans-Italic.otf,BoldItalicFont=AlibabaSans-BoldItalic.otf,Ligatures=NoCommon]
+\setmonofont{DejaVuSansMono.ttf}[Path=fonts/,BoldFont=DejaVuSansMono-Bold.ttf,ItalicFont=DejaVuSansMono-Oblique.ttf,BoldItalicFont=DejaVuSansMono-BoldOblique.ttf,Scale=0.9,Ligatures=NoCommon]
+\setCJKmainfont{Alibaba-PuHuiTi-Regular.otf}[Path=fonts/,BoldFont=Alibaba-PuHuiTi-Bold.otf,ItalicFont=Alibaba-PuHuiTi-Regular.otf]
+\setCJKsansfont{Alibaba-PuHuiTi-Regular.otf}[Path=fonts/,BoldFont=Alibaba-PuHuiTi-Bold.otf]
+\setCJKmonofont{Alibaba-PuHuiTi-Regular.otf}[Path=fonts/,BoldFont=Alibaba-PuHuiTi-Bold.otf]
+\xeCJKDeclareCharClass{CJK}{"2190 -> "2193,"2264 -> "2265}
+\usepackage{xcolor,graphicx,adjustbox}
+\definecolor{Ink}{HTML}{243746}
+\definecolor{Muted}{HTML}{617785}
+\definecolor{Blue}{HTML}{176B93}
+\definecolor{Teal}{HTML}{16877E}
+\definecolor{PaleBlue}{HTML}{F2F7FA}
+\definecolor{PaleTeal}{HTML}{F0F8F6}
+\definecolor{Line}{HTML}{D9E5EB}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc,backgrounds,shapes.geometric}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem,titlesec,fancyhdr,needspace,setspace}
+\usepackage[skins,breakable]{tcolorbox}
+\usepackage{fvextra}
+\usepackage[unicode,colorlinks,linkcolor=Blue,urlcolor=Teal,bookmarksopen=true,bookmarksnumbered=false,pdfencoding=auto]{hyperref}
+\usepackage{bookmark}
+\hypersetup{pdftitle={基于 Schema 的 Kernel 表示与生成},pdfauthor={邵瀚雍},pdfsubject={TRE AI系统工程}}
+\urlstyle{same}
+\pdfstringdefDisableCommands{\def\InlineCode#1{#1}\def\allowbreak{}\def\textbf#1{#1}\def\emph#1{#1}}
+\setcounter{secnumdepth}{-1}
+\setcounter{tocdepth}{2}
+\renewcommand{\contentsname}{目录}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{.5em plus .1em minus .1em}
+\setstretch{1.20}
+\emergencystretch=2em
+\clubpenalty=10000
+\widowpenalty=10000
+\displaywidowpenalty=10000
+\raggedbottom
+\color{Ink}
+\setlist{leftmargin=1.7em,itemsep=.45em,parsep=.35em,topsep=.4em,partopsep=0pt}
+\setlist[itemize,1]{label=\textcolor{Teal}{\small\textbullet}}
+\setlist[itemize,2]{label=\textcolor{Teal}{\scriptsize\textbullet}}
+\setlist[enumerate]{label=\textcolor{Blue}{\arabic*.},align=left}
+\titleformat{\section}{\color{Blue}\bfseries\fontsize{18}{27}\selectfont}{}{0pt}{}[\vspace{4pt}{\color{Teal}\titlerule[1.2pt]}]
+\titleformat{\subsection}{\color{Blue}\bfseries\fontsize{14.5}{22}\selectfont}{}{0pt}{}
+\titleformat{\subsubsection}{\color{Teal}\bfseries\fontsize{12}{19}\selectfont}{}{0pt}{}
+\titlespacing*{\section}{0pt}{0pt}{18pt}
+\titlespacing*{\subsection}{0pt}{20pt plus 3pt minus 2pt}{9pt}
+\titlespacing*{\subsubsection}{0pt}{16pt plus 2pt minus 2pt}{7pt}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\fontsize{8.5}{11}\selectfont\color{Muted}基于 Schema 的 Kernel 表示与生成}
+\fancyhead[R]{\fontsize{8.5}{11}\selectfont\color{Teal}TRE AI系统工程}
+\fancyfoot[R]{\fontsize{9}{11}\selectfont\color{Blue}\thepage}
+\renewcommand{\headrulewidth}{.35pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{Line}\leaders\hrule height\headrulewidth\hfill}}
+\DeclareRobustCommand{\InlineCode}[1]{{\color{Blue}\sffamily #1}}
+\newcommand{\SourceSeparator}{\par\addvspace{3pt}}
+\newtcolorbox{ReportQuote}{enhanced,breakable,colback=PaleTeal,colframe=Teal,boxrule=0pt,borderline west={2pt}{0pt}{Teal},arc=0pt,left=10pt,right=10pt,top=7pt,bottom=7pt,before skip=10pt,after skip=10pt}
+\newtcolorbox{RouteCard}{enhanced,before upper={\small\setstretch{1.15}},colback=PaleBlue,colframe=Line,boxrule=.5pt,arc=3pt,left=12pt,right=12pt,top=9pt,bottom=9pt,before skip=12pt,after skip=12pt,borderline west={2pt}{0pt}{Blue}}
+\newcommand{\CardField}[2]{\par\Needspace{4\baselineskip}{\color{Teal}\bfseries #1}\par\nobreak #2\par\smallskip}
+\newtcolorbox{CodeBox}{enhanced,colback=PaleBlue,colframe=Line,boxrule=.5pt,arc=3pt,left=9pt,right=9pt,top=9pt,bottom=9pt,before skip=10pt,after skip=12pt}
+\fvset{fontsize=\fontsize{9}{13}\selectfont,baselinestretch=1,tabsize=2}
+\newenvironment{DiagramBlock}{\par\addvspace{12pt}\noindent\begin{minipage}{\linewidth}\centering}{\end{minipage}\par\addvspace{12pt}}
+\newcommand{\MissingDiagram}[1]{\ifdefined\AllowMissingDiagrams\fcolorbox{Line}{PaleBlue}{\parbox[c][35mm][c]{.90\linewidth}{\centering\color{Muted}TikZ #1}}\else\PackageError{KernelReport}{Missing diagrams/diagram-#1.tex}{Provide all 13 TikZ files, or use scripts/build.py --draft for placeholders.}\fi}
+\newcommand{\ImageCaption}[2]{{\fontsize{9.5}{14}\selectfont\color{Muted}\textbf{#1}\par #2\par}}
+\newcommand{\OriginalImage}[3]{\par\addvspace{10pt}\noindent\begin{minipage}{\linewidth}\centering\includegraphics[width=\linewidth,height=.61\textheight,keepaspectratio]{#1}\par\vspace{6pt}\raggedright\ImageCaption{#2}{#3}\end{minipage}\par\addvspace{10pt}}
+\newcommand{\TallOriginalImage}[3]{\clearpage\noindent\begin{minipage}{\linewidth}\centering\includegraphics[width=\linewidth,height=.87\textheight,keepaspectratio]{#1}\par\vspace{5pt}\raggedright\ImageCaption{#2}{#3}\end{minipage}\clearpage}
+\newcommand{\ReportCover}[2]{%
+  \pagenumbering{gobble}\thispagestyle{empty}%
+  \begin{tikzpicture}[remember picture,overlay]
+    \fill[PaleBlue] (current page.north west) rectangle ([yshift=-145mm]current page.north east);
+    \fill[Teal] ([xshift=22mm,yshift=-38mm]current page.north west) rectangle ++(17mm,-2mm);
+    \node[anchor=north west,inner sep=0pt,align=left,text=Blue,font=\bfseries\fontsize{30}{43}\selectfont] at ([xshift=22mm,yshift=-55mm]current page.north west) {基于 Schema 的 Kernel\\表示与生成};
+    \node[anchor=north west,inner sep=0pt,align=left,text=Ink,font=\fontsize{13}{24}\selectfont] at ([xshift=22mm,yshift=-112mm]current page.north west) {#2};
+    \draw[Line,line width=.5pt] ([xshift=22mm,yshift=37mm]current page.south west) -- ([xshift=-22mm,yshift=37mm]current page.south east);
+    \node[anchor=south west,inner sep=0pt,text=Teal,font=\fontsize{10}{14}\selectfont] at ([xshift=22mm,yshift=43mm]current page.south west) {Kernel Schema};
+  \end{tikzpicture}%
+  \null\clearpage
+}
+\newcommand{\ReportContents}{\pagenumbering{roman}\pdfbookmark[0]{目录}{contents}\begingroup\small\setstretch{1.02}\setlength{\parskip}{0pt}\tableofcontents\endgroup\clearpage\pagenumbering{arabic}}
+% Register raw body as an engine dependency for latexmk continuous rebuilds.
+\newread\BodySourceDependency
+\openin\BodySourceDependency=body.tex
+\closein\BodySourceDependency
+\begin{document}
+\InputIfFileExists{yaml-style.tex}{}{}
+\IfFileExists{body-highlighted.tex}{\input{body-highlighted.tex}}{\input{body.tex}}
+\end{document}
