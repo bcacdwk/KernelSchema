@@ -31,7 +31,7 @@
 | 文件 | 原文位置 / 图内容 |
 | --- | --- |
 | `diagram-01.tex` | 第一章：未来 AI 闭环与当下 MaaS 刚需 |
-| `diagram-02.tex` | 第三章：事前、事中、事后三大挑战 |
+| `diagram-02.tex` | 第三章：数据与表示、生成与迭代、交付与维护三个环节的挑战 |
 | `diagram-03.tex` | 3.2：设计与实现耦合导致的路径坍缩 |
 | `diagram-04.tex` | 4.1：人类 HPC 专家与编码 Agent 对比 |
 | `diagram-05.tex` | 4.2：Kernel Schema 破局总蓝图 |

@@ -22,30 +22,28 @@
   schema flow/.style={flow, draw=D09Blue, line width=.9pt,
     -{Latex[length=3mm,width=2mm]}}
 ]
-\node[group title] at (0,17) {原生 AKA 模式：单层混杂循环（无高层约束与方向锚点）};
+\node[group title] at (0,17) {原生 AKA：单层混合循环，缺少高层设计约束};
 \node[group title] at (0,-48)
-  {我们的两阶段解耦模式：Planner（管压缩态设计）+ Coder（管解压态恢复）};
+  {两阶段解耦：Planner 负责压缩态设计，Coder 负责解压与实现};
 
 \node[card, draw=D09Amber, minimum width=42mm, minimum height=18mm] (o1) at (-55,0)
-  {从零起步 / 拉取已有 SOTA};
+  {从零开始 / 基于已有 SOTA};
 \node[card, draw=D09Amber, minimum width=46mm, minimum height=18mm] (o2) at (0,0)
-  {单一 Episode 混杂迭代\\
-   边猜策略 · 边改底层代码 ·\\
-   边排编译错};
+  {单一 Episode 内混合迭代\\
+   策略、代码与编译排错交织};
 \node[card, draw=D09Amber, minimum width=46mm, minimum height=18mm] (o3) at (55,0)
   {验证与晋升判定\\
-   易因局部实现摩擦\\
+   易因实现受阻\\
    放弃正确方向};
 
 \node[card, draw=D09Blue, minimum width=51mm, minimum height=24mm] (n1) at (-48,-71)
   {Planner 维护 Schema\\
-   Design / Extract 建立初版\\
-   Optimize 分层级演进设计};
+   Design / Extract 生成初版\\
+   Optimize 分层演进};
 \node[card, draw=D09Teal, minimum width=55mm, minimum height=24mm] (n2) at (48,-71)
-  {Coder 维护 Kernel（改造自 AKA）\\
-   Implement 定向信息解压\\
-   与代码恢复\\
-   内部消化编译与工程细节};
+  {Coder 维护 Kernel（基于 AKA）\\
+   Implement 将 Schema 解压为代码\\
+   内部处理编译与工程细节};
 
 \begin{scope}[on background layer]
   \node[group box, draw=D09Amber, fill=D09PaleAmber,
@@ -58,16 +56,16 @@
 \draw[flow] (o2) -- (o3);
 \coordinate (retry) at (0,-18);
 \draw[flow, draw=D09Amber] (o3.south) -- (o3.south |- retry)
-  -- node[edge text, fill=D09PaleAmber] {无方向盲目重试} (retry) -- (o2.south);
+  -- node[edge text, fill=D09PaleAmber] {缺少方向的重试} (retry) -- (o2.south);
 
 \coordinate (schema) at (0,-65);
 \coordinate (evidence) at (0,-77);
 \draw[schema flow] (n1.east |- schema) --
-  node[edge text, fill=D09PaleBlue] {下发固定 Schema\\明确方向与硬边界} (n2.west |- schema);
+  node[edge text, fill=D09PaleBlue] {下发 Schema\\限定方向与边界} (n2.west |- schema);
 \draw[schema flow, draw=D09Teal] (n2.west |- evidence) --
-  node[edge text, fill=D09PaleBlue] {回传干净实测证据\\不稀释 Planner 注意力} (n1.east |- evidence);
+  node[edge text, fill=D09PaleBlue] {回传实测结果\\不含编译排错细节} (n1.east |- evidence);
 
 \draw[flow, draw=D09Blue, dash pattern=on 2.6pt off 2pt] (old.south) --
-  node[edge text, right=2mm] {注入 Kernel Schema 拆分职责} (new.north);
+  node[edge text, right=2mm] {引入 Kernel Schema，拆分职责} (new.north);
 \end{tikzpicture}%
 \endgroup%

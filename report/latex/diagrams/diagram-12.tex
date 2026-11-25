@@ -28,42 +28,36 @@
     -{Latex[length=3mm,width=2mm]}}
 ]
 \node[group title] at (0,12)
-  {分级异步验证流水线：消除串行等待，严防 Reward Hacking 与隐式 Bug};
+  {分级异步验证：减少串行等待，防范 Reward Hacking 与隐式 Bug};
 \node[fast, minimum width=51mm, minimum height=9mm] (cand) at (-41,0)
   {Coder 生成候选 Kernel};
 \node[fast, minimum width=59mm] (g1) at (-41,-21)
-  {Gate 1：轻量级同步门禁\\
-   编译检查 · 静态校验 · 冒烟小 Shape};
+  {Gate 1：轻量同步检查\\
+   编译、静态校验、小 Shape 冒烟};
 \node[fast, minimum width=56mm] (next) at (45,-21)
-  {立刻返回主循环继续下一轮迭代\\
-   （主链路零阻塞）};
+  {返回主循环，进入下一轮\\
+   （主链路不阻塞）};
 \node[async] (g2) at (-41,-49)
-  {Gate 2：中层动态域与性能题\\
-   跨字段动态 Shape · 掩码/空块边界 ·\\
-   Geomean 测速};
+  {Gate 2：动态边界与性能\\
+   动态 Shape、掩码 / 空块边界、Geomean};
 \node[async] (g3) at (-41,-75)
-  {Gate 3：重型上线准入压测\\
-   全量盲测集 · Sanitizer 并发检测 ·\\
-   防掉点监控};
+  {Gate 3：上线前重型压测\\
+   全量盲测、Sanitizer、掉点监控};
 
 \node[group title] at (0,-105)
-  {自动化自进化 Loop 的头尾哲学：Data-Driven + Bench-Verified};
+  {系统的头与尾：头部 Data 驱动探索，尾部 Bench 验证结果};
 \node[loop core] (head) at (-53,-129)
-  {头部：Data 数据集\\（第五章）\\
-   Kernel Schema 与\\Schema Wiki\\
-   提供高压缩先验，\\
-   承担 Data-Driven 引擎};
+  {头部：Data\\（第五章）\\
+   Kernel Schema\\与 schema\_wiki\\
+   提供设计先验};
 \node[loop core] (mid) at (0,-129)
-  {中部：Planner–Coder\\
-   解耦闭环（第六章）\\
-   设计空间树搜索 +\\
-   受控工程恢复};
+  {中部：Planner–Coder\\（第六章）\\
+   设计空间树搜索\\
+   与受控代码实现};
 \node[loop core] (tail) at (53,-129)
-  {尾部：Bench 测试集\\
-   （第七章规划）\\
-   分阶段分层级\\正确性与速度基准\\
-   锚定物理真值，\\
-   承担 Bench-Verified 准星};
+  {尾部：Bench\\（第七章规划）\\
+   分层的正确性\\与速度基准\\
+   以实测结果为准};
 
 \begin{scope}[on background layer]
   \node[group box, draw=D12Teal, fill=D12PaleTeal, fit={(-81,19) (81,-89)}] {};
@@ -71,11 +65,11 @@
 \end{scope}
 
 \draw[flow] (cand) -- (g1);
-\draw[flow] (g1) -- node[edge text] {快速通过 ·\\立即放行} (next);
-\draw[async flow] (g1) -- node[edge text] {后台按重要度异步触发} (g2);
+\draw[flow] (g1) -- node[edge text] {通过即放行} (next);
+\draw[async flow] (g1) -- node[edge text] {后台按优先级异步触发} (g2);
 \draw[async flow] (g2) -- (g3);
 \draw[async flow] (g3.east) -- (next.south |- g3.east)
-  -- node[edge text] {发现隐式缺陷则告警回滚} (next.south);
+  -- node[edge text] {发现缺陷则告警回滚} (next.south);
 
 \draw[loop flow] (head) -- (mid);
 \draw[loop flow] (mid) -- (tail);
