@@ -6,7 +6,7 @@
 \SourceSeparator
 \clearpage
 \section{一、背景与立意：为什么做自动化算子生成}
-高性能算子（Kernel）连接上层深度学习算法和底层异构硬件。我们做自动化算子生成，看重的不只是得到一个局部的代码生成工具。这件事同时对应两方面的需要：面向未来，它适合用来研究 AI 的自我改进闭环；面向当下，MaaS 大规模推理需要更多、更快的算子。
+高性能算子（Kernel）连接上层的深度学习算法和底层的异构硬件平台。我们做自动化算子生成的意义，看重的不只是得到一个局部的代码生成工具。这件事同时对应两方面的需要：面向当下，MaaS 大规模推理需要更多、更快的算子；面向未来，它非常适合作为研究 AI 自我改进闭环的起点。
 
 
 \begin{DiagramBlock}
@@ -18,26 +18,8 @@
 \MissingDiagram{01}%
 }
 \end{DiagramBlock}
-\subsection{1.1 面向未来：可验证的自动化闭环}
-预训练语料带来的增益正在放缓，模型能力的提升越来越依赖强化学习（RL）合成数据、长程工具交互（Agentic Harness）和系统的自迭代、自进化（Recursive Self-Improvement）。这类自动化循环要转起来，首先需要一个\textbf{边界清楚、结果能客观验证的好问题（Good Problem \& Verifiable Loop）}：先在这个问题上把闭环建起来，再推广到各类任务。在众多工程和科研任务中，算子开发是少有的满足这个条件的问题，适合作为研究自动化闭环的起点，理由有三：
-
-
-\begin{enumerate}[start=1]
-\item
-\textbf{结果可验证}：能否编译、数值是否与参考实现（Reference）一致，都有确定的判据；实测延迟和 Roofline 利用率又给出来自真实硬件的连续反馈，每次尝试都能拿到一个分数。
-
-
-\item
-\textbf{问题有难度}：写好算子要在寄存器、片上存储（SMEM / TMEM）和带宽的约束下，同时决定数学等价改写、并行切分、多级存储复用，以及用异步流水掩盖访存延迟。这是一个组合优化问题，靠语法翻译解决不了。
-
-
-\item
-\textbf{方法可迁移}：如果能在算子这个软硬件协同问题上打磨出一套高效、能收敛、能积累经验的自动化 Loop，其中问题表示、分层搜索、门禁验证和经验蒸馏等机制有望用到其他系统设计和自动化科研任务上。
-
-
-\end{enumerate}
-\subsection{1.2 面向当下：MaaS 推理的算子需求}
-撇开长远的研究价值，算子开发本身就有很大的现实需求。在大规模 MaaS（Model-as-a-Service）推理中，算子需求是下面三类因素的笛卡尔积，每多一种模型结构、一款卡或一种负载，要写的算子就成倍增加：
+\subsection{1.1 面向当下：MaaS 推理的算子需求}
+首先我们聚焦于现实的需求。在大规模 MaaS（Model-as-a-Service）推理中，算子需求是下面三类因素的笛卡尔积，每多一种模型结构、一款卡或一种负载，要写的算子就成倍增加：
 
 
 \begin{itemize}
@@ -58,7 +40,27 @@
 算子效率直接影响单 Token 成本、算力利用率和 TTFT / TPOT 延迟。同时懂数学推导和微架构的 HPC 专家很少，一个算子在一款卡上手写调优要几周到几个月，跟不上模型与硬件组合增长的速度。
 
 
-\textbf{向远看，自动化算子生成是探索 AI 自我改进闭环的理想试验场；向近看，它是降低 MaaS 推理成本的必经之路。}
+\subsection{1.2 面向未来：可验证的自动化闭环}
+除了眼前的需求，这件事还有更长远的意义。预训练语料带来的增益正在放缓，模型能力的提升越来越依赖强化学习（RL）合成数据、长程工具交互（Agentic Harness）和系统的自迭代、自进化（Recursive Self-Improvement）。这类自动化循环要转起来，首先需要一个\textbf{边界清楚、结果能客观验证的好问题（Good Problem \& Verifiable Loop）}：先在这个问题上把闭环建起来，再推广到各类任务。在众多工程和科研任务中，算子开发是少有的满足这个条件的问题，适合作为研究自动化闭环的起点，有三个关键理由：
+
+
+\begin{enumerate}[start=1]
+\item
+\textbf{结果可验证}：能否编译、数值是否与参考实现（Reference）一致，都有确定的判据；实测延迟和 Roofline 利用率又给出来自真实硬件的连续反馈，每次尝试都能拿到一个分数。
+
+
+\item
+\textbf{问题有难度}：写好算子要在寄存器、片上存储（SMEM / TMEM）和带宽的约束下，同时决定数学等价改写、并行切分、多级存储复用，以及用异步流水掩盖访存延迟。这是一个组合优化问题，靠语法翻译解决不了。
+
+
+\item
+\textbf{方法可迁移}：如果能在算子这个软硬件协同问题上打磨出一套高效、能收敛、能积累经验的自动化 Loop，其中问题表示、分层搜索、门禁验证和经验蒸馏等机制有望用到其他系统设计和自动化科研任务上。
+
+
+\end{enumerate}
+
+
+\textbf{向近看，自动化算子生成是降低 MaaS 推理成本的必经之路；向远看，它是探索 AI 自我改进闭环的理想试验场。}
 
 
 \SourceSeparator
@@ -72,37 +74,37 @@
 
 
 \begin{RouteCard}
-\CardField{技术路线}{\textbf{路线一：训练内化型} \emph{(LLM4Kernel / Agentic RL)}}
+\CardField{技术路线}{\textbf{路线一：垂域后训练型} \emph{(LLM4Kernel / Agentic RL)}}
 \CardField{代表工作}{\textbf{CUDA Agent} \emph{(字节 Seed × 清华, 2026)}}
-\CardField{做法}{合成多样的训练题，在能编译、测试和 Profiling 的真实 CUDA 环境里做多轮 Agentic RL，把排障和改写代码的能力训练进模型权重}
+\CardField{实现方法}{合成多样的训练题，在能编译、测试和 Profiling 的真实 CUDA 环境里做多轮 Agentic RL，把排障和改写代码的能力训练进模型权重}
 \CardField{优势}{端到端调用工具和单点优化的能力明显提升；分档奖励和随机输入减少了模型钻评测漏洞（Reward Hacking）的情况}
-\CardField{局限}{需要昂贵的可执行训练环境和题目合成；能力固化在权重里，绑定特定硬件和语言分布，难以迁移到新架构}
+\CardField{局限}{需要昂贵的可执行训练环境和题目；能力固化在权重里，绑定特定硬件和语言分布，难以迁移到新架构}
 \end{RouteCard}
 \begin{RouteCard}
 \CardField{技术路线}{\textbf{路线二：推理期搜索与执行反馈} \emph{(Agent4Kernel)}}
 \CardField{代表工作}{\textbf{AlphaEvolve} \emph{(DeepMind)} · \textbf{AVO} \emph{(NVIDIA, 2026)} · \textbf{KDA} \emph{(MIT HAN Lab, 2026)} · \textbf{AKA} \emph{(内部 Atrex-Kernel-Agent)}}
-\CardField{做法}{冻结强基座模型，结合进化搜索 / 候选池、硬件知识库（Wiki）、Profiler 反馈（如 NCU）、独立校验和按真实负载 Roofline 加权的评分，做长程迭代}
+\CardField{实现方法}{冻结强基座模型，结合进化搜索 / 候选池、硬件知识库（Wiki）、Profiler 反馈（如 NCU）、独立校验和按真实负载 Roofline 加权的评分，做长程迭代}
 \CardField{优势}{在多个单算子任务上提速明显：AVO 在 B200 上从强先验出发连续演化 7 天，接近手写库，在部分算子上超过；KDA 显示加入 Wiki 和 NCU 反馈后加速比大幅提高}
 \CardField{局限}{直接在底层代码上做变异搜索，每轮试错周期长，Token 和 GPU 开销大；收敛随机性强，产物容易变成黑盒，分支越来越多}
 \end{RouteCard}
 \begin{RouteCard}
 \CardField{技术路线}{\textbf{路线三：高层意图 / 调度中间层} \emph{(Sketch / IR 分层)}}
-\CardField{代表工作}{\textbf{K-Search} \emph{(UC Berkeley, 2026)} · \textbf{AKG Kernel Agent} \emph{(华为)} · \textbf{CAKE} \emph{(NVIDIA × CMU, 2026)}}
-\CardField{做法}{把高层策略和底层代码分开：K-Search 维护一棵自然语言优化意图树；AKG 生成跨 DSL 的 Unified Sketch；CAKE 定义编译器级调度 IR，再确定性地生成代码}
-\CardField{优势}{一次编译失败不会丢掉高层优化意图，初步说明策略与实现分离是可行的}
-\CardField{局限}{自然语言意图和粗粒度 Sketch 难以精确约束片上资源、同步和数学改写；CAKE 一类 IR 绑定特定算子域和专用后端，难以跨语言通用，也没有给具体实现留白}
+\CardField{代表工作}{\textbf{K-Search} \emph{(UC Berkeley, 2026)} · \textbf{AKG Kernel Agent} \emph{(华为)} · \textbf{CAKE} \emph{(NVIDIA × CMU, 2026)} · \mbox{\textbf{ForgeKernel}} \emph{(面壁智能, 2026)}}
+\CardField{实现方法}{把高层策略和底层代码分开：K-Search 维护一棵自然语言优化意图树；AKG 生成跨 DSL 的 Unified Sketch；CAKE 定义编译器级调度 IR，再确定性地生成代码；ForgeKernel 由架构 Agent 制定里程碑计划，编码 Agent 按计划实现}
+\CardField{优势}{一次编译失败不会丢掉高层优化意图；ForgeKernel 在 Hopper / Blackwell 的 29 个配置中有 25 个持平或超过参考实现，初步说明策略与实现分离是可行的}
+\CardField{局限}{自然语言意图和粗粒度 Sketch 难以精确约束片上资源、同步和数学改写；CAKE 一类 IR 绑定特定算子域和专用后端，难以跨语言通用，也没有给具体实现留白；ForgeKernel 依赖已有的高性能参考实现，缺少参考时优化容易停滞}
 \end{RouteCard}
-\subsection{2.2 共同局限：以底层代码为中心}
-这些工作说明，LLM 和 Agent 闭环可以生成可用的算子。但把视角从中小规模标准算子的刷榜，拉回到复杂生产算子（如 Blackwell 上的 FA4、Fused MoE、MLA、GDN）从研发到上线的完整流程，现有 Kernel Agent 无论换用哪种搜索技巧，都会撞上同一堵墙。
+\subsection{2.2 共同局限：以算子coding为中心的编程视角}
+这些工作说明，LLM 和 Agent 闭环可以生成可用的算子。但把视角从中小规模标准算子的刷榜，拉回到复杂生产算子（如 Blackwell 上的 FA4、Fused MoE、MLA、GDN）从研发到上线的完整流程，现有 Kernel Agent 无论换用哪种搜索技巧，都会碰到完全相同的问题。
 
 
-问题出在表示上：\textbf{现有方案大多把未经压缩的底层代码同时当作知识的存放形式、搜索空间和交付产物}。按算子生成的流程看，这种做法在数据与表示、生成与迭代、交付与维护三个环节各自带来问题，三者环环相扣，第三章逐一展开。
+而关键在于表示方法：\textbf{现有方案大多把未经压缩的底层代码同时当作知识的存放形式、搜索空间和交付产物}。按算子生成的流程看，这种做法在“数据与表示”、“生成与迭代”、“交付与维护”三个环节各自带来问题，三者环环相扣；我们在下一章展开。
 
 
 \SourceSeparator
 \clearpage
-\section{三、挑战：算子生成流程中的三个问题}
-三个挑战分别出现在算子生成流程的数据与表示、生成与迭代、交付与维护三个环节，依次限制了自动设计的能力上限、迭代的收敛效率，以及产物能否进入生产。
+\section{三、挑战：自动化算子生成面临的挑战}
+刚刚提到，现有方案的问题分别出现在算子生成流程的数据与表示、生成与迭代、交付与维护三个环节，对应的依次限制了自动设计的能力上限、迭代的收敛效率，以及产物能否真正进入生产环境。我们将在本章详细展开。
 
 
 \begin{DiagramBlock}
@@ -114,47 +116,53 @@
 \MissingDiagram{02}%
 }
 \end{DiagramBlock}
-\SourceSeparator
+
+\newpage
+
 \subsection{3.1 数据与表示：模型懂编程，不懂硬件}
 现有基座模型和编码 Agent 普遍“重编程、轻硬件”：通用编程与代码改写能力较强，但对硬件的理解和软硬件协同设计（Algorithm-Hardware Co-design）能力较弱。它们能写出语法正确的核函数，却不清楚目标硬件的吞吐、存储层级和延迟掩盖机制，也说不清为什么要采用某种切分和流水结构。原因主要在语料和表达方式上，有以下三点。
 
 
 \begin{enumerate}[start=1]
 \item
-\textbf{语料偏向旧架构，代际混杂}
+\textbf{训练语料架构代际混杂}
 
 
 语料集中在 NVIDIA 的历史架构（如 Ampere、Hopper），不同代际的实现混在一起，也没有标注各代硬件的能力边界。面对新微架构（如 Blackwell 的 TMEM 与异步指令）或昇腾 Ascend、AMD HIP 等平台时，模型缺少目标卡的可靠先验，常常照搬旧卡的模板。国产模型和跨架构迁移场景受影响最大。
 
 
 \item
-\textbf{编程语言碎片化}
+\textbf{编程语言细节碎片化}
 
 
-算子开发语言很多，包括 \InlineCode{CUDA C++}、\InlineCode{PTX}、\InlineCode{CuTe /\allowbreak{} CuTeDSL}、\InlineCode{Triton}、\InlineCode{TileLang}、\InlineCode{Ascend C}、\InlineCode{HIP} 等，抽象层级各不相同。\textbf{语言是思维的边界}：Agent 在某一种面向特定硬件抽象的语言里思考时，设计空间就被框定在这种语言的惯用写法之内，很难看到各语言之间共通的数学改写和调度结构。Megakernel 这类打破单算子边界、需要重新划定切分与融合范围的场景，受这一限制最明显。
+算子开发语言很多，包括 \InlineCode{CUDA C++}、\InlineCode{PTX}、\InlineCode{CuTe /\allowbreak{} CuTeDSL}、\InlineCode{Triton}、\InlineCode{TileLang}、\InlineCode{Ascend C}、\InlineCode{HIP} 等，抽象层级各不相同，规范标准也完全不同。
+
+\textbf{语言是思维的边界}：Agent 在某一种面向特定硬件抽象的语言里思考时，设计空间就被框定在这种语言的惯用写法之内，很难看到各语言之间共通的数学改写和调度结构。Megakernel 这类打破单算子边界、需要重新划定切分与融合范围的场景，受这一限制最明显。
 
 
 \item
-\textbf{工程样板淹没设计决策}
+\textbf{工程实现细节耦合设计决策}
 
 
-现有算子源码大多没有经过整理，信息密度很低。一份工业级算子动辄数千行（如 FlashAttention-4 前向核心 CUDA 代码超过 2300 行），大部分篇幅是 Host 胶水、张量 IO 校验、指针步长、模板元编程与语法样板；\textbf{决定性能上限的设计决策（数学改写、工作块映射、片上缓冲复用、异步流水编排）只有百余行，深埋在这些代码中间}。
+现有算子源码大多没有经过整理，信息密度很低。一份工业级算子动辄数千行（如 FlashAttention-4 前向核心 CUDA 代码超过 2300 行），大部分篇幅是 host 衔接层、张量 IO 校验、指针步长、模板元编程与语法样板；\textbf{决定性能上限的设计决策（数学改写、工作块映射、片上缓冲复用、异步流水编排）只有百余行，隐藏在这些代码中间}。
 
 \textbf{压缩即智能}：大模型的能力来自对数据中共性规律的压缩。源码中与设计无关的工程代码占了大头，模型能从中提炼出的软硬件协同规律就很少。
 
 
 \end{enumerate}
 
-后两点合起来是“语言杂、内容杂”：同一类设计散落在多种语言里，每份源码中讲设计的部分又很少。于是，训练时的语料和推理时查阅的 Wiki 都处在未压缩、未蒸馏的状态。表达设计的语言不统一、不凝练，造成了数据问题，也限制了模型思考设计的方式，“重编程、轻硬件”由此成为自动设计的能力上限。
-\SourceSeparator
+总的来说，现有算子源代码信息密度低，导致同一类设计散落在多种语言里，每份源码中讲设计的部分又很少。于是，训练时的语料和推理时查阅的 Wiki 都处在未压缩、未蒸馏的状态。表达设计的语言不统一、不凝练，造成了数据问题，也限制了模型思考设计的方式，“重编程、轻硬件”由此成为自动设计的能力上限。
+
+\newpage
+
 \subsection{3.2 生成与迭代：难以收敛，也不知何时停止}
 在生成与迭代环节，问题是相同配置多次运行的结果不一致，容易停在平台期，而且无法判断成本与收益之间的帕累托前沿（Pareto Frontier），也就不知道该在哪里停下。
 
 
-每一轮优化都要消耗墙钟时间、GPU 机时和大量 Token，这些都是成本。我们希望在成本可接受的位置停下，同时确信此时的解已接近该算子在目标硬件上的性能极限。这需要回答两个问题：\textbf{当前解离硬件极限还有多远？什么时候应该停止？}前者是预测问题，后者是收敛问题。在现有的端到端代码迭代中，最优路径难以稳定复现，这两个问题都无从回答。
+每一轮优化都要消耗实际迭代时间、GPU 机时和大量 Token，这些都是需要减少的成本。我们希望在成本可接受的位置停下，同时确信此时的解已接近该算子在目标硬件上的性能极限。这需要回答两个问题：\textbf{当前的solution离硬件极限SOL还有多远？什么时候应该停止？}前者是预测问题，后者是收敛问题。在现有的端到端代码迭代中，最优路径难以稳定复现，这两个问题都无从回答。
 
 
-两组实验数据可以说明这一点。在 B300 上用完全相同的配置重复运行 AKA Loop，前 10 个 episode 内，各次运行最终接受的延迟最慢与最快相差 1.44×～1.67×，单轮探索累计消耗数亿输入 Token（含缓存）。在 \InlineCode{013 GQA} 任务中，Opus 在第 97 个版本达到 13.34 µs；Qwen 经过很长的平台期，到第 1224 个版本才达到最佳的 13.83 µs，跑到 \InlineCode{v1367} 仍为 13.91 µs。系统无法判断这是已经接近硬件上限，还是停在了局部次优解。
+我们实测的两组数据可以说明这一点。在 B300 上用完全相同的配置重复运行 AKA Loop，前 10 个 episode 内，各次运行最终接受的延迟最慢与最快相差 1.44×～1.67×，单轮探索累计消耗数亿输入 Token（含缓存）。在 \InlineCode{GQA} 任务中，Opus 在第 97 个版本达到 13.34 µs；Qwen 经过很长的平台期，到第 1224 个版本才达到最佳的 13.83 µs，跑到 \InlineCode{v1367} 仍为 13.91 µs。系统无法判断这是已经接近硬件上限，还是停在了局部次优解。
 
 
 \OriginalImage{assets/gdn_prefill_trace.png}{GDN Prefill 从零迭代的多路收敛轨迹}{\emph{图：L20D（SM103）上} \InlineCode{GDN Prefill} \emph{多路独立重复运行的收敛轨迹。橙色为基线组（}\InlineCode{Control r1–r3}\emph{）：初始条件相同、无外部参考，各 Run 的路径明显分化，其中} \InlineCode{Control r2} \emph{长期停在} 365.9 µs \emph{附近，与同组其他路径相差数倍。蓝色为第五章引入 Kernel Schema 后的对照组。}}
@@ -186,10 +194,10 @@
 \end{enumerate}
 \SourceSeparator
 \subsection{3.3 交付与维护：产物是黑盒，难审难维护}
-第三个问题出在交付环节：产物能否让人看懂、能否可靠可控，决定了它能否进入生产。现状是 Agent 为特定输入写了大量分支特化，代码随之膨胀，内部还藏有并发和边界错误；人类专家难以界定它的行为，也难以读懂和修改，长期维护成本高。
+第三个问题在于交付的环节：产物能否让人看懂、能否可靠可控，决定了它能否进入生产。现状是 Agent 为特定输入写了大量分支特化，代码随之膨胀，内部还藏有非常深的并发和边界错误；人类专家难以界定它的行为，也难以读懂和修改，长期维护成本高。
 
 
-我们在自建的 44 个算子主库（20 个 AKA 优胜解 + 24 个参考实现）上做了审计。对其中首批 18 个算子（共 48 份设计）做静态提取和独立的正确性复审后，发现了三类问题。
+我们在自建的 44 个算子主库（20 个 AKA 迭代解 + 24 个参考算子实现）上做了审计。对其中首批 18 个算子（共 48 份设计）做静态提取和独立的正确性复审后，发现了三类核心问题。
 
 
 \begin{enumerate}[start=1]
@@ -201,16 +209,16 @@ Agent 倾向于堆砌 \InlineCode{if-\allowbreak{}else} 分支和针对特定 Sh
 
 
 \item
-\textbf{并发与边界缺陷漏网，测试集越堆越慢}
+\textbf{并发与边界等缺陷难以感知，测试集越堆越慢}
 
 
-能通过有限评测用例的代码，仍可能含有不易察觉的错误。首批 18 个算子中的典型问题有两类。一是共享内存竞争与越界：\InlineCode{fmha\_\allowbreak{}mxfp8\_\allowbreak{}qkv} 的空 split 分支中，零有效块路径仍会写入零部分和，但复用共享缓冲前缺少跨 warp 同步（后置的 CTA 屏障无法弥补）；空分支入口还存在读取 \InlineCode{MState[cLo-\allowbreak{}1]} 的越界风险。二是零工作量下的同步失配：\InlineCode{paged\_\allowbreak{}indexed\_\allowbreak{}latent\_\allowbreak{}fp8} 在 \InlineCode{active\_\allowbreak{}topk=0} 时，生产者的通知执行 0 次，而消费者仍无条件等待首个通知，存在死锁风险。另有部分算子在测试未覆盖的分支上依赖慢速 Fallback。
+能通过有限评测用例的代码，仍可能含有不易察觉的错误。首批 18 个算子中的典型问题有两类。一是共享内存竞争与越界：\InlineCode{fmha\_\allowbreak{}mxfp8\_\allowbreak{}qkv} 的空 split 分支中，零有效块路径仍会写入零部分和，但复用共享缓冲前缺少跨 warp 同步（后置的 CTA 屏障无法弥补）；空分支入口还存在读取 \InlineCode{MState[cLo-\allowbreak{}1]} 的越界风险。二是零工作量下的同步失配：\InlineCode{paged\_\allowbreak{}indexed\_\allowbreak{}latent\_\allowbreak{}fp8} 在 \InlineCode{active\_\allowbreak{}topk=0} 时，生产者的通知执行 0 次，而消费者仍无条件等待首个通知，存在死锁风险。另有部分算子在测试未覆盖的分支上依赖慢速 fallback。
 
 要拦住这类缺陷，只能不断扩充测试集、增加极端用例，结果是单次评估越来越慢，迭代也被拖慢，而测试没有覆盖的边界上仍可能有缺陷。
 
 
 \item
-\textbf{设计意图丢失，专家难以介入}
+\textbf{设计意图丢失，专家难以介入和理解算子}
 
 
 人类专家擅长做高层取舍，也有设计品味（Taste），例如知道为什么选 3 级流水（2 级掩盖不住 TMA 延迟，4 级超出 SMEM 预算），或者延迟重缩放阈值（如 $\tau=8$）的精度边界在哪里。端到端生成的代码把这些取舍埋在语法细节里，算子成了黑盒，专家很难以 Human-in-the-Loop 的方式参与。\textbf{要上线，需要大量人力逐行审计；直接上线，又可能因隐式竞争和边界行为引发线上故障。}这限制了自动生成的算子在生产中大规模使用。
@@ -220,7 +228,7 @@ Agent 倾向于堆砌 \InlineCode{if-\allowbreak{}else} 分支和针对特定 Sh
 \SourceSeparator
 \clearpage
 \section{四、第一性原理：从“工程编码”回归“算子设计”}
-提出方案之前，先看一个基本问题：\textbf{优秀的 HPC 工程师是怎样开发算子的？编码 Agent 和他们差在哪里？}
+提出方案之前，先看一个基本问题：\textbf{一个优秀的 HPC 工程师是怎样开发算子的？编码 Agent 和他们差在哪里？}
 
 
 \subsection{4.1 人类专家先做设计，编码 Agent 直接写代码}
@@ -248,10 +256,10 @@ Agent 倾向于堆砌 \InlineCode{if-\allowbreak{}else} 分支和针对特定 Sh
 \MissingDiagram{04}%
 }
 \end{DiagramBlock}
-现有编码 Agent 的做法正好相反。在当前的任务定义和强化学习（RL）训练方式下，Agent 得到的主要奖励是交出一份能编译、能通过测试的代码。长程任务中有效奖励稀疏，Agent 变得短视：跳过瓶颈分析，一上来就写底层代码。同时，Agent 也没有一种形式化的方式来记录、检查和修改设计，最多用 Markdown 写几句自然语言总结，没有结构约束，也无法检查前后是否自洽。结果是 Agent 一方面缺少对设计的敏感度和品味（Taste），另一方面缺少做设计的载体和能力。前者让它不去做设计，后者让它做了设计也留不下来，两者形成恶性循环。
+现有编码 Agent 的做法正好相反。在当前的任务定义和强化学习训练方式下，Agent 得到的主要奖励是交出一份能编译、能通过测试的代码。长程任务中有效奖励稀疏，Agent 变得短视：跳过瓶颈分析，一上来就写底层代码。同时，Agent 也没有一种形式化的方式来记录、检查和修改设计，最多用 Markdown 写几句自然语言总结，没有结构约束，也无法检查前后是否自洽。结果是 Agent 一方面缺少对设计的敏感度和 Taste，另一方面缺少做设计的载体和能力。前者让它不去做设计，后者让它做了设计也留不下来，两者形成恶性循环。
 
 
-\textbf{三个挑战的共同根源：人类把算子开发当作高层的软硬件协同 Design 问题，现有 Agent 则把它当作底层的 Code 任务。}设计一旦只能依附在代码上，三个环节的问题就都有了来由：语料中的设计被工程样板淹没（挑战一），迭代中设计的好坏受实现质量牵连（挑战二），交付后设计取舍埋在代码里，难以审阅（挑战三）。
+\textbf{三个挑战的共同根源：人类把算子开发当作高层的软硬件协同 Design 问题，现有 Agent 则把它当作底层的 Code 任务。}设计一旦只能依附在代码上，三个环节的问题也因此出现：语料中的设计被工程实现细节淹没（挑战一），迭代中设计的好坏受实现质量牵连（挑战二），交付后设计取舍埋在代码里，难以审阅（挑战三）。
 
 
 \subsection{4.2 总体思路：用 Kernel Schema 记录设计，接入迭代闭环}
@@ -290,7 +298,7 @@ Agent 倾向于堆砌 \InlineCode{if-\allowbreak{}else} 分支和针对特定 Sh
 我们希望这门语言在理论上能描述任意异构硬件（不同的硬件特性）和任意模型结构（不同的数学规格），并且描述完备。这首先是一个数据问题：只能从大量真实算子中归纳共性，再把共性压缩成少量字段，必须由数据驱动（Data-Driven）。CAKE-IR 同样以大量 Kernel 为数据归纳调度表达，但没有开源，且绑定专用的编译降级链。\textbf{Kernel Schema 比 CAKE-IR 这类编译器 IR 更高一层：不需要编译，只写决定性能的设计决策，Agent 有了描述和记录设计的语言，人类专家也能直接阅读。}
 
 
-\InlineCode{schema\_\allowbreak{}docs} 的每个字段都推敲过原理和意义，没有一条是让 Agent 凭空起草的。至少目前，大模型还不擅长压缩，而压缩恰恰是智能的必要条件：它能写出冗长的规则，却很难判断哪些该删。因此我们采用人机结对的方式，以大量真实 SOTA 算子为样本，反复修订每一层抽象和每条字段规则：AI 从源码中拆出事实，专家判断这些事实的物理意义和取舍，再通过对话推演反例来修正规则。取舍上采用奥卡姆剃刀式的“删除测试”：一个字段或一句描述删掉后，如果既不会引起误读，也不会漏掉设计决策，就删去。
+\InlineCode{schema\_\allowbreak{}docs} 的每个字段都推敲过原理和意义，没有一条是让 Agent 凭空撰写提出的。因为我们认为，至少目前，大模型还不擅长压缩，而压缩恰恰是智能的必要条件：它能写出冗长的规则，却很难判断哪些该删。因此我们采用人机结对的方式，以大量真实 SOTA 算子为样本，反复修订每一层抽象和每条字段规则：AI 从源码中拆出事实，专家判断这些事实的物理意义和取舍，再通过对话推演反例来修正规则。取舍上采用奥卡姆剃刀式的“删除测试”：一个字段或一句描述删掉后，如果既不会引起误读，也不会漏掉设计决策，就删去。
 
 
 一份完整的 Kernel Schema 除了记录任务和来源的 \InlineCode{META\_\allowbreak{}DATA}，分为三个区域：只读的任务契约（\InlineCode{Contract}）、分三层描述的设计（\InlineCode{Design}），以及少量实现约束（\InlineCode{Realization}）。
@@ -327,7 +335,9 @@ Agent 倾向于堆砌 \InlineCode{if-\allowbreak{}else} 分支和针对特定 Sh
 三层构成一座决策金字塔：从上到下，抽象粒度逐层变细，\textbf{优化难度和可能带来的性能收益逐层降低}。三层都不写代码，不涉及 Host 启动、IO 声明、内存分配和底层 Layout 代数，记录的只是抽象层面的设计决策。
 
 
-\textbf{第一层} \InlineCode{Math\_\allowbreak{}reshape}\textbf{（数学变换）}在纯数学层面做等价重排或有界的精度折中，如分块矩阵乘、Online Softmax、线性注意力的逐块三角逆展开，目的是减少计算量、缩短串行依赖，或省去全局内存中的中间结果；收益与代价记在 \InlineCode{Ledger} 账本中核对。例如 \InlineCode{FA4 Prefill} 用滞后阈值 $\tau=4$ 跳过不必要的重缩放，分子窄化为 FP8，分母保留未舍入的 FP32 累加，十余行就能写清楚：
+\textbf{第一层} \InlineCode{Math\_\allowbreak{}reshape}\textbf{（数学变换）}在纯数学层面做等价重排或有界的精度折中，如分块矩阵乘、Online Softmax、线性注意力的逐块三角逆展开，目的是减少计算量、缩短串行依赖，或省去全局内存中的中间结果；收益与代价记在 \InlineCode{Ledger} 账本中核对。
+
+例如 \InlineCode{FA4 Prefill} 用滞后阈值 $\tau=4$ 跳过不必要的重缩放，分子窄化为 FP8，分母保留未舍入的 FP32 累加，十余行就能写清楚：
 \begin{CodeBox}
 \begin{Verbatim}[breaklines,breakanywhere,breaksymbolleft={},breaksymbolright={},breakautoindent=true]
 # 摘自 schema_template/examples/fa4_prefill/root.yaml (DESIGN.Math_reshape)
@@ -345,7 +355,9 @@ Agent 倾向于堆砌 \InlineCode{if-\allowbreak{}else} 分支和针对特定 Sh
 \end{Verbatim}
 \end{CodeBox}
 
-\textbf{第二层} \InlineCode{Work\_\allowbreak{}schedule}\textbf{（工作调度）}负责 Tile 以上的并行规划：把改写后的任务切分为可统一处理的子任务单元（\InlineCode{Worktile}，其中 \InlineCode{Invariant} 在块内常驻，\InlineCode{Iteration} 逐轮流入），确定归并方式，映射到硬件资源（如单 CTA 或 2-CTA Cluster），再确定任务顺序和负载均衡方式（静态步长常驻，或原子票据动态队列）。\InlineCode{FA4 Prefill} 的工作调度如下：
+\textbf{第二层} \InlineCode{Work\_\allowbreak{}schedule}\textbf{（工作调度）}负责 Tile 以上的并行规划：把改写后的任务切分为可统一处理的子任务单元（\InlineCode{Worktile}，其中 \InlineCode{Invariant} 在块内常驻，\InlineCode{Iteration} 逐轮流入），确定归并方式，映射到硬件资源（如单 CTA 或 2-CTA Cluster），再确定任务顺序和负载均衡方式（静态步长常驻，或原子票据动态队列）。
+
+例如，\InlineCode{FA4 Prefill} 的工作调度如下：
 \begin{CodeBox}
 \begin{Verbatim}[breaklines,breakanywhere,breaksymbolleft={},breaksymbolright={},breakautoindent=true]
 # 摘自 schema_template/examples/fa4_prefill/packed_persistent.yaml (DESIGN.Work_schedule)
@@ -365,7 +377,9 @@ Schedule:
 \end{Verbatim}
 \end{CodeBox}
 
-\textbf{第三层} \InlineCode{Tile\_\allowbreak{}pipeline}\textbf{（微流水线）}描述单个 Tile 内部的执行。它参考 \InlineCode{Microbench} 的周期数据，把 Warp / Warpgroup 划分为专职角色，用 8 个跨平台的基础动词和 3 类等待契约描述片上存储复用与指令级并发掩盖。8 个动词按用途分为数值计算 \InlineCode{compute /\allowbreak{} matmul}、搬运访存 \InlineCode{load /\allowbreak{} store}、顺序同步 \InlineCode{await /\allowbreak{} signal}、资源占用 \InlineCode{acquire /\allowbreak{} release}；3 类等待契约是数据就绪 \InlineCode{Prepared}、槽位释放 \InlineCode{Released} 和协议放行 \InlineCode{Allowed}。下面是 \InlineCode{FA4 Prefill} 中 MMA 角色的片段：
+\textbf{第三层} \InlineCode{Tile\_\allowbreak{}pipeline}\textbf{（微流水线）}描述单个 Tile 内部的执行。它参考 \InlineCode{Microbench} 的周期数据，把 Warp / Warpgroup 划分为专职角色，用 8 个跨平台的基础动词和 3 类等待契约描述片上存储复用与指令级并发掩盖。8 个动词按用途分为数值计算 \InlineCode{compute /\allowbreak{} matmul}、搬运访存 \InlineCode{load /\allowbreak{} store}、顺序同步 \InlineCode{await /\allowbreak{} signal}、资源占用 \InlineCode{acquire /\allowbreak{} release}；3 类等待契约是数据就绪 \InlineCode{Prepared}、槽位释放 \InlineCode{Released} 和协议放行 \InlineCode{Allowed}。
+
+下面节选了 \InlineCode{FA4 Prefill} 中 MMA 角色的片段：
 \begin{CodeBox}
 \begin{Verbatim}[breaklines,breakanywhere,breaksymbolleft={},breaksymbolright={},breakautoindent=true]
 # 摘自 schema_template/examples/fa4_prefill/packed_persistent.yaml (DESIGN.Tile_pipeline · MMA 角色)
@@ -393,7 +407,8 @@ Waiting:
 \InlineCode{Realization} 区只作少量补充：用 \InlineCode{Require /\allowbreak{} Prefer /\allowbreak{} Forbid} 规定少数决定方案能否成立的原语或预算边界，例如在 Blackwell 上要求使用 \InlineCode{tcgen05} 和 TMA、禁止退回 \InlineCode{mma.\allowbreak{}sync}，不涉及一般的代码组织。
 
 
-\SourceSeparator
+\newpage
+
 \subsection{5.2 形式化检查、篇幅压缩与流水线验证（\InlineCode{schema\_\allowbreak{}template}）}
 语言定义之外，还需要工具来检查 Agent 写出的 Schema：结构是否合法，格式是否统一，篇幅是否精炼，流水线有没有死锁。\InlineCode{schema\_\allowbreak{}template} 提供检查、规范化和可视化工具（入口为 \InlineCode{check\_\allowbreak{}yaml.\allowbreak{}py}），并附有 \InlineCode{FA4 Prefill}、\InlineCode{FA4 Decode}、\InlineCode{GDN Prefill}、\InlineCode{QSA Prefill} 四个算子的标准样例。主要功能和结果有以下三项。
 
@@ -414,7 +429,9 @@ Waiting:
 \end{enumerate}
 
 \TallOriginalImage{assets/root.png}{FA4 Prefill 由 Schema 自动生成的微流水线事件依赖图}{\emph{图：}\InlineCode{check\_\allowbreak{}yaml.\allowbreak{}py -\allowbreak{}-\allowbreak{}graph png} \emph{根据} \InlineCode{fa4\_\allowbreak{}prefill/\allowbreak{}root.\allowbreak{}yaml} \emph{展开并渲染的片内事件依赖图。各纵列对应} \InlineCode{LOAD\_\allowbreak{}QK}\emph{、}\InlineCode{LOAD\_\allowbreak{}V}\emph{、}\InlineCode{MMA}\emph{、}\InlineCode{SOFTMAX}\emph{、}\InlineCode{CORRECTION} \emph{等专职角色，有向边表示异步搬运、矩阵乘发射、在线重缩放与多槽缓冲回收之间的先后约束。生成这张图不需要编译 CUDA 代码，可直接用于审查流水线设计。}}
-\SourceSeparator
+
+\newpage
+
 \subsection{5.3 自动蒸馏：从 \InlineCode{kernel\_\allowbreak{}wiki} 到 \InlineCode{schema\_\allowbreak{}wiki}（\InlineCode{schema\_\allowbreak{}extract}）}
 有了语言和检查工具，下一步是“造数据”：从原始算子库中批量清洗、提取专家的设计，整理成设计知识库 \InlineCode{schema\_\allowbreak{}wiki}，供 Agent 在设计新算子或适配新卡时检索。
 
@@ -439,7 +456,9 @@ Waiting:
 
 
 \textbf{检索到的是设计思路。}\InlineCode{schema\_\allowbreak{}wiki} 回答的是两类问题：同一张卡上的其他算子是怎么设计的，同一个算子在其他卡上又是怎么设计的。它不教 CuTe 等 DSL 的写法，那是 Agent 本来就擅长的部分。
-\SourceSeparator
+
+\newpage
+
 \subsection{5.4 初步验证：无外部参考的 Schema 注入消融实验}
 这组实验检验一个问题：只在提示词中提供 Kernel Schema，能否改善编码 Agent 的生成与收敛。实验不使用第六章的双层架构，只做最简单的注入（Prompt-only Schema Injection）。
 
@@ -514,22 +533,26 @@ Waiting:
 \end{enumerate}
 
 \begin{ReportQuote}
-\textbf{小结}：\textbf{只在提示词中加入一份数百行的 Kernel Schema，Agent 就能更早达到性能门槛，各 Run 结果也更集中。}GDN Prefill 达标少用约一半 Token；GDN Prefill、FA4 Decode、QSA Prefill 的 GSD 分别降至 1.17、1.04、1.01。FA4 Prefill 迭代更稳，但设计没有完整落到代码上，中位延迟只快 1.03×～1.04×；QSA Prefill 停在这份 Schema 自身的上限。第六章的 Planner–Coder 分层闭环针对这两个问题：Planner 搜索和改进 Schema，Coder 忠实实现并反馈。
+\textbf{小结}：\textbf{只在提示词中加入一份数百行的 Kernel Schema，Agent 就能更早达到性能门槛，各 Run 结果也更集中。}GDN Prefill 达标少用约一半 Token；GDN Prefill、FA4 Decode、QSA Prefill 的 GSD 分别降至 1.17、1.04、1.01。FA4 Prefill 迭代更稳定，但设计没有完整落到代码上，中位延迟只快 1.03×～1.04×；QSA Prefill 停在这份 Schema 自身的上限。
+
+下一章的 Planner–Coder 分层闭环针对这两个问题：Planner 搜索和改进 Schema，Coder 忠实实现并反馈。
 
 
 \end{ReportQuote}
 \SourceSeparator
 \clearpage
+
+
 \section{六、面向挑战二：Planner–Coder 两阶段闭环}
-第五章讨论了如何压缩表示算子设计，本章讨论如何在迭代中使用 Schema，应对第 3.2 节的几个现象：多次运行的结果离散，设计与实现相互牵连，试错消耗大量时间和 Token，稀疏奖励又让 Agent 只顾眼前。这些现象指向同一个做法：先解耦，再分阶段处理。我们的做法是\textbf{把策略思考和代码修改放进两个阶段，由 Planner 和 Coder 分别负责}。
+第五章讨论了如何压缩表示算子设计，本章讨论如何在迭代中使用 Schema，应对第 3.2 节的几个现象：多次运行的结果离散，设计与实现相互牵连，试错会消耗大量时间和 Token，稀疏奖励又让 Agent 只顾眼前。这些现象指向同一个做法：先解耦，再分阶段处理。我们的做法是\textbf{把策略思考和代码修改放进两个阶段，由 Planner 和 Coder 分别负责}。
 
 
 \SourceSeparator
 \subsection{6.1 思路：用两个角色分开设计与实现}
-一些工作通过加重循环编排来提升效果。例如 \InlineCode{KernelForge} 使用重型 MCTS 树搜索并配套部署桥接；另一些系统设置总控、测试、规划、编码、合并等多个角色，甚至嵌套多级 RSI。我们把这类做法称为 \textbf{Loop Engineering}：效果主要靠工程编排的堆叠，系统随之变得非常复杂。它可以扩大搜索覆盖面，但层级和角色增加后，角色之间传递信息会有损耗，状态管理的开销上升，每个角色上下文里与自身任务相关的内容比例也会下降。
+现有报道的一些工作，倾向于通过加重循环编排来提升效果。例如 Kernel Forge 用 MCTS 树搜索探索多条优化路径，并配套模型算子捕获和带回退的部署封装；另一些系统设置总控、测试、规划、编码、合并等多个角色，甚至嵌套多级 RSI。我们可以把这类做法统称为 \textbf{Loop Engineering}：效果主要靠工程编排的堆叠，系统随之变得非常复杂。它可以扩大搜索覆盖面，但层级和角色增加后，角色之间传递信息会有损耗，状态管理的开销上升，每个角色上下文里与自身任务相关的内容比例也会下降。
 
 
-相比之下，\textbf{Humanize} 这种最小化的轻量系统更可取：只设两个职责正交的角色，一个独立审视当前结果并提出高层改进意见，另一个负责把意见落地执行。两个角色就能组成闭环，不需要复杂的编排。
+相比之下，\textbf{Humanize} 这种最小化的轻量系统更可取：只设两个职责正交的角色，一个独立审视当前结果并提出高层改进意见，另一个负责把意见落地执行。两个角色就能组成闭环，不需要复杂的编排。而且，它也取得了比较好的效果；因此我们也认为，理想的系统设计应该遵从轻量、最小化、Less is more 的设计原则。
 
 
 \begin{DiagramBlock}
@@ -549,17 +572,41 @@ Waiting:
 
 \begin{itemize}
 \item
-\textbf{Planner（设计维护者，操作压缩态的 Schema）}：不接触底层语法和编译细节，在百行量级的设计描述上决定优化方向；
+\textbf{Planner（设计者，操作压缩态的 Schema）}：不接触底层语法和编译细节，在百行量级的设计描述上决定优化方向；
 
 
 \item
-\textbf{Coder（实现维护者，操作解压态的 Kernel）}：由 AKA 改造而来，在 Schema 规定的范围内把设计还原为高性能代码。
+\textbf{Coder（实现者，操作解压态的 Kernel）}：由 AKA 改造而来，在 Schema 规定的范围内把设计还原为高性能代码。
 
 
 \end{itemize}
 \SourceSeparator
-\subsection{6.2 工作流程：两种起点、分层优化与设计遗传树}
-两阶段架构把算子开发拆成 Design、Extract、Implement、Optimize 四个动作，并用同一套流程处理“从零构建”和“从已有 SOTA 继续优化”两种情况。
+\subsection{6.2 视角：为什么需要在设计空间里搜索}
+第 3.2 节把迭代难以收敛归因于设计与实现耦合。换一个角度，这也可以从两个搜索空间的性质来理解。直接迭代代码，相当于在代码空间里做局部搜索：每一步改动若干行，编译评测后决定是否保留。这个空间维度很高，而且很不连续，一处索引写错、一个屏障漏配，结果就从“快”跳到“错”或“超时”。
+
+\textbf{借用生物遗传学中的适应性景观（Fitness Landscape）的说法，算子自身的Kernel空间中路径崎岖弯折、存在许多不收敛的病态点，仅一次评测或NCU反馈信息很难告诉 Agent 下一步该往哪里走}。但是，Schema 描述的设计空间要小得多：一份设计由计算路径、分块与映射、流水角色和缓冲槽数等百行量级的决策构成。直观地说，相邻设计之间的性能变化通常有迹可循，\InlineCode{Microbench} 的信息还能在写代码之前给出粗略的估计。
+\OriginalImage{assets/fitness_landscape.png}{两种搜索空间的适应性景观示意}{\emph{图：左为 Kernel 代码空间，景观崎岖、断崖密布，从同一起点出发的几条搜索路径各自停在不同的局部峰上；右为 Schema 设计空间，景观平滑，路径顺坡即可攀升到主峰或次峰。示意图，不对应具体数据。}}
+
+两个空间之间可以理解为一种一对多的映射：一份设计对应许多份实现，Schema 是这些实现的压缩，代码是 Schema 的展开。问题在于，这种映射并不保持邻域关系。设计空间里的一小步，例如把 \InlineCode{FA4 Prefill} 的 score 缓冲由双槽改为三槽，或让当前块的 QK 与上一块的 PV 交错推进，在 Schema 中只是改动 \InlineCode{Tile\_\allowbreak{}pipeline} 的几行循环和等待条件；落到代码里，却要重新安排存储分配、屏障相位和软件流水的首尾，常常牵动成百上千行。反过来，代码里只差一处的两份实现，可能一份正确且接近设计上限，另一份死锁或读到未就绪的数据；挪动一处等待的位置，也可能让两份文本相近的代码实际执行着不同的流水设计。
+
+\textbf{性能主要由设计决定，而代码空间里的“邻居”与性能上的远近并不对应，局部搜索因此很难找准优化的方向。}
+
+
+\begin{DiagramBlock}
+\IfFileExists{diagrams/diagram-14.tex}{%
+\begin{adjustbox}{max width=\linewidth,max totalheight=.80\textheight,center}
+\input{diagrams/diagram-14.tex}%
+\end{adjustbox}%
+}{%
+\MissingDiagram{14}%
+}
+\end{DiagramBlock}
+这也解释了 Planner 与 Coder 的分工。Planner 在维度低、较平滑的设计空间里走“大步”，比较、选择和修改设计；Coder 只在一份设计所对应的代码邻域里做局部实现与调优，也就是第 6.1 节所说的解压与信息恢复。设计每迈出一步，都由 Coder 在新的代码邻域里把实现补全、调稳，评测结果因此更多反映设计本身的上限，较少受某一次实现瑕疵的干扰。第 6.3 节的设计遗传树，记录的正是设计空间里的这些“Stride”。
+
+
+\SourceSeparator
+\subsection{6.3 工作流程：两种起点、分层优化与设计遗传树}
+两阶段架构把算子开发拆成 \textbf{Design}、\textbf{Extract}、\textbf{Implement}、\textbf{Optimize} 四个动作，并用同一套流程处理“从零构建”和“从已有 SOTA 继续优化”两种情况。
 
 
 初始 Schema 有两种来源。从零开始（From Scratch）时，Planner 执行 \textbf{Design}，参考任务的 \InlineCode{Contract} 和 \InlineCode{schema\_\allowbreak{}wiki} 中相近算子的设计，写出第一版 Schema；从已有 SOTA Kernel 开始时，Planner 执行 \textbf{Extract}，从 SOTA 源码中提取出与之一致的初始 Schema。
@@ -570,7 +617,7 @@ Waiting:
 
 \begin{itemize}
 \item
-\textbf{Implement（Coder：解压与信息恢复）}：Coder 把 Planner 给定的 Schema 当作不可违背的设计蓝图，把其中省略的工程信息恢复出来：在若干受控 Episode 内处理语法细节、内存偏移、屏障配对和局部参数调优。它的任务和边界都很明确，不必漫无目的地探索和重试，也不再自行改变设计方向。
+\textbf{Implement（Coder：解压与信息恢复）}：Coder 把 Planner 给定的 Schema 当作不可轻易修改的设计蓝图，把其中省略的工程信息恢复出来：在若干受控 Episode 内处理语法细节、内存偏移、屏障配对和局部参数调优。它的任务和边界都很明确，不必漫无目的地探索和重试，也不再自行改变设计方向。
 
 
 \item
@@ -580,7 +627,8 @@ Waiting:
 \end{itemize}
 
 \OriginalImage{assets/framework.jpg}{基于 Kernel Schema 与 AKA 的两阶段迭代框架}{\emph{图：两阶段协同优化总框架。Planner 在 Schema 层结合硬件规格、数学改写与瓶颈分析，提出并修改候选流水线（Pipeline A / B / C）；基于 AKA 的 Coder 针对选定的 Schema 生成多个实现版本；Verifier 把实测性能与诊断回传给 Planner，作为下一轮设计的依据。}}
-不同设计方案之间有继承和分叉关系。设计与代码分离后，Planner 可以在 Schema 层维护一棵“Schema 设计遗传树（Design Genetic Tree）”：
+
+\textbf{不同设计方案之间有继承和分叉关系。设计与代码分离后，Planner 可以在 Schema 层维护一棵“Schema 设计遗传树（Design Genetic Tree）”：}
 
 
 \begin{DiagramBlock}
@@ -592,11 +640,11 @@ Waiting:
 \MissingDiagram{10}%
 }
 \end{DiagramBlock}
-编译报错和指针 Bug 都在叶子节点下的 Coder 实现簇内部处理，不会污染 Planner 的上下文；\textbf{一条高上限的设计分支，也不会因为代码暂时没写对而被误杀}。Planner 只负责在这棵树上选择和扩展设计，Coder 只负责实现给定的节点。
+编译报错和指针 Bug 都在叶子节点下的 Coder 实现簇内部处理，不会污染 Planner 的上下文；\textbf{一条潜在的更高上限的设计分支，也不会因为代码暂时没优化好而被放弃}。Planner 只负责在这棵树上选择和扩展设计，Coder 只负责实现给定的节点。
 
 
 \SourceSeparator
-\subsection{6.3 面向长程迭代的两个机制：\InlineCode{Step} 与 \InlineCode{Dispatch}}
+\subsection{6.4 面向长程迭代的两个机制：\InlineCode{Step} 与 \InlineCode{Dispatch}}
 把 Kernel Schema 用于复杂生产算子的长程迭代时，我们补充了两个表达机制：\textbf{Step} 描述一个算子内部的阶段划分，\textbf{Dispatch} 描述不同负载之间的设计分支。前者让 Planner 可以调整算子的阶段边界，后者让面向不同负载的特化设计不必各存一份完整副本。
 
 
@@ -614,7 +662,7 @@ Waiting:
 设计 \InlineCode{Work\_\allowbreak{}schedule} 与 \InlineCode{Tile\_\allowbreak{}pipeline} 时我们发现，工业级的复杂算子很少从头到尾是同一个循环体，\textbf{内部通常有明确的阶段边界，各阶段的调度方式也不相同}。同一个维度，在前一阶段可能是独立并行的切分轴，到下一阶段变成 Worker 内的串行递推轴，收尾时又成为跨分片的规约轴。典型例子有稀疏注意力的“稀疏索引预处理 → 主注意力计算”、长序列的“分片计算 → 全局归并”，以及融合 MoE 中依次完成路由、分块矩阵乘、激活量化与聚合的多个 \InlineCode{Step}。
 
 
-在 Schema 中显式写出 \InlineCode{Step}，并规定各 \InlineCode{Step} 的启动方式和数据交接方式（片上直接传递，或经全局内存交接）之后，Schema 描述的算子不再局限于功能单一、重复循环的循环核，边界可以自由扩展。这带来两个好处。一是描述完备，多阶段的复合算子也能完整写进 Schema。二是 Planner 可以在 \InlineCode{Step} 边界上做优化：拆分一个 \InlineCode{Step}，用额外的中间结果物化换取更高的并行度；或者融合相邻的 \InlineCode{Step}，省去全局内存往返和 Kernel 启动开销。这也为以后描述和优化 \textbf{Megakernel} 做了准备。
+在 Schema 中显式写出 \InlineCode{Step}，并规定各 \InlineCode{Step} 的启动方式和数据交接方式（片上直接传递，或经全局内存交接）之后，Schema 描述的算子不再局限于功能单一、重复循环的循环核，边界可以自由扩展。这带来两个好处。一是描述完备，多阶段的复合算子也能完整写进 Schema。二是 Planner 可以在 \InlineCode{Step} 边界上做优化：拆分一个 \InlineCode{Step}，用额外的中间结果物化换取更高的并行度；或者融合相邻的 \InlineCode{Step}，省去全局内存往返和 Kernel 启动开销。这也为以后描述和优化更复杂的 \textbf{Megakernel} 做好了准备。
 
 
 \Needspace{6\baselineskip}
@@ -644,7 +692,7 @@ Waiting:
 
 
 \SourceSeparator
-\subsection{6.4 工程实现与 6 类算子的实验进展}
+\subsection{6.5 工程实现与 6 类算子的实验进展}
 这部分工作以工程实现为主，重点是把第五章的 Schema 用进迭代，让整个设计 Loop 跑起来。目前这套流程已在两个代码库中实现，并完成了端到端运行：
 
 
@@ -659,17 +707,17 @@ Waiting:
 
 \end{enumerate}
 
-实验方面，整套闭环已在真实集群上运行。我们以现有 SOTA Kernel 为起点，在首批完成蒸馏的 \textbf{6 类算子}（\InlineCode{FMHA MXFP8}、\InlineCode{FP8 Grouped GEMM}、\InlineCode{GDN Prefill}、\InlineCode{MLA FP8}、\InlineCode{NVFP4 MoE}、\InlineCode{Sparse Attention}，计算与访存特征各不相同）上做两阶段闭环的消融对照。受 L20D 算力限制，完整的多算子长程对比仍在运行。从已有的迭代轨迹看，两阶段闭环收敛更快：\textbf{在相同的迭代耗时内更快突破性能瓶颈，并稳定达到更低的执行延迟}。
+实验方面，整套闭环已在真实集群上运行。我们以现有 SOTA Kernel 为起点，在首批完成蒸馏提取的 \textbf{6 类典型算子}（\InlineCode{FMHA MXFP8}、\InlineCode{FP8 Grouped GEMM}、\InlineCode{GDN Prefill}、\InlineCode{MLA FP8}、\InlineCode{NVFP4 MoE}、\InlineCode{Sparse Attention}，计算与访存特征各不相同）上做两阶段闭环的消融对照。受 L20D 算力限制，完整的多算子长程对比仍在运行。从已有的迭代轨迹看，两阶段闭环收敛更快：\textbf{在相同的迭代耗时内更快突破性能瓶颈，并稳定达到更低的执行延迟}。
 
 
 \SourceSeparator
 \clearpage
 \section{七、面向挑战三：灰盒交付、分级验证与性能预估}
-第三个挑战出在交付与维护环节：生成的代码是黑盒，隐式缺陷难以排查，也难以确认能否用于生产。另外，第 3.2 节还留下一个问题：能否预先判断硬件极限，从而知道迭代何时可以停止。本章是在现有架构上的分析与规划，分三部分：用 Schema 把黑盒变成灰盒；分级验证门禁与分层测试集；基于 Schema 的先验性能估算。
+第三个挑战在于交付与维护环节：生成的代码是黑盒，隐式缺陷难以排查，也难以确认能否用于生产。另外，第 3.2 节还留下一个问题：能否预先判断硬件极限，从而知道迭代何时可以停止。我们在这里分成三点讨论这个问题的解决思路。
 
 
 \SourceSeparator
-\subsection{7.1 从黑盒到灰盒：设计可读，实现以实测为准}
+\subsection{7.1 从黑盒到灰盒：设计阅读友好，实现以实测为准}
 对于生成的算子难以理解和维护的问题，Kernel Schema 解决的是设计这一层：\textbf{它把原本完全黑盒的代码，变成了高层透明的“灰盒（Grey-Box）”}。底层代码仍然难读，但设计有了可读、可审的记录。
 
 

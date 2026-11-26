@@ -1,0 +1,61 @@
+\begingroup%
+\def\baselinestretch{1}%
+\definecolor{D14Blue}{HTML}{3478B8}%
+\definecolor{D14Teal}{HTML}{27877F}%
+\definecolor{D14Amber}{HTML}{C58B28}%
+\definecolor{D14Ink}{HTML}{243447}%
+\definecolor{D14PaleBlue}{HTML}{F0F6FC}%
+\definecolor{D14PaleAmber}{HTML}{FFF8E8}%
+\begin{tikzpicture}[
+  x=1mm, y=1mm,
+  card/.style={draw, fill=white, rounded corners=2mm, line width=.75pt,
+    inner xsep=2.5mm, inner ysep=2.6mm, outer sep=.4pt, align=flush center,
+    text=D14Ink, font=\fontsize{9.5}{12.5}\selectfont},
+  group box/.style={draw, rounded corners=2.5mm, line width=.7pt,
+    inner sep=0pt, outer sep=.4pt},
+  group title/.style={inner sep=0pt, text=D14Ink, align=flush center,
+    font=\bfseries\fontsize{10}{12.5}\selectfont},
+  edge text/.style={fill=white, inner xsep=1mm, inner ysep=.5mm, align=flush center,
+    text=D14Ink, font=\fontsize{9}{12.5}\selectfont},
+  flow/.style={draw=D14Ink, line width=.7pt, rounded corners=1.8mm,
+    -{Latex[length=2.5mm,width=1.6mm]}},
+  expand/.style={flow, draw=D14Teal, dash pattern=on 2.6pt off 2pt}
+]
+\node[group title] at (0,17)
+  {设计空间（Schema，压缩态）：维度低，邻域较平滑};
+\node[group title] at (0,-31)
+  {代码空间（Kernel，解压态）：维度高，邻域崎岖};
+
+\node[card, draw=D14Blue, minimum width=46mm, minimum height=16mm] (da) at (-52,0)
+  {设计 A\\双槽缓冲，QK 与 PV 串行};
+\node[card, draw=D14Blue, minimum width=46mm, minimum height=16mm] (db) at (52,0)
+  {设计 B\\三槽缓冲，QK 与 PV 交错};
+
+\node[card, draw=D14Teal, minimum width=46mm, minimum height=16mm] (a1) at (-52,-50)
+  {实现 A-1\\正确，接近设计 A 的上限};
+\node[card, draw=D14Amber, minimum width=46mm, minimum height=16mm] (a2) at (-52,-78)
+  {实现 A-2\\与 A-1 只差一处屏障\\结果错误或超时};
+\node[card, draw=D14Teal, minimum width=46mm, minimum height=16mm] (b1) at (52,-64)
+  {实现 B-1, B-2, …\\重排角色、屏障与存储分配};
+
+\begin{scope}[on background layer]
+  \node[group box, draw=D14Blue, fill=D14PaleBlue,
+    fit={(-81,23) (81,-13)}] (design) {};
+  \node[group box, draw=D14Amber, fill=D14PaleAmber,
+    fit={(-81,-25) (81,-92)}] (code) {};
+\end{scope}
+
+\draw[flow, draw=D14Blue, line width=.9pt] (da) --
+  node[edge text, fill=D14PaleBlue] {一小步\\改动数行 Schema} (db);
+
+\draw[expand] (da.south) -- (a1.north);
+\draw[expand] (db.south) -- (b1.north);
+\node[edge text] at (-52,-19) {一对多展开};
+\node[edge text] at (52,-19) {一对多展开};
+
+\draw[flow, draw=D14Amber] (a1.east) -- (-8,-50) -- (-8,-64) -- (b1.west);
+\node[edge text, fill=D14PaleAmber] at (10.5,-57) {一大步\\成百上千行改动};
+\draw[draw=D14Amber, line width=.7pt, dash pattern=on 2.6pt off 2pt] (a1.south) --
+  node[edge text, fill=D14PaleAmber, right=2mm] {代码相近，性能悬殊} (a2.north);
+\end{tikzpicture}%
+\endgroup%
