@@ -3,7 +3,7 @@
 ## 快捷编译
 
 ```sh
-cd /Users/hanyong/KernelSchema/report/latex
+cd /Users/hanyong/KernelSchema/report
 latexmk
 ```
 
@@ -20,26 +20,17 @@ latexmk -C    # 清理 build 下全部编译产物；保留根目录的中文名
 
 ## 编辑入口
 
-- `body.tex`：正文与三个 YAML 代码块，直接修改此文件即可。
+- `body.tex`：正文与 YAML 代码块，直接修改此文件即可。章节编号自动生成，交叉引用使用 `\label` / `\ref`。
 - `main.tex`：字体、颜色、封面、标题、代码框和页面版式。
-- `diagrams/diagram-01.tex` 至 `diagram-13.tex`：原生 TikZ 流程图。
-- `assets/`：七张原始图片；`fonts/`：本报告使用的字体。
-- `scripts/highlight_yaml.py`：YAML 高亮配色与词法处理。
+- `diagrams/diagram-01.tex` 至 `diagram-15.tex`：原生 TikZ 图，清单见 `diagrams/README.md`。
+- `assets/`：正文引用的图片；`fonts/`：本报告使用的字体。
+- `scripts/`：
+  - `compile_xelatex.py`、`publish_pdf.py`：由 `.latexmkrc` 调用，分别负责编译前刷新高亮、编译后同步分发 PDF；
+  - `highlight_yaml.py`：YAML 高亮配色与词法处理；
+  - `plot_fitness_landscape.py`：生成 `assets/fitness_landscape.png`（`python3 scripts/plot_fitness_landscape.py assets/fitness_landscape.png`）。
+- `old/`：原 Markdown 稿、旧 PPT、早期配图，以及已停用的 Markdown 转换、旧构建脚本和基于 Markdown 的核对工具，仅作存档。
 
 `body-highlighted.tex` 和 `yaml-style.tex` 是自动生成文件，不要手工修改；删除后 `latexmk` 会重新生成。高亮使用 Pygments，逐字符核对代码内容，不需要 LaTeX shell-escape。行内标识使用 Alibaba Sans 并继承所在位置的字号/字重；代码块使用 DejaVu Sans Mono。
-
-## 从 Markdown 重新生成正文（可选）
-
-```sh
-python3 scripts/convert.py
-latexmk
-```
-
-注意：转换会覆盖 `body.tex` 的手工修改，不改 TikZ。平时仅编辑 LaTeX 时，无需执行转换。转换器依赖上级 Markdown 及原图来源，是仓库内维护工具。
-
-```sh
-python3 scripts/convert.py --check  # 核对正文与当前 Markdown 的确定性转换是否一致
-```
 
 ## 本机环境与依赖
 
@@ -55,21 +46,6 @@ python3 scripts/convert.py --check  # 核对正文与当前 Markdown 的确定�
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-`.latexmkrc` 自动补充本机便携 TeX 的工具路径。在其他机器上安装 TeX Live/MacTeX（含 XeLaTeX、latexmk）即可使用；此路径不存在时使用系统 PATH。Python 3 需要 `pygments`；只有 Markdown 转换额外需要 `markdown-it-py`。
-
-```sh
-python3 -m pip install pygments markdown-it-py
-```
-
-另保留 `scripts/build.py` 作为不使用 latexmk 的构建方式：
-
-```sh
-python3 scripts/build.py --engine xelatex
-python3 scripts/publish_pdf.py
-```
-
-## 清理与验证资料
-
-一次性 ZIP、逐图编译日志与快照、整页预览和重复测试输出已清理。保留 `qa/` 下轻量的核对脚本/清单，以及 `diagrams/_test/verify.py` 和验证摘要，供需要时复查。构建缓存、高亮生成文件等已列入本目录 `.gitignore`。
+`.latexmkrc` 自动补充本机便携 TeX 的工具路径。在其他机器上安装 TeX Live/MacTeX（含 XeLaTeX、latexmk）即可使用；此路径不存在时使用系统 PATH。Python 3 需要 `pygments`；重新生成适应性景观图还需要 `matplotlib` 与 `numpy`。
 
 随附 DejaVu 字体许可在 `fonts/LICENSE_DEJAVU`。必要字体和图片已本地收齐，PDF 阅读者无需安装任何编译工具。

@@ -1,0 +1,39 @@
+\documentclass[a4paper]{article}
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc,backgrounds,shapes.geometric}
+\setmainfont[Path=/Library/Fonts/,BoldFont=Alibaba-PuHuiTi-Bold.otf,Ligatures=NoCommon]
+  {Alibaba-PuHuiTi-Regular.otf}
+\setCJKmainfont[Path=/Library/Fonts/,BoldFont=Alibaba-PuHuiTi-Bold.otf]
+  {Alibaba-PuHuiTi-Regular.otf}
+\pagestyle{empty}
+\setlength{\textwidth}{168mm}
+\setlength{\oddsidemargin}{\dimexpr(\paperwidth-\textwidth)/2-1in\relax}
+\setlength{\evensidemargin}{\oddsidemargin}
+
+\newsavebox{\diagramBox}
+\newdimen\diagramHeight
+\ExplSyntaxOn
+\cs_new:Npn \DiagramMillimeters #1
+  { \fp_eval:n { round(\dim_to_fp:n {#1} / \dim_to_fp:n {1mm}, 2) } }
+\ExplSyntaxOff
+\newcommand{\TestDiagram}[1]{%
+  \sbox{\diagramBox}{\input{../../diagram-#1.tex}}%
+  \diagramHeight=\dimexpr\ht\diagramBox+\dp\diagramBox\relax
+  \typeout{DIAGRAM-#1: \DiagramMillimeters{\wd\diagramBox} mm x \DiagramMillimeters{\diagramHeight} mm}%
+  \ifdim\wd\diagramBox>168mm\errmessage{Diagram #1 exceeds 168mm in width}\fi
+  \ifdim\diagramHeight>180mm\errmessage{Diagram #1 exceeds 180mm in height}\fi
+  \null\vfill
+  \noindent\makebox[\textwidth]{\usebox{\diagramBox}}\par
+  \vfill\null\clearpage
+}
+
+\begin{document}
+\TestDiagram{08}
+\TestDiagram{09}
+\TestDiagram{10}
+\TestDiagram{11}
+\TestDiagram{12}
+\TestDiagram{13}
+\end{document}

@@ -6,8 +6,8 @@ import fitz
 
 HERE = Path(__file__).resolve().parent
 DIAGRAMS = HERE.parent
-ROOT = DIAGRAMS.parents[2]
-SOURCE = ROOT / 'report/基于 Schema 的 Kernel 表示与生成.md'
+ROOT = DIAGRAMS.parents[1]
+SOURCE = ROOT / 'report/old/基于 Schema 的 Kernel 表示与生成.md'
 PREAMBLE = r'''\documentclass[10pt,a4paper]{article}
 \usepackage[margin=20mm]{geometry}
 \usepackage{fontspec}
@@ -61,7 +61,7 @@ def main():
     doc=fitz.open(HERE/'all-diagrams.pdf')
     if len(doc)!=13: sys.exit(f'Expected 13 pages, got {len(doc)}')
     report=[]
-    qa_path=ROOT/'report/latex/qa/diagram-labels.json'
+    qa_path=ROOT/'report/qa/diagram-labels.json'
     qa_labels={row['diagram']:row['labels'] for row in json.loads(qa_path.read_text())} if qa_path.exists() else {}
     for i,(page,block) in enumerate(zip(doc,blocks),1):
         # Every quoted Mermaid string is a node, group title, or edge label.

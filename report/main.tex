@@ -39,8 +39,33 @@
 \hypersetup{pdftitle={基于 Schema 的 Kernel 表示与生成},pdfauthor={邵瀚雍},pdfsubject={TRE AI系统工程}}
 \urlstyle{same}
 \pdfstringdefDisableCommands{\def\InlineCode#1{#1}\def\allowbreak{}\def\textbf#1{#1}\def\emph#1{#1}}
-\setcounter{secnumdepth}{-1}
+\setcounter{secnumdepth}{3}
 \setcounter{tocdepth}{2}
+\newcommand{\ChineseNumeral}[1]{\ifcase#1\or 一\or 二\or 三\or 四\or 五\or 六\or 七\or 八\or 九\or 十\fi}
+% \ref{sec:...} yields 五 / 5.1 / （1）; headings, TOC and bookmarks append the separators below.
+\renewcommand{\thesection}{\ChineseNumeral{\value{section}}}
+\renewcommand{\thesubsection}{\arabic{section}.\arabic{subsection}}
+\renewcommand{\thesubsubsection}{（\arabic{subsubsection}）}
+\newcommand{\BookmarkNumberline}{\ifcase\bookmarkget{level}\or\def\numberline##1{##1、}\or\def\numberline##1{##1 }\or\def\numberline##1{##1}\fi}
+\bookmarksetup{numbered,addtohook={\BookmarkNumberline}}
+\makeatletter
+\renewcommand*{\@dottedtocline}[5]{%
+  \ifnum #1>\c@tocdepth \else
+    \vskip \z@ \@plus.2\p@
+    {\leftskip #2\relax \rightskip \@tocrmarg \parfillskip -\rightskip
+     \parindent #2\relax\@afterindenttrue \interlinepenalty\@M
+     \leavevmode \@tempdima #3\relax
+     \advance\leftskip \@tempdima \null\nobreak\hskip -\leftskip
+     {#4}\nobreak
+     \leaders\hbox{\textcolor{Muted!45}{$\m@th\mkern 4.5mu\hbox{.}\mkern 4.5mu$}}\hfill
+     \nobreak\hb@xt@\@pnumwidth{\hfil #5}\par}%
+  \fi}
+\renewcommand*{\l@section}[2]{%
+  \addpenalty{-\@highpenalty}\addvspace{.75em \@plus\p@}%
+  {\sffamily\bfseries\def\numberline##1{##1、}\@dottedtocline{1}{\z@}{\z@}{#1}{#2}}}
+\renewcommand*{\l@subsection}[2]{{\rmfamily\@dottedtocline{2}{2em}{2.6em}{#1}{#2}}}
+\renewcommand*{\l@subsubsection}[2]{}
+\makeatother
 \renewcommand{\contentsname}{目录}
 \setlength{\parindent}{2em}
 \setlength{\parskip}{.3em plus .1em minus .1em}
@@ -55,9 +80,9 @@
 \setlist[itemize,1]{label=\textcolor{Teal}{\sffamily\small\textbullet}}
 \setlist[itemize,2]{label=\textcolor{Teal}{\sffamily\scriptsize\textbullet}}
 \setlist[enumerate]{label=\textcolor{Blue}{\sffamily\arabic*.},align=left}
-\titleformat{\section}{\sffamily\color{Blue}\bfseries\fontsize{18}{27}\selectfont}{}{0pt}{}[\vspace{4pt}{\color{Teal}\titlerule[1.2pt]}]
-\titleformat{\subsection}{\sffamily\color{Blue}\bfseries\fontsize{14.5}{22}\selectfont}{}{0pt}{}
-\titleformat{\subsubsection}{\sffamily\color{Teal}\bfseries\fontsize{12}{19}\selectfont}{}{0pt}{}
+\titleformat{\section}[block]{\sffamily\color{Blue}\bfseries\fontsize{18}{27}\selectfont}{\thesection、}{0pt}{}[\vspace{4pt}{\color{Teal}\titlerule[1.2pt]}]
+\titleformat{\subsection}[block]{\sffamily\color{Blue}\bfseries\fontsize{14.5}{22}\selectfont}{\thesubsection}{0pt}{\space}
+\titleformat{\subsubsection}[block]{\sffamily\color{Teal}\bfseries\fontsize{12}{19}\selectfont}{\thesubsubsection}{0pt}{}
 \titlespacing*{\section}{0pt}{0pt}{18pt}
 \titlespacing*{\subsection}{0pt}{20pt plus 3pt minus 2pt}{9pt}
 \titlespacing*{\subsubsection}{0pt}{16pt plus 2pt minus 2pt}{7pt}
@@ -76,23 +101,37 @@
 \newtcolorbox{CodeBox}{enhanced,colback=PaleBlue,colframe=Line,boxrule=.5pt,arc=3pt,left=9pt,right=9pt,top=9pt,bottom=9pt,before skip=10pt,after skip=12pt}
 \fvset{fontsize=\fontsize{9}{13}\selectfont,baselinestretch=1,tabsize=2}
 \newenvironment{DiagramBlock}{\par\addvspace{12pt}\noindent\begin{minipage}{\linewidth}\centering\sffamily}{\end{minipage}\par\addvspace{12pt}}
-\newcommand{\MissingDiagram}[1]{\ifdefined\AllowMissingDiagrams\fcolorbox{Line}{PaleBlue}{\parbox[c][35mm][c]{.90\linewidth}{\centering\color{Muted}TikZ #1}}\else\PackageError{KernelReport}{Missing diagrams/diagram-#1.tex}{Provide all 13 TikZ files, or use scripts/build.py --draft for placeholders.}\fi}
+\newcommand{\MissingDiagram}[1]{\ifdefined\AllowMissingDiagrams\fcolorbox{Line}{PaleBlue}{\parbox[c][35mm][c]{.90\linewidth}{\centering\color{Muted}TikZ #1}}\else\PackageError{KernelReport}{Missing diagrams/diagram-#1.tex}{Add the TikZ file, or define \string\AllowMissingDiagrams\space for placeholders.}\fi}
 \newcommand{\ImageCaption}[2]{{\sffamily\setlength{\parindent}{0pt}\fontsize{9.5}{14}\selectfont\color{Muted}\textbf{#1}\par #2\par}}
 \newcommand{\OriginalImage}[3]{\par\addvspace{10pt}\noindent\begin{minipage}{\linewidth}\centering\includegraphics[width=\linewidth,height=.61\textheight,keepaspectratio]{#1}\par\vspace{6pt}\raggedright\ImageCaption{#2}{#3}\end{minipage}\par\addvspace{10pt}}
 \newcommand{\TallOriginalImage}[3]{\clearpage\noindent\begin{minipage}{\linewidth}\centering\includegraphics[width=\linewidth,height=.87\textheight,keepaspectratio]{#1}\par\vspace{5pt}\raggedright\ImageCaption{#2}{#3}\end{minipage}\clearpage}
-\newcommand{\ReportCover}[2]{%
+\newcommand{\FullPageImage}[1]{\clearpage\noindent\makebox[\linewidth][c]{\includegraphics[width=\linewidth,height=.98\textheight,keepaspectratio]{#1}}\clearpage}
+\newcommand{\ReportCover}[5]{%
   \pagenumbering{gobble}\thispagestyle{empty}%
   \begin{tikzpicture}[remember picture,overlay]
-    \fill[PaleBlue] (current page.north west) rectangle ([yshift=-145mm]current page.north east);
+    \fill[PaleBlue] (current page.north west) rectangle ([yshift=-128mm]current page.north east);
     \fill[Teal] ([xshift=22mm,yshift=-38mm]current page.north west) rectangle ++(17mm,-2mm);
     \node[anchor=north west,inner sep=0pt,align=left,text=Blue,font=\sffamily\bfseries\fontsize{30}{43}\selectfont] at ([xshift=22mm,yshift=-55mm]current page.north west) {基于 Schema 的 Kernel\\表示与生成};
-    \node[anchor=north west,inner sep=0pt,align=left,text=Ink,font=\sffamily\fontsize{13}{24}\selectfont] at ([xshift=22mm,yshift=-112mm]current page.north west) {#2};
+    \node[anchor=north west,inner sep=0pt,align=left,text=Muted,font=\sffamily\fontsize{13}{18}\selectfont] at ([xshift=22mm,yshift=-103mm]current page.north west) {#2};
+    \draw[Teal,line width=1.2pt] ([xshift=22mm,yshift=-150mm]current page.north west) -- ++(0,-19mm);
+    \node[anchor=north west,inner sep=0pt,text=Ink,font=\sffamily\fontsize{13}{18}\selectfont] at ([xshift=28mm,yshift=-150.5mm]current page.north west) {%
+      \begin{tabular}{@{}l@{\hspace{7mm}}l@{}}
+        {\color{Muted}\fontsize{10.5}{18}\selectfont 汇报人} & #3\\[3.5mm]
+        {\color{Muted}\fontsize{10.5}{18}\selectfont 指导人} & #4
+      \end{tabular}};
     \draw[Line,line width=.5pt] ([xshift=22mm,yshift=37mm]current page.south west) -- ([xshift=-22mm,yshift=37mm]current page.south east);
     \node[anchor=south west,inner sep=0pt,text=Teal,font=\sffamily\fontsize{10}{14}\selectfont] at ([xshift=22mm,yshift=43mm]current page.south west) {Kernel Schema};
+    \node[anchor=south east,inner sep=0pt,text=Muted,font=\sffamily\fontsize{10}{14}\selectfont] at ([xshift=-22mm,yshift=43mm]current page.south east) {#5};
   \end{tikzpicture}%
   \null\clearpage
 }
-\newcommand{\ReportContents}{\pagenumbering{roman}\pdfbookmark[0]{目录}{contents}\begingroup\sffamily\small\setstretch{1.02}\setlength{\parskip}{0pt}\tableofcontents\endgroup\clearpage\pagenumbering{arabic}}
+\makeatletter
+\newcommand{\ReportContents}{\pagenumbering{roman}\pdfbookmark[0]{目录}{contents}%
+  \begingroup\hypersetup{linkcolor=Ink}\color{Ink}\setlength{\parskip}{0pt}\DeclareRobustCommand{\InlineCode}[1]{{\sffamily ##1}}%
+  {\centering\sffamily\bfseries\fontsize{18}{24}\selectfont 目\hspace{1em}录\par}\vspace{9mm}%
+  \setstretch{1}\fontsize{10.5}{17.6}\selectfont\@starttoc{toc}%
+  \endgroup\clearpage\pagenumbering{arabic}}
+\makeatother
 % Register raw body as an engine dependency for latexmk continuous rebuilds.
 \newread\BodySourceDependency
 \openin\BodySourceDependency=body.tex

@@ -16,7 +16,7 @@ import shutil
 from markdown_it import MarkdownIt
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT.parent / "基于 Schema 的 Kernel 表示与生成.md"
+SOURCE = ROOT / "old" / "基于 Schema 的 Kernel 表示与生成.md"
 ORIGINAL_SHA256 = "6f592ed1fb8d0d3cb31856e16aceb649fd2a8cde0a63a97a3fed073e954053a8"
 ESCAPES = {"\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#", "_": r"\_", "{": r"\{", "}": r"\}", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}"}
 

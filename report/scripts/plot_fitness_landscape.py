@@ -19,7 +19,7 @@ from scipy.ndimage import gaussian_filter
 HERE = Path(__file__).resolve().parent
 FONT_DIR = next(
     p
-    for p in (HERE.parent / "fonts", Path("/Users/hanyong/KernelSchema/report/latex/fonts"))
+    for p in (HERE.parent / "fonts", Path("/Users/hanyong/KernelSchema/report/fonts"))
     if (p / "Alibaba-PuHuiTi-Regular.otf").exists()
 )
 for _name in ("Alibaba-PuHuiTi-Regular.otf", "Alibaba-PuHuiTi-Medium.otf"):

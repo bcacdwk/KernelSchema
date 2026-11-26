@@ -15,7 +15,7 @@
 \setCJKmainfont{Alibaba PuHuiTi}
 ```
 
-从 `report/latex/` 编译的主文中可写：
+从 `report/` 编译的主文中可写：
 
 ```tex
 \begin{figure}[htbp]
@@ -44,13 +44,14 @@
 | `diagram-12.tex` | 7.2：异步验证门禁与 Data/Bench 头尾闭环 |
 | `diagram-13.tex` | 7.3：先验性能建模与近似保序剪枝 |
 | `diagram-14.tex` | 6.2：设计空间与代码空间的邻域错位（直接在 LaTeX 正文中新增，不对应原 Markdown） |
+| `diagram-15.tex` | 8.4：从 Kernel 到自动化科研的 Infra 自我改进阶梯与四个迁移前提（直接在 LaTeX 正文中新增，不对应原 Markdown） |
 
 ## 独立测试
 
 在项目根目录执行：
 
 ```sh
-python3 report/latex/diagrams/_test/verify.py \
+python3 report/diagrams/_test/verify.py \
   --engine ~/.local/share/kernel-schema-texlive/bin/universal-darwin/xelatex
 ```
 
